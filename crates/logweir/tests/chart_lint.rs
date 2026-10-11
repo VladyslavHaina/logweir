@@ -18,16 +18,16 @@
 //! * The chart's `crds/` and `ui/` are byte-identical copies of `config/crd/`
 //!   and the twenty-six shipped UI files — asserted here with `std::fs` and in
 //!   the script with `cmp`, so the property holds whichever runs first.
-//! * The DEFAULT render and `logweir.yaml` agree on the substance of the
+//! * The DEFAULT render and `config/` agree on the substance of the
 //!   control plane: the Deployment's args, every other env name and value,
 //!   both security contexts, the resources and the ServiceAccount; the same
 //!   four ClusterRoles with the same rules as sets; the same six CRD names.
 //!   **Exactly FOUR differences are permitted**, all of them the chart's image
 //!   ruling of 2026-09-12 (`values.yaml`'s header): the controller image (the
-//!   SAME repository, at `:latest` rather than at the install file's digest —
+//!   SAME repository, at `:latest` rather than at `config/`'s digest —
 //!   asserted, not assumed), `imagePullPolicy` (`Always` rather than
 //!   `IfNotPresent`), and the two envs `LOGWEIR_RUNNER_IMAGE` (Task 33) and
-//!   `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), which `logweir.yaml` does not set
+//!   `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), which `config/` does not set
 //!   at all. The runner reference is read from `crates/weirkeeper/src/job.rs`
 //!   and never spelt here (`crd_shape.rs::the_runner_image_is_named_once`
 //!   counts that string under `crates/`). There is no namespace-derived env in
@@ -140,6 +140,27 @@ fn docs_in(rel: &str) -> Vec<Doc> {
 
 fn rendered(name: &str) -> Vec<Doc> {
     docs_in(&format!("charts/logweir/rendered/{name}.yaml"))
+}
+
+/// The documents `config/kustomization.yaml` installs: each base's own
+/// `kustomization.yaml` names its files, and no transformer rewrites them.
+fn config_install() -> Vec<Doc> {
+    let resources = |rel: &str| -> Vec<String> {
+        let k: Value = serde_yaml::from_str(&read(rel)).expect("a kustomization parses");
+        k["resources"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{rel} lists no resources"))
+            .iter()
+            .map(|r| r.as_str().expect("a resource is a path").to_string())
+            .collect()
+    };
+    let mut out = Vec::new();
+    for base in resources("config/kustomization.yaml") {
+        for file in resources(&format!("config/{base}/kustomization.yaml")) {
+            out.extend(docs_in(&format!("config/{base}/{file}")));
+        }
+    }
+    out
 }
 
 fn find<'a>(docs: &'a [Doc], kind: &str, name: &str) -> &'a Doc {
@@ -270,7 +291,7 @@ fn repository_of(reference: &str) -> String {
 
 /// The tag this chart's defaults give the two Logweir images — **the owner's
 /// decision of 2026-09-12**, in place of the digests these values carried
-/// before it. `config/`, `logweir.yaml` and `weirkeeper::job::RUNNER_IMAGE` are
+/// before it. `config/` and `weirkeeper::job::RUNNER_IMAGE` are
 /// untouched by that ruling and still pin digests (Global Constraint 7).
 const LOGWEIR_TAG: &str = "latest";
 
@@ -584,9 +605,9 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
     );
 }
 
-// ================================================ the default render vs logweir.yaml
+// ================================================ the default render vs config/
 
-/// **The default render and `logweir.yaml` agree on the substance of the
+/// **The default render and `config/` agree on the substance of the
 /// control plane.** Args, every other env name and value, both security
 /// contexts, the resources, the ServiceAccount, the four ClusterRoles' rules as
 /// sets, the ClusterRoleBinding's subject, the six CRD names, the
@@ -595,7 +616,7 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
 /// **EXACTLY FOUR DIFFERENCES ARE PERMITTED, and each is asserted rather than
 /// skipped:**
 ///
-/// 1. the controller IMAGE — the SAME REPOSITORY as the install file's, at
+/// 1. the controller IMAGE — the SAME REPOSITORY as `config/`'s, at
 ///    `:latest` rather than at its digest (the owner's decision of 2026-09-12);
 ///    the repository equality is the assertion that keeps this from becoming
 ///    "any image at all";
@@ -612,7 +633,7 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
 #[test]
 fn chart_lint_default_render_agrees_with_the_install_file() {
     let chart = rendered("default");
-    let install = docs_in("logweir.yaml");
+    let install = config_install();
 
     // The Deployment.
     let cd = find(&chart, "Deployment", "weirkeeper");
@@ -620,17 +641,17 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     let cc = container(cd);
     let ic = container(id);
     // DIFFERENCE 1: the same REPOSITORY, a different reference.
-    let install_image = ic["image"].as_str().expect("logweir.yaml names an image");
+    let install_image = ic["image"].as_str().expect("config/ names an image");
     let chart_image = cc["image"].as_str().expect("the render names an image");
     assert!(
         is_digest_reference(install_image),
-        "logweir.yaml still pins the controller image BY DIGEST (Global Constraint 7): \
+        "config/ still pins the controller image BY DIGEST (Global Constraint 7): \
          {install_image}"
     );
     assert_eq!(
         format!("{}:{LOGWEIR_TAG}", repository_of(install_image)),
         chart_image,
-        "the default render's controller image must be logweir.yaml's REPOSITORY at \
+        "the default render's controller image must be config/'s REPOSITORY at \
          `:{LOGWEIR_TAG}` — the same repository, the chart's own tag ruling"
     );
     assert!(
@@ -641,7 +662,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     assert_eq!(
         Some("IfNotPresent"),
         ic["imagePullPolicy"].as_str(),
-        "logweir.yaml's pull policy, unchanged by this chart's ruling"
+        "config/'s pull policy, unchanged by this chart's ruling"
     );
     assert_eq!(
         Some("Always"),
@@ -696,7 +717,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     );
     assert_eq!(
         install_env, chart_env,
-        "the Deployment's env differs between logweir.yaml and the default render \
+        "the Deployment's env differs between config/ and the default render \
          (LOGWEIR_RUNNER_IMAGE and LOGWEIR_RUNNER_PULL_POLICY are the two permitted extras, \
          already removed)"
     );
@@ -711,7 +732,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         assert_eq!(
             rules_of(find(&install, "ClusterRole", role)),
             rules_of(find(&chart, "ClusterRole", role)),
-            "ClusterRole {role}'s rules differ from logweir.yaml's"
+            "ClusterRole {role}'s rules differ from config/'s"
         );
     }
     let mut chart_roles = names_of(&chart, "ClusterRole");
@@ -729,7 +750,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
     assert_eq!(
         names_of(&install, "ClusterRole"),
         chart_roles,
-        "apart from the managed identity's singleton, ClusterRoles must match logweir.yaml"
+        "apart from the managed identity's singleton, ClusterRoles must match config/"
     );
 
     // The ClusterRoleBinding binds the same role to the same ServiceAccount.
@@ -871,7 +892,7 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         );
     }
     // THE TREE ITSELF IS STILL PINNED BY DIGEST. Global Constraint 7 governs
-    // `config/`, `logweir.yaml` and the Rust constant, and this ruling does not
+    // `config/` and the Rust constant, and this ruling does not
     // reach them — `repository_of` above would have panicked otherwise, and this
     // says so out loud.
     assert!(
@@ -4180,8 +4201,8 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
             && !read("config/rbac/kustomization.yaml")
                 .lines()
                 .any(|l| l.trim() == "- retention-serviceaccount.yaml"),
-        "the fragment must NOT be listed in config/rbac/kustomization.yaml: rendering it into \
-         `logweir.yaml` would create the account in the one namespace no enforcement Job runs in"
+        "the fragment must NOT be listed in config/rbac/kustomization.yaml: installing it with \
+         the base would create the account in the one namespace no enforcement Job runs in"
     );
     assert!(
         read("docs/install.md").contains("config/rbac/retention-serviceaccount.yaml"),
@@ -4205,7 +4226,7 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
 /// `""` as `0` would silently disable fail-fast on every default install.
 ///
 /// MUTANTS: render the variables unconditionally (the default render stops
-/// agreeing with `logweir.yaml`); use `if .Values…` instead of
+/// agreeing with `config/`); use `if .Values…` instead of
 /// `ne (toString …) ""` (a configured `0` renders nothing and the operator's
 /// "never" becomes 300 s).
 #[test]
@@ -4217,8 +4238,7 @@ fn chart_lint_the_two_controller_windows_render_only_when_configured() {
             Some(""),
             values["controller"][key].as_str(),
             "`controller.{key}` ships as the EMPTY STRING — this build's own default — so a \
-             default install renders no environment variable and stays byte-identical to \
-             logweir.yaml"
+             default install renders no environment variable"
         );
     }
     for name in ["default", "minimal", "demo", "msk"] {
@@ -5029,10 +5049,8 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
             "config/samples/console-credential-admission-policy.yaml must carry `{needle}`"
         );
     }
-    // IT IS NOT IN THE INSTALL FILE, and it cannot be: a
-    // ValidatingAdmissionPolicy applied to a 1.29 cluster is rejected with
-    // `no matches for kind`, and `logweir.yaml` has to apply unedited on the
-    // stated floor (spec §16 clause 1).
+    // IT IS NOT IN THE INSTALL, and it cannot be: a ValidatingAdmissionPolicy
+    // applied to a 1.29 cluster is rejected with `no matches for kind`.
     let root: Value = serde_yaml::from_str(&read("config/kustomization.yaml"))
         .expect("the install root's kustomization parses");
     let resources: Vec<String> = root["resources"]
@@ -5049,10 +5067,6 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
     assert!(
         !std::path::Path::new(&repo().join("config/samples/kustomization.yaml")).exists(),
         "config/samples/ has no kustomization of its own either"
-    );
-    assert!(
-        !read("logweir.yaml").contains("ValidatingAdmissionPolicy"),
-        "logweir.yaml must carry no ValidatingAdmissionPolicy: minimum Kubernetes is 1.29"
     );
 }
 

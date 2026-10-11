@@ -32,7 +32,7 @@ a port, a cluster id, a network or a volume and need no lock:
 ```sh
 eval "$(e2e/compose/stack-env.sh --slot 2)"   # project logweir-e2e-s2, ports 29092, 29000, …
 just e2e-up
-./scripts/e2e-seed.sh && just e2e              # or: just demo / just pitr / just mvp-demo
+./scripts/e2e-seed.sh && just e2e              # or: just pitr / just mvp-demo
 just e2e-down
 eval "$(e2e/compose/stack-env.sh --slot 0)"    # back to the default stack
 ```
@@ -63,7 +63,7 @@ slot has its own network.
 `logweir-e2e` (or unset) or `logweir-e2e-sN`, and EVERY port — the five above
 and the nine profile ports — must be exactly that slot's; an unknown
 `LOGWEIR_E2E_*_PORT` is refused too. `just e2e-up`, `just e2e-down`,
-`scripts/demo.sh`, `scripts/mvp-demo.sh`, `scripts/e2e-seed.sh` and
+`scripts/mvp-demo.sh`, `scripts/e2e-seed.sh` and
 `compose/profile-smoke.sh` check first (`stack-env.sh --check`), and so does the
 Rust harness before its first address, scratch path or `docker compose` call. A
 single moved port on the default project would make `up` recreate the shared
@@ -73,7 +73,7 @@ would recreate that slot. Set everything at once with `stack-env.sh`.
 **What reads the variables.** The scripts source
 [`compose/stack-lib.sh`](compose/stack-lib.sh); the Rust harness compiles the
 same file in ([`tests/harness/stack.rs`](tests/harness/stack.rs)). On a slot, the harness and
-`scripts/demo.sh` / `scripts/mvp-demo.sh` rebind the checked-in examples'
+`scripts/mvp-demo.sh` rebind the checked-in examples'
 `localhost:9092` and `http://localhost:9000` to the slot's ports, and write to
 `.e2e/<project>/` and `.demo/<project>/` instead of `.e2e/` and `.demo/`, so two
 slots can run from one checkout; `scripts/e2e-seed.sh` never refreshes the two
@@ -89,10 +89,7 @@ coherence first (`stack::ensure_coherent()`).
 **What does not move yet.** On a non-default slot `just e2e` runs only the `e2e`
 package: the `--features e2e` rows under `crates/` still dial
 `localhost:9092` / `localhost:9000` and would reach the default stack, so they
-run on the default stack. `scripts/k8s-demo.sh` and the `laptop-demo.sh` /
-`kind-demo.sh` walk (`demo-steps.sh`) address the default stack only and REFUSE
-a slot before they take the stack (they also install Logweir into a cluster,
-which the orchestrated run forbids besides).
+run on the default stack.
 
 **Cluster ids.** Each Kafka cluster loads its id from
 `compose/slots/<project>/<cluster>.env`: `kafka-broker-1.env`,
@@ -129,7 +126,7 @@ PROD-01.4's topic-identity suites) is in
 
 ```sh
 eval "$(e2e/compose/stack-env.sh --slot 3 --kafka 4.3)"
-just e2e-up && bash scripts/demo.sh && just pitr
+just e2e-up && just pitr
 just e2e-down && just e2e-up && just mvp-demo && just e2e-down
 ```
 
@@ -157,8 +154,7 @@ names Logweir's build-input digest for a `+logweir.` version, as the build
 ledger `third_party/kafka-backup-builds.txt` records it for that version (so
 an earlier build run at this checkout is named by its own digest, FX-21), and
 OSO's image digest otherwise, so a signed document always names the engine
-that ran. `scripts/demo.sh` and `scripts/mvp-demo.sh` read the ledger the
-same way.
+that ran. `scripts/mvp-demo.sh` reads the ledger the same way.
 
 **A native engine can outrun the target's metadata.** Built natively on the
 host (`scripts/engine-source.sh build` on macOS), the engine starts a restore

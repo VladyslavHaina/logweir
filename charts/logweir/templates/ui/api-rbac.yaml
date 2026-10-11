@@ -36,7 +36,7 @@ adapter calls FOUR kube verbs — `list`, `get`, `create`, `patch` — and
 `logweir-api`'s `linkage.rs` pins the `(verb, resource)` pairs at the point the
 adapter names them.
 
-Every rule below is that pin, transcribed. `scripts/render-install.sh --check`
+Every rule below is that pin, transcribed. `scripts/check-chart.sh`
 re-derives the seal from `kube.rs` and refuses when this file and the seal
 disagree, in both directions; `chart_lint.rs` holds the rendered role to the
 table verb for verb.

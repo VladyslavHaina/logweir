@@ -1140,8 +1140,8 @@ reversible direction until the owning task rules.
   point-in-time range you are recovering to, so a checked-in example cannot
   carry a correct one. A window that overlaps no segment is REFUSED with exit
   1 — "a drill over an empty window would report a pass that means nothing" —
-  rather than reported as a pass over nothing. `scripts/demo.sh` and the e2e
-  harness both rebind those two fields at run time, and only those two.
+  rather than reported as a pass over nothing. The e2e harness rebinds those
+  two fields at run time, and only those two.
 
 - **The exit-code contract is nearly invisible under Kubernetes** unless the
   Job is shaped with `restartPolicy: Never` and `backoffLimit: 0`. Exit 2 ("a
@@ -1290,8 +1290,8 @@ build reads host headers. A cross attempt failed on `sys/types.h` in the
 recorded 2026-09-11 trial; the native arm64 build took 182 s with cached base
 layers. These are historical measurements, not build-time guarantees.
 
-Local rebuilds change image digests. `config/manager/deployment.yaml` and
-`logweir.yaml` retain local digest pins; the Helm chart uses `:latest` for the
+Local rebuilds change image digests. `config/manager/deployment.yaml` retains
+a local digest pin; the Helm chart uses `:latest` for the
 Logweir repositories by the owner's 2026-09-12 decision. Third-party chart
 images remain digest-pinned. See the [chart guide](../charts/logweir/README.md)
 for the pull-policy and registry consequences.

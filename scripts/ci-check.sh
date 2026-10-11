@@ -43,7 +43,6 @@ just verify-py
 just schema-check
 just crds-check
 just chart-check
-bash scripts/render-install.sh --check
 just links
 
 mkdir -p target

@@ -21,7 +21,7 @@ because `logweir drill approve` requires `--key`, and compares the `plan_hash` l
 `await planHash(bytes)` computed in the browser's own `crypto.subtle`. The value of that test is
 that the two numbers come from two languages; a stub would make it a test of one.
 
-It was generated in this worktree with the two commands `scripts/demo.sh` uses:
+It was generated in this worktree with these two commands:
 
 ```
 openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out approver.pem
@@ -65,8 +65,8 @@ restore wizard met on a real cluster and refused, and the two rows at the end of
 about them.
 
 - **`wizard-clusters-source-only.json`** is ONE `KafkaCluster`, `role: source`, at the published `K8S`
-  listener -- the namespace `scripts/laptop-demo.sh` builds and the namespace `scripts/k8s-demo.sh`
-  runs a green `mode: newTopic` restore in. Until Task 28a step 4 filtered the target select down to
+  listener -- the namespace the withdrawn laptop and Phase B walks built and ran a green
+  `mode: newTopic` restore in. Until Task 28a step 4 filtered the target select down to
   `role: target` and rendered nothing here.
 - **`wizard-backups-schedule-running.json`** is a two-minute schedule caught mid-flight: two
   `Succeeded` `Backup` objects and, LAST in the list, one still `Running` with no `backupId` and no

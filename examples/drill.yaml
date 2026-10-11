@@ -44,10 +44,9 @@ sample:
   # report a pass that means nothing" — because the alternative is a drill that
   # restores nothing and calls it a pass.
   #
-  # `scripts/demo.sh` therefore REBINDS these two fields (and only these two)
-  # to the last 24 hours before running, since that is where the seed script
-  # just produced records; `e2e/tests/harness/mod.rs` does the same for the e2e
-  # suite via `spec_example_with_only_the_window_bound`. Neither is Logweir
+  # `e2e/tests/harness/mod.rs` therefore REBINDS these two fields (and only
+  # these two) for the e2e suite via `spec_example_with_only_the_window_bound`,
+  # since that is where the seed script just produced records. That is not Logweir
   # papering over a defect: a fixed date in a checked-in example cannot follow
   # your archive, and the honest thing is to say so rather than to ship a
   # window that silently stops overlapping anything a week after it was written.

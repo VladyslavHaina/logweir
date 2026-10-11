@@ -454,12 +454,8 @@ fn the_one_list_is_the_only_list() {
     }
     let mut shells = vec![
         "justfile".to_string(),
-        "scripts/demo.sh".to_string(),
-        "scripts/demo-approve.sh".to_string(),
         "scripts/mvp-demo.sh".to_string(),
         "scripts/e2e-seed.sh".to_string(),
-        "scripts/k8s-demo.sh".to_string(),
-        "scripts/demo-steps.sh".to_string(),
     ];
     for e in std::fs::read_dir(root().join("e2e/compose"))
         .unwrap()
@@ -1098,12 +1094,7 @@ fn no_stack_reader_hard_codes_a_default_host_address() {
         &["e2e/tests", "e2e/src"],
         &["e2e/tests/stack_params.rs"],
     );
-    for rel in [
-        "scripts/demo.sh",
-        "scripts/demo-approve.sh",
-        "scripts/mvp-demo.sh",
-        "scripts/e2e-seed.sh",
-    ] {
+    for rel in ["scripts/mvp-demo.sh", "scripts/e2e-seed.sh"] {
         scanned += 1;
         found.extend(literal_addresses(rel, &read(rel), "#"));
     }

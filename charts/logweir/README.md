@@ -40,15 +40,16 @@ registry. [`values.yaml`](values.yaml) lists **every** option with its default,
 one line each — it is deliberately short, and every explanation lives in this
 file.
 
-One chart that installs Logweir's control plane — the same objects
-[`logweir.yaml`](../../logweir.yaml) ships — and, optionally, its own
+One chart that installs Logweir's control plane — the only install since the
+static `logweir.yaml` bundle was withdrawn
+([release notes](../../docs/release-notes.md), item 73) — and, optionally, its own
 object-store backend, two throwaway Kafka clusters and the UI. It is
 **derived from `config/`**, never the other way round: `scripts/check-chart.sh`
 holds the chart's CRDs byte-identical to the tree (and the page's bytes are
 held to it by `scripts/check-image-ui.sh`, against the image that serves
 them), and
-`crates/logweir/tests/chart_lint.rs` holds the rendered control plane to the
-install file. [`docs/install.md`](../../docs/install.md) is still the single
+`crates/logweir/tests/chart_lint.rs` holds the rendered control plane to
+`config/`. [`docs/install.md`](../../docs/install.md) is still the single
 install document; this README is the chart's own.
 
 ## What it installs
@@ -78,7 +79,7 @@ install document; this README is the chart's own.
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
 matches the same
-controller, env, security context and RBAC rules as `logweir.yaml`
+controller, env, security context and RBAC rules as `config/`
 (`chart_lint_default_render_agrees_with_the_install_file`).
 
 ## The installation policy (`checks.*`, `runs.*`, `engine.*`, `evidence.*`)
@@ -330,8 +331,8 @@ entry**, because that is where the Jobs are: the controller creates an
 enforcement Job in the namespace of the `RetentionPolicy` that produced it, and
 a `RetentionPolicy` lives with the workload it protects. It reads that list even
 when `identity.enabled` is off — the list is about where Jobs run, and only the
-signer distribution beside it is about identity. For the low-level
-`logweir.yaml` path there is a fragment,
+signer distribution beside it is about identity. For a namespace the chart
+does not list there is a fragment,
 `config/rbac/retention-serviceaccount.yaml`, applied once per namespace exactly
 as the runner's is (`docs/install.md` step 4).
 
@@ -415,7 +416,7 @@ both `myrel-api` once you set the value, and neither can be silently wrong.
 (An installation fencing a console deployed out of band leaves `api.enabled`
 off, and the refusal does not apply.)
 
-`./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
+`bash scripts/check-chart.sh` answers the `kubectl auth can-i` question
 for every pair above, in both directions, against every checked-in render. It
 finds the console's roles through the bindings that name its ServiceAccount,
 whatever the roles are called, and refuses a binding that names anyone else
@@ -1086,7 +1087,7 @@ whose read failed for want of it is read once more
 **The chart's defaults name `controllerImage` and `runnerImage` by the `latest`
 TAG, not by a digest. That is the owner's decision of 2026-09-12**, taken after
 the trade-off below was put to them, and it is this chart's ruling alone:
-`config/manager/deployment.yaml`, `logweir.yaml` and
+`config/manager/deployment.yaml` and
 `weirkeeper::job::RUNNER_IMAGE` still pin digests under Global Constraint 7, and
 so do the four third-party images this chart can bring (MinIO, `mc`,
 `apache/kafka`, `kubectl`). The two repositories are the tree's own — the gate
@@ -1813,9 +1814,8 @@ second independent signer. **The demo MinIO's `PersistentVolumeClaim` is NOT
 kept:** it is an ordinary release object, so `helm uninstall` deletes it and,
 under a `Delete` reclaim policy (docker-desktop's `hostpath`), the demo archive
 with it — copy anything you need out of the bucket first (seen live by the PoC
-install, 2026-09-24). And, as with `kubectl delete -f
-logweir.yaml`: no archive object and no evidence object is ever deleted by
-Logweir — Global Constraint 6.
+install, 2026-09-24). And no archive object and no evidence object is ever
+deleted by Logweir — Global Constraint 6.
 
 ## The checks that hold the chart to the tree
 
@@ -1842,7 +1842,7 @@ Logweir — Global Constraint 6.
   `identity.bootstrapImage` pins; no separate workflow or end-user hash step
   exists.
 * `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
-  `logweir.yaml`; nothing optional renders under defaults; each flag renders
+  `config/`; nothing optional renders under defaults; each flag renders
   its named objects; the chart carries no copy of `ui/` and mounts no ConfigMap
   into the proxy — the page's bytes are asserted against the image instead, by
   `scripts/check-image-ui.sh`.

@@ -145,9 +145,8 @@ release. A push to `main` need not create a tag or GitHub Release. See
 
 Project naming and announcement requirements remain in
 [TRADEMARKS.md](../TRADEMARKS.md); they are not a claim established by CI.
-Historical local transcripts remain useful in [kubernetes.md](kubernetes.md)
-and [e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md), but cannot substitute
-for evidence about the current release candidate.
+Historical local transcripts remain useful in [kubernetes.md](kubernetes.md),
+but cannot substitute for evidence about the current release candidate.
 
 ---
 

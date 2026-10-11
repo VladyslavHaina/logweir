@@ -104,7 +104,7 @@ reaches it.
 
 `kubectl proxy` forwards every API path except pod exec and attach, on the same
 origin as the page, under the viewer's kubeconfig. So the page runs with the
-**viewer's entire cluster authority**, not with the roles `logweir.yaml` ships:
+**viewer's entire cluster authority**, not with the roles the chart ships:
 `logweir-viewer`, `logweir-operator` and `logweir-approver` bind the **user**,
 and under this serving path they bind nothing at all about the page. Anyone who
 runs the UI from a cluster-admin kubeconfig gives the shipped bundle

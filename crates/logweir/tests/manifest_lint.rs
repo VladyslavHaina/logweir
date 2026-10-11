@@ -2,7 +2,7 @@
 //!
 //! # The selection rule, fixed here and inherited by Tasks 22 and 23
 //!
-//! Every file under `config/**` and `examples/**`, plus `logweir.yaml`, is
+//! Every file under `config/**` and `examples/**` is
 //! parsed with [`serde_yaml::Deserializer::from_str`] as a MULTI-DOCUMENT
 //! stream, and a document is treated as a Kubernetes manifest when it carries
 //! **both `apiVersion` and `kind`** — never by filename and never by extension.
@@ -20,14 +20,9 @@
 //! # Why all of this is in-process
 //!
 //! Global Constraint 22: every test here parses checked-in bytes, shells
-//! nothing, dials nothing, and finishes in milliseconds. Two acceptance lines
-//! for this task read as though they were tests —
-//! `bash scripts/render-install.sh --check` and `just check-secrets <ns>` —
-//! and both shell out, one to `kubectl kustomize` and one to `just`. They are
-//! `just` recipes and recorded transcript steps. The PROPERTIES they check are
-//! tested here without a subprocess: [`install_yaml_has_no_drift`] compares the
-//! rendered file against the source manifests document by document, and
-//! [`check_secrets_refuses_a_missing_secret`] parses the recipe.
+//! nothing, dials nothing, and finishes in milliseconds. `just check-secrets
+//! <ns>` shells out to `kubectl`; [`check_secrets_refuses_a_missing_secret`]
+//! parses the recipe instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -152,7 +147,7 @@ fn manifests_in(path: &Path) -> Vec<Manifest> {
 
 use serde::Deserialize;
 
-/// Every manifest under the three shipped locations.
+/// Every manifest under the two shipped locations.
 fn all_manifests() -> Vec<Manifest> {
     let mut out = Vec::new();
     for dir in ["config", "examples"] {
@@ -160,12 +155,7 @@ fn all_manifests() -> Vec<Manifest> {
             out.extend(manifests_in(&f));
         }
     }
-    out.extend(manifests_in(&repo().join("logweir.yaml")));
     out
-}
-
-fn install_file() -> Vec<Manifest> {
-    manifests_in(&repo().join("logweir.yaml"))
 }
 
 /// One `ClusterRole`'s rules, as `(apiGroups, resources, verbs)` triples with
@@ -252,73 +242,6 @@ fn v(items: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     out.sort();
     out
-}
-
-// ---------------------------------------------------------------------------
-// The Namespace, and the order it appears in
-// ---------------------------------------------------------------------------
-
-/// `logweir.yaml` creates the namespace it installs into, and creates it FIRST.
-///
-/// Critique B **H12**, interface **I27**. Without the Namespace document the
-/// first apply on a clean cluster fails with `namespaces "logweir-system" not
-/// found` and X-APPLY is unsatisfiable — which is the whole "a stranger applies
-/// one file" claim of spec §1. Without the ORDER, the same thing happens: the
-/// documents are applied in file order and a ServiceAccount cannot precede its
-/// namespace.
-#[test]
-fn logweir_yaml_creates_its_own_namespace() {
-    let docs = install_file();
-    let namespaces: Vec<&Manifest> = docs.iter().filter(|m| m.kind == "Namespace").collect();
-    assert_eq!(
-        namespaces.len(),
-        1,
-        "logweir.yaml must carry EXACTLY ONE `kind: Namespace` document; found {}: {:?}",
-        namespaces.len(),
-        namespaces.iter().map(|m| m.name()).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        namespaces[0].name(),
-        "logweir-system",
-        "the namespace logweir.yaml creates must be `logweir-system` — \
-         `config/rbac/role_binding.yaml`'s subject names that literal"
-    );
-
-    let ns_at = docs
-        .iter()
-        .position(|m| m.kind == "Namespace")
-        .expect("just asserted there is one");
-    for (i, m) in docs.iter().enumerate() {
-        if m.namespace().is_some() {
-            assert!(
-                i > ns_at,
-                "namespaced document {} (index {i}) precedes the Namespace (index {ns_at}) in \
-                 logweir.yaml; `kubectl apply -f` applies documents in file order, so this one \
-                 fails on a clean cluster",
-                m.id()
-            );
-        }
-    }
-}
-
-/// No document in `logweir.yaml` is a Logweir custom resource.
-///
-/// The CRD-not-yet-established ordering failure is avoided BY CONSTRUCTION and
-/// not by a `kubectl wait`: a `KafkaCluster` in the same file as the CRD that
-/// defines it races the establishment on the first apply and races it
-/// differently on the second — and the second apply is the one X-APPLY reads.
-#[test]
-fn logweir_yaml_contains_no_custom_resource() {
-    for m in install_file() {
-        assert_ne!(
-            m.api_version,
-            "logweir.dev/v1alpha1",
-            "logweir.yaml carries a custom resource ({} at document {}); samples are separate \
-             files, applied second",
-            m.id(),
-            m.index
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,16 +1109,13 @@ fn every_call_site_has_a_grant() {
         callers
     );
 
-    // EVERY SHIPPED COPY, not just the source manifest. An operator applies
-    // `logweir.yaml` or renders the chart; a fix that lands in `config/rbac`
-    // and nowhere else is still a broken install. The Helm TEMPLATE
+    // EVERY SHIPPED COPY, not just the source manifest. An operator renders
+    // the chart; a fix that lands in `config/rbac` and nowhere else is still a
+    // broken install. The Helm TEMPLATE
     // (`charts/logweir/templates/clusterrole.yaml`) is not parseable YAML on
-    // its own — it carries `{{ include }}` lines — and is held to the install
-    // file by `chart_lint`'s render comparison, over these rendered outputs.
-    let mut files = vec![
-        "config/rbac/role.yaml".to_string(),
-        "logweir.yaml".to_string(),
-    ];
+    // its own — it carries `{{ include }}` lines — so the rendered outputs are
+    // read.
+    let mut files = vec!["config/rbac/role.yaml".to_string()];
     for path in files_under("charts/logweir/rendered") {
         let rel = path
             .strip_prefix(repo())
@@ -1817,8 +1737,8 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
 ///
 ///  What is asserted, and the one grant that is allowed to exist
 ///
-/// Across every shipped manifest — `logweir.yaml`, `config/rbac/`,
-/// `config/samples/` and every rendered chart file — no `Role` or `ClusterRole`
+/// Across every shipped manifest — `config/rbac/`, `config/samples/` and
+/// every rendered chart file — no `Role` or `ClusterRole`
 /// rule names `secrets` (or `*`) with:
 ///
 /// * `delete`, `deletecollection` or `*`, **ever**, however scoped; or
@@ -1846,7 +1766,7 @@ fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
     /// comment: the identity bootstrap legitimately holds `get`/`patch` on the
     /// one Secret it names.
     const FORBIDDEN: [&str; 3] = ["delete", "deletecollection", "*"];
-    let mut files: Vec<String> = vec!["logweir.yaml".to_string()];
+    let mut files: Vec<String> = Vec::new();
     for dir in ["config/rbac", "config/samples", "charts/logweir/rendered"] {
         for path in files_under(dir) {
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
@@ -2082,14 +2002,10 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
 fn runner_pods_do_not_automount_a_token() {
     // THE EXEMPTION. A literal list, never a pattern: a third exempt PodSpec is
     // a diff in these lines, reviewed on its own merits. Each entry is
-    // `<file>::<Kind>/<name>`, and the rendered install file carries the same
-    // two objects a second time — so they are named twice rather than matched
-    // by a rule that would also match something else.
-    const EXEMPT: [&str; 4] = [
+    // `<file>::<Kind>/<name>`.
+    const EXEMPT: [&str; 2] = [
         "config/manager/deployment.yaml::Deployment/weirkeeper",
         "config/rbac/service_account.yaml::ServiceAccount/weirkeeper",
-        "logweir.yaml::Deployment/weirkeeper",
-        "logweir.yaml::ServiceAccount/weirkeeper",
     ];
 
     // --- arm (a), the shipped manifests -----------------------------------
@@ -2178,24 +2094,6 @@ fn runner_pods_do_not_automount_a_token() {
     );
 }
 
-/// `logweir.yaml`'s header carries Global Constraint 37's literal.
-#[test]
-fn the_install_file_records_blocked_images_not_published() {
-    let text = read("logweir.yaml");
-    assert!(
-        text.contains("blocked: images not published"),
-        "logweir.yaml's header must contain the literal `blocked: images not published` (Global Constraint \
-         37): the images it references are referenced by TAG, no such image has been pushed, and \
-         a locally built one is author-only and never satisfies spec §16 clause 1"
-    );
-    // It is a HEADER, not a line buried mid-file: a stranger reads the top.
-    let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
-    assert!(
-        head.contains("blocked: images not published"),
-        "the `blocked: images not published` line must be in logweir.yaml's header comment (first 60 lines)"
-    );
-}
-
 /// The `TrustRoster` sample is named `default`, and says the name is fixed.
 ///
 /// Interface **I16**: `weirkeeper::controllers::approval::ROSTER_NAME` is the
@@ -2237,8 +2135,7 @@ fn the_trustroster_sample_is_named_default() {
 // The selection rule itself, and drift
 // ---------------------------------------------------------------------------
 
-/// The five non-manifest files under `examples/` are skipped BY THE PARSE, and
-/// `logweir.yaml` yields exactly the expected document count.
+/// The five non-manifest files under `examples/` are skipped BY THE PARSE.
 ///
 /// The mutant this exists for: selecting manifests by a `*.yaml` glob. That
 /// passes every other test in this file and fails here, on `drill.yaml`.
@@ -2279,111 +2176,6 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         2,
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
     );
-
-    // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
-    // ServiceAccount + 6 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
-    // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
-    // six, Amendment F's three and Amendment G's five — and a kind that
-    // reaches `config/crd/` without reaching
-    // `config/crd/kustomization.yaml` shows up here as a count that did not
-    // move. SIX ClusterRoles since D3 W13: `weirkeeper`, the three human
-    // roles, `logweir-trust-admin` and `logweir-retention-admin`.
-    let docs = install_file();
-    let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
-    for m in &docs {
-        *by_kind.entry(m.kind.clone()).or_default() += 1;
-    }
-    assert_eq!(
-        by_kind,
-        BTreeMap::from([
-            ("Namespace".to_string(), 1),
-            ("CustomResourceDefinition".to_string(), 14),
-            ("ServiceAccount".to_string(), 1),
-            ("ClusterRole".to_string(), 6),
-            ("ClusterRoleBinding".to_string(), 1),
-            ("Deployment".to_string(), 1),
-            ("NetworkPolicy".to_string(), 1),
-        ]),
-        "logweir.yaml's document census changed"
-    );
-    assert_eq!(
-        docs.len(),
-        25,
-        "logweir.yaml must hold exactly 25 documents"
-    );
-}
-
-/// `logweir.yaml` is what `config/` renders to — checked without a subprocess.
-///
-/// `scripts/render-install.sh --check` is the shell form and a `just` recipe;
-/// this is the same property, asserted in-process (Global Constraint 22). No
-/// kustomize transformer in `config/kustomization.yaml` rewrites anything — no
-/// `namePrefix`, no `namespace`, no `commonLabels` — so each rendered document
-/// must be VALUE-EQUAL to the source document it came from, and the two
-/// document sets must match exactly.
-#[test]
-fn install_yaml_has_no_drift() {
-    // The sources the install root actually names, in one flat list.
-    let mut sources: Vec<Manifest> = Vec::new();
-    for rel in ["config/manager", "config/crd", "config/rbac"] {
-        for f in files_under(rel) {
-            let name = f.file_name().and_then(|s| s.to_str()).unwrap_or_default();
-            if name == "kustomization.yaml" {
-                continue;
-            }
-            // The three files `config/rbac/kustomization.yaml` deliberately
-            // does not list must not appear in the rendered file: Task 17's
-            // REQUEST fragment, and the two PER-NAMESPACE Job ServiceAccounts.
-            // Asserted below rather than skipped silently.
-            //
-            // `retention-serviceaccount.yaml` joined them at D3 W13's fix round
-            // 1 (review F2), for exactly the reason the runner's carries:
-            // enforcement Jobs run in the namespace of the `RetentionPolicy`
-            // that produced them, which is an adopter's namespace and never
-            // `logweir-system`, so rendering it here would create the account
-            // in the one namespace no enforcement Job ever runs in.
-            if name == "backup-reconciler-rbac-request.yaml"
-                || name == "backup-runner-serviceaccount.yaml"
-                || name == "retention-serviceaccount.yaml"
-            {
-                for m in manifests_in(&f) {
-                    assert!(
-                        !install_file().iter().any(|r| r.id() == m.id()),
-                        "{} is a REQUEST fragment / a per-namespace file and must not be rendered \
-                         into logweir.yaml, but {} is in there",
-                        name,
-                        m.id()
-                    );
-                }
-                continue;
-            }
-            sources.extend(manifests_in(&f));
-        }
-    }
-
-    let rendered = install_file();
-    let src_ids: BTreeSet<String> = sources.iter().map(Manifest::id).collect();
-    let out_ids: BTreeSet<String> = rendered.iter().map(Manifest::id).collect();
-    assert_eq!(
-        src_ids, out_ids,
-        "logweir.yaml's documents are not the documents config/ carries. Run `just install-yaml`."
-    );
-
-    for s in &sources {
-        let r = rendered
-            .iter()
-            .find(|r| r.id() == s.id())
-            .unwrap_or_else(|| panic!("{} is in config/ and not in logweir.yaml", s.id()));
-        assert_eq!(
-            s.value,
-            r.value,
-            "logweir.yaml's `{}` differs from `{}`. Either config/ changed and logweir.yaml was \
-             not regenerated, or logweir.yaml was edited by hand. Both are fixed by \
-             `just install-yaml`.",
-            s.id(),
-            s.origin
-        );
-    }
 }
 
 /// The author-only overlay reaches the same bases as the install root.
@@ -2467,7 +2259,7 @@ fn install_docs_name_all_operator_managed_secrets() {
     assert!(
         docs.contains("short-lived bootstrap Job")
             && docs.contains("identity.authorizedRunnerNamespaces")
-            && docs.contains("low-level `logweir.yaml`"),
+            && docs.contains("(the low-level path)"),
         "managed signer bootstrap/distribution and low-level provisioning must be distinct"
     );
     assert!(
@@ -2492,16 +2284,11 @@ fn install_docs_name_all_operator_managed_secrets() {
 }
 
 /// `just check-secrets` is its own recipe, names the current Secrets with
-/// `logweir-signing-key` first, exits 1, and is NOT part of `just apply-install`.
+/// `logweir-signing-key` first, and exits 1.
 ///
-/// Critique B **M15**, interface **I26**. `just apply-check` was two different
-/// jobs under one name: X-APPLY is "apply the file twice and read both exit
-/// codes", and the missing-Secret check is "inspect a namespace and refuse".
-/// Folding the second into the first would make the install refuse on a clean
-/// cluster — which is precisely the state X-APPLY is defined against. The live
-/// `rc=1` run is a recorded transcript step; the recipe's SHAPE is asserted
-/// here, in-process (Global Constraint 22 forbids a `#[test]` that shells
-/// `just`).
+/// Critique B **M15**, interface **I26**. The live `rc=1` run is a recorded
+/// transcript step; the recipe's SHAPE is asserted here, in-process (Global
+/// Constraint 22 forbids a `#[test]` that shells `just`).
 #[test]
 fn check_secrets_refuses_a_missing_secret() {
     let justfile = read("justfile");
@@ -2546,33 +2333,6 @@ fn check_secrets_refuses_a_missing_secret() {
     assert!(
         check.contains("exit 1"),
         "`just check-secrets` must exit 1 when a Secret is absent"
-    );
-
-    let apply = recipe("apply-install");
-    assert!(
-        !apply.contains("check-secrets"),
-        "`just apply-install` invokes `check-secrets`. X-APPLY is defined against a CLEAN cluster \
-         that has no Secrets at all; folding the check in makes the install refuse in exactly the \
-         state it is specified to succeed in (critique B M15)."
-    );
-    // And X-APPLY really is two applies with their exit codes read directly.
-    assert_eq!(
-        apply.matches("apply --server-side -f logweir.yaml").count(),
-        2,
-        "`just apply-install` is X-APPLY: `kubectl --context docker-desktop apply --server-side \
-         -f logweir.yaml`, TWICE"
-    );
-    // STANDING RULE 12: the context is named explicitly, always — as the
-    // variable the demo drivers export, whose DEFAULT is the laptop's cluster.
-    // The literal `--context docker-desktop` was what failed the first CI run
-    // of the demo on a `kind` cluster (2026-09-12).
-    assert!(
-        apply.contains("--context \"${LOGWEIR_KUBE_CONTEXT:-docker-desktop}\""),
-        "STANDING RULE 12: `just apply-install` must pass `--context \"${{LOGWEIR_KUBE_CONTEXT:-docker-desktop}}\"` — the driver's context, defaulting to the laptop's"
-    );
-    assert!(
-        !apply.contains("| grep") && !apply.contains("|grep"),
-        "STANDING RULE 20: an exit code is never read through a pipe"
     );
 }
 
@@ -2892,10 +2652,12 @@ fn is_digest_reference(reference: &str) -> bool {
 #[test]
 fn manifest_lint_every_image_reference_is_a_digest() {
     let refs = image_references();
+    // The controller Deployment and the CronJob example; the floor counted
+    // logweir.yaml's copy of the first before that file was withdrawn.
     assert!(
-        refs.len() >= 3,
-        "only {} container image references were found across config/**, examples/** and \
-         logweir.yaml; this gate would then be asserting almost nothing. Found: {refs:?}",
+        refs.len() >= 2,
+        "only {} container image references were found across config/** and examples/**; \
+         this gate would then be asserting almost nothing. Found: {refs:?}",
         refs.len()
     );
     for (where_, reference) in &refs {
@@ -2918,8 +2680,8 @@ fn manifest_lint_every_image_reference_is_a_digest() {
 /// no list anywhere.
 ///
 /// THE MUTANT THIS EXISTS FOR: replacing the parsed selection with a hard-coded
-/// list of files — `["config/manager/deployment.yaml", "examples/cronjob-drill.yaml",
-/// "logweir.yaml"]`. That mutant passes every other assertion in this file,
+/// list of files — `["config/manager/deployment.yaml", "examples/cronjob-drill.yaml"]`.
+/// That mutant passes every other assertion in this file,
 /// because those are in fact the files that carry images today. It fails here,
 /// because this document is written to a temporary directory the repository
 /// has never heard of and is still selected and still has its image read.
@@ -3456,66 +3218,5 @@ fn the_controller_image_owes_no_mit_notice() {
         checker.contains("ldd /usr/local/bin/weirkeeper"),
         "scripts/check-image-weirkeeper.sh must run `ldd /usr/local/bin/weirkeeper` (interface \
          I25, check 1)"
-    );
-}
-
-/// Pinning a LOCALLY BUILT digest does not make the install file publishable.
-///
-/// Global Constraint 37 and spec §11's amendment 5: "published" means a PULL
-/// from a registry the author does not control. `docker inspect --format
-/// '{{index .RepoDigests 0}}'` on a locally built image returns the digest of
-/// bytes that exist on exactly one laptop — and if that image was pushed to a
-/// local `registry:2` to obtain one, the bytes exist on exactly one laptop
-/// still. So the install file now carries `@sha256:` references AND still reads
-/// `blocked: images not published`, and those two facts are not in tension: the first is
-/// Global Constraint 7, the second is Global Constraint 37.
-///
-/// THIS IS NOT A DUPLICATE OF [`the_install_file_records_blocked_images_not_published`].
-/// That one asserts the literal is present. This one asserts the literal
-/// survived the digest pin AND that the header still says, in the same breath,
-/// that a locally built image is author-only and never satisfies spec §16
-/// clause 1 — the mutant being "record the `registry:2` run as satisfying it",
-/// which deletes the qualifying sentence and leaves the four words behind.
-#[test]
-fn the_install_file_still_records_blocked_images_not_published() {
-    let text = read("logweir.yaml");
-    let head: String = text.lines().take(60).collect::<Vec<_>>().join("\n");
-
-    // The pin really did land — otherwise this test would pass on a tree where
-    // nothing changed.
-    let deployment = install_file()
-        .into_iter()
-        .find(|m| m.kind == "Deployment" && m.name() == "weirkeeper")
-        .expect("logweir.yaml carries the weirkeeper Deployment");
-    let images = images_in(&deployment);
-    assert_eq!(images.len(), 1, "the Deployment has one container");
-    assert!(
-        is_digest_reference(&images[0].1),
-        "logweir.yaml's controller image must be pinned by digest; it is `{}`",
-        images[0].1
-    );
-
-    assert!(
-        head.contains("blocked: images not published"),
-        "logweir.yaml's header must STILL carry Global Constraint 37's literal \
-         `blocked: images not published` after the digest pin. A digest that names bytes on one laptop is \
-         not a publication."
-    );
-    assert!(
-        head.contains("author-only"),
-        "logweir.yaml's header must say that a locally built or locally loaded image is \
-         `author-only`"
-    );
-    assert!(
-        head.contains("never satisfies spec §16 clause 1"),
-        "logweir.yaml's header must say that an author-only image `never satisfies spec §16 \
-         clause 1`. Deleting that clause while leaving `blocked: images not published` behind is how a local \
-         `registry:2` run comes to be recorded as a publication."
-    );
-    assert!(
-        !head.contains("referenced by tag"),
-        "logweir.yaml's header still says the images are `referenced by tag`. They are referenced \
-         by DIGEST after Task 23, and a header that describes the previous state is worse than no \
-         header: it is the one comment a stranger reads."
     );
 }

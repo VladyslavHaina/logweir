@@ -146,9 +146,8 @@ sample:
   # present, which it is here; `window_start` bounds the SAMPLE and never the
   # restore window, whose floor is the archive's.
   #
-  # `scripts/demo.sh` REBINDS these two fields (and only these two) to the last
-  # 24 hours before running, since that is where the seed script just produced
-  # records. That is not Logweir papering over a defect: a fixed date in a
+  # Rebind these two fields (and only these two) to a window your archive
+  # covers. That is not Logweir papering over a defect: a fixed date in a
   # checked-in example cannot follow your archive, and the honest thing is to
   # say so rather than to ship a window that silently stops overlapping
   # anything a week after it was written.

@@ -128,17 +128,17 @@ def test_an_untracked_build_input_trips_it_live() -> None:
 
 def test_a_tracked_modification_still_trips_it() -> None:
     head = _git("rev-parse", "HEAD")
-    victim = ROOT / "logweir.yaml"
+    victim = ROOT / "charts" / "logweir" / "values.yaml"
     if not victim.is_file():
         row("MUTANT: a tracked product file modified in the working tree is refused",
-            False, "logweir.yaml is not present; the probe needs a tracked product file")
+            False, "charts/logweir/values.yaml is not present; the probe needs a tracked product file")
         return
     original = victim.read_bytes()
     victim.write_bytes(original + b"\n# hf drift probe - reverted immediately\n")
     try:
         ok, why, _ = _contains(head)
         row("MUTANT: a tracked product file modified in the working tree is refused",
-            not ok and "logweir.yaml" in why, why[:160])
+            not ok and "charts/logweir/values.yaml" in why, why[:160])
     finally:
         victim.write_bytes(original)
     ok, why, _ = _contains(head)

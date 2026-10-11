@@ -1347,7 +1347,7 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     );
 
     // The managed and low-level paths are deliberately distinct: Helm owns
-    // declared runner namespaces; logweir.yaml users apply the base account.
+    // declared runner namespaces; identity-off installs apply the base account.
     assert!(
         install.contains("config/rbac/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
@@ -1448,13 +1448,14 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
 
     // The uninstall, and what survives it.
     assert!(
-        install.contains("kubectl --context docker-desktop delete -f logweir.yaml"),
-        "docs/install.md must carry the uninstall command"
+        install.contains("helm uninstall logweir -n logweir-system")
+            && install.contains("kubectl --context docker-desktop delete -f charts/logweir/crds/"),
+        "docs/install.md must carry the uninstall commands"
     );
     assert!(
         install.contains("removes only\nthat first thing")
             || install.contains("removes only that first thing"),
-        "docs/install.md must state that `kubectl delete -f logweir.yaml` removes only \
+        "docs/install.md must state that uninstalling removes only \
          the control plane; the scratch topics, the archive objects and the evidence \
          objects survive it and each has its own command"
     );
@@ -2261,6 +2262,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "a catalog's window holds the newest points",
             "It is a partial view",
+        ),
+        // PROD-17.1 C5 (2026-10-11, item 73): the chart is the only install;
+        // the selector that removes a bundle install's control plane.
+        (
+            "the Helm chart is the only install",
+            "-l app.kubernetes.io/name=logweir",
         ),
     ];
     assert_eq!(

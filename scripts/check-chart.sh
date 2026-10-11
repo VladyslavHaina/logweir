@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate chart CRDs, rendering, image references and value types.
+# Validate chart CRDs, rendering, image references, value types and the install's grants.
 # Use --write to refresh snapshots; default checks do not change tracked files.
 set -uo pipefail
 # --write explicitly refreshes committed render snapshots. Normal checks never edit files.
@@ -1333,6 +1333,437 @@ else
   fi
 fi
 
+echo "== 11. the enforcement image, the console's grants and who may create a TrustPolicy =="
+
+# The retention enforcement Job runs `logweir-retention` from the runner image
+# (defect RET-NOIMAGE: without it the Job exits 127 at the kubelet). Three
+# links, each read from the file that owns it: the Job's command and its image
+# (retention_policy.rs), and the runner image building and shipping the binary
+# (Dockerfile). Whole-line comments are stripped first, so the prose that
+# explains the defect cannot satisfy the check. It reads spellings; images.yml
+# runs the binary out of the built image.
+check_enforcement_image() {
+  retention_src="crates/weirkeeper/src/controllers/retention_policy.rs"
+  controller="$(sed '/^[[:space:]]*\/\//d' "$retention_src")"
+  dockerfile="$(sed '/^[[:space:]]*#/d' Dockerfile)"
+
+  case "$controller" in
+    *'RETENTION_BINARY: &str = "logweir-retention"'*) ;;
+    *)
+      echo "check-chart: $retention_src no longer names \`logweir-retention\` as the" >&2
+      echo "  enforcement Job's binary. If the binary was renamed, rename it in Dockerfile" >&2
+      echo "  and in .github/workflows/images.yml too — this check is the link between them." >&2
+      return 1
+      ;;
+  esac
+
+  case "$controller" in
+    *'image: self.ctx.runner_image.image'*) ;;
+    *)
+      echo "check-chart: $retention_src no longer takes the enforcement Job's image from" >&2
+      echo "  \`self.ctx.runner_image\`. The check below proves the RUNNER image carries" >&2
+      echo "  \`logweir-retention\`; if enforcement now names a different image, this script" >&2
+      echo "  must check THAT image's recipe instead, or the chart goes back to" >&2
+      echo "  installing an enforcement path that exits 127." >&2
+      return 1
+      ;;
+  esac
+
+  case "$dockerfile" in
+    *'-p logweir-retention'*) ;;
+    *)
+      echo "check-chart: Dockerfile does not build \`-p logweir-retention\`." >&2
+      echo "  The controller this file installs creates enforcement Jobs that run" >&2
+      echo "  \`logweir-retention\` from the image Dockerfile builds. Without that package" >&2
+      echo "  the Job dies at the kubelet with exitCode 127 (\`executable file not found" >&2
+      echo "  in \$PATH\`) — observed live, defect RET-NOIMAGE. Refusing a chart" >&2
+      echo "  whose enforcement path cannot start." >&2
+      return 1
+      ;;
+  esac
+
+  case "$dockerfile" in
+    *'/usr/local/bin/logweir-retention'*) ;;
+    *)
+      echo "check-chart: Dockerfile builds \`logweir-retention\` but COPYs it nowhere on" >&2
+      echo "  PATH. The binary must land at /usr/local/bin/logweir-retention: that is the" >&2
+      echo "  bare name the controller sets as the container's command, and \$PATH is how" >&2
+      echo "  the kubelet resolves it. Refusing to render." >&2
+      return 1
+      ;;
+  esac
+}
+
+# The console principal can do exactly what the console does, in every
+# rendered variant (`kubectl auth can-i`, offline, both ways): every
+# (verb, resource) the sealed adapter spends is granted, so no route 403s, and
+# every grant is one it spends, on the one service that holds `create` on
+# Secrets. The roles are found through every binding that reaches the account,
+# never by name, and such a binding must name the account and nobody else.
+# `chart_lint.rs` holds the same renders to the same table from Rust.
+CONSOLE_NAMESPACE="logweir-system"
+CONSOLE_ACCOUNT="logweir-api"
+
+# One line per binding that reaches `system:serviceaccount:<ns>:<sa>` — as the
+# account, as its user name, or through a group every ServiceAccount token
+# carries:
+#   ROLE <ClusterRole|Role> <namespace, or - for a ClusterRole> <name>
+#   SUBJECTS <kind>/<name>   when that binding names anyone besides the account
+console_bindings() {
+  awk -v ns="$CONSOLE_NAMESPACE" -v sa="$CONSOLE_ACCOUNT" '
+    function val(   v) { v = $0; sub(/^[^:]*:[ ]*/, "", v); gsub(/["'\'']/, "", v); return v }
+    function reaches(i) {
+      if (skind[i] == "ServiceAccount") return sname[i] == sa && sns[i] == ns
+      if (skind[i] == "User")           return sname[i] == "system:serviceaccount:" ns ":" sa
+      if (skind[i] == "Group")          return sname[i] == "system:authenticated" || sname[i] == "system:serviceaccounts" || sname[i] == "system:serviceaccounts:" ns
+      return 1
+    }
+    function flush(   i, hit) {
+      if (kind != "") {
+        hit = 0
+        for (i = 1; i <= nsub; i++) if (reaches(i)) hit = 1
+        if (hit) {
+          if (!(nsub == 1 && skind[1] == "ServiceAccount" && sname[1] == sa && sns[1] == ns))
+            print "SUBJECTS " kind "/" bname
+          print "ROLE " rkind " " (rkind == "Role" ? bns : "-") " " rname
+        }
+      }
+      kind = ""; bname = ""; bns = ""; rkind = ""; rname = ""; nsub = 0; sect = ""
+    }
+    /^---/                         { flush(); next }
+    /^ *#/                         { next }
+    /^kind: (Cluster)?RoleBinding$/ { kind = val(); next }
+    /^metadata:$/                  { sect = "meta"; next }
+    /^roleRef:$/                   { sect = "ref"; next }
+    /^subjects:$/                  { sect = "subj"; next }
+    /^[^ ]/                        { sect = ""; next }
+    sect == "meta" && /^  name:/      { bname = val(); next }
+    sect == "meta" && /^  namespace:/ { bns = val(); next }
+    sect == "ref"  && /^  kind:/      { rkind = val(); next }
+    sect == "ref"  && /^  name:/      { rname = val(); next }
+    sect == "subj" && /^  - / {
+      nsub++; skind[nsub] = ""; sname[nsub] = ""; sns[nsub] = ""
+      sub(/^  - /, "    ")
+    }
+    sect == "subj" && /^    kind:/      { skind[nsub] = val(); next }
+    sect == "subj" && /^    name:/      { sname[nsub] = val(); next }
+    sect == "subj" && /^    namespace:/ { sns[nsub] = val(); next }
+    END { flush() }
+  ' "$1"
+}
+
+# Every `verb resource[@name]` pair the roles listed in $1 (lines of
+# `<kind> <namespace|-> <name>`) grant in the render $2. A rule with
+# `resourceNames` yields one pair per name, so a roster grant that drops its
+# name list reads as `get trustrosters` and is refused by the sheet. A rule
+# naming `nonResourceURLs` yields `verb url:<path>`, which no sheet carries.
+console_grants() {
+  awk '
+    function val(   v) { v = $0; sub(/^[^:]*:[ ]*/, "", v); gsub(/["'\'']/, "", v); return v }
+    function inline(arr,   t, c, i, n) {
+      t = $0; sub(/^[^[]*\[/, "", t); sub(/\].*$/, "", t); gsub(/[",'\'']/, " ", t)
+      c = split(t, parts, " "); n = 0
+      for (i = 1; i <= c; i++) if (parts[i] != "") arr[++n] = parts[i]
+      return n
+    }
+    function emit(   i, j, k) {
+      if (!inrule) return
+      for (i = 1; i <= nv; i++) {
+        for (j = 1; j <= nu; j++) print verbs[i] " url:" urls[j]
+        for (j = 1; j <= nr; j++) {
+          if (nn == 0) print verbs[i] " " res[j]
+          for (k = 1; k <= nn; k++) print verbs[i] " " res[j] "@" names[k]
+        }
+      }
+      inrule = 0
+    }
+    function key(k) {
+      coll = ""
+      if ($0 ~ /\[/) {
+        if (k == "resources") nr = inline(res)
+        else if (k == "resourceNames") nn = inline(names)
+        else if (k == "verbs") nv = inline(verbs)
+        else if (k == "nonResourceURLs") nu = inline(urls)
+      } else coll = k
+    }
+    function reset_doc() { emit(); kind = ""; name = ""; ns = ""; sect = ""; wanted = 0 }
+    FNR == NR { bound[$1 " " $2 " " $3] = 1; next }
+    /^---/                             { reset_doc(); next }
+    /^ *#/                             { next }
+    /^kind: /                          { kind = val(); next }
+    /^metadata:$/                      { sect = "meta"; next }
+    /^rules:$/ {
+      sect = "rules"
+      wanted = (kind == "ClusterRole" && (("ClusterRole - " name) in bound)) || \
+               (kind == "Role" && (("Role " ns " " name) in bound))
+      if (wanted) seen[kind " " (kind == "Role" ? ns : "-") " " name] = 1
+      next
+    }
+    /^aggregationRule:/                { if (kind == "ClusterRole" && (("ClusterRole - " name) in bound)) print "aggregated role:" name; sect = ""; next }
+    /^[^ ]/                            { emit(); sect = ""; next }
+    sect == "meta" && /^  name:/       { name = val(); next }
+    sect == "meta" && /^  namespace:/  { ns = val(); next }
+    sect == "rules" && wanted && /^  - / {
+      emit(); inrule = 1; nr = 0; nn = 0; nv = 0; nu = 0; coll = ""
+      sub(/^  - /, "    ")
+    }
+    sect == "rules" && wanted && /^    resources:/       { key("resources"); next }
+    sect == "rules" && wanted && /^    resourceNames:/   { key("resourceNames"); next }
+    sect == "rules" && wanted && /^    verbs:/           { key("verbs"); next }
+    sect == "rules" && wanted && /^    nonResourceURLs:/ { key("nonResourceURLs"); next }
+    sect == "rules" && wanted && /^    apiGroups:/       { coll = "apiGroups"; if ($0 ~ /\[/) coll = ""; next }
+    sect == "rules" && wanted && /^      - / {
+      v = $0; sub(/^      - /, "", v); gsub(/["'\'']/, "", v)
+      if (coll == "resources") res[++nr] = v
+      else if (coll == "resourceNames") names[++nn] = v
+      else if (coll == "verbs") verbs[++nv] = v
+      else if (coll == "nonResourceURLs") urls[++nu] = v
+      next
+    }
+    END {
+      reset_doc()
+      for (b in bound) if (!(b in seen)) print "unrendered role:" b
+    }
+  ' "$1" "$2"
+}
+
+check_console_grants() {
+  demo="charts/logweir/rendered/demo.yaml"
+  adapter="crates/logweir-api/src/kube.rs"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/logweir-console-cani.XXXXXX")"
+
+  # THE ANSWER SHEET: one line per question, and the whole of what may be
+  # answered `yes`. The eight kinds sealed into `ProductResource`, all eight
+  # with a POST route (`approvals` since PLAT-19.2: the console creates the
+  # Approval its ordinary confirmation IS, the governed confirmation object and
+  # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
+  # the two named merge patches plus the two `CancellableCheck`
+  # kinds, D3 W11's four namespaced reads and its ONE write, the cluster-scoped
+  # `TrustPolicy` read, the ONE roster read (`get trustrosters@default`: the
+  # rule's `resourceNames` is part of the pair, so the name list cannot be
+  # dropped — PREFLIGHT-TRUSTROSTER-STALE), and the two core objects with one
+  # verb each.
+  printf '%s\n' \
+    'get approvals'          'list approvals'          'create approvals' \
+    'get backupdestinations' 'list backupdestinations' 'create backupdestinations' 'patch backupdestinations' \
+    'get backups'            'list backups'            'create backups' \
+    'get backupschedules'    'list backupschedules'    'create backupschedules'    'patch backupschedules' \
+    'get kafkaclusters'      'list kafkaclusters'      'create kafkaclusters' \
+    'get preflights'         'list preflights'         'create preflights'         'patch preflights' \
+    'get restores'           'list restores'           'create restores' \
+    'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
+    'get protectionpolicies' 'list protectionpolicies' \
+    'get recoverycatalogs'   'list recoverycatalogs'   'create recoverycatalogs' \
+    'get rehearsalschedules' 'list rehearsalschedules' \
+    'get retentionpolicies'  'list retentionpolicies' \
+    'get trustpolicies'      'list trustpolicies' \
+    'get trustrosters@default' \
+    'get configmaps' \
+    'create secrets' \
+    > "$dir/expected.raw"
+  sort -u "$dir/expected.raw" > "$dir/expected"
+
+  # EVERY RENDERED VARIANT, not only the demo: a variant that turns
+  # `api.enabled` on must grant exactly the sheet, and one that leaves it off
+  # must grant the account nothing at all. The demo must grant something — a
+  # gate that reads nothing answers `yes` to every question.
+  for render_file in charts/logweir/rendered/*.yaml; do
+    console_bindings "$render_file" > "$dir/bindings"
+    awk '/^SUBJECTS / { print $2 }' "$dir/bindings" > "$dir/bad-subjects"
+    if [ -s "$dir/bad-subjects" ]; then
+      echo "check-chart: a binding in $render_file hands the console's grant to someone else." >&2
+      echo "  Each binding below names system:serviceaccount:$CONSOLE_NAMESPACE:$CONSOLE_ACCOUNT" >&2
+      echo "  (or a group it belongs to) AND another subject; the other subject then holds" >&2
+      echo "  every verb the console holds. Its subjects must be the account and nothing else:" >&2
+      sed 's/^/    /' "$dir/bad-subjects" >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    awk '/^ROLE / { print $2, $3, $4 }' "$dir/bindings" > "$dir/roles"
+    # An empty role list is no grant at all — and `awk`'s `FNR == NR` idiom
+    # would read the render as the list, so it is not handed one.
+    : > "$dir/granted.raw"
+    if [ -s "$dir/roles" ]; then
+      console_grants "$dir/roles" "$render_file" > "$dir/granted.raw"
+    fi
+    sort -u "$dir/granted.raw" > "$dir/granted"
+
+    # CHART GAP G6 — THE ONE CONDITIONAL PAIR. A render whose console
+    # configuration names `trustedProxyService` spends `list endpointslices`
+    # (`KubeAdapter::list_service_endpoints`, pinned by `linkage.rs` as
+    # `list_page endpointslices`), and must be granted it; a render that does
+    # not must not be. The pair is the variant's, so the sheet is too.
+    cp "$dir/expected" "$dir/expected.variant"
+    if grep -q '^    trustedProxyService:$' "$render_file"; then
+      case "$(sed '/^[[:space:]]*\/\//d' "$adapter")" in
+        *'"list_page", "endpointslices"'*) ;;
+        *)
+          rm -rf "$dir"
+          echo "check-chart: $render_file configures trustedProxyService but $adapter no" >&2
+          echo "  longer spends \`list_page endpointslices\`; the grant would be one nobody uses." >&2
+          return 1
+          ;;
+      esac
+      printf '%s\n' 'list endpointslices' >> "$dir/expected.variant"
+      sort -u "$dir/expected.variant" -o "$dir/expected.variant"
+    fi
+
+    # PROD-16.1 — THE SECOND CONDITIONAL PAIR. A render whose console
+    # configuration names `installationIdentity` spends `get configmaps` on
+    # that ONE public identity ConfigMap (`KubeAdapter::get_installation_identity`,
+    # the fresh-install marker read), and must be granted exactly it.
+    if grep -q '^    installationIdentity:$' "$render_file"; then
+      case "$(sed '/^[[:space:]]*\/\//d' "$adapter")" in
+        *'pub async fn get_installation_identity'*) ;;
+        *)
+          rm -rf "$dir"
+          echo "check-chart: $render_file configures installationIdentity but $adapter no" >&2
+          echo "  longer reads it (\`get_installation_identity\`); the grant would be one nobody uses." >&2
+          return 1
+          ;;
+      esac
+      identity_cm="$(sed -n 's/^      publicConfigMap: *//p' "$render_file" | head -1)"
+      printf '%s\n' "get configmaps@$identity_cm" >> "$dir/expected.variant"
+      sort -u "$dir/expected.variant" -o "$dir/expected.variant"
+    fi
+
+    if [ ! -s "$dir/granted" ]; then
+      if [ "$render_file" = "$demo" ]; then
+        rm -rf "$dir"
+        echo "check-chart: no console grant was found in $demo." >&2
+        echo "  Either \`api.enabled\` is no longer on in charts/logweir/examples/demo.values.yaml," >&2
+        echo "  or the render is stale (\`bash scripts/check-chart.sh --write\`). A gate that reads" >&2
+        echo "  nothing answers \`yes\` to every question." >&2
+        return 1
+      fi
+      continue
+    fi
+
+    # The wider direction first: a grant nobody spends is the finding that
+    # matters more when a rule both loses and gains a pair (a dropped
+    # `resourceNames` turns `get trustrosters@default` into `get trustrosters`).
+    comm -13 "$dir/expected.variant" "$dir/granted" > "$dir/extra"
+    if [ -s "$dir/extra" ]; then
+      echo "check-chart: the console principal can do MORE than the console does ($render_file)." >&2
+      echo "  Each pair below is a \`yes\` to a question no route asks — a capability nobody" >&2
+      echo "  audits, on the one service that holds \`create\` on Secrets. It is reached" >&2
+      echo "  through SOME binding of the account, whatever the role is called:" >&2
+      sed 's/^/    /' "$dir/extra" >&2
+      echo "  Narrow charts/logweir/templates/ui/api-rbac.yaml, or add the pair to the answer" >&2
+      echo "  sheet in this function TOGETHER WITH the route that spends it." >&2
+      rm -rf "$dir"
+      return 1
+    fi
+    comm -23 "$dir/expected.variant" "$dir/granted" > "$dir/missing"
+    if [ -s "$dir/missing" ]; then
+      echo "check-chart: the console principal CANNOT do what the console does ($render_file)." >&2
+      echo "  \`kubectl auth can-i\` would answer \`no\` for each pair below, and each one is a" >&2
+      echo "  route that 403s in production while every route-table test stays green:" >&2
+      sed 's/^/    /' "$dir/missing" >&2
+      echo "  Widen charts/logweir/templates/ui/api-rbac.yaml deliberately, say why in its" >&2
+      echo "  header, and run \`bash scripts/check-chart.sh --write\`." >&2
+      rm -rf "$dir"
+      return 1
+    fi
+
+    if [ "$render_file" = "$demo" ]; then
+      cp "$dir/granted" "$dir/demo-granted"
+    fi
+  done
+  if [ ! -s "$dir/demo-granted" ]; then
+    rm -rf "$dir"
+    echo "check-chart: $demo was not audited; is it missing?" >&2
+    return 1
+  fi
+
+  # THE FOUR VERBS ARE STILL THE ADAPTER'S FOUR. The sheet above is a list this
+  # file owns; these two arms read the ADAPTER, so a fifth kube verb reaching it
+  # cannot be authorised by editing one list.
+  adapter_src="$(sed '/^[[:space:]]*\/\//d' "$adapter")"
+  case "$adapter_src" in
+    *'pub trait ProductResource'*) ;;
+    *)
+      rm -rf "$dir"
+      echo "check-chart: $adapter no longer seals its custom resources behind" >&2
+      echo "  \`ProductResource\`. The console's ClusterRole is written from that seal; without" >&2
+      echo "  it there is nothing to hold the grant to, and the answer sheet in this function" >&2
+      echo "  becomes a list nobody derives." >&2
+      return 1
+      ;;
+  esac
+  for verb in delete deletecollection watch update; do
+    case "$(cat "$dir/demo-granted")" in
+      *"$verb "*)
+        rm -rf "$dir"
+        echo "check-chart: the console principal is granted \`$verb\`." >&2
+        echo "  The sealed adapter spends four kube verbs — list, get, create, patch — and has" >&2
+        echo "  no method that could issue this one. \`watch\` would additionally be a" >&2
+        echo "  long-lived connection per browser tab, and D3 §10's event stream is server-sent" >&2
+        echo "  events over this service's own reads. Remove the verb." >&2
+        return 1
+        ;;
+    esac
+  done
+  rm -rf "$dir"
+  echo "check-chart: the console principal's grants are the sealed adapter's, both ways,"
+  echo "  through every binding that reaches it, in every rendered variant."
+}
+
+# Who may create a TrustPolicy (PROD-16.1 security review). `create` cannot be
+# narrowed by name, so in every rendered variant only two ClusterRoles may hold
+# it: the human `logweir-trust-admin`, and the identity hook's
+# `<release>-identity-trust` as an install-only, self-deleting post-install hook.
+check_trust_creators() {
+  for render_file in charts/logweir/rendered/*.yaml; do
+    awk -v file="$render_file" '
+      function flush() {
+        if (kind == "ClusterRole" && creates) {
+          if (name == "logweir-trust-admin") {
+            # the human role, unbound by the chart
+          } else if (name ~ /-identity-trust$/) {
+            if (hook != "post-install" || policy !~ /hook-succeeded/ || policy !~ /hook-failed/) {
+              print file ": ClusterRole " name " grants create on trustpolicies as a standing grant (helm.sh/hook=" hook ", delete-policy=" policy "); it must be a post-install hook deleted when the install hooks finish"
+            }
+          } else {
+            print file ": ClusterRole " name " grants create on trustpolicies; only logweir-trust-admin and the install-only identity hook may"
+          }
+        }
+        kind = ""; name = ""; hook = ""; policy = ""; creates = 0; trust_rule = 0
+      }
+      /^---/ { flush(); next }
+      /^kind: / { kind = $2 }
+      /^  name: / { if (name == "") name = $2 }
+      /^    helm.sh\/hook: / { hook = $2 }
+      /^    helm.sh\/hook-delete-policy: / { policy = $2 }
+      /^ *resources:/ { trust_rule = ($0 ~ /"trustpolicies"/) }
+      /^ *- trustpolicies$/ { trust_rule = 1 }
+      /^ *verbs:/ { if (trust_rule && $0 ~ /"create"/) creates = 1; trust_rule = 0 }
+      END { flush() }
+    ' "$render_file"
+  done > "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+  if [ -s "${TMPDIR:-/tmp}/logweir-trust-creators.$$" ]; then
+    echo "check-chart: a TrustPolicy creator outside the two allowed holders:" >&2
+    sed 's/^/  /' "${TMPDIR:-/tmp}/logweir-trust-creators.$$" >&2
+    rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+    return 1
+  fi
+  rm -f "${TMPDIR:-/tmp}/logweir-trust-creators.$$"
+  # NOT VACUOUS (PROD-16.1 fix round): at least one variant renders the
+  # install-only grant (`console-fresh-install`, and every console variant once
+  # the bootstrap feature is the default), so the rule above reads a real one.
+  if ! grep -l -E '^  name: [a-z0-9-]+-identity-trust$' charts/logweir/rendered/*.yaml > /dev/null; then
+    echo "check-chart: no rendered variant carries the install-only identity trust grant; the" >&2
+    echo "  least-privilege rule above would pass over nothing (examples/console-fresh-install.values.yaml)" >&2
+    return 1
+  fi
+  echo "check-chart: only logweir-trust-admin and the install-only identity hook may create a"
+  echo "  TrustPolicy, and the hook's grant is a self-deleting post-install hook, in every variant."
+}
+
+check_enforcement_image || fail=1
+check_console_grants || fail=1
+check_trust_creators || fail=1
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
@@ -1342,5 +1773,7 @@ echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is th
 echo "    helm lint clean, rendered files current, every image a digest except the four Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
 echo "    flag, values.yaml names the tree's own repositories at :$LOGWEIR_TAG, and every"
-echo "    console configuration that would install a console that looks like it works is refused."
+echo "    console configuration that would install a console that looks like it works is refused;"
+echo "    the runner image ships the enforcement binary, the console principal's grants are the"
+echo "    adapter's both ways, and only the two allowed holders may create a TrustPolicy."
 exit 0
