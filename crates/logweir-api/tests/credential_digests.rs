@@ -100,15 +100,24 @@ fn destination_body(bucket: &str, secret_access_key: &str) -> Value {
     body
 }
 
-/// One create on a FRESH fake under [`KEY`], and every digest it produced.
-async fn create(path: &str, plural: &str, body: &Value) -> (Digests, Value) {
+/// Capture this thread's log lines. EVERY ROW IN THIS FILE CALLS THIS before
+/// it logs (the digest row through [`create`]), as in `tests/sign_in_state.rs`
+/// (FX-37): a row with no subscriber can switch a log statement off for a
+/// capturing row.
+fn capture() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
     let buffer = LogBuffer::default();
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_writer(buffer.clone())
         .with_env_filter(logweir_api::audit::log_filter_from("debug"))
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let guard = tracing::subscriber::set_default(subscriber);
+    (buffer, guard)
+}
+
+/// One create on a FRESH fake under [`KEY`], and every digest it produced.
+async fn create(path: &str, plural: &str, body: &Value) -> (Digests, Value) {
+    let (buffer, _guard) = capture();
     let app = TestApp::new();
     let created = app.post(path, Some(KEY), &body.to_string()).await;
     assert_eq!(
@@ -296,6 +305,7 @@ async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
 /// present field, `null` for an absent one, never a value.
 #[test]
 fn the_write_only_dtos_serialize_no_value() {
+    let (_log, _guard) = capture();
     let connection: logweir_api::contract::NewConnectionCredentialRequest =
         serde_json::from_value(json!({
             "password": PASSWORD_ONE,

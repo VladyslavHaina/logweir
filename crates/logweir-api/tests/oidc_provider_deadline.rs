@@ -411,7 +411,9 @@ impl Buffer {
 }
 
 /// Capture this thread's log lines. `#[tokio::test]` runs the router on the
-/// test's own thread, so its audit record lands here.
+/// test's own thread, so its audit record lands here. EVERY ROW IN THIS FILE
+/// CALLS THIS FIRST, as in `tests/sign_in_state.rs` (FX-37): a row with no
+/// subscriber can switch a log statement off for a capturing row.
 fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let buffer = Buffer::default();
     let subscriber = tracing_subscriber::fmt()
@@ -557,6 +559,7 @@ async fn assert_stalled_and_bounded(wire: &Wire, elapsed: Duration) {
 /// literal. A changed constant fails here; a changed call site fails them.
 #[test]
 fn the_provider_deadline_is_ten_seconds() {
+    let (_log, _guard) = capture();
     assert_eq!(PROVIDER_DEADLINE, EXPECTED_DEADLINE);
     assert_eq!(MAX_PROVIDER_BODY, 512 * 1024);
 }
@@ -619,6 +622,7 @@ async fn a_slow_head_then_a_stalled_body_shares_one_deadline() {
 /// request's own timer, not the dial's longer one), and the console hangs up.
 #[tokio::test]
 async fn a_tls_handshake_that_stalls_is_bounded_by_the_deadline() {
+    let (_log, _guard) = capture();
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let port = listener.local_addr().unwrap().port();
     let hung_up: Arc<Mutex<Option<Duration>>> = Arc::default();
@@ -750,6 +754,7 @@ async fn a_stalled_token_body_fails_the_callback_within_the_deadline() {
 /// than one deadline, because the bound is per request.
 #[tokio::test]
 async fn a_slow_but_steady_provider_still_signs_in() {
+    let (_log, _guard) = capture();
     let key = TestKey::ec("k1");
     let wire = Wire::start(&[&key]);
     let steady = Behaviour::Steady {
@@ -958,6 +963,7 @@ fn shared_server(issuer: &str) -> (Server, u16, Scratch) {
 /// the pre-fix code nothing arrives within the bound.
 #[test]
 fn the_built_binary_answers_a_stalled_sign_in_and_closes_the_connection() {
+    let (_log, _guard) = capture();
     let key = TestKey::ec("k1");
     let wire = Wire::start(&[&key]);
     wire.set(DISCOVERY, Behaviour::StallAfterHead { sent: 1 });
@@ -1012,6 +1018,13 @@ fn the_built_binary_answers_a_stalled_sign_in_and_closes_the_connection() {
     );
     let closed = closed.unwrap_or_else(|| panic!("the server kept the connection open: {text}"));
     assert!(closed <= bound, "closed after {closed:?}");
+    // FX-37: the server writes this line before the 503, but a thread of this
+    // test drains its pipe, so on a loaded host the line can arrive after the
+    // close. Waiting for it measures no deadline: the timings above are fixed.
+    let logged = Instant::now() + SLACK;
+    while !server.log().contains("provider_timeout") && Instant::now() < logged {
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         server.log().contains("provider_timeout"),
         "the server logged the named reason:\n{}",
