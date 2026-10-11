@@ -145,10 +145,12 @@ pub fn run(
             }
             Some(st) => {
                 let total: i64 = st.end_offsets.iter().map(|(_, hi)| *hi).sum();
+                // FX-47: a source key the target does not report differs. Absent
+                // is never agreement (`phase7_verify::classify_parity`'s rule).
                 let differing = t
                     .configurations
                     .iter()
-                    .filter(|(k, v)| st.configs.get(*k).map(|cur| cur != *v).unwrap_or(false))
+                    .filter(|(k, v)| st.configs.get(*k).map(|cur| cur != *v).unwrap_or(true))
                     .map(|(k, _)| k.clone())
                     .collect();
                 let configuration_not_assessed = match coverage.of(&t.name) {
