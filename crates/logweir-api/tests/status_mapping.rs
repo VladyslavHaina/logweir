@@ -85,7 +85,7 @@ fn verdict(result: VerificationVerdict, payload_type: &str) -> VerificationResul
         payload_type: payload_type.to_string(),
         verified_at: now(),
         detail: (!matches!(result, VerificationVerdict::Valid)).then(|| "a reason".to_string()),
-        // PLAT-19.1: these fixtures model the three verdicts the API has
+        // These fixtures model the three verdicts the API has
         // always normalised. The trust projection is the signer's lifecycle,
         // which this mapping does not read.
         trust: None,
@@ -445,11 +445,10 @@ fn every_backup_status_the_controller_writes() {
         assert_eq!(op.message.as_deref(), Some("refused"));
     }
 
-    // `ExecutionSpecInvalid`, PLAT-06.1's meaning — the same class as the
-    // `Restore`'s (FX-2 review L4). Driven through the controller's OWN
-    // refusal of a `triggeredBy` it does not run, written by its own refusal
-    // writer before any Job exists, so this row fails if either side moves.
-    // Before the review the API served it `failed`.
+    // `ExecutionSpecInvalid`, the same class as the `Restore`'s: the API serves
+    // it `refused`, not `failed`. Driven through the controller's OWN refusal of
+    // a `triggeredBy` it does not run, written by its own refusal writer before
+    // any Job exists, so this row fails if either side moves.
     let mut unknown_trigger = base.clone();
     unknown_trigger["spec"]["triggeredBy"] = json!("nightly");
     let typed_trigger = backup_of(&unknown_trigger);
@@ -577,7 +576,7 @@ fn every_restore_status_the_controller_writes() {
             },
             "ApprovalSubjectMismatch",
         ),
-        // PLAT-19.2's two terminal admission refusals: nothing executed.
+        // The two terminal admission refusals: nothing executed.
         (
             RestoreAdmission::AuthorizationPolicyMismatch {
                 approval: "a1".into(),
@@ -624,13 +623,13 @@ fn every_restore_status_the_controller_writes() {
         );
     }
 
-    // FX-2: a `spec.runnerResources` the controller will not apply is refused
-    // `ExecutionSpecInvalid` before the approval is read and before anything
-    // is created, so the API serves it `refused`, never `failed` (review L4:
-    // "failed" sent an operator looking in the target for partial writes that
-    // cannot exist). THE REFUSAL IS THE CONTROLLER'S OWN — `runner_resources_of`,
-    // the function STEP 1 calls — written by its one refusal writer, so this
-    // row fails if either side moves.
+    // A `spec.runnerResources` the controller will not apply is refused
+    // `ExecutionSpecInvalid` before the approval is read and before anything is
+    // created, so the API serves it `refused`, never `failed` ("failed" would
+    // send an operator looking in the target for partial writes that cannot
+    // exist). THE REFUSAL IS THE CONTROLLER'S OWN -- `runner_resources_of`, the
+    // function STEP 1 calls -- written by its one refusal writer, so this row
+    // fails if either side moves.
     let mut with_block = base.clone();
     with_block["spec"]["runnerResources"] = json!({"limits": {"memory": "16Gi"}});
     let typed_block = restore_of(&with_block);
@@ -991,17 +990,13 @@ async fn the_operations_route_serves_the_normalized_status() {
 
 /// **No infrastructure detail is frozen into the versioned operation contract.**
 ///
-/// REGRESSION REASON (review finding R5). The projection used to copy the
-/// controller's runner Job name into `Operation.jobName`. PLAT-17.1's own
-/// problem statement is that direct CR manipulation "exposes infrastructure
-/// details", and D0 hands PLAT-14.1 the final normalized mapping, listing what
-/// stays visible: reason, message, exit code, last phase, timestamps and
-/// evidence references. A Job name is on none of them.
-///
-/// The asymmetry is what decides it: adding a field to this document later is a
-/// MINOR change, removing one is MAJOR. So the field waits for the task that
-/// owns the ruling — and this test is what stops it, or any other Job/Pod/image
-/// detail, from arriving by accident in the meantime.
+/// D0's normalized operation mapping lists what stays visible: reason,
+/// message, exit code, last phase, timestamps and evidence references. A Job
+/// name is on none of them, and direct CR manipulation is what "exposes
+/// infrastructure details". Adding a field to this document later is a MINOR
+/// change and removing one is MAJOR, so a field waits for a ruling -- and
+/// this test is what stops it, or any other Job/Pod/image detail, from
+/// arriving by accident.
 ///
 /// The key set is asserted whole rather than one absent name at a time, so a
 /// field added under a different spelling fails too.
@@ -1031,9 +1026,8 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
     // it was removed or merely unset, and only one of those is a contract change.
     let document: Value =
         serde_json::from_str(&logweir_api::openapi::openapi_document()).expect("JSON");
-    // D3 W11 flattened PLAT-17.1's `Operation` into `OperationView`, so the
-    // published field set is that schema's: the frozen sixteen plus D3 §2.5's
-    // additions, and the assertion still names every one of them.
+    // The published field set is `OperationView`'s: the frozen sixteen plus D3
+    // §2.5's additions, and the assertion names every one of them.
     let declared: BTreeSet<&str> = document["components"]["schemas"]["OperationView"]["properties"]
         .as_object()
         .expect("OperationView is an object schema")
@@ -1043,7 +1037,7 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
     assert_eq!(
         declared,
         BTreeSet::from([
-            // PLAT-17.1's frozen projection.
+            // The frozen projection.
             "conditions",
             "createdAt",
             "evidence",
@@ -1064,8 +1058,8 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
             // happening and why is it taking so long"; `runner` is NOT among
             // them, because a Job name, a pod name and a container state are
             // the infrastructure identifiers this test exists to keep out. A
-            // DIAGNOSTIC's `object` is published — PLAT-14.1's acceptance asks
-            // for resource-scoped errors in as many words — and is checked by
+            // DIAGNOSTIC's `object` is published -- the normalized status asks for
+            // resource-scoped errors in as many words -- and is checked by
             // the byte scan below like everything else.
             "awaitingApproval",
             "capture",
@@ -1092,9 +1086,8 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
     // `reason` and `message` visible, and the controller's running message says
     // "the runner Job <name> exists and has not finished". Prose that mentions
     // an object is not a machine-readable handle to it: a client cannot select
-    // on it, and PLAT-14.1 owns that message's final wording anyway. A field
-    // whose VALUE is exactly the Job name is the handle, and that is what stays
-    // out until PLAT-14.1 rules.
+    // on it. A field whose VALUE is exactly the Job name is the handle, and that
+    // is what stays out.
     for (operation, label) in [
         (backup_operation(&backup_of(&running)), "Backup"),
         (
@@ -1145,7 +1138,7 @@ fn collect_fields_equal_to(value: &Value, path: &str, needle: &str, out: &mut Ve
     }
 }
 
-/// **PLAT-19.1, review finding F8.** The fourth verdict reaches this API as
+/// **The fourth verdict reaches this API as
 /// `Unknown`, and that is the fail-closed answer — asserted, not assumed.
 ///
 /// `weirkeeper` now writes `result: Untrusted` for a signature that verified
@@ -1155,8 +1148,8 @@ fn collect_fields_equal_to(value: &Value, path: &str, needle: &str, out: &mut Ve
 /// matters. **The console then renders it as `unverified`**: `ui/client.js`'s
 /// `VERIFICATION_OF` has no `unknown` key, so in shared mode the distinction
 /// between "we did not check" and "we checked and will not accept the signer"
-/// is lost. That is a gap owed to W11/W12, and this row is the guard that stops
-/// a future `Some(_) => Valid` from being worse than a lost distinction.
+/// is lost. This row is the guard that stops a future `Some(_) => Valid`
+/// from being worse than a lost distinction.
 ///
 /// KILLS: `Some(_) => VerificationState::Valid`, and any arm that adds
 /// `"Untrusted"` to the `Valid` match.
@@ -1191,7 +1184,7 @@ fn an_untrusted_verdict_is_never_valid_on_this_api() {
     }
 }
 
-/// **TRUST-UPGRADE-SIGNEDAT, review finding F1.** The block the re-trust pass
+/// **The re-trust pass's waiting block.** The block the re-trust pass
 /// writes while it is waiting on one bounded re-read is never `valid` on this
 /// API and never `verifiedSuccess`.
 ///
@@ -1208,10 +1201,10 @@ fn an_untrusted_verdict_is_never_valid_on_this_api() {
 /// The block below is built by `retrust_with` itself rather than hand-written,
 /// so it cannot drift away from what the controller patches.
 ///
-/// KILLS: "carry the stored `Valid` across while the read is outstanding" —
-/// which made this assertion `VerificationState::Valid`, `verifiedSuccess`
+/// KILLS: "carry the stored `Valid` across while the read is outstanding",
+/// which makes this assertion `VerificationState::Valid`, `verifiedSuccess`
 /// true, and the console badge a green *"verified by weirkeeper at … against
-/// key …"* for a document the controller had not re-verified.
+/// key …"* for a document the controller has not re-verified.
 #[test]
 fn an_unread_pre_signedat_verdict_is_never_valid_on_this_api() {
     // The exact shape a controller older than `signedAt` wrote: a `Valid`
@@ -1291,8 +1284,9 @@ fn an_unread_pre_signedat_verdict_is_never_valid_on_this_api() {
     );
 }
 
-/// **RECEIPT-DUP (review F2).** A backup whose runner named its execution-claim
-/// outcome reaches the product API — and so the console's exit-reason cell and
+/// **A named execution-claim outcome.** A backup whose runner named its
+/// execution-claim outcome reaches the product API -- and so the console's
+/// exit-reason cell and
 /// message — with that state, not with a bare `operational` /
 /// `signing-or-lock`.
 #[test]

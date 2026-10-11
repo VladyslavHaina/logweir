@@ -1,4 +1,4 @@
-//! The route access table, held to the router from both sides (PLAT-17.2).
+//! The route access table, held to the router from both sides.
 //!
 //! THE GUARD FOR ROUTES THAT DO NOT EXIST YET. Every route this service serves
 //! must carry a declaration in `logweir_api::access::ROUTES`, and the layer
@@ -36,8 +36,6 @@ use support::{
     SHARED_HOST, SHARED_ORIGIN,
 };
 use tower::ServiceExt as _;
-
-// ---------------------------------------------------------------- the scan
 
 /// Every `(method, path)` `src/app.rs` registers, read from the source.
 ///
@@ -130,7 +128,7 @@ fn every_routed_path_is_declared_and_every_declaration_is_routed() {
 
 /// **The access layer is applied once, over the whole router, after every
 /// route.** `axum` layers wrap only the routes that exist when they are
-/// applied; a route appended after the layer would run unenforced (review M1).
+/// applied; a route appended after the layer would run unenforced.
 /// This holds the position in the source; `tests/route_access_marker.rs` holds
 /// it at runtime, per declared route.
 #[test]
@@ -181,8 +179,6 @@ fn the_access_layer_is_applied_once_after_every_route() {
         "src/app.rs applies a group route_layer: every layer is whole-router now"
     );
 }
-
-// ------------------------------------------------------ fail-closed layer
 
 static UNDECLARED_HANDLER_RAN: AtomicBool = AtomicBool::new(false);
 static UNDECLARED_METHOD_HANDLER_RAN: AtomicBool = AtomicBool::new(false);
@@ -272,8 +268,6 @@ async fn an_undeclared_method_on_a_declared_path_never_reaches_its_handler() {
     );
     assert_eq!(call(router, "GET", "/api/v1/session").await.status(), 200);
 }
-
-// ------------------------------------------------------- the whole table
 
 /// A concrete request path for a declared route. A command route's target
 /// carries its first verb, so the verb's action is the one decided.
@@ -553,8 +547,6 @@ async fn local_admin_mode_passes_the_layer_on_every_route() {
         .assert_problem(403, "namespace_forbidden");
 }
 
-// ------------------------------------------- the layer, with no handler help
-
 static DUMMY_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Every declared route, served by a handler that checks NOTHING, behind the
@@ -775,7 +767,7 @@ fn the_event_stream_is_declared_with_the_stream_action() {
     );
 }
 
-/// **An undeclared `:verb` fails closed in the layer** (review L2). Every
+/// **An undeclared `:verb` fails closed in the layer.** Every
 /// command route, served by a handler that checks NOTHING behind the real
 /// layer, a target with a verb nobody declared, an administrator allowed every
 /// declared verb: `404` and the handler never reached. NEGATIVE CONTROL: the

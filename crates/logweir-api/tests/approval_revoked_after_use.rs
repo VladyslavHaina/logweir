@@ -1,4 +1,4 @@
-//! Review M1 (poc-fixes-2), the API half: a CONSUMED `Approval` whose signer
+//! The API half: a CONSUMED `Approval` whose signer
 //! was later revoked for `KeyCompromise` reaches the console exactly as the
 //! controller recorded it — `verified: false`, the `Verified` condition with
 //! reason `RecordedBeforeRevocation`, `Consumed=True` with the admission

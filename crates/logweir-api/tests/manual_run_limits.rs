@@ -1,14 +1,13 @@
-//! P10 — the API half: one person cannot queue manual runs faster than
-//! `rateLimits.*` per namespace per minute, and a queued run is published as
-//! `queued` with the ceiling it waits behind.
+//! The API half of manual-run limits: one person cannot queue manual runs
+//! faster than `rateLimits.*` per namespace per minute, and a queued run is
+//! published as `queued` with the ceiling it waits behind.
 //!
-//! THE DEFECT, MEASURED. On the PoC install one operator's hundred
-//! `POST …/backups` were all answered `201` within 2.4 s
-//! (`final/scale/seed.log`), and every one became a runner pod. The controller
-//! now bounds how many RUN at once (`weirkeeper::run_pool`); these rows hold
-//! the rate at which one principal can START them, D0's `rate_limited` (429
-//! plus `Retry-After`), keyed exactly as the discovery and preflight limits
-//! are: `(actor, namespace, route)`.
+//! Unbounded, one operator's hundred `POST …/backups` would all be answered
+//! `201` within seconds, each a runner pod. The controller bounds how many RUN
+//! at once (`weirkeeper::run_pool`); these rows hold the rate at which one
+//! principal can START them, D0's `rate_limited` (429 plus `Retry-After`),
+//! keyed exactly as the discovery and preflight limits are: `(actor,
+//! namespace, route)`.
 //!
 //! EVERY ROW ASSERTS THE CLUSTER, NOT ONLY THE STATUS CODE: a 429 that still
 //! created the object would pass on status codes alone.
@@ -75,7 +74,7 @@ fn retry_after(response: &support::TestResponse) -> u64 {
 /// same namespace is a different window and is still admitted; the first is
 /// admitted again once the window has passed.
 ///
-/// KILLS: no limit on the route at all (the P10 defect: all eleven `201`); a
+/// KILLS: no limit on the route at all (all eleven `201`); a
 /// limit keyed by namespace or route alone (the second operator would be
 /// refused for the first one's clicks); a 429 without `Retry-After`; a refused
 /// request that still reaches the cluster; a window that never resets; an
@@ -341,7 +340,7 @@ async fn a_queued_run_is_published_as_queued_with_its_ceiling() {
 }
 
 /// **The window is the AUTHENTICATED PRINCIPAL's — `issuer#subject` — and
-/// nothing else a client can vary** (review L4, mutant R3).
+/// nothing else a client can vary**.
 ///
 /// One person in two sessions (a second browser, a re-login) shares ONE
 /// window: ten from the first session, and the eleventh — from the second —
@@ -431,7 +430,7 @@ async fn the_window_is_keyed_on_the_subject_not_the_session_or_the_display_name(
     assert_eq!(fake.count("backups", NS_A), 20, "two people, two windows");
 }
 
-/// **A queued restore publishes its approval's deadline** (review M2): the
+/// **A queued restore publishes its approval's deadline**: the
 /// item's `queue.authorizationExpiresAt` is the object's own
 /// `status.queue.authorizationExpiresAt`, copied.
 #[tokio::test]

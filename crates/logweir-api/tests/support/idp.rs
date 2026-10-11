@@ -199,7 +199,7 @@ struct IdpState {
     last_token_form: String,
     /// How long the token endpoint takes to answer, after counting the call:
     /// the network round trip a real provider costs, which is the window two
-    /// concurrent callbacks race in (FX-13a).
+    /// concurrent callbacks race in.
     token_delay: Option<std::time::Duration>,
     /// Whether a code is single-use, as RFC 6749 §4.1.2 requires of a real
     /// provider: an exchanged grant is gone, and its second use answers 400.
@@ -296,7 +296,7 @@ impl MockIdp {
         self.with(|s| s.token_delay = delay);
     }
 
-    /// Make codes single-use, as a real provider's are (FX-13a): a code that
+    /// Make codes single-use, as a real provider's are: a code that
     /// has been exchanged once is refused with HTTP 400 after that.
     pub fn set_single_use_codes(&self, on: bool) {
         self.with(|s| s.consume_codes = on);

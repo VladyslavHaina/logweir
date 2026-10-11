@@ -27,7 +27,7 @@ fn decoded(secret: &Value, key: &str) -> String {
     .expect("utf-8")
 }
 
-/// FX-20: the binding a stored destination's Secrets must carry, computed by
+/// The binding a stored destination's Secrets must carry, computed by
 /// the CONTROLLER's own code — `status_for`, which publishes
 /// `status.credentialBinding` — so the value the API writes and the value the
 /// controller expects are compared across the two crates, not each against a
@@ -66,8 +66,8 @@ async fn a_destination_is_created_under_its_own_name_with_references_only() {
     assert_eq!(item["storage"]["addressing"], "pathStyle");
     assert_eq!(item["transport"]["security"], "tls");
     assert_eq!(item["transport"]["caBundle"]["key"], "ca.crt");
-    // FX-20: the shared fixture's grants are workload identities; the
-    // credential rows below build their own.
+    // The shared fixture's grants are workload identities; the credential rows
+    // below build their own.
     assert_eq!(item["access"]["archiveWrite"]["mode"], "workloadIdentity");
     assert!(item["access"]["archiveWrite"].get("secretName").is_none());
     // ABSENT IS A STATED ANSWER, not a blank field.
@@ -199,7 +199,7 @@ async fn the_rules_are_evaluated_before_the_object_exists() {
         .await;
     let problem = response.json();
     assert!(field_codes(&problem).contains(&"addressing_unsupported_by_engine".to_string()));
-    // A-C16-1 (PROD-00.3f): refused on the 0.23.3 pin as on 0.21.0, and the
+    // Refused on the 0.23.3 pin as on 0.21.0, and the
     // message names the behaviour and no engine version.
     let message = problem["errors"]
         .as_array()
@@ -276,9 +276,7 @@ async fn addressing_never_decides_transport() {
     assert_eq!(stored["spec"]["storage"]["addressing"], "PathStyle");
 }
 
-// ======================================================================
-// The write-only credential
-// ======================================================================
+// THE WRITE-ONLY CREDENTIAL.
 
 /// A credential entered once is created as a Secret and is never echoed, in
 /// the response, in the stored object, or anywhere in the process's own view
@@ -479,16 +477,14 @@ async fn an_unknown_field_in_a_destination_request_is_refused() {
     assert_eq!(response.json()["errors"][0]["field"], "pathStyle");
 }
 
-// ======================================================================
-// Rotation
-// ======================================================================
+// ROTATION.
 
 #[tokio::test]
 async fn update_access_rotates_the_grants_under_a_generation_precondition() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
     let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
-    // FX-20: a rotation may re-arrange the Secrets this destination already
+    // A rotation may re-arrange the Secrets this destination already
     // names (here the two roles swap), and names no other existing Secret.
     let rotation = json!({
         "expectedGeneration": 3,
@@ -590,9 +586,7 @@ async fn at_most_one_destination_is_the_namespace_default() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// Reads
-// ======================================================================
+// READS.
 
 #[tokio::test]
 async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
@@ -718,20 +712,16 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// H1: a rotation that cannot write the value changes nothing
-// ======================================================================
+// A ROTATION THAT CANNOT WRITE THE VALUE CHANGES NOTHING.
 
 /// **`:update-access` fails closed when the value's Secret name is taken.**
 ///
 /// This service holds `create` on Secrets and nothing else, so a value whose
-/// name is taken can never be written. The previous shape answered 200 with
-/// the name in `credentialSecrets`, which let an operator responding to a
-/// leaked key record a rotation while the leaked value stayed live.
-///
-/// FX-20: a rotation writes under a NEW name (`lwd-<d>-<role>-<suffix>`), so
-/// the deterministic name being held by the old value no longer blocks it; the
-/// taken case is now a race, injected here as the API server's answer.
+/// name is taken can never be written; answering 200 with the name in
+/// `credentialSecrets` would let an operator responding to a leaked key
+/// record a rotation while the leaked value stayed live. A rotation writes
+/// under a NEW name (`lwd-<d>-<role>-<suffix>`), so the taken case is a
+/// race, injected here as the API server's answer.
 #[tokio::test]
 async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
     let app = TestApp::new();
@@ -819,7 +809,7 @@ async fn a_rotation_into_a_role_with_no_secret_yet_is_written_and_lands() {
         )
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
-    // FX-20: a rotation's value lands under `lwd-<d>-<role>-<suffix>`, bound
+    // A rotation's value lands under `lwd-<d>-<role>-<suffix>`, bound
     // to this destination.
     let name = response.json()["item"]["access"]["evidenceWrite"]["secretName"]
         .as_str()
@@ -921,7 +911,7 @@ async fn a_planted_credential_secret_is_refused_on_the_first_attempt_and_on_the_
 async fn a_taken_name_for_a_later_role_leaves_the_earlier_role_unwritten() {
     let app = TestApp::new();
     // `archiveWrite`'s name is free; `archiveRead`'s is taken. On the CREATE
-    // path, whose names are deterministic (a rotation's are fresh: FX-20).
+    // path, whose names are deterministic (a rotation's are fresh).
     app.fake.seed(
         "secrets",
         NS_A,
@@ -1036,8 +1026,6 @@ async fn the_audit_line_separates_written_credentials_from_replayed_ones() {
     assert!(!stored.to_string().contains(SECRET_ACCESS_KEY));
 }
 
-// ------------------------------------------------------------------ helpers
-
 fn field_codes(problem: &Value) -> Vec<String> {
     problem["errors"]
         .as_array()
@@ -1050,9 +1038,7 @@ fn field_codes(problem: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// ======================================================================
-// M3 / L2: bounded reads that report their own bound
-// ======================================================================
+// BOUNDED READS THAT REPORT THEIR OWN BOUND.
 
 /// **`lastTest` finds the newest access test, however many checks there are.**
 ///
@@ -1195,9 +1181,7 @@ async fn the_default_check_selects_on_a_label_rather_than_scanning() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// FX-20: a destination's credential is entered, never named
-// ======================================================================
+// A DESTINATION'S CREDENTIAL IS ENTERED, NEVER NAMED.
 
 /// **A new destination that names an existing Secret is refused, and nothing
 /// is written; the same destination with the credential ENTERED is created,
@@ -1342,7 +1326,7 @@ async fn fx20_a_rotation_refuses_a_secret_the_destination_does_not_already_name(
     app.fake.assert_strict();
 }
 
-/// **FX-20 fix round (review F1), at the API.** A region is part of the host
+/// **A region is part of the host
 /// an endpoint-less S3 request is sent to, so a create whose `storage.region`
 /// is not a region name is refused, `422 region_invalid`, and nothing is
 /// written; the value is never echoed. CONTROL: the same request with a real
@@ -1389,8 +1373,8 @@ async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
     assert_eq!(created.status.as_u16(), 201, "{}", created.text());
 }
 
-/// **FX-20c: the API answers a destination's Test access whose binding row
-/// refused, by grant.** The PoC batch 4 F6 thief, after the fix: every
+/// **The API answers a destination's Test access whose binding row refused,
+/// by grant.** A credential bound elsewhere: every
 /// controller and pod row is ready, `destination.archivePrefixWritable` is
 /// execution-only, and `destination.credentialBound` is `notReady`,
 /// `CredentialBindingMismatch`, naming `archiveWrite` and the Secret. The

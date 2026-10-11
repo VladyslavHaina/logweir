@@ -1,4 +1,4 @@
-//! PLAT-20.2: the product API at the sizes its own bounds allow — what one
+//! The product API at the sizes its own bounds allow -- what one
 //! request costs, and what walking a whole list costs.
 //!
 //! TWO KINDS OF TEST LIVE HERE, AND ONLY ONE OF THEM RUNS BY DEFAULT.
@@ -69,9 +69,7 @@ fn fixture(name: &str) -> Value {
     .expect("a fixture is JSON")
 }
 
-// ======================================================================
-// Seeding
-// ======================================================================
+// SEEDING.
 
 /// `count` copies of a live-derived `Backup` (verified, succeeded), each with
 /// its own name and uid.
@@ -208,9 +206,7 @@ fn seed_inventory(fake: &FakeKube, name: &str, topics: usize) {
     seed_discovery(fake, NS_A, name, "source", None, &chunks);
 }
 
-// ======================================================================
-// Walking, counting and timing
-// ======================================================================
+// WALKING, COUNTING AND TIMING.
 
 /// What the fake Kubernetes API was asked during one request, by kind.
 #[derive(Debug, Default, Clone, Copy)]
@@ -297,9 +293,7 @@ async fn walk(app: &TestApp, first: &str, cap: usize) -> Walk {
     walk
 }
 
-// ======================================================================
-// Regression checks: a request's reads are bounded by the stated budget
-// ======================================================================
+// REGRESSION CHECKS: a request's reads are bounded by the stated budget.
 
 /// **A point page reads a bounded number of objects, whatever the view and the
 /// namespace hold.**
@@ -438,9 +432,7 @@ async fn walking_the_console_list_budget_is_one_list_per_page() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// Measurements (ignored; `--ignored --nocapture`)
-// ======================================================================
+// MEASUREMENTS (ignored; `--ignored --nocapture`).
 
 /// Status load: the console's whole list budget of `Backup`s and `Restore`s.
 #[tokio::test]

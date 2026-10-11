@@ -38,18 +38,17 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
         "/api/v1/namespaces/team-a/trustrosters",
         "/api/v1/namespaces/team-a/backups/x/status",
         "/api/v1/namespaces/team-a/operations/secret/x",
-        // D2 W12 ADDED `{id}` ROUTES AND NOT A COLLECTION ROUTE. A discovery
+        // `{id}` ROUTES AND NOT A COLLECTION ROUTE. A discovery
         // is always addressed through its connection or by its own id; there
         // is no namespace-wide list of checks, and a client that guessed one
         // gets 404 rather than an unbounded scan.
         "/api/v1/namespaces/team-a/topic-discoveries",
         "/api/v1/namespaces/team-a/destinations/x/topics",
         "/api/v1/namespaces/team-a/backupdestinations",
-        // D3 W11 ADDED `.../events`, so the path that used to be here has
-        // moved to `catalogs.rs`'s own suite; what stays a 404 is a stream
-        // for a kind that has none. A transient check finishes in seconds and
-        // already has a cancel route; a long-lived connection is a resource it
-        // does not need, and the route table is the boundary.
+        // What stays a 404 is a stream for a kind that has none. A transient check
+        // finishes in seconds and already has a cancel route; a long-lived
+        // connection is a resource it does not need, and the route table is the
+        // boundary.
         "/api/v1/namespaces/team-a/operations/discovery/x/events",
         "/api/v1/namespaces/team-a/operations/preflight/x/events",
         "/api/v1/namespaces/team-a/operations/secret/x/events",
@@ -85,9 +84,9 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
 #[tokio::test]
 async fn unimplemented_mutations_have_no_route() {
     let app = TestApp::new();
-    // Approval submission, delete and patch: absent. D1 W6 gave `POST
-    // .../backups` and `PUT .../schedules/{name}` real routes, so they moved
-    // to the list below; the shapes that must NEVER exist are these.
+    // Approval submission, delete and patch: absent. `POST .../backups` and
+    // `PUT .../schedules/{name}` are real routes (the list below); the shapes
+    // that must NEVER exist are these.
     //
     // `PATCH` and `PUT` ARE NOT THE SAME QUESTION. The edit route is a `PUT`
     // of the whole policy through a typed DTO; a `PATCH` would be a
@@ -122,7 +121,7 @@ async fn unimplemented_mutations_have_no_route() {
     assert!(app.fake.requests().is_empty());
 }
 
-/// **The two routes D1 W6 added are routed, and refuse before Kubernetes.**
+/// **The edit and manual-run routes are routed, and refuse before Kubernetes.**
 ///
 /// A negative control for the list above: if `POST .../backups` were dropped
 /// from the router, the test above would still pass (it no longer probes it)
@@ -437,8 +436,6 @@ async fn unsafe_methods_need_the_exact_origin_and_json_before_anything_else() {
     );
 }
 
-// ------------------------------------------------------------- static UI
-
 /// The shipped UI files, selected the way `crates/logweir/tests/chart_lint.rs`
 /// selects them: everything under `ui/` except Markdown and `ui/tests/`.
 fn shipped_ui_files() -> Vec<String> {
@@ -466,8 +463,8 @@ fn shipped_ui_files() -> Vec<String> {
     out
 }
 
-/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE FILE DOES NOT
-/// (console-ux-1 review L1): the marker must come from this service and only
+/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE FILE DOES NOT: the
+/// marker must come from this service and only
 /// from it.
 #[tokio::test]
 async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
@@ -506,8 +503,8 @@ async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
 async fn every_shipped_asset_is_served_byte_for_byte() {
     let app = TestApp::new();
     let files = shipped_ui_files();
-    // TWENTY-SIX SINCE D3 W12, which added `operation-watch.js` and the three
-    // pages `#/operations`, `#/protection` and `#/catalog` are rendered by.
+    // TWENTY-SIX, including `operation-watch.js` and the three pages
+    // `#/operations`, `#/protection` and `#/catalog` are rendered by.
     // The number is asserted rather than taken from the tree: a count read from
     // the same directory the server serves from stays green when files are
     // deleted from both sides at once.
@@ -517,7 +514,7 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
         "the shipped UI is twenty-six files: {files:?}"
     );
     for rel in &files {
-        // ONE FILE IS THE SERVICE'S OWN (review L1): `runtime.js` is served
+        // ONE FILE IS THE SERVICE'S OWN: `runtime.js` is served
         // compiled in, carrying the console marker, in place of the legacy
         // file's empty context. Every other file is its bytes on disk.
         let source = if rel == "ui/runtime.js" {
@@ -606,13 +603,13 @@ fn references(html: &str) -> Vec<(String, String)> {
     out
 }
 
-/// PLAT-18.2's live run: every console page load logged a CSP violation,
-/// because `ui/index.html` named its icon `data:,` and this server's policy
-/// admits no `data:` image (`img-src` falls back to `default-src 'self'`).
-/// The fix is the icon from `'self'`, NOT a wider policy — so this holds both
-/// halves: the policy a page is held to is exactly `'self'` for every fetch a
-/// page makes, and every asset any shipped page names is a same-origin path
-/// this server answers 200 for.
+/// A page icon named `data:,` would be refused by this server's policy, which
+/// admits no `data:` image (`img-src` falls back to `default-src 'self'`),
+/// and log a CSP violation on every console page load. The fix is the icon
+/// from `'self'`, NOT a wider policy -- so this holds both halves: the policy
+/// a page is held to is exactly `'self'` for every fetch a page makes, and
+/// every asset any shipped page names is a same-origin path this server
+/// answers 200 for.
 ///
 /// REGRESSION REASONS. Put `data:,` back in `ui/index.html`: the reference
 /// walk fails naming it. Drop the compiled-in icon from `assets.rs`: the

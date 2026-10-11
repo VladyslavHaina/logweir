@@ -37,7 +37,7 @@ fn the_decision_table_is_exactly_this() {
         (Action::CreateConnection, [false, true, false, true]),
         (Action::TestConnection, [false, true, false, true]),
         (Action::WriteCredential, [false, true, false, true]),
-        // D2 W12: a domain's READ is the viewer's floor; starting and
+        // A domain's READ is the viewer's floor; starting and
         // cancelling are the operator's, and an approver sees readiness only
         // because an approval packet needs it.
         (Action::ReadTopicDiscoveries, [true, true, false, true]),
@@ -51,7 +51,7 @@ fn the_decision_table_is_exactly_this() {
         (Action::ReadSchedules, [true, true, false, true]),
         (Action::CreateSchedule, [false, true, false, true]),
         (Action::SetScheduleSuspension, [false, true, false, true]),
-        // D1 W6: editing a schedule's FUTURE policy. Same row as
+        // Editing a schedule's FUTURE policy. Same row as
         // `CreateSchedule` on purpose — see the invariant below.
         (Action::EditSchedulePolicy, [false, true, false, true]),
         (Action::ReadBackups, [true, true, true, true]),
@@ -126,11 +126,11 @@ fn the_decision_table_is_exactly_this() {
 /// **Editing a schedule's policy is exactly the authority to create one.**
 ///
 /// D0's matrix gives an operator "create and set suspension" on schedules and
-/// says nothing about editing, because PLAT-05.1 had not made a schedule
-/// editable. This crate's decision (recorded in `docs/api.md`) is that writing
-/// a NEW policy over a schedule is the same authority as writing the first
-/// one: it reaches exactly the fields `POST` already sets, it cannot reach
-/// `spec.sourceRef`, and it cannot touch a run that already exists.
+/// says nothing about editing. This crate's decision (recorded in
+/// `docs/api.md`) is that writing a NEW policy over a schedule is the same
+/// authority as writing the first one: it reaches exactly the fields `POST`
+/// already sets, it cannot reach `spec.sourceRef`, and it cannot touch a run
+/// that already exists.
 ///
 /// THE TEST IS WHAT MAKES THE ONE CAPABILITY FLAG HONEST. `ui/contract.js`'s
 /// `CAPABILITY_FLAGS` is a frozen 19-entry list, so the edit route has no flag
@@ -153,8 +153,6 @@ fn editing_a_policy_is_exactly_the_authority_to_create_one() {
     assert!(!Role::Viewer.allows(Action::EditSchedulePolicy));
     assert!(!Role::Approver.allows(Action::EditSchedulePolicy));
 }
-
-// ------------------------------------------------------------------ HTTP
 
 struct Probe {
     label: &'static str,
@@ -232,15 +230,12 @@ fn probes() -> Vec<Probe> {
         Probe {
             label: "set suspension",
             method: "POST",
-            // THE COMMAND'S OWN PATH. This probe used to omit the verb and was
-            // decided under the route's floor action; since review L2 an
-            // undeclared verb is 404 in the access layer for everyone, so the
-            // probe names the command it means.
+            // THE COMMAND'S OWN PATH: an undeclared verb is 404 in the access layer for
+            // everyone, so the probe names the command it means.
             path: "/schedules/sched-1:set-suspension",
             body: suspension,
             action: Action::SetScheduleSuspension,
         },
-        // ------------------------------------------------------- D1 W6
         Probe {
             label: "edit schedule policy",
             method: "PUT",
@@ -318,7 +313,6 @@ fn probes() -> Vec<Probe> {
             body: nothing,
             action: Action::ReadOperations,
         },
-        // ------------------------------------------------------ D2 W12
         Probe {
             label: "list destinations",
             method: "GET",
@@ -718,10 +712,9 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
 ///
 /// THE APPROVER IS THE ROW THAT MATTERS. An approver is BOUND to the namespace
 /// and is deliberately granted no schedule surface at all: no
-/// `schedule.read`, no cadence, no topic inventory. A guard written as "is this
-/// actor bound anywhere" would admit it and still pass every other test in this
-/// crate, which is exactly the weakening the reviewer planted and the whole
-/// suite survived. These four rows are what kill it.
+/// `schedule.read`, no cadence, no topic inventory. A guard written as "is
+/// this actor bound anywhere" would admit it and still pass every other test
+/// in this crate; these four rows are what kill it.
 ///
 /// KILLS: `authorize_any` relaxed to `!authorizer.namespaces(actor).is_empty()`
 /// (the approver arm answers 200 and this fails); the `ReadSchedules` check
@@ -1112,10 +1105,9 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
 /// **Separation of duties compares principals, and administrator is not a way
 /// around it.**
 ///
-/// The governed-approval ROUTE is PLAT-19.2 and is absent (the capability is
-/// advertised `false`). The DECISION is here and tested now, because the
-/// tracker's acceptance — "an operator cannot assume approver rights" and
-/// "admin is not a self-approval bypass" — is a property of the decision.
+/// The DECISION is tested here, because the tracker's acceptance -- "an
+/// operator cannot assume approver rights" and "admin is not a self-approval
+/// bypass" -- is a property of the decision.
 #[tokio::test]
 async fn governed_approval_needs_an_approver_binding_and_a_different_principal() {
     use logweir_api::auth::Actor;
@@ -1207,13 +1199,12 @@ async fn governed_approval_needs_an_approver_binding_and_a_different_principal()
     ));
 }
 
-/// **PLAT-19.2: governed approval submission HAS a route, and it is the
-/// approver's.** Before PLAT-19.2 this row pinned the route as absent; it now
-/// pins the opposite and the role gate: the route exists (it answers the
-/// approver with the route's own verdict — here `not_found`, the Restore does
-/// not exist — never 404-no-route or 405), a viewer or operator is `forbidden`
-/// by the role table before any lookup, and the approver's session advertises
-/// `approvalSubmit`. The old stub-shaped paths stay absent.
+/// **Governed approval submission HAS a route, and it is the approver's.**
+/// The route exists (it answers the approver with the route's own verdict --
+/// here `not_found`, the Restore does not exist -- never 404-no-route or
+/// 405), a viewer or operator is `forbidden` by the role table before any
+/// lookup, and the approver's session advertises `approvalSubmit`. The
+/// stub-shaped paths stay absent.
 #[tokio::test]
 async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbed() {
     let app = SharedApp::new(

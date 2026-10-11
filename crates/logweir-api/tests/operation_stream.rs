@@ -493,7 +493,7 @@ fn only_a_bounded_decimal_is_an_event_id() {
 /// wrong: a run that exited 0 with its evidence keys recorded and no verdict
 /// yet is terminal, and the verdict is the thing a console is waiting for.
 /// Closing there would leave "succeeded, verification pending" on the screen
-/// for ever, which is the exact conflation PLAT-14.1 exists to remove. The
+/// for ever, which is the conflation the normalized status exists to remove. The
 /// stream therefore keeps the connection and ends on the ceiling, not on
 /// `settled`.
 #[tokio::test]
