@@ -3359,7 +3359,8 @@ OD-12); each part below did nothing v1 uses.
   bytes: absent or empty (`webhooks: []`, what the console writes) is
   accepted, and a block that names a sink is refused by name, by the
   controller's admission of a destination-backed `Restore` and by the runner
-  at phase 0 (exit 3, `refusal-reason=GuardRefused`), before anything is read.
+  at startup (exit 3, `refusal-reason=GuardRefused`), before anything is read
+  or dialled; phase 0 repeats the check.
   An upgraded install sees such a `Restore` or `drill run` refused; remove the
   sinks and approve the plan again. Alert on the runner's metrics textfile or
   the `Restore`'s conditions instead.
@@ -3380,8 +3381,8 @@ Job or ConfigMap route, so any delivery would panic); API rows over an older
 live object (its routes and delivery state are not published); the chart's
 refusal row and its control (`notify=null` renders); the bind-credential
 refusal row and its control; the plan's `notifications` refusal at the
-controller's admission, at phase 0 and through the binary, with an empty
-block as the control; the unsafe-scope gate over the smaller crate;
+controller's admission, at phase 0 and through the binary (before any
+phase), with an empty block as the control; the unsafe-scope gate over the smaller crate;
 the e2e group rows (the three ACL rows are removed with the read).
 [UNVERIFIED — no cluster has applied the narrowed ProtectionPolicy CRD over an older policy yet; the PoC upgrade that carries this item runs it.]
 **Rollback:** roll back the chart, the CRDs, the controller and the runner

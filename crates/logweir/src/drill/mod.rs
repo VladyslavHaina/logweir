@@ -2422,6 +2422,10 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
         "target.auth",
         &authenticated_spec.target.auth,
     )?;
+    // **PROD-17.1 B2**: a plan that still names a notification sink is
+    // refused here, exit 3, before the point binding reads the archive and
+    // before `context` dials. Phase 0 repeats the check.
+    logweir_core::guard::reject_withdrawn_notifications(&authenticated_spec.notifications)?;
     // **FX-20 fix round (review F1)**: a storage region that is not a region
     // name is refused here, exit 3 (`StorageRegionInvalid`), before the point
     // binding below reads the archive and before any client exists. On an

@@ -220,20 +220,30 @@ fn a_globbed_topic_in_the_spec_exits_3_at_phase_0_with_its_reason_line() {
 }
 
 /// **The withdrawn `notifications` block, through the binary.** The example
-/// plan with a PagerDuty routing key added exits 3 at phase 0 with
-/// `refusal-reason=GuardRefused`, naming `notifications`
-/// and never echoing the key. (The control, an empty block passing, is
-/// `logweir-core`'s `a_notifications_block_that_names_a_sink_is_refused_by_name`;
-/// the shipped example itself carries `webhooks: []`.)
+/// plan with a PagerDuty routing key added exits 3 with
+/// `refusal-reason=GuardRefused`, naming `notifications` and never echoing
+/// the key, at the runner's startup: no phase began, so the archive was not
+/// read and no client was built. Phase 0's backstop is `topic_preflight.rs`.
+///
+/// CONTROL: the same plan with the shipped empty block (`webhooks: []`) is not
+/// refused on it. Both plans carry an empty `topic_mapping_prefix`, so the
+/// control stops at phase 0's local mapping check, which proves the
+/// no-phase-line discriminator is live.
 #[test]
 fn a_plan_that_names_a_notification_sink_exits_3_naming_notifications() {
-    let example = std::fs::read_to_string("../../examples/drill.yaml").unwrap();
+    let example = std::fs::read_to_string("../../examples/drill.yaml")
+        .unwrap()
+        .replace(
+            "topic_mapping_prefix: \"drill-\"",
+            "topic_mapping_prefix: \"\"",
+        );
     assert!(example.contains("\nnotifications:\n  webhooks: []\n"));
     let spec = example.replacen(
         "\nnotifications:\n  webhooks: []\n",
         "\nnotifications:\n  webhooks: []\n  pagerduty_routing_key: R0FAKEROUTINGKEY\n",
         1,
     );
+    assert_ne!(spec, example, "the sink was added");
     let (code, stdout, stderr) = run_with_spec_capturing_streams(&spec);
     assert_eq!(code, Some(3), "stdout:\n{stdout}\nstderr:\n{stderr}");
     assert_eq!(
@@ -248,6 +258,29 @@ fn a_plan_that_names_a_notification_sink_exits_3_naming_notifications() {
     assert!(
         !stderr.contains("R0FAKEROUTINGKEY") && !stdout.contains("R0FAKEROUTINGKEY"),
         "the routing key is never echoed"
+    );
+    assert!(
+        !stdout.contains("progress-phase="),
+        "refused before any phase:\n{stdout}"
+    );
+
+    let (code, stdout, stderr) = run_with_spec_capturing_streams(&example);
+    assert_eq!(
+        code,
+        Some(3),
+        "control\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("notifications is withdrawn"),
+        "an empty block is not refused:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("topic_mapping entry") || stderr.contains("onto itself"),
+        "the control reached phase 0's mapping check:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("progress-phase="),
+        "the control printed a phase line, so the discriminator above is live:\n{stdout}"
     );
 }
 
