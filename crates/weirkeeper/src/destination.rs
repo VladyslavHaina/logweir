@@ -1,57 +1,36 @@
 //! The controller half of a saved destination: resolve one `BackupDestination`
-//! into the COMPLETE, EXPLICIT object-store configuration one operation needs
-//! — decision D2 §3.4, §3.5, §3.7, §3.10.
-//!
-//! # What the pure half already decided, and what is left here
+//! into the complete, explicit object-store configuration one operation needs
+//! (decision D2 §3.4, §3.5, §3.7, §3.10).
 //!
 //! [`logweir_core::destination`] owns everything that is a function of the
 //! location alone: the closed enums, R3–R6, the engine-compatibility refusal,
 //! the canonical URL, the location digest and the two `StorageUrl` renderings.
-//! It is re-exported here rather than re-derived, because two spellings of
-//! "where the archive is" is exactly the defect PLAT-08 removes.
+//! It is re-exported here rather than re-derived, so there is one spelling of
+//! "where the archive is". This module adds what needs the object: which grant
+//! a role resolves to after defaulting, whether the object's own status says it
+//! is `Valid`, what a Job's environment is, and what a run freezes.
 //!
-//! What is left is everything that needs the OBJECT rather than the location:
-//! which of the four grants a role resolves to after defaulting, whether the
-//! object's own status says it is `Valid`, what a Job's environment is, and
-//! what a run freezes.
+//! # The environment this module renders is complete and closed
 //!
-//! # THE ENVIRONMENT THIS MODULE RENDERS IS COMPLETE AND CLOSED
+//! The engine calls `AmazonS3Builder::from_env()`, which reads every `AWS_*`
+//! variable it finds, so a variable forwarded from the controller's own
+//! process ([`crate::controllers::backup::archive_addressing_env`]) such as
+//! `AWS_ALLOW_HTTP=true` would enable plaintext HTTP in a runner whose approved
+//! plan says `allow_http: false` (seam **S5**). Not one function in this module
+//! reads `std::env::var`. Every value in [`DestinationEnv`] is computed from the
+//! `BackupDestination` it was handed, and `AWS_ALLOW_HTTP` from
+//! [`TransportSecurity::allows_plaintext_http`] alone: not from the addressing
+//! style, the endpoint scheme or the process. `AWS_ENDPOINT_URL` is absent by
+//! construction; the endpoint reaches the runner in the plan's own `storage`
+//! block.
 //!
-//! Defect **SEC-ENVHTTP** (D-SEAMS **S5**): today's controller FORWARDS
-//! `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and
-//! `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from its own process environment into
-//! every runner Job ([`crate::controllers::backup::archive_addressing_env`]),
-//! and the engine calls `AmazonS3Builder::from_env()`, which reads every
-//! `AWS_*` variable it finds. A controller started with `AWS_ALLOW_HTTP=true`
-//! therefore enables plaintext HTTP in a runner **whose approved plan says
-//! `allow_http: false`**.
+//! # No credential value passes through this module
 //!
-//! Not one function in this module reads `std::env::var`. Every value in
-//! [`DestinationEnv`] is computed from the `BackupDestination` it was handed,
-//! and `AWS_ALLOW_HTTP` is computed from
-//! [`TransportSecurity::allows_plaintext_http`] and from nothing else — not
-//! from the addressing style (defect **UI-HTTPDOWNGRADE**'s server-side twin),
-//! not from the endpoint scheme, and not from the process. `AWS_ENDPOINT_URL`
-//! is ABSENT BY CONSTRUCTION: the endpoint reaches the runner inside the plan's
-//! own `storage` block, which W2's `StoreOptions` path reads explicitly, so a
-//! variable that could relocate a store never exists in the pod at all.
-//!
-//! # No credential VALUE passes through this module
-//!
-//! A grant resolves to a Secret NAME and DATA KEYS. The kubelet projects the
-//! value, in the pod's own namespace, from the reference the controller wrote.
-//! The controller holds no verb on `secrets`
-//! (`tests/linkage.rs::the_controller_never_reads_a_secret`), which is also why
-//! "the Secret exists" is NOT something this module can assert: see
+//! A grant resolves to a Secret name and data keys; the kubelet projects the
+//! value in the pod's own namespace. The controller holds no verb on `secrets`
+//! (`tests/linkage.rs::the_controller_never_reads_a_secret`), so "the Secret
+//! exists" is not something this module can assert: see
 //! [`ResolvedDestination::check_job_namespace`] for what it asserts instead.
-//!
-//! # Wiring
-//!
-//! W7 owns the resolver, the `BackupDestination` reconciler and the evidence
-//! store cache. **W10** wires [`ResolvedDestination::job_env`] and
-//! [`ResolvedDestination::plan_storage`] into `controllers/backup.rs` and
-//! `controllers/restore.rs`, freezes [`ResolvedDestinationSnapshot`] into
-//! PLAT-06.1's `execution-inputs.json` (seam **S4**).
 
 use std::collections::BTreeSet;
 
@@ -76,35 +55,21 @@ use crate::crds::backup_destination::{
 };
 use crate::job::EnvFromSecret;
 
-/// **`DestinationRole` LIVES IN THE PURE LAYER AND IS RE-EXPORTED HERE.**
-///
-/// The check plan (`logweir_core::check_contract`), this resolver and the API
-/// DTOs must all name the same four roles; a second enum in this crate would
-/// be a second vocabulary that drifts at the first added role. Consumers write
-/// `weirkeeper::destination::DestinationRole` or the core path — both resolve
-/// to one type.
+/// Re-exported from the pure layer: the check plan, this resolver and the API
+/// DTOs must all name the same four roles, and a second enum here would drift
+/// at the first added role.
 pub use logweir_core::destination::DestinationRole;
-
-// ---------------------------------------------------------------------------
-// The version-skew handshake (D2 §3.5)
-// ---------------------------------------------------------------------------
 
 /// The store-contract version a destination-backed Job is driven at.
 ///
-/// A RUNNER WITHOUT THE CONTRACT MUST REFUSE, NOT IMPROVISE. The same technique
-/// as `--execution-contract-version`: the flag below reaches the runner's argv
-/// allowlist, and a runner that does not know it exits before dispatch. Without
-/// the handshake a new controller could drive an old runner that silently built
-/// its evidence store from ambient credentials.
+/// It reaches the runner's argv allowlist, and a runner that does not know it
+/// exits before dispatch, so a new controller cannot drive an old runner that
+/// would build its evidence store from ambient credentials.
 pub const STORE_CONTRACT_VERSION: &str = "1";
 /// The argv flag carrying [`STORE_CONTRACT_VERSION`].
 pub const STORE_CONTRACT_VERSION_ARG: &str = "--store-contract-version";
 /// The environment variable carrying [`STORE_CONTRACT_VERSION`].
 pub const STORE_CONTRACT_VERSION_ENV: &str = "LOGWEIR_STORE_CONTRACT_VERSION";
-
-// ---------------------------------------------------------------------------
-// The variable names one resolved destination renders (D2 §3.5)
-// ---------------------------------------------------------------------------
 
 /// Which credential provider the runner builds its ARCHIVE store with.
 pub const ARCHIVE_CREDENTIALS_ENV: &str = "LOGWEIR_ARCHIVE_CREDENTIALS";
@@ -156,36 +121,25 @@ pub const AWS_METADATA_ENDPOINT_ENV: &str = "AWS_METADATA_ENDPOINT";
 /// Rendered only when `spec.storage.region` is set.
 pub const AWS_REGION_ENV: &str = "AWS_REGION";
 
-/// The variable this module NEVER renders.
-///
-/// Named as a constant so the guard
-/// `no_rendered_environment_carries_an_endpoint_variable` can assert its
-/// absence by the same spelling the leak would use. The endpoint travels in the
-/// plan's `storage` block, which the runner reads explicitly; a variable that
-/// `AmazonS3Builder::from_env()` would sweep up is a second, silent answer to
-/// "where is the bucket".
+/// The variable this module never renders: the endpoint travels in the plan's
+/// `storage` block, and a variable `AmazonS3Builder::from_env()` would sweep up
+/// is a second, silent answer to "where is the bucket". The guard
+/// `no_rendered_environment_carries_an_endpoint_variable` asserts its absence
+/// by this spelling.
 pub const AWS_ENDPOINT_URL_ENV: &str = "AWS_ENDPOINT_URL";
 
-/// A CA bundle larger than this is refused with [`CheckCode::CaBundleTooLarge`].
-///
-/// 64 KiB is roughly two hundred certificates. A `ConfigMap` may hold a
-/// megabyte, and every byte of it would be copied into every run's immutable
-/// plan `ConfigMap` and parsed on every store build.
+/// A CA bundle larger than this is refused with [`CheckCode::CaBundleTooLarge`]:
+/// 64 KiB is roughly two hundred certificates, and every byte is copied into
+/// every run's immutable plan `ConfigMap` and parsed on every store build.
 pub const CA_BUNDLE_MAX_BYTES: usize = 64 * 1024;
 
 /// The condition type the `BackupDestination` reconciler owns.
 pub const CONDITION_VALID: &str = "Valid";
 
-// ---------------------------------------------------------------------------
-// Refusals
-// ---------------------------------------------------------------------------
-
 /// Why a destination cannot be resolved, or cannot be used for this operation.
 ///
-/// THE CODE IS A [`CheckCode`], NOT A LOCAL STRING. D2's check catalogue, this
-/// resolver and the `BackupDestination` status all report the same closed
-/// vocabulary; a private `&'static str` set here would be a fourth spelling
-/// nobody could compare against the other three.
+/// The code is a [`CheckCode`] so the check catalogue, this resolver and the
+/// `BackupDestination` status report one closed vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DestinationRefusal {
     /// The closed code. Also the condition `reason` a caller writes.
@@ -213,15 +167,12 @@ impl DestinationRefusal {
         self.code.as_str()
     }
 
-    /// Whether a caller should HOLD (requeue and re-read) rather than fail the
-    /// object terminally — D2 §3.6.
+    /// Whether a caller should hold (requeue and re-read) rather than fail the
+    /// object terminally (D2 §3.6).
     ///
-    /// **TWO CODES AND NO MORE.** A destination that is absent or not yet
-    /// `Valid` is a race an operator resolves by creating or fixing the object,
-    /// and a run that failed terminally on it could never be retried. Everything
-    /// else — a role nobody configured, two ServiceAccounts in one pod, an
-    /// addressing the engine cannot honour — is a decision, and a decision that
-    /// is retried forever is a decision nobody sees.
+    /// Only an absent or not-yet-`Valid` destination holds: that is a race an
+    /// operator resolves by creating or fixing the object. Everything else is a
+    /// decision, and a decision retried forever is one nobody sees.
     #[must_use]
     pub fn is_hold(&self) -> bool {
         matches!(
@@ -241,9 +192,8 @@ impl std::error::Error for DestinationRefusal {}
 
 /// A refusal, or the API server would not answer.
 ///
-/// SEPARATE FROM [`DestinationRefusal`] ON PURPOSE. A 503 is not a verdict
-/// about the destination: a caller requeues on it and writes no condition,
-/// exactly as [`crate::controllers::approval::ReconcileError::Api`] does.
+/// Separate from [`DestinationRefusal`] because a 503 is not a verdict about
+/// the destination: a caller requeues on it and writes no condition.
 #[derive(Debug)]
 pub enum ResolveError {
     /// The destination was read and refused.
@@ -275,25 +225,16 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-// ---------------------------------------------------------------------------
-// The resolved grant
-// ---------------------------------------------------------------------------
-
-/// One role's credential, after defaulting — REFERENCES ONLY.
-/// **`rename_all_fields`, NOT JUST `rename_all`.** On an ENUM, `rename_all`
-/// renames the VARIANTS and leaves struct-variant FIELDS alone — so the first
-/// version of this type serialised `{"mode":"secretKeys","access_key_id_key":…}`
-/// inside a snapshot that is camelCase everywhere else, against D2 §3.7's
-/// `{mode, secretName?, keys?, serviceAccountName?}`. That block is frozen into
-/// `execution-inputs.json` under `deny_unknown_fields` and re-encoded byte for
-/// byte on every later pass, so renaming a key after W10 lands turns every
-/// running `Backup` into a `PlanConfigMapConflict`. `the_snapshot_key_spellings_are_pinned`
-/// is the golden-bytes test that keeps it.
+/// One role's credential, after defaulting: references only.
+///
+/// `rename_all_fields`, not just `rename_all`: on an enum `rename_all` renames
+/// only the variants. This block is frozen into `execution-inputs.json` under
+/// `deny_unknown_fields` and re-encoded byte for byte on every later pass, so a
+/// renamed key turns every running `Backup` into a `PlanConfigMapConflict`;
+/// `the_snapshot_key_spellings_are_pinned` pins the bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-/// The VARIANT names are left PascalCase deliberately, so the snapshot's `mode`
-/// reads exactly as `spec.access.<role>.mode` reads on the object it was
-/// resolved from — `SecretKeys`, `WorkloadIdentity`, `ControllerIdentity`. One
-/// vocabulary, one spelling; a camelCased tag here would be a second.
+/// The variant names stay PascalCase so the snapshot's `mode` reads exactly as
+/// `spec.access.<role>.mode` does on the object it was resolved from.
 #[serde(rename_all_fields = "camelCase", tag = "mode")]
 pub enum ResolvedGrant {
     /// Keys the kubelet projects from a Secret in the destination's own
@@ -345,15 +286,11 @@ impl ResolvedGrant {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The resolved destination
-// ---------------------------------------------------------------------------
-
-/// A `BackupDestination`, resolved for ONE role.
+/// A `BackupDestination`, resolved for one role.
 ///
-/// SERIALISABLE AND VALUE-FREE, like [`crate::connection::ResolvedConnection`]:
-/// every field is a setting or a reference, so the whole thing can be frozen
-/// into a run's immutable inputs and returned by a product API.
+/// Value-free, like [`crate::connection::ResolvedConnection`]: every field is a
+/// setting or a reference, so it can be frozen into a run's immutable inputs
+/// and returned by a product API.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedDestination {
@@ -387,12 +324,12 @@ pub struct ResolvedDestination {
     pub ca_pem: Option<Vec<u8>>,
     /// The grant for [`ResolvedDestination::role`], after defaulting.
     pub grant: ResolvedGrant,
-    /// FX-20: this resolution stands for an INLINE archive — a legacy
-    /// `secretRef` read where an approved plan or an inline `archive.url`
-    /// says — and not for a `BackupDestination` object. Its Secret is bound to
-    /// the LOCATION ([`logweir_core::credential_binding::archive_location_binding`]),
-    /// because there is no object UID to bind it to. Omitted when `false`, so
-    /// every resolution serialised before it existed reads the same.
+    /// This resolution stands for an inline archive (a legacy `secretRef` read
+    /// where an approved plan or an inline `archive.url` says), not for a
+    /// `BackupDestination` object. Its Secret is bound to the location
+    /// ([`logweir_core::credential_binding::archive_location_binding`]) because
+    /// there is no object UID to bind it to. Omitted when `false`, so older
+    /// serialised resolutions read the same.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inline_archive: bool,
 }
@@ -409,11 +346,10 @@ pub struct CaBundleReference {
 
 /// What one destination contributes to one runner Job.
 ///
-/// THREE LISTS, AND THE THIRD IS NOT A LIST. Literal variables and
-/// `secretKeyRef` variables are appended by the caller wherever it already
-/// appends its own; the ServiceAccount is a single Job field, which is why two
-/// grants that want different ones is an [`CheckCode::ExecutionContextConflict`]
-/// and not a merge.
+/// The caller appends the literals and `secretKeyRef` variables beside its own;
+/// the ServiceAccount is a single Job field, which is why two grants that want
+/// different ones are an [`CheckCode::ExecutionContextConflict`] and not a
+/// merge.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DestinationEnv {
     /// Literal `name=value` variables, in a stable order.
@@ -449,16 +385,9 @@ impl DestinationEnv {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reading the spec
-// ---------------------------------------------------------------------------
-
-/// The pure [`DestinationLocation`] a `BackupDestination.spec` names.
-///
-/// The ONE place the CRD's `storage` block and `transport.security` become the
-/// pure layer's value. Everything that reasons about the location — the digest,
-/// the two `StorageUrl`s, R3–R6 — goes through here, so there is no second
-/// reading of the same fields.
+/// The pure [`DestinationLocation`] a `BackupDestination.spec` names: the one
+/// place the CRD's `storage` block and `transport.security` are read, so the
+/// digest, the two `StorageUrl`s and R3–R6 all see the same reading.
 #[must_use]
 pub fn location_of(dest: &BackupDestination) -> DestinationLocation {
     let storage = &dest.spec.storage;
@@ -474,13 +403,8 @@ pub fn location_of(dest: &BackupDestination) -> DestinationLocation {
 }
 
 /// Whether a persisted `BackupDestination` carries a `Valid=True` condition
-/// computed from its CURRENT generation.
-///
-/// **GENERATION-AWARE ON PURPOSE.** A `Valid=True` left over from the previous
-/// generation says nothing about the spec that is there now — an edit that
-/// added an unreadable CA bundle would be used by every run that started before
-/// the reconciler caught up. `observedGeneration` is what makes the answer
-/// about the object a caller is holding.
+/// computed from its current generation. A `Valid=True` from an earlier
+/// generation says nothing about the spec there now.
 #[must_use]
 pub fn is_valid_now(dest: &BackupDestination) -> bool {
     let Some(status) = dest.status.as_ref() else {
@@ -495,24 +419,10 @@ pub fn is_valid_now(dest: &BackupDestination) -> bool {
     })
 }
 
-/// Whether this destination opted in to the create-only readiness marker —
-/// `spec.readiness.writeProbe: CreateOnlyMarker`.
-///
-/// # Why this is a free function and not a field on [`ResolvedDestination`]
-///
-/// It is a fact about the SPEC, not about a resolved role: the same answer
-/// holds for all four grants, and adding a field would mean touching every
-/// construction site of a struct this module's own tests pin. Added by D2 W9
-/// (reviewer finding **F3**): the field is shipped, user-settable and
-/// documented as *"a `Preflight` with `operation: DestinationAccess` may create
-/// ONE marker object"*, and until this existed the preflight controller
-/// hard-coded `writeProbe: false` into every plan — so an operator who opted in
-/// got `destination.evidenceWritable: unknown / WriteNotProbed` with a message
-/// that was FALSE about their object. A status that contradicts the spec is the
-/// UI-FAKEPREFLIGHT pattern the kind exists to close.
-///
-/// Absent `spec.readiness` and absent `writeProbe` both mean `Disabled`, which
-/// is Global Constraint 6's create-only boundary left untouched.
+/// Whether this destination opted in to the create-only readiness marker
+/// (`spec.readiness.writeProbe: CreateOnlyMarker`). Absent `spec.readiness` and
+/// absent `writeProbe` both mean `Disabled`: Global Constraint 6's create-only
+/// boundary left untouched.
 #[must_use]
 pub fn write_probe_enabled(dest: &BackupDestination) -> bool {
     dest.spec.readiness.as_ref().is_some_and(|r| {
@@ -520,47 +430,32 @@ pub fn write_probe_enabled(dest: &BackupDestination) -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
-// The resolver
-// ---------------------------------------------------------------------------
-
-/// Resolve one `BackupDestination` for one role — D2 §3.4.
+/// Resolve one `BackupDestination` for one role (D2 §3.4).
 ///
-/// # The order of the checks, and why it is this order
+/// The checks run in this order:
 ///
-/// 1. **Identity.** Namespace, UID and generation. Every reference below is
-///    resolved in that namespace, and the freeze records that UID: a
-///    deleted-and-recreated destination of the same name is a different
-///    destination.
+/// 1. **Identity.** Every reference is resolved in the object's namespace, and
+///    the freeze records its UID: a deleted-and-recreated destination of the
+///    same name is a different destination.
 /// 2. **The location re-validated.** R3–R6 and the bucket and region patterns
-///    are re-evaluated HERE, over what the API server actually stored, and not
-///    trusted from CEL. An object admitted by an older CRD revision — installed
-///    before a rule existed, or by an administrator who applied the CRD by hand
-///    — is still refused, and the operator gets the field name.
-/// 3. **Engine compatibility** (G4). `VirtualHosted` with a custom endpoint is
-///    a setting the pinned engine cannot honour (every engine since 0.21.0,
-///    the 0.23.3 pin included, forces path-style with an endpoint), so it is
-///    refused rather than silently served as path-style (defect
-///    **ENGINE-PATHSTYLE**).
-/// 4. **The object's own verdict.** `Valid=True` at the current generation.
-///    AFTER the two checks above, so a destination whose reconciler has not run
-///    yet still reports the real problem rather than "not valid yet".
-/// 5. **The grant**, after defaulting.
-///
-/// # The role defaulting, in one place
-///
-/// * `ArchiveRead` falls back to `archiveWrite`.
-/// * `EvidenceWrite` falls back to `archiveWrite`.
-/// * `EvidenceRead` resolves `ArchiveReadGrant` to the EXPLICIT `archiveRead`
-///   (R9 refuses the mode without one, and this refuses it again).
-/// * `EvidenceRead` absent is [`ResolvedGrant::NotConfigured`] — a defined
-///   answer, never a fall-back to a wider grant.
-/// * `ArchiveWrite` is required; it cannot default to anything.
+///    are re-evaluated over what the API server stored, so an object admitted
+///    by an older CRD revision is still refused, with the field name.
+/// 3. **Engine compatibility** (G4). The pinned engine forces path-style
+///    whenever an endpoint is set, so `VirtualHosted` with a custom endpoint is
+///    refused rather than silently served as path-style.
+/// 4. **The object's own verdict**, `Valid=True` at the current generation;
+///    after the two above, so a destination whose reconciler has not run yet
+///    still reports the real problem.
+/// 5. **The grant**, after defaulting: `ArchiveRead` and `EvidenceWrite` fall
+///    back to `archiveWrite`; `EvidenceRead` with `ArchiveReadGrant` needs an
+///    explicit `archiveRead` (R9, refused again here); an absent `evidenceRead`
+///    is [`ResolvedGrant::NotConfigured`], never a wider grant; `archiveWrite`
+///    is required.
 ///
 /// # Errors
 ///
-/// [`DestinationRefusal`], whose [`DestinationRefusal::is_hold`] says whether
-/// the caller should requeue or fail terminally.
+/// [`DestinationRefusal`]; [`DestinationRefusal::is_hold`] says whether to
+/// requeue or fail terminally.
 pub fn resolve(
     dest: &BackupDestination,
     role: DestinationRole,
@@ -674,10 +569,8 @@ fn resolve_grant(
             namespace,
             name,
         ),
-        // DEFAULTING IS A FALL-BACK TO THE WRITE GRANT AND NOT TO "ANYTHING
-        // AVAILABLE": an absent read grant means the operator did not separate
-        // the principals, which is the pre-destination status quo, not a
-        // widening.
+        // An absent read grant falls back to the write grant, never to
+        // "anything available": the operator did not separate the principals.
         DestinationRole::ArchiveRead => {
             let (grant, field) = match access.archive_read.as_ref() {
                 Some(g) => (g, "spec.access.archiveRead"),
@@ -706,9 +599,8 @@ fn evidence_read_grant(
     location: &DestinationLocation,
 ) -> Result<ResolvedGrant, DestinationRefusal> {
     let access = &dest.spec.access;
-    // ABSENT IS AN ANSWER. Verification reports `NotAttempted` with a detail
-    // naming this field, which is a truthful "nobody configured a reader" —
-    // not a green badge and not an error.
+    // Absent is an answer: verification reports `NotAttempted` naming this
+    // field, not a green badge and not an error.
     let Some(read) = access.evidence_read.as_ref() else {
         return Ok(ResolvedGrant::NotConfigured);
     };
@@ -729,10 +621,8 @@ fn evidence_read_grant(
                 name,
             )?,
         }),
-        // R9 IS RE-EVALUATED HERE, for the same reason R3-R6 are: a write grant
-        // must never be reused to read evidence back, and an object admitted
-        // before R9 existed would otherwise verify its own writer's bucket with
-        // its own writer's key.
+        // R9 re-evaluated, as R3-R6 are: a write grant must never read evidence
+        // back, even on an object admitted before R9 existed.
         EvidenceReadMode::ArchiveReadGrant => {
             let Some(archive_read) = access.archive_read.as_ref() else {
                 return Err(DestinationRefusal::new(
@@ -769,13 +659,11 @@ fn evidence_read_grant(
 }
 
 /// Whether the installation policy allows the controller's own identity to read
-/// evidence at this location — D2 §4.4's `evidence` block.
+/// evidence at this location (D2 §4.4's `evidence` block).
 ///
-/// **BUCKET, ENDPOINT AND REGION, ALL THREE.** A bucket name is not an identity:
-/// `lw-b` at `minio-a` and `lw-b` at `minio-b` are two different stores, and an
-/// allowlist that matched on the bucket alone would let an operator point the
-/// controller's principal at a bucket of that name on any endpoint they can
-/// name. The comparison uses [`DestinationLocation::host_identity`] so that
+/// Matched on bucket, endpoint and region: a bucket name alone is not an
+/// identity (`lw-b` at `minio-a` and at `minio-b` are two stores). The host is
+/// compared through [`DestinationLocation::host_identity`], so
 /// `https://minio-b.ns.svc:9000` and `minio-b.ns.svc:9000` are the same host.
 #[must_use]
 pub fn controller_identity_allowed(policy: &Policy, location: &DestinationLocation) -> bool {
@@ -841,14 +729,10 @@ fn secret_grant(
             ),
         ));
     };
-    // NAMESPACE ISOLATION, ENFORCED ON THE SPELLING. A `S3SecretKeysRef` has no
-    // `namespace` field, so a cross-namespace reference cannot be EXPRESSED —
-    // but `name: "team-b/logweir-s3"` is a name-shaped attempt at one, and a
-    // kubelet would reject it in a way an operator reads as "Secret not found"
-    // rather than as "you may not reach another namespace". Refusing it here
-    // names the real rule. (`the_controller_never_reads_a_secret` is why this
-    // is a SPELLING check and not a `get`: the controller holds no verb on
-    // Secrets, and a design that gave it one is D2 §3.8 option B, rejected.)
+    // Namespace isolation, enforced on the spelling: `name: "team-b/x"` is a
+    // name-shaped cross-namespace reference that a kubelet would report as
+    // "Secret not found". The controller holds no verb on Secrets, so this is a
+    // spelling check and not a `get`.
     check_object_name(
         &secret.name,
         &format!("{field}.secret.name"),
@@ -941,10 +825,6 @@ fn check_data_key(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// The CA bundle
-// ---------------------------------------------------------------------------
-
 /// What one read of the CA `ConfigMap` observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaObservation {
@@ -960,17 +840,12 @@ pub enum CaObservation {
 
 /// A CA bundle's bytes checked and digested, or the code that refuses them.
 ///
-/// # What "parseable" means here, and what it deliberately does not
-///
-/// At least one `BEGIN CERTIFICATE` / `END CERTIFICATE` block whose body is
-/// valid standard base64 decoding to a DER SEQUENCE (tag `0x30`). That is
-/// enough to catch the failures an operator actually makes — pasting a PRIVATE
-/// KEY, pasting a truncated block, pasting a `.der` file, or leaving the value
-/// empty — and it is the same shape `object_store::Certificate::from_pem_bundle`
-/// will reject later, so a bundle accepted here is one a store build has a
-/// chance with. It is NOT certificate validation: expiry, chain and key usage
-/// are the TLS handshake's business, and a controller that pre-judged them
-/// would refuse a bundle that works.
+/// "Parseable" means at least one `BEGIN CERTIFICATE`/`END CERTIFICATE` block
+/// whose body is valid standard base64 decoding to a DER SEQUENCE (tag `0x30`):
+/// enough to catch a pasted private key, a truncated block, a `.der` file or an
+/// empty value, the same shape `object_store::Certificate::from_pem_bundle`
+/// rejects. It is not certificate validation: expiry, chain and key usage are
+/// the TLS handshake's business.
 ///
 /// # Errors
 ///
@@ -1008,9 +883,8 @@ pub fn certificate_count(bytes: &[u8]) -> usize {
             .collect();
         rest = &rest[end + END.len()..];
         match decode_base64(&body) {
-            // A DER certificate is a SEQUENCE: tag 0x30. Anything else is a
-            // different object that happened to be wrapped in CERTIFICATE
-            // markers — a private key, a CSR, a base64 of nothing.
+            // A DER certificate is a SEQUENCE (tag 0x30); anything else in
+            // CERTIFICATE markers is a private key, a CSR or nothing.
             Some(der) if der.first() == Some(&0x30) => found += 1,
             _ => return found,
         }
@@ -1039,11 +913,8 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
     let last = bytes.len() / 4 - 1;
     for (group, chunk) in bytes.chunks(4).enumerate() {
-        // PADDING ONLY IN THE FINAL GROUP. Counting it per group accepted
-        // `AA==AAAA`, which is not base64 at all — and a body that is not base64
-        // is a body `object_store::Certificate::from_pem_bundle` will refuse
-        // later, so accepting it here only made `CaBundleInvalid` fire at the
-        // wrong moment.
+        // Padding only in the final group: `AA==AAAA` is not base64, and
+        // `object_store::Certificate::from_pem_bundle` would refuse it later.
         let pad = chunk.iter().rev().take_while(|c| **c == b'=').count();
         if pad > 2 || (pad > 0 && group != last) {
             return None;
@@ -1136,14 +1007,11 @@ impl ResolvedDestination {
     /// A Job built from this resolution may run in the destination's own
     /// namespace and in no other.
     ///
-    /// THE PROPERTY THE RESOLUTION CANNOT ENFORCE BY ITSELF. Every reference in
-    /// [`ResolvedDestination`] is a bare object name, and the kubelet resolves a
-    /// bare name in the POD's namespace. A Job placed in another namespace
-    /// therefore projects whatever object happens to carry that name THERE — a
-    /// silent credential substitution, not an error. The caller that chooses the
-    /// namespace calls this; `check_job_namespace` is the same contract
-    /// [`crate::connection::ResolvedConnection::check_job_namespace`] holds for
-    /// a connection.
+    /// Every reference here is a bare object name, which the kubelet resolves in
+    /// the pod's namespace, so a Job placed elsewhere would silently project
+    /// whatever object carries that name there. The caller that chooses the
+    /// namespace calls this, as it does
+    /// [`crate::connection::ResolvedConnection::check_job_namespace`].
     ///
     /// # Errors
     ///
@@ -1165,24 +1033,22 @@ impl ResolvedDestination {
         ))
     }
 
-    /// The COMPLETE, EXPLICIT archive environment this destination contributes
-    /// to a runner Job — D2 §3.5.
+    /// The complete, explicit archive environment this destination contributes
+    /// to a runner Job (D2 §3.5):
     ///
-    /// # Every variable, and why it is here
-    ///
-    /// * `LOGWEIR_STORE_CONTRACT_VERSION` — the handshake. A runner that does
+    /// * `LOGWEIR_STORE_CONTRACT_VERSION`: the handshake. A runner that does
     ///   not know the contract refuses before it dispatches.
-    /// * `LOGWEIR_ARCHIVE_CREDENTIALS` — which provider the runner builds with.
-    /// * `AWS_ALLOW_HTTP` — `"true"` if and only if
-    ///   `spec.transport.security == InsecureHTTP`. ALWAYS RENDERED, including
-    ///   the `"false"` case, because an ABSENT variable is one an ambient
+    /// * `LOGWEIR_ARCHIVE_CREDENTIALS`: which provider the runner builds with.
+    /// * `AWS_ALLOW_HTTP`: `"true"` if and only if
+    ///   `spec.transport.security == InsecureHTTP`. Always rendered, including
+    ///   `"false"`, because an absent variable is one an ambient
     ///   `AWS_ALLOW_HTTP=true` in the pod's environment could still answer.
-    /// * `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — from `spec.storage.addressing`
-    ///   alone, and it does not touch the line above. Two fields, two answers.
-    /// * `AWS_METADATA_ENDPOINT` — a dead loopback, so a missing workload
+    /// * `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`: from `spec.storage.addressing`
+    ///   alone; it does not touch the line above.
+    /// * `AWS_METADATA_ENDPOINT`: a dead loopback, so a missing workload
     ///   identity cannot fall through to the node's instance role (G16).
-    /// * `AWS_REGION` — only when the destination names one.
-    /// * `LOGWEIR_ARCHIVE_CA_FILE` — only with a CA bundle; the bytes are frozen
+    /// * `AWS_REGION`: only when the destination names one.
+    /// * `LOGWEIR_ARCHIVE_CA_FILE`: only with a CA bundle; the bytes are frozen
     ///   into the run's own plan `ConfigMap`, never re-read at Job time.
     ///
     /// `AWS_ENDPOINT_URL` is absent by construction: see
@@ -1199,10 +1065,10 @@ impl ResolvedDestination {
         )
     }
 
-    /// FX-20: the binding this destination's `SecretKeys` Secrets must carry
-    /// under `logweir-binding` — its UID and its whole archive route
+    /// The binding this destination's `SecretKeys` Secrets must carry under
+    /// `logweir-binding`: its UID and archive route
     /// ([`logweir_core::credential_binding::destination_binding`]), or the
-    /// fail-closed `unbound:no-uid` for an object with no UID. What
+    /// fail-closed `unbound:no-uid` for an object with no UID. It is what
     /// `status.credentialBinding` publishes, what the console writes into the
     /// Secrets it creates, and what every Job built from this destination
     /// expects.
@@ -1214,40 +1080,33 @@ impl ResolvedDestination {
         binding_for(&self.uid, &self.plan_storage())
     }
 
-    /// The EVIDENCE-side environment for a Job that already carries `archive`'s
-    /// [`ResolvedDestination::job_env`] — D2 §3.5's restore paragraph.
+    /// The evidence-side environment for a Job that already carries `archive`'s
+    /// [`ResolvedDestination::job_env`] (D2 §3.5's restore paragraph).
     ///
-    /// # The three cases, and the one refusal
-    ///
-    /// * The evidence grant IS the archive grant (same Secret and keys, or the
+    /// * The evidence grant is the archive grant (same Secret and keys, or the
     ///   same ServiceAccount): `LOGWEIR_EVIDENCE_CREDENTIALS=archive`, and no
     ///   second credential is projected.
     /// * A different Secret: `=static`, plus the three `LOGWEIR_EVIDENCE_AWS_*`
-    ///   variables. They are SEPARATELY NAMED so neither store's credential can
-    ///   shadow the other's — `AWS_*` is the archive's.
+    ///   variables, named apart so neither store's credential can shadow the
+    ///   other's (`AWS_*` is the archive's).
     /// * A workload identity beside a static archive grant: `=workloadIdentity`,
-    ///   and the runner builds the evidence store WITHOUT `from_env`, copying
-    ///   only the web-identity and container-credential variables. Otherwise
+    ///   and the runner builds the evidence store without `from_env`, copying
+    ///   only the web-identity and container-credential variables; otherwise
     ///   object_store's chain would put the static archive keys first (G16).
-    /// * Two DIFFERENT workload-identity ServiceAccounts in one pod:
-    ///   [`CheckCode::ExecutionContextConflict`]. A pod has exactly one
-    ///   ServiceAccount, so this is a fact about Kubernetes and not a policy.
     ///
     /// # Errors
     ///
-    /// [`CheckCode::ExecutionContextConflict`] for two ServiceAccounts in one
-    /// pod, or for two destinations in two namespaces.
+    /// [`CheckCode::ExecutionContextConflict`] for two different
+    /// workload-identity ServiceAccounts in one pod (a pod has exactly one), or
+    /// for two destinations in two namespaces.
     pub fn evidence_env(
         &self,
         archive: &ResolvedDestination,
     ) -> Result<DestinationEnv, DestinationRefusal> {
         archive.check_job_namespace(&self.namespace)?;
-        // THE ONE REFUSAL THAT NEEDS THE OBJECTS, AND IT STAYS HERE. A pod has
-        // exactly one ServiceAccount, so two different workload identities
-        // cannot be satisfied by one Job — and the message has to name both
-        // destinations, which a renderer working from grants alone cannot do.
-        // Everything below it is a pure function of the two grants, so it is
-        // `render_evidence_env`: see there for why there is exactly one.
+        // The one refusal that needs the objects, because its message names
+        // both destinations; everything below is `render_evidence_env`, a pure
+        // function of the two grants.
         if let (
             ResolvedGrant::WorkloadIdentity {
                 service_account_name,
@@ -1282,19 +1141,16 @@ impl ResolvedDestination {
                 ),
             ));
         }
-        // THE EVIDENCE DESTINATION'S OWN ROOT, ALWAYS, INCLUDING IN THE
-        // `archive` ARM. The two destinations may be different objects with
-        // different bundles even when they share a credential, and the runner
-        // ADDS this root to whatever the archive options already carry.
+        // The evidence destination's own root, in the `archive` arm too: the
+        // two may be different objects with different bundles even when they
+        // share a credential, and the runner adds this root to the archive's.
         let ca_file = self
             .ca_bundle
             .is_some()
             .then(|| format!("{PLAN_MOUNT_PATH}/{EVIDENCE_CA_PLAN_KEY}"));
-        // THE EVIDENCE DESTINATION'S OWN BINDING, ALSO IN THE `archive` ARM.
-        // When the two grants name one Secret the evidence store presents the
-        // archive credential to THIS destination's route, so the Secret must
-        // be bound to THIS destination too — which a Secret bound to another
-        // destination is not (FX-20).
+        // The evidence destination's own binding, in the `archive` arm too: a
+        // shared Secret presents the archive credential to this destination's
+        // route, so it must be bound to this destination as well.
         Ok(render_evidence_env(
             &self.grant,
             &archive.grant,
@@ -1306,31 +1162,27 @@ impl ResolvedDestination {
         ))
     }
 
-    /// The EVIDENCE-WRITE environment a CHECK Job adds so the create-only
+    /// The evidence-write environment a check Job adds so the create-only
     /// readiness marker is written as this destination's `evidenceWrite`
-    /// principal — defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    /// principal.
     ///
     /// `self` is the resolution the check plan's destination credential came
-    /// from (the `ArchiveWrite` grant for a Backup readiness check, the
-    /// primary requested role for a `DestinationAccess` check), and
-    /// `evidence_write` is the SAME object's `evidenceWrite` grant.
+    /// from (`ArchiveWrite` for a Backup readiness check, the primary requested
+    /// role for a `DestinationAccess` check); `evidence_write` is the same
+    /// object's `evidenceWrite` grant.
     ///
-    /// * `Ok(None)` — the two are one grant. Nothing second is projected, and
-    ///   the plan carries no separate grant: the marker is written with the
-    ///   credential the pod already has, exactly as before this existed.
-    /// * `Ok(Some(env))` — a different Secret (`LOGWEIR_EVIDENCE_AWS_*`
-    ///   `secretKeyRef`s) or a workload identity (`service_account_name`),
-    ///   rendered by the ONE renderer [`ResolvedDestination::evidence_env`]
-    ///   uses, so a check pod and a Restore pod project the evidence-write
-    ///   grant the same way. No `LOGWEIR_EVIDENCE_CA_FILE`: it is one
-    ///   destination, and the check plan names its one trust bundle itself.
+    /// * `Ok(None)`: the two are one grant, so nothing second is projected.
+    /// * `Ok(Some(env))`: a different Secret or a workload identity, rendered by
+    ///   the renderer [`ResolvedDestination::evidence_env`] uses, so a check pod
+    ///   and a Restore pod project the grant the same way. No
+    ///   `LOGWEIR_EVIDENCE_CA_FILE`: one destination, and the check plan names
+    ///   its trust bundle itself.
     ///
     /// # Errors
     ///
     /// [`CheckCode::ExecutionContextConflict`] when both grants are workload
-    /// identities on different ServiceAccounts (one pod, one ServiceAccount),
-    /// and [`CheckCode::DestinationRoleNotConfigured`] for a grant no Job can
-    /// use.
+    /// identities on different ServiceAccounts, and
+    /// [`CheckCode::DestinationRoleNotConfigured`] for a grant no Job can use.
     pub fn check_evidence_write_env(
         &self,
         evidence_write: &ResolvedGrant,
@@ -1402,19 +1254,12 @@ impl ResolvedDestination {
     }
 
     /// [`ResolvedDestination::snapshot`] with the `evidenceWrite` grant this
-    /// run's evidence store is built from — D2 §3.5.
+    /// run's evidence store is built from (D2 §3.5).
     ///
-    /// # WHY A BACKUP NEEDS THIS AT ALL
-    ///
-    /// A backup run writes TWO things: the archive, through `archiveWrite`, and
-    /// its signed receipt, through `evidenceWrite` over Global Constraint 6's
-    /// `logweir/` root of the same bucket. The runner builds two stores and
-    /// refuses a run that does not say which credential the second one uses —
-    /// so a Job rendered from a snapshot carrying only the archive grant exits
-    /// 3 before a byte is archived. That was the defect this method closes.
-    ///
-    /// `evidence` is recorded only when it DIFFERS from
-    /// [`ResolvedDestination::grant`]; see
+    /// A backup run writes the archive through `archiveWrite` and its signed
+    /// receipt through `evidenceWrite`, and the runner refuses a run that does
+    /// not say which credential the second store uses. `evidence` is recorded
+    /// only when it differs from [`ResolvedDestination::grant`]; see
     /// [`ResolvedDestinationSnapshot::evidence_grant`].
     #[must_use]
     pub fn snapshot_with_evidence(&self, evidence: &ResolvedGrant) -> ResolvedDestinationSnapshot {
@@ -1426,44 +1271,19 @@ impl ResolvedDestination {
     }
 }
 
-/// The COMPLETE, EXPLICIT archive environment one resolved location and grant
-/// contribute to a runner Job — D2 §3.5.
+/// The archive environment one resolved location and grant contribute to a
+/// runner Job; [`ResolvedDestination::job_env`] lists every variable.
 ///
-/// # ONE RENDERER, TWO CALLERS, AND THAT IS THE POINT
-///
-/// [`ResolvedDestination::job_env`] renders it from the LIVE object at the
-/// freeze; [`ResolvedDestinationSnapshot::job_env`] renders it from the FROZEN
-/// block on every later pass (a Job recreated after the controller restarted, a
-/// pod rescheduled onto another node). Two implementations would be two answers
-/// to "what does this run address", and the second one would drift the first
-/// time a variable was added — which is the exact shape of defect
-/// **SEC-ENVHTTP**, one layer up. `the_snapshot_renders_the_same_job_env`
+/// One renderer for two callers: [`ResolvedDestination::job_env`] renders from
+/// the live object at the freeze, [`ResolvedDestinationSnapshot::job_env`] from
+/// the frozen block on every later pass. Two implementations would drift the
+/// first time a variable was added; `the_snapshot_renders_the_same_job_env`
 /// pins the equality.
 ///
-/// # Every variable, and why it is here
-///
-/// * `LOGWEIR_STORE_CONTRACT_VERSION` — the handshake. A runner that does
-///   not know the contract refuses before it dispatches.
-/// * `LOGWEIR_ARCHIVE_CREDENTIALS` — which provider the runner builds with.
-/// * `AWS_ALLOW_HTTP` — `"true"` if and only if
-///   `spec.transport.security == InsecureHTTP`. ALWAYS RENDERED, including
-///   the `"false"` case, because an ABSENT variable is one an ambient
-///   `AWS_ALLOW_HTTP=true` in the pod's environment could still answer.
-/// * `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — from `spec.storage.addressing`
-///   alone, and it does not touch the line above. Two fields, two answers.
-/// * `AWS_METADATA_ENDPOINT` — a dead loopback, so a missing workload
-///   identity cannot fall through to the node's instance role (G16).
-/// * `AWS_REGION` — only when the destination names one.
-/// * `LOGWEIR_ARCHIVE_CA_FILE` — only with a CA bundle; the bytes are frozen
-///   into the run's own plan `ConfigMap`, never re-read at Job time.
-///
-/// `AWS_ENDPOINT_URL` is absent by construction: see
-/// [`AWS_ENDPOINT_URL_ENV`].
-///
-/// **FX-20: a `SecretKeys` grant brings its binding pair** —
-/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING` as an OPTIONAL `secretKeyRef` to the
+/// A `SecretKeys` grant brings its binding pair:
+/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING` as an optional `secretKeyRef` to the
 /// same Secret's `logweir-binding` key, and
-/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED` = `binding` as a literal — so
+/// `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED` = `binding` as a literal, so
 /// every runner refuses a Secret written for another destination before it
 /// builds a store.
 #[must_use]
@@ -1483,12 +1303,12 @@ fn render_job_env(
             ),
             (
                 AWS_ALLOW_HTTP_ENV.to_string(),
-                // FROM THE TRANSPORT AND FROM NOTHING ELSE (D-SEAMS S5).
+                // From the transport alone (seam S5).
                 bool_env(transport.allows_plaintext_http()),
             ),
             (
                 AWS_VIRTUAL_HOSTED_ENV.to_string(),
-                // FROM THE ADDRESSING AND FROM NOTHING ELSE.
+                // From the addressing alone.
                 bool_env(!addressing.is_path_style()),
             ),
             (
@@ -1565,43 +1385,21 @@ fn render_job_env(
     env
 }
 
-/// The EVIDENCE-side environment one grant pair contributes to a runner Job —
-/// D2 §3.5's restore paragraph, and the Backup Job's receipt store.
+/// The evidence-side environment one grant pair contributes to a runner Job;
+/// [`ResolvedDestination::evidence_env`] lists the cases.
 ///
-/// # ONE RENDERER, THREE CALLERS, FOR `render_job_env`'s REASON
+/// One renderer for every caller, for [`render_job_env`]'s reason: a second
+/// implementation would be a second answer to "which credential writes this
+/// run's evidence". On the Backup path the two grants are usually one, because
+/// `evidenceWrite` falls back to `archiveWrite` (D2 §3.4).
 ///
-/// [`ResolvedDestination::evidence_env`] renders it at the freeze from two live
-/// resolutions; [`ResolvedDestinationSnapshot::evidence_job_env`] renders it on
-/// every later pass from the FROZEN block. A second implementation would be a
-/// second answer to "which credential writes this run's evidence", and the
-/// answer that lost would be the one an approved run was admitted with.
+/// `ca_file` is the plan path of a root the evidence store needs of its own,
+/// `None` where it inherits the archive's.
 ///
-/// # The three cases
-///
-/// * **The evidence grant IS the archive grant** (same Secret and keys, or the
-///   same ServiceAccount): `LOGWEIR_EVIDENCE_CREDENTIALS=archive`, and no second
-///   credential is projected. This is the DEFAULT on the Backup path, because
-///   `evidenceWrite` falls back to `archiveWrite` (D2 §3.4).
-/// * **A different Secret**: `=static`, plus the three `LOGWEIR_EVIDENCE_AWS_*`
-///   variables. They are SEPARATELY NAMED so neither store's credential can
-///   shadow the other's — `AWS_*` is the archive's.
-/// * **A workload identity beside a static archive grant**:
-///   `=workloadIdentity`, and the runner builds the evidence store WITHOUT
-///   `from_env`, copying only the web-identity and container-credential
-///   variables. Otherwise object_store's chain would put the static archive
-///   keys first (**G16**).
-///
-/// `ca_file` is the plan path of a root the EVIDENCE store needs of its own.
-/// `None` where it inherits the archive's — a Backup whose evidence grant IS
-/// the archive grant, so the runner clones options that already carry it.
-///
-/// **IT CANNOT REFUSE.** The two refusals `evidence_env` makes — two
-/// ServiceAccounts in one pod, and a grant no Job can use — need the OBJECTS to
-/// name, and they are made before this is reached. A `ControllerIdentity` or
-/// `NotConfigured` grant that arrived here anyway renders nothing rather than
-/// panicking: a Job with no evidence credential is one the runner refuses at
-/// exit 3 with the variable named, which is a worse outcome than the refusal
-/// above and a better one than a controller that crashes.
+/// It cannot refuse: the refusals need the objects to name and are made before
+/// this is reached. A `ControllerIdentity` or `NotConfigured` grant that
+/// arrives anyway renders nothing, and the runner then refuses at exit 3 with
+/// the variable named, which beats a controller that panics.
 #[must_use]
 fn render_evidence_env(
     evidence_grant: &ResolvedGrant,
@@ -1613,14 +1411,11 @@ fn render_evidence_env(
     if let Some(path) = ca_file {
         env.literals.push((EVIDENCE_CA_FILE_ENV.to_string(), path));
     }
-    // FX-20: AN EVIDENCE CREDENTIAL FROM A SECRET CARRIES ITS BINDING PAIR —
-    // its own Secret's `logweir-binding` against the EVIDENCE destination's
-    // binding. In the `archive` arm the evidence store reuses the archive
-    // credential, whose Secret the archive pair already checks; the pair is
-    // added there only when the two destinations' bindings DIFFER (a Restore
-    // whose evidence destination is another object), so a Secret bound to the
-    // source is refused before it reaches the evidence destination's route,
-    // and a Backup's one destination projects nothing twice.
+    // A Secret-backed evidence credential carries its binding pair against the
+    // evidence destination's binding. In the `archive` arm the archive pair
+    // already checks the Secret, so the pair is added only when the two
+    // destinations' bindings differ (a Restore whose evidence destination is
+    // another object); a Backup's one destination projects nothing twice.
     let pair_needed = match evidence_grant {
         _ if evidence_grant == archive_grant => bindings.evidence != bindings.archive,
         ResolvedGrant::SecretKeys { .. } => true,
@@ -1673,8 +1468,7 @@ fn render_evidence_env(
             ));
             env.service_account_name = Some(service_account_name.clone());
         }
-        // See the doc comment: refused upstream, and rendering nothing here is
-        // the least harmful of the three ways to react to the impossible.
+        // Refused upstream; rendering nothing is the least harmful reaction.
         ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured => {}
     }
     if let (true, ResolvedGrant::SecretKeys { secret, .. }) = (pair_needed, evidence_grant) {
@@ -1690,19 +1484,18 @@ fn render_evidence_env(
     env
 }
 
-/// FX-20: the two destinations' bindings an evidence environment is rendered
-/// against — the EVIDENCE destination's and the ARCHIVE destination's. Equal
-/// for a Backup (one destination), possibly different for a Restore.
+/// The two bindings an evidence environment is rendered against: equal for a
+/// Backup (one destination), possibly different for a Restore.
 #[derive(Clone, Copy)]
 struct EvidenceBindings<'a> {
     evidence: &'a str,
     archive: &'a str,
 }
 
-/// FX-20: the binding pair one Secret-backed credential contributes — the
-/// Secret's `logweir-binding` key as an OPTIONAL `secretKeyRef` (an unbound
-/// Secret still reaches the runner, which refuses it by name) and the
-/// expectation as a literal.
+/// The binding pair one Secret-backed credential contributes: the Secret's
+/// `logweir-binding` key as an optional `secretKeyRef` (an unbound Secret still
+/// reaches the runner, which refuses it by name) and the expectation as a
+/// literal.
 fn push_binding_pair(
     env: &mut DestinationEnv,
     secret: &str,
@@ -1720,17 +1513,14 @@ fn push_binding_pair(
     });
 }
 
-/// FX-20: what an INLINE archive's `secretRef` contributes to a runner Job —
-/// the binding pair for the `AWS_*` credential it projects, over the LOCATION
-/// the runner dials (`archive`: scheme, bucket and endpoint), and, when the
-/// run also writes evidence with that credential somewhere ELSE (an inline
-/// `Restore` whose approved plan names another bucket or endpoint for its
-/// `evidence:`), a second pair from the same Secret expecting the evidence
-/// location's binding — which one Secret cannot carry beside the first, so
-/// such a run is refused rather than presenting the credential at a location
-/// it was never bound to.
-///
-/// Literals and `secretKeyRef`s, appended by the caller beside the
+/// What an inline archive's `secretRef` contributes to a runner Job: the
+/// binding pair for its `AWS_*` credential over the location the runner dials
+/// (scheme, bucket and endpoint). When the run also writes evidence with that
+/// credential elsewhere (an inline `Restore` whose plan names another bucket or
+/// endpoint for `evidence:`), a second pair from the same Secret expects the
+/// evidence location's binding, which one Secret cannot carry beside the
+/// first, so the run is refused rather than present the credential where it
+/// was never bound. The caller appends these beside the
 /// `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair it already projects.
 #[must_use]
 pub fn inline_archive_binding_env(
@@ -1764,13 +1554,11 @@ pub fn inline_archive_binding_env(
 
 /// The location an inline-archive runner actually dials: the plan's (or the
 /// frozen) storage block, with an S3 endpoint and region the block leaves out
-/// filled from the `AWS_ENDPOINT_URL` and `AWS_REGION` the Job is handed —
-/// `object_store`'s own fall-back, so the binding covers the host the request
-/// really goes to. The region joined the location binding in FX-20's fix
-/// round (review F1); filling it here makes a `Restore` whose plan omits it
-/// expect the same binding as a `Backup` at that location, whose frozen block
-/// already carries the controller's `AWS_REGION`
-/// (`crate::retention::storage_url_for`).
+/// filled from the `AWS_ENDPOINT_URL` and `AWS_REGION` the Job is handed
+/// (`object_store`'s own fall-back). The binding then covers the host the
+/// request really goes to, and a `Restore` whose plan omits the region expects
+/// the same binding as a `Backup` at that location, whose frozen block already
+/// carries the controller's `AWS_REGION` (`crate::retention::storage_url_for`).
 #[must_use]
 pub fn effective_inline_storage(
     storage: &StorageUrl,
@@ -1797,8 +1585,8 @@ pub fn effective_inline_storage(
     effective
 }
 
-/// FX-20: a destination's binding, or the fail-closed expectation for an
-/// object with no UID.
+/// A destination's binding, or the fail-closed expectation for an object with
+/// no UID.
 fn binding_for(uid: &str, archive: &StorageUrl) -> String {
     if uid.trim().is_empty() {
         return credential_binding::UNBOUND_NO_UID.to_string();
@@ -1822,59 +1610,24 @@ fn bool_env(value: bool) -> String {
     if value { "true" } else { "false" }.to_string()
 }
 
-// ---------------------------------------------------------------------------
-// The frozen snapshot (seam S4)
-// ---------------------------------------------------------------------------
-
-/// The resolved destination as one run freezes it — D2 §3.7, seam **S4**.
+/// The resolved destination as one run freezes it (D2 §3.7, seam **S4**).
 ///
-/// # BEFORE W10 FREEZES THIS, READ THESE TWO LINES
+/// A block inside `execution-inputs.json`
+/// ([`crate::backup_execution::BackupExecutionInputs`]), not a second freeze.
+/// It carries the UID and generation (a destination deleted and recreated
+/// under the same name is a different input), the location digest (to match a
+/// recovery point to a destination later), both `StorageUrl`s (the Job is
+/// rendered from the snapshot, never from the live object), the CA digest and
+/// the grant references. It carries no credential value and no CA bytes: the
+/// bytes live in the same immutable plan `ConfigMap` under
+/// [`ARCHIVE_CA_PLAN_KEY`], and this digest binds them, so a rotated CA cannot
+/// be swapped into a run that already exists.
 ///
-/// 1. **The key spellings are settled and pinned.** They were not, in the first
-///    version of this type: `#[serde(rename_all)]` on an enum renames VARIANTS
-///    and not struct-variant FIELDS, so `grant` carried `access_key_id_key`
-///    inside a camelCase document. `rename_all_fields` fixes it and
-///    `tests/destination_controller.rs::the_snapshot_key_spellings_are_pinned`
-///    is the golden-bytes row that keeps it. Do not freeze a build without that
-///    row green: once these bytes are in an immutable `ConfigMap` that is
-///    re-encoded and compared on every later pass, renaming one key turns every
-///    running `Backup` into a `TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`.
-/// 2. **Rollback is an open ruling, not an oversight.** Adding this block under
-///    the existing [`crate::backup_execution::INPUTS_VERSION`] with
-///    `#[serde(default)]` keeps FORWARD compatibility — a `v1` document with no
-///    `destination` still loads. It does NOT give backward compatibility: every
-///    struct in that module is `deny_unknown_fields` and the loader requires the
-///    version string exactly, so an OLDER controller handed a document carrying
-///    `destination` refuses the run. That is fail-closed and probably right, but
-///    it is a rollback behaviour nobody has written down. W10 (with the
-///    orchestrator) decides between "additive under the current version, with the
-///    refusal recorded in `docs/stability.md`" and a version bump. This type is
-///    fit for either; nothing here presumes one.
-///
-/// # It is a BLOCK inside PLAT-06.1's document, not a second freeze
-///
-/// Seam S4 is explicit: `execution-inputs.json` is the single frozen grammar
-/// and the same immutable `ConfigMap`. **W10** adds
-/// `destination: Option<ResolvedDestinationSnapshot>` to
-/// [`crate::backup_execution::BackupExecutionInputs`] additively, keeps every
-/// snapshot written without it loadable, and extends that module's existing
-/// validation rather than adding a parallel one. This type and
-/// [`ResolvedDestinationSnapshot::canonical_bytes`] are what it adds; nothing
-/// here writes a `ConfigMap`.
-///
-/// # What it carries, and what it deliberately does not
-///
-/// It carries the UID and generation (so a destination deleted and recreated
-/// under the same name is a different input), the location digest (so a
-/// recovery point can be matched to a destination later), both `StorageUrl`s
-/// (so the Job is rendered from the snapshot and never from the live object),
-/// the CA DIGEST and the grant REFERENCES.
-///
-/// It carries NO credential value and no CA bytes. The bytes live beside
-/// `backup.yaml` in the same immutable plan `ConfigMap` under
-/// [`ARCHIVE_CA_PLAN_KEY`]; this digest is what binds them, so a rotated CA
-/// cannot be swapped into a run that already exists without the snapshot
-/// disagreeing.
+/// The key spellings are pinned by
+/// `tests/destination_controller.rs::the_snapshot_key_spellings_are_pinned`:
+/// the frozen bytes are re-encoded and compared on every later pass, so
+/// renaming one key turns every running `Backup` into a
+/// `TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResolvedDestinationSnapshot {
@@ -1890,54 +1643,34 @@ pub struct ResolvedDestinationSnapshot {
     pub archive_storage: StorageUrl,
     /// The evidence storage block, rooted at `logweir/`.
     pub evidence_storage: StorageUrl,
-    /// The declared transport security.
     pub transport: TransportSecurity,
-    /// The declared addressing style.
     pub addressing: Addressing,
     /// `sha256:<hex>` over the CA bytes frozen beside this snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_sha256: Option<String>,
     /// The grant for the role this snapshot was resolved for.
     pub grant: ResolvedGrant,
-    /// The `evidenceWrite` grant, when it DIFFERS from [`Self::grant`].
+    /// The `evidenceWrite` grant, when it differs from [`Self::grant`].
     ///
-    /// # `None` MEANS "THE SAME GRANT", AND THAT IS NOT A SHORTCUT
-    ///
-    /// `evidenceWrite` falls back to `archiveWrite` (D2 §3.4), so on the common
-    /// destination it IS [`Self::grant`] and the runner is told
-    /// `LOGWEIR_EVIDENCE_CREDENTIALS=archive` — one credential, projected once.
-    /// Recording it a second time would put the same Secret name in the frozen
-    /// document twice and make two spellings of one fact.
-    ///
-    /// **LAST IN DECLARATION ORDER, AND OMITTED WHEN ABSENT.**
-    /// `logweir_core::det_json` emits struct fields in declaration order and
-    /// this is `skip_serializing_if`, so a snapshot without a separate evidence
-    /// grant re-encodes to exactly the bytes it encoded before this field
-    /// existed — which is what keeps
-    /// `destination_controller::the_snapshot_key_spellings_are_pinned` green
-    /// and every frozen plan re-verifiable.
+    /// `None` means the same grant: `evidenceWrite` falls back to `archiveWrite`
+    /// (D2 §3.4), and the runner is told `LOGWEIR_EVIDENCE_CREDENTIALS=archive`.
+    /// Last in declaration order and omitted when absent, because
+    /// `logweir_core::det_json` emits fields in declaration order: a snapshot
+    /// without it re-encodes to the bytes it had before this field existed, so
+    /// every frozen plan stays re-verifiable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_grant: Option<ResolvedGrant>,
 }
 
 impl ResolvedDestinationSnapshot {
-    /// The COMPLETE, EXPLICIT archive environment a Job rendered from THIS
-    /// FROZEN BLOCK carries — D2 §3.7's "the Job is rendered only from the
-    /// snapshot".
+    /// The archive environment a Job rendered from this frozen block carries
+    /// (D2 §3.7: the Job is rendered only from the snapshot).
     ///
-    /// # Why the frozen block and not the live object
-    ///
-    /// A runner Job is created once and may be RE-created: garbage collected,
-    /// a node lost, a controller restarted mid-run. Rendering the second Job
-    /// from the destination as it reads NOW would let a CA rotation or an
-    /// access-key rotation between the freeze and the re-creation change what a
-    /// run that is already approved and already half-written addresses and
-    /// trusts. The snapshot is the input that was admitted, so it is the input
-    /// the Job is built from, on the first pass and on every later one.
-    ///
-    /// It is [`render_job_env`], the same renderer
-    /// [`ResolvedDestination::job_env`] uses — see there for every variable and
-    /// for what is ABSENT BY CONSTRUCTION.
+    /// A runner Job may be re-created (garbage collected, a node lost, a
+    /// controller restarted mid-run). Rendering it from the destination as it
+    /// reads now would let a CA or access-key rotation change what an approved,
+    /// half-written run addresses and trusts. It is [`render_job_env`], the
+    /// renderer [`ResolvedDestination::job_env`] uses.
     #[must_use]
     pub fn job_env(&self) -> DestinationEnv {
         render_job_env(
@@ -1950,30 +1683,22 @@ impl ResolvedDestinationSnapshot {
         )
     }
 
-    /// FX-20: [`ResolvedDestination::credential_binding`] over the FROZEN
-    /// block — the same UID and the same archive route, so a Job re-created
-    /// from the snapshot expects exactly what the first one did.
+    /// [`ResolvedDestination::credential_binding`] over the frozen block, so a
+    /// Job re-created from the snapshot expects exactly what the first one did.
     #[must_use]
     pub fn credential_binding(&self) -> String {
         binding_for(&self.uid, &self.archive_storage)
     }
 
-    /// The EVIDENCE-side environment a Job rendered from THIS FROZEN BLOCK
-    /// carries — D2 §3.5, and the half a Backup Job was missing.
+    /// The evidence-side environment a Job rendered from this frozen block
+    /// carries (D2 §3.5).
     ///
-    /// # The CA file, and why the `archive` case has none
-    ///
-    /// A Backup names ONE destination, so the archive store and the receipt
-    /// store trust the same root — the bytes frozen at
-    /// [`ARCHIVE_CA_PLAN_KEY`]. When the evidence grant IS the archive grant
-    /// the runner CLONES the archive's options, which already carry that root,
-    /// so naming a file would add it twice and naming
-    /// [`EVIDENCE_CA_PLAN_KEY`] would name a key this plan does not have.
-    /// When the grants differ the runner builds fresh options, and then the
-    /// root has to be named — at the archive's own key, because there is one
-    /// destination and one bundle.
-    ///
-    /// It is [`render_evidence_env`], the same renderer
+    /// A Backup names one destination, so the archive and receipt stores trust
+    /// the same root, frozen at [`ARCHIVE_CA_PLAN_KEY`]. When the evidence grant
+    /// is the archive grant the runner clones the archive's options, which
+    /// already carry that root, so no file is named; when the grants differ the
+    /// runner builds fresh options and the root is named at the archive's key.
+    /// It is [`render_evidence_env`], the renderer
     /// [`ResolvedDestination::evidence_env`] uses.
     #[must_use]
     pub fn evidence_job_env(&self) -> DestinationEnv {
@@ -1992,19 +1717,15 @@ impl ResolvedDestinationSnapshot {
         )
     }
 
-    /// The ONE canonical encoding of this block — `logweir_core::det_json`, the
-    /// same encoder [`crate::backup_execution::canonical_inputs`] uses for the
-    /// document this block sits inside.
-    ///
-    /// ONE ENCODER AND NOT TWO. The frozen document is re-encoded and compared
-    /// byte for byte on every later pass; a block with its own serialiser would
-    /// re-encode differently the first time a field was added and turn every
-    /// running Backup into a `PlanConfigMapConflict`.
+    /// The one canonical encoding of this block: `logweir_core::det_json`, the
+    /// encoder [`crate::backup_execution::canonical_inputs`] uses for the
+    /// document this block sits inside. A second serialiser would re-encode
+    /// differently the first time a field was added and turn every running
+    /// Backup into a `PlanConfigMapConflict`.
     ///
     /// # Errors
     ///
-    /// The encoder's own error, which a typed value built by this module cannot
-    /// produce.
+    /// The encoder's own error, which a typed value built here cannot produce.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, logweir_core::det_json::DetJsonError> {
         logweir_core::det_json::to_deterministic_json(self)
     }
@@ -2019,11 +1740,8 @@ impl ResolvedDestinationSnapshot {
     }
 }
 
-/// `(backend, bucket)` of a parsed location.
-///
-/// THE BACKEND IS HALF OF THE ANSWER. `s3://kb` and `gs://kb` are two buckets
-/// that happen to share a name, and a guard comparing names alone would read
-/// one through a handle over the other.
+/// `(backend, bucket)` of a parsed location. The backend matters: `s3://kb` and
+/// `gs://kb` are two buckets that share a name.
 fn storage_bucket(u: &StorageUrl) -> (&'static str, String) {
     match u {
         StorageUrl::S3 { bucket, .. } => ("s3", bucket.clone()),
@@ -2037,35 +1755,21 @@ fn storage_bucket(u: &StorageUrl) -> (&'static str, String) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The evidence guard for inline-archive runs (D2 §3.10, the global handle)
-// ---------------------------------------------------------------------------
-
-/// Whether the controller's ONE global handle can read an inline-archive run's
-/// EVIDENCE.
-///
-/// # The defect this closes (legacy-point-restore, PoC P5)
+/// Whether the controller's one global handle can read an inline-archive run's
+/// evidence.
 ///
 /// An inline-archive `Restore` writes its signed scorecard wherever its
-/// approved plan's `evidence:` block says, with the archive credential (D2
-/// grounding G6), and the runner prints only BUCKET-RELATIVE keys. The
-/// controller reads those keys through the handle `main` built from
-/// `LOGWEIR_ARCHIVE_URL`. A plan whose evidence bucket is not that handle's
-/// bucket was therefore read in the WRONG bucket, found nothing, and the run
-/// ended with no verification block and no completion at all — silently, on
-/// the PoC upgrade (`rst-4y5hcog6vsj5jwrfxj4exrm6f6`: plan evidence
-/// `logweir-evidence`, handle `s3://kafka-backups/logweir`).
-///
-/// A read of a bucket the document is not in is never an answer: it cannot be
-/// `Valid`, and an object that happened to sit at the same key there would be
-/// someone else's. So a run whose evidence location differs from the handle's
-/// is not read at all, and says so.
+/// approved plan's `evidence:` block says, and the runner prints only
+/// bucket-relative keys, which the controller reads through the handle `main`
+/// built from `LOGWEIR_ARCHIVE_URL`. Read in a bucket the document is not in, a
+/// key finds nothing, or someone else's object; so a run whose evidence
+/// location differs from the handle's is not read at all, and says so.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LegacyEvidenceScope {
-    /// The caller did not state where the handle points — the reconcile entry
-    /// points tests drive with in-memory oracles. Evaluated AS BEFORE: in the
-    /// shipped binary a handle exists only when `LOGWEIR_ARCHIVE_URL` names
-    /// one, and then the caller passes it.
+    /// The caller did not state where the handle points (the reconcile entry
+    /// points tests drive with in-memory oracles). Read like
+    /// [`Self::GlobalHandleApplies`]: in the shipped binary a handle exists only
+    /// when `LOGWEIR_ARCHIVE_URL` names one, and then the caller passes it.
     HandleLocationUnstated,
     /// The evidence is in the handle's bucket: read it through the handle.
     GlobalHandleApplies,
@@ -2074,9 +1778,8 @@ pub enum LegacyEvidenceScope {
         /// `<backend>://<bucket>` the run's evidence was written to — the
         /// tenant's own plan, and safe to publish.
         evidence: String,
-        /// The handle's `LOGWEIR_ARCHIVE_URL`. INSTALLATION CONFIGURATION: it
-        /// goes to the controller's log and never into a status a tenant reads
-        /// (review L4 of the legacy-point-restore round).
+        /// The handle's `LOGWEIR_ARCHIVE_URL`. Installation configuration: it
+        /// goes to the controller's log and never into a status a tenant reads.
         handle: String,
     },
 }
@@ -2111,18 +1814,16 @@ impl LegacyEvidenceScope {
 }
 
 /// Decide [`LegacyEvidenceScope`] for an inline-archive run whose evidence is
-/// at `evidence` — a restore plan's `evidence:` block, or a backup's archive
+/// at `evidence`: a restore plan's `evidence:` block, or a backup's archive
 /// (its receipt goes under the archive's own bucket, D2 grounding G7).
 ///
-/// Compared on the BACKEND AND THE BUCKET: every key
-/// a runner prints is bucket-relative, so the bucket is the whole question.
-/// The ENDPOINT is not compared — the handle's comes from the controller's own
-/// environment — so a same-named bucket on another endpoint is read and found
-/// empty, which the unread-evidence verdict then names; the safe direction.
-///
-/// `handle_archive_url` is [`crate::retention::configured_archive_url`]'s
-/// answer, or `None` when the caller does not state it (see
-/// [`LegacyEvidenceScope::HandleLocationUnstated`]).
+/// Compared on backend and bucket, since every key a runner prints is
+/// bucket-relative. The endpoint is not compared (the handle's comes from the
+/// controller's own environment), so a same-named bucket on another endpoint is
+/// read and found empty, which the unread-evidence verdict names: the safe
+/// direction. `handle_archive_url` is
+/// [`crate::retention::configured_archive_url`]'s answer, or `None`
+/// ([`LegacyEvidenceScope::HandleLocationUnstated`]).
 #[must_use]
 pub fn legacy_evidence_scope(
     evidence: &StorageUrl,
@@ -2171,17 +1872,9 @@ pub fn legacy_backup_evidence_scope(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The API-server half
-// ---------------------------------------------------------------------------
-
 /// Read one `BackupDestination` by name, resolve it for `role`, and attach its
-/// CA bundle.
-///
-/// NAMESPACE-LOCAL BY CONSTRUCTION: `Api::namespaced` over the namespace the
-/// caller is reconciling in. A `destinationRef` is a [`crate::crds::LocalRef`]
-/// with no namespace field, and this is the call that makes that structural
-/// fact a runtime one.
+/// CA bundle. Namespace-local by construction (`Api::namespaced`): a
+/// `destinationRef` is a [`crate::crds::LocalRef`] with no namespace field.
 ///
 /// # Errors
 ///
@@ -2219,17 +1912,11 @@ pub struct ResolvedRoles {
     /// URL are the same on both; only [`ResolvedDestination::grant`] and
     /// [`ResolvedDestination::role`] differ.
     pub primary: ResolvedDestination,
-    /// The second role's resolution from the same object and the same read, or
-    /// the refusal its grant produced.
-    ///
-    /// A `Result` AND NOT AN ERROR OF THE WHOLE CALL, because only the CALLER
-    /// knows when the second role matters. Every check before the grant —
-    /// identity, the location, engine compatibility, the object's own `Valid`
-    /// verdict — is role-independent and has already passed for `primary`, so a
-    /// refusal here is always about `spec.access.<secondary>` alone. A caller
-    /// that needs the role on some passes and not others (retention: only in
-    /// `Enforce`) would otherwise have to fail a pass over a field that pass
-    /// never reads.
+    /// The second role's resolution from the same read, or the refusal its
+    /// grant produced. Not an error of the whole call, because only the caller
+    /// knows when the second role matters (retention needs it only in
+    /// `Enforce`); every check before the grant is role-independent and has
+    /// already passed for `primary`.
     pub secondary: Result<ResolvedDestination, Box<DestinationRefusal>>,
     /// Whether the object DECLARES the second role's own grant, or
     /// [`secondary`](Self::secondary) is the documented fall-back — see
@@ -2237,20 +1924,13 @@ pub struct ResolvedRoles {
     pub secondary_declared: bool,
 }
 
-/// Whether `dest` declares `role`'s OWN grant, rather than reaching one through
+/// Whether `dest` declares `role`'s own grant, rather than reaching one through
 /// the defaulting [`resolve`] documents.
 ///
-/// A CALLER MAY NEED THE DIFFERENCE EVEN THOUGH [`resolve`] DOES NOT. Every
-/// role but `EvidenceRead` resolves to *something* — `archiveWrite` is required
-/// and the other two fall back to it — so a resolution alone cannot say whether
-/// an operator declared the principal or merely inherited the write grant.
-///
-/// **This does not decide whether the default is ALLOWED**, and no caller uses
-/// it that way: the defaulting is the documented contract (§7's absent-field
-/// rule, `docs/install.md`'s *absent grants do not widen*) and it stands. It
-/// decides which field a REFUSAL names, which is the difference between
-/// telling an operator to fix the line they wrote and sending them looking for
-/// a line their object does not contain.
+/// It does not decide whether the default is allowed (the defaulting is the
+/// documented contract: absent grants do not widen). It decides which field a
+/// refusal names, so an operator is sent to the line they wrote rather than a
+/// line their object does not contain.
 #[must_use]
 pub fn declares(dest: &BackupDestination, role: DestinationRole) -> bool {
     let access = &dest.spec.access;
@@ -2263,20 +1943,15 @@ pub fn declares(dest: &BackupDestination, role: DestinationRole) -> bool {
     }
 }
 
-/// Read one `BackupDestination` by name and resolve it for TWO roles, from ONE
-/// read and ONE CA-bundle fetch.
-///
-/// TWO `resolve_ref` CALLS WOULD BE TWO READS OF A MOVING OBJECT: a destination
-/// edited between them would give a caller a location from one generation and a
-/// grant from another, and the pair is exactly what such a caller freezes into
-/// one Job. [`resolve`] is pure over the object this reads once, so the second
-/// role costs no API call — the shape `controllers::backup` already uses for
-/// its own two roles.
+/// Read one `BackupDestination` by name and resolve it for two roles from one
+/// read and one CA-bundle fetch: two reads of a moving object could pair a
+/// location from one generation with a grant from another, and the pair is
+/// what a caller freezes into one Job.
 ///
 /// # Errors
 ///
-/// Whatever [`resolve_ref`] refuses for the PRIMARY role. The secondary's own
-/// refusal is carried in [`ResolvedRoles::secondary`] — see there for why.
+/// Whatever [`resolve_ref`] refuses for the primary role; the secondary's
+/// refusal is in [`ResolvedRoles::secondary`].
 pub async fn resolve_ref_roles(
     client: &kube::Client,
     namespace: &str,
@@ -2329,24 +2004,16 @@ pub async fn read_ca_bundle(
     if let Some(pem) = cm.data.as_ref().and_then(|d| d.get(&reference.key)) {
         return Ok(CaObservation::Present(pem.clone().into_bytes()));
     }
-    // `binaryData` IS READ TOO, AND IT IS NOT A CONVENIENCE. The API server puts
-    // a key in `binaryData` and not `data` whenever its value is not valid
-    // UTF-8, which is exactly what `kubectl create configmap ca --from-file=ca.crt=ca.der`
-    // produces. Reading `data` alone answered `CaBundleKeyMissing` — "that
-    // ConfigMap carries no such key" — for a key the operator can see in
-    // `kubectl get cm -o yaml`, and sent them looking for the wrong thing. Read
-    // here, the bytes reach `check_ca_bundle`, which refuses them as
-    // `CaBundleInvalid` with the message that names the real problem: a DER file
-    // is not a PEM bundle.
+    // `binaryData` too: the API server stores a non-UTF-8 value there, which is
+    // what `kubectl create configmap ca --from-file=ca.crt=ca.der` produces.
+    // Read here, a DER file reaches `check_ca_bundle` and is refused as
+    // `CaBundleInvalid` (a DER file is not a PEM bundle) instead of a false
+    // "no such key".
     if let Some(bytes) = cm.binary_data.as_ref().and_then(|d| d.get(&reference.key)) {
         return Ok(CaObservation::Present(bytes.0.clone()));
     }
     Ok(CaObservation::KeyMissing)
 }
-
-// ---------------------------------------------------------------------------
-// The status the reconciler writes (D2 §3.3)
-// ---------------------------------------------------------------------------
 
 /// One `BackupDestination` verdict — the pure half of the reconciler.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2369,11 +2036,8 @@ pub struct DestinationVerdict {
 pub const REASON_VALID: &str = "Valid";
 
 /// Every reason [`evaluate`] can write, for a guard that asserts the set is
-/// closed and for the CRD's own documentation.
-///
-/// A LITERAL TABLE, deliberately derived from no `match` the evaluator reads: a
-/// list computed from the same code it checks moves with a mutant and asserts
-/// nothing.
+/// closed. A literal table derived from no `match` the evaluator reads: a list
+/// computed from the code it checks moves with a mutant.
 pub const DESTINATION_CONDITION_REASONS: [&str; 7] = [
     REASON_VALID,
     "AddressingUnsupportedByEngine",
@@ -2384,25 +2048,18 @@ pub const DESTINATION_CONDITION_REASONS: [&str; 7] = [
     "DestinationNotValid",
 ];
 
-/// Decide one `BackupDestination`'s `Valid` condition — D2 §3.3.
+/// Decide one `BackupDestination`'s `Valid` condition (D2 §3.3), as a pure
+/// function of the object and one observation.
 ///
-/// A PURE FUNCTION OF THE OBJECT AND ONE OBSERVATION, for the reason every
-/// evaluator in `controllers/` is one: the verdict is the property, and a test
-/// that must build a route table to reach it is a test about `kube`.
+/// It checks what CEL rules R0–R9 cannot:
 ///
-/// # What it checks that CEL does not, and why
-///
-/// CEL rules R0–R9 are compiled by the API server and cannot change without a
-/// CRD upgrade. These four can:
-///
-/// * **`AddressingUnsupportedByEngine`** depends on the ENGINE VERSION. Every
-///   engine from 0.21.0 to the 0.23.3 pin forces path-style whenever an
-///   endpoint is set, so `VirtualHosted` with an endpoint is unhonourable; a
-///   later engine may honour it, and that must not require a new CRD.
+/// * **`AddressingUnsupportedByEngine`** depends on the engine version: the
+///   pinned engine forces path-style whenever an endpoint is set, and a later
+///   one may not, which must not require a new CRD.
 /// * **The CA bundle's existence, key, size and content** depend on another
-///   object, which CEL cannot read at all.
+///   object, which CEL cannot read.
 ///
-/// It ALSO re-evaluates R3–R6 through `logweir_core::destination::validate`, so
+/// It also re-evaluates R3–R6 through `logweir_core::destination::validate`, so
 /// an object admitted by an older CRD revision is reported here rather than
 /// discovered by a run.
 #[must_use]
@@ -2518,8 +2175,8 @@ pub fn evaluate(dest: &BackupDestination, ca: &CaObservation) -> DestinationVerd
     }
 }
 
-/// The `observedAt` a verdict takes — `now` for a NEW verdict, the stored value
-/// for an unchanged one (erratum E11(d)).
+/// The `observedAt` a verdict takes: `now` for a new verdict, the stored value
+/// for an unchanged one.
 #[must_use]
 pub fn observed_at_for(
     previous: Option<&crate::crds::backup_destination::BackupDestinationStatus>,
