@@ -147,6 +147,18 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
          lists those in `capabilityChecks`) and list it as `NotAsked`, or give a plan without \
          `capabilityChecks` an older code on that row and list it as `Instead`"
     );
+    // The count alone lets a rename through: pin the older spellings, sorted
+    // and joined by "\n", by their digest at `3c149d4a^1` (`0fd681ff`).
+    let older: std::collections::BTreeSet<&str> = CheckCode::ALL
+        .iter()
+        .filter(|c| !listed.contains(c))
+        .map(|c| c.as_str())
+        .collect();
+    assert_eq!(
+        sha256_prefixed(older.into_iter().collect::<Vec<_>>().join("\n").as_bytes()),
+        "sha256:81e08a6001d53c6e6592951b8f783f3ddf51a1b9e9f3d12cccb04097633e4527",
+        "a spelling an older controller reads was renamed or removed"
+    );
     for (code, older) in newer {
         match older {
             NotAsked(rows) => {
