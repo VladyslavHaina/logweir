@@ -52,9 +52,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     "ApprovalNotReceived",
     "ApprovalSubjectMismatch",
     "ApprovalBundleConflict",
-    // PLAT-19.2: the approval was issued under another policy than the
-    // namespace's current binding, or its authorization window closed, before
-    // any Job existed. Both end the Restore with nothing executed.
+    // The approval was issued under another policy than the namespace's
+    // current binding, or its authorization window closed, before any Job
+    // existed. Both end the Restore with nothing executed.
     "ApprovalPolicyMismatch",
     "ArchiveUrlUnreadable",
     "AuthorizationExpired",
@@ -62,11 +62,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     "CredentialNotRenderable",
     // The spec cannot be run as written, decided before any Job exists and
     // with nothing executed: on a `Restore`, a `spec.runnerResources` the
-    // controller will not apply (FX-2); on a `Backup`, an unknown
-    // `triggeredBy`, a non-positive or unfundable `deadlineSeconds` or a
-    // missing identity (PLAT-06.1). Served as `failed` before the FX-2 review
-    // (L4), which sent an operator looking for partial writes that cannot
-    // exist.
+    // controller will not apply; on a `Backup`, an unknown `triggeredBy`, a
+    // non-positive or unfundable `deadlineSeconds` or a missing identity.
+    // `refused`, not `failed`: there are no partial writes to look for.
     "ExecutionSpecInvalid",
     "Expired",
     "GuardRefused",
@@ -76,13 +74,13 @@ pub const REFUSAL_STATES: &[&str] = &[
     "PlanConfigMapConflict",
     "PlanHashMismatch",
     "ReferentNotFound",
-    // FX-8: the runner's refusal of a time selection by producer time over a
+    // The runner's refusal of a time selection by producer time over a
     // `LogAppendTime` source. It arrives with exit 3, which is `refused`
     // already; listed so the vocabulary names every runner refusal state.
     "PointInTimeByProducerTime",
     "TargetTopicConfigRefused",
-    // PROD-01.1a: the runner's refusal of an archive holding transaction
-    // markers. Exit 3 as well; listed for the same reason.
+    // The runner's refusal of an archive holding transaction markers. Exit 3
+    // as well; listed for the same reason.
     "TransactionMarkersInArchive",
 ];
 
@@ -134,7 +132,7 @@ fn current_reason<'a>(o: &Observed<'a>) -> Option<&'a str> {
         Some("Failed") => by_type("Failed"),
         Some("Running") => by_type("JobCreated"),
         Some("Pending") => by_type("Admitted").or_else(|| by_type("ApprovalBundleReady")),
-        // P10: a manual run waiting for a slot. `Admitted=False` carries
+        // A manual run waiting for a slot. `Admitted=False` carries
         // `ConcurrencyLimited` and the sentence naming the ceiling.
         Some("Queued") => by_type("Admitted"),
         _ => None,
@@ -168,19 +166,19 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
             OperationState::Running,
             reason.or_else(|| Some("JobCreated".to_string())),
         ),
-        // P10: THE CONTROLLER'S OWN WORD, NOT AN INFERENCE. A manual run that
-        // waits for a slot in its namespace's manual-run pool is written
+        // THE CONTROLLER'S OWN WORD, NOT AN INFERENCE. A manual run that waits
+        // for a slot in its namespace's manual-run pool is written
         // `phase: Queued` by `weirkeeper::run_pool`'s gate, so this is the
-        // resource's phase byte for byte — unlike the `queued` STAGE, which
+        // resource's phase byte for byte -- unlike the `queued` STAGE, which
         // the progress channel alone may draw (a Job with no pod yet).
         Some("Queued") => (
             OperationState::Queued,
             reason.or_else(|| Some("ConcurrencyLimited".to_string())),
         ),
         Some(phase @ ("Succeeded" | "Failed")) => {
-            // A `Pending` block is not a verdict (D2 §3.9 step 3): an
-            // evidence-fetch Job is still reading the document, which is
-            // exactly "evidence recorded, no verdict yet".
+            // A `Pending` block is not a verdict: an evidence-fetch Job is still
+            // reading the document, which is exactly "evidence recorded, no
+            // verdict yet".
             let no_verdict = o
                 .verification
                 .is_none_or(|v| v.result.as_deref() == Some("Pending"));
@@ -285,8 +283,8 @@ fn verification_of(o: &Observed<'_>, terminal_run: bool) -> OperationVerificatio
         }
         Some("Valid") | Some("NotAttempted") => VerificationState::NotAttempted,
         Some("Invalid") => VerificationState::Invalid,
-        // D2 §3.9 step 3: an evidence-fetch Job is reading the document and
-        // no verdict is recorded yet — this vocabulary's own `pending`.
+        // An evidence-fetch Job is reading the document and no verdict is
+        // recorded yet: this vocabulary's own `pending`.
         None | Some("Pending") => VerificationState::Pending,
         Some(_) => VerificationState::Unknown,
     };
@@ -453,32 +451,22 @@ fn status_json<T: serde::Serialize>(status: Option<&T>) -> Value {
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
 }
 
-// ======================================================================
-// D3 §2.5 — the normalized operation VIEW
-// ======================================================================
+// THE NORMALIZED OPERATION VIEW. `contract::Operation` is a frozen
+// projection (`ui/contract.js` types it, the OpenAPI document publishes it,
+// adding a field is MINOR and removing one MAJOR), so [`OperationView`]
+// flattens it and carries the additions beside it: a stage, a progress
+// block, diagnoses, a trust basis, a verification scope and two
+// kind-specific panels. The wire body is the old body plus new keys.
 //
-// WHY A SECOND TYPE AND NOT MORE FIELDS ON `Operation`. `contract::Operation`
-// is PLAT-17.1's frozen projection: `ui/contract.js` types it, the OpenAPI
-// document publishes it, and D0's rule is that adding a field is MINOR and
-// removing one is MAJOR. D3 §2.5 adds a stage, a progress block, a diagnosis
-// list, a trust basis, a verification scope and two kind-specific panels, and
-// every one of them is a superset. [`OperationView`] flattens the frozen shape
-// and carries the additions beside it, so the wire body is the old body plus
-// new keys — a console written against either reads the one it knows.
+// NO INFRASTRUCTURE DETAIL: no Job name, no pod name and no container state
+// (`no_infrastructure_detail_is_frozen_into_the_operation_contract`). A
+// DIAGNOSTIC's `object {kind, name}` IS published: a scheduling failure
+// with no object named is not resource-scoped.
 //
-// WHAT IS STILL NOT HERE. No Job name, no pod name and no container state:
-// D0's "remains visible in bounded form" list is reason, message, exit code,
-// last phase, timestamps and evidence references, and
-// `no_infrastructure_detail_is_frozen_into_the_operation_contract` keeps the
-// first of those out. A DIAGNOSTIC's `object {kind, name}` IS published,
-// because PLAT-14.1's acceptance asks in as many words for "pod mount and
-// scheduling failures as useful resource-scoped errors" and a scheduling
-// failure with no object named is not resource-scoped.
-//
-// AND NO PROSE. D3 §3.5 and §11 give `ui/render.js` the fixed sentences and
-// say the server never authors them, so `verificationScope` carries the level
-// and the counts and no `statement` string: a sentence in a versioned contract
-// is a sentence that cannot be corrected without a contract change.
+// AND NO PROSE. `ui/render.js` owns the fixed sentences, so
+// `verificationScope` carries the level and the counts and no `statement`
+// string: a sentence in a versioned contract cannot be corrected without a
+// contract change.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -732,7 +720,7 @@ pub struct VerificationScopeView {
     pub selection: Option<crate::contract::RestoreSelectionView>,
 }
 
-/// **PROD-11.1b.** `status.integrity.selection` as the API's
+/// `status.integrity.selection` as the API's
 /// [`crate::contract::RestoreSelectionView`], copied field for field; `None`
 /// exactly when the status carries none.
 #[must_use]
@@ -861,7 +849,7 @@ pub fn recorded_coverage(
     }
 }
 
-/// **PROD-08.1a.** The complete block as the API serves it, only beside a
+/// The complete block as the API serves it, only beside a
 /// recorded `coverage: complete`.
 #[must_use]
 pub fn complete_view(
@@ -1124,38 +1112,37 @@ fn diagnostic_views(progress: Option<&RunProgress>) -> Vec<DiagnosticView> {
         .collect()
 }
 
-/// D3 §12's absent-field rule for the trust block, in one place.
+/// The absent-field rule for the trust block, in one place.
 ///
 /// An absent `trust` is `basis: none`; a `basis` this build does not recognise
 /// is passed through verbatim rather than rounded to the nearest word it does.
 fn trust_basis(trust: Option<&TrustBasis>) -> String {
     // PASSED THROUGH, NOT TRANSLATED. Every value here is a word the CRD
-    // stores and `docs/kubernetes.md` §15.2c names; a projection that rounded
-    // an unrecognised one to the nearest word it knew would report a basis
-    // nobody wrote.
+    // stores; a projection that rounded an unrecognised one to the nearest
+    // word it knew would report a basis nobody wrote.
     trust
         .and_then(|t| t.basis.as_deref())
         .map_or_else(|| BASIS_NONE.to_string(), |basis| bounded(basis, 64))
 }
 
-/// What an absent `trust` block projects to (D3 §12).
+/// What an absent `trust` block projects to.
 pub const BASIS_NONE: &str = "None";
 
 /// `status.evidence.verification.result` for a verdict the controller REACHED
-/// and refused on the key (D3 §7.4) — `weirkeeper::verification`'s
+/// and refused on the key -- `weirkeeper::verification`'s
 /// `VerificationVerdict::Untrusted`. This projection's `VerificationState` has
 /// no word for it and reads it as `unknown`, which is why the raw result is
 /// consulted here.
 const RESULT_UNTRUSTED: &str = "Untrusted";
 
-/// D3 §2.5's combined word, from the recorded result and the trust block.
+/// The combined trust word, from the recorded result and the trust block.
 ///
-/// # ONE RULE WITH THE CONTROLLER'S BADGE (`TRUST-STATE-RBR-VERIFIED`)
+/// # ONE RULE WITH THE CONTROLLER'S BADGE
 ///
 /// A `Valid` result is `verified`/`verifiedHistorical` exactly where
 /// `weirkeeper::verification::backup_badge`/`restore_badge` would let it be
-/// green, which is `logweir_core::trust::Verdict::may_render_green` plus D3
-/// §12's absent-field rule:
+/// green, which is `logweir_core::trust::Verdict::may_render_green` plus the
+/// absent-field rule:
 ///
 /// | `result` | `trust` | state |
 /// |---|---|---|
@@ -1168,12 +1155,10 @@ const RESULT_UNTRUSTED: &str = "Untrusted";
 /// | `NotAttempted`/unrecognised | `basis: Unverified` | `notAttempted` |
 /// | `NotAttempted`/unrecognised | key `Revoked`/`Expired`/`Unknown` | `untrusted` |
 ///
-/// `RecordedBeforeRevocation` is the row this build used to get wrong: it
-/// published `verified`. D3 §7.4 says that verdict is "`Untrusted`, reason
-/// `RecordedBeforeRevocation` (rendered with the recorded instant, never
-/// green)", and every client that reads `trust.state` alone read a
-/// compromise-revoked key as trusted. The basis is still published verbatim,
-/// so the recorded-instant rendering keeps its case.
+/// `RecordedBeforeRevocation` is `untrusted`, never green: a client that reads
+/// `trust.state` alone must not read a compromise-revoked key as trusted. The
+/// basis is still published verbatim, so the recorded-instant rendering
+/// keeps its case.
 ///
 /// THE RESULT DECIDES FIRST, THE BASIS ONLY REFINES IT DOWNWARD. A result that
 /// is not `Valid` can never be read up to a verified state, and a `Valid` is
@@ -1186,9 +1171,9 @@ fn trust_state(
 ) -> TrustState {
     let basis = trust.and_then(|t| t.basis.as_deref());
     match verification {
-        // THE CONTROLLER'S OWN RULE, NOT A COPY OF IT (TRUST-VALID-BASIS-CLASS):
-        // `ValidBasis` is what the badge and every controller reader of a
-        // stored `Valid` use, so this word cannot drift from them.
+        // THE CONTROLLER'S OWN RULE, NOT A COPY OF IT: `ValidBasis` is what the
+        // badge and every controller reader of a stored `Valid` use, so this
+        // word cannot drift from them.
         VerificationState::Valid => match ValidBasis::of_block(trust) {
             ValidBasis::Absent | ValidBasis::Current => TrustState::Verified,
             ValidBasis::Historical => TrustState::VerifiedHistorical,
@@ -1200,8 +1185,8 @@ fn trust_state(
         VerificationState::NoEvidence => TrustState::NotApplicable,
         // A REACHED REFUSAL ON THE KEY, whatever the key state beside it: a
         // `KeyUsageMismatch` on an `Active` key and a `SignedOutsideValidity`
-        // on a `Retired` one are both `Untrusted` rows of D3 §7.4, and the key
-        // state is not what makes them so.
+        // on a `Retired` one are both `Untrusted`, and the key state is not
+        // what makes them so.
         VerificationState::NotAttempted | VerificationState::Unknown
             if recorded_result == Some(RESULT_UNTRUSTED) =>
         {
@@ -1261,7 +1246,7 @@ fn scope_level(integrity_level: Option<&str>) -> VerificationScopeLevel {
 /// The stage a run is at, from the controller's own word when it wrote one and
 /// from the phase alone when it did not.
 ///
-/// `Queued` AND `Preparing` ARE NEVER INFERRED (D3 §12). They are distinctions
+/// `Queued` AND `Preparing` ARE NEVER INFERRED. They are distinctions
 /// only the progress channel can draw — a Job with no pod, against a pod whose
 /// container has not started — and a projection that guessed them from
 /// `phase: Pending` would be inventing an observation.
@@ -1270,8 +1255,8 @@ fn stage_of(progress: Option<&RunProgress>, phase: Option<&str>) -> Option<Opera
         return Some(stage);
     }
     match phase {
-        // A pool-queued run (P10) is at ADMISSION, not at the `Queued` stage:
-        // that stage is "a Job exists and no pod is running yet", and a queued
+        // A pool-queued run is at ADMISSION, not at the `Queued` stage: that
+        // stage is "a Job exists and no pod is running yet", and a queued
         // manual run has no Job at all.
         None | Some("Pending" | "Queued") => Some(OperationStage::Admission),
         Some("Resolving") => Some(OperationStage::Preparing),
@@ -1281,7 +1266,7 @@ fn stage_of(progress: Option<&RunProgress>, phase: Option<&str>) -> Option<Opera
     }
 }
 
-/// D3 §2.5's stage overrides, applied only to a run that has not finished.
+/// The stage overrides, applied only to a run that has not finished.
 ///
 /// A TERMINAL PHASE IS NEVER OVERRIDDEN. `phase`, `exitCode` and `outcome` own
 /// the OUTCOME; the progress channel owns "what is happening and why is it
@@ -1309,7 +1294,7 @@ fn apply_stage(
     }
 }
 
-/// D3 §2.5's last row: a status too old to believe is `unknown`, not the last
+/// The staleness rule: a status too old to believe is `unknown`, not the last
 /// thing it said.
 fn apply_staleness(
     state: OperationState,
@@ -1427,9 +1412,9 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
         status.is_some(),
         now,
     );
-    // D3 §2.5's first row: a Restore held for an approval is `pending` AND
-    // says so, because "waiting for a person" and "waiting for a machine" are
-    // the same word on a badge and different facts in an incident.
+    // A Restore held for an approval is `pending` AND says so, because
+    // "waiting for a person" and "waiting for a machine" are the same word on
+    // a badge and different facts in an incident.
     let awaiting_approval =
         state == OperationState::Pending && reason.as_deref() == Some("ApprovalNotVerified");
     operation.state = state;
@@ -1466,9 +1451,9 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
             records_sampled: completion.and_then(|c| c.records_sampled),
             records_sampled_matching: completion.and_then(|c| c.records_sampled_matching),
             records_expected: completion.and_then(|c| c.records_expected),
-            // PROD-08.1a / FX-23: from `status.integrity`, the controller's copy
-            // of the signed scorecard — a claim until the evidence verifies,
-            // like every other fact here.
+            // From `status.integrity`, the controller's copy of the signed
+            // scorecard: a claim until the evidence verifies, like every other
+            // fact here.
             coverage: recorded_coverage(status.and_then(|s| s.integrity.as_ref())),
             complete: complete_view(status.and_then(|s| s.integrity.as_ref())),
             unsampled_topics: status
@@ -1477,7 +1462,7 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
                 .filter(|t| t.len() <= weirkeeper::crds::restore::UNSAMPLED_TOPICS_MAX)
                 .map(|t| t.iter().map(|n| bounded(n, 249)).collect())
                 .unwrap_or_default(),
-            // PROD-11.1b: the selection every number above is over.
+            // The selection every number above is over.
             selection: selection_view(status.and_then(|s| s.integrity.as_ref())),
         },
         awaiting_approval,
@@ -1536,36 +1521,28 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
     }
 }
 
-// ======================================================================
-// D3 §2.6 — the server-sent event stream
-// ======================================================================
+// THE SERVER-SENT EVENT STREAM.
 //
-// POLLED, NOT WATCHED, AND THE CONTRACT SAYS SO. `KubeAdapter` has no `watch`
-// method and this task does not add one: a watch is a long-lived connection
-// per subscriber against the API server, it needs the `watch` verb in the
-// console's RBAC, and it makes one browser tab's reconnect storm the API
-// server's problem. The stream re-reads ONE named object it has already
-// authorized, at [`StreamBounds::poll`], and emits only when the
-// resourceVersion moves. The event id is that resourceVersion, so
-// `Last-Event-ID` means exactly what it means on the read route.
+// POLLED, NOT WATCHED. `KubeAdapter` has no `watch` method: a watch is a
+// long-lived API-server connection per subscriber, needs the `watch` verb in
+// the console's RBAC, and makes one tab's reconnect storm the API server's
+// problem. The stream re-reads ONE named object it has already authorized,
+// at [`StreamBounds::poll`], and emits only when the resourceVersion moves.
+// The event id is that resourceVersion, so `Last-Event-ID` means exactly
+// what it means on the read route.
 //
-// EVERY BOUND IS THE SERVER'S. The caller chooses nothing: no query parameter
-// is accepted (so no token can be put in a URL, which is the one place a
-// credential survives in a proxy log and a browser history), the connection is
-// closed at [`StreamBounds::max_connection`], the heartbeat is fixed, and the
-// number of concurrent streams one principal may hold in one namespace is
-// capped.
+// EVERY BOUND IS THE SERVER'S. No query parameter is accepted (so no token
+// can be put in a URL, where a credential survives in a proxy log and a
+// browser history), the connection is closed at
+// [`StreamBounds::max_connection`], the heartbeat is fixed, and the number
+// of concurrent streams one principal may hold in one namespace is capped.
 //
-// AND THE CEILING IS WALL CLOCK FROM SUBSCRIBE, NOT PRODUCER TIME. The first
-// shape of this loop checked the deadline only BETWEEN sends, so a client that
-// opened the stream and never read filled the eight-frame channel, left the
-// producer parked in `tx.send(...).await`, and held its task and its slot for
-// as long as it kept the socket open and silent — measured at 1.212 s against
-// a 120 ms ceiling (review finding F3). Every send is now bounded by the
-// REMAINING budget and the tick never overshoots it, so a silent socket costs
-// one slot for `max_connection` and not for ever. Authorization is decided ONCE at subscribe, before the first read,
-// and the stream carries no ambient authority afterwards: it re-reads the same
-// object in the same namespace and can reach nothing else.
+// THE CEILING IS WALL CLOCK FROM SUBSCRIBE, NOT PRODUCER TIME: every send is
+// bounded by the REMAINING budget and the tick never overshoots it, so a
+// client that opens the stream and never reads costs one slot for
+// `max_connection`, not for ever. Authorization is decided ONCE at
+// subscribe, and the stream re-reads the same object in the same namespace
+// and can reach nothing else.
 
 /// The bounds a stream runs inside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1690,8 +1667,7 @@ pub fn valid_event_id(value: &str) -> bool {
 ///
 /// TERMINAL IS NOT ENOUGH. A run that exited 0 with its evidence unverified is
 /// terminal and its verdict is still coming; closing there would leave a
-/// console showing "succeeded, verification pending" for ever, which is the
-/// exact conflation PLAT-14.1 exists to remove.
+/// console showing "succeeded, verification pending" for ever.
 #[must_use]
 pub fn is_settled(view: &OperationView) -> bool {
     view.operation.terminal && view.trust.state != TrustState::Pending
@@ -1810,10 +1786,9 @@ pub async fn open_stream(
         // resourceVersion, and this service keeps no history of them, so it
         // cannot replay what happened between two versions. A client that
         // resumes at the version we are already at is exactly caught up and is
-        // sent nothing; a client that resumes at any other version — older,
-        // newer, or from a different object under the same name — is sent a
-        // `reset` carrying the whole current state, which is the only honest
-        // answer and is what D3 §2.6's "one reset snapshot" asks for.
+        // sent nothing; a client that resumes at any other version -- older,
+        // newer, or from a different object under the same name -- is sent a
+        // `reset` carrying the whole current state.
         let resumed_here = last_event_id.as_deref() == Some(version.as_str());
         let opening = if resumed_here {
             None

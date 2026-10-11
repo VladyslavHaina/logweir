@@ -3,49 +3,24 @@
 //!
 //! Runs the binary cargo has ALREADY built for this test target
 //! (`CARGO_BIN_EXE_…`), never `cargo run`, which would re-enter cargo while
-//! the workspace build lock is held — the idiom
-//! `crates/logweir/tests/guard_cli.rs` and `crates/weirkeeper/tests/linkage.rs`
-//! establish.
+//! the workspace build lock is held.
 //!
 //! THE KUBERNETES ENDPOINT IN EVERY FIXTURE IS `https://127.0.0.1:1`:
 //! privileged, unused and never contacted, so a regression that dialled would
 //! fail instantly rather than hang.
 //!
-//! EVERY CHILD HERE IS TIME-BOUNDED AND ALWAYS REAPED, and that is a
-//! regression fix, not a precaution. On 2026-09-15 a mutation run removed the
-//! loopback check in `config::parse_loopback_listen` to prove
-//! [`a_non_loopback_listener_is_refused_before_anything_is_bound`] can fail.
-//! With the check gone the binary did what the mutant asked — it bound
-//! `0.0.0.0` and served — and the test, which collected the child with
-//! `Command::output()`, waited for a server to close its stdout. It waited 13
-//! hours. Killing the test runner then left the server orphaned on
-//! `0.0.0.0:18484` (PPID 1) for another 14 hours, holding a fixed port that
-//! the next run of this same file needed.
-//!
-//! Three rules follow, and [`bounded_output`] and [`Reaped`] are how they are
-//! kept:
+//! EVERY CHILD HERE IS TIME-BOUNDED AND ALWAYS REAPED ([`bounded_output`],
+//! [`Reaped`]): a mutant that binds and serves must cost seconds, not hang the
+//! runner and leave an orphaned listener on a port the next run needs.
 //!
 //! 1. **No child is waited on without a deadline.** Past [`CHILD_LIMIT`] the
-//!    child is killed and the test FAILS with what it printed. A surviving
-//!    mutant must cost seconds, not a working day.
+//!    child is killed and the test FAILS with what it printed.
 //! 2. **No child outlives the test.** [`Reaped`] kills on `Drop`, so a panic
 //!    between spawn and the intended stop cannot leak a listener.
 //! 3. **No fixed ports, AND no assumption that a free port stays free.** Every
-//!    port comes from [`free_port`], which can only report a port nothing is
-//!    listening on right now — it cannot reserve one. Between that answer and
-//!    the child's own `bind`, any process on this host may take it, and under
-//!    concurrency one regularly does.
-//!
-//! Rule 3's second half is a regression fix too, from 2026-09-17
-//! (`FLAKE-APISHUTDOWN`). Five concurrent runs of THIS test binary failed 5
-//! times in 15, every failure a socket that belonged to another run:
-//! `ConnectionReset` reading a response, `ConnectionRefused` connecting to a
-//! server that had just been confirmed listening, an RST on the 48th
-//! connection of the ceiling test, and `0.0.0.0:64169 left a listener behind`
-//! for a listener this binary never opened. None of them was a timeout, so
-//! none of them would have been fixed by a longer deadline. What was wrong was
-//! the identification: a connect that succeeds proves only that SOMEONE is
-//! listening.
+//!    port comes from [`free_port`], which cannot reserve one: under
+//!    concurrency another process may take it before the child binds, and a
+//!    connect that succeeds proves only that SOMEONE is listening.
 //!
 //! So no test here infers a server from a port. It waits for its OWN child to
 //! print [`STARTED`] naming that exact port ([`start_server`]), starts again on
@@ -64,33 +39,15 @@ use std::time::{Duration, Instant};
 
 /// How long any child spawned here may run before it is killed and the test
 /// fails. Startup is milliseconds and every refusal path is immediate; this is
-/// a ceiling for a wedged process, not an expected wait.
-///
-/// WIDENED FROM 30 s FOR A LOADED HOST, not for a slow product. Two tests in
-/// this suite flaked during a concurrent mutant build, both on reaching or
-/// leaving the socket rather than on any property they assert. This bound and
-/// [`SERVE_LIMIT`] exist to stop a WEDGED process, so doubling them costs a red
-/// build nothing; the assertions about the shutdown grace period below are
-/// untouched and still compare against `main::SHUTDOWN_GRACE`'s own ten
-/// seconds.
-///
-/// THE WIDENING DID NOT BUY IMMUNITY TO A BUSY MACHINE, and the sentence that
-/// once claimed it did is deleted rather than softened. Those same two tests
-/// went on flaking at these limits, because they were never waiting too
-/// briefly — see [`SERVE_LIMIT`] and rule 3.
+/// a ceiling for a wedged process on a loaded host, not an expected wait. The
+/// shutdown-grace assertions below still compare against
+/// `main::SHUTDOWN_GRACE`'s own ten seconds.
 const CHILD_LIMIT: Duration = Duration::from_secs(60);
 
 /// How long the served process is given to reach its listening socket, to
-/// answer a request, and to exit after SIGTERM. See [`CHILD_LIMIT`] on why this
-/// is 40 s and not 20.
-///
-/// IT IS DELIBERATELY NOT RAISED AGAIN for `FLAKE-APISHUTDOWN`. Every one of
-/// the five failures reproduced on 2026-09-17 happened in under 13 s, on a
-/// socket that answered immediately — with the wrong answer, from the wrong
-/// process. A deadline cannot fix a misidentification, and a bigger one only
-/// makes a real hang cost more; 40 s is already several hundred times the
-/// startup this binary needs on an idle host. What changed instead is what the
-/// suite waits FOR: see rule 3 in the module documentation.
+/// answer a request, and to exit after SIGTERM. A longer deadline cannot fix a
+/// misidentified socket (rule 3 in the module documentation); it would only
+/// make a real hang cost more.
 const SERVE_LIMIT: Duration = Duration::from_secs(40);
 
 /// The one line the binary writes AFTER its listener is bound, and never
@@ -436,24 +393,13 @@ fn a_non_loopback_listener_is_refused_before_anything_is_bound() {
             stderr.contains("loopback") || stderr.contains("IP:port"),
             "{listen}: {stderr}"
         );
-        // NOTHING WAS BOUND — read off the child, not off the port.
-        //
-        // This replaces a connect to `127.0.0.1:{port}` that asserted nothing
-        // was listening afterwards, which was the third `FLAKE-APISHUTDOWN`
-        // failure: on 2026-09-17 it reported `0.0.0.0:64169 left a listener
-        // behind` for a listener this binary had never opened, because by then
-        // `port` belonged to a concurrent run. It could only ever have gone
-        // that way. The child is dead before the assertion runs — `run` waits
-        // for its exit or kills it — and a dead process holds no socket, so a
-        // listener seen here is by construction somebody else's, and a listener
-        // this binary opened and closed again is invisible.
-        //
-        // The child's stdout answers the real question, and answers it for the
-        // bound-then-refused case too: `STARTED` is written between a
-        // successful `bind` and `serve`, `BIND_FAILED` when a bind was tried
-        // and refused, and neither can appear at all here — `main` installs the
-        // logging subscriber only after the configuration has been accepted, so
-        // a refusal this early leaves stdout empty.
+        // NOTHING WAS BOUND -- read off the child, not off the port. The child is
+        // dead before this runs (`run` waits or kills), so a listener seen on the
+        // port would be somebody else's. `STARTED` is written between a successful
+        // `bind` and `serve`, `BIND_FAILED` when a bind was tried and refused, and
+        // neither can appear here: `main` installs the logging subscriber only
+        // after the configuration has been accepted, so a refusal this early leaves
+        // stdout empty.
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             !stdout.contains(STARTED) && !stdout.contains(BIND_FAILED),
@@ -525,8 +471,8 @@ fn a_short_cursor_key_is_refused() {
     assert!(stderr.contains("cursorKeyFile"), "{stderr}");
 }
 
-/// **The shipped binary refuses every shared-mode configuration D0 says it
-/// must, before it binds a socket or builds a Kubernetes client.**
+/// **The shipped binary refuses every shared-mode configuration it must,
+/// before it binds a socket or builds a Kubernetes client.**
 ///
 /// These are the refusals whose whole value is that they happen at STARTUP: a
 /// console that comes up on plain HTTP, or with a key file someone rewrote
@@ -618,9 +564,9 @@ fn shared_mode_refuses_plain_http_a_rotated_key_and_a_wildcard_binding() {
     );
     write_shared_material(&fixture, 1);
 
-    // 6. Chart gap G1: a CA bundle that cannot be read fails CLOSED, before a
-    //    socket — never a console that starts over the system roots alone and
-    //    then cannot reach the issuer it was told to trust.
+    // 6. A CA bundle that cannot be read fails CLOSED, before a socket --
+    //    never a console that starts over the system roots alone and then
+    //    cannot reach the issuer it was told to trust.
     let unreadable = base("https://console.example").replace(
         "  clientSecretFile:",
         &format!(
@@ -849,18 +795,10 @@ fn the_binary_serves_loopback_and_stops_on_sigterm() {
 /// Start the server and return it with the port IT SAID it is listening on.
 /// The caller keeps the [`Watched`] alive for as long as it wants the server.
 ///
-/// THIS IS THE FIX FOR `FLAKE-APISHUTDOWN`, so it is worth being plain about
-/// what it replaced. The old helper connected to the port [`free_port`] had
-/// suggested and returned as soon as the connect succeeded — which proves that
-/// SOMETHING is listening there, not that this child is. When several runs of
-/// this binary share a host they draw ports from one kernel range, and the
-/// stale answer is common enough to have produced every failure recorded in
-/// rule 3: the caller then held a stranger's socket while its own child was
-/// dying of `Address already in use` three lines below.
-///
-/// The child's own [`STARTED`] line carries the bound address and is written
-/// only after the bind returns, so waiting for it settles both questions at
-/// once. [`BIND_FAILED`] settles the third: the port went, take another.
+/// A successful connect proves only that something is listening (rule 3); the
+/// child's own [`STARTED`] line carries the bound address and is written only
+/// after the bind returns, so waiting for it settles which process and which
+/// port at once. [`BIND_FAILED`] means the port went: take another.
 fn start_server(fixture: &Fixture) -> (Watched, u16) {
     let mut lost = Vec::new();
     for _ in 0..START_ATTEMPTS {
@@ -892,7 +830,7 @@ fn start_server(fixture: &Fixture) -> (Watched, u16) {
 /// **A connection that never finishes its headers is closed, and does not hold
 /// the server.**
 ///
-/// REGRESSION REASON (review finding R4). `axum::serve` builds its hyper
+/// REGRESSION REASON. `axum::serve` builds its hyper
 /// connection with no header-read deadline, so a client that opened a socket and
 /// sent one byte held a task and a descriptor for as long as it liked — the
 /// slow-loris shape. `main::HEADER_READ_TIMEOUT` is ten seconds; this asserts
@@ -982,16 +920,11 @@ fn an_oversized_request_head_is_refused() {
 /// may be waiting in the kernel's listen queue, not yet accepted, at any one
 /// time.
 ///
-/// THE LISTEN QUEUE IS SMALLER THAN THE CEILING. `kern.ipc.somaxconn` is 128
-/// on macOS, and the kernel caps the listener's backlog to it whatever the
-/// server asks for; when the queue overflows, XNU resets a queued connection.
-/// Opening all 256 connections back to back therefore assumed the server's
-/// accept loop would keep pace with the client, which is a statement about the
-/// scheduler, not about the server. On a host at load average 20-40 the loop
-/// fell behind by more than 128 and the test failed with `connection N:
-/// Connection reset by peer`, N between 129 and 213 (FX-3, FX-8, FX-13 and
-/// FX-16's workspace runs, 2026-10-07/08; FX-18). A quarter of the queue
-/// leaves room for whatever else this host is connecting to the same port.
+/// THE LISTEN QUEUE IS SMALLER THAN THE CEILING: `kern.ipc.somaxconn` is 128
+/// on macOS, the kernel caps the backlog to it, and XNU resets a queued
+/// connection when it overflows. Opening all 256 back to back would assume the
+/// accept loop keeps pace on a loaded host. A quarter of the queue leaves room
+/// for whatever else this host is connecting to the same port.
 const UNACCEPTED_AT_ONCE: usize = 32;
 
 /// GET `/healthz` on a fresh connection, retried until [`SERVE_LIMIT`], and
@@ -1017,36 +950,25 @@ fn answered_after(port: u16, ahead: usize) -> Duration {
 ///
 /// `main::MAX_CONNECTIONS` is 256. The permit is taken BEFORE the accept, so at
 /// the ceiling further connections wait in the kernel backlog instead of each
-/// becoming a task — which is the difference between a bounded server and one
-/// that runs out of memory politely.
+/// becoming a task.
 ///
-/// NOTHING HERE WAITS ON THE SCHEDULER (FX-18). The connections that hold the
-/// permits are opened [`UNACCEPTED_AT_ONCE`] at a time, and after each batch a
-/// probe request ([`answered_after`]) must be answered before another batch is
-/// opened, so the listen queue never holds more than one batch however slowly
-/// the server runs. The fixed 500 ms sleep that used to stand in for "the
-/// accept loop has taken them all" is gone; the probe IS that condition.
+/// NOTHING HERE WAITS ON THE SCHEDULER. The held connections are opened
+/// [`UNACCEPTED_AT_ONCE`] at a time, and after each batch a probe
+/// ([`answered_after`]) must be answered before the next, so the listen queue
+/// never holds more than one batch.
 ///
-/// The held connections send nothing, and since FX-24 the server closes such
-/// a connection at the header deadline ([`HEADER_DEADLINE`], counted from its
-/// accept), which frees its permit by itself. So both assertions finish before
-/// the FIRST held connection's deadline: until then every permit is held by a
-/// connection this test opened, and only this test can free one.
-///
-/// The two assertions:
+/// The held connections send nothing, and the server closes such a connection
+/// at the header deadline ([`HEADER_DEADLINE`], from its accept), which frees
+/// its permit. So both assertions finish before the FIRST held connection's
+/// deadline, while only this test can free a permit:
 ///
 /// - **Held.** The pending request is not answered while every permit is
-///   held. Absence of an answer can only be shown over a window, so the window
-///   is MEASURED: four times the slowest probe answer, and never less than the
-///   two seconds it used to be. A server without a ceiling answers within
-///   about one probe's time, so on a slow host a fixed two seconds could have
-///   expired before a broken server answered, and passed it. The window must
-///   end [`RELEASE_MARGIN`] before the first held connection's deadline; a host
-///   too slow for that fails as inconclusive, by name, rather than passing.
+///   held, over a MEASURED window: four times the slowest probe answer, at
+///   least two seconds. It must end [`RELEASE_MARGIN`] before the first
+///   deadline; a host too slow for that fails as inconclusive, by name.
 /// - **Released.** After one accepted connection is dropped, the pending
 ///   request is answered before that deadline, so the permit came back from
-///   the drop and not from the deadline; one that never came back fails
-///   there.
+///   the drop and not from the deadline.
 #[test]
 fn the_connection_ceiling_holds_and_then_releases() {
     const CEILING: usize = 256;
@@ -1136,7 +1058,7 @@ fn the_connection_ceiling_holds_and_then_releases() {
 
 /// **A client holding a connection open cannot hold the shutdown open.**
 ///
-/// REGRESSION REASON (review finding R4). Graceful shutdown with no deadline is
+/// REGRESSION REASON. Graceful shutdown with no deadline is
 /// not a shutdown: one idle keep-alive connection could keep the process past
 /// any supervisor's patience and turn a clean stop into a SIGKILL.
 /// `main::SHUTDOWN_GRACE` is ten seconds, and the exit is still 0 — the process
@@ -1203,28 +1125,19 @@ fn a_held_connection_does_not_block_shutdown_past_the_grace_period() {
 }
 
 // WHAT THIS PAIR DOES AND DOES NOT PROVE. The test above holds an IDLE
-// keep-alive connection, and hyper closes those at once — between requests
-// there is nothing in flight to finish — so it exits in milliseconds rather
-// than after the grace period. That is the behaviour worth having, and it is
-// what the assertion checks: a held connection cannot delay the exit.
-//
-// The deadline itself — `main::SHUTDOWN_GRACE` elapsing and the remaining
-// connections being dropped — is NOT exercised here, because every handler in
-// this service answers in microseconds and none of them can be made to hang
-// from the outside. Reaching it would need a deliberately slow route, and
-// adding one to the product router to test the server would be the wrong
-// trade. It is recorded as unexercised in the task report rather than implied
-// by a passing test.
+// keep-alive connection, which hyper closes at once, so the process exits in
+// milliseconds: a held connection cannot delay the exit. The deadline itself
+// (`main::SHUTDOWN_GRACE` elapsing with connections still open) is NOT
+// exercised: every handler answers in microseconds, and a deliberately slow
+// route in the product router to test the server would be the wrong trade.
 
 /// Open a keep-alive connection to `port`, get one request answered on it, and
 /// return it STILL OPEN.
 ///
-/// Every failure here is a failure to set the test up, not a failure of the
-/// thing the test asserts, and until 2026-09-17 they were the same panic: the
-/// read `unwrap`ed, so a `ConnectionReset` from another run's socket came out
-/// as `FLAKE-APISHUTDOWN`. It is retried on a fresh connection while the server
-/// is alive and the deadline holds, and only then reported — as what it is, a
-/// server resetting a live connection before anyone asked it to stop.
+/// Every failure here is a failure to SET UP, not of what the test asserts,
+/// so it is retried on a fresh connection while the server is alive and the
+/// deadline holds, and only then reported -- as a server resetting a live
+/// connection before anyone asked it to stop.
 fn hold_an_answered_keep_alive(server: &mut Watched, port: u16) -> TcpStream {
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let deadline = Instant::now() + SERVE_LIMIT;
@@ -1289,14 +1202,12 @@ const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 /// host.
 const RELEASE_MARGIN: Duration = Duration::from_secs(2);
 
-/// How long past [`HEADER_DEADLINE`] the FX-24 rows wait for the server to act
-/// before calling it a failure.
+/// How long past [`HEADER_DEADLINE`] the header-deadline rows wait for the
+/// server to act before calling it a failure.
 ///
-/// FIVE SECONDS, NOT THE R4 ROW'S FIFTEEN (FX-24 review L1). The server's own
-/// timer fires on time under load (10.0 s measured at load 15-42), and the
-/// slack is what tells the documented ten seconds from a deadline doubled at
-/// the call site: with fifteen, a twenty-second deadline passed every row. Half
-/// the deadline is still several hundred times what closing a socket takes.
+/// FIVE SECONDS: the server's own timer fires on time under load, and the
+/// slack must be small enough to tell the documented ten seconds from a
+/// deadline doubled at the call site.
 const DEADLINE_SLACK: Duration = Duration::from_secs(5);
 
 /// `count` connections to `port` that send nothing, every one proven ACCEPTED
@@ -1359,10 +1270,9 @@ fn closed_by_the_server(stream: &mut TcpStream, limit: Duration) -> Result<Durat
 /// The deadline the rows below measure is the one `src/main.rs` configures,
 /// and the one its connection builder is handed.
 ///
-/// BOTH HALVES (FX-24 review L1). Pinning only the constant's text let
-/// `.header_read_timeout(HEADER_READ_TIMEOUT * 2)` through: the constant still
-/// read ten seconds while the server waited twenty. The call site must hand
-/// the builder the constant itself, once, and nothing else may set a header
+/// BOTH HALVES: a constant that reads ten seconds proves nothing if the call
+/// site hands the builder `HEADER_READ_TIMEOUT * 2`. The builder must be
+/// handed the constant itself, once, and nothing else may set a header
 /// deadline. ([`DEADLINE_SLACK`] makes the behavioural rows catch the same
 /// mutant.)
 #[test]
@@ -1396,16 +1306,13 @@ fn the_header_deadline_these_rows_measure_is_mains() {
     );
 }
 
-/// **A connection that sends nothing at all is closed at the header deadline
-/// (FX-24).**
+/// **A connection that sends nothing at all is closed at the header
+/// deadline.**
 ///
-/// REGRESSION REASON. The accept loop used hyper-util's `auto` builder, which
-/// reads the first bytes to choose HTTP/1 or HTTP/2 with no timer; the header
-/// deadline belonged to the HTTP/1 connection that exists only after them. So
-/// the R4 row above, whose client sends a partial head, passed, while a socket
-/// that never sent a byte was still open at 16 s on the built binary
-/// (2026-10-08). The server now serves HTTP/1.1 directly, and hyper arms the
-/// deadline in its first read.
+/// REGRESSION REASON. hyper-util's `auto` builder reads the first bytes to
+/// choose HTTP/1 or HTTP/2 with no timer, before the HTTP/1 header deadline
+/// exists, so a socket that never sent a byte stayed open. The server serves
+/// HTTP/1.1 directly, and hyper arms the deadline in its first read.
 ///
 /// - **Closed.** The silent connection ends from the server's side no sooner
 ///   than the deadline (counted from our connect, which precedes the accept)
@@ -1465,12 +1372,11 @@ fn a_connection_that_sends_nothing_is_closed_at_the_header_deadline() {
 }
 
 /// **Silent connections at the connection ceiling are released by the header
-/// deadline, and the request queued behind them is answered (FX-24).**
+/// deadline, and the request queued behind them is answered.**
 ///
-/// This is the denial of service the finding described, end to end: every
-/// one of `main::MAX_CONNECTIONS` (256) permits held by a socket that sends
-/// nothing, and a real request waiting in the kernel's queue behind them. On
-/// main `cee79f42` that request was still unanswered 25 s after it was sent.
+/// The denial of service end to end: every one of `main::MAX_CONNECTIONS`
+/// (256) permits held by a socket that sends nothing, and a real request
+/// waiting in the kernel's queue behind them.
 ///
 /// - **Held first.** The request is not answered while the silent sockets
 ///   hold every permit, for a window measured as in the ceiling row (four
@@ -1553,16 +1459,14 @@ fn silent_connections_cannot_hold_the_ceiling_past_the_header_deadline() {
 }
 
 /// **A client that speaks HTTP/2 with prior knowledge is closed at once, not
-/// served and not held (FX-24).**
+/// served and not held.**
 ///
-/// The server is HTTP/1.1 only. hyper's HTTP/2 server has no header deadline,
-/// so under the old `auto` builder a client that sent the 24-byte preface and
-/// stopped was answered with a SETTINGS frame and was still open at 16 s
-/// (2026-10-08): bounding only the version read would have left that hole.
-/// Now the preface is an HTTP/1 request line with version `HTTP/2.0`, which
-/// hyper refuses at once. "At once" is asserted as well under half the header
-/// deadline, so a server that held the connection until the deadline fails
-/// too, and the server goes on answering afterwards.
+/// The server is HTTP/1.1 only, and hyper's HTTP/2 server has no header
+/// deadline, so the 24-byte preface must not reach one. It is an HTTP/1
+/// request line with version `HTTP/2.0`, which hyper refuses at once. "At
+/// once" is asserted well under half the header deadline, so a server that
+/// held the connection until the deadline fails too, and the server goes on
+/// answering afterwards.
 #[test]
 fn http2_prior_knowledge_is_closed_at_once() {
     let fixture = Fixture::new("h2");
@@ -1600,10 +1504,8 @@ fn http2_prior_knowledge_is_closed_at_once() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
-// ---------------------------------------------------------------------------
-// FX-24b: the stall deadline on a connection's output and a request body, and
-// the total on a JSON body.
-// ---------------------------------------------------------------------------
+// The stall deadline on a connection's output and a request body, and the
+// total on a JSON body.
 
 /// `main::IO_STALL_TIMEOUT`, which a test cannot import from a binary.
 /// [`the_stall_and_body_deadlines_these_rows_measure_are_mains`] reads it back
@@ -1613,16 +1515,11 @@ const STALL_DEADLINE: Duration = Duration::from_secs(30);
 /// How long past [`STALL_DEADLINE`] the non-reading-clients row waits for the
 /// server to act, counted from the LAST client's connect.
 ///
-/// LONGER THAN [`DEADLINE_SLACK`], AND WHY. The stall clock starts at the last
-/// byte the KERNEL took, not at the last byte the client read, and a client
-/// that stops reading does not stop the kernel at once: macOS grows a
-/// connection's receive buffer on its own while data arrives (a socket set to
-/// 4 KiB read back 326,640 bytes once connected, 2026-10-08), so the server's
-/// writes keep progressing for a few seconds after the client's last read.
-/// Measured on the built binary: a single non-reading client ended 35.1 s
-/// after its request, 5 s of ramp plus the 30 s deadline. Fifteen seconds
-/// covers that ramp three times over and still fails a deadline doubled to
-/// sixty seconds.
+/// LONGER THAN [`DEADLINE_SLACK`]: the stall clock starts at the last byte the
+/// KERNEL took, and macOS grows a connection's receive buffer while data
+/// arrives, so the server's writes keep progressing for a few seconds after
+/// the client's last read (about 5 s measured). Fifteen seconds covers that
+/// ramp and still fails a deadline doubled to sixty seconds.
 const STALL_SLACK: Duration = Duration::from_secs(15);
 
 /// `logweir_api::http::JSON_BODY_DEADLINE`, WRITTEN OUT rather than imported:
@@ -1630,13 +1527,11 @@ const STALL_SLACK: Duration = Duration::from_secs(15);
 /// that raised it, and pass at the new value. The pin row compares the two.
 const BODY_DEADLINE: Duration = Duration::from_secs(60);
 
-/// The deadline the FX-24b rows measure is the one `src/main.rs` configures
+/// The deadline the stall rows measure is the one `src/main.rs` configures
 /// and hands to both guards, and the JSON body's total is the documented one.
 ///
-/// THE CALL SITES TOO (the FX-24 review's L1 lesson): a constant that still
-/// reads thirty seconds proves nothing if a guard is built with something
-/// else, so each guard must be handed `IO_STALL_TIMEOUT` itself, once — and,
-/// since FX-24c, the body's guard `BODY_MIN_PROGRESS` itself as its floor
+/// THE CALL SITES TOO: each guard must be handed `IO_STALL_TIMEOUT` itself,
+/// once, and the body's guard `BODY_MIN_PROGRESS` itself as its floor
 /// ([`the_rate_floor_and_peer_cap_these_rows_measure_are_mains`]).
 #[test]
 fn the_stall_and_body_deadlines_these_rows_measure_are_mains() {
@@ -1702,9 +1597,9 @@ fn socket_runtime() -> tokio::runtime::Runtime {
 ///
 /// WHY. A client that stops reading stops the server's writes only once the
 /// server's send buffer and the client's receive buffer are both full. With
-/// the defaults that is about half a MiB per connection on macOS (measured
-/// 2026-10-08: 556,016 bytes), 140 MB of kernel memory for 256 of them; with a
-/// 4 KiB receive buffer it is the server's send buffer alone.
+/// the defaults that is about half a MiB per connection on macOS, 140 MB of
+/// kernel memory for 256 of them; with a 4 KiB receive buffer it is the
+/// server's send buffer alone.
 fn connect_with_receive_buffer(
     runtime: &tokio::runtime::Runtime,
     address: SocketAddr,
@@ -1774,14 +1669,11 @@ fn render_js_size() -> usize {
 }
 
 /// **Clients that stop reading cannot hold the ceiling past the stall
-/// deadline, and the request queued behind them is answered (FX-24b).**
+/// deadline, and the request queued behind them is answered.**
 ///
-/// The FX-24 review's reproduction, as a row: every one of the 256 connection
-/// permits held by a client that pipelined requests for a 156 KiB asset and
-/// reads nothing, and a real request waiting in the kernel's queue behind
-/// them. Before FX-24b that request was unanswered at 30 s and every
-/// non-reading connection was still open at 32.9 s (the review's probe on the
-/// built binary).
+/// Every one of the 256 connection permits held by a client that pipelined
+/// requests for a 156 KiB asset and reads nothing, and a real request
+/// waiting in the kernel's queue behind them.
 ///
 /// - **Held first.** The queued request is not answered while the
 ///   non-reading clients hold every permit, for a measured window (as in the
@@ -1918,20 +1810,18 @@ fn clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
-/// **One client that stops reading is ended by the stall deadline (FX-24b).**
+/// **One client that stops reading is ended by the stall deadline.**
 ///
-/// The ceiling row above proves the permit comes back, but it opens 256
-/// sockets, and a connection flood may not run on a host that is serving a
-/// compose stack or the PoC (WORKER-RULES, 2026-10-08). Without this row the
-/// mutants that drop or blunt the OUTPUT clock were caught at the binary level
-/// only by that flood row (FX-24b review L3). So: one connection, through a
-/// 4 KiB receive buffer, pipelines sixteen requests for the 156 KiB asset and
-/// reads nothing. Nothing reads it before the stall deadline plus
-/// [`STALL_SLACK`] — a read is progress — and then it must already be over:
-/// EOF or reset within two seconds, short of its sixteen answers. A server
-/// without the output clock is still writing, and hands over every answer once
-/// read. A request on another connection is answered meanwhile, so the wait is
-/// this connection's, not the server's.
+/// The ceiling row above opens 256 sockets, which may not run on a host that
+/// is serving a compose stack; this row catches the mutants that drop or
+/// blunt the OUTPUT clock with one connection. Through a 4 KiB receive buffer
+/// it pipelines sixteen requests for the 156 KiB asset and reads nothing.
+/// Nothing reads it before the stall deadline plus [`STALL_SLACK`] (a read is
+/// progress), and then it must already be over: EOF or reset within two
+/// seconds, short of its sixteen answers. A server without the output clock
+/// is still writing, and hands over every answer once read. A request on
+/// another connection is answered meanwhile, so the wait is this
+/// connection's, not the server's.
 #[test]
 fn a_client_that_stops_reading_is_ended_at_the_stall_deadline() {
     const PIPELINED: usize = 16;
@@ -1971,7 +1861,7 @@ fn a_client_that_stops_reading_is_ended_at_the_stall_deadline() {
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
 }
 
-/// **A slow but steady reader outlasts the stall deadline (FX-24b).**
+/// **A slow but steady reader outlasts the stall deadline.**
 ///
 /// NEGATIVE CONTROL for the row above: the bound is on a STALL. One client
 /// pipelines fourteen requests for the 156 KiB asset (the last asks to
@@ -2128,7 +2018,7 @@ impl Drop for FakeKube {
     }
 }
 
-/// **An event stream that heartbeats outlives the stall deadline (FX-24b).**
+/// **An event stream that heartbeats outlives the stall deadline.**
 ///
 /// The console's one long-lived answer is the operation event stream: up to
 /// 300 s, a heartbeat every 15 s of silence. Between heartbeats the server
@@ -2242,7 +2132,7 @@ fn backup_post_head(port: u16, length: usize, key: &str) -> String {
 }
 
 /// **A signed-in client that stops sending its body is answered and closed at
-/// the stall deadline (FX-24b).**
+/// the stall deadline.**
 ///
 /// The local administrator is the signed-in actor in localAdmin mode, and
 /// `POST .../backups` reads its body only after authorizing it. The client
@@ -2322,27 +2212,23 @@ fn a_signed_in_body_that_stops_is_closed_at_the_stall_deadline() {
 }
 
 /// **A signed-in client that trickles its body is answered and closed at the
-/// total deadline (FX-24b).**
+/// total deadline.**
 ///
 /// 8 KiB of spaces (which JSON allows) every four seconds: 60 KiB a window,
-/// past the 32 KiB floor (FX-24c), so the body's progress window never ends it
-/// and only `read_json`'s total can — at sixty seconds, with `400
+/// past the 32 KiB floor, so the body's progress window never ends it and
+/// only `read_json`'s total can -- at sixty seconds, with `400
 /// malformed_request`, "not received within 60 seconds", and the connection
 /// closed after the answer. A server with no total fails here; so does one
-/// whose total is the window's. (Before FX-24c the drip was one byte, which
-/// the floor now ends at the window instead:
-/// [`a_signed_in_body_below_the_rate_floor_is_closed_at_the_window`].)
+/// whose total is the window's. (A one-byte drip is ended at the window
+/// instead: [`a_signed_in_body_below_the_rate_floor_is_closed_at_the_window`].)
 ///
-/// THE DRIPS STOP EIGHT SECONDS SHORT OF THE TOTAL (FX-24b review L1). The
-/// first version dripped on its five-second read timeout, which divides sixty,
-/// so the twelfth byte was due the instant the server gave up on the body. A
-/// byte that lands after the server dropped the body is unread when it closes
-/// the socket, the kernel answers with a reset, and the next socket option
-/// call on the reset socket failed with `EINVAL` on macOS (2 of 8 runs under
-/// load). Now the last byte is sent at 52 s and is read long before the
-/// server's 60 s; the 8 s gap after it is still far inside the 30 s stall. The
-/// read timeout is set once, before the first byte, and the loop paces itself
-/// on the clock.
+/// THE DRIPS STOP EIGHT SECONDS SHORT OF THE TOTAL: a byte that lands after
+/// the server dropped the body is unread when it closes the socket, the kernel
+/// answers with a reset, and the next socket option call fails with `EINVAL`
+/// on macOS. The last byte is sent at 52 s, read long before the server's
+/// 60 s, and the 8 s gap after it is far inside the 30 s stall. The read
+/// timeout is set once, before the first byte, and the loop paces itself on
+/// the clock.
 #[test]
 fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     const DRIP_EVERY: Duration = Duration::from_secs(4);
@@ -2420,11 +2306,9 @@ fn a_signed_in_body_that_trickles_is_closed_at_the_total_deadline() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-24c: what the stall does to a client that reads a byte at a time, the
-// rate floor on a request body, and the cap on the connections one peer
-// outside the trusted-proxy set may hold.
-// ---------------------------------------------------------------------------
+// What the stall does to a client that reads a byte at a time, the rate floor
+// on a request body, and the cap on the connections one peer outside the
+// trusted-proxy set may hold.
 
 /// `main::BODY_MIN_PROGRESS`, which a test cannot import from a binary.
 /// [`the_rate_floor_and_peer_cap_these_rows_measure_are_mains`] reads it back
@@ -2434,11 +2318,10 @@ const RATE_FLOOR: usize = 32 * 1024;
 /// `main::MAX_CONNECTIONS_PER_PEER`, read back the same way.
 const PEER_CAP: usize = 32;
 
-/// The slow-rate client's pace: ONE byte every twenty seconds, the shape of
-/// the FX-24b review's measurement M1.
+/// The slow-rate client's pace: ONE byte every twenty seconds.
 const SLOW_READ_EVERY: Duration = Duration::from_secs(20);
 
-/// The floor and the cap the FX-24c rows measure are the ones `src/main.rs`
+/// The floor and the cap these rows measure are the ones `src/main.rs`
 /// configures, handed over at their one call site each.
 ///
 /// The body guard's call site, with `BODY_MIN_PROGRESS` as its floor, is
@@ -2484,10 +2367,10 @@ fn the_rate_floor_and_peer_cap_these_rows_measure_are_mains() {
         1,
         "src/main.rs builds a peer cap somewhere else too"
     );
-    // ONCE, AND BY THE SOCKET PEER (review L2): a second `.admit(` — say,
-    // re-keying a connection on the client its `X-Forwarded-For` names —
-    // would leave the count of `.admit(peer_ip)` at one and let a header move
-    // a connection out of its peer's share.
+    // ONCE, AND BY THE SOCKET PEER: a second `.admit(` -- say, re-keying a
+    // connection on the client its `X-Forwarded-For` names -- would leave the
+    // count of `.admit(peer_ip)` at one and let a header move a connection out
+    // of its peer's share.
     assert_eq!(
         code.matches(".admit(").count(),
         1,
@@ -2504,19 +2387,16 @@ fn the_rate_floor_and_peer_cap_these_rows_measure_are_mains() {
 const _: () = assert!(PEER_CAP < 256);
 
 /// **A client that reads one byte every twenty seconds is ended at the stall
-/// deadline (FX-24c, correcting the FX-24b review's M1).**
+/// deadline.**
 ///
-/// M1's shape, as a row: one connection pipelines sixteen requests for the
-/// 156 KiB asset through a 4 KiB receive buffer, then reads ONE byte every
-/// twenty seconds. The review's probe reported it "still open at 100 s", but
-/// that probe read a byte at a time out of the half a megabyte the kernel had
-/// buffered, and could never reach the end-of-stream behind it: the server's
-/// own log shows the connection ended at 35.1 s (`claude/fx-24c.result.md`).
-/// The kernel stops waking a writer whose client takes almost nothing, so the
-/// stall ends it like a client that stopped. This row drains the connection
-/// after the bound instead: EOF or reset within two seconds, short of the
-/// sixteen answers. A stall clock that restarted on a mere poll, or a
-/// deadline far past thirty seconds, leaves it open and hands over every
+/// One connection pipelines sixteen requests for the 156 KiB asset through a
+/// 4 KiB receive buffer, then reads ONE byte every twenty seconds. The kernel
+/// stops waking a writer whose client takes almost nothing, so the stall ends
+/// it like a client that stopped; a reader taking a byte at a time out of
+/// what the kernel buffered would never reach the end behind it. So this row
+/// drains the connection after the bound: EOF or reset within two seconds,
+/// short of the sixteen answers. A stall clock that restarted on a mere poll,
+/// or a deadline far past thirty seconds, leaves it open and hands over every
 /// answer once drained. A request on another connection is answered
 /// meanwhile, so the wait is this connection's, not the server's.
 #[test]
@@ -2581,21 +2461,19 @@ fn a_client_reading_one_byte_every_twenty_seconds_is_ended_at_the_stall_deadline
 }
 
 /// **Clients that read one byte every twenty seconds cannot hold the ceiling
-/// past the stall deadline, and the request queued behind them is answered
-/// (FX-24c).**
+/// past the stall deadline, and the request queued behind them is answered.**
 ///
-/// THE CI-SCALE ROW: 256 sockets. Under the flood rule (WORKER-RULES,
-/// 2026-10-08) it does not run on a host serving a compose stack or the PoC;
-/// CI's Linux `cargo test --workspace` runs it, and the FX-24c worker ran it
-/// at a ceiling of eight (a temporary `MAX_CONNECTIONS` edit).
+/// THE CI-SCALE ROW: 256 sockets, so under the connection-flood rule it does
+/// not run on a host serving a compose stack; CI's Linux
+/// `cargo test --workspace` runs it.
 ///
 /// [`clients_that_stop_reading_cannot_hold_the_ceiling_past_the_stall_deadline`]
-/// with one change: every client READS one byte every twenty seconds — the
-/// ledger's slow-rate client. The bounds are that row's: held for a measured
-/// window first; then answered no sooner than the deadline (less a second)
-/// after the first client connected, and within the deadline plus
-/// [`STALL_SLACK`] of the last; and by then every slow connection ended by the
-/// server, short of its sixteen answers.
+/// with one change: every client READS one byte every twenty seconds. The
+/// bounds are that row's: held for a measured window first; then answered no
+/// sooner than the deadline (less a second) after the first client
+/// connected, and within the deadline plus [`STALL_SLACK`] of the last; and
+/// by then every slow connection ended by the server, short of its sixteen
+/// answers.
 #[test]
 fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
     const CEILING: usize = 256;
@@ -2729,16 +2607,15 @@ fn slow_rate_clients_cannot_hold_the_ceiling_past_the_stall_deadline() {
 }
 
 /// **A signed-in body that arrives below the rate floor is answered and
-/// closed at the window (FX-24c).**
+/// closed at the window.**
 ///
 /// The localAdmin actor announces 4096 bytes and sends ONE every twenty
-/// seconds. Before FX-24c each byte restarted the body's stall clock, so only
-/// the sixty-second total ended it. Now its window wants [`RATE_FLOOR`] bytes:
-/// it is answered `400 malformed_request`, "arrived too slowly", and closed at
-/// thirty seconds, not sixty. A body floor of one byte fails here.
+/// seconds. The body's window wants [`RATE_FLOOR`] bytes, so it is answered
+/// `400 malformed_request`, "arrived too slowly", and closed at thirty
+/// seconds, not sixty. A body floor of one byte fails here.
 ///
-/// Its headers are held too, because FX-32 lets a handler's headers through
-/// the problem rendering: `Cache-Control: no-store`, `Content-Type` and
+/// Its headers are held too, because a handler's headers pass through the
+/// problem rendering: `Cache-Control: no-store`, `Content-Type` and
 /// `Content-Length` once each, and no header that described another body.
 #[test]
 fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
@@ -2791,7 +2668,7 @@ fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
             && response.contains("arrived too slowly"),
         "a body below the floor was answered with: {response}"
     );
-    // FX-32 lets the headers a handler set through the problem rendering
+    // A handler's headers pass through the problem rendering
     // (`http::rerender`), so this refusal's headers are held on the wire: one
     // problem document, never stored, described once, and nothing left over
     // that described another body.
@@ -2851,8 +2728,6 @@ fn a_signed_in_body_below_the_rate_floor_is_closed_at_the_window() {
     );
 }
 
-// ------------------------------------------------- the per-peer cap (shared)
-
 /// Start the binary in SHARED mode, with `extra` appended to its
 /// configuration, and return it with the port it said it is listening on.
 /// Shared mode reaches nothing at start: the identity provider is read on
@@ -2902,7 +2777,7 @@ fn answered_before(port: u16, deadline: Instant) -> Result<String, String> {
 }
 
 /// **A peer outside the trusted-proxy set holds at most its share, and gets
-/// a place back when one of its connections ends (FX-24c).**
+/// a place back when one of its connections ends.**
 ///
 /// Shared mode, with TEST-NET-1 as the trusted proxy, so loopback — where
 /// this test connects from — is outside the set and capped at [`PEER_CAP`].
@@ -2971,11 +2846,11 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
         held.set_nonblocking(false).unwrap();
     }
 
-    // A REFUSAL GIVES ITS PERMIT BACK (review L3). The listener has 256
-    // permits; this peer holds 32 of them, so a refusal that kept its permit
-    // would leave no permit at all by the 225th of these, which is then never
-    // accepted (and the place-back below is never answered either). One at a
-    // time: never more than 33 sockets open.
+    // A REFUSAL GIVES ITS PERMIT BACK. The listener has 256 permits; this peer
+    // holds 32 of them, so a refusal that kept its permit would leave no permit
+    // at all by the 225th of these, which is then never accepted (and the
+    // place-back below is never answered either). One at a time: never more
+    // than 33 sockets open.
     const MORE_REFUSALS: usize = 240;
     const _: () = assert!(PEER_CAP + 1 + MORE_REFUSALS > 256);
     for i in 0..MORE_REFUSALS {
@@ -3019,7 +2894,7 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
 }
 
 /// The warning shared mode logs at start when no trusted proxy is configured,
-/// so the per-peer cap is off (review L1).
+/// so the per-peer cap is off.
 const CAP_OFF_WARNING: &str = "the per-peer connection cap is off";
 
 /// The server's own `logweir-api started` line, and only it: the warning
@@ -3035,7 +2910,7 @@ fn start_line(log: &str) -> String {
 /// Connect to `address`, send `request` if any, and require the server to
 /// close the connection unanswered within two seconds: a connection over its
 /// peer's cap. macOS answers `EINVAL` to an option call on a socket the server
-/// has already reset (the FX-24b review's L1); that is the refusal too.
+/// has already reset; that is the refusal too.
 fn refused_at_once(address: &SocketAddr, request: Option<&str>) -> Result<(), String> {
     let mut stream = TcpStream::connect_timeout(address, Duration::from_secs(5))
         .map_err(|e| format!("connect: {e}"))?;
@@ -3070,8 +2945,7 @@ fn refused_at_once(address: &SocketAddr, request: Option<&str>) -> Result<(), St
     }
 }
 
-/// **A forwarded header cannot move a connection out of its peer's share
-/// (FX-24c, review L2).**
+/// **A forwarded header cannot move a connection out of its peer's share.**
 ///
 /// The cap is keyed on the accepted socket's peer before a byte is read,
 /// never on a header. Shared mode, TEST-NET-1 trusted, loopback outside it:
@@ -3079,8 +2953,8 @@ fn refused_at_once(address: &SocketAddr, request: Option<&str>) -> Result<(), St
 /// `X-Forwarded-For`, the last four claiming an address INSIDE the trusted
 /// range, and is answered and held. The next connection, claiming the
 /// trusted proxy as well, is still closed unanswered. A cap re-keyed on the
-/// forwarded client — "one share per real client behind the proxy" — lets
-/// every one of them through (the review's mutant R2, 40 of 40 held).
+/// forwarded client -- "one share per real client behind the proxy" -- lets
+/// every one of them through.
 #[test]
 fn a_forwarded_header_cannot_move_a_connection_out_of_its_peers_share() {
     let fixture = Fixture::new("peercapxff");
@@ -3198,7 +3072,7 @@ fn held_past_the_cap(server: &Watched, port: u16, who: &str) {
     );
 }
 
-/// **The trusted proxy is never capped as one peer (FX-24c).** Every browser
+/// **The trusted proxy is never capped as one peer.** Every browser
 /// behind the ingress arrives from the ingress's address, so capping it would
 /// cap the console's whole audience at [`PEER_CAP`] connections. Loopback is
 /// the trusted proxy here, and holds [`PEER_CAP`] + 8 connections.
@@ -3215,7 +3089,7 @@ fn the_trusted_proxy_is_never_capped_as_one_peer() {
     );
 }
 
-/// **With no trusted-proxy set, no peer is capped (FX-24c).** The console
+/// **With no trusted-proxy set, no peer is capped.** The console
 /// cannot then tell its ingress from any other peer, and the chart's default
 /// names none: a cap here would cap an unconfigured install's ingress as one
 /// peer.
@@ -3224,8 +3098,8 @@ fn without_a_trusted_proxy_set_no_peer_is_capped() {
     let fixture = Fixture::new("peercapnone");
     let (server, port) = start_shared_server(&fixture, "");
     held_past_the_cap(&server, port, "a peer of a console with no trusted proxy");
-    // And it says so at start, as a warning (review L1): an uncapped install
-    // and a capped one that refuses nobody look the same otherwise.
+    // And it says so at start, as a warning: an uncapped install and a capped
+    // one that refuses nobody look the same otherwise.
     assert!(
         start_line(&server.log()).contains("\"per_peer_cap\":0")
             && server.log().contains(CAP_OFF_WARNING),
@@ -3235,7 +3109,7 @@ fn without_a_trusted_proxy_set_no_peer_is_capped() {
 }
 
 /// **One address outside the trusted set cannot hold the ceiling, however it
-/// reads (FX-24c).**
+/// reads.**
 ///
 /// THE CI-SCALE CAP ROW: 256 sockets, so the flood rule applies as above.
 ///
@@ -3268,9 +3142,9 @@ fn one_address_outside_the_trusted_set_cannot_hold_the_ceiling() {
             let i = clients.len();
             let mut stream = connect_with_receive_buffer(&runtime, address, 4096)
                 .unwrap_or_else(|e| panic!("client {i}: {e}"));
-            // A client the server has already closed may refuse the socket
-            // option (macOS answers `EINVAL` on a reset socket, the FX-24b
-            // review's L1) and the write; either is the refusal under test.
+            // A client the server has already closed may refuse the socket option
+            // (macOS answers `EINVAL` on a reset socket) and the write; either is the
+            // refusal under test.
             let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let _ = stream.write_all(requests.as_bytes());
             clients.push(stream);

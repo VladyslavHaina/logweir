@@ -50,25 +50,22 @@ pub const MAX_ID_TOKEN_AGE: chrono::TimeDelta = chrono::TimeDelta::seconds(600);
 /// The largest document this module will read from the provider, 512 KiB.
 pub const MAX_PROVIDER_BODY: usize = 512 * 1024;
 /// The deadline on every provider request, from the first byte sent to the
-/// LAST BYTE OF THE BODY (FX-28).
-///
-/// One timer covers the connection, the request, the response head and the
-/// whole body together. Before FX-28 it ended at the response head, and the
-/// body was collected with no timer at all, so a provider (or a path to it)
-/// that sent headers and then stalled held the sign-in handler, and the
-/// browser connection's permit, for as long as the socket stayed open. A
-/// stalled request now fails [`OidcError::ProviderTimeout`] at this bound.
+/// LAST BYTE OF THE BODY: one timer covers the connection, the request, the
+/// response head and the whole body, so a provider (or a path to it) that
+/// sends headers and then stalls cannot hold the sign-in handler and the
+/// browser connection's permit. A stalled request fails
+/// [`OidcError::ProviderTimeout`].
 ///
 /// Each provider REQUEST has this bound, not each sign-in step. `/auth/login`
 /// makes at most one request (discovery, when its cache is stale), so it
 /// answers within one deadline. `/auth/callback` makes at most four
 /// (discovery, the token, the key set and one forced key refetch for an
-/// unknown `kid`); a stalled one ends the callback at once, so a stall answers
-/// within one deadline after the requests before it, and only a provider that
-/// answers each request just inside the bound can take the callback to four.
+/// unknown `kid`); a stalled one ends the callback at once, and only a
+/// provider that answers each request just inside the bound can take it to
+/// four.
 pub const PROVIDER_DEADLINE: Duration = Duration::from_secs(10);
 /// TCP keepalive on every provider connection: how long a connection is idle
-/// before the first probe (FX-28).
+/// before the first probe.
 ///
 /// The deadline bounds a request in flight. Keepalive is for the connection
 /// between requests: the client pools connections, and without it a pooled
@@ -103,9 +100,9 @@ pub enum OidcError {
     /// The provider could not be reached, or answered a non-2xx status.
     #[error("the identity provider is unreachable: {0}")]
     ProviderUnreachable(String),
-    /// A provider request — connection, request, head and the whole body —
-    /// did not complete within [`PROVIDER_DEADLINE`] (FX-28). The provider,
-    /// or the path to it, accepted the request and then stalled.
+    /// A provider request -- connection, request, head and the whole body --
+    /// did not complete within [`PROVIDER_DEADLINE`]. The provider, or the
+    /// path to it, accepted the request and then stalled.
     #[error(
         "the identity provider did not complete a request within the {}-second provider deadline",
         PROVIDER_DEADLINE.as_secs()
@@ -170,10 +167,6 @@ impl OidcError {
     }
 }
 
-// ======================================================================
-// The HTTP the provider needs, behind a trait
-// ======================================================================
-
 /// A boxed future, so the trait stays object-safe without a macro crate.
 pub type HttpFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, HttpError>> + Send + 'a>>;
 
@@ -183,8 +176,8 @@ pub type HttpFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, HttpError>
 /// that FAILED (a refused connection, a certificate, a non-2xx status, a body
 /// over [`MAX_PROVIDER_BODY`]) says what is wrong, and a request that was
 /// accepted and then never finished says the provider or the path to it is
-/// stalled (FX-28). The provider maps them to [`OidcError::ProviderTimeout`]
-/// and the other variants, so the audit record names which it was.
+/// stalled. The provider maps them to [`OidcError::ProviderTimeout`] and the
+/// other variants, so the audit record names which it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpError {
     /// The connection, the request, the response head and the whole body
@@ -246,10 +239,6 @@ pub trait HttpClient: Send + Sync + 'static {
     ) -> HttpFuture<'a>;
 }
 
-// ======================================================================
-// Settings
-// ======================================================================
-
 /// How the client authenticates at the token endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenAuthMethod {
@@ -288,7 +277,7 @@ pub struct OidcSettings {
 /// `Zeroizing` is best effort and says so: the compiler may have copied the
 /// value before it got here, and anything that can read this process's memory
 /// already holds every live session. It costs one wrapper and removes the
-/// client secret from a core dump. Review finding F-6.
+/// client secret from a core dump.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(zeroize::Zeroizing<String>);
 
@@ -311,10 +300,6 @@ impl std::fmt::Debug for Secret {
         f.write_str("Secret([redacted])")
     }
 }
-
-// ======================================================================
-// Discovery and JWKS
-// ======================================================================
 
 /// The three endpoints this service uses from the discovery document.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -389,10 +374,6 @@ struct TokenResponse {
     id_token: String,
 }
 
-// ======================================================================
-// The provider
-// ======================================================================
-
 struct Cached<T> {
     value: T,
     fetched: Instant,
@@ -437,17 +418,14 @@ impl Provider {
     }
 
     /// Whether the provider has INITIALISED: discovery was read, naming this
-    /// issuer, and a non-empty key set was obtained — once. After that this
+    /// issuer, and a non-empty key set was obtained -- once. After that this
     /// answers `true` for the life of the process.
     ///
-    /// D0, both halves, read together: "The API **starts** NotReady if OIDC
-    /// discovery/JWKS cannot **initialize**" (§Helm), and "an already valid
-    /// console session continues only to its signed expiry" (§Identity). A
-    /// provider outage AFTER initialisation must therefore not take replicas
-    /// out of rotation: every signed session would be cut off by a probe,
-    /// while it needs nothing from the provider. Sign-in during an outage
-    /// still fails closed on its own path (`auth::login`), which is where that
-    /// outage belongs (review M2).
+    /// The API STARTS NotReady if discovery or JWKS cannot initialise, but a
+    /// provider outage AFTER initialisation must not take replicas out of
+    /// rotation: every valid signed session continues to its expiry and needs
+    /// nothing from the provider. Sign-in during an outage still fails closed
+    /// on its own path (`auth::login`).
     pub async fn ready(&self) -> bool {
         use std::sync::atomic::Ordering;
         if self.initialised.load(Ordering::Acquire) {
@@ -455,8 +433,8 @@ impl Provider {
         }
         // WHY NOT READY IS LOGGED, because it is the first thing an operator
         // wiring a private issuer asks: an untrusted certificate, an
-        // unresolvable host and a blocked egress read the same from outside
-        // (chart gaps G1 and G2). A transport error carries no credential.
+        // unresolvable host and a blocked egress read the same from outside. A
+        // transport error carries no credential.
         if let Err(error) = self.discovery().await {
             tracing::warn!(
                 reason = error.code(),
@@ -533,9 +511,8 @@ impl Provider {
         // DOCUMENT WAS. `authorization_endpoint` goes straight into a
         // `Location` header and `token_endpoint` RECEIVES THE CLIENT SECRET, so
         // an issuer that is compromised or merely misconfigured could name
-        // `http://…` and — under the loopback escape hatch, where the client is
-        // built `https_or_http()` — the secret would leave in cleartext.
-        // Review finding F-4.
+        // `http://…` and -- under the loopback escape hatch, where the client is
+        // built `https_or_http()` -- the secret would leave in cleartext.
         for (name, endpoint) in [
             ("authorization_endpoint", &discovery.authorization_endpoint),
             ("token_endpoint", &discovery.token_endpoint),
@@ -639,7 +616,7 @@ impl Provider {
             }
             Err(error) => {
                 // OUTAGE: keep serving the cached keys until JWKS_MAX_AGE. A
-                // stalled key-set request (FX-28) is an outage like any other.
+                // stalled key-set request is an outage like any other.
                 let state = self.cache.lock().expect("the cache lock is never poisoned");
                 match state
                     .jwks
@@ -862,12 +839,8 @@ fn audience_matches(claims: &BTreeMap<String, serde_json::Value>, client_id: &st
     if !audience_names_us {
         return false;
     }
-    // §3.1.3.7(6): if `azp` is present it MUST be this client — whatever shape
-    // `aud` took. The previous version checked it only in the multi-audience
-    // branch, so a token with `aud: "logweir-console"` and `azp:
-    // "another-client"` was accepted: an authorized party this client is not.
-    // Low impact, because `aud` already names us, but this is the one function
-    // whose whole job is exactness. Review finding F-3.
+    // §3.1.3.7(6): if `azp` is present it MUST be this client, whatever shape
+    // `aud` took.
     match claims.get("azp") {
         None => true,
         Some(azp) => azp.as_str() == Some(client_id),
@@ -955,10 +928,6 @@ fn verify(key: &Jwk, alg: &str, message: &[u8], signature: &[u8]) -> Result<(), 
     }
 }
 
-// ======================================================================
-// PKCE and the authorization URL
-// ======================================================================
-
 /// The S256 code challenge for a verifier.
 #[must_use]
 pub fn code_challenge_s256(verifier: &str) -> String {
@@ -995,17 +964,10 @@ pub fn authorization_url(
     format!("{}{separator}{query}", discovery.authorization_endpoint)
 }
 
-// ======================================================================
-// The one implementation that opens a socket
-// ======================================================================
-
-/// The trust anchors the provider's TLS certificate is verified against.
-///
-/// CHART GAP G1. An issuer whose certificate a PRIVATE CA issued — a Dex behind
-/// an ingress with an internal certificate, an enterprise IdP on a corporate
-/// PKI — could only be trusted before this by replacing the whole system trust
-/// store (`SSL_CERT_FILE`, which `rustls-native-certs` honours), mounted by a
-/// post-install `kubectl patch`. This is the product answer:
+/// The trust anchors the provider's TLS certificate is verified against: the
+/// operating system's roots and, for an issuer whose certificate a PRIVATE CA
+/// issued (a Dex behind an internal certificate, an enterprise IdP on a
+/// corporate PKI), a configured PEM bundle.
 ///
 /// * ADDED, NOT SUBSTITUTED. The bundle's certificates are trust anchors IN
 ///   ADDITION to the operating system's, unless the administrator sets
@@ -1129,9 +1091,9 @@ impl TlsTrust {
                 );
             }
             // The rule `hyper_rustls::HttpsConnectorBuilder::with_native_roots`
-            // applied before this existed, kept: asked-for system roots that
-            // are not there are a refusal, and an unparsable individual system
-            // root is skipped, as the platform's own store would skip it.
+            // applies: asked-for system roots that are not there are a refusal,
+            // and an unparsable individual system root is skipped, as the
+            // platform's own store would skip it.
             if loaded.certs.is_empty() {
                 return Err(
                     "the system certificate store could not be read: no root certificate was \
@@ -1186,16 +1148,15 @@ impl HyperHttpClient {
         })
     }
 
-    /// One provider request, under ONE deadline that ends with the body's
-    /// last byte (FX-28).
+    /// One provider request, under ONE deadline that ends with the body's last
+    /// byte.
     ///
-    /// The timer is around [`Self::exchange`] — the connection, the request,
-    /// the head AND the collect — and nowhere else. A timer around
-    /// `self.http.request(..)` alone is what this replaced: that future ends
-    /// at the response head, so a provider that sent its head and then
-    /// stalled was collected with no bound. When the timer fires the
-    /// in-flight future is dropped, and with it the response body and the
-    /// connection, so a stalled provider holds nothing here afterwards either.
+    /// The timer is around [`Self::exchange`] -- the connection, the request,
+    /// the head AND the collect -- and nowhere else: `self.http.request(..)`
+    /// alone ends at the response head, which would leave the body unbounded.
+    /// When the timer fires the in-flight future is dropped, and with it the
+    /// response body and the connection, so a stalled provider holds nothing
+    /// here afterwards.
     async fn send(
         &self,
         request: http::Request<http_body_util::Full<bytes::Bytes>>,
@@ -1250,7 +1211,7 @@ impl HyperHttpClient {
 }
 
 /// The connector the provider's client dials through, and the ONE place it
-/// is assembled (FX-28): the scheme policy (`https_only`, or `https_or_http`
+/// is assembled: the scheme policy (`https_only`, or `https_or_http`
 /// for the loopback escape hatch), TLS over [`provider_tcp_connector`] with
 /// its keepalive, and a deadline on the dial itself ([`BoundedConnect`]).
 fn provider_connector(allow_plain_http: bool, tls: rustls::ClientConfig) -> BoundedConnect {
@@ -1326,7 +1287,7 @@ impl tower::Service<http::Uri> for BoundedConnect {
 }
 
 /// The TCP connector under the provider's TLS: hyper-util's own, with TCP
-/// keepalive on (FX-28; [`PROVIDER_KEEPALIVE`] says why).
+/// keepalive on ([`PROVIDER_KEEPALIVE`] says why).
 ///
 /// `enforce_http(false)` is what `HttpsConnectorBuilder::build` sets on the
 /// connector it would have made: the scheme is the TLS layer's to enforce
@@ -1347,7 +1308,7 @@ fn provider_tcp_connector() -> hyper_util::client::legacy::connect::HttpConnecto
 /// the cause — `invalid peer certificate: UnknownIssuer`, a refused connection,
 /// a name that did not resolve — one level down. Those three need three
 /// different fixes (the CA bundle, the NetworkPolicy, `hostAliases`), so the
-/// log line has to say which (chart gaps G1 and G2). Nothing in a transport
+/// log line has to say which. Nothing in a transport
 /// error is a credential: the request carrying the client secret is built
 /// after the connection exists, and its body never reaches an error.
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
@@ -1506,11 +1467,11 @@ mod tests {
         assert!(select_key(&keys, Some("current"), "ES256").is_none());
     }
 
-    /// **FX-28: every provider connection carries TCP keepalive**, with the
-    /// three documented values, read back off a socket the provider's own
-    /// connector dialled. NEGATIVE CONTROL: hyper-util's default connector,
-    /// which the client used before, dials the same listener with keepalive
-    /// off, so this row cannot pass on a platform default.
+    /// **Every provider connection carries TCP keepalive**, with the three
+    /// documented values, read back off a socket the provider's own connector
+    /// dialled. NEGATIVE CONTROL: hyper-util's default connector dials the same
+    /// listener with keepalive off, so this row cannot pass on a platform
+    /// default.
     #[tokio::test]
     async fn the_provider_connector_turns_tcp_keepalive_on() {
         use tower::ServiceExt as _;
@@ -1556,7 +1517,7 @@ mod tests {
             .with_no_client_auth()
     }
 
-    /// **FX-28 review M2: the CLIENT's connector — the one `HyperHttpClient`
+    /// **The CLIENT's connector -- the one `HyperHttpClient`
     /// is built over — dials with keepalive and keeps its scheme policy.**
     /// `provider_connector` is the one place the client's connector is
     /// assembled, so a revert to `HttpsConnectorBuilder::build()` (hyper-util's
@@ -1603,7 +1564,7 @@ mod tests {
         assert_eq!(refused.to_string(), "unsupported scheme http");
     }
 
-    /// **FX-28 review L1: a dial that stalls is ended by the connector's own
+    /// **A dial that stalls is ended by the connector's own
     /// deadline**, so a dial that outlives its request (the pool handed the
     /// request another connection) cannot hold its task and socket while a
     /// peer accepts TCP and never answers the TLS handshake. The listener is
