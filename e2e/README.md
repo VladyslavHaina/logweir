@@ -317,7 +317,12 @@ Monday and on `workflow_dispatch`: one runner and one default stack per entry
 (`confluent`; `redpanda`; `objectstore,rustfs,versitygw` with the directory
 archive row; `registry`), with the engine built from the vendored source as CI
 builds it. It needs no secret. A new hand-run row that needs a profile goes in
-one entry's `rows`.
+one entry's `rows`. Its `operator-archives` job (PROD-00.3o) runs
+`scripts/archive-compat.sh`: `fixtures` fails if a published version's (`v*`
+tag's) archive fixtures are no longer in the tree, and `engines` seeds a fresh
+stack with each engine a published version pinned, puts the pin back and
+drills that archive with the checkout's engine. On a slot:
+`eval "$(e2e/compose/stack-env.sh --slot N)"; scripts/archive-compat.sh engines`.
 
 ## CI's e2e job: four shards
 

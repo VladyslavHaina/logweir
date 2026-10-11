@@ -58,7 +58,12 @@ runner and stack with the engine CI builds: Confluent Platform, Redpanda, the
 S3 servers beside MinIO (SeaweedFS, RustFS, versitygw), a directory archive
 and Karapace. It needs no secret. It has not yet run on GitHub: until its
 first run, those cells rest on their hand runs. The `acl`, `cluster3` and
-credential-code rows stay by hand.
+credential-code rows stay by hand. Its `operator-archives` job (PROD-00.3o,
+`scripts/archive-compat.sh`) seeds an archive with the engine every published
+Logweir version pinned, OSO's 0.21.0, and drills it with the shipped engine
+(`pass`, both readers, and the corrupted-segment control; by hand on compose
+slot 2, 2026-10-11), and fails if a published version's archive fixtures leave
+the tree.
 
 <!-- compatibility:begin -->
 

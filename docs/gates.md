@@ -123,7 +123,7 @@ historical runs passed.
 | `just smoke`, `just smoke-weirkeeper`, `just smoke-console` | Check locally built runner, controller and console images |
 | [helm-demo.yml](../.github/workflows/helm-demo.yml) | Manual Kubernetes/Helm deployment exercise on an isolated CI kind cluster, including scheduling, restore, verification and UI access |
 | [engine-matrix.yml](../.github/workflows/engine-matrix.yml) | Weekly or manual compatibility checks across engine versions, and the record-semantics and topic-identity suites on each supported Apache Kafka line with the shipped engine |
-| [compat-weekly.yml](../.github/workflows/compat-weekly.yml) | Weekly or manual: the compatibility contract's rows that need a compose profile CI's e2e job does not start (Confluent Platform, Redpanda, SeaweedFS, RustFS, versitygw, a directory archive, Karapace) |
+| [compat-weekly.yml](../.github/workflows/compat-weekly.yml) | Weekly or manual: the compatibility contract's rows that need a compose profile CI's e2e job does not start (Confluent Platform, Redpanda, SeaweedFS, RustFS, versitygw, a directory archive, Karapace), and archives written by the engines published versions pinned, drilled with the shipped engine |
 | [test-k8s-scram.py](../scripts/test-k8s-scram.py) | Authenticated backup/restore regression exercise restricted to `docker-desktop`; it also installs the shared lab, whose seed topics never expire (`retention.ms=-1`, checked offline by `python3 scripts/test_k8s_scram_seed.py`) |
 
 The standalone no-OSO workflow and duplicate kind demo workflow have been
