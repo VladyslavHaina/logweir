@@ -70,8 +70,9 @@ points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
 changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
 authorizations withdrawn), 74 (PROD-17.1, four parts v1 does not use are
-withdrawn) and 75 (PROD-17.1, surfaces withdrawn for the v1 cut) so far.
-Items continue the next entry's
+withdrawn), 75 (PROD-17.1, surfaces withdrawn for the v1 cut) and 76
+(PROD-17.1, the Helm chart is the only install) so far. Items continue the
+next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3469,6 +3470,59 @@ the console UI suite, where two console-mode rows replace legacy-mode ones
 the page; an older API serves the route and refuses as before, and the
 `logweir-ui` images already published stay pullable.
 
+#### 76. The Helm chart is the only install (PROD-17.1)
+
+**Changed.** The static `kubectl apply` bundle `logweir.yaml`, its renderer
+`scripts/render-install.sh`, the walks that applied it (`just k8s-demo`,
+`just laptop-demo`, `scripts/kind-demo.sh`, `scripts/demo-steps.sh`), the v0.1
+drill demo (`scripts/demo.sh`, `scripts/demo-approve.sh`) and quickstart Paths 2
+and 4 are withdrawn (OD-12: v1 installs one way). The bundle had no signing
+identity, console or approval key, so it could not produce v1's evidence or
+console approvals. `just mvp-demo` and `scripts/helm-demo.sh` stay. The
+bundle's three checks moved into `scripts/check-chart.sh`: the runner image
+ships `logweir-retention`, the console principal's grants are the adapter's
+both ways, and only the two allowed holders may create a `TrustPolicy`.
+The kustomize `config/` tree goes with it: `config/manager`, `config/rbac`,
+`config/overlays` and the `config/crd` copy. `charts/logweir/crds/` is the one
+CRD copy (`just crds` writes it, `just crds-check` holds it to the emitter),
+the chart's roles carry every grant `config/rbac` did (compared rule for rule,
+by default and in shared mode, before the cut), and the two per-namespace
+ServiceAccount fragments moved to `config/samples/`.
+**Do:** nothing on a chart install. An author-only install from
+`config/overlays/local-images` uses
+`-f charts/logweir/examples/author-only.values.yaml`; a script that applied
+`config/rbac/backup-runner-serviceaccount.yaml` or
+`retention-serviceaccount.yaml` applies them from `config/samples/`. An
+install made with `kubectl apply -f logweir.yaml` keeps running, with no
+newer bundle to apply; move it to the chart. Its CRDs, custom resources, namespace and Secrets stay. Remove the
+bundle's control plane, then install the chart into the same namespace
+([install.md](install.md) (c); `identity.enabled=false` keeps the signer you
+provisioned):
+
+```bash
+kubectl --context <ctx> -n logweir-system delete deployment,serviceaccount,networkpolicy \
+  -l app.kubernetes.io/name=logweir
+kubectl --context <ctx> delete clusterrole,clusterrolebinding -l app.kubernetes.io/name=logweir
+```
+
+A `weirkeeper-policy` ConfigMap you created by hand blocks `helm install`,
+because Helm will not adopt it. Set its settings as chart values (`checks.*`,
+`runs.*`, `engine.*`, `evidence.*`), then
+`kubectl --context <ctx> -n logweir-system delete configmap weirkeeper-policy`
+before installing.
+
+Your RoleBindings to the five human roles keep working: the chart recreates
+the roles under the same names. Helm skips CRDs that exist; apply a newer set
+by hand ([the chart README](../charts/logweir/README.md), *Upgrading the CRDs by
+hand*).
+[UNVERIFIED — the move from a bundle install to the chart has not been run; PROD-14.1's clean install runs the chart path only.]
+**Scope:** the chart gate (`just chart-check`) carries the three moved checks;
+`cargo test` rows that read only the bundle or the `config/` copies were
+removed with them, and the rows that read RBAC, the controller Deployment and
+the CRDs now read the chart's render and `charts/logweir/crds/`.
+**Rollback:** check out a tree before this item to get the bundle back; no
+image changes.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3482,6 +3536,9 @@ In addition to the next entry's six, in its order:
   again: a plan whose `notifications` block names a sink is refused.
 - **Before `helm upgrade`, remove any `ui` block from the values file**
   (item 75): the chart refuses `ui.*` by name. Use the console for the page.
+- **An install made with `kubectl apply -f logweir.yaml` moves to the chart**
+  (item 76); the two commands there remove the bundle's control plane and keep
+  everything else.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
@@ -3590,7 +3647,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74 and 75, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75 and 76, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3675,7 +3732,8 @@ changes only how the repository is tested and needs nothing; item 73
 removes a kind, a route and a flag, and leaves the `RehearsalSchedule` CRD for
 the operator to delete; item 74 withdraws what its own section lists; item 75
 changes the product API, the console, the chart and the published image set,
-and needs any `ui` block removed from values files first. To roll back to
+and needs any `ui` block removed from values files first; item 76 changes no image, and a bundle
+install moves to the chart once. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

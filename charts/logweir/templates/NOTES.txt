@@ -1,6 +1,6 @@
 Logweir {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
-INSTALLED (the control plane, the same objects logweir.yaml ships):
+INSTALLED (the control plane):
   * the thirteen CustomResourceDefinitions under logweir.dev/v1alpha1 —
     installed ONCE from crds/ and never upgraded by Helm; the README says how
     to upgrade them by hand (`kubectl apply --server-side --force-conflicts`)

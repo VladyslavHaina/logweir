@@ -1461,7 +1461,7 @@ fn view_entry(id: &str, age_days: i64) -> Value {
 /// THE PREFIX IS THE POINT, AND ITS ABSENCE WAS A LIVE DEFECT. This helper used
 /// to return `catalog_view::page_digest`'s bare hex, which
 /// `catalog_view::seal` never writes and the CRD does not document
-/// (`config/crd/recoverycatalogs.yaml`: "`sha256:<lowercase hex>` over its
+/// (`charts/logweir/crds/recoverycatalogs.yaml`: "`sha256:<lowercase hex>` over its
 /// entry lines"). Every route table below therefore published a spelling no
 /// catalog produces, the positive path was green in CI and red in every
 /// cluster, and RET-DIGEST-PREFIX — `Evaluated=False/ViewUnreadable` for every
@@ -2006,7 +2006,7 @@ fn routes_publishing_digest(entries: &[Value], sha256: &str) -> Vec<Route> {
 
 /// **RET-DIGEST-PREFIX.** A page whose published digest carries the `sha256:`
 /// prefix — which is the ONLY spelling `catalog_view::seal` writes and the only
-/// one `config/crd/recoverycatalogs.yaml` documents — is read, not refused.
+/// one `charts/logweir/crds/recoverycatalogs.yaml` documents — is read, not refused.
 ///
 /// WHY THIS ROW EXISTS AS ITS OWN TEST when `happy_routes` already publishes
 /// that spelling: the fixture can be changed back by accident, and this row
@@ -8178,7 +8178,7 @@ async fn fx22_a_truncated_policy_writes_nothing_once_settled() {
 #[tokio::test]
 async fn fx22_a_small_keep_rule_writes_a_kept_list_inside_the_crds_bound() {
     let crd: serde_yaml::Value = serde_yaml::from_str(
-        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+        &std::fs::read_to_string(repo_root().join("charts/logweir/crds/retentionpolicies.yaml"))
             .expect("the generated CRD"),
     )
     .expect("YAML");
@@ -8207,7 +8207,7 @@ async fn fx22_a_small_keep_rule_writes_a_kept_list_inside_the_crds_bound() {
 
 /// What a `RetentionPolicy` CRD from BEFORE FX-22 knows under
 /// `status.lastEvaluation`: the ten members of the merge base's
-/// `config/crd/retentionpolicies.yaml` (`86a8688b`), WRITTEN OUT.
+/// `charts/logweir/crds/retentionpolicies.yaml` (`86a8688b`), WRITTEN OUT.
 ///
 /// A LITERAL LIST AND NOT `ctrl::ADDITIVE_EVALUATION_FIELDS` (FX-22 review
 /// M3). The skew row models "what an older API server stores" with this
@@ -8256,7 +8256,7 @@ fn fx22_pruned(mut status: Value) -> Value {
 #[test]
 fn fx22_the_skew_list_is_what_an_older_crd_does_not_know() {
     let crd: serde_yaml::Value = serde_yaml::from_str(
-        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+        &std::fs::read_to_string(repo_root().join("charts/logweir/crds/retentionpolicies.yaml"))
             .expect("the generated CRD"),
     )
     .expect("YAML");
@@ -9349,7 +9349,7 @@ fn fx22_the_ceiling_remedy_names_a_number_only_when_the_field_can_hold_it() {
     );
     // The limit in the message is the CRD's own.
     let crd: serde_yaml::Value = serde_yaml::from_str(
-        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+        &std::fs::read_to_string(repo_root().join("charts/logweir/crds/retentionpolicies.yaml"))
             .expect("the generated CRD"),
     )
     .expect("YAML");
@@ -9633,7 +9633,7 @@ async fn fx22_the_shared_fixture_is_what_the_controller_writes() {
 /// The generated CRD's schema for `RetentionPolicy.status`.
 fn fx39_status_schema() -> Value {
     let crd: serde_yaml::Value = serde_yaml::from_str(
-        &std::fs::read_to_string(repo_root().join("config/crd/retentionpolicies.yaml"))
+        &std::fs::read_to_string(repo_root().join("charts/logweir/crds/retentionpolicies.yaml"))
             .expect("the generated CRD"),
     )
     .expect("YAML");

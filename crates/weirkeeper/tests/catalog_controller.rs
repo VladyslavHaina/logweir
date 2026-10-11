@@ -1511,7 +1511,7 @@ fn the_crd_refuses_a_cadence_below_the_floor() {
     );
     let crd = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/crd/recoverycatalogs.yaml"),
+            .join("../../charts/logweir/crds/recoverycatalogs.yaml"),
     )
     .expect("the generated CRD is on disk");
     assert!(

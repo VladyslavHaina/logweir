@@ -1,6 +1,6 @@
 //! The properties of every kind, read off the CHECKED-IN CRD YAML.
 //!
-//! WHY THESE READ FILES RATHER THAN CALL CODE. What ships is `config/crd/*.yaml`
+//! WHY THESE READ FILES RATHER THAN CALL CODE. What ships is `charts/logweir/crds/*.yaml`
 //! — that is what `kubectl apply` consumes, what the UI's forms are written
 //! against, and what Tasks 16–24 read. A test over the Rust types would pass
 //! while the checked-in YAML said something else, which is exactly the failure
@@ -43,7 +43,7 @@ fn repo_root() -> PathBuf {
 
 /// The directory the checked-in CRDs live in.
 fn crd_dir() -> PathBuf {
-    repo_root().join("config/crd")
+    repo_root().join("charts/logweir/crds")
 }
 
 /// Every file, in the order [`weirkeeper::crds::KINDS`] names their kinds.
@@ -247,30 +247,15 @@ fn the_group_is_logweir_dev_v1alpha1() {
 /// arrives without an amendment is a red test rather than a new CRD file.
 #[test]
 fn the_kind_list_is_exactly_the_adr() {
-    // READ EVERY FILE IN `config/crd/`, NOT THE SIX THIS TEST NAMES. A list
-    // built from `FILES` could not see an UNLISTED kind at all — the emitted
-    // set would be compared against itself and the forbidden-name loop below
-    // would have nothing to look at. Reading the directory is what makes a
-    // `Drill` CRD someone added and emitted fail on its own name.
-    //
-    // ONE EXACT FILENAME IS SKIPPED, AND IT IS NOT A PATTERN (Task 21).
-    // `config/crd/kustomization.yaml` is the kustomize base that lists the
-    // CRDs by name, and it is a `kustomize.config.k8s.io/v1beta1 Kustomization`
-    // rather than a `CustomResourceDefinition`. It has to live in this
-    // directory: kustomize only recognises a base by a file of that exact name
-    // inside it, and `config/overlays/local-images` can name a sibling
-    // DIRECTORY but not a bare file from outside its own root. Skipping it by
-    // its literal name leaves the property this test asserts untouched — a
-    // seventh CRD file still fails here, on its own name — and adding a second
-    // skip would be a visible diff on this line.
-    const NOT_A_CRD: [&str; 1] = ["kustomization.yaml"];
-    let is_crd_file = |p: &PathBuf| -> bool {
-        p.extension().is_some_and(|x| x == "yaml")
-            && !NOT_A_CRD.contains(&p.file_name().and_then(|n| n.to_str()).unwrap_or_default())
-    };
+    // READ EVERY FILE IN `charts/logweir/crds/`, NOT THE SIX THIS TEST NAMES.
+    // A list built from `FILES` could not see an UNLISTED kind at all — the
+    // emitted set would be compared against itself and the forbidden-name loop
+    // below would have nothing to look at. Reading the directory is what makes
+    // a `Drill` CRD someone added and emitted fail on its own name.
+    let is_crd_file = |p: &PathBuf| -> bool { p.extension().is_some_and(|x| x == "yaml") };
     let dir = crd_dir();
     let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("config/crd is readable")
+        .expect("charts/logweir/crds is readable")
         .map(|e| e.expect("an entry").path())
         .filter(is_crd_file)
         .collect();
@@ -291,7 +276,7 @@ fn the_kind_list_is_exactly_the_adr() {
     assert_eq!(
         kinds.len(),
         weirkeeper::crds::KINDS.len(),
-        "config/crd holds {} kinds, not the {} ADR 0008 records: {kinds:?}",
+        "charts/logweir/crds holds {} kinds, not the {} ADR 0008 records: {kinds:?}",
         kinds.len(),
         weirkeeper::crds::KINDS.len()
     );
@@ -354,41 +339,21 @@ fn the_kind_list_is_exactly_the_adr() {
     );
 
     let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-        .expect("config/crd is readable")
+        .expect("charts/logweir/crds is readable")
         .map(|e| {
             e.expect("an entry")
                 .file_name()
                 .to_string_lossy()
                 .to_string()
         })
-        .filter(|n| !NOT_A_CRD.contains(&n.as_str()))
         .collect();
     on_disk.sort();
     let mut want: Vec<String> = FILES.iter().map(|f| f.to_string()).collect();
     want.sort();
     assert_eq!(
         on_disk, want,
-        "config/crd holds exactly the CRD files `FILES` names and no more (the one kustomize \
-         base named in NOT_A_CRD aside) — a stray file here is a kind someone applied"
-    );
-
-    // AND THE KUSTOMIZE BASE LISTS EVERY ONE OF THEM. `kustomize` has no
-    // directory wildcard, so a file that exists here but is missing from
-    // `resources:` never reaches `logweir.yaml` — the install would create a
-    // controller for a kind the cluster cannot store.
-    let kustomization = std::fs::read_to_string(dir.join("kustomization.yaml"))
-        .expect("config/crd/kustomization.yaml is readable");
-    let listed: Vec<String> = kustomization
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("- "))
-        .map(str::to_string)
-        .collect();
-    let mut listed_sorted = listed.clone();
-    listed_sorted.sort();
-    assert_eq!(
-        listed_sorted, want,
-        "config/crd/kustomization.yaml must list every CRD file by name; kustomize has no \
-         directory wildcard, so an unlisted file is a kind `logweir.yaml` never installs"
+        "charts/logweir/crds holds exactly the CRD files `FILES` names and no more — a stray \
+         file here is a kind someone applied"
     );
 }
 
@@ -406,7 +371,7 @@ fn no_vendor_crd_group_is_named_anywhere() {
     let scanned = [
         root.join("crates/weirkeeper/src"),
         root.join("crates/weirkeeper/examples"),
-        root.join("config/crd"),
+        root.join("charts/logweir/crds"),
     ];
     let needles = ["kafka.oso.sh", "kafkabackup.com", "osodevops/"];
     let mut hits = Vec::new();
@@ -447,17 +412,17 @@ fn no_vendor_crd_group_is_named_anywhere() {
 // a dropped printer column or a dropped `subresources.status` ships silently.
 //
 // So these three read `render_all()` — the renderer's own output, independent
-// of `config/crd/` — and compare it against a LITERAL copied from
+// of `charts/logweir/crds/` — and compare it against a LITERAL copied from
 // `task-15b-brief.md`'s Produces table. The two halves are complementary and
 // both are needed: the drift gate
 // (`the_checked_in_crds_are_what_the_emitter_renders`) catches a hand edit to
-// `config/crd/` with no re-render, and these catch an emitter edit WITH one.
+// `charts/logweir/crds/` with no re-render, and these catch an emitter edit WITH one.
 
 /// Every kind as the RENDERER produces it, parsed: `(kind, file_name, doc)`.
 ///
 /// `render_all` is the single renderer the `emit_crds` example and the drift
 /// test both go through, so this is exactly the document that would be written
-/// to `config/crd/` by the next `just crds` — which is the point: a test that
+/// to `charts/logweir/crds/` by the next `just crds` — which is the point: a test that
 /// re-read the files after that command could not see the change.
 fn rendered() -> Vec<(&'static str, &'static str, Value)> {
     weirkeeper::crds::render_all()
@@ -504,7 +469,7 @@ type Column = (&'static str, &'static str, &'static str);
 /// are required to keep, so a column that survives a RENAME of the field it
 /// reads fails here too.
 ///
-/// Reading these back out of `config/crd/` — or out of the derive — would make
+/// Reading these back out of `charts/logweir/crds/` — or out of the derive — would make
 /// the expectation a copy of the thing under test, which is exactly the hole
 /// mutant MA walked through: it dropped `REASON` from `Restore`, ran
 /// `just crds`, and 16 of 16 tests passed with all six CI diffs green.
@@ -1147,7 +1112,7 @@ fn every_spec_carries_exactly_its_declared_rules() {
 /// Review finding F1 planted two mutants through that hole. Deleting
 /// `restore::EXACTLY_ONE_AUTHORIZATION_RULE` from `restore::SPEC_RULES` and
 /// running `just crds` left all forty `crd_shape` tests green with
-/// `config/crd/restores.yaml` no longer carrying the rule — and that rule is
+/// `charts/logweir/crds/restores.yaml` no longer carrying the rule — and that rule is
 /// the ONLY thing making an unauthorised `Restore` unrepresentable, in the same
 /// change that made `approvalRef` optional. Deleting
 /// `backup::DESTINATION_SENTINEL_RULE` survived the whole 424-test suite.
@@ -4463,8 +4428,8 @@ fn the_crds_recipe_is_in_the_justfile() {
         "the `crds` recipe must invoke the `emit_crds` example. Body was:\n{body}"
     );
     assert!(
-        body.contains("config/crd"),
-        "the `crds` recipe must write into `config/crd`, which is what CI diffs. Body \
+        body.contains("charts/logweir/crds"),
+        "the `crds` recipe must write into `charts/logweir/crds`, which is what CI diffs. Body \
          was:\n{body}"
     );
     // The schema line is untouched, and stays a sibling rather than a
@@ -4496,7 +4461,7 @@ fn the_ci_workflow_carries_the_crd_drift_arm() {
 ///
 /// The CI arm re-renders with `cargo run` and `diff -u`s the files, which is
 /// the shipped gate. This test asserts the same property with no subprocess
-/// and no shell, so a hand edit to `config/crd/` fails `cargo test` on a
+/// and no shell, so a hand edit to `charts/logweir/crds/` fails `cargo test` on a
 /// laptop too — `ci.yml` mirrors `just gate` (green since 2026-09-12), and a
 /// gate that lives only there runs only on a push; this one runs everywhere.
 #[test]

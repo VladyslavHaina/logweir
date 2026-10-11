@@ -103,18 +103,17 @@ just gate
 timings and workflow evidence. The gate compiles the workspace in debug and
 release profiles; individual test commands are useful during development.
 
-Eight recipes run separately because they need Docker, Kafka or Kubernetes:
-`e2e`, `smoke`, `smoke-weirkeeper`, `mvp-demo`, `k8s-demo`, `laptop-demo`,
-`pitr`, and `helm-demo`. Run those relevant to your change. Release readiness
+Six recipes run separately because they need Docker, Kafka or Kubernetes:
+`e2e`, `smoke`, `smoke-weirkeeper`, `mvp-demo`, `pitr`, and `helm-demo`. Run those relevant to your change. Release readiness
 is tracked in [the release checklist](docs/tag1-checklist.md).
 
-Changes to `charts/logweir/`, `config/crd/` or `ui/` need `just chart-check`.
-The chart's CRDs and shipped UI assets are intentionally copied into the chart
-so it can be distributed independently. Keep those copies byte-identical to
-the canonical files and commit regenerated `charts/logweir/rendered/` output.
-Do not delete them as duplicate files. Likewise, the generated schemas,
-`logweir.yaml`, signed test fixtures and dependency notices are checked inputs
-to distribution or regression tests.
+Changes to `charts/logweir/` or `ui/` need `just chart-check`; a CRD change
+also needs `just crds` and `just crds-check`.
+`charts/logweir/crds/` is the one CRD copy (`just crds` writes it,
+`just crds-check` holds it to the emitter); commit regenerated
+`charts/logweir/rendered/` output. The generated schemas, signed test
+fixtures and dependency notices are checked inputs to distribution or
+regression tests.
 
 ## Before you open a pull request
 

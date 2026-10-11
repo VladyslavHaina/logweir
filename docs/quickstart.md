@@ -9,8 +9,7 @@ reference that owns the detail; this page does not restate those references.
 
 The CLI and the local stack come after it, as
 [*Demos and the standalone CLI*](#demos-and-the-standalone-cli): the product
-backup/restore demo, the scratch-drill demo, a drill against your own archive
-and the laptop Kubernetes walkthrough. To interpret evidence someone gives you,
+backup/restore demo and a drill against your own archive. To interpret evidence someone gives you,
 use [verify-a-scorecard.md](verify-a-scorecard.md). What changed since the last
 release, and what an upgrade requires, is [release-notes.md](release-notes.md).
 
@@ -351,8 +350,10 @@ NetworkPolicy-enforcing CNI have not been run at all
 
 ## Demos and the standalone CLI
 
-The four paths below run the CLI and the local stack. They are demos and
+The two paths below run the CLI and the local stack. They are demos and
 drills, not an installation: nothing in them is the supported path above.
+Paths 2 and 4, the v0.1 drill demo and the `kubectl apply` laptop walk, were
+withdrawn in v1 ([release notes](release-notes.md), item 76).
 
 ---
 
@@ -387,45 +388,6 @@ gitignored `.demo/mvp/`; the script removes its own archive prefix on exit.
 
 The demo generates separate approval and signing keys. They demonstrate
 integrity, not organizational provenance; see [keys.md](keys.md).
-
----
-
-## Path 2: the drill demo
-
-```bash
-./scripts/demo.sh
-```
-
-This demo uses a harness-created `kafka-backup` archive and restores it into a
-marker-protected scratch cluster. Path 1 instead exercises Logweir's own
-`backup run` and a `newTopic` point-in-time restore.
-
-Needs `docker`, `cargo`, `openssl`, `shasum`, and `python3` with the
-`cryptography` package. All five are checked before anything starts, so a missing one costs you
-a second rather than four minutes. Override the interpreter with
-`LOGWEIR_PYTHON=/path/to/python3`.
-
-Tear down with `just e2e-down`.
-
-**It leaves your working tree clean.** Everything the demo writes goes to
-`.demo/` and `.engine/`, both gitignored, and the script checks `git status`
-itself at the end and tells you the result.
-
-The one thing worth knowing: `scripts/e2e-seed.sh` has a second job besides
-seeding — by default it also refreshes two **checked-in** fixtures
-(`e2e/fixtures/manifests/0.21.json` and
-`e2e/fixtures/segments/upstream-0.21.0.kbak`) from the archive it just made.
-Those bytes are not reproducible between runs, so refreshing them shows up as
-two modified tracked files. That is a **maintainer** action — `just e2e-seed` —
-and the demo opts out of it with `LOGWEIR_SEED_REFRESH_FIXTURES=0`. If you run
-`scripts/e2e-seed.sh` directly and see two modified fixtures, that is why; set
-the same variable to avoid it.
-
-What it proves, in order: the engine is digest-pinned and extractable; a real
-backup exists; the plan was approved by a **different key** than the one that
-signs the result; the drill ran every phase against a real broker and a real
-archive; and the scorecard verifies under **two independent verifiers**, one of
-which shares no code with Logweir.
 
 ---
 
@@ -663,41 +625,6 @@ shasum -a 256 scorecard.json
 
 A **missing** receipt means "no storage evidence was published for this run" —
 never "the upload was not create-only".
-
----
-
-## Path 4: `just laptop-demo` — the whole product on docker-desktop Kubernetes
-
-This walkthrough runs `weirkeeper`, custom resources and the local UI on a
-disposable docker-desktop installation. Prepare the two local images using
-[install.md](install.md)'s author-only path, then:
-
-```bash
-just e2e-up
-LOGWEIR_DEMO_NONINTERACTIVE=1 just laptop-demo; echo "rc=$?"
-```
-
-The script refuses a different context. Its shared twelve-step implementation
-is [scripts/demo-steps.sh](../scripts/demo-steps.sh): preflight, namespace and
-install checks, keys and Secrets, roster, Kafka reachability, scheduled backup,
-UI/API requests, Restore creation, out-of-band approval, terminal status and
-both independent verifiers. The noninteractive run exercises the request
-emitter; the browser half is a separate interactive pass:
-
-```bash
-LOGWEIR_DEMO_ONLY_STEP=10b ./scripts/laptop-demo.sh
-```
-
-The demo uses **author-only** images and a laptop MinIO endpoint. It validates
-the product flow, not public image availability. It writes `.demo/laptop/` and
-tears down its install, namespaces, archive prefix, temporary tags, proxy,
-keypairs and compose stack. Use a disposable environment.
-
-The recorded browser walkthrough is
-[e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md); CI behavior is documented
-in [kubernetes.md](kubernetes.md) §18. A `logweir-ui` field manager alone cannot
-prove a browser created an object; other API clients can set the same value.
-
 
 ---
 

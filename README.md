@@ -28,8 +28,7 @@ Python with `cryptography`. Output goes to the ignored `.demo/mvp/` directory.
 The generated demo keys prove integrity but have no independent provenance.
 
 [Quickstart](docs/quickstart.md) starts with the one supported setup-and-recovery
-path on Kubernetes, then covers the scratch-cluster drill demo and running
-against your own archive.
+path on Kubernetes, then covers running a drill against your own archive.
 [Verification](docs/verify-a-scorecard.md) explains what the signed result proves.
 
 ## Install
@@ -37,7 +36,7 @@ against your own archive.
 Kubernetes 1.29 or newer is required. The supported path is the published Helm
 chart with its managed installation identity: [quickstart](docs/quickstart.md),
 *The supported path*, then [the installation guide](docs/install.md) and
-[the chart reference](charts/logweir/README.md). The low-level manifests and
+[the chart reference](charts/logweir/README.md). The chart is the only install;
 locally built images remain in the installation guide.
 
 **What is published.** A push to `main` that changes something outside

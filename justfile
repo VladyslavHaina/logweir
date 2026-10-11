@@ -370,17 +370,11 @@ e2e:
 # too. Any CI job that calls this MUST NOT `git diff --exit-code` afterwards.
 # The committed fixtures are checked instead by the default (Docker-free) test
 # set — see crates/logweir-engine-oso/tests/kbak.rs.
-# `scripts/demo.sh` seeds with LOGWEIR_SEED_REFRESH_FIXTURES=0, which does
-# everything except the fixture refresh and leaves the tree clean — the
-# quickstart must not hand a stranger two modified tracked files. THIS recipe
-# is the maintainer form and refreshes them on purpose — on the DEFAULT stack
+# THIS recipe refreshes them on purpose — on the DEFAULT stack
 # only: on a slot (PROD-01.5) it never touches them, and refuses an explicit
 # LOGWEIR_SEED_REFRESH_FIXTURES=1, so parallel slots cannot race on them.
 e2e-seed:
     ./scripts/e2e-seed.sh
-
-demo:
-    ./scripts/demo.sh
 
 # Runs every `#[ignore]`d test in the workspace: the rows that need a stack,
 # a lab or a binary the default `cargo test` run does not have. CI does not
@@ -443,14 +437,16 @@ smoke: image
     bash scripts/check-image.sh logweir:check
     cargo test -p e2e --features e2e --test check_image -- --ignored --test-threads=1
 
-# Task 15b (chain J, slot 5). Regenerate the six checked-in CRDs.
+# Task 15b (chain J, slot 5). Regenerate the checked-in CRDs.
 #
 # THE SIBLING OF `schema`, ABOVE, AND FOR THE SAME REASON. A CRD change is a
-# FORMAT change: the six files under config/crd/ are what `kubectl apply`
-# consumes, what the UI's forms are written against and what Tasks 16-24 read,
+# FORMAT change: the files under charts/logweir/crds/ are what the chart
+# installs, what the UI's forms are written against and what Tasks 16-24 read,
 # so a change to one has to appear as a diff in a pull request rather than as a
-# surprise at apply time. `.github/workflows/ci.yml`'s third drift arm renders
-# into a temporary directory and `diff -u`s these files against it, beside the
+# surprise at apply time. They are the one copy (PROD-17.1 C6);
+# `config/crd/backups.yaml` is a symlink to one of them, kept because the
+# frozen two-reader parity row reads that path. `just crds-check` renders into
+# a temporary directory and `diff -u`s these files against it, beside the
 # scorecard-schema arm that has done the same job since Phase 1.
 #
 # DELIBERATELY NOT PART OF `lint`. This recipe WRITES the tracked files, and a
@@ -463,7 +459,7 @@ smoke: image
 # `crds` and `schema` stay independent: two formats, two gates, no dependency
 # edge between them.
 crds:
-    cargo run -p weirkeeper --example emit_crds -- --out config/crd
+    cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds
 
 # Compare all emitted CRDs without requiring a clean working tree.
 crds-check:
@@ -474,10 +470,10 @@ crds-check:
     trap 'rm -rf "$tmp"' EXIT
     cargo run --locked -p weirkeeper --example emit_crds -- --out "$tmp"
     for crd in "$tmp"/*.yaml; do
-      diff -u "config/crd/$(basename "$crd")" "$crd"
+      diff -u "charts/logweir/crds/$(basename "$crd")" "$crd"
     done
-    for crd in config/crd/*.yaml; do
-      [ "$(basename "$crd")" = kustomization.yaml ] || test -f "$tmp/$(basename "$crd")"
+    for crd in charts/logweir/crds/*.yaml; do
+      test -f "$tmp/$(basename "$crd")"
     done
 
 # Lint the chart and verify CRD copies, rendered manifests and image references.
@@ -524,12 +520,6 @@ pitr:
 #                (target.mode: newTopic, restore.point_in_time)
 #             -> scorecard verified by BOTH readers -> one summary line
 #
-# IT IS NOT `just demo`. `scripts/demo.sh` takes its archive from the HARNESS
-# (`scripts/e2e-seed.sh`, whose backup step is the pinned engine invoked
-# directly) and restores into a SCRATCH cluster at no point in time. This
-# recipe drives the PRODUCT's own `backup run` and its `newTopic` restore, and
-# it is the single command Phases B, C and D all cite as "the CLI path works".
-#
 # THIS RECIPE ASSUMES THE STACK IS ALREADY UP, exactly as `pitr` above does and
 # for the same reason: the compose stack is a shared resource with one owner at
 # a time (STANDING RULE 3), and a recipe that brought it down would pull it out
@@ -556,61 +546,6 @@ pitr:
 mvp-demo:
     cargo build -p logweir
     ./scripts/mvp-demo.sh
-# Task 21, chain J slot 14. The three install recipes — interface **I26**.
-#
-# `just apply-check` WAS TWO DIFFERENT JOBS UNDER ONE NAME, and it is split
-# into three (critique B M15). X-APPLY is "apply the file twice and read both
-# exit codes"; the missing-Secret check is "inspect a namespace and refuse";
-# and the second would make the first FAIL on a clean cluster — no Secrets yet
-# — which is precisely the state X-APPLY is defined against. They must never be
-# chained. `crates/logweir/tests/manifest_lint.rs`'s
-# `check_secrets_refuses_a_missing_secret` asserts they are not.
-
-# Regenerate `logweir.yaml` from `config/`.
-#
-# `scripts/render-install.sh` is the ONLY producer of that file. The checking
-# half is `./scripts/render-install.sh --check` (which re-renders into a temp
-# file and `diff -u`s) and, without a subprocess,
-# `crates/logweir/tests/manifest_lint.rs::install_yaml_has_no_drift`, which
-# compares the rendered documents against the source manifests value by value.
-# This recipe WRITES the tracked file and is therefore deliberately not part of
-# `lint` — the same arrangement `crds` has, and for the same reason: a gate that
-# rewrites the thing it is checking cannot fail.
-install-yaml:
-    ./scripts/render-install.sh
-
-# X-APPLY (spec §16 clause 1): apply the install file twice, reading both exit
-# codes DIRECTLY.
-#
-# TWICE IS THE TEST, NOT A RETRY. The first apply creates the CRDs; the second
-# is the one that would fail if the file contained a custom resource of a kind
-# the same file is still establishing, or if server-side apply disagreed with
-# itself about field ownership. A single green apply proves much less.
-#
-# `--server-side` IS NOT OPTIONAL: the six CRDs are large enough that a
-# client-side apply stores a `last-applied-configuration` annotation over the
-# 262144-byte metadata limit on some of them.
-#
-# WHAT THIS DOES AND DOES NOT PROVE. It proves `kubectl apply` exits 0. It does
-# NOT start a pod: the images are referenced by tag, no such image has been
-# pushed, and the Deployment's pod is expected to sit in `ImagePullBackOff`
-# until `release.yml` has run on a pushed tag (Global Constraint 37 —
-# `blocked: images not published`; no tag has been pushed, so that workflow has
-# never run). For an author-only local run use the overlay:
-#
-#     kubectl --context docker-desktop apply --server-side -k config/overlays/local-images
-#
-# NO PIPE ANYWHERE (STANDING RULE 20): `cmd | grep` reports grep's status, and
-# both of these exit codes are load-bearing.
-# THE CONTEXT IS THE DRIVER'S. `scripts/demo-steps.sh` exports
-# `LOGWEIR_KUBE_CONTEXT` (`kind-demo.sh` sets `kind-logweir`, `laptop-demo.sh`
-# sets `docker-desktop`); run by hand, unset, it is the laptop's cluster. STANDING
-# RULE 12 is satisfied by the context ALWAYS being passed. The literal here was
-# what failed the first CI run of the demo (2026-09-12): step 3 on kind asked
-# for a `docker-desktop` context the runner does not have.
-apply-install:
-    kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
-    kubectl --context "${LOGWEIR_KUBE_CONTEXT:-docker-desktop}" apply --server-side -f logweir.yaml
 
 # The pre-flight: refuse a namespace that is missing any of the four current
 # Secrets, naming the FIRST absent one.
@@ -792,87 +727,6 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
     fi
     echo "check-org-root: both images carry third_party/org-root.fingerprint at /etc/logweir/org-root.fingerprint."
 
-# Task 24, chain J slot 17. **PHASE B'S EXIT CRITERION**, scripted.
-#
-# One command from an empty docker-desktop cluster to a `Restore` object
-# carrying `phase: Succeeded`, `exitCode: 0`, `outcome: pass` and
-# `status.evidence.verification.result: Valid` with a `matchedKeyId` — plus a
-# `Backup` carrying `exitCode: 0` and the same `Valid`. Both verdicts are the
-# CONTROLLER's, computed in-cluster with the read-only `logweir-evidence-ro`
-# credential against the runner's public key on the cluster-scoped
-# `TrustRoster` named `default`.
-#
-# IT IS AUTHOR-ONLY (Global Constraint 37) and says so in its own header. Two
-# steps work only on the machine the images were built on: the `docker tag`
-# that makes the SHIPPED `docker.io/vladyslavhaina/<name>@sha256:…` references resolve
-# on this node (the kubelet keys on the WHOLE reference — plan erratum E19b),
-# and `config/overlays/k8s-demo/deployment-env-patch.yaml`, which points the
-# controller at this laptop's compose stack. "Published" still means a PULL
-# from a registry the author does not control, and the install file's digest
-# rows still read `blocked: images not published`.
-#
-# The legacy walkthrough runs lint before starting its compose stack.
-#
-# THE OBJECT STORE IS ADDRESSED AS `http://host.docker.internal:9000`
-# (critique B H20): the compose stack's MinIO already publishes `9000:9000`, so
-# no compose change is needed and STANDING RULE 15's one-owner rule is not
-# touched. The archive is `s3://kafka-backups/k8s-demo` and the bucket is
-# created with `mc` inside the compose network first, because `just e2e-down`
-# runs `down -v` and EMPTIES the MinIO volume (plan erratum E12g).
-#
-# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
-# script shells `logweir drill approve` from `target/debug/logweir`, and
-# nothing else in this recipe builds it.
-#
-#     just image && just image-weirkeeper     # once, if the images are absent
-#     just k8s-demo; echo "rc=$?"
-#
-# It cleans up after itself from a `trap`: `kubectl delete -f logweir.yaml`,
-# `kubectl delete ns logweir-system logweir-t24`, the two author-only image
-# tags, the archive prefix, and `just e2e-down` — each with its rc printed.
-k8s-demo:
-    cargo build -p logweir
-    ./scripts/k8s-demo.sh
-
-# Task 28 (slot 21). PHASE C's EXIT CRITERION, and install gate X-UIWRITE.
-#
-# The walk spec §1 calls "the whole acceptance surface": a stranger clones,
-# applies ONE file to docker-desktop Kubernetes and gets CRDs, RBAC and the
-# controller; the UI is static files served by `kubectl proxy --www=`; against
-# a plain broker from the compose stack they create a `BackupSchedule`, watch a
-# `Backup` produce a signed receipt, run a drill (a `Restore` with a `newTopic`
-# target) and read a signed scorecard with measured RTO and RPO -- NEVER TYPING
-# A PRIVATE KEY INTO A BROWSER. Twelve numbered steps; the transcript of the
-# run that proved it is `e2e/k8s/laptop-demo.md`.
-#
-# THE COMPOSE STACK IS A PRECONDITION, not a step: spec §2's Demo 1 opens with
-# `docker compose … up`, so bring it up first and let the demo's teardown take
-# it down (STANDING RULE 3).
-#
-#     just e2e-up
-#     LOGWEIR_DEMO_NONINTERACTIVE=1 just laptop-demo; echo "rc=$?"
-#
-# X-UIWRITE HAS TWO HALVES AND THE SECOND ONE IS THE GATE. Spec §10 asks for a
-# `create` of a `Restore` FROM THE PAGE returning 201, and `curl` is not the
-# page. Step 10(a) is the scripted half; step 10(b) is performed by hand from
-# the wizard's final step, and the created object's `metadata.managedFields`
-# names `logweir-ui` (`ui/api.js`'s `?fieldManager=logweir-ui`, interface
-# register I23) -- which is the evidence, and which neither `kubectl` nor a
-# browser User-Agent can produce. With the proxy still up from the first pass:
-#
-#     LOGWEIR_DEMO_ONLY_STEP=10b ./scripts/laptop-demo.sh
-#
-# `cargo build -p logweir` FIRST, and it is not optional (plan erratum E9): the
-# script shells `logweir drill approve` and `logweir drill verify` from
-# `target/debug/logweir`, and nothing else in this recipe builds it.
-#
-# It cleans up after itself from a `trap`: `kubectl delete -f logweir.yaml`,
-# `kubectl delete ns logweir-system logweir-t28`, the two author-only image
-# tags, the archive prefix, the proxy, the keypairs it minted, and `just
-# e2e-down` -- each with its rc printed.
-laptop-demo:
-    cargo build -p logweir
-    ./scripts/laptop-demo.sh
 
 # Task 35: THE CHART, WALKED END TO END ON A REAL CLUSTER. The release must be
 # installed first with all three optional components on (the README's

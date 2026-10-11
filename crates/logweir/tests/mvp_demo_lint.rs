@@ -111,18 +111,17 @@ fn mvp_demo_masks_no_exit_code() {
     exit_code_lint::assert_no_masked_exit_code("scripts/mvp-demo.sh", &script);
 }
 
-/// **The other two scripts this task touches nothing of, checked anyway.**
+/// **A script this task touches nothing of, checked anyway.**
 ///
 /// Not in the brief, and cheap: the tokeniser is a repository-wide rule, and
-/// running it over the two scripts that were already here proves the helper
-/// works on text nobody wrote for it. Both predate I29, so a finding would be
-/// a real one — `scripts/demo.sh` and `scripts/e2e-seed.sh` pipe freely, but
-/// never on a line whose first word is one of the five.
+/// running it over a script that was already here proves the helper works on
+/// text nobody wrote for it. It predates I29, so a finding would be a real one
+/// — `scripts/e2e-seed.sh` pipes freely, but never on a line whose first word
+/// is one of the five.
 #[test]
 fn the_existing_demo_scripts_mask_no_exit_code_either() {
-    for rel in ["scripts/demo.sh", "scripts/e2e-seed.sh"] {
-        exit_code_lint::assert_no_masked_exit_code(rel, &read(rel));
-    }
+    let rel = "scripts/e2e-seed.sh";
+    exit_code_lint::assert_no_masked_exit_code(rel, &read(rel));
 }
 
 /// **The reusable half (I29), driven over inline fixtures.**

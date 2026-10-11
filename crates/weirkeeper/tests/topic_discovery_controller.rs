@@ -3596,7 +3596,7 @@ fn the_reconciler_names_no_grant_this_role_does_not_hold() {
     ] {
         assert!(
             !code.contains(forbidden),
-            "controllers/topic_discovery.rs names `{forbidden}`, which config/rbac/role.yaml \
+            "controllers/topic_discovery.rs names `{forbidden}`, which the chart's ClusterRole \
              grants nothing for"
         );
     }

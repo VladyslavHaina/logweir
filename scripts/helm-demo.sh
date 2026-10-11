@@ -455,16 +455,14 @@ echo "    rc=$rc  (kubectl rollout status deploy/weirkeeper, after the evidence 
 [ "$rc" -eq 0 ] || die "the controller did not come back (rc=$rc)"
 
 # The runner ServiceAccount, in the namespace that runs Jobs (docs/install.md
-# step 4). The NetworkPolicy is NOT applied here: the shipped file carries
-# `namespace: logweir-system` in its metadata, so `kubectl -n <ns> apply -f`
-# of it refuses with a namespace mismatch (measured on this walk's first run,
-# 2026-09-12) — the laptop demo does not apply it into its namespace either,
-# and neither cluster this walk runs on enforces NetworkPolicy.
+# step 4): the walk's namespace is not in identity.authorizedRunnerNamespaces.
+# No NetworkPolicy is applied here; neither cluster this walk runs on enforces
+# one.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" apply -f config/rbac/backup-runner-serviceaccount.yaml > "$OUT/runner-sa.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" apply -f config/samples/backup-runner-serviceaccount.yaml > "$OUT/runner-sa.log" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl apply -f config/rbac/backup-runner-serviceaccount.yaml -n $NS)"
+echo "    rc=$rc  (kubectl apply -f config/samples/backup-runner-serviceaccount.yaml -n $NS)"
 [ "$rc" -eq 0 ] || die "could not create the runner ServiceAccount (rc=$rc)"
 
 # `just check-secrets` reads the fifth Secret from the literal `logweir-system`

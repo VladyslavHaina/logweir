@@ -18,7 +18,7 @@
 # ServiceAccount must exist in THIS namespace before this object is useful:
 #
 #     kubectl --context docker-desktop -n <namespace> \
-#       apply -f config/rbac/backup-runner-serviceaccount.yaml
+#       apply -f config/samples/backup-runner-serviceaccount.yaml
 ---
 apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster

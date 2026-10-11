@@ -1113,7 +1113,7 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
     // an author types beside the signed bytes. It can say anything while the
     // document says something else, which is the whole reason check 7 on the
     // Approval side and `admit` on this side both RECOMPUTE.
-    let shipped = workspace_yaml("config/crd/approvals.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/approvals.yaml");
     let status_props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"];
     assert!(
@@ -5021,7 +5021,7 @@ async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
 
 /// **Interface I21.** `crds/restore.rs`'s `outcome` field description states
 /// that green requires verification `Valid` and outcome `pass`, and
-/// `config/crd/restores.yaml` declares `status.outcome`.
+/// `charts/logweir/crds/restores.yaml` declares `status.outcome`.
 #[test]
 fn the_restore_green_rule_reads_the_outcome() {
     let doc = restore_crd_field_description(&["status", "outcome"]);
@@ -5034,12 +5034,12 @@ fn the_restore_green_rule_reads_the_outcome() {
     }
 
     // And the SHIPPED file declares it, not just the emitter.
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"];
     assert!(
         props.get("outcome").is_some(),
-        "config/crd/restores.yaml declares status.outcome — the field the badge reads"
+        "charts/logweir/crds/restores.yaml declares status.outcome — the field the badge reads"
     );
     assert!(
         props.get("objectives").is_some() && props.get("integrity").is_some(),
@@ -5082,7 +5082,7 @@ fn the_restore_green_rule_reads_the_outcome() {
 #[tokio::test]
 async fn every_status_write_sets_the_scalar_reason() {
     // ---- ARM 1: the column, and the field it names ------------------------
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let columns = shipped["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Restore CRD declares printer columns");
@@ -5115,8 +5115,8 @@ async fn every_status_write_sets_the_scalar_reason() {
         "this fix ADDS a field; it does not take GC11's vocabulary away"
     );
     // `Backup` IS UNAFFECTED, and this says so mechanically.
-    let backup_columns: Vec<String> = workspace_yaml("config/crd/backups.yaml")["spec"]["versions"]
-        [0]["additionalPrinterColumns"]
+    let backup_columns: Vec<String> = workspace_yaml("charts/logweir/crds/backups.yaml")["spec"]
+        ["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Backup CRD declares printer columns")
         .iter()
@@ -5320,7 +5320,7 @@ async fn every_status_write_sets_the_scalar_reason() {
 /// The printer columns are the contract.
 #[test]
 fn the_restore_printer_columns_are_the_contract() {
-    let shipped = workspace_yaml("config/crd/restores.yaml");
+    let shipped = workspace_yaml("charts/logweir/crds/restores.yaml");
     let columns: Vec<String> = shipped["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_sequence()
         .expect("the Restore CRD declares printer columns")

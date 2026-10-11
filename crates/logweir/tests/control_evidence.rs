@@ -467,7 +467,7 @@ impl Doc {
             Doc::StandingAuthorization => {
                 "stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"
             }
-            Doc::Restore => "../config/crd/restores.yaml",
+            Doc::Restore => "../charts/logweir/crds/restores.yaml",
         }
     }
 
@@ -535,7 +535,10 @@ impl Fields {
             Doc::CatalogPoint,
             json_schema_paths(&read_json(&newest_schema("catalog-point"))),
         );
-        sets.insert(Doc::Restore, crd_paths(&read("config/crd/restores.yaml")));
+        sets.insert(
+            Doc::Restore,
+            crd_paths(&read("charts/logweir/crds/restores.yaml")),
+        );
         sets.insert(
             Doc::PutReceipt,
             put_receipt_paths(&read("docs/verify-a-scorecard.md")),
@@ -1405,7 +1408,7 @@ fn a_made_up_or_misattributed_field_is_refused() {
         ),
         (
             "| A restore cited through the operator guide. | [Restore](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here): `status.exitCode` |",
-            "a Restore citation must link its definition `../config/crd/restores.yaml`",
+            "a Restore citation must link its definition `../charts/logweir/crds/restores.yaml`",
         ),
     ] {
         let mutated = with_extra_row(&page, row);

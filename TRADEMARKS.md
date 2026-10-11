@@ -43,7 +43,7 @@ mark — is a use in commerce and **is gated on the clearance opinion above**.
 
 Images publish to Docker Hub: `docker.io/vladyslavhaina/logweir` (the runner)
 and `docker.io/vladyslavhaina/weirkeeper` (the controller). **Both are literals,
-not placeholders.** A shipped `logweir.yaml` carrying
+not placeholders.** A shipped manifest carrying
 `docker.io/<namespace>/logweir@sha256:…` is not applyable, and the one clause
 that says a stranger can install Logweir would fail on exactly the condition a
 placeholder was meant to protect against.

@@ -177,8 +177,8 @@ change. On an older API server the rules are dropped rather than rejected,
 and a dropped immutability rule is worse than no rule: the object would accept
 an edit after approval and nothing would say so.
 
-The CRDs are checked in at [../config/crd/](../config/crd/) and regenerated
-with `just crds`; CI re-renders them and diffs the result, so a schema change
+The CRDs are checked in at [../charts/logweir/crds/](../charts/logweir/crds/) and
+regenerated with `just crds`; CI re-renders them and diffs the result, so a schema change
 arrives as a reviewable diff. Do not hand-edit those files.
 
 | Kind | Scope | What it is |
@@ -840,8 +840,8 @@ same reason.
   two different places, and the second one is an object that is not there. The
   refusal names which of the two states it is in: no
   `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` on the
-  Deployment at all (a hand-wired controller; the chart and `logweir.yaml` both
-  set the pair), or the named `ConfigMap` simply absent.
+  Deployment at all (a hand-wired controller; the chart sets the pair), or the
+  named `ConfigMap` simply absent.
 - **A `SecretKeys`, `WorkloadIdentity` or `ArchiveReadGrant` `evidenceRead` is
   read by an evidence-fetch check Job, never by the controller** (D2 §3.8
   option C, the default). The controller holds no verb on `secrets` and still
@@ -1159,9 +1159,8 @@ is claimed.
 
 **`attestedComplete` needs an administrator's attestation, and nothing else can
 produce it.** The controller reads the installation policy through
-`LOGWEIR_POLICY_CONFIGMAP` or `LOGWEIR_INSTALLATION_NAMESPACE`; the chart and
-`logweir.yaml` both set them (§22.2), and the chart renders `weirkeeper-policy`
-itself. With no attestation in that document every honest observation is
+`LOGWEIR_POLICY_CONFIGMAP` or `LOGWEIR_INSTALLATION_NAMESPACE`; the chart
+sets them (§22.2) and renders `weirkeeper-policy` itself. With no attestation in that document every honest observation is
 `unknown` or `limited`. [UNVERIFIED — an attestation matching a live broker has not been run on docker-desktop; the matching rules are unit-tested only.]
 
 A `TopicDiscovery` is a **request**, not a cache. `spec.request` is immutable, so
@@ -2149,7 +2148,7 @@ sync has no component label yet (`controllers/recovery_catalog.rs`).
 `protectionpolicies/status` — and widens one that already existed: `get` joins
 `list`/`watch` on `recoverycatalogs`, for the ONE catalog a policy names
 (narrower than the cluster-wide `list` on `configmaps` the alternative would
-need, which `config/rbac/role.yaml` refuses by name). No `get` on
+need, which the chart's `weirkeeper` ClusterRole refuses). No `get` on
 `protectionpolicies` itself — the reconciler never re-reads a policy the watcher
 handed it — no verb on `secrets`, and no `delete` on anything.
 
@@ -2293,8 +2292,8 @@ set and nothing extra to publish. It did **not** ship before 2026-09-18, and the
 symptom was exact: the Job's pod terminated `ContainerCannotRun`, exitCode 127,
 `exec: "logweir-retention": executable file not found in $PATH`, with the
 policy's own status unchanged. Two checks now stand between that and an
-operator: `./scripts/render-install.sh --check` refuses to render an install
-file whose enforcement chain is broken, and `scripts/check-image.sh` check 7 —
+operator: `bash scripts/check-chart.sh` refuses a tree whose enforcement
+chain is broken, and `scripts/check-image.sh` check 7 —
 run by `just smoke` and by the image workflow, on the local tag and again on the
 digest the registry returns — runs `logweir-retention --version` out of the
 image by bare name, so the container runtime resolves it through `PATH` exactly
@@ -2397,12 +2396,12 @@ codes so that the common question is answered without following any of them.
 **Enforcement needs the retention ServiceAccount in the policy's namespace.**
 Every Job this controller builds requests `logweir-retention`. The chart renders
 it when `retention.enabled` is true, in the release namespace and every
-`identity.authorizedRunnerNamespaces` entry; on the low-level path apply
-`config/rbac/retention-serviceaccount.yaml` ([install.md](install.md) step 4).
+`identity.authorizedRunnerNamespaces` entry; elsewhere apply
+`config/samples/retention-serviceaccount.yaml` ([install.md](install.md) step 4).
 Without it an `Enforce` policy produces a Job whose pod the API server will not
 admit — fail-closed, and nothing is deleted.
 
-The controller never reads either Secret — `config/rbac/role.yaml` grants it no
+The controller never reads either Secret — its ClusterRole grants it no
 verb on `secrets` at all — and never inherits them: the reaper builds its handle
 with `AmazonS3Builder::new()` and the destination's own frozen addressing, never
 `from_env()`, so no ambient `AWS_ENDPOINT_URL` can relocate a deletion
@@ -3211,8 +3210,8 @@ and says both places must agree.
 
 *Upgrade and rollback.* A controller carrying check 9 refuses an `Approval`
 whose `spec.planHash` disagrees with the plan it signed; every producer in this
-repository -- the UI, `scripts/demo-steps.sh`, `scripts/helm-demo.sh`,
-`scripts/k8s-demo.sh` -- writes the `sha256:<hex>` the CLI printed, so a
+repository -- the UI and `scripts/helm-demo.sh` -- writes the `sha256:<hex>`
+the CLI printed, so a
 correctly recorded approval is unaffected. An existing `Approval` that
 disagreed and was verified by an older controller flips to `Verified=False`
 with `PlanHashMismatch` on its next reconcile, and the `Restore` it names
@@ -4998,7 +4997,7 @@ never proof. `limited` requires an observed authorization failure.
 `attestedComplete` requires an administrator attestation in the installation
 policy ConfigMap naming the namespace, the `KafkaCluster`, the principal and the
 observed cluster id, and not expired — a blank principal or cluster id fails
-closed. The chart and `logweir.yaml` wire the policy reference (§22.2), so
+closed. The chart wires the policy reference (§22.2), so
 `coverage: AllUserTopicsAttested` is written exactly when such an attestation
 matches; without one the two labels a run can earn are `VisibleUserTopicsOnly`
 (with `incompleteDiscovery: BackUpVisibleTopics`) and, for a named allowlist,
@@ -5547,7 +5546,7 @@ and every run reports `ExecutionInputsUnverified` for its own Job:
 
 ```bash
 export LOGWEIR_CONTEXT=<production-context>
-kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/backups.yaml
+kubectl --context "$LOGWEIR_CONTEXT" apply -f charts/logweir/crds/backups.yaml
 kubectl --context "$LOGWEIR_CONTEXT" wait \
   --for=condition=Established crd/backups.logweir.dev --timeout=60s
 kubectl --context "$LOGWEIR_CONTEXT" get crd/backups.logweir.dev \
@@ -5644,8 +5643,7 @@ Three RBAC notes, because each is easy to get wrong:
 - The controller requests **no verb on `secrets`, and no `pods/exec` or
   `pods/attach`**. The runner's key reaches its pod because kubelet projects it;
   the controller never reads it and cannot start a process inside the pod that
-  holds it. `config/rbac/` carries the request; the install file carries the
-  grant.
+  holds it. The chart's `weirkeeper` ClusterRole carries the grant.
 - **Every status write is a merge `PATCH`, and the role grants no `update`.**
   A `PUT` — `Api::replace_status` in kube — is authorised as the verb `update`
   on `<kind>/status`, which no rule in this install grants; the controller
@@ -6385,7 +6383,7 @@ export LOGWEIR_CONTEXT=<production-context>
 export LOGWEIR_NAMESPACE=<logweir-namespace>
 
 # 1. Apply the additive API schema before any new controller pod can start.
-kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/approvals.yaml
+kubectl --context "$LOGWEIR_CONTEXT" apply -f charts/logweir/crds/approvals.yaml
 
 # 2. Wait for API discovery, then verify the provenance object and UID field.
 kubectl --context "$LOGWEIR_CONTEXT" wait \
@@ -7182,7 +7180,8 @@ Secret read, pod exec or pod attach permission, and **no `update` on
 anything**: every status write, the `Forbid` slot reservation included, is a
 merge `PATCH` whose body carries `metadata.resourceVersion` as the
 compare-and-set precondition (§10's three RBAC notes). Inspect
-[config/rbac](../config/rbac/) for the authoritative grants.
+[the chart's ClusterRole](../charts/logweir/templates/clusterrole.yaml) for the
+authoritative grants.
 
 ### The five Amendment G kinds, grant by grant
 
@@ -7191,7 +7190,7 @@ The controller's rules for `ProtectionPolicy`, `RecoveryCatalog`,
 withdrawn in v1) are written the way every
 other rule in that file is: a verb appears only where a reconciler calls it, and
 `crates/logweir/tests/manifest_lint.rs` walks both directions over the source
-manifest, the install file and every rendered chart copy.
+manifest and every rendered chart copy.
 
 | Kind | Controller's verbs | Why not more |
 |---|---|---|
@@ -7279,11 +7278,7 @@ is commented out, requires 1.30+, and is excluded from the install.
 [UNVERIFIED — needs a 1.30+ cluster to apply and exercise the policy.]
 The CRDs' own CEL rules remain the installed immutability control.
 
-X-APPLY was recorded against docker-desktop v1.34.1: applying the manifest
-twice returned zero, while the controller remained in `ImagePullBackOff` for
-an unpublished image. A successful apply establishes object creation, not a
-working installation or publication. Release evidence is tracked in
-[tag1-checklist.md](tag1-checklist.md).
+Release evidence is tracked in [tag1-checklist.md](tag1-checklist.md).
 
 ## 14. Image references and the org-root anchor
 
@@ -7294,8 +7289,8 @@ under another repository produced `ErrImageNeverPull`. Retagging resolved that
 case only when the image bytes still matched the pinned digest.
 
 BuildKit provenance changed the observed manifest-list digest even on a cached
-rebuild. Read current pins from `config/manager/deployment.yaml` and
-`crates/weirkeeper/src/job.rs`; historical build digests are not install values.
+rebuild. Read the current runner pin from `crates/weirkeeper/src/job.rs`;
+historical build digests are not install values.
 The local-image path and the registry path are documented in [install.md](install.md).
 Local builds are **author-only** and do not establish public pullability.
 
@@ -7359,7 +7354,7 @@ It is projected into the controller's own pod as environment, with
 `optional: true`:
 
 ```yaml
-# config/manager/deployment.yaml
+# charts/logweir/templates/deployment.yaml
 - name: AWS_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef: { name: logweir-evidence-ro, key: access-key-id, optional: true }
@@ -7891,15 +7886,11 @@ None of this stops a cluster-admin — `docs/stability.md`, **O0**.
 
 ### 15.5 Where the object store is, for a local demo
 
-`just k8s-demo` (Phase B's exit criterion; the transcript is
-[../e2e/k8s/phase-b-demo.md](../e2e/k8s/phase-b-demo.md)) reaches the compose
-stack's MinIO from inside docker-desktop as **`http://host.docker.internal:9000`**,
-with `AWS_REGION=us-east-1` and `AWS_ALLOW_HTTP=true`. Those three are
-**author-only** and live in
-`config/overlays/k8s-demo/deployment-env-patch.yaml`, not in
-`config/manager/deployment.yaml`: a shipped manifest naming one laptop's
-hostname is not a file a stranger can apply, and an S3 endpoint that does not
-resolve looks exactly like an empty bucket.
+A laptop MinIO is reached from inside docker-desktop as
+**`http://host.docker.internal:9000`**, with `AWS_REGION=us-east-1` and
+`AWS_ALLOW_HTTP=true`. Those three are **author-only**; no shipped default
+names one laptop's hostname, and an S3 endpoint that does not resolve looks
+exactly like an empty bucket.
 
 The controller **forwards** `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP`
 and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from its own environment to every runner
@@ -8408,50 +8399,27 @@ approval binds bytes, and these are different bytes.
 
 ## 18. Demo 1 in CI
 
-[scripts/demo-steps.sh](../scripts/demo-steps.sh) defines the twelve-step walk
-shared by the laptop and kind drivers. The kind driver sets
-`LOGWEIR_KUBE_CONTEXT=kind-logweir`, discovers the Docker network's IPv4
-gateway, installs an idempotent CoreDNS `hosts` mapping for
-`host.docker.internal` with `fallthrough`, and probes Kafka from a pod before
-starting the walk. The bootstrap stays `host.docker.internal:9095`.
-`extraPortMappings` maps the opposite direction and does not solve this path.
-
-The workflow selects `LOGWEIR_INSTALL_PATH` from the dispatch input, repository
-variable, or `author-only` default. The author-only branch loads locally built
-images. The published branch instead uses
-`vars.LOGWEIR_PUBLISHED_RUNNER_REF` and waits for the pulled controller to
-become Ready. After checking the unmodified install, the demo supplies
-`LOGWEIR_RUNNER_IMAGE`; local image and pull-policy overrides affect only the
-live Deployment.
-
-Recorded evidence: [kind demo run 34700987743](https://github.com/VladyslavHaina/logweir/actions/runs/34700987743),
-commit `a113dd2`, 2026-09-12, completed all twelve steps using author-only
-images. It closed the CI demo requirement, not the image-publication requirement.
-The earlier local arm64 kind probe established DNS and host-port access but
-could not start the amd64 runner; it is not a full demo pass.
-
-CI exercises the mechanical half of X-UIWRITE using the page's own request
-emitter. The actual browser interaction is recorded in
-[e2e/k8s/laptop-demo.md](../e2e/k8s/laptop-demo.md). A `fieldManager=logweir-ui`
-value alone is not proof of browser interaction: an API client can supply it.
+Withdrawn in v1 with the `kubectl apply` laptop walk it ran
+([release notes](release-notes.md), item 76). The chart's walk,
+`scripts/helm-demo.sh`, runs in `.github/workflows/helm-demo.yml`.
 
 ## 19. The Helm chart
 
 [charts/logweir/README.md](../charts/logweir/README.md) is the canonical chart
 reference, including all values, registry overrides, optional Kafka resources,
 MinIO, demo brokers and the console. [install.md](install.md) path (c)
-connects it to the same key, Secret and roster prerequisites as the manifests.
+connects it to the key, Secret and roster prerequisites.
 
-The chart copies its CRDs from `config/`. The UI ships inside the console
+The UI ships inside the console
 image (`Dockerfile.console`); the chart carries no duplicate UI files or asset
 ConfigMap. `just smoke-console` compares the image’s served assets with `ui/`.
-`just chart-check` checks CRD parity, rendered manifests, schema and Helm lint;
+`just chart-check` checks rendered manifests, schema and Helm lint;
 `chart_lint.rs` checks the control-plane contract. Helm installs CRDs from
 `crds/` but does not upgrade or delete them; manage CRD changes separately.
 
 The controller, runner and optional console images default to mutable `latest`
 tags. All three pull policies default to `Always`; `api.console.imagePullPolicy`
-can be overridden for local images. The base manifests and compiled runner default remain digest-pinned;
+can be overridden for local images. The compiled runner default remains digest-pinned;
 third-party chart images remain pinned too. The author-only values use locally
 loaded tags with `Never`. Runner pull policy reaches Jobs through
 `LOGWEIR_RUNNER_PULL_POLICY` (§14).
@@ -8614,10 +8582,10 @@ different settings is not an observation this controller stands behind.
 
 **Upgrade: apply the CRD, then the controller.** Helm installs CRDs from
 `crds/` but never upgrades them (§19), so apply
-`config/crd/kafkaclusters.yaml` yourself before rolling the controller:
+`charts/logweir/crds/kafkaclusters.yaml` yourself before rolling the controller:
 
 ```
-kubectl --context <ctx> apply -f config/crd/kafkaclusters.yaml
+kubectl --context <ctx> apply -f charts/logweir/crds/kafkaclusters.yaml
 kubectl --context <ctx> -n <ns> set image deployment/weirkeeper weirkeeper=<new image>
 ```
 
@@ -10075,10 +10043,7 @@ this one is in every `Backup` and `Restore` check.
   and `runnerImage`. Its defaults move together, but a release installed with
   `runnerImage` pinned (a private registry, the ECR example of
   [install.md](install.md)) keeps the old runner through
-  `helm upgrade --reuse-values` unless `--set runnerImage=…` moves it. An
-  install from `logweir.yaml` has no chart value: the controller reads
-  `LOGWEIR_RUNNER_IMAGE` from its own Deployment, so set it to the new runner
-  image in the same change that rolls the controller.
+  `helm upgrade --reuse-values` unless `--set runnerImage=…` moves it.
 - **A `Preflight` that failed this way stays `Failed`.** The phase is terminal
   (§21.2): the object is not run again when the runner image is corrected.
   Create a new `Preflight`.
@@ -10108,7 +10073,7 @@ optional admission rule that narrows a grant RBAC cannot narrow.
 
 ### 22.1 The roles, and the one verb that changed
 
-`logweir.yaml` and the chart ship **six** ClusterRoles, all of them unbound
+The chart ships the **six** ClusterRoles below, all of them unbound
 except the controller's ([install.md](install.md) step 5 binds the five human
 ones).
 
@@ -10370,7 +10335,7 @@ surface, as though it did not.
 
 Turn it on with `admissionPolicy.enabled=true` (Helm) or apply
 `config/samples/console-credential-admission-policy.yaml` after editing the
-principal (kustomize). **It is off by default for one reason and it is not a
+principal (by hand). **It is off by default for one reason and it is not a
 security opinion:** `admissionregistration.k8s.io/v1`
 `ValidatingAdmissionPolicy` is Kubernetes 1.30+ and Logweir's floor is 1.29,
 where the document is rejected with `no matches for kind`.

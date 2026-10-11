@@ -279,7 +279,7 @@
     },
     "controllerImage": {
       "type": "string",
-      "description": "The weirkeeper image. The default is the repository config/manager/deployment.yaml pins, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
+      "description": "The weirkeeper image. The default is the runner pin's namespace with the name weirkeeper, at the `latest` TAG (the owner's decision of 2026-09-12); `<repository>@sha256:<64 hex>` is accepted and is how you pin it back.",
       "minLength": 1
     },
     "runnerImage": {

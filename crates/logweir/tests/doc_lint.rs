@@ -1122,7 +1122,7 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
     for literal in [
         "author-only",
         "imagePullPolicy: Never",
-        "kubectl --context docker-desktop apply --server-side -k config/overlays/local-images",
+        "-f charts/logweir/examples/author-only.values.yaml",
     ] {
         assert!(
             install.contains(literal),
@@ -1176,16 +1176,13 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
         "docs/install.md carries {} digest literal(s):\n  {}\nIt must not: a locally \
          built image's digest changes on EVERY build, so a digest in prose is a \
          measurement of one build. The document names \
-         `config/manager/deployment.yaml` and `crates/weirkeeper/src/job.rs` as the \
-         places the pinned references live, and the reader reads them from the \
+         `charts/logweir/values.yaml` and `crates/weirkeeper/src/job.rs` as the \
+         places the image references live, and the reader reads them from the \
          checkout. The bare `@sha256:<digest>` placeholder is fine — it carries no hex",
         digests.len(),
         digests.join("\n  ")
     );
-    for source_of_truth in [
-        "config/manager/deployment.yaml",
-        "crates/weirkeeper/src/job.rs",
-    ] {
+    for source_of_truth in ["charts/logweir/values.yaml", "crates/weirkeeper/src/job.rs"] {
         assert!(
             install.contains(source_of_truth),
             "docs/install.md must name `{source_of_truth}` as a place the pinned image \
@@ -1278,9 +1275,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     );
 
     // The managed and low-level paths are deliberately distinct: Helm owns
-    // declared runner namespaces; logweir.yaml users apply the base account.
+    // declared runner namespaces; identity-off installs apply the base account.
     assert!(
-        install.contains("config/rbac/backup-runner-serviceaccount.yaml"),
+        install.contains("config/samples/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
     );
     assert!(
@@ -1379,13 +1376,14 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
 
     // The uninstall, and what survives it.
     assert!(
-        install.contains("kubectl --context docker-desktop delete -f logweir.yaml"),
-        "docs/install.md must carry the uninstall command"
+        install.contains("helm uninstall logweir -n logweir-system")
+            && install.contains("kubectl --context docker-desktop delete -f charts/logweir/crds/"),
+        "docs/install.md must carry the uninstall commands"
     );
     assert!(
         install.contains("removes only\nthat first thing")
             || install.contains("removes only that first thing"),
-        "docs/install.md must state that `kubectl delete -f logweir.yaml` removes only \
+        "docs/install.md must state that uninstalling removes only \
          the control plane; the scratch topics, the archive objects and the evidence \
          objects survive it and each has its own command"
     );
@@ -2215,6 +2213,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "surfaces withdrawn for the v1 cut",
             "destinations:from-legacy",
+        ),
+        // PROD-17.1 C5 (2026-10-11, item 76): the chart is the only install;
+        // the selector that removes a bundle install's control plane.
+        (
+            "the Helm chart is the only install",
+            "-l app.kubernetes.io/name=logweir",
         ),
     ];
     assert_eq!(

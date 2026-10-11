@@ -1,7 +1,7 @@
 //! Write the six `logweir.dev/v1alpha1` CRDs to a directory.
 //!
 //! ```text
-//! cargo run -p weirkeeper --example emit_crds -- --out config/crd
+//! cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds
 //! ```
 //!
 //! `just crds` is that line. The CI `crd drift` arm renders into a temporary

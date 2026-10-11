@@ -24,7 +24,7 @@ adapter calls FOUR kube verbs — `list`, `get`, `create`, `patch` — and
 `logweir-api`'s `linkage.rs` pins the `(verb, resource)` pairs at the point the
 adapter names them.
 
-Every rule below is that pin, transcribed. `scripts/render-install.sh --check`
+Every rule below is that pin, transcribed. `scripts/check-chart.sh`
 re-derives the seal from `kube.rs` and refuses when this file and the seal
 disagree, in both directions; `chart_lint.rs` holds the rendered role to the
 table verb for verb.
@@ -105,8 +105,7 @@ role below already carries.
 AND NO `/status` SUBRESOURCE IS NAMED, WHICH IS NOT AN OMISSION. `get` on
 `recoverycatalogs` returns the whole object, status included; the status
 subresource exists so a WRITER can be authorised separately, not so a reader
-can be denied. `config/rbac/viewer_role.yaml`'s header makes the same argument
-at length. Naming `recoverycatalogs/status` here would grant this service
+can be denied. Naming `recoverycatalogs/status` here would grant this service
 nothing it does not already have and would read, to an auditor, as though the
 console could write one.
 

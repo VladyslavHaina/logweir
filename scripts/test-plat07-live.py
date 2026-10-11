@@ -487,7 +487,7 @@ def lab_swap() -> None:
     if not baseline:
         raise RuntimeError("run lab-baseline first")
     before = {name: crd_summary().get(name) for name in ["kafkaclusters.logweir.dev"]}
-    applied = run(K + ["apply", "-f", "config/crd/kafkaclusters.yaml"]).stdout.strip()
+    applied = run(K + ["apply", "-f", "charts/logweir/crds/kafkaclusters.yaml"]).stdout.strip()
     after = {name: crd_summary().get(name) for name in ["kafkaclusters.logweir.dev"]}
     STATE["crdApply"] = {"at": now(), "output": applied, "before": before, "after": after}
     save()

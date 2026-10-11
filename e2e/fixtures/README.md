@@ -148,8 +148,8 @@ drills the archive.
 
 Harness scripts and specs that drive named failure paths — an engine that exits
 non-zero, one that drops a rendered key, an archive with no backup set, an
-unreachable target. `engine-docker.sh` is the container route the e2e suite and
-`scripts/demo.sh` fall back to on a host that cannot exec a linux/amd64 ELF; it
+unreachable target. `engine-docker.sh` is the container route the e2e suite
+falls back to on a host that cannot exec a linux/amd64 ELF; it
 invokes nothing itself and forwards argv verbatim.
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software

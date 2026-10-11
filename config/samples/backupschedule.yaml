@@ -4,7 +4,7 @@
 #       apply -f config/samples/backupschedule.yaml
 #
 # EVERY `.spec` FIELD IS EDITABLE EXCEPT `sourceRef` (PLAT-05.1, D1 §5.1).
-# `config/crd/backupschedules.yaml` carries an object-level
+# `charts/logweir/crds/backupschedules.yaml` carries an object-level
 # `x-kubernetes-validations` rule with the message `spec.sourceRef is
 # immutable; create a new BackupSchedule to protect a different cluster`, and
 # the API server applies it to **every** subject — cluster-admin included. A
@@ -19,7 +19,7 @@
 # backupschedule nightly -o jsonpath='{.status.policy}'` shows the revision in
 # force and the digest of what a run under it does.
 #
-# `config/rbac/operator_role.yaml` grants `update` AND `patch`: `kubectl edit`
+# `logweir-operator` grants `update` AND `patch`: `kubectl edit`
 # and `kubectl apply` send a PATCH, so `update` alone cannot edit a schedule at
 # all. Neither verb widens what may change — the CRD's CEL rule does that, and
 # RBAC has no expression language to restrict it with (critique B H13).
