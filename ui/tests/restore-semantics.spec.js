@@ -56,10 +56,11 @@ const RECORD = fileURLToPath(
 /** What an operator reads of this paragraph: its identifiers are code, and the
  *  words between them are the record's. */
 const SHOWN =
-  "Restores copy the archive as written: aborted transactions and transaction markers are " +
-  "restored as ordinary records, LogAppendTime timestamps come back as producer CreateTime, " +
-  "repeated header keys keep one copy, and when timestamps are out of order a full or " +
-  "point-in-time restore can miss records.";
+  "Restores copy the archive as written: an archive holding transaction markers is refused " +
+  "unless the plan allows them, and under that allowance, or for an open transaction the check " +
+  "cannot see, aborted transactions and transaction markers are restored as ordinary records, " +
+  "LogAppendTime timestamps come back as producer CreateTime, repeated header keys keep one " +
+  "copy, and when timestamps are out of order a full or point-in-time restore can miss records.";
 
 const PARAGRAPH_OPEN = "<p class=\"note\" id=\"restore-semantics\">";
 
