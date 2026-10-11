@@ -3294,7 +3294,7 @@ export const REPLICATION_HELP =
  *  three. Said beside the basis on step 4 and under the review row on step 6
  *  whenever [`replicationMayDiffer`] -- unless the catalog's view records the
  *  selected topics' factor and the plan asks for exactly it. `ui/README.md` and
- *  `docs/quickstart.md` (section 7) carry the same sentence, and
+ *  `docs/install.md` (*The first restore*) carry the same sentence, and
  *  `ui/tests/replication-factor.spec.js` holds all three to it. */
 export const REPLICATION_DIFFERS_NOTE =
   "This factor can differ from the source's, and the target's storage follows it: a topic the " +

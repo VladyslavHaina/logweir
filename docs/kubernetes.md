@@ -1,10 +1,9 @@
 # Running Logweir on Kubernetes
 
 The operator guide for one team's install: back up, restore, verify, set
-retention and approve. Start at [quickstart.md](quickstart.md) for the walk from
-install to disaster restore, and [install.md](install.md) for installing and
-upgrading the chart. Every reason, exit code and runner output line is in
-[reference.md](reference.md); signed document fields are in
+retention and approve. Start at [install.md](install.md) for the walk from
+install to disaster restore, and for installing and upgrading the chart. Every
+reason, exit code and runner output line is in [reference.md](reference.md); signed document fields are in
 [formats/](formats/). Section numbers used before v1 are mapped at
 [the end of this page](#section-numbers-before-v1).
 

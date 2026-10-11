@@ -1,7 +1,7 @@
 # Logweir PoC install profile: Helm, ingress, TLS and SSO
 
 This directory is a **versioned proof-of-concept installation** of the supported
-path in [docs/quickstart.md](../../docs/quickstart.md): everything installed with
+path in [docs/install.md](../../docs/install.md): everything installed with
 Helm — Logweir itself from its **published OCI chart**, which names the three
 published Docker Hub images of the same commit (`docker.io/vladyslavhaina/weirkeeper`,
 `logweir`, `logweir-console`, by their `sha-<commit>` tags —
@@ -413,8 +413,9 @@ every topic, its target name, the target cluster and the source, and clicks
 
 ## 10. First backup and restore, in the console
 
-Signed in as `operator`, follow [the supported path](../../docs/quickstart.md#the-supported-path-install-to-disaster-restore)
-steps 4–8 with these PoC values:
+Signed in as `operator`, follow [the first backup](../../docs/install.md#the-first-backup)
+and [the first restore](../../docs/install.md#the-first-restore-and-verifying-it)
+with these PoC values:
 
 | Step | Value |
 |---|---|
