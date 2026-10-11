@@ -64,10 +64,11 @@ docker-desktop publishes Traefik's `LoadBalancer` Service on the host's
 ## Prerequisites
 
 - docker-desktop with Kubernetes enabled (1.30 or newer; the admission policy
-  needs 1.30), ports 80 and 443 free on the host, and — on Apple silicon —
-  amd64 emulation (the runner image is `linux/amd64`).
-- `helm` 3.15+ or 4 (OCI charts), `kubectl`, `openssl`, `htpasswd` (macOS ships
-  it), `git`.
+  needs 1.30) and ports 80 and 443 free on the host. Every Logweir image runs
+  natively on Apple silicon (linux/arm64); the identity hook does from a chart
+  carrying release-notes item 84, and needs amd64 emulation before it.
+- `helm` 3.19+ or 4 (a first install with the console needs 3.19; the PoC runs
+  4.0.1), `kubectl`, `openssl`, `htpasswd` (macOS ships it), `git`.
 
 ```bash
 git clone https://github.com/VladyslavHaina/logweir && cd logweir
