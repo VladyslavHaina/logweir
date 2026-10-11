@@ -725,10 +725,12 @@ test("a_window_end_is_shown_to_the_millisecond_the_run_uses", () => {
   const scope = structuredClone(request("pending").scope);
   scope.recovery.pointInTime = "2026-09-07T14:05:00.999Z";
   scope.recovery.windowStart = "2026-09-07T14:00:00.001Z";
+  scope.verification.windowStart = "2026-09-07T12:00:00.500Z";
   scope.verification.windowEnd = "2026-09-07T15:00:00.250Z";
   const html = renderApprovalScope(scope);
   assert.ok(html.includes(">2026-09-07 14:05:00.999 UTC</time>"), html);
   assert.ok(html.includes(">2026-09-07 14:00:00.001 UTC</time>"), html);
+  assert.ok(html.includes(">2026-09-07 12:00:00.500 UTC</time>"), html);
   assert.ok(html.includes(">2026-09-07 15:00:00.250 UTC</time>"), html);
   assert.ok(!html.includes(">2026-09-07 14:05:00 UTC</time>"), "never the second before it");
   // NEGATIVE CONTROL: a whole-second end reads as before, with no fraction.
