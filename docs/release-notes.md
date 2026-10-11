@@ -64,8 +64,9 @@ two-person approval in the console, no key), 67 (PROD-01.1a, an
 archive holding transaction markers is refused unless the plan allows them), 68
 (PROD-02.1, a backup of a source whose records all expired is a signed, named
 empty capture), 69 (FX-44, a failed restore removes or names the scratch
-topic it created) and 70 (FX-49, the console's original-name box takes effect
-when ticked) so far. Items continue the next entry's
+topic it created), 70 (FX-49, the console's original-name box takes effect
+when ticked) and 71 (FX-50, a catalog's `viewLimit` window holds the newest
+points) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3031,8 +3032,8 @@ bounds what a backup signs ([kubernetes.md](kubernetes.md) §7b.5):
   grant. A point whose record could not be read is listed by its point id
   alone, with nothing a restore could bind to, and is never selectable; in a
   full view it gives its place to a point with a record, and an entry with a
-  record never does. A record read that did not answer leaves the walk
-  incomplete until a sync reads it. `counts` and the `Synced` message
+  record gives its place only to a newer one (item 71). A record read that
+  did not answer leaves the walk incomplete until a sync reads it. `counts` and the `Synced` message
   separate a size and a content fault from a permission or transport
   failure.
 
@@ -3271,6 +3272,36 @@ and the approval panel's `newTopic` and scratch wording.
 **Rollback:** the console image; an older console needs another field edited
 after the tick.
 
+#### 71. A catalog's `viewLimit` window holds the newest points, and a partial view says so (FX-50)
+
+**Changed.** A `RecoveryCatalog` over more points than `spec.sync.viewLimit`
+listed the first `viewLimit` points its walk met. An `Index` walk meets the
+newest first; a `Full` rescan meets them in point-id order, and a point id is
+a digest. On the PoC a `Full` catalog with `viewLimit: 100` over 386 points
+listed 24 of the 100 newest, and not the newest. The runner now keeps the
+newest `viewLimit` points with a record in either mode, holding at most
+`viewLimit` entries; a tie goes to the smaller point id, the controller's own
+order. An entry whose record gave no facts gives its place first, and a point
+with a record gives its place only to a newer one, so a set's newer receipt
+is listed whenever its older one is. Counts and the histogram still cover the
+whole walk. The `Synced` message of a view from a resumed `Full` rescan now
+ends `It is a partial view: <n> point(s) from a resumed rescan; the archive
+holds more`, and that of a walk that did not finish `… from a walk that did
+not finish; the archive may hold more`. Before, a resumed rescan read "the
+newest 136 of 136 points". `status.truncated` and `status.cursor` are
+unchanged, so an `Enforce` run still refuses both views (item 64).
+**Do:** nothing. A `Full` catalog lists its newest points from its first sync
+after the runner image rolls; set `spec.syncRequest` to a new value to see it
+at once.
+**Scope:** runner rows over an in-memory archive (386 points in both walks; a
+tie at the window's edge; FX-33's window rules in a `Full` rescan) and
+controller rows over a recording API double (the stopped, resumed and whole
+walks' `Synced` messages and `truncated`).
+[UNVERIFIED — no PoC catalog has listed its newest points under this build yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older runner lists the first points its walk meets; an older controller drops
+the sentence.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3381,7 +3412,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69 and 70, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 and 71, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3460,8 +3491,8 @@ console and the chart, and needs nothing until a namespace is bound
 `two-person`; item 67 changes the
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
-transaction markers; item 69 changes the runner and the controller and needs
-nothing, in either order; item 70 changes the console only. To roll back to
+transaction markers; items 69 and 71 change the runner and the controller and
+need nothing, in either order; item 70 changes the console only. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

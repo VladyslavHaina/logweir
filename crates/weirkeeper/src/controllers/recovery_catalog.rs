@@ -1213,8 +1213,11 @@ impl Pass<'_> {
 
         let cursor = parsed.cursor.clone().unwrap_or_default();
         let complete = cursor.complete;
+        // A WALK THAT DID NOT START AT THE BEGINNING OF THE ARCHIVE IS A
+        // WINDOW (FX-40 review D1): a resumed Full rescan lists only the tail.
+        let from_start = self.walked_from_start(job).await?;
         let unreadable = counts.unreadable > 0;
-        let (synced_status, synced_reason, synced_message) = if unreadable {
+        let (synced_status, synced_reason, mut synced_message) = if unreadable {
             (
                 "False",
                 REASON_PARTIAL_SCAN.to_string(),
@@ -1237,10 +1240,11 @@ impl Pass<'_> {
                 sync_message(&materialised, &parsed, &tally),
             )
         };
+        if let Some(note) = partial_view_note(counts.total, complete, from_start) {
+            synced_message = format!("{synced_message}. {note}");
+        }
 
-        // A WALK THAT DID NOT START AT THE BEGINNING OF THE ARCHIVE IS A
-        // WINDOW (FX-40 review D1): a resumed Full rescan lists only the tail.
-        let truncated = materialised.truncated || !self.walked_from_start(job).await?;
+        let truncated = materialised.truncated || !from_start;
         let expires_at = view::view_expires_at(finished_at, self.interval());
         let mut status = json!({
             "observedGeneration": self.generation(),
@@ -1991,6 +1995,25 @@ fn credential_mode(
         destination::ResolvedGrant::ControllerIdentity
         | destination::ResolvedGrant::NotConfigured => CredentialMode::Ambient,
     }
+}
+
+/// **FX-50.** What a `Synced` message adds when the published view is not
+/// the whole archive's: a `Full` rescan that resumed after the previous
+/// sync's cursor lists only the tail, and a walk that did not finish lists
+/// only what it reached. `None` for a whole walk. `status.truncated` and
+/// `status.cursor.complete` already say it; this says it in words, because
+/// "the newest 136 of 136 points" otherwise reads as the whole archive.
+fn partial_view_note(walked: i64, complete: bool, from_start: bool) -> Option<String> {
+    let (source, rest) = if !from_start {
+        ("a resumed rescan", "the archive holds more")
+    } else if !complete {
+        ("a walk that did not finish", "the archive may hold more")
+    } else {
+        return None;
+    };
+    Some(format!(
+        "It is a partial view: {walked} point(s) from {source}; {rest}"
+    ))
 }
 
 /// The `Synced=True` message: what was published, and what the ten counters

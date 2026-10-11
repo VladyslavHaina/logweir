@@ -2256,6 +2256,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the original-name box takes effect when ticked",
             "Restore under the original topic names",
         ),
+        // FX-50 (2026-10-11, item 71): a catalog's window holds the newest
+        // points; the sentence a partial view's `Synced` message carries.
+        (
+            "a catalog's window holds the newest points",
+            "It is a partial view",
+        ),
     ];
     assert_eq!(
         items.len(),
