@@ -1,9 +1,10 @@
 //! What outlived the laptop demo.
 //!
 //! `scripts/laptop-demo.sh`, its steps and its transcript were withdrawn with
-//! the static install file (release-notes item 76). Two checks here are not
-//! about that walk and stay: the page's own body emitter, which
-//! `scripts/helm-demo.sh` still runs, and the parent spec's serving command.
+//! the static install file (release-notes item 76). One check here is not
+//! about that walk and stays: the page's own body emitter, which
+//! `scripts/helm-demo.sh` still runs. (The parent spec's `kubectl proxy`
+//! serving-command row went with that page, release-notes item 75.)
 
 use std::path::PathBuf;
 
@@ -22,21 +23,6 @@ fn read(rel: &str) -> String {
             p.display()
         )
     })
-}
-
-/// The serving command spec §2's Demo 1 and spec §8 must both spell out.
-const FULL_PROXY_COMMAND: &str =
-    "kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1";
-
-/// The form critique C L2 is about: it serves the files under the shipped
-/// default `--www-prefix='/static/'` and not under `/ui/`, and it names no
-/// context (STANDING RULE 12).
-const BARE_PROXY_COMMAND: &str = "kubectl proxy --www=./ui";
-
-/// Every run of whitespace collapsed to one space, so a command the spec
-/// line-wrapped mid-token (`kubectl\nproxy --www=./ui`) is still one string.
-fn collapse(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -108,84 +94,5 @@ fn the_body_emitter_renders_the_plan_with_the_pages_own_renderer() {
              signs and the bytes the runner parses are the page's or they are two documents \
              with one hash"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// THE PARENT SPEC
-// ---------------------------------------------------------------------------
-
-/// **Spec §2's Demo 1 names the whole serving command.**
-///
-/// As `fdc73a5` wrote it, Demo 1's `kubectl proxy --www=./ui` serves the files
-/// under the shipped default `--www-prefix='/static/'` and NOT under `/ui/`,
-/// binds every address rather than loopback, and names no context (critique C
-/// L2; STANDING RULE 12).
-///
-/// This is the one acceptance line in the plan that reads a parent-repository
-/// file. It resolves the path from `CARGO_MANIFEST_DIR` (Global Constraint
-/// 36), so it does not care what the working directory is.
-///
-/// KILLS: leaving the bare `kubectl proxy --www=./ui` in place.
-#[test]
-fn the_spec_demo_command_is_the_full_string() {
-    let path = root().join("../docs/mvp/03-spec.md");
-    // A STANDALONE CHECKOUT HAS NO PARENT. The spec is the parent corpus's file,
-    // present only when this repository sits inside it; on GitHub it does not
-    // (the first CI run, 2026-09-12, failed here on "No such file or
-    // directory"). Absent, the check does not apply and says so — it does NOT
-    // pass silently: the line below is the record. The repository's own copies
-    // of the serving command are held by `the_ui_recipe_serves_under_ui_prefix`
-    // and the transcript tests, which run everywhere.
-    if !path.exists() {
-        eprintln!(
-            "the_spec_demo_command_is_the_full_string: not applicable — {} is not present \
-             (standalone checkout; the parent spec is checked only inside the parent corpus)",
-            path.display()
-        );
-        return;
-    }
-    let spec = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
-
-    let two_start = spec
-        .find("\n## 2. Personas and the two demos")
-        .expect("spec §2 exists");
-    let two_end = spec[two_start + 1..]
-        .find("\n## 3.")
-        .map(|at| two_start + 1 + at)
-        .expect("spec §3 follows spec §2");
-    let two = collapse(&spec[two_start..two_end]);
-
-    assert!(
-        two.contains(FULL_PROXY_COMMAND),
-        "spec §2's Demo 1 must name the whole serving command:\n    {FULL_PROXY_COMMAND}\n\n§2, \
-         whitespace collapsed:\n{two}"
-    );
-    assert!(
-        !two.contains(BARE_PROXY_COMMAND),
-        "spec §2 still carries the bare `{BARE_PROXY_COMMAND}`. As written it serves the UI \
-         under the default `--www-prefix='/static/'` and not under `/ui/`, so the demo it \
-         describes cannot work; and STANDING RULE 12 admits no `kubectl` without its context.\n\n\
-         §2, whitespace collapsed:\n{two}"
-    );
-
-    // AND EVERY OTHER PLACE THE SPEC SPELLS THE `./ui` FORM. §8's serving
-    // paragraph carries the same command; a fix in §2 alone leaves the
-    // document disagreeing with itself about the one command that hands a
-    // browser a cluster credential.
-    let flat = collapse(&spec);
-    let mut at = 0usize;
-    while let Some(hit) = flat[at..].find("--www=./ui") {
-        let abs = at + hit;
-        let prefix = &flat[..abs];
-        assert!(
-            prefix.ends_with("kubectl --context docker-desktop proxy "),
-            "docs/mvp/03-spec.md spells `--www=./ui` after `{}` — every occurrence of the \
-             serving command in the spec names the context and the prefix (STANDING RULE 12, \
-             critique C L2)",
-            &prefix[prefix.len().saturating_sub(60)..]
-        );
-        at = abs + 1;
     }
 }
