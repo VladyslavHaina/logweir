@@ -4186,9 +4186,9 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
     // documentation must now say is the half an operator acts on.
     let docs = workspace_source("docs/kubernetes.md");
     let retained_history = docs
-        .split("### Deleting a schedule keeps its history (PLAT-05.2)")
+        .split("### Deleting a schedule keeps its history\n")
         .nth(1)
-        .expect("§9 documents what deleting a schedule now does");
+        .expect("the guide documents what deleting a schedule now does");
     for required in [
         "leaves every run",
         "--cascade=orphan",

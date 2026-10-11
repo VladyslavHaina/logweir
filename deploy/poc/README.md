@@ -256,7 +256,7 @@ could not be read", the SDK falling back to the instance metadata address
 reads so the console does not offer it as a recovery point. The failed read is
 not final: the controller reads the run again at +1, +5 and +15 minutes, and
 once more whenever a controller process starts
-([docs/kubernetes.md §15.1b](../../docs/kubernetes.md#151b-a-failed-controller-read-is-read-again-poc-p12));
+([docs/kubernetes.md, *When a read fails*](../../docs/kubernetes.md#when-a-read-fails));
 only a receipt the store reports absent is never read again. Runs through a
 saved destination (step 10) are unaffected: they read their evidence with the
 destination's own `evidenceRead` grant. The controller reads the Secret at

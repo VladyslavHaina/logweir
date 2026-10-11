@@ -1474,13 +1474,13 @@ it read through the same `catalog::pin`: the first row is `archive.backupSet`
 `notReady`, `ManifestSuperseded`; the second is `ready` with `PointPinUnchecked`
 in the message and the note as the remedy; the third keeps the store's code
 with the remedy that names `s3:GetObjectVersion`
-([what it reads, and what it refuses to read](../kubernetes.md#218-what-this-build-does-not-do)).
+([what it reads, and what it refuses to read](../kubernetes.md#what-the-rows-check)).
 
 **The grant.** On AWS S3 the read by id is authorised as `s3:GetObjectVersion`
 on the archive prefix, beside the `s3:GetObject` the manifest read already
 needs [UNVERIFIED — needs a real AWS S3 bucket and a credential source]. MinIO
 serves it under `s3:GetObject` (measured 2026-10-09, FX-14:
-[the grants table](../kubernetes.md#the-object-storage-permission-each-grant-actually-needs-measured)).
+[the grants table](../kubernetes.md#the-grants-and-the-object-storage-actions-each-one-needs)).
 
 **The cost of reading a copy as a copy.** The pin is checked only where the
 bucket being read still HOLDS the pinned version and serves it by id: "not this

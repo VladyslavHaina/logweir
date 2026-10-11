@@ -70,7 +70,7 @@ is the companion to this page.
 | Backup receipt | The same key | One completed backup run: the source cluster, the topics, per-topic record counts, the covered window, the manifest digest and, from format 1.1.0, per-topic configuration capture coverage | [Backup receipt format](formats/backup-receipt.md) |
 | Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window, where its archive is and, from format 1.1.0, a copy of each topic's configuration capture coverage | [Catalog point format](formats/catalog-point.md) |
 | Standing authorization | An approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule could run, for at most 90 days, before v1 withdrew scheduled rehearsals ([key custody](#key-custody)) | [The standing rehearsal authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature) |
-| Restore | Nothing: Kubernetes status written by the controller | One restore run under Kubernetes: its exit code, how it ended and, when it signed a scorecard, where that is | [CRD schema](../charts/logweir/crds/restores.yaml), described in [Kubernetes §12](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here) |
+| Restore | Nothing: Kubernetes status written by the controller | One restore run under Kubernetes: its exit code, how it ended and, when it signed a scorecard, where that is | [CRD schema](../charts/logweir/crds/restores.yaml), described in [Kubernetes, *Admission*](kubernetes.md#admission-what-is-checked-before-any-pod) |
 
 Four reading notes:
 
@@ -693,9 +693,9 @@ Such a run is recorded only outside the signed evidence:
 
 - Under Kubernetes, on its `Restore`: `status.exitCode`, `status.exitReason`,
   `status.reason` and `status.conditions`, unsigned and kept as long as the
-  object is ([what the status carries](kubernetes.md#what-the-status-carries-and-what-it-copies)).
+  object is ([what the status carries](kubernetes.md#what-the-status-carries)).
 - Kubernetes' own Events about the Job and its pod, which are rotated and rate
-  limited ([best effort](kubernetes.md#diagnostics-are-derived-from-events-which-are-best-effort)).
+  limited ([best effort](kubernetes.md#a-run-that-is-stuck-or-failed-with-no-exit-code)).
   Logweir writes no Event of its own.
 - From the command line, the exit code and the run's own output.
 
@@ -725,7 +725,7 @@ Who holds those keys is outside the documents:
   runner Jobs ([managed installation identity](keys.md#managed-installation-identity)).
   Anyone who can create pods in a runner namespace, and the controller, which
   creates Jobs there, can sign with it
-  ([the residual, stated plainly](kubernetes.md#154-the-residual-stated-plainly);
+  ([the signing-oracle residual](kubernetes.md#the-signing-oracle-residual);
   [what the control plane does not stop](stability.md#kubernetes-what-the-control-plane-does-not-stop-and-what-it-was-built-against)).
   Logweir has no KMS or PKCS#11 signing
   ([deferred item 10](stability.md#later-named--original-scope-with-current-status)).
@@ -742,7 +742,7 @@ it ran under only by `approval.approver` (the schedule's name),
 `issuedAt`. No scorecard field carries a digest of the document, and the
 runner uploaded no copy of it under `logweir/drills/`; keeping the documents
 beside the scorecards is the operator's work
-([§7g](kubernetes.md#7g-scheduled-rehearsals-are-withdrawn-in-v1)).
+(scheduled rehearsals are withdrawn in v1, [release-notes item 73](release-notes.md)).
 
 Every timestamp in these documents was read from the clock of a machine that
 produced it: the runner's, or for an approval, the approver's. Logweir uses no
@@ -782,7 +782,7 @@ archive. Neither the engine nor Logweir configures encryption of the archive at
 rest. Retention periods are the operator's: a `RetentionPolicy` in `Enforce`
 refuses to delete from versioned buckets, including every Object Lock bucket,
 and Logweir cannot verify a legal hold
-([§7f](kubernetes.md#7f-a-retentionpolicy-in-enforce-is-the-one-thing-logweir-does-that-cannot-be-undone)).
+([Retention](kubernetes.md#retention)).
 Logweir never deletes evidence under `logweir/`.
 
 ### Transaction and timestamp semantics

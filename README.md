@@ -194,6 +194,7 @@ package and fixture READMEs stay beside the files they describe.
 | Install or configure Helm | [Chart guide](charts/logweir/README.md) |
 | Run the demos, a drill, or the standalone CLI | [Quickstart, *Demos and the standalone CLI*](docs/quickstart.md) |
 | Operate controllers, jobs, approvals and retention | [Kubernetes](docs/kubernetes.md) |
+| Look up an exit code, a status reason or a runner output line | [Reference](docs/reference.md) |
 | Use or develop the static UI | [UI guide](ui/README.md) |
 | Use the bounded product API (`logweir-api`) | [Product API](docs/api.md) |
 | Verify signed evidence | [Auditor guide](docs/verify-a-scorecard.md) |

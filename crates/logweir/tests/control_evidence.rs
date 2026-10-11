@@ -1397,7 +1397,7 @@ fn a_made_up_or_misattributed_field_is_refused() {
             "a citation must read `[Document](definition)",
         ),
         (
-            "| A restore cited through the operator guide. | [Restore](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here): `status.exitCode` |",
+            "| A restore cited through the operator guide. | [Restore](kubernetes.md#admission-what-is-checked-before-any-pod): `status.exitCode` |",
             "a Restore citation must link its definition `../charts/logweir/crds/restores.yaml`",
         ),
     ] {
@@ -1571,17 +1571,19 @@ fn every_cited_field_is_named_on_its_definition() {
     );
     assert!(problems[0].contains("`modes`"), "{problems:?}");
 
-    // The operator guide's §12, which describes the kind and never names
-    // the backup set's field:
-    let guide_12 = definition_text(
-        "kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here",
+    // The operator guide's restore admission section, which describes the
+    // kind and never names the backup set's field:
+    let guide_admission = definition_text("kubernetes.md#admission-what-is-checked-before-any-pod");
+    assert!(
+        guide_admission.len() > 1000,
+        "the guide's admission section was found"
     );
-    assert!(guide_12.len() > 1000, "the §12 section was found");
     let restore = [(Doc::Restore, "spec.backupSetRef".to_string())];
     assert_eq!(
-        unnamed_citations(&restore, |_| guide_12.clone()).len(),
+        unnamed_citations(&restore, |_| guide_admission.clone()).len(),
         1,
-        "§12 does not name `backupSetRef`, so a citation linking it must be refused"
+        "the admission section does not name `backupSetRef`, so a citation linking it must be \
+         refused"
     );
     assert!(
         unnamed_citations(&restore, |doc| definition_text(doc.definition())).is_empty(),
@@ -1605,8 +1607,8 @@ fn every_anchor_the_control_evidence_page_links_resolves() {
     for (from, to) in [
         ("(#key-custody)", "(#key-custodian)"),
         (
-            "kubernetes.md#154-the-residual-stated-plainly",
-            "kubernetes.md#154-the-residual",
+            "kubernetes.md#the-signing-oracle-residual",
+            "kubernetes.md#the-signing-oracle",
         ),
     ] {
         let mutated = page.replacen(from, to, 1);
