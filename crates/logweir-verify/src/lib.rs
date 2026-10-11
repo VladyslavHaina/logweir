@@ -71,9 +71,9 @@ pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
 /// contains none of them.
 pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
     "application/vnd.logweir.backup-receipt+json;version=1.0.0";
-/// The RECOVERY CATALOG POINT record — the
-/// signed, durable, append-only description of one recovery point, written
-/// under `logweir/catalog/v1/points/<pointId>/record.json`.
+/// The RECOVERY CATALOG POINT record — the signed, durable, append-only
+/// description of one recovery point, written under
+/// `logweir/catalog/v1/points/<pointId>/record.json`.
 ///
 /// DECLARED HERE, in the verify-only crate, for the reason
 /// `PAYLOAD_TYPE_BACKUP_RECEIPT` above records: D3's `RecoveryCatalog`

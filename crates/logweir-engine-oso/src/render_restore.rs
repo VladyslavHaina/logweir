@@ -299,9 +299,9 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     ));
     // `pub source_partitions: Option<Vec<i32>>`
     // [U:crates/kafka-backup-core/src/config.rs:859-861 @ v0.23.3], a filter
-    // the engine applies to EVERY topic of this run — which is why a plan
-    // whose topics carry different subsets is several runs (`runs`). Rendered
-    // only when this run has a subset, so every document without one is
+    // the engine applies to EVERY topic of this run — which is why a plan whose
+    // topics carry different subsets is several runs (`runs`). Rendered only
+    // when this run has a subset, so every document without one is
     // byte-identical to what it was. Integers, sorted and unique
     // (`ReplaySelection::from_spec`): no `yaml_scalar` needed.
     if let Some(partitions) = &run.source_partitions {

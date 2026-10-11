@@ -531,13 +531,12 @@ impl RdKafkaReader {
     }
 }
 
-/// The broker and client codes a topic answers with while its
-/// creation is still propagating, and nothing else: `UnknownTopicOrPartition`
-/// (the answering broker's metadata does not hold it yet) and its two
-/// client-side spellings, `LeaderNotAvailable` (no leader elected yet) and
-/// `NotLeaderForPartition` (the listed leader has not yet become one). An
-/// authorization failure, a timeout or a
-/// transport error is not on the list: waiting cannot change it.
+/// The broker and client codes a topic answers with while its creation is still
+/// propagating, and nothing else: `UnknownTopicOrPartition` (the answering
+/// broker's metadata does not hold it yet) and its two client-side spellings,
+/// `LeaderNotAvailable` (no leader elected yet) and `NotLeaderForPartition`
+/// (the listed leader has not yet become one). An authorization failure, a
+/// timeout or a transport error is not on the list: waiting cannot change it.
 fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
     use rdkafka::error::RDKafkaErrorCode as Code;
     matches!(
@@ -772,9 +771,8 @@ impl ClusterReader for RdKafkaReader {
     /// (rdkafka 0.36.2 does not read the per-resource error). Kafka answers a
     /// topic its metadata does not hold yet with exactly that empty list, and
     /// the metadata read that names it a moment later finds the topic
-    /// "visible".
-    /// A principal that really lacks DescribeConfigs therefore costs `within`
-    /// before the same refusal is returned.
+    /// "visible". A principal that really lacks DescribeConfigs therefore costs
+    /// `within` before the same refusal is returned.
     fn created_topic_configs(
         &self,
         topic: &str,
@@ -1459,11 +1457,10 @@ mod tests {
         }
     }
 
-    /// The SMALLEST replica count is the factor:
-    /// a partition mid-reassignment (four replicas listed while the topic's
-    /// factor is three) must not raise it, and an RF-1 partition beside RF-3
-    /// ones is what a restore can count on. No partitions, or a zero, is NOT
-    /// RECORDED.
+    /// The SMALLEST replica count is the factor: a partition mid-reassignment
+    /// (four replicas listed while the topic's factor is three) must not raise
+    /// it, and an RF-1 partition beside RF-3 ones is what a restore can count
+    /// on. No partitions, or a zero, is NOT RECORDED.
     #[test]
     fn the_replication_factor_is_the_smallest_replica_count() {
         use super::replication_factor_of;
@@ -1758,9 +1755,9 @@ mod tests {
     }
 
     /// **A denied resource is never read back as "no overrides".** rdkafka
-    /// 0.36.2 hands a refused topic back
-    /// as `Ok` with NO entries; the reader must turn that into the refusal it
-    /// stands for, whatever the metadata says, and never into `Ok`.
+    /// 0.36.2 hands a refused topic back as `Ok` with NO entries; the reader
+    /// must turn that into the refusal it stands for, whatever the metadata
+    /// says, and never into `Ok`.
     #[test]
     fn an_empty_topic_answer_is_a_refusal_never_an_empty_override_set() {
         use crate::reader::{KafkaError, TopicVisibility};

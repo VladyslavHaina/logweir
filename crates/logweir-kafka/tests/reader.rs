@@ -520,11 +520,11 @@ fn a_read_after_a_create_waits_for_the_topic_and_a_plain_read_does_not() {
     assert_eq!(waited.calls(), 4, "three answers waited out, then the read");
 }
 
-/// A refusal is not propagation: the default
-/// `created_topic_configs` returns `NotAuthorized` on the first answer, and
-/// does not spend `CREATED_TOPIC_SETTLE` on it. (`RdKafkaReader` waits it out
-/// too, because there it is T13's inference from an empty answer; its exact
-/// set is pinned by the unit row
+/// A refusal is not propagation: the default `created_topic_configs` returns
+/// `NotAuthorized` on the first answer, and does not spend
+/// `CREATED_TOPIC_SETTLE` on it. (`RdKafkaReader` waits it out too, because
+/// there it is T13's inference from an empty answer; its exact set is pinned by
+/// the unit row
 /// `the_created_topic_configuration_read_waits_out_only_propagation`, and its
 /// reason is PROD-00.3f's recorded failure, "DescribeConfigs answered this
 /// visible topic with no configuration". No broker row reproduces that race.)

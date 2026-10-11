@@ -101,11 +101,11 @@ pub struct ObjectHead {
 ///
 /// [`Store::get_capped`] takes a cap and there is no uncapped read, so a new
 /// read site has to name which of these it is (or argue for a new row here).
-/// The caps are per DOCUMENT and
-/// per READER: a runner, CLI or check Job reads in its own pod under its own
-/// memory limit, while `weirkeeper` is one process for every namespace, so
-/// the controller's caps are the smaller `CONTROLLER_*` rows and an object a
-/// tenant planted cannot take memory the other namespaces' reconciles need.
+/// The caps are per DOCUMENT and per READER: a runner, CLI or check Job reads
+/// in its own pod under its own memory limit, while `weirkeeper` is one process
+/// for every namespace, so the controller's caps are the smaller `CONTROLLER_*`
+/// rows and an object a tenant planted cannot take memory the other namespaces'
+/// reconciles need.
 ///
 /// | cap | bytes | read by | measured |
 /// |---|---|---|---|
@@ -746,12 +746,11 @@ struct Misreport {
 impl Store {
     /// One arm per `StorageUrl` variant, matching upstream's own
     /// `StorageBackendConfig` shape
-    /// (`kafka-backup-core/src/storage/config.rs`).
-    /// The client is built INSIDE `rt.block_on`, so the client and its
-    /// connection pool belong to the runtime that will later drive them.
-    /// Shared by `from_url` and `read_only_from_url` — the two constructors
-    /// differ only in whether the `LOGWEIR_ROOT` guard runs, never in how the
-    /// backend itself is built.
+    /// (`kafka-backup-core/src/storage/config.rs`). The client is built INSIDE
+    /// `rt.block_on`, so the client and its connection pool belong to the
+    /// runtime that will later drive them. Shared by `from_url` and
+    /// `read_only_from_url` — the two constructors differ only in whether the
+    /// `LOGWEIR_ROOT` guard runs, never in how the backend itself is built.
     fn build_backend(
         u: &StorageUrl,
         rt: &tokio::runtime::Runtime,
@@ -766,11 +765,10 @@ impl Store {
                     allow_http,
                     ..
                 } => {
-                    // `from_env()` reads
-                    // `AWS_REGION`/`AWS_DEFAULT_REGION` when the location names
-                    // none, and the region becomes the host on an endpoint-less
-                    // location, so the environment's spelling is held to the
-                    // same rule as the location's.
+                    // `from_env()` reads `AWS_REGION`/`AWS_DEFAULT_REGION` when
+                    // the location names none, and the region becomes the host
+                    // on an endpoint-less location, so the environment's
+                    // spelling is held to the same rule as the location's.
                     refuse_invalid_region(region.as_deref())?;
                     if region.is_none() {
                         for var in ["AWS_REGION", "AWS_DEFAULT_REGION"] {
@@ -1242,8 +1240,7 @@ impl Store {
     }
 
     /// **Read one object whole, and never more than `max_bytes` of it.**
-    /// Returns
-    /// the bytes and the version id the store answered with.
+    /// Returns the bytes and the version id the store answered with.
     ///
     /// # The two fences, in order
     ///
@@ -1267,9 +1264,9 @@ impl Store {
     /// on every restart.
     ///
     /// `StoreError::NotFound` only when the object does not exist, never for
-    /// another failure (`Io`).
-    /// `EngineError: From<StoreError>` keeps every `?`-based caller a plain
-    /// operational failure, whose message names the cap.
+    /// another failure (`Io`). `EngineError: From<StoreError>` keeps every
+    /// `?`-based caller a plain operational failure, whose message names the
+    /// cap.
     pub fn get_capped(
         &self,
         key: &str,
@@ -1904,11 +1901,11 @@ pub struct VersionLog {
 /// The id counter EVERY [`VersionLog`] in this process draws from.
 ///
 /// **A version id is a property of one object in ONE bucket**, and a real store
-/// never issues an id another bucket issued. A
-/// per-bucket counter would: two doubles written in the same order hand out
-/// the same ids, and a byte-for-byte COPY of a pinned point would then find
-/// its pin among the copy's own versions by coincidence — a test of "the pin
-/// is not this bucket's" that could not fail.
+/// never issues an id another bucket issued. A per-bucket counter would: two
+/// doubles written in the same order hand out the same ids, and a byte-for-byte
+/// COPY of a pinned point would then find its pin among the copy's own versions
+/// by coincidence — a test of "the pin is not this bucket's" that could not
+/// fail.
 static NEXT_VERSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl VersionLog {

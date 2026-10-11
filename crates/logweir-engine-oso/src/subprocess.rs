@@ -46,12 +46,13 @@ pub const LOGWEIR_STREAM: &str = "logweir";
 /// # Why a FILE and not a flag
 ///
 /// The pinned engine takes no CA argument for its object-store client. What it
-/// is claimed to honour — `[UNVERIFIED — U1: whether the engine honours a custom CA file]`
-/// — is `SSL_CERT_FILE`, through
-/// rustls-platform-verifier on Linux. Until that is measured on a recorded
-/// engine digest the controller REFUSES a destination carrying a `caBundle`
-/// for engine-driven runs (`weirkeeper::controllers::backup::ENGINE_CUSTOM_CA_VERIFIED`),
-/// so this path is reachable only under the administrator's explicit
+/// is claimed to honour —
+/// `[UNVERIFIED — U1: whether the engine honours a custom CA file]` — is
+/// `SSL_CERT_FILE`, through rustls-platform-verifier on Linux. Until that is
+/// measured on a recorded engine digest the controller REFUSES a destination
+/// carrying a `caBundle` for engine-driven runs
+/// (`weirkeeper::controllers::backup::ENGINE_CUSTOM_CA_VERIFIED`), so this path
+/// is reachable only under the administrator's explicit
 /// `engine.allowUnverifiedCustomCa` opt-in — which is exactly how D2 §14's
 /// scenario S2b measures it.
 ///

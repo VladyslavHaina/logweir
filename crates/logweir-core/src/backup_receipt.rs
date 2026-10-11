@@ -542,12 +542,11 @@ pub const CONFIG_SOURCES: [&str; 6] = [
     "unknown",
 ];
 
-/// The `format_version` of a receipt that carries
-/// `topic_configuration`: the MINOR after 1.2.0. Every receipt this build signs
-/// carries the block and is written as [`FORMAT_VERSION_WITH_GENERATIONS`] or
-/// later ([`format_version_for`]). A 1.0.0,
-/// 1.1.0 or 1.2.0 reader ignores the field inside major 1 and reads the
-/// document under it.
+/// The `format_version` of a receipt that carries `topic_configuration`: the
+/// MINOR after 1.2.0. Every receipt this build signs carries the block and is
+/// written as [`FORMAT_VERSION_WITH_GENERATIONS`] or later
+/// ([`format_version_for`]). A 1.0.0, 1.1.0 or 1.2.0 reader ignores the field
+/// inside major 1 and reads the document under it.
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
 /// The first minor of format 1 that defines `topic_configuration` (arm 12). A
@@ -912,22 +911,21 @@ pub struct ReceiptArchive {
 
 /// The `format_version` a receipt carries when it pins
 /// `archive.manifest_version_id`: a MINOR bump over [`RECEIPT_FORMAT_VERSION`]
-/// (1.1.0), because the field is optional and a
-/// 1.1.0 or 1.0.0 reader, which ignores unknown fields inside major 1, still
-/// reads it (reading rule 1). Written only when the pin is present, so every
-/// receipt on an unversioned bucket is exactly the [`RECEIPT_FORMAT_VERSION`]
-/// document.
+/// (1.1.0), because the field is optional and a 1.1.0 or 1.0.0 reader, which
+/// ignores unknown fields inside major 1, still reads it (reading rule 1).
+/// Written only when the pin is present, so every receipt on an unversioned
+/// bucket is exactly the [`RECEIPT_FORMAT_VERSION`] document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
-/// The `format_version` of a receipt whose `source.auth.mode`
-/// is `scramSha256`, `plain` or `mtls`: a MINOR bump over
+/// The `format_version` of a receipt whose `source.auth.mode` is `scramSha256`,
+/// `plain` or `mtls`: a MINOR bump over
 /// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (1.3.0), because the change is
 /// new content in an existing field that an older reader can only refuse (arm
 /// 5a), never accept as something stronger (OD-7, third case). Written only for
-/// those modes, so
-/// a receipt for a `plaintext` or `scramSha512` backup is byte-for-byte the
-/// document it was before. It includes every earlier minor: a 1.4.0 receipt
-/// carries `topic_configuration` and may carry `archive.manifest_version_id`.
+/// those modes, so a receipt for a `plaintext` or `scramSha512` backup is
+/// byte-for-byte the document it was before. It includes every earlier minor: a
+/// 1.4.0 receipt carries `topic_configuration` and may carry
+/// `archive.manifest_version_id`.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 
 /// The first minor of format 1 whose `source.auth.mode` may be one of

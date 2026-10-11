@@ -58,10 +58,9 @@ use serde_json::Value;
 
 /// What a key is allowed to be used for.
 ///
-/// SEPARATED: one key that both signs
-/// evidence and authorises restores is a key whose holder can approve their
-/// own work, and the usage set is what turns "the same operator holds both"
-/// from a labelled risk into a refusal.
+/// SEPARATED: one key that both signs evidence and authorises restores is a key
+/// whose holder can approve their own work, and the usage set is what turns
+/// "the same operator holds both" from a labelled risk into a refusal.
 ///
 /// A usage MISMATCH is its own verdict ([`UntrustReason::KeyUsageMismatch`])
 /// and never a signature failure: a genuinely signed approval presented as an

@@ -326,14 +326,13 @@ impl OutsideTheSubset {
 }
 
 /// What a document from a stated start proves about the records BEFORE that
-/// start. Only a COMPLETE verification whose
-/// `integrity.result` is `pass` shows that none was restored: there a
-/// restored record below the start is `unexpected`, and IV-6 holds a
-/// complete pass to no unexpected record in any partition. A SAMPLED check
-/// cannot: its sample is drawn from the window, and its per-partition count
-/// bound counts every record of a segment that straddles the start, so an
-/// engine that restored a straddling segment's earlier records stays inside
-/// every bound.
+/// start. Only a COMPLETE verification whose `integrity.result` is `pass` shows
+/// that none was restored: there a restored record below the start is
+/// `unexpected`, and IV-6 holds a complete pass to no unexpected record in any
+/// partition. A SAMPLED check cannot: its sample is drawn from the window, and
+/// its per-partition count bound counts every record of a segment that
+/// straddles the start, so an engine that restored a straddling segment's
+/// earlier records stays inside every bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeforeTheStart {
     /// A complete verification that passed: none was restored or expected.
@@ -436,11 +435,11 @@ pub struct TimeBasisLabel {
 /// `the_written_version_defines_time_basis` keeps the pair coherent.
 pub const TIME_BASIS_SINCE_MINOR: u64 = 3;
 
-/// The first minor of scorecard format 1 whose
-/// `target.auth.mode` may be one of `crate::connection::PROD_01_3_AUTH_MODES`
-/// (`scramSha256`, `plain`, `mtls`). **A renumber changes this and
-/// [`FORMAT_VERSION_WITH_AUTH_MODES`] together**, and
-/// `docs/verify_scorecard.py`'s `SCORECARD_AUTH_MODES_SINCE_MINOR` follows it.
+/// The first minor of scorecard format 1 whose `target.auth.mode` may be one of
+/// `crate::connection::PROD_01_3_AUTH_MODES` (`scramSha256`, `plain`, `mtls`).
+/// **A renumber changes this and [`FORMAT_VERSION_WITH_AUTH_MODES`] together**,
+/// and `docs/verify_scorecard.py`'s `SCORECARD_AUTH_MODES_SINCE_MINOR` follows
+/// it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 5;
 
 /// The `format_version` of a scorecard whose `target.auth.mode` is
@@ -948,8 +947,8 @@ fn known_major(format_version: &str) -> bool {
 /// The NEWER of two scorecard versions, by major and then minor. Every version
 /// step takes the max, so a later version is never downgraded by an earlier
 /// step, and a 2.0.0 chosen for a subset is never lowered to a 1.x minor. A
-/// version this build cannot parse is kept
-/// as it is, so a malformed value is never silently replaced.
+/// version this build cannot parse is kept as it is, so a malformed value is
+/// never silently replaced.
 #[must_use]
 pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
     match (
@@ -1010,9 +1009,9 @@ pub fn format_version_with_sample<'a>(
     sample: &SampleInfo,
     coverage: crate::spec::Coverage,
 ) -> &'a str {
-    // At least 1.6.0, never lower than the
-    // version handed in, so a later minor a step before this one chose (1.7.0
-    // for a stated window start) is never written over.
+    // At least 1.6.0, never lower than the version handed in, so a later minor
+    // a step before this one chose (1.7.0 for a stated window start) is never
+    // written over.
     if coverage == crate::spec::Coverage::Sampled || sample.unsampled_topics.is_some() {
         newer_format_version(current, FORMAT_VERSION_WITH_UNSAMPLED_TOPICS)
     } else {
@@ -2893,17 +2892,16 @@ impl Scorecard {
                 ));
             }
             // ON-5. Format 1.9.0 SPLITS THIS ARM BY VERSION and leaves every
-            // document
-            // below 1.9.0 judged exactly as before: `consoleApproval` is a
-            // value of 1.9.0 and later, so under an older minor it is refused
-            // as a value that version does not define (the first statement,
-            // which names the version and never the document's word), and
-            // from 1.9.0 the closed set is four (the second). A reader built
-            // at 1.8.0 refuses a 1.9.0 document naming the new member through
-            // the third statement, its own, unchanged — the SAFER verdict,
-            // OD-7's third case — so the change is MINOR. This build accepts
-            // the member only beside the block that says who approved (arm
-            // CA-8, below). NOT INTERPOLATED but for the version.
+            // document below 1.9.0 judged exactly as before: `consoleApproval`
+            // is a value of 1.9.0 and later, so under an older minor it is
+            // refused as a value that version does not define (the first
+            // statement, which names the version and never the document's
+            // word), and from 1.9.0 the closed set is four (the second). A
+            // reader built at 1.8.0 refuses a 1.9.0 document naming the new
+            // member through the third statement, its own, unchanged — the
+            // SAFER verdict, OD-7's third case — so the change is MINOR. This
+            // build accepts the member only beside the block that says who
+            // approved (arm CA-8, below). NOT INTERPOLATED but for the version.
             let four_defined = defines_console_approval(&self.format_version);
             if on.approval_mode == APPROVAL_MODE_CONSOLE {
                 if !four_defined {
@@ -4025,8 +4023,8 @@ mod tests {
         // EARLIER in `validate_invariants` and would otherwise fire first.
         // `pass-degraded` is the honest value for this document, and the same
         // override the corpus case
-        // `pass_rate_measured_without_byte_fingerprint` carries.
-        // Python sibling:
+        // `pass_rate_measured_without_byte_fingerprint` carries. Python
+        // sibling:
         // `docs/test_verify_scorecard.py::test_a_pass_rate_measured_without_byte_fingerprint_is_refused`.
         let mut sc = valid_scorecard();
         sc.integrity.level = IntegrityLevel::ConsumeOnly;
@@ -5077,10 +5075,10 @@ mod tests {
         assert_eq!(back.integrity.verification, Some(complete_verification()));
     }
 
-    /// "Blank" is `str::trim().is_empty()`, and
-    /// `trim` strips `char::is_whitespace`. `docs/verify_scorecard.py`'s
-    /// `RUST_WHITESPACE` is that set, code point for code point (pinned there
-    /// by `test_the_blank_set_is_the_rust_readers`); this pins it here, so a
+    /// "Blank" is `str::trim().is_empty()`, and `trim` strips
+    /// `char::is_whitespace`. `docs/verify_scorecard.py`'s `RUST_WHITESPACE` is
+    /// that set, code point for code point (pinned there by
+    /// `test_the_blank_set_is_the_rust_readers`); this pins it here, so a
     /// toolchain whose Unicode data moves the set fails beside its twin.
     #[test]
     fn the_blank_set_is_the_unicode_white_space_property_the_script_strips() {
@@ -5292,9 +5290,9 @@ mod tests {
 
     /// **The version steps are MONOTONIC**: each takes the newer of what it was
     /// handed and its own minor, so the sampled step can never write 1.6.0 over
-    /// a 1.7.0 a step before it chose, and the
-    /// selection step never lowers a later minor. KILLS: either step returning
-    /// its own constant unconditionally.
+    /// a 1.7.0 a step before it chose, and the selection step never lowers a
+    /// later minor. KILLS: either step returning its own constant
+    /// unconditionally.
     #[test]
     fn every_version_step_takes_the_newer_minor() {
         use crate::spec::Coverage::{Complete, Sampled};

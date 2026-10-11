@@ -57,11 +57,10 @@ use logweir_core::check_contract::{
 /// through [`redact`].
 ///
 /// A RAW BROKER STRING NEVER LEAVES THIS MODULE: only codes plus a redacted
-/// message. librdkafka's error reasons
-/// carry the broker list, and a SASL failure's reason has been observed to
-/// carry the mechanism and the principal; [`CheckFailure::new`] is the ONE
-/// constructor, and it redacts, so a caller cannot build one that has not been
-/// through the rules.
+/// message. librdkafka's error reasons carry the broker list, and a SASL
+/// failure's reason has been observed to carry the mechanism and the principal;
+/// [`CheckFailure::new`] is the ONE constructor, and it redacts, so a caller
+/// cannot build one that has not been through the rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckFailure {
     /// The closed code a check outcome carries.
@@ -423,8 +422,8 @@ pub trait InventoryProbe {
     /// dials, waits and reads inside it, and does not start with none left.
     ///
     /// The DEFAULT observes nothing and says so, so a probe that does not
-    /// implement it (a test double) can only
-    /// leave a capability row `unknown`, never `ready`.
+    /// implement it (a test double) can only leave a capability row `unknown`,
+    /// never `ready`.
     ///
     /// # Errors
     /// [`CheckFailure`] with [`CheckCode::ApiVersionsNotObserved`] when the

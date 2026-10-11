@@ -1,10 +1,10 @@
-//! Every credential binding form is
-//! computed in two places — the product (`logweir_core::credential_binding`
-//! and, for a `KafkaCluster`, `logweir_core::connection::credential_binding`:
-//! what the controller publishes and every runner Job expects) and the
-//! operator's upgrade tool (`scripts/bind-credential.py`, which COMPUTES the
-//! binding from the object's spec, compares it with the published one and
-//! writes it into a Secret). A fixture both sides read is the agreement;
+//! Every credential binding form is computed in two places — the product
+//! (`logweir_core::credential_binding` and, for a `KafkaCluster`,
+//! `logweir_core::connection::credential_binding`: what the controller
+//! publishes and every runner Job expects) and the operator's upgrade tool
+//! (`scripts/bind-credential.py`, which COMPUTES the binding from the object's
+//! spec, compares it with the published one and writes it into a Secret). A
+//! fixture both sides read is the agreement;
 //! `scripts/test_bind_credential_rows.py` reads the same file.
 
 use logweir_core::credential_binding::{

@@ -151,24 +151,22 @@ pub struct RestoreSpecBlock {
     /// floor (that would silently widen the selection the approver read). It
     /// must also be earlier than the window's end. It is a time selection, so
     /// the `restore.time_basis` rule applies to it as it does to
-    /// `point_in_time`.
-    /// Present only beside a `point_in_time`: the interval states both ends.
+    /// `point_in_time`. Present only beside a `point_in_time`: the interval
+    /// states both ends.
     pub window_start: Option<DateTime<Utc>>,
-    /// Per-topic partition subsets,
-    /// `{topic: [partition, …]}`: each named topic restores ONLY the listed
-    /// partitions; a selected topic not named restores every partition. A run
-    /// that states one signs scorecard format **2.0.0**, which every reader
-    /// before it refuses as an unsupported major instead of reading it as a
-    /// full restore.
+    /// Per-topic partition subsets, `{topic: [partition, …]}`: each named topic
+    /// restores ONLY the listed partitions; a selected topic not named restores
+    /// every partition. A run that states one signs scorecard format **2.0.0**,
+    /// which every reader before it refuses as an unsupported major instead of
+    /// reading it as a full restore.
     ///
     /// **Only beside the interval form of `point_in_time`**: an older runner
     /// ignores an unknown `partitions` key and would restore EVERY partition of
-    /// the plan
-    /// an approver narrowed. So a plan stating a subset writes its point in
-    /// time as `"<start>/<end>"`, or `"../<end>"` (an ISO 8601 interval with an
-    /// open start: from the archive's floor), which no older runner can parse:
-    /// it refuses the plan (`drill spec does not parse`, exit 1) before any
-    /// client exists. A subset beside a plain instant, or with no
+    /// the plan an approver narrowed. So a plan stating a subset writes its
+    /// point in time as `"<start>/<end>"`, or `"../<end>"` (an ISO 8601
+    /// interval with an open start: from the archive's floor), which no older
+    /// runner can parse: it refuses the plan (`drill spec does not parse`, exit 1)
+    /// before any client exists. A subset beside a plain instant, or with no
     /// `point_in_time`, is refused at parse; so is `"../<end>"` without a
     /// subset, so each plan has one spelling. Empty for every plan that states
     /// none, which keeps its bytes.
@@ -714,8 +712,7 @@ pub struct TopicNaming {
     /// this block is refused exactly as before.
     ///
     /// Optional and skipped when absent, so every plan written before the block
-    /// existed
-    /// serialises, hashes and means exactly what it did.
+    /// existed serialises, hashes and means exactly what it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name: Option<OriginalNameSpec>,
 }
@@ -934,8 +931,8 @@ pub enum Anchor {
 impl Anchor {
     /// The wire spelling, which is also what reaches `sample.anchor` in the
     /// signed scorecard. That field stays a `String` in
-    /// `logweir_core::scorecard`:
-    /// narrowing a published field's type is not an optional addition.
+    /// `logweir_core::scorecard`: narrowing a published field's type is not an
+    /// optional addition.
     pub fn as_str(self) -> &'static str {
         match self {
             Anchor::Head => "head",
@@ -1356,8 +1353,7 @@ mod tests {
     }
 
     /// UNSPELLABLE, not detected: an unsupported value fails to parse instead
-    /// of
-    /// reaching `select_sample`.
+    /// of reaching `select_sample`.
     #[test]
     fn an_unsupported_anchor_spelling_does_not_parse_at_all() {
         let err = sample(

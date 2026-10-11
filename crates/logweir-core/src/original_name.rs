@@ -1,29 +1,28 @@
-//! **PROD-15.1 — restore under the ORIGINAL topic name, into a topic that does
-//! not exist: the conditions contract.** Pure: no clock, no I/O, no client.
+//! **Restore under the ORIGINAL topic name, into a topic that does not exist:
+//! the conditions contract.** Pure: no clock, no I/O, no client.
 //!
-//! # What the owner decided, and what stays refused
+//! # What stays refused
 //!
-//! OD-2 (2026-10-05) kept `docs/stability.md`'s Never #1 — a restore into a
-//! LIVE topic stays refused — and narrowed it so that this one path is allowed:
-//! a restore that writes under the source's own topic names into topics that
-//! are ABSENT, behind its own approval subject. Everything else about an
-//! identity mapping stays refused exactly as before: in `scratch` mode, for any
-//! target name that exists, and for an empty prefix nobody opted into.
+//! `docs/stability.md`'s Never #1 keeps a restore into a LIVE topic refused;
+//! this one path is allowed: a restore that writes under the source's own topic
+//! names into topics that are ABSENT, behind its own approval subject.
+//! Everything else about an identity mapping stays refused: in `scratch` mode,
+//! for any target name that exists, and for an empty prefix nobody opted into.
 //!
 //! # The conditions, and where each one is checked
 //!
 //! | # | condition | where | refusal |
 //! |---|---|---|---|
 //! | 1 | the plan opts in explicitly: `target.topic_naming: {prefix: "", original_name: {…}}` in `newTopic` mode | phase 0, local ([`refuse_shape`]) | [`ORIGINAL_NAME_NOT_NEW_TOPIC`], [`ORIGINAL_NAME_PREFIX_NOT_EMPTY`]; an empty prefix without the block keeps the old "onto itself" refusal |
-//! | 1b | the plan asks for COMPLETE verification, `sample.coverage: complete` (the orchestrator's ruling of 2026-10-09) | phase 0, local ([`refuse_shape`]); runner and controller readiness; controller admission; the product API and the console | [`ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE`] |
-//! | 1c | the plan restores WHOLE topics: no `restore.partitions` (the orchestrator's ruling of 2026-10-09, after PROD-11.1b allowed partition subsets). A stated window start or end stays allowed: whole partitions, bounded in time | phase 0, local ([`refuse_shape`]); runner startup, `drill approve`, runner and controller readiness; controller admission and reconcile. No CEL rule: the `Restore` CRD declares no partitions | [`ORIGINAL_NAME_NEEDS_WHOLE_TOPICS`] |
+//! | 1b | the plan asks for COMPLETE verification, `sample.coverage: complete` | phase 0, local ([`refuse_shape`]); runner and controller readiness; controller admission; the product API and the console | [`ORIGINAL_NAME_NEEDS_COMPLETE_COVERAGE`] |
+//! | 1c | the plan restores WHOLE topics: no `restore.partitions`. A stated window start or end stays allowed: whole partitions, bounded in time | phase 0, local ([`refuse_shape`]); runner startup, `drill approve`, runner and controller readiness; controller admission and reconcile. No CEL rule: the `Restore` CRD declares no partitions | [`ORIGINAL_NAME_NEEDS_WHOLE_TOPICS`] |
 //! | 2 | every restored name is absent on the target | phase 0 (the existing absence refusal, both modes) | "already exists" |
 //! | 3 | the target is not the source cluster, OR every broker reports `auto.create.topics.enable=false` | phase 0 ([`source_relation`], [`require_auto_create_disabled`]) | [`ORIGINAL_NAME_AUTO_CREATE_ENABLED`], [`ORIGINAL_NAME_AUTO_CREATE_UNKNOWN`] |
 //! | 4 | somewhere was looked for a declarative owner, and none was found unless the owner path is chosen | phase 0 ([`owner_verdict`]) | [`ORIGINAL_NAME_OWNER_NOT_CHECKED`], [`ORIGINAL_NAME_OWNER_PRESENT`], [`ORIGINAL_NAME_OWNERS_INVALID`] |
 //! | 5 | the approval names the separate subject `originalName` | runner startup and phase 1, controller admission ([`check_approval_subject`]) | [`APPROVAL_SUBJECT_MISMATCH`] |
-//! | 5b | on a one-person-confirmation (`Ordinary`) authorization, the requester RE-TYPED every original topic name, exactly, and the console signed what was typed (the owner's decision OD-10) | the product API before it signs, controller admission, runner startup and phase 1 ([`check_typed_confirmation`]) | [`ORIGINAL_NAME_CONFIRMATION_MISSING`], [`ORIGINAL_NAME_CONFIRMATION_MISMATCH`], [`ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED`] |
+//! | 5b | on a one-person-confirmation (`Ordinary`) authorization, the requester RE-TYPED every original topic name, exactly, and the console signed what was typed | the product API before it signs, controller admission, runner startup and phase 1 ([`check_typed_confirmation`]) | [`ORIGINAL_NAME_CONFIRMATION_MISSING`], [`ORIGINAL_NAME_CONFIRMATION_MISMATCH`], [`ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED`] |
 //! | 6 | creation is exclusive: `CreateTopics` fails on an existing name, and a name that appears after phase 0 loses the race by name | the creation step | [`TARGET_TOPIC_APPEARED`] |
-//! | 7 | the `LogAppendTime` probe and teardown never touch an original name, and NO code path deletes a topic under one — not a topic this run created, not after a lost race (the orchestrator's ruling of 2026-10-09: Kafka has no conditional delete) | phase 0 ([`probe_topic_name`]), the creation step and phase 9 | — |
+//! | 7 | the `LogAppendTime` probe and teardown never touch an original name, and NO code path deletes a topic under one (not a topic this run created, not after a lost race): Kafka has no conditional delete | phase 0 ([`probe_topic_name`]), the creation step and phase 9 | — |
 //!
 //! Every refusal before the creation step is exit 3 before anything is written
 //! (the probe, the one documented exception, writes only under the scratch
@@ -31,7 +30,7 @@
 //! run by then (`docs/stability.md`, "A phase-5 / phase-6 … divergence is exit
 //! 1"), and nothing was written into the name that appeared.
 //!
-//! Every refusal MESSAGE opens with its token and a colon, as FX-16's
+//! Every refusal MESSAGE opens with its token and a colon, as
 //! `PointBindingSetMismatch` does; the runner's `refusal-reason=` line stays
 //! `GuardRefused`, so no controller condition vocabulary changes.
 //!
@@ -44,10 +43,10 @@
 //! it can never OBSERVE that no owner exists. It looks where it can (the
 //! approved plan's statement, Strimzi `KafkaTopic` resources it is given, the
 //! bound point's verified receipt) and refuses when it looked nowhere — the
-//! same rule PROD-05.1 applies to `owner_detection: []` ("owner not checked",
-//! never "no owner"). The controller does not list `KafkaTopic` resources yet
-//! (PROD-05.1a, which needs a `kafka.strimzi.io` grant), so on Kubernetes the
-//! approved plan's statement is the place.
+//! same rule `owner_detection: []` has in a backup ("owner not checked", never
+//! "no owner"). The controller does not list `KafkaTopic` resources yet (it
+//! would need a `kafka.strimzi.io` grant), so on Kubernetes the approved plan's
+//! statement is the place.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,9 +56,7 @@ use crate::backup_receipt::TopicOwner;
 use crate::spec::{DrillSpec, TargetMode};
 use crate::topic_configuration::DeclaredOwner;
 
-// ---------------------------------------------------------------------------
 // The refusal tokens
-// ---------------------------------------------------------------------------
 
 /// An `original_name` block in `scratch` mode: the identity ban stays in
 /// scratch mode, whatever the block says.
@@ -117,14 +114,11 @@ pub const ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED: &str = "OriginalNameConfirmat
 /// reference it cannot record: an owner it cannot see is never dropped.
 pub const ORIGINAL_NAME_OWNER_UNREADABLE: &str = "OriginalNameOwnerUnreadable";
 
-// ---------------------------------------------------------------------------
 // The approval subject
-// ---------------------------------------------------------------------------
 
 /// The wire value of the separate approval subject an original-name restore
 /// needs, inside the SIGNED approval document: v1's `approval_subject`, v2's
-/// `approvalSubject`. An ordinary approval carries no such key, so every
-/// document written before PROD-15.1 is an ordinary approval byte for byte.
+/// `approvalSubject`. An ordinary approval carries no such key.
 pub const APPROVAL_SUBJECT_ORIGINAL_NAME: &str = "originalName";
 
 /// The label an ordinary approval is SHOWN with (console, API, scorecard
@@ -207,7 +201,7 @@ impl std::fmt::Display for ApprovalSubject {
 /// The approval's subject must BE the plan's — in both directions.
 ///
 /// An ordinary approval never authorises an original-name restore: that is
-/// the separate approval OD-2 and the tracker's rule 5 require. And an
+/// the separate approval this path requires. And an
 /// original-name approval never authorises an ordinary plan either: the plan
 /// hash would already refuse a different plan, so a mismatch here means the
 /// approver and the plan disagree about what is being restored, and running it
@@ -240,9 +234,7 @@ pub fn check_approval_subject(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Condition 5b: the typed confirmation (OD-10, 2026-10-09)
-// ---------------------------------------------------------------------------
+// Condition 5b: the typed confirmation.
 
 /// The scorecard's `target.original_name.confirmation` for an authorization
 /// the requester confirmed alone by re-typing every original topic name.
@@ -252,12 +244,12 @@ pub const CONFIRMATION_TYPED_TOPIC_NAMES: &str = "typedTopicNames";
 /// `topicMapping` bound.
 pub const MAX_TYPED_TOPICS: usize = 1000;
 
-/// **OD-10 (a), decided by the owner on 2026-10-09.** On an install using
-/// one-person confirmation (an `Ordinary` policy), the requester may confirm
-/// an original-name restore alone, but only after RE-TYPING every original
-/// topic name, exactly; the console signs what was typed into the
-/// authorization document v2, beside the approval subject. Two-person and
-/// strict namespaces still need the second person, and carry no typed names.
+/// On an install using one-person confirmation (an `Ordinary` policy), the
+/// requester may confirm an original-name restore alone, but only after
+/// RE-TYPING every original topic name, exactly; the console signs what was
+/// typed into the authorization document v2, beside the approval subject.
+/// Two-person and strict namespaces still need the second person, and carry no
+/// typed names.
 ///
 /// INSIDE THE SIGNED BYTES (`RestoreAuthorization::original_name_confirmation`,
 /// wire `originalNameConfirmation`), so the runner and the controller can hold
@@ -374,9 +366,7 @@ pub fn check_typed_confirmation(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Condition 1: the plan's shape
-// ---------------------------------------------------------------------------
 
 /// Whether this plan is an original-name restore the runner may consider at
 /// all: the block, `newTopic`, and the empty prefix.
@@ -409,17 +399,14 @@ pub fn is_original_name_restore(spec: &DrillSpec) -> bool {
 /// not hold as unexpected, by offset. Only that is acceptable under an
 /// original name, so the plan must ask for it.
 ///
-/// **Why whole topics, and never a partition subset** (PROD-11.1b lifted the
-/// general refusal of `restore.partitions`; this is the rule that stays for
-/// an original name). The creation step creates each topic under its
-/// production name with EVERY partition the archive lists, and the engine
-/// fills only the selected ones. The result is a production-named topic whose
-/// other partitions are empty, signed as covered, because "covered" then
-/// means every SELECTED partition. And it cannot be finished later: the name
-/// now exists, and a restore into an existing topic is refused. So the plan
-/// is refused before anything is created. A stated window (a start, or an
-/// end) restores whole partitions bounded in time, and stays allowed; a
-/// subset under a PREFIX is PROD-11.1b's and is untouched.
+/// **Why whole topics, and never a partition subset.** The creation step
+/// creates each topic under its production name with EVERY partition the
+/// archive lists, and the engine fills only the selected ones: the result would
+/// be a production-named topic whose other partitions are empty, signed as
+/// covered (every SELECTED partition), and it could not be finished later,
+/// because the name now exists. A stated window (a start, or an end) restores
+/// whole partitions bounded in time and stays allowed; a subset under a PREFIX
+/// is untouched.
 #[must_use]
 pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
     spec.target.original_name()?;
@@ -482,9 +469,7 @@ pub fn refuse_shape(spec: &DrillSpec) -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
 // Condition 3: which cluster, and auto-creation
-// ---------------------------------------------------------------------------
 
 /// `cluster_condition`'s value when the target is proven not to be the source
 /// cluster.
@@ -534,8 +519,8 @@ impl SourceRelation {
 /// holds as MEASURED facts — the bound point's verified receipt
 /// (`source.cluster_id`, read from the broker at backup). Never a value from
 /// the plan, and never the allowlist file's `source_cluster_id`: that is
-/// unsigned runner input, and a wrong value would skip the auto-creation read
-/// (PROD-15.1 review L3).
+/// unsigned runner input, and a wrong value would skip the auto-creation
+/// read.
 ///
 /// "Not the source" needs a known id and every known id to differ: one that
 /// equals the target makes it the same cluster, and none at all is unknown.
@@ -645,9 +630,7 @@ pub fn cluster_condition(relation: &SourceRelation) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Condition 4: declarative owners
-// ---------------------------------------------------------------------------
 
 /// The plan's `original_name.owners`: the approver's statement.
 pub const OWNER_FOUND_IN_PLAN: &str = "plan";
@@ -784,13 +767,12 @@ pub fn owner_verdict(
     }
     owners.sort();
     owners.dedup();
-    // **THE RECEIPT ADDS OWNERS; IT NEVER STANDS IN FOR LOOKING** (the fix
-    // round's sweep of review M2). A backup records a `KafkaTopic` whose
-    // reference it cannot record as NO owner (PROD-05.1 warns and goes on), so
-    // "the receipt looked and found none" is not proof for a restore that
-    // recreates a production name. An owner the receipt names still blocks
-    // (below); "none found" needs the approved plan's statement or the
-    // target's `KafkaTopic` resources.
+    // **THE RECEIPT ADDS OWNERS; IT NEVER STANDS IN FOR LOOKING.** A backup
+    // records a `KafkaTopic` whose reference it cannot record as NO owner (it
+    // warns and goes on), so "the receipt looked and found none" is not proof
+    // for a restore that recreates a production name. An owner the receipt
+    // names still blocks (below); "none found" needs the approved plan's
+    // statement or the target's `KafkaTopic` resources.
     let looked = detection
         .iter()
         .any(|place| place != OWNER_FOUND_IN_POINT_RECEIPT);
@@ -840,9 +822,7 @@ pub fn owner_verdict(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Condition 7: the probe
-// ---------------------------------------------------------------------------
 
 /// The stem of the `LogAppendTime` probe's name in an original-name restore.
 pub const PROBE_TOPIC_STEM: &str = "logweir-probe-";
@@ -886,7 +866,7 @@ mod tests {
         vec!["orders".into(), "payments".into()]
     }
 
-    /// OD-10. A one-person confirmation of an original-name plan needs every
+    /// A one-person confirmation of an original-name plan needs every
     /// original topic name typed, exactly; anything else is refused by name.
     /// KILLS: accepting a missing list; accepting a list missing a name, with
     /// an extra name, a repeated name, a name differing in case or padding;

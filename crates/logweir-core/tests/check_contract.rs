@@ -479,10 +479,10 @@ fn access_plan_with(
     }
 }
 
-/// The `evidenceWrite` grant rides
-/// ONLY on a plan that will use it, names exactly one reference, and names it
-/// as a Kubernetes object name. Every refusal here is a controller bug the
-/// runner refuses in step 4 (exit 3) rather than acts on.
+/// The `evidenceWrite` grant rides ONLY on a plan that will use it, names
+/// exactly one reference, and names it as a Kubernetes object name. Every
+/// refusal here is a controller bug the runner refuses in step 4 (exit 3)
+/// rather than acts on.
 ///
 /// MUTANT RP-4 (`check_contract.rs`): drop the `!write_probe` clause from
 /// `validate_evidence_write`. The first refusal below starts validating, and a
@@ -2379,8 +2379,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
         );
     }
     // And it anchors no credential: the anchored-run probes with the scheduled
-    // set id in
-    // the anchor position, exactly as they run with a UUID.
+    // set id in the anchor position, exactly as they run with a UUID.
     for input in [
         format!("{set}/{AWS}"),
         format!("{set}/{AWS_ONE_SLASH}"),
@@ -2474,10 +2473,9 @@ fn attestation() -> Attestation {
     }
 }
 
-/// A SUCCESSFUL listing alone is
-/// `unknown`, including for an empty cluster. This is the whole point of the
-/// vocabulary — Kafka omits topics the principal cannot describe, so "I saw
-/// none" is not "there are none".
+/// A SUCCESSFUL listing alone is `unknown`, including for an empty cluster.
+/// This is the whole point of the vocabulary — Kafka omits topics the principal
+/// cannot describe, so "I saw none" is not "there are none".
 #[test]
 fn empty_listing_is_unknown() {
     let v = visibility(&signals(), None, t("2026-09-16T00:00:00Z"));

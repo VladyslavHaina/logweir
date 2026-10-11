@@ -781,8 +781,7 @@ pub trait DataEngine {
     /// rendered document.
     ///
     /// The default body returns `EngineError::Operational`, so a test double
-    /// need
-    /// not implement it.
+    /// need not implement it.
     ///
     /// **Never a fabricated `Ok(BackupFacts { exit_code: 0, .. })`.** Phase
     /// −1's caller reads this result and then reads the ARCHIVE the run was

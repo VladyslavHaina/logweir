@@ -39,13 +39,12 @@
 //!
 //! # The unbound default, and why an upgrade never reaches it
 //!
-//! A FRESH install starts with one-person
-//! confirmation in the console for every namespace without a binding, so the
-//! first restore needs no personal key. An unbound namespace then resolves to
-//! [`default_confirm_policy`] (`default-confirm-v1`, `Ordinary`), a concrete,
-//! content-addressed policy like any other: the console signs a v2 document
-//! naming it, and every checkpoint compares that name and digest exactly as for
-//! an explicit binding.
+//! A FRESH install starts with one-person confirmation in the console for every
+//! namespace without a binding, so the first restore needs no personal key. An
+//! unbound namespace then resolves to [`default_confirm_policy`]
+//! (`default-confirm-v1`, `Ordinary`), a concrete, content-addressed policy
+//! like any other: the console signs a v2 document naming it, and every
+//! checkpoint compares that name and digest exactly as for an explicit binding.
 //!
 //! What decides it, in this order ([`ApprovalPolicySet::unbound_basis`]):
 //!
@@ -199,12 +198,11 @@ pub const PAYLOAD_TYPE_RESTORE_AUTHORIZATION: &str =
 /// [`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`] for one that does.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
 
-/// The minor that defines `approvalSubject` and
-/// `originalNameConfirmation`. A document declaring an older minor that
-/// carries either is refused: the fields change WHAT the document
-/// authorises (a restore under the original topic names), and a document
-/// that predates them cannot have said so. The standing authorization's
-/// 1.1.0 is the same pattern
+/// The minor that defines `approvalSubject` and `originalNameConfirmation`. A
+/// document declaring an older minor that carries either is refused: the fields
+/// change WHAT the document authorises (a restore under the original topic
+/// names), and a document that predates them cannot have said so. The standing
+/// authorization's 1.1.0 is the same pattern
 /// (`crate::execution_contract::STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR`).
 pub const RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR: u64 = 1;
 
@@ -1827,12 +1825,11 @@ pub fn check_binding(
 /// REQUEST and an approval have in common.
 ///
 /// Two rules about the console approver, both of which can only refuse:
-/// `approver`
-/// and `approvedAt` obey their version rule
+/// `approver` and `approvedAt` obey their version rule
 /// ([`RestoreAuthorization::check_approver_fields`]), and they belong to a
 /// policy whose `approverSignature` is `Console` and to no other — so a
-/// console-approved document is never read as anything under a personal-key
-/// or a one-person policy, even one whose digest it names.
+/// console-approved document is never read as anything under a personal-key or
+/// a one-person policy, even one whose digest it names.
 fn check_document_binding(
     doc: &RestoreAuthorization,
     expected: &ExpectedSubject,
@@ -3596,9 +3593,9 @@ namespaces:
     }
 
     /// THE OLDER RUNNER, frozen: `Snapshot` exactly as it was before
-    /// `approverSignature`.
-    /// It refuses a two-person snapshot (an unknown field) — it never runs
-    /// one as a personal-key policy — and still reads every other snapshot.
+    /// `approverSignature`. It refuses a two-person snapshot (an unknown field)
+    /// — it never runs one as a personal-key policy — and still reads every
+    /// other snapshot.
     #[test]
     fn an_older_snapshot_reader_refuses_the_console_setting() {
         #[derive(Deserialize)]
@@ -3708,10 +3705,9 @@ namespaces:
         }
     }
 
-    /// THE OLDER CONTROLLER AND CONSOLE, frozen: the policy entry exactly as
-    /// it was before `approverSignature`. A document that says
-    /// `approverSignature` is
-    /// refused at start (fail closed), and so is `mode: two-person`, which
+    /// THE OLDER CONTROLLER AND CONSOLE, frozen: the policy entry exactly as it
+    /// was before `approverSignature`. A document that says `approverSignature`
+    /// is refused at start (fail closed), and so is `mode: two-person`, which
     /// that build refused by name.
     #[test]
     fn an_older_policy_reader_refuses_the_console_setting() {
@@ -4336,10 +4332,9 @@ namespaces:
     }
 
     /// **THE COMBINATION WITH THE ORIGINAL-NAME RESTORE.** An original-name
-    /// restore approved
-    /// by a second person carries the subject and the approver, at 2.2.0; the
-    /// typed names of a one-person confirmation are refused on it, as on
-    /// every `Governed` document.
+    /// restore approved by a second person carries the subject and the
+    /// approver, at 2.2.0; the typed names of a one-person confirmation are
+    /// refused on it, as on every `Governed` document.
     #[test]
     fn an_original_name_restore_approved_by_a_second_person_carries_the_subject_and_no_typed_names()
     {
@@ -4625,10 +4620,10 @@ namespaces:
     }
 
     /// **REFUSAL TEXT CARRIES NOTHING A REQUESTER CHOSE, UNBOUNDED OR AS IT
-    /// IS.** An issuer and a subject are
-    /// attacker-chosen strings: in a sentence they are quoted, cut at
-    /// [`MAX_SHOWN_CHARS`] and written in visible ASCII, so they cannot start
-    /// a line, end a quotation, hide a character or grow a message.
+    /// IS.** An issuer and a subject are attacker-chosen strings: in a sentence
+    /// they are quoted, cut at [`MAX_SHOWN_CHARS`] and written in visible
+    /// ASCII, so they cannot start a line, end a quotation, hide a character or
+    /// grow a message.
     #[test]
     fn a_principal_in_a_refusal_is_bounded_and_cleaned() {
         assert_eq!(shown("alice"), "\"alice\"");

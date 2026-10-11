@@ -397,14 +397,14 @@ pub const PAYLOAD_TYPE_STANDING_AUTHORIZATION: &str =
 /// [`STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE`].
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION: &str = "1.0.0";
 
-/// The minor that defines `scope.coverage` and
-/// `scope.completeMaxRecords`. A document declaring an older minor that
-/// carries either is refused: the fields are a signer's choice of a STRONGER
-/// check, and a document that predates them cannot have made it.
+/// The minor that defines `scope.coverage` and `scope.completeMaxRecords`. A
+/// document declaring an older minor that carries either is refused: the fields
+/// are a signer's choice of a STRONGER check, and a document that predates them
+/// cannot have made it.
 pub const STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR: u64 = 1;
 
-/// The version a document whose scope carries
-/// `coverage` or `completeMaxRecords` is minted at.
+/// The version a document whose scope carries `coverage` or
+/// `completeMaxRecords` is minted at.
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE: &str = "1.1.0";
 
 /// `kind` — inside the signed bytes, so it cannot be relabelled.
@@ -975,9 +975,9 @@ pub struct PlanScopeFacts {
     /// `sample.complete_max_records`, held to the signed
     /// scope's `completeMaxRecords` when it states one.
     pub complete_max_records: Option<u64>,
-    /// `restore.allow_transaction_markers`. The
-    /// plan bytes are not hash-bound to a standing authorization, so
-    /// [`plan_within_scope`] refuses it: only a per-run approval binds it.
+    /// `restore.allow_transaction_markers`. The plan bytes are not hash-bound
+    /// to a standing authorization, so [`plan_within_scope`] refuses it: only a
+    /// per-run approval binds it.
     pub allows_transaction_markers: bool,
 }
 
@@ -1218,8 +1218,8 @@ pub fn plan_within_scope(
             facts.replay_selection.join(", ")
         ));
     }
-    // The override that restores transaction
-    // markers as data needs an approver to have seen it, for the same reason.
+    // The override that restores transaction markers as data needs an approver
+    // to have seen it, for the same reason.
     if facts.allows_transaction_markers {
         mismatches.push(
             "the plan states restore.allow_transaction_markers: true; a standing rehearsal \

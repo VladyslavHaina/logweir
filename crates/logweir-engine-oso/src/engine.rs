@@ -1038,8 +1038,7 @@ fn select_sample(
                 out.push(sorted[idx].clone());
             }
             // Defensive: a stride that floors two `i` values to one index must
-            // not
-            // repeat a record.
+            // not repeat a record.
             out.dedup_by_key(|f| f.offset);
             Ok(out)
         }

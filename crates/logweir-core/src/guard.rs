@@ -359,8 +359,8 @@ pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByPr
 /// state; its call sites are the runner's guards over a spec's auth
 /// (`crate::spec::AuthSpec::transport_refusal`).
 pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = crate::connection::PLAIN_WITHOUT_TLS;
-/// [I9] A projected credential Secret whose
-/// `logweir-binding` is absent or names another connection or endpoint
+/// [I9] A projected credential Secret whose `logweir-binding` is absent or
+/// names another connection or endpoint
 /// (`crate::connection::CredentialBindingRefusal`). Refused before any client
 /// exists, so a credential is never presented to brokers it was not entered
 /// for.
@@ -421,19 +421,18 @@ pub const TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClai
 /// ignored): exit 4, no engine run, nothing signed. Not retryable.
 pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
 
-/// A restore whose creation step lost a race: a
-/// mapped target name phase 0 proved absent existed when the run came to
-/// create it. Exit 1 (phases 0–5 ran); the runner names what appeared and
-/// what it created and LEFT on its `target-topics-appeared=` line. Nothing is
-/// deleted.
+/// A restore whose creation step lost a race: a mapped target name phase 0
+/// proved absent existed when the run came to create it. Exit 1 (phases 0–5
+/// ran); the runner names what appeared and what it created and LEFT on its
+/// `target-topics-appeared=` line. Nothing is deleted.
 pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TARGET_TOPIC_APPEARED;
 
-/// A restore whose creation step stopped for a reason other
-/// than a race and LEFT topics on the cluster: ones this execution created
-/// (a broker refused another name, answered short, or did not serve a created
-/// topic in time), or ones it asked for, got no definite answer about, and
-/// cannot account for. Exit 1; each is named on
-/// `target-topics-appeared=` (`left`, `unconfirmed`) and left in place.
+/// A restore whose creation step stopped for a reason other than a race and
+/// LEFT topics on the cluster: ones this execution created (a broker refused
+/// another name, answered short, or did not serve a created topic in time), or
+/// ones it asked for, got no definite answer about, and cannot account for.
+/// Exit 1; each is named on `target-topics-appeared=` (`left`, `unconfirmed`)
+/// and left in place.
 pub const TERMINAL_STATE_CREATED_TOPICS_LEFT: &str = "CreatedTopicsLeft";
 
 /// What EVERY surface says about a topic a stopped creation step created and

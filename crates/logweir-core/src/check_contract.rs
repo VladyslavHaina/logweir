@@ -69,10 +69,10 @@ pub const MAX_EVIDENCE_OBJECTS: usize = 3;
 /// [`MAX_EVIDENCE_SCORECARD_BYTES`] for a scorecard, which it does.
 pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = crate::topic_budget::MAX_RECEIPT_BYTES;
 /// The cap of a relayed document that is NOT a backup receipt — a drill
-/// scorecard: 1 MiB. The
-/// controller parses such a document into a `serde_json::Value` (about 37
-/// times its size at worst), so it is not raised with the receipt's. Applied
-/// by the controller to the bytes it receives, and asked for in the plan.
+/// scorecard: 1 MiB. The controller parses such a document into a
+/// `serde_json::Value` (about 37 times its size at worst), so it is not raised
+/// with the receipt's. Applied by the controller to the bytes it receives, and
+/// asked for in the plan.
 pub const MAX_EVIDENCE_SCORECARD_BYTES: u64 = 1024 * 1024;
 const _: () = assert!(MAX_EVIDENCE_SCORECARD_BYTES <= MAX_EVIDENCE_PAYLOAD_BYTES);
 /// `evidenceFetch` sidecar cap: 64 KiB.
@@ -319,18 +319,18 @@ closed_vocabulary! {
         RecoveryPointNotSucceeded => "RecoveryPointNotSucceeded",
         RecoveryPointUidChanged => "RecoveryPointUidChanged",
         RecoveryPointLocationMismatch => "RecoveryPointLocationMismatch",
-        // A restore readiness check about a
-        // CATALOG point re-reads the catalog row when it runs. The row is not
-        // restorable (availability or verification), the controller reached a
-        // refusal on a `Backup` of the same receipt, or the plan's
-        // `source.point` / `source.backup` is not this row's binding.
+        // A restore readiness check about a CATALOG point re-reads the catalog
+        // row when it runs. The row is not restorable (availability or
+        // verification), the controller reached a refusal on a `Backup` of the
+        // same receipt, or the plan's `source.point` / `source.backup` is not
+        // this row's binding.
         CatalogPointNotSelectable => "CatalogPointNotSelectable",
         CatalogPointRefusedByController => "CatalogPointRefusedByController",
         CatalogPointBindingMismatch => "CatalogPointBindingMismatch",
-        // The row's signer is
-        // judged again against the namespace's CURRENT trust when the check
-        // runs, so a key revoked or retired after the last catalog sync
-        // refuses the point instead of riding on the sync-time verdict.
+        // The row's signer is judged again against the namespace's CURRENT
+        // trust when the check runs, so a key revoked or retired after the last
+        // catalog sync refuses the point instead of riding on the sync-time
+        // verdict.
         CatalogPointSignerUntrusted => "CatalogPointSignerUntrusted",
         BackupSetNotFound => "BackupSetNotFound",
         ManifestUnreadable => "ManifestUnreadable",
@@ -423,9 +423,8 @@ closed_vocabulary! {
         // has no answer, and a blocking row with no answer is never `ready`.
         CatalogPointViewUnavailable => "CatalogPointViewUnavailable",
         // The signer re-check's Unknown column: the namespace's trust could not
-        // be resolved
-        // (two policies claim it, none does, or the read failed), or the row
-        // names no signer key, so the re-check has no answer.
+        // be resolved (two policies claim it, none does, or the read failed),
+        // or the row names no signer key, so the re-check has no answer.
         CatalogPointSignerUnknown => "CatalogPointSignerUnknown",
         // The Unknown column of every row that reads the namespace's trust
         // (`signer.rostered`, and the restore allowlist behind
@@ -929,9 +928,8 @@ pub struct DestinationPlan {
     ///
     /// Empty, and then absent from the bytes, when the destination has no such
     /// grant: a plan with no Secret-backed grant is byte-identical to one
-    /// rendered before the field existed.
-    /// An older runner refuses a plan that carries it (`deny_unknown_fields`,
-    /// exit 3).
+    /// rendered before the field existed. An older runner refuses a plan that
+    /// carries it (`deny_unknown_fields`, exit 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_bindings: Vec<GrantBindingRef>,
 }
@@ -1277,11 +1275,11 @@ pub struct OperationReadinessRequest {
     pub evidence_read: Option<GrantRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
-    /// The capability rows this check answers
-    /// ([`capability_checks_for`] its operation). Absent when empty, so a plan
-    /// without one is byte-identical to every plan rendered before the field
-    /// existed, and a runner emits no capability row for it; an older runner
-    /// refuses a plan that carries it (`deny_unknown_fields`).
+    /// The capability rows this check answers ([`capability_checks_for`] its
+    /// operation). Absent when empty, so a plan without one is byte-identical
+    /// to every plan rendered before the field existed, and a runner emits no
+    /// capability row for it; an older runner refuses a plan that carries it
+    /// (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_checks: Vec<CheckId>,
 }
@@ -2972,16 +2970,15 @@ enum KeywordForm {
     Any,
     /// The quoted-key form ONLY: `"k": v` / `'k': v`. Used for the bare word
     /// `secret`, which in prose names a Kubernetes Secret, and a Secret NAME
-    /// may
-    /// appear in a message, so `secret \`logweir-s3\` key
-    /// \`access-key-id\`` must survive while `{"secret":"…"}` must not.
+    /// may appear in a message, so
+    /// `secret \`logweir-s3\` key \`access-key-id\`` must survive while
+    /// `{"secret":"…"}` must not.
     QuotedKeyOnly,
 }
 
-/// The keyword set: `aws_secret_access_key`,
-/// `secret[_-]?access[_-]?key`, `password`, `sasl.password`, `token` — plus
-/// the bare `secret` in its quoted-key form, ordered LONGEST FIRST so the more
-/// specific spelling wins.
+/// The keyword set: `aws_secret_access_key`, `secret[_-]?access[_-]?key`,
+/// `password`, `sasl.password`, `token` — plus the bare `secret` in its
+/// quoted-key form, ordered LONGEST FIRST so the more specific spelling wins.
 const SECRET_KEYWORDS: [(&str, KeywordForm); 8] = [
     ("aws_secret_access_key", KeywordForm::Any),
     ("secret_access_key", KeywordForm::Any),

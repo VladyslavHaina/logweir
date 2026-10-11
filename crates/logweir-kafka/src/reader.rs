@@ -552,9 +552,8 @@ pub fn empty_broker_config_answer(broker_id: i32) -> KafkaError {
 /// from a broker whose metadata does not hold it yet, `LeaderNotAvailable`
 /// before a leader is elected, `NotLeaderForPartition` from a broker that has
 /// not yet become the leader it is listed as. On an idle single broker that
-/// window is milliseconds, and CI has hit it.
-/// Thirty seconds is a bound for a wedged cluster, not an expected wait: a
-/// served topic ends the wait at once.
+/// window is milliseconds, and CI has hit it. Thirty seconds is a bound for a
+/// wedged cluster, not an expected wait: a served topic ends the wait at once.
 pub const CREATED_TOPIC_SETTLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The longest pause between two attempts in [`settle`].

@@ -22,20 +22,18 @@
 //!
 //! # Who wrote the line: the Job's token, and nothing about where it stands
 //!
-//! A plan can start a line of its own in a pod log. An error may repeat a
-//! plan value, and a YAML scalar may hold a line break. The runner escapes
-//! every line break in the error text it prints itself (`one_line`); the
-//! Kafka client inside the runner logs to the same stderr by itself,
-//! unescaped. Both
-//! streams reach a controller as ONE log, so no rule about where a line
-//! stands, or how well-formed it is, can tell the runner's line from text a
-//! plan's author got into the log. What the plan's author cannot have is a
-//! value that did not exist when the plan was written. So the controller
-//! makes a fresh random [`LineToken`] each time it builds a Job, hands it to
-//! the runner as a command-line ARGUMENT, and honours a `refusal-detail=`
-//! line only when the line carries that Job's token
-//! ([`RefusalDetail::read_line`]). A line with no token, or another token, is
-//! not the runner's and is not read at all.
+//! A plan can start a line of its own in a pod log. An error may repeat a plan
+//! value, and a YAML scalar may hold a line break. The runner escapes every
+//! line break in the error text it prints itself (`one_line`); the Kafka client
+//! inside the runner logs to the same stderr by itself, unescaped. Both streams
+//! reach a controller as ONE log, so no rule about where a line stands, or how
+//! well-formed it is, can tell the runner's line from text a plan's author got
+//! into the log. What the plan's author cannot have is a value that did not
+//! exist when the plan was written. So the controller makes a fresh random
+//! [`LineToken`] each time it builds a Job, hands it to the runner as a
+//! command-line ARGUMENT, and honours a `refusal-detail=` line only when the
+//! line carries that Job's token ([`RefusalDetail::read_line`]). A line with no
+//! token, or another token, is not the runner's and is not read at all.
 //!
 //! An argument and not an environment variable, for two reasons that are
 //! properties of this codebase: the engine child process inherits the
@@ -684,8 +682,7 @@ mod tests {
     fn the_real_refusal_round_trips_whole() {
         // K3's opening word is in no closed set today, so it is what any word
         // outside the set is: part of the sentence, kept whole, behind the
-        // default
-        // code.
+        // default code.
         let line = printed(Restore, K3);
         assert!(line.starts_with(REFUSAL_DETAIL_PREFIX));
         assert!(!line.contains('\n'), "one line: {line}");
