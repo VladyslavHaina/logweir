@@ -8165,6 +8165,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     timeBasis,
     coverage,
     coverageBound,
+    originalName,
+    originalNameNoOwner,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);
