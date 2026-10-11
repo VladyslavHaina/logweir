@@ -3,60 +3,38 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.8.0.json`](../../schemas/logweir-backup-receipt-1.8.0.json)
-and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
-file on every build, so this document and the schema cannot drift apart
-silently. A MINOR bump is a new schema file beside the old one: the
-[`1.7.0` schema](../../schemas/logweir-backup-receipt-1.7.0.json) (PROD-04.1),
-the [`1.6.0` schema](../../schemas/logweir-backup-receipt-1.6.0.json)
-(PROD-01.4a), the
-[`1.5.0` schema](../../schemas/logweir-backup-receipt-1.5.0.json) (PROD-03.0's
-`schema_dependency`), which describes every receipt written before
-PROD-01.4a, the
-[`1.4.0` schema](../../schemas/logweir-backup-receipt-1.4.0.json) (PROD-01.3's
-auth modes) and the [`1.3.0` schema](../../schemas/logweir-backup-receipt-1.3.0.json)
-(PROD-05.1's `topic_configuration`), which describe every receipt written
-before PROD-03.0, the
-[`1.2.0` schema](../../schemas/logweir-backup-receipt-1.2.0.json), which
-describes every pinned receipt written before PROD-05.1 (FX-7's format), the
-[`1.1.0` schema](../../schemas/logweir-backup-receipt-1.1.0.json), which
-describes every unpinned receipt written before PROD-05.1 (FX-4's format), and
-the [`1.0.0` schema](../../schemas/logweir-backup-receipt-1.0.0.json),
-which describes every receipt written before format 1.1.0, are FROZEN beside it
-and never regenerated. The payload type keeps `version=1.0.0`: it names the
-major-1 envelope, and a new value would make every existing reader refuse every
-new receipt at the payload-type comparison. A signed worked example is
+[`schemas/logweir-backup-receipt-1.8.0.json`](../../schemas/logweir-backup-receipt-1.8.0.json),
+regenerated from the Rust type by `just schema` and `diff -u`'d against the
+checked-in file by CI on every build, so this document and the schema cannot
+drift apart silently. Every older schema, `-1.0.0.json` to `-1.7.0.json`, is
+frozen beside it and never regenerated
+(`crates/logweir-core/tests/schema_drift.rs` keeps each what it was). The
+payload type keeps `version=1.0.0`: it names the major-1 envelope, and a new
+value would make every existing reader refuse every new receipt at the
+payload-type comparison. A signed worked example is
 [`e2e/fixtures/signed/backup-receipt.json`](../../e2e/fixtures/signed/backup-receipt.json)
 with its detached sidecar
 [`backup-receipt.sig`](../../e2e/fixtures/signed/backup-receipt.sig) — read
 [`e2e/fixtures/signed/README.md`](../../e2e/fixtures/signed/README.md) first,
-which says what the throwaway key in that directory is and is not for.
+which says what the throwaway key in that directory is and is not for. The
+fixture is a 1.0.0 document.
 
 If you are verifying a document rather than producing one, read
 [../verify-a-scorecard.md](../verify-a-scorecard.md) for the mechanics of a
 detached DSSE sidecar; everything it says about verifying-as-read applies here
 unchanged, and this document is a field reference.
 
-## Why this is its own document and not eight new scorecard fields
+## Why this is its own document
 
-The drill scorecard is **frozen** at `format_version 1.0.0` with 21 top-level
-properties and 17 required ones. A backup happens on a different cluster, at a
-different time, under a different command, and the facts it establishes — the
-source cluster id read from the broker, the rendered auth mode, the named topic
-set, the pinned engine's digest, the manifest key and its sha256, the per-topic
-record counts, the covered window — are top-level facts about that operation.
-Bolting them onto the scorecard would have cost eight new top-level properties
-in the one document that exists to stay still, and would have left every
-scorecard ever written claiming, by the shape of its own schema, to say
-something about a backup it never observed.
-
-So the receipt has its own media type, its own schema, its own
-`format_version` — **independent of the scorecard's**: `1.1.0` since FX-4, or
-`1.2.0` for a receipt that pins its manifest's version
-([below](#the-pinned-manifest-version-versioned-buckets)) — and its own arms:
-five in 1.0.0, and six more that read only 1.1.0's
-[`config_coverage`](#config_coverage--topic-configuration-capture-coverage-format-110).
-The pin adds no arm.
+A backup happens on a different cluster, at a different time, under a different
+command from a drill, and the facts it establishes — the source cluster id read
+from the broker, the rendered auth mode, the named topic set, the pinned
+engine's digest, the manifest key and its sha256, the per-topic record counts,
+the covered window — are top-level facts about that operation. Bolting them
+onto the frozen scorecard would have left every scorecard claiming, by the
+shape of its own schema, to say something about a backup it never observed. So
+the receipt has its own media type, its own schema, its own `format_version`,
+**independent of the scorecard's**, and its own arms.
 
 ## Reading rules a consumer must honour
 
@@ -79,13 +57,67 @@ The pin adds no arm.
    it as "nobody recorded whether this topic's configuration was captured",
    and never as "it was".
 
+## Versions
+
+Each minor adds one optional block and the arms that read it. Every such arm
+fires only on a receipt carrying its block, so every older receipt is decided
+exactly as before (MINOR under the owner's OD-7 (a),
+[the rule](../stability.md#the-v010-tag-is-the-compatibility-boundary)); the
+corpus (`e2e/fixtures/invariants/backup-receipt-index.json`) and the parity gate
+re-prove that on every `just lint`. A receipt is written with the NEWEST minor
+whose fields it uses (`backup_receipt::format_version_for`, the one place a
+writer decides it), and each minor defines every earlier minor's fields and
+values. The payload type keeps `version=1.0.0`.
+
+| Version | Task | Adds | Written for | Arms |
+|---|---|---|---|---|
+| 1.0.0 | Task 5b | the format | every receipt before FX-4 | 1–5 |
+| 1.1.0 | FX-4 | [`config_coverage`](#config_coverage--topic-configuration-capture-coverage-format-110) | an unpinned receipt from FX-4 until PROD-05.1 | 6–11 |
+| 1.2.0 | FX-7 | [`archive.manifest_version_id`](#the-pinned-manifest-version-versioned-buckets): the frozen 1.1.0 schema plus the pin, no other property, type or required field moved | a pinned receipt (a versioned bucket) from FX-7 until PROD-05.1; an unpinned one stays FX-4's 1.1.0 document, byte for byte | none: no arm reads the pin |
+| 1.3.0 | PROD-05.1 | [`topic_configuration`](#topic_configuration--the-topic-configuration-model-format-130) and `owner_detection` | every receipt from PROD-05.1 until PROD-03.0, pinned or not; an unpinned one still has no `manifest_version_id` key | 12–21 |
+| 1.4.0 | PROD-01.3 | no field: `source.auth.mode` gains `scramSha256`, `plain` and `mtls`; the schema differs from 1.3.0's in the `source.auth.mode` and `username` descriptions only | a receipt naming one of the three, on builds before PROD-03.0 | arm 5 becomes three statements, 5a to 5c |
+| 1.5.0 | PROD-03.0 | [`schema_dependency`](#schema_dependency--does-a-restore-need-a-schema-registry-format-150) | every receipt from PROD-03.0 until PROD-01.4a, whatever its auth mode or pin | 22–29 |
+| 1.6.0 | PROD-01.4a | [`generations`](#generations--the-topics-id-before-and-after-the-engine-format-160) | every receipt from PROD-01.4a: this build signs none below 1.6.0 | 36–40 |
+| 1.7.0 | PROD-04.1 | [`consumer_positions`](#consumer_positions--consumer-position-evidence-format-170), which binds the positions document (its own format 1.0.0) | a receipt whose backup selected consumer groups; a backup that selects none writes the document it wrote before PROD-04.1, byte for byte | 30–35, and CP-1 to CP-14 over the document |
+| 1.8.0 | PROD-02.1 | [`source_watermarks` and the empty capture](#source_watermarks-and-the-empty-capture-format-180) | a receipt whose watermark read answered for every partition within the 32 KiB budget | 41–45; arm 4 admits the empty window only beside the block |
+
+1.4.0 is MINOR under OD-7's third case: a reader built before it refuses a
+receipt naming a new mode through arm 5a, the safer verdict, and never reads it
+as something stronger. 1.8.0's empty window is the same: an older reader
+refuses an empty capture through arm 4.
+
+**What an older reader does, and what a rollback writes.** In every row the
+receipts already written stay valid and verifiable under every major-1 reader
+(1.4.0's under readers from PROD-01.3 on), and the payload type is unchanged,
+so every reader that verifies a receipt still verifies a new one.
+
+| Version | A reader built before it | Rolled back |
+|---|---|---|
+| 1.1.0 | Accepts it: readers compare majors only and ignore an unknown field (measured for FX-4 with script 1.14.0 and a `logweir` at `ac76cd0d` on the three accepted 1.1.0 corpus receipts). It does not enforce arms 6–11 — it accepts `config_coverage_value_outside_the_three.json` too — and prints no coverage: verify with script 1.15.0 or a `logweir` from FX-4 on | An older `logweir backup run` writes 1.0.0 receipts again. Their points read coverage `unknown`, so a restore of them by a runner from FX-4 on reports configuration parity `not assessed` (an older runner reports parity as it always did) |
+| 1.2.0 | Accepts it and ignores the pin: arm 6 reads the 1.2 minor as "at least 1" (measured: a `logweir` at `b8b9263f` with script 1.15.0, and the released `v0.1.5` runner's `logweir` with script 1.14.0, on `unmodified_receipt_pinned.json` and on a real receipt from a versioned SeaweedFS bucket). It prints no manifest version: verify with script 1.16.0 or a `logweir` from FX-7 on | A build before FX-7 writes unpinned receipts again, and its readers neither print nor check a pin. Before rolling the runner back past the execution claim, read [what it still does not cover](#the-execution-claim-one-engine-run-per-backup_id) |
+| 1.3.0 | Accepts it and ignores the block (script 1.19.0 and earlier) and prints no model: verify with script 1.20.0 or a `logweir` from PROD-05.1 on | An older runner writes 1.1.0 or 1.2.0 receipts again, ignores `source.topic_owners` and records no owner. A catalog it syncs lists no topics for a point |
+| 1.4.0 | **Refuses a 1.4.0 receipt naming a new mode** (arm 5a) and accepts every other receipt. Verify such a receipt with script 1.21.0 or a `logweir` from PROD-01.3 on | A build before PROD-01.3 cannot take a backup over the three modes (its spec does not parse), so it writes no 1.4.0 receipt |
+| 1.5.0 | Accepts it and ignores the block (script 1.23.0 and earlier); it does not say whether a topic needs a registry: use script 1.24.0 or a `logweir` from PROD-03.0 on | A runner before PROD-03.0 writes 1.3.0 or 1.4.0 receipts with no block; their topics then read not assessed |
+| 1.6.0 | Accepts it and ignores the block; a 1.6.0 receipt naming a PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0 one. It prints no topic ID: use script 1.25.0 or a `logweir` from PROD-01.4a on | An older runner writes 1.3.0 to 1.5.0 receipts again, with no IDs; its points read "not established by ID" against their neighbours |
+| 1.7.0 | Accepts it, ignores the block and prints no `consumer_positions` line (script 1.25.0 and earlier): for positions use script 1.26.0 or a `logweir` from PROD-04.1 on ([the recovery path](#recovering-positions-with-the-source-offline)) | An older runner ignores `source.consumer_groups`, and `--consumer-group` is an unknown flag to it. An older controller refuses a frozen plan whose execution inputs carry `consumerGroups` (`PlanConfigMapConflict`): let such runs finish, or remove `spec.consumerGroups` from the schedule, before rolling it back |
+| 1.8.0 | Refuses an empty capture through arm 4 and reads an ordinary 1.8.0 receipt as the 1.7.0 document under it. Script 1.30.0 knows the block | An older runner writes receipts with no block, and fails a backup of an emptied source exit 1 as before PROD-02.1 |
+
+**Old receipts are never reinterpreted.** No reader infers a block a receipt
+lacks: a receipt before 1.1.0 has every topic's capture coverage UNKNOWN to
+every consumer (the catalog, a restore's configuration parity, FX-8's timestamp
+rule); before 1.3.0 it records no configuration model, and a restore says so;
+before 1.5.0 its topics are NOT ASSESSED for schema dependency, and a catalog
+point synced from it carries none; before 1.6.0 every topic's generation is
+UNKNOWN, never the same as another point's; and `logweir catalog sync` never
+infers a pin for a receipt that does not carry one.
+
 ---
 
 ## Identity and provenance
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of **this** format. `1.1.0` since FX-4 (`1.0.0` before it), or `1.2.0` for a receipt that pins [`archive.manifest_version_id`](#the-pinned-manifest-version-versioned-buckets). Independent of the scorecard's. |
+| `format_version` | string | Semver of **this** format, `1.0.0` to `1.8.0`: see [Versions](#versions). Independent of the scorecard's. |
 | `run_id` | string | ULID of the run that produced this receipt. Also the object key stem in the evidence bucket. |
 | `backup_id` | string | The engine's identifier for the archive this run wrote — the **execution** id under Kubernetes. **Not** `run_id`: `archive.manifest_key` is keyed on this, and a set written by an older build can carry receipts from two runs. Since RECEIPT-DUP was fixed, at most one run per `backup_id` reaches the engine (see [the execution claim](#the-execution-claim-one-engine-run-per-backup_id)), so a new execution signs exactly one receipt. |
 | `requested_at` | RFC 3339 | When the run was requested. |
@@ -148,28 +180,17 @@ byte-identical bytes here.
 | `covered.from_ms` | integer (int64) | **Inclusive** start of the covered range, **epoch milliseconds**. |
 | `covered.to_ms` | integer (int64) | **EXCLUSIVE** end of the covered range, **epoch milliseconds**. Strictly `> from_ms` — invariant 4. |
 
-The window is **half-open**: `[from_ms, to_ms)`. That is the convention
-`charts/logweir/crds/backups.yaml` already documents for
-`Backup.status.windowCovered.toMs`, which Task 17 fills by copying these two
-integers, so the two documents describe one range under one rule. Task 5 shipped
-invariant 4 as `<=` and a test asserting that `from_ms == to_ms` was a legal
-"instantaneous window"; that was the disagreement, and the receipt is the side
-that moved (Task 5's review, F3).
-
-A backup whose records all share one millisecond is still a window, and still
-legal: `crates/logweir/src/backup/phase_run.rs` derives `to_ms` from the newest
-segment's **inclusive** `end_timestamp` and adds one millisecond, so such a run
-publishes `[t, t+1)` — a window containing exactly those records — rather than
-the empty `[t, t]` invariant 4 now refuses. That conversion happens once, where
-the window is measured, and nowhere else.
-
-This is the shape the operator's `Backup.status.windowCovered{fromMs,toMs}`
-mirrors, as two `int64`s. A Kubernetes status subresource has no date-time type
-to mirror a string into, so two representations of one window — a string here
-and an integer there — would need a conversion nobody owns, and the first
-disagreement between them would be invisible because both would still be
-well-formed. The receipt speaks the operator's units and the operator copies the
-numbers.
+The window is **half-open**: `[from_ms, to_ms)`, the convention
+`charts/logweir/crds/backups.yaml` documents for
+`Backup.status.windowCovered{fromMs,toMs}`, which the controller fills by
+copying these two integers as two `int64`s, so the two documents describe one
+range under one rule and need no conversion nobody owns. A backup whose records
+all share one millisecond is still a window: `backup/phase_run.rs` derives
+`to_ms` from the newest segment's **inclusive** `end_timestamp` and adds one
+millisecond, so such a run publishes `[t, t+1)` rather than the empty `[t, t]`
+invariant 4 refuses. That conversion happens once, where the window is
+measured, and nowhere else. The one empty window a receipt may carry is an
+[empty capture](#source_watermarks-and-the-empty-capture-format-180) (1.8.0).
 
 ## `config_coverage` — topic-configuration capture coverage (format 1.1.0)
 
@@ -255,6 +276,14 @@ provider-specific key) are never part of the claim. Which settings are portable
 is [`topic_configuration`](#topic_configuration--the-topic-configuration-model-format-130)
 below; how they are applied is PROD-05.2.
 
+**Permissions.** `captured` needs the backup principal to hold
+`DescribeConfigs` on every backed-up topic (beside `Read` and `Describe`).
+Without it on one topic the backup still runs: that topic reads
+`captureDenied`, and every other topic in the run that HAS overrides reads
+`notCaptured` (`manifestDiffers`), because the engine's capture is
+all-or-nothing and its record for them is empty (measured on the compose stack
+in `e2e/tests/config_coverage.rs`).
+
 ---
 
 ## `topic_configuration` — the topic configuration model (format 1.3.0)
@@ -327,6 +356,10 @@ topic its `spec.topicName` (else its name) names. The plan's
 declaration naming an unplanned topic, another kind or an unusable reference,
 or a topic declared twice, and a declaration wins over a resource for the same
 topic.
+
+**Permissions.** Nothing new: the replication factor comes from the metadata
+the run already reads (`Describe`), and the entries from FX-4's
+`DescribeConfigs` read.
 
 ## `schema_dependency` — does a restore need a schema registry? (format 1.5.0)
 
@@ -574,42 +607,24 @@ document.
 
 **The receipt stays small however many partitions the groups hold** (PROD-04.1
 review H1). The catalog, the controller and the evidence fetch read a receipt
-under one bound (5,131,072 bytes since FX-33, the topic budget of
-[kubernetes.md](../kubernetes.md) §7b.5; it was 256 KiB for the catalog and 1
-MiB for the other two) and a receipt over it is `Unreadable` in the catalog,
-so the console stops offering the point; positions grow with groups ×
-partitions. So the receipt
-carries only a per-group SUMMARY — outcome, type, states, members, `active` and
-the position COUNTS — the capture window, and the positions document's key,
-SHA-256 and length. Its size depends on the selection alone, and its cap,
-`MAX_BLOCK_BYTES` (80 KiB), is ENFORCED on the block's encoded bytes (review
-N1): `refuse_selection` builds the largest block the selection could produce —
-every group captured, every field at its longest — encodes it as the receipt
-does, and refuses the selection by name (`ConsumerGroupSelectionTooLarge`)
-when it is over, before anything runs. Never a truncated block. Escapes count
-as JSON writes them: 100 ids of 255 bytes that need no escape fit (71,236
-bytes at worst, four-byte characters included), while ids of 255 `"` or `\`
-— two bytes each when encoded — fit 84 to a selection (81,220 bytes at worst)
-and the 85th is refused (82,171; the review's 100 such ids would be 96,436)
-(`consumer_positions::tests::the_cap_is_enforced_on_the_encoded_bytes_with_escape_heavy_ids_at_and_over_it`,
-`consumer_positions_seam::a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name`).
-Ordinary ids cost a few hundred bytes a group. Measured through the runner's
-own builder with every group committed on every partition
-(`check_cli::the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available`):
-
-| Selection | Receipt | Block | Positions document |
-|---|---|---|---|
-| 10 groups over 20 topics × 12 partitions | 9,264 bytes | 4,046 bytes | 481,703 bytes |
-| 100 groups over 10 topics × 11 partitions | 43,715 bytes | 37,527 bytes | 1,943,683 bytes |
-
-Live on Kafka 4.3.1 through `logweir backup run`
-(`e2e/tests/position_evidence.rs::a_large_selection_keeps_the_receipt_small_and_its_positions_verified`,
-one record in every partition), the same two selections signed 52,049 and
-65,530-byte receipts — most of it the topics' configuration model, which grows
-with topics, not groups — beside 512,787 and 2,087,137-byte positions
-documents. Before this split those positions were inline, and both receipts
-were over the catalog's cap (the review measured 487,437 and 1,947,657
-bytes).
+under one bound (5,131,072 bytes since FX-33, the
+[topic budget](../kubernetes.md#one-backup-names-at-most-1000-topics); it was
+256 KiB for the catalog and 1 MiB for the other two), and a receipt over it is
+`Unreadable` in the catalog, so the console stops offering the point; positions
+grow with groups × partitions. So the receipt carries only a per-group
+SUMMARY — outcome, type, states, members, `active` and the position COUNTS —
+the capture window, and the positions document's key, SHA-256 and length. Its
+size depends on the selection alone, and its cap, `MAX_BLOCK_BYTES` (80 KiB),
+is ENFORCED on the block's encoded bytes (review N1): `refuse_selection` builds
+the largest block the selection could produce — every group captured, every
+field at its longest — encodes it as the receipt does, escapes counted as JSON
+writes them, and refuses the selection by name
+(`ConsumerGroupSelectionTooLarge`) when it is over, before anything runs. Never
+a truncated block. So 100 ids of 255 bytes that need no escape fit, while ids
+of 255 `"` or `\` fit 84 to a selection. Ordinary ids cost a few hundred bytes a
+group: measured, 100 groups over 10 topics × 11 partitions sign a 43,715-byte
+receipt (a 37,527-byte block) beside a 1,943,683-byte positions document
+(`check_cli::the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available`).
 
 **The positions document** is `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`,
 beside the receipt, put create-only BEFORE the receipt (a receipt never names a
@@ -617,7 +632,9 @@ document that is not there), and written beside `--receipt-out` as
 `<stem>.consumer-positions.json`. It is not signed itself: the receipt's
 signature covers its digest and length, so a reader that fetches it verifies it
 against the signed receipt (arms CP-1 to CP-14 below). Its own format is
-`1.0.0`; its schema is `schemas/logweir-consumer-positions-1.0.0.json`.
+`1.0.0`; its schema is `schemas/logweir-consumer-positions-1.0.0.json`. The
+evidence prefix therefore holds one more object per selecting run: `logweir catalog sync` reads only `.receipt.json` keys and skips
+it, and a `--max` page of the listing counts it like the sidecar.
 
 ```json
 "consumer_positions": {
@@ -1208,71 +1225,59 @@ The `--scorecard` flag keeps its name even when it names a receipt. Renaming it
 would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
-> **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all forty-five arms above** over a `--payload-type
-> backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
-> together in FX-4, arms 12–21 together in PROD-05.1, arms 22–29 together in
-> PROD-03.0, arms 36–40 together in PROD-01.4a, arms 30–35 together in
-> PROD-04.1 and arms 41–45 together in PROD-02.1, so the two readers never
-> disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all forty-five
-> backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
-> verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
-> the configuration capture coverage in the same words, one
-> `config_coverage["<topic>"]: <coverage>[ (<reason>)], message.timestamp.type
-> <value> from <source>` line per topic — or `config_coverage: not recorded, so
-> every topic's configuration capture is UNKNOWN, never captured`, for every
-> receipt without the block — and `scripts/check-verifier-parity.sh` compares those lines
-> between the two readers on every accepted receipt. Both print the topic
-> configuration model in the same words, one `topic_configuration["<topic>"]:
-> partitions <n>, replication factor <n>, <n> entries (<class> <count>, …),
-> <route>` line per topic — counts and classes, never a value; the route is
-> `owned by …, so restored by desired-state export`, `no declarative owner
-> found (<sources>), so applied through the admin API` or `owner not checked,
-> so how it is applied is not known` — or
-> `topic_configuration: not recorded, …` for a receipt without the block, and
-> the parity script compares those lines too. Both print the schema dependency
-> in the same words, one `schema_dependency["<topic>"]: schema-dependent,
-> registry not captured; <n> records judged (<basis>); key framed <f> of <n>
-> non-null[, dependent, schema ids <ids>[ and <k> more]]; value …` line per
-> topic (`no schema framing detected; …`, or `not assessed (<reason>)`) — or
-> `schema_dependency: not assessed, so whether any topic's records need a
-> schema registry is not known from this receipt` for a receipt without the
-> block — and the parity script compares those lines AND derives them from
-> each document. Both print the topic IDs in the
-> same words, one `generations["<topic>"]:` line per topic — `topic ID <id>
-> before and after the capture (describeTopics), one generation`, `topic ID
-> CHANGED during the capture (<a> before, <b> after): …`, or `topic ID
-> not recorded (<reason>) before the capture and … after it, so its generation
-> is not established by ID and is UNKNOWN` — or `generations: not recorded, …`
-> for a receipt without the block; the parity script compares those lines and
-> derives what each must say from the document. Both print a pinned
-> `archive.manifest_version_id` when the receipt carries one (`manifest version:`
-> and `manifest_version_id=`), and both refuse one that is not a string — Rust
-> at deserialisation, the script in its shape layer (FX-7; verdict parity in
-> `scripts/check-verifier-parity.sh`). Both compare the sidecar's `payloadType`
-> **in full**, so a genuinely-signed scorecard presented as a receipt is refused
-> as a substitution rather than accepted — `drill verify` exits 4 and says
-> `PAYLOAD TYPE MISMATCH`, which is deliberately not `SIGNATURE INVALID`: the
-> signature may be perfectly valid over some other document.
->
-> An exit 0 from either reader therefore means "these bytes are signed by this
-> key under this media type **and** the document does not contradict itself".
-> The weaker sentence — `checked:   the SIGNATURE only …` — is still printed for
-> `--payload-type receipt` and `--payload-type teardown`, whose invariant
-> readers are not in tag 1, and
-> `crates/logweir/tests/cli_verify.rs::the_signature_only_verdict_is_still_reachable`
-> keeps it honest.
->
-> **Where else the arms are enforced — all of them, at each version.** At the two places a receipt is
-> WRITTEN: `crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs`
-> validates before it signs, and `logweir backup run` validates the exact
-> document it is about to sign before it signs or uploads anything
-> (`crates/logweir/src/backup/phase_run.rs::persist_receipt`, step 1) — a
-> violating receipt is exit **4** with nothing in the bucket, asserted by
-> `crates/logweir/tests/backup_run.rs::a_receipt_that_cannot_be_signed_is_exit_4_and_puts_nothing`.
-> Before Task 5b this paragraph named `logweir backup run` while that command
-> wrote no receipt at all; it is now true by execution.
+**What each reader checks.** Both readers run **all forty-five arms above**
+over a `--payload-type backup-receipt` document; each group of arms arrived in
+both readers together (1–5 in Task 5b, 6–11 in FX-4, 12–21 in PROD-05.1, 22–29
+in PROD-03.0, 36–40 in PROD-01.4a, 30–35 in PROD-04.1, 41–45 in PROD-02.1), so
+the two never disagreed in between. `logweir drill verify` prints `checked:
+the signature AND all forty-five backup-receipt invariants …`;
+`docs/verify_scorecard.py` prints `verifier: verify_scorecard.py
+<SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both print, in the same
+words, one line per topic for each block, or one line saying the block is not
+recorded, and `scripts/check-verifier-parity.sh` compares those lines (and
+derives what each must say from the document):
+
+- `config_coverage["<topic>"]: <coverage>[ (<reason>)], message.timestamp.type
+  <value> from <source>`, or `config_coverage: not recorded, so every topic's
+  configuration capture is UNKNOWN, never captured`;
+- `topic_configuration["<topic>"]: partitions <n>, replication factor <n>, <n>
+  entries (<class> <count>, …), <route>` — counts and classes, never a value;
+  the route is `owned by …, so restored by desired-state export`, `no
+  declarative owner found (<sources>), so applied through the admin API` or
+  `owner not checked, so how it is applied is not known` — or
+  `topic_configuration: not recorded, …`;
+- `schema_dependency["<topic>"]: schema-dependent, registry not captured; <n>
+  records judged (<basis>); key framed <f> of <n> non-null[, dependent, schema
+  ids <ids>[ and <k> more]]; value …` (`no schema framing detected; …`, or
+  `not assessed (<reason>)`), or `schema_dependency: not assessed, so whether
+  any topic's records need a schema registry is not known from this receipt`;
+- `generations["<topic>"]:` — `topic ID <id> before and after the capture
+  (describeTopics), one generation`, `topic ID CHANGED during the capture (<a>
+  before, <b> after): …`, or `topic ID not recorded (<reason>) before the
+  capture and … after it, so its generation is not established by ID and is
+  UNKNOWN` — or `generations: not recorded, …`;
+- a pinned `archive.manifest_version_id` (`manifest version:` and
+  `manifest_version_id=`); both refuse one that is not a string, Rust at
+  deserialisation and the script in its shape layer.
+
+Both compare the sidecar's `payloadType` **in full**, so a genuinely-signed
+scorecard presented as a receipt is refused as a substitution — `drill verify`
+exits 4 and says `PAYLOAD TYPE MISMATCH`, deliberately not `SIGNATURE INVALID`:
+the signature may be perfectly valid over some other document. An exit 0 from
+either reader therefore means "these bytes are signed by this key under this
+media type **and** the document does not contradict itself". The weaker
+sentence — `checked:   the SIGNATURE only …` — is still printed for
+`--payload-type receipt` and `--payload-type teardown`, whose invariant readers
+are not in tag 1
+(`crates/logweir/tests/cli_verify.rs::the_signature_only_verdict_is_still_reachable`).
+
+**Where else the arms are enforced — all of them, at each version.** At the two
+places a receipt is WRITTEN: `crates/logweir-evidence/examples/mint_backup_receipt_fixture.rs`
+validates before it signs, and `logweir backup run` validates the exact
+document it is about to sign before it signs or uploads anything
+(`crates/logweir/src/backup/phase_run.rs::persist_receipt`, step 1) — a
+violating receipt is exit **4** with nothing in the bucket
+(`crates/logweir/tests/backup_run.rs::a_receipt_that_cannot_be_signed_is_exit_4_and_puts_nothing`).
 
 ## Where `logweir backup run` puts it
 
@@ -1312,31 +1317,17 @@ does not carry a run id:
 logweir/backups/<backup_id>/execution.claim.json
 ```
 
-**Why it exists (tracker defect RECEIPT-DUP).** The engine writes
-`<prefix>/<backup_id>/manifest.json` with its own, unconditional store client. A
-second engine run under the same `backup_id` — a Kubernetes Backup Job lost and
-re-created from its frozen inputs, or a second `logweir backup run` with the
-same spec — replaced the manifest the first run's receipt attests. When the
-topic had advanced in between, the first receipt's `archive.manifest_sha256` no
-longer matched the manifest in the bucket, and every verifier that reads the
-archive back (a point-bound drill, the `catalogSync` deep check, an auditor with
-`sha256sum`) reported the first receipt as describing an archive that is no
-longer there. Logweir cannot make the engine's write conditional, so it makes
-sure the second engine run never starts.
-
-**It is worse than a changed digest (FX-7, measured on engine 0.21.0).** The
-engine keys each segment by its start offset —
-`<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>.bin…` — so a
-second run over the same set REWRITES the first run's segment objects in place,
-and its get-merge-put keeps the first run's manifest entry for every key it
-already had ("existing wins"). When the new records fall inside an existing
-segment, the manifest bytes come out IDENTICAL while the segment under them now
-holds different records: measured on compose slot 3 (MinIO unversioned and
-SeaweedFS versioned), 100 records backed up, 50 produced, a second run over the
-set — the first receipt's manifest digest still matched, and the segment's
-recorded `sha256` no longer matched the object (150 records under an entry for
-100). No manifest check can see that afterwards; only a run that never starts
-keeps the first point true.
+**Why it exists (RECEIPT-DUP, FX-7).** The engine writes
+`<prefix>/<backup_id>/manifest.json` with its own, unconditional store client,
+and keys each segment by its start offset. A second engine run under the same
+`backup_id` — a Backup Job lost and re-created from its frozen inputs, or a
+second `logweir backup run` with the same spec — replaced the manifest the
+first receipt attests and REWROTE the first run's segment objects in place;
+because its get-merge-put keeps the first run's entry for every existing key,
+the manifest bytes could come out IDENTICAL over segments that now hold
+different records (measured on engine 0.21.0, on MinIO and SeaweedFS). No
+manifest check can see that afterwards, and Logweir cannot make the engine's
+write conditional, so it makes sure the second engine run never starts.
 
 **What the runner does.** After every local and read-only check and
 immediately before the engine starts, `logweir backup run` puts the claim with a
@@ -1385,23 +1376,18 @@ It is never deleted by Logweir: the retention worker refuses every key under
 overwrite an attested manifest again.
 
 **The set must be new, too (FX-7).** A set whose first run was made by a
-build without the claim carries none, so the claim alone let a later run of that
-`backup_id` start — at upgrade (a Backup Job lost while the controller was
-upgraded, re-created with the new runner image) and for a standalone
-`backup run` re-using a `backup_id` an older build wrote to
-(RECEIPT-DUP-UPGRADE-WINDOW). So after winning the claim, as the last refusal
-before the engine (only the topic-configuration read above, which writes
-nothing and is never fatal, follows it), the runner reads the set through its read-only archive
-handle — a one-key LIST of `<prefix>/<backup_id>/topics/` and a GET of
-`<prefix>/<backup_id>/manifest.json` — and refuses when either exists: a
-finished set, or the segments of a run that died or is still running. Anything
-else under the directory is not the engine's output in the configuration
-Logweir renders (`offsets.db` and `consumer-groups-snapshot.json` are written
-only by continuous backups and an enabled snapshot, which `render_backup` never
-turns on), so an upstream archive's snapshot planted beside a new set does not
-refuse it. Both reads are under the prefix the run's read-back already reads, so
-no permission is added. Between two runs of this build the claim still answers
-first, with its own message.
+build without the claim carries none (RECEIPT-DUP-UPGRADE-WINDOW). So after
+winning the claim, as the last refusal before the engine, the runner reads the
+set through its read-only archive handle — a one-key LIST of
+`<prefix>/<backup_id>/topics/` and a GET of `<prefix>/<backup_id>/manifest.json`
+— and refuses when either exists: a finished set, or the segments of a run that
+died or is still running. Anything else under the directory is not the engine's
+output in the configuration Logweir renders (`offsets.db` and
+`consumer-groups-snapshot.json` come only from continuous backups and an
+enabled snapshot, which `render_backup` never turns on), so a snapshot planted
+beside a new set does not refuse it. Both reads are under the prefix the
+read-back already reads, so no permission is added. Between two runs of this
+build the claim still answers first, with its own message.
 
 **What it still does not cover.** A runner that ignores the claim and the set
 check — a build from before them, after a ROLLBACK — can still run the engine
@@ -1426,20 +1412,17 @@ receipts, and the catalog keeps both as two points (see
 
 ### The pinned manifest version (versioned buckets)
 
-**FX-7, receipt format `1.2.0`** (the MINOR after FX-4's `1.1.0`). On a bucket with versioning enabled the store
+**FX-7, receipt format `1.2.0`.** On a bucket with versioning enabled the store
 answers every read with the object's version id. `logweir backup run` keeps the
 one its read-back of the manifest was answered with — the version of exactly the
-bytes `archive.manifest_sha256` is over, i.e. the LAST manifest the engine wrote
-(it re-puts the manifest several times in one run: five versions per run were
-measured on SeaweedFS) — and signs it as `archive.manifest_version_id`, at
-`format_version` `1.2.0`, beside the `config_coverage` block every receipt
-carries. The catalog point record copies it, at its own `1.2.0`
-([catalog-point.md](catalog-point.md)).
+bytes `archive.manifest_sha256` is over, the LAST manifest the engine wrote (it
+re-puts the manifest several times in one run) — and signs it as
+`archive.manifest_version_id`. The catalog point record copies it.
 
 | The store answered the read-back with | The receipt |
 |---|---|
-| a version id | `format_version: 1.2.0`, `archive.manifest_version_id: <id>` |
-| no version id (MinIO and SeaweedFS unversioned buckets; any filesystem store) | `format_version: 1.1.0`, no `manifest_version_id` key — byte-for-byte the document FX-4's build writes |
+| a version id | `archive.manifest_version_id: <id>` (`format_version: 1.2.0` on FX-7's build; the receipt's version follows its other blocks since) |
+| no version id (MinIO and SeaweedFS unversioned buckets; any filesystem store) | no `manifest_version_id` key (on FX-7's build, `format_version: 1.1.0`, byte for byte FX-4's document) |
 | S3's literal `null` (versioning never enabled, or suspended) | as above: a `null` version is replaced in place by the next write, so it pins nothing |
 
 Measured on SeaweedFS 4.48 (versioned, Object Lock) and on MinIO and SeaweedFS
@@ -1474,13 +1457,13 @@ it read through the same `catalog::pin`: the first row is `archive.backupSet`
 `notReady`, `ManifestSuperseded`; the second is `ready` with `PointPinUnchecked`
 in the message and the note as the remedy; the third keeps the store's code
 with the remedy that names `s3:GetObjectVersion`
-([what it reads, and what it refuses to read](../kubernetes.md#218-what-this-build-does-not-do)).
+([what it reads, and what it refuses to read](../kubernetes.md#what-the-rows-check)).
 
 **The grant.** On AWS S3 the read by id is authorised as `s3:GetObjectVersion`
 on the archive prefix, beside the `s3:GetObject` the manifest read already
 needs [UNVERIFIED — needs a real AWS S3 bucket and a credential source]. MinIO
 serves it under `s3:GetObject` (measured 2026-10-09, FX-14:
-[the grants table](../kubernetes.md#the-object-storage-permission-each-grant-actually-needs-measured)).
+[the grants table](../kubernetes.md#the-grants-and-the-object-storage-actions-each-one-needs)).
 
 **The cost of reading a copy as a copy.** The pin is checked only where the
 bucket being read still HOLDS the pinned version and serves it by id: "not this
@@ -1548,7 +1531,8 @@ just fixtures-sign
 the fingerprint [`../verify-a-scorecard.md`](../verify-a-scorecard.md) teaches
 auditors to pin. It writes the document and the signature over exactly those
 bytes itself, in one process, after validating the document against every
-arm (the fixture is a 1.0.0 document, so arms 6–11 have nothing to read), so there is no window in which the tracked document and the tracked
+arm (the fixture is a 1.0.0 document, so the later arms have nothing to
+read), so there is no window in which the tracked document and the tracked
 signature over it disagree.
 
 ## Regenerating the schema
@@ -1559,202 +1543,9 @@ just schema
 
 Regenerates the checked-in schemas from their Rust types. The CI drift arm
 fails on any difference, so `just schema` is the only sanctioned way to change
-the current receipt schema, `schemas/logweir-backup-receipt-1.3.0.json`. The
-1.0.0, FX-4's 1.1.0 and FX-7's 1.2.0 files beside it are frozen and are not
-regenerated; `crates/logweir-core/tests/schema_drift.rs::
-the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
-`::the_frozen_1_1_0_receipt_schema_is_still_fx4s` and
-`::the_frozen_1_2_0_receipt_schema_is_still_fx7s` keep them what they were.
-
-## Upgrade, rollback and old receipts (format 1.1.0)
-
-- **Every receipt this build signs carries `config_coverage`**, at 1.1.0 — or
-  at 1.2.0 when it also pins its manifest's version (FX-7,
-  [below](#upgrade-rollback-and-old-receipts-format-120)). The payload type is
-  unchanged, so every reader that verifies a receipt today still verifies a new
-  one.
-- **Readers built before FX-4 accept 1.1.0 receipts**: they compare majors only
-  and ignore the unknown field. Measured for FX-4 with both readers at
-  `ac76cd0d` (`git show ac76cd0d:docs/verify_scorecard.py`, script 1.14.0, and
-  a `logweir` built there): each exits 0 on the three accepted 1.1.0 corpus
-  receipts in `e2e/fixtures/invariants/`, signed with the fixture key. They do
-  not enforce arms 6–11 — they accept
-  `config_coverage_value_outside_the_three.json` too — and they print no
-  coverage, so an auditor who needs the coverage verifies with script 1.15.0 or
-  a `logweir` built from FX-4 on.
-- **Old receipts are never reinterpreted.** A 1.0.0 receipt verifies exactly as
-  before under both readers, and every consumer — the catalog, a restore's
-  configuration parity, FX-8's timestamp rule — reads its coverage as UNKNOWN.
-  The signed fixture `e2e/fixtures/signed/backup-receipt.json` stays 1.0.0 and
-  is that case.
-- **Rollback.** An older `logweir backup run` writes 1.0.0 receipts again: the
-  points it produces read coverage `unknown`, so a restore of them by a runner
-  from FX-4 on reports configuration parity `not assessed` (a restore by an
-  older runner reports parity as it always did). Receipts already written at
-  1.1.0 stay valid and verifiable.
-- **Permissions.** `captured` needs the backup principal to hold
-  `DescribeConfigs` on every backed-up topic (beside `Read` and `Describe`).
-  Without it on one topic the backup still runs: that topic reads
-  `captureDenied`, and every other topic in the run that HAS overrides reads
-  `notCaptured` (`manifestDiffers`), because the engine's capture is
-  all-or-nothing and its record for them is empty. Measured on the compose
-  stack in `e2e/tests/config_coverage.rs`.
-
-## Upgrade, rollback and old receipts (format 1.3.0)
-
-- **Every receipt this build signs carries `topic_configuration`**, pinned or
-  not (at 1.3.0 until PROD-03.0, at 1.5.0 from PROD-03.0 and 1.6.0 from
-  PROD-01.4a, [below](#upgrade-rollback-and-old-receipts-format-160)); an unpinned one
-  still has no `manifest_version_id` key. The payload type keeps
-  `version=1.0.0`.
-- **Readers built before PROD-05.1 accept 1.3.0 receipts** and ignore the
-  block: they compare majors only, arms 6 and 10 read the 1.3 minor as at least
-  1, and no receipt type refuses an unknown field (measured: script 1.19.0 over
-  1.3.0 receipts in `crates/logweir/tests/receipt_dup.rs` before the Python arms
-  existed, and the parity gate's older-reader rows). They print no model, so an
-  auditor who needs it verifies with script 1.20.0 or a `logweir` built from
-  PROD-05.1 on.
-- **Old receipts are never reinterpreted.** A receipt before 1.3.0 records no
-  configuration model; a reader then knows none, and a restore says so.
-- **Rollback.** An older `logweir backup run` writes 1.1.0 or 1.2.0 receipts
-  again; the 1.3.0 receipts already written stay valid under every major-1
-  reader.
-- **Permissions.** Nothing new: the replication factor comes from the same
-  metadata the run already reads (`Describe`), and the entries from FX-4's
-  `DescribeConfigs` read.
-
-## Upgrade, rollback and old receipts (format 1.2.0)
-
-- **A pinned receipt is 1.2.0; every other receipt is FX-4's 1.1.0.** The pin
-  is the only difference: `schemas/logweir-backup-receipt-1.2.0.json` is the
-  frozen 1.1.0 schema plus the optional `archive.manifest_version_id`, with no
-  other property, type or required field moved. The payload type keeps
-  `version=1.0.0`, and no arm reads the pin.
-- **Readers built before FX-7 accept 1.2.0 receipts and ignore the pin** —
-  FX-4's (script 1.15.0, a `logweir` built after FX-4 and before FX-7) and the ones before
-  them: they compare majors only, arm 6 reads the 1.2 minor as "at least 1",
-  and none of the receipt's types refuses an unknown field. They print no
-  manifest version, so an auditor who needs the pin verifies with script 1.16.0
-  or a `logweir` built from FX-7 on. Measured (FX-7 renumber, 2026-10-05): a
-  `logweir` built at main `b8b9263f` with script 1.15.0, and the released
-  `v0.1.5` runner's `logweir` with script 1.14.0, each exit 0 on
-  `unmodified_receipt_pinned.json` signed with the fixture key and print for it
-  exactly what they print for the same document without the pin at 1.1.0
-  (FX-4's two read and print its coverage too); all four exit 0 on a real 1.2.0
-  receipt a run signed on a versioned SeaweedFS bucket. A 1.2.0 catalog point is
-  accepted by the three that know the type; `v0.1.5` has no `catalog-point`
-  payload type at all.
-- **Rollback.** A build from before FX-7 writes unpinned receipts again (1.1.0
-  from FX-4's build, 1.0.0 before it), and its readers neither print nor check
-  a pin. The 1.2.0 receipts already written stay valid and verifiable under
-  every major-1 reader. Before rolling the runner back past the execution
-  claim, read [what it still does not cover](#the-execution-claim-one-engine-run-per-backup_id).
-
-## Upgrade, rollback and old receipts (format 1.4.0)
-
-- **A receipt is 1.4.0 exactly when its `source.auth.mode` is `scramSha256`,
-  `plain` or `mtls`** (PROD-01.3), whatever else it carries — 1.4.0 includes
-  PROD-05.1's 1.3.0 `topic_configuration` and FX-7's optional
-  `archive.manifest_version_id`. Every receipt of a `plaintext` or
-  `scramSha512` backup that a build from PROD-05.1 to before PROD-03.0 wrote is
-  the 1.3.0 document (or the 1.1.0/1.2.0 document an earlier build wrote), byte
-  for byte; from PROD-03.0 every receipt is 1.5.0, and from PROD-01.4a 1.6.0
-  (below).
-  `schemas/logweir-backup-receipt-1.4.0.json` differs from the frozen 1.3.0
-  file in the `source.auth.mode` and `username` descriptions only: no
-  property, type or required field moved. The payload type keeps
-  `version=1.0.0`.
-- **Readers built before PROD-01.3 refuse a 1.4.0 receipt naming a new mode**
-  (arm 5a: a value outside the two they know) and accept every other receipt.
-  Refusal is the safe direction — a reader that cannot say what a mode means
-  does not vouch for the document — so the bump is MINOR (OD-7, third case),
-  and an auditor verifying such a receipt uses script 1.21.0 or a `logweir`
-  built from PROD-01.3 on.
-- **Rollback.** A build from before PROD-01.3 cannot take a backup over
-  `scramSha256`, `plain` or `mtls` at all (its `AuthSpec` has no such arm, so
-  the spec does not parse), and writes no 1.4.0 receipt. The 1.4.0 receipts
-  already written stay valid for every reader from PROD-01.3 on.
-
-## Upgrade, rollback and old receipts (format 1.5.0)
-
-- **Every receipt a build from PROD-03.0 to before PROD-01.4a signs is 1.5.0**
-  (from PROD-01.4a it is 1.6.0, below): it carries `schema_dependency`
-  for every named topic, whatever its auth mode or pin (1.5.0 defines PROD-01.3's
-  modes, PROD-05.1's model and FX-7's pin). `schemas/logweir-backup-receipt-1.5.0.json`
-  adds the optional property and its two definitions to the frozen 1.4.0 file;
-  nothing else moved. The payload type keeps `version=1.0.0`.
-- **Older readers accept a 1.5.0 receipt** and ignore the block inside major 1
-  (OD-7 (a): the new arms read only the new block, so the bump is MINOR). They
-  verify everything they verified before; they just do not say whether a topic
-  needs a registry. An auditor who wants that line uses `verify_scorecard.py`
-  1.24.0 or a `logweir` built from PROD-03.0 on.
-- **Old receipts read NOT ASSESSED**, never "not schema-dependent": both
-  readers say so per receipt, and a catalog point synced from one carries no
-  `schema_dependency` (record format 1.1.0–1.4.0 as before).
-- **Backup cost.** Detection reads back at most two segments per partition for
-  at most eight partitions per topic, streams them and stops at its caps
-  (16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed,
-  120 s per backup, about 17 MB of memory at worst); see the contract above.
-- **Rollback.** A runner from before PROD-03.0 writes 1.3.0/1.4.0 receipts with
-  no block; the 1.5.0 receipts already written stay valid for every reader.
-
-## Upgrade, rollback and old receipts (format 1.6.0)
-
-- **Every receipt this build signs is at least 1.6.0 and carries
-  `generations`** (1.7.0 when its backup selected consumer groups, below), one
-  entry per named topic, whatever else it carries — 1.6.0 includes every
-  earlier minor (PROD-03.0's `schema_dependency`, PROD-01.3's auth modes,
-  PROD-05.1's `topic_configuration`, FX-7's optional pin).
-  `schemas/logweir-backup-receipt-1.6.0.json` is the
-  frozen 1.5.0 file plus the optional `generations` property and its
-  `TopicIdentity` definition: no other property, type or required field moved.
-  The payload type keeps `version=1.0.0`.
-- **Readers built before PROD-01.4a accept 1.6.0 receipts** and ignore the
-  block: they compare majors only, every minor arm reads 6 as "at least" its
-  own, and no receipt type refuses an unknown field; a 1.6.0 receipt naming a
-  PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0
-  one. Arms 36–40 read only the new block, so this is MINOR under OD-7 (a).
-  Older readers print no IDs; an auditor who needs them verifies with script
-  1.25.0 or a `logweir` built from PROD-01.4a on.
-- **Old receipts are never reinterpreted.** A receipt before 1.6.0 records no
-  topic ID: every topic's generation in it is UNKNOWN, never the same as
-  another point's.
-- **Rollback.** An older `logweir backup run` writes 1.3.0, 1.4.0 or 1.5.0
-  receipts again, with no IDs; the 1.6.0 receipts already written stay valid under
-  every major-1 reader. A rolled-back build's points read "not established by
-  ID" against their neighbours.
-- **Permissions and brokers.** Nothing new to grant (DescribeTopics needs
-  `Describe`, as the engine does). A cluster below inter-broker protocol 2.8
-  has no topic IDs: its receipts record `null` with `noTopicId` and every
-  generation stays unknown.
-
-## Upgrade, rollback and old receipts (format 1.7.0)
-
-- **A receipt carries the block exactly when its backup selected consumer
-  groups** (PROD-04.1), and such a receipt is 1.7.0, whatever else it
-  carries — 1.7.0 includes every earlier minor's fields. A backup that selects
-  none writes the document it wrote before PROD-04.1, byte for byte, and a plan without `source.consumer_groups` is
-  the plan it was. `schemas/logweir-backup-receipt-1.7.0.json` adds the one
-  optional property to the frozen 1.6.0 file; the payload type keeps
-  `version=1.0.0`.
-- **MINOR under OD-7 (a).** Arms 30 to 35 read only the new block, and the
-  positions document is a new object beside the receipt that only a reader
-  asked for it reads. Readers built before PROD-04.1 (`verify_scorecard.py`
-  1.25.0 and earlier, an older `logweir`) accept a 1.7.0 receipt, ignore the
-  block and print no `consumer_positions` line — they say nothing about the
-  positions, and decide everything else as before; for positions, use a
-  reader from 1.26.0 on (the recovery path above). ABSENT means positions not
-  recorded: no group was selected.
-- **The evidence prefix holds one more object per selecting run**
-  (`<run_id>.consumer-positions.json`). `logweir catalog sync` reads only
-  `.receipt.json` keys and skips it; a `--max` page of the listing counts it
-  like the sidecar.
-- **Rollback.** An older runner ignores `source.consumer_groups` and
-  `--consumer-group` is an unknown flag to it, so it records no positions; the
-  1.7.0 receipts already written stay valid for every major-1 reader. An older
-  controller refuses a frozen plan whose execution inputs carry
-  `consumerGroups` (`PlanConfigMapConflict`): let such runs finish, or remove
-  `spec.consumerGroups` from the schedule, before rolling it back.
+the current receipt schema, `schemas/logweir-backup-receipt-1.8.0.json`. The
+1.0.0 to 1.7.0 files beside it are frozen and are not regenerated;
+`crates/logweir-core/tests/schema_drift.rs` keeps each what it was.
 
 ---
 

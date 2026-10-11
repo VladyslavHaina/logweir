@@ -711,7 +711,8 @@ async fn backup_reconcile_creates_exactly_one_job_with_the_pinned_failure_policy
         Some("Never"),
         "`restartPolicy: Never` is the other half. `OnFailure` restarts the container in place \
          and then DELETES the pod, and the exit code lives ONLY on the pod object — so the code \
-         is not buried in `lastState`, it is GONE (measured live, docs/kubernetes.md §1)"
+         is not buried in `lastState`, it is GONE (measured live; docs/kubernetes.md, \
+         Running the CLI as a CronJob)"
     );
     assert_eq!(
         job["spec"]["template"]["spec"]["automountServiceAccountToken"].as_bool(),

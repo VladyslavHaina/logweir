@@ -304,8 +304,8 @@ name: Kafka assigns it a new topic id, and the document claims the name, not
 the original topic
 ([the format](formats/drill-scorecard.md#targetoriginal_name-format-180)).
 
-Backup receipts have their own shape and invariants — eleven arms since format
-1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
+Backup receipts have their own shape and invariants — forty-five arms since
+format 1.8.0 ([the list](formats/backup-receipt.md#the-forty-five-arms-and-the-positions-documents-fourteen)). For an accepted
 receipt both readers print its configuration capture coverage in the same words:
 
 ```
@@ -720,7 +720,7 @@ other (and for a standalone CLI's), read `topics[].source_replication_factor`
 in the archive's manifest (`source.backup_id`, `source.manifest_sha256`): a
 topic without one has no replication-factor finding, whatever the scorecard
 lists
-([stability](stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+([the format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
 
 **What "assessed" covers.** An assessed topic's parity compares the
 configuration OVERRIDES the engine captured — explicit topic-level settings on
@@ -877,7 +877,7 @@ A verifier older than `1.25.0`, and a `logweir` built before PROD-01.4a, accept
 a 1.6.0 backup receipt or catalog point: they ignore `generations` (and the
 record's `topics[].identity`), check none of arms 36 to 40 and print no topic
 ID — so they cannot say whether a topic was recreated between two points or
-during one ([backup-receipt.md](formats/backup-receipt.md#upgrade-rollback-and-old-receipts-format-160)).
+during one ([backup-receipt.md](formats/backup-receipt.md#versions)).
 A verifier older than `1.26.0`, and a `logweir` built before PROD-04.1, accept
 a 1.7.0 receipt — the major is unchanged — ignore `consumer_positions` and
 print no `consumer_positions` line, so they say nothing about the selected
@@ -985,7 +985,7 @@ them as a sample of every expected record.
 A `1.15.0` verifier, and a `logweir` built before FX-7, still accept a 1.2.0
 receipt or catalog point: they ignore `archive.manifest_version_id` and print
 no manifest version
-([backup-receipt.md](formats/backup-receipt.md#upgrade-rollback-and-old-receipts-format-120)).
+([backup-receipt.md](formats/backup-receipt.md#versions)).
 
 A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
 accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore

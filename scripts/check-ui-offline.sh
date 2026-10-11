@@ -44,9 +44,9 @@
 # SCOPE, AND WHY IT HAS EXACTLY TWO HOLES. The walk covers every file under the
 # root EXCEPT `*.md` and EXCEPT the `tests/` subtree.
 #   - A Markdown file is documentation, not an asset the browser loads. The
-#     README has to print the serving command and the hardened kubeconfig
-#     alternative, both of which contain a server address; a rule that forbade
-#     the bytes there would make the document unwritable. Markdown integrity is
+#     README has to print the address the console is reached at
+#     (`http://127.0.0.1:8484/ui/`); a rule that forbade the bytes there would
+#     make the document unwritable. Markdown integrity is
 #     `scripts/check-links.sh`'s job.
 #   - A test is data, not an asset. `ui/tests/api.spec.js` proves that the path
 #     builder REFUSES an absolute URL, which it cannot do without containing

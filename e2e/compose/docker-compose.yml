@@ -109,7 +109,8 @@ services:
       # RULE 15 makes Task 7 the only editor of this file — so the override
       # has to exist here or a later task has to break that rule to get one.
       # The default is the docker-desktop name every local gate uses.
-      # Documented in `docs/kubernetes.md`, "Task 7 — the five-listener stack".
+      # `e2e/README.md` lists the listeners' ports; this override is documented
+      # only here.
       # The three HOST-FACING advertisements carry the published host port
       # (PROD-01.5); the two in-network ones name container ports and never move.
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:${LOGWEIR_E2E_KAFKA_PORT:-9092},SASL://kafka-broker-1:9096,SASLEXT://localhost:${LOGWEIR_E2E_SASL_PORT:-9097},K8S://${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:${LOGWEIR_E2E_K8S_PORT:-9095}
@@ -129,9 +130,8 @@ services:
       #   listener.name.saslext.scram-sha-512.sasl.jaas.config=…
       #
       # read back with `docker compose exec kafka-broker-1 cat
-      # /opt/kafka/config/server.properties` — the transcript is in
-      # `docs/kubernetes.md`, and it is what closed spec §15's sixth
-      # `[UNVERIFIED]` mark.
+      # /opt/kafka/config/server.properties` — that read-back is what closed
+      # spec §15's sixth `[UNVERIFIED]` mark.
       #
       # No username/password in the module options: on a listener the broker
       # SERVES, `ScramLoginModule` validates against the broker's own

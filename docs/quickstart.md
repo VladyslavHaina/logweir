@@ -163,7 +163,7 @@ grants per role — `archiveWrite`, `archiveRead`, `evidenceWrite`, `evidenceRea
 1. On *Schedules*, create one: the source connection, **named topics** or **all
    user topics** (a discovery per run; say what happens when completeness
    cannot be established), the cadence with its preview in your time zone, and
-   the destination ([ui/README.md](../ui/README.md), *Creating a schedule*).
+   the destination.
    Everything but the source connection can be edited later, and an edit never
    reaches a run that already exists ([kubernetes.md](kubernetes.md) §9).
 2. Press *Run first backup now* rather than waiting: a slot due before the
@@ -177,8 +177,7 @@ always a destination with no `evidenceRead` grant.
 ### 7. Restore a chosen point
 
 1. From the schedule's page, choose *Restore this point* on the exact row you
-   want — an older point is its own link, not a highlighted row
-   ([ui/README.md](../ui/README.md), *Restore, from here*).
+   want — an older point is its own link, not a highlighted row.
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
    Restores only ever write **new** topics. Check the **replication factor** in
@@ -190,9 +189,7 @@ always a destination with no `evidenceRead` grant.
    collects that discovery, a day by default; past the discovery's freshness,
    15 minutes by default, the count sets the default but refuses no factor),
    and otherwise to 1, which the step says; run the discovery first, or set the
-   factor yourself
-   ([ui/README.md](../ui/README.md), *The replication factor: a default with its
-   basis, an input, and a refusal before Create*). This factor can differ from
+   factor yourself. This factor can differ from
    the source's, and the target's storage follows it: a topic the source kept
    at replication factor 1, restored at 3, takes three times the storage it
    took there, with the replication traffic on top; a factor below the
@@ -200,8 +197,7 @@ always a destination with no `evidenceRead` grant.
 3. Run the readiness check in step 5 before *Create the Restore*. Once a check
    has run for the plan, Create is held until it reads ready: every blocking
    row `ready`, except the approval row, which is `skipped` until the Restore
-   exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
-   *The readiness check holds the submit*). The check is advisory, so with no
+   exists ([kubernetes.md](kubernetes.md) §21.7). The check is advisory, so with no
    check at all Create stays enabled, beside a warning, and nothing has
    validated the replication factor against the target's brokers: the page
    refuses a factor above the broker count only on a fresh discovery's count. A

@@ -677,8 +677,9 @@ impl CatalogEntry {
     /// The two spellings agree today (`catalog_view::ViewEntry` is
     /// `rename_all = "camelCase"` and both vocabularies serialise as the
     /// PascalCase strings compared here). The gap is that nothing holds them
-    /// together; `docs/kubernetes.md` §7e names the one-line fixture W8 or W13
-    /// should add.
+    /// together: one fixture line asserting that a serialized
+    /// `catalog_view::ViewEntry` deserializes into `CatalogEntry` with both axes
+    /// preserved would.
     #[must_use]
     pub fn has_blank_axis(&self) -> bool {
         self.availability.is_empty() || self.verification.is_empty()

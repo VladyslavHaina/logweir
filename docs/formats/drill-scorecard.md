@@ -2,75 +2,16 @@
 
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
-The machine-readable schema is
+The machine-readable schemas are
 [`schemas/logweir-drill-scorecard-2.1.0.json`](../../schemas/logweir-drill-scorecard-2.1.0.json)
 (format 2's newest) and
 [`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json)
-(format 1's newest), and CI diffs both against the code on every build. Format
-**1.9.0** and **2.1.0** (PROD-16.2) add the nested optional
-[`approval.console`](#approvalconsole-format-190-and-210): a restore a second
-person approved in the console; `-1.8.0.json` and `-2.0.0.json` are frozen
-beside them. Before PROD-16.2 the current schema was
-[`schemas/logweir-drill-scorecard-2.0.0.json`](../../schemas/logweir-drill-scorecard-2.0.0.json), so this document and the
-schema cannot drift apart silently. Format **2.0.0** (PROD-11.1b, the owner's
-decision OD-9 (a)) is the format's first MAJOR and is written ONLY for a
-restore that states a partition subset: 1.7.0's fields with
-[`source.selection.partitions`](#sourceselection-format-170-and-200) required,
-and `integrity.verification.complete.partitions[]` and the sampled lane's
-fields naming the SELECTED partitions. Every reader before it refuses a 2.0.0
-document as an unsupported major. Every other document this build writes is
-1.x, described by
-[`schemas/logweir-drill-scorecard-1.9.0.json`](../../schemas/logweir-drill-scorecard-1.9.0.json),
-format 1's newest minor (generated, and diffed by CI the same way; 1.8.0 is
-frozen since PROD-16.2). Format
-**1.8.0** (PROD-15.1) adds the nested optional
-[`target.original_name`](#targetoriginal_name-format-180): a restore under the
-source's original topic names, into topics the run created. That block is
-format 1's only: an original-name restore restores whole topics, so it never
-appears in a 2.x document and the 2.0.0 schema does not describe it (arm
-ON-14). Format **1.7.0** (PROD-11.1: a restore from a stated window start) is
-described by the frozen
-[`schemas/logweir-drill-scorecard-1.7.0.json`](../../schemas/logweir-drill-scorecard-1.7.0.json),
-with the older files beside it. Format **1.6.0** (FX-23), described by the frozen
-[`schemas/logweir-drill-scorecard-1.6.0.json`](../../schemas/logweir-drill-scorecard-1.6.0.json), adds the nested
-optional [`sample.unsampled_topics`](#sampleunsampled_topics-format-160): the
-topics a sampled drill's `max_partitions` left without a sampled partition.
-Every SAMPLED-lane scorecard a build with FX-23's checks signs declares 1.6.0,
-named topics or not, so the version marks that build. Format **1.5.0**
-(PROD-01.3) adds no field: it widens `target.auth.mode` by three values
-(`scramSha256`, `plain`, `mtls`), and a complete verification's scorecard of a
-restore into such a target declares it, described by the frozen
-[`schemas/logweir-drill-scorecard-1.5.0.json`](../../schemas/logweir-drill-scorecard-1.5.0.json);
-every other complete verification's scorecard is the 1.4.0 document, described by the frozen
-[`schemas/logweir-drill-scorecard-1.4.0.json`](../../schemas/logweir-drill-scorecard-1.4.0.json).
-[`schemas/logweir-drill-scorecard-1.3.0.json`](../../schemas/logweir-drill-scorecard-1.3.0.json),
-[`schemas/logweir-drill-scorecard-1.2.0.json`](../../schemas/logweir-drill-scorecard-1.2.0.json),
-[`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
-and [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
-are frozen beside it. Format **1.4.0** (PROD-08.1) added the nested optional
-[`integrity.verification`](#integrityverification-format-140): whether the
-verdict covered a sample or every selected record, and what a complete
-verification found. Format **1.3.0** (FX-8) added the nested optional
-[`source.time_basis`](#sourcetime_basis-format-130); format **1.2.0** (FX-3) added
-`topic_parity.not_reconstructed`. Format **1.1.0** (FX-4) added the nested optional
-[`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
-the first fields added after the v0.1 tags and therefore a MINOR bump with a new
-schema file
-([`docs/stability.md`](../stability.md#the-v010-tag-is-the-compatibility-boundary)).
-The fail-safe entries it also writes into the existing
-`topic_parity.unexpected_divergence` widen what that array's entries can say;
-the owner ruled them MINOR on 2026-10-05
-([OD-7](../to-do/product-expansion.md#owner-decisions)'s follow-up ruling),
-because they can only weaken an older reader's verdict. Each
-`target_diff.collisions` string is written exactly as before.
-Format **1.2.0** (FX-3) adds the nested optional
-[`topic_parity.not_reconstructed`](#topic_parity-in-a-newtopic-restore-not-reconstructed-120):
-the source settings a `newTopic` restore did not reconstruct, which every
-earlier writer signed as `intentionally_deviated` in both modes. Those
-deviations are also written into the existing `unexpected_divergence`, and
-[`docs/stability.md`](../stability.md#format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct)
-says how that is classified.
-The payload type keeps `version=1.0.0`, the major-1 envelope. A worked example is
+(format 1's newest). Both are generated from the code and diffed by CI on every
+build, so this document and the schemas cannot drift apart silently. Every older
+schema file, `-1.0.0.json` to `-1.8.0.json` and `-2.0.0.json`, is frozen beside
+them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
+envelope, so an older reader reaches its major refusal rather than a
+payload-type mismatch. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
 read [`e2e/fixtures/README.md`](../../e2e/fixtures/README.md) first, which lists
 the one field in it that v0.1's code cannot emit and why it is still there.
@@ -93,6 +34,66 @@ that reader and this one is a reference.
 4. **The `logweir drill show` table is a summary.** It renders fourteen frozen
    rows plus a qualifiers footer; the signed document carries more. Where they
    differ, the document is authoritative.
+5. **An absent optional block means not recorded.** A block added in a later
+   version is never read as its most flattering value in a document that lacks
+   it: each section below says what its absence means.
+
+## Versions
+
+Each version adds optional fields under the rule in
+[stability.md](../stability.md#the-v010-tag-is-the-compatibility-boundary): a
+MINOR adds optional fields only, and a MAJOR needs the owner's recorded
+decision. Every arm a minor adds fires only on a document carrying its new
+field, so every older document is decided exactly as before; the corpus
+(`e2e/fixtures/invariants/`) and the parity gate re-prove that on every
+`just lint`. **The version only rises:** each step that raises it keeps the
+newer of two versions, by major and then minor
+(`scorecard::newer_format_version`), so no step lowers what an earlier step
+chose.
+
+| Version | Task | Adds | Which documents carry it | Ruled |
+|---|---|---|---|---|
+| 1.0.0 | v0.1 | the format | every document before FX-4 | the tag is the compatibility boundary |
+| 1.1.0 | FX-4 | [`topic_parity.not_assessed`, `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means), and one fail-safe entry per `not_assessed` entry in the existing `unexpected_divergence` | every document of a build from FX-4 until FX-3 | MINOR, the first post-tag addition. The fail-safe entry is MINOR by OD-7's follow-up ruling (2026-10-05): it can only weaken an older reader's verdict. Each `target_diff.collisions` string is byte for byte what a writer before FX-4 produced |
+| 1.2.0 | FX-3 | [`topic_parity.not_reconstructed`](#topic_parity-in-a-newtopic-restore-not-reconstructed-120), arms NR-1 to NR-5 | every document of a build from FX-3 until FX-8 | MINOR ([the classification](#topic_parity-in-a-newtopic-restore-not-reconstructed-120)) |
+| 1.3.0 | FX-8 | [`source.time_basis`](#sourcetime_basis-format-130), arms TB-1 to TB-4 | every document of a build from FX-8 until PROD-08.1; every run that reaches the time-basis decision writes the block | MINOR: an additive optional block, arms under OD-7 (a). The refusal `PointInTimeByProducerTime` (exit 3) is a new cause for an existing value, only to the safer side: OD-7's third case |
+| 1.4.0 | PROD-08.1 | [`integrity.verification`](#integrityverification-format-140), arms IV-1 to IV-7 | every document of a build from PROD-08.1 (every run that reaches phase 7 writes the block); since FX-23, a complete verification's document only | MINOR, OD-7 (a). Two new causes, each only to the safer side (third case): the sampled lane FAILS a selection whose restored head repeats or goes backwards in `x-original-offset` (`fail-integrity`), and phase 0 refuses a plan asking for two verifications at once (exit 3) |
+| 1.5.0 | PROD-01.3 | no field: `target.auth.mode` gains `scramSha256`, `plain` and `mtls` | a document naming one of the three that no later minor covers (since FX-23, a complete verification's); the schema differs from 1.4.0's in that field's description only | MINOR, third case: an older reader refuses such a document, never reads it as something stronger |
+| 1.6.0 | FX-23 | [`sample.unsampled_topics`](#sampleunsampled_topics-format-160), arms US-1 to US-3, and the stricter sampled check | every SAMPLED-lane document, so the version marks the build | MINOR, OD-7 (a). The per-partition count bound and the engine-report check are new causes for `fail-integrity` (third case) |
+| — | FX-21 | no field and no version: `not_assessed` entries for a [replication factor or partition count the source's record lacks](#topic_parity-and-what-its-silence-means) | the version the rest of the run writes | MINOR, third case: what an earlier writer signed as matching is now not assessed |
+| 1.7.0 | PROD-11.1 | [`source.selection`](#sourceselection-format-170-and-200) with a start and an end, arms SEL-1 to SEL-3 | a restore from a stated window start | MINOR, OD-7 (a) |
+| 2.0.0 | PROD-11.1b | [a partition subset](#format-200-a-partition-subset-prod-111b-od-9-a): `source.selection` required, with `partitions` and `engine_runs`; arms PS-1 to PS-5 | a partition-subset restore, and only it | **MAJOR**, the owner's decision OD-9 (a), 2026-10-09: two existing fields then name the selection, not the topic |
+| 1.8.0 | PROD-15.1 | [`target.original_name`](#targetoriginal_name-format-180), arms ON-1 to ON-14 | a restore under the original topic names; format 1 only | MINOR, OD-7 (a) |
+| 1.9.0, 2.1.0 | PROD-16.2 | [`approval.console`](#approvalconsole-format-190-and-210), arms CA-1 to CA-8; `target.original_name.approval_mode` gains `consoleApproval` from 1.9.0 | a run a second person approved in the console (2.1.0 for a subset) | MINOR, OD-7 (a) and its third case. No MAJOR |
+
+**What an older reader does, and what a rollback writes.**
+
+| Version | A reader built before it | Rolled back |
+|---|---|---|
+| 1.1.0 | Accepts every 1.1.0 document and ignores the new fields. It prints no coverage, and it sees the fail-safe entry in `unexpected_divergence`, never a clean list | An older `logweir` writes 1.0.0 documents again, whose coverage reads unknown. 1.1.0 documents already written stay valid under both readers |
+| 1.2.0 | Accepts every 1.2.0 document and prints no reconstruction line; its `logweir drill show` lists each not-reconstructed setting under `unexpected [...]`, never `intended [...]`. It does not run NR-1 to NR-5, so it also accepts a 1.2.0 document only a newer reader refuses | An older `logweir` writes the old labels again; 1.2.0 documents stay valid |
+| 1.3.0 | Accepts it (same major, a nested optional field) and prints no time-basis line | An older `logweir` writes documents with no block, runs the selections FX-8 refuses and signs them without a label. 1.3.0 documents stay valid |
+| 1.4.0 | Accepts it, prints no coverage line and does not run IV-1 to IV-7 | An older `logweir` writes sampled documents with no block; 1.4.0 documents stay valid |
+| 1.5.0 | **Refuses a document naming a new mode** (outside the two it knows) and decides every other document as before. Each reader's auth arm is three statements: the closed two below the new version, a new value under an older version (refused), the closed five from it | An older `logweir` cannot parse a spec naming a new mode, so it writes none. Those already written stay valid for every reader from PROD-01.3 on |
+| 1.6.0 | Accepts it and says nothing about the topics the sample left out | An older `logweir` samples the first N partitions again, judges one aggregate bound and ignores the engine report: its `pass` over an early-stopped restore is the defect FX-23 closed. 1.6.0 documents stay valid |
+| FX-21 | A reader older than 1.1.0 sees the fail-safe twin in `unexpected_divergence`; every reader since 1.1.0 prints the entries in its `configuration parity: NOT ASSESSED for …` line | An older `logweir` signs the old silence again. Rolling the engine back to `+logweir.1` or OSO's 0.23.3 records one factor per backup again; this build then names the rest `notRecorded` where no 1.3.0 receipt is bound |
+| 1.7.0 | `verify_scorecard.py` 1.21.0 and 1.22.0 and an older `logweir drill verify` accept it, and nothing they print is false over the window ([what they print](../verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)); they print nothing that names the start. A runner built before PROD-11.1 refuses a plan stating a start (`drill spec does not parse`, exit 1) and signs nothing | Start-only documents stay valid in both directions |
+| 2.0.0 | **Every older reader refuses it**, never prints it `VALID`: `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1 as a newer major; a `logweir` between PROD-11.1 and PROD-11.1b as a newer major, or (a subset from the floor, with no start) at deserialisation. Upgrade the verifier before verifying subset restores. Older runners refuse a subset plan ([the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b)) | 2.0.0 documents stay verifiable with readers from PROD-11.1b on |
+| 1.8.0 | A verifier older than 1.28.0 and a `logweir` built before PROD-15.1 accept it, ignore the block and print no `original name:` line. An older runner refuses an original-name plan at phase 0 (its empty prefix maps every topic onto itself) | Documents stay valid; no older runner restores under the original names |
+| 1.9.0, 2.1.0 | An older `logweir drill verify` accepts a 1.9.0 document and prints `approval:  <issuer>#<subject> (<ticket>)` with no key id; `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line; a 1.28.0 reader refuses an original-name document naming `consoleApproval` (its ON-5); readers before 1.27.0 refuse a 2.1.0 document by its major | Documents stay valid |
+
+**What a renumber moves.** A version's number is held in several places that
+must move together, with each corpus case's `format_version` and its version
+arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
+
+| Version | Moves together |
+|---|---|
+| 1.3.0 | `logweir_core::FORMAT_VERSION` and `scorecard::TIME_BASIS_SINCE_MINOR`; the justfile's `scorecard_schema_version` and the schema file's name; `docs/verify_scorecard.py`'s `FORMAT_VERSION` and `SCORECARD_TIME_BASIS_SINCE_MINOR`; the parity script's `SCORECARD_TIME_BASIS_VERSION`; the literal pins in `crates/logweir-core/src/lib.rs` and `docs/test_verify_scorecard.py`; the corpus cases `time_basis_*.json` |
+| 1.4.0 | `logweir_core::FORMAT_VERSION` and `scorecard::VERIFICATION_SINCE_MINOR`; the justfile and schema name; `FORMAT_VERSION` and `SCORECARD_VERIFICATION_SINCE_MINOR`; `SCORECARD_VERIFICATION_VERSION`; the same literal pins; `verification_*.json` |
+| 1.6.0 | `scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS` and `UNSAMPLED_TOPICS_SINCE_MINOR`; the justfile and schema name; `SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR`; `SCORECARD_UNSAMPLED_VERSION`; `unsampled_topics_*.json` |
+| 1.7.0 | `scorecard::FORMAT_VERSION_WITH_SELECTION` and `SELECTION_SINCE_MINOR`; the frozen schema's name; `SCORECARD_SELECTION_SINCE_MINOR`; `SCORECARD_SELECTION_VERSION`; `selection_*.json` |
+| 2.0.0 | `scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and `PARTITION_SUBSETS_MAJOR`; the justfile's `scorecard_schema_version` and the current schema's name; `SCORECARD_PARTITION_SUBSETS_VERSION` and `SCORECARD_PARTITION_SUBSETS_MAJOR`; `SCORECARD_SUBSET_VERSION`; `subsets_*.json` |
+| 1.8.0 | `scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and `ORIGINAL_NAME_SINCE_MINOR`; the justfile's `scorecard_format_1_schema_version` and the schema's name; `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`; `SCORECARD_ORIGINAL_NAME_VERSION`; `original_name_*.json` |
 
 ---
 
@@ -100,7 +101,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4; `1.2.0` since FX-3; `1.3.0` since FX-8; `1.4.0` since PROD-08.1; `1.5.0` (PROD-01.3) for a restore into a target whose `target.auth.mode` is `scramSha256`, `plain` or `mtls`. |
+| `format_version` | string | Semver of this format: `1.0.0` to `1.9.0` (major 1) or `2.0.0` and `2.1.0` (major 2, a partition subset only). See [Versions](#versions). |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -113,7 +114,7 @@ that reader and this one is a reference.
 The scorecard is the **exact bytes phase 8 signed**, and phase 8 signs a frozen
 copy. Its own phase record is pushed onto the in-memory document afterwards,
 and phase 9 (teardown) runs after the upload. So the highest phase a SIGNED
-scorecard can record is 7, and the emittable values in v0.1.0 are:
+scorecard can record is 7:
 
 | Value | What happened |
 |---|---|
@@ -124,26 +125,15 @@ scorecard can record is 7, and the emittable values in v0.1.0 are:
 **`7` does not mean teardown was skipped.** Teardown is attested in its own
 separately signed document, `<run_id>.teardown.json`. `drill run`'s stdout line
 quotes this same value, from the artifact rather than from the in-memory copy,
-so the console and the document cannot disagree about it.
-
-`8` and `9` are in the DOMAIN — `validate_invariants` accepts `-1..=9` — and no
-v0.1.0 writer produces them.
+so the console and the document cannot disagree about it. `8` and `9` are in the
+DOMAIN — `validate_invariants` accepts `-1..=9` — and no v0.1.0 writer produces
+them.
 
 ### `outcome` is ENTAILED by the rest of the document, and that is ENFORCED
 
-`outcome` is the field an auditor reads first, and until Task 5 it was read by
-**neither** verifier. `self.outcome` appeared in no arm of
-`Scorecard::validate_invariants` and `outcome` in no arm of
-`docs/verify_scorecard.py::check_invariants`, so a document claiming
-`outcome: "pass"` beside its own contradicting evidence was accepted, signed
-and verified at exit **0** by both readers. Two such documents were falsifiable
-on the shipped code: `pass` beside an `integrity.partial_reason` naming an
-unreconciled topic, and `pass` beside `records_sampled_matching: 50` against
-`records_sampled: 100`.
-
-Six rules now make `outcome` a claim the rest of the document has to support.
-They are checked **in this order** by both readers, and a document violating
-any of them is refused by `logweir drill verify` at exit **4** and by
+Six rules make `outcome` a claim the rest of the document has to support. Both
+readers check them **in this order**, and a document violating any of them is
+refused by `logweir drill verify` at exit **4** and by
 `docs/verify_scorecard.py` at exit **1**, with the **same message**:
 
 | # | Rule | Message |
@@ -162,28 +152,21 @@ Two values stay legal and are easy to misread as violations:
   requested `pass_rate` could not be measured, and neither contradicts a pass —
   see [`objectives`](#objectives).
 - **`matrix_verdict: "pass-degraded"` is the correct value for a pass at a
-  non-`byte-fingerprint` level.** Rule 6 does not say a degraded drill cannot
-  pass; it says such a drill's matrix row is `pass-degraded`, which is what
-  that value is for.
+  non-`byte-fingerprint` level.** Rule 6 says such a drill's matrix row is
+  `pass-degraded`, which is what that value is for.
 
-Rule 5 is the one rule that binds on **every** outcome, not only a pass:
-`sample.records_expected` is the canary size the drill **set out** to
-reconcile, so reconciling more records than were selected is not a stronger
-result, it is an incoherent one.
-
-Rule 6 is stated as a property of the DOCUMENT rather than of one call site.
-`crates/logweir/src/drill/phase8_score.rs`'s `matrix_verdict_for` returns
-`pass` on exactly one path — a `pass` outcome at `byte-fingerprint` level,
-reachable only when the phase-5 lever readback was itself `pass` — so the rule
-holds for every value that writer can emit, and now also for every document an
-auditor can be handed.
+Rule 5 binds on **every** outcome: `sample.records_expected` is the canary size
+the drill **set out** to reconcile, so reconciling more records than were
+selected is an incoherent result, not a stronger one. Rule 6 holds for every
+value the writer can emit (`phase8_score.rs`'s `matrix_verdict_for` returns
+`pass` on exactly one path) and now for every document an auditor can be
+handed.
 
 Like the `partial_reason`, `evidence` and `redactions` arms, this is a
 **retroactive tightening of the 1.0.0 reader, not a format change**: no field
 is added, `format_version` stays `1.0.0`, and the accepted set only narrows.
 `crates/logweir/tests/two_reader_parity.rs` runs both readers over
-`e2e/fixtures/invariants/` — nine documents for these six rules — and compares
-their refusal text, so the agreement is checked rather than asserted.
+`e2e/fixtures/invariants/` and compares their refusal text.
 
 ## `engine`
 
@@ -268,17 +251,12 @@ before `redactions`) and words, fire only on a document carrying the block:
 | TB-4 | a topic in both lists: its type was either recorded as `LogAppendTime` or not recorded |
 
 Both readers print one `time basis:` line per non-empty list, or the one line
-saying it was not recorded for a document without the block; `logweir drill
-show` renders the same in its qualifiers footer (`source.time_basis`).
-
-**The number.** 1.3.0; 1.2.0 is FX-3's. A renumber moves
-`logweir_core::FORMAT_VERSION` and `scorecard::TIME_BASIS_SINCE_MINOR`
-together, the justfile's `scorecard_schema_version` and this schema file's
-name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
-`SCORECARD_TIME_BASIS_SINCE_MINOR`, the parity script's
-`SCORECARD_TIME_BASIS_VERSION`, and the literal pins in
-`crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
-corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
+saying it was not recorded (`time basis: not recorded`) for a document without
+the block; `logweir drill show` renders the same in its qualifiers footer
+(`source.time_basis`). The backup receipt's format did not change for FX-8:
+both readers print one `time basis:` line per topic a receipt records as
+`LogAppendTime`, saying that the receipt's covered window is that topic's
+producer time.
 
 ### `source.selection` (format 1.7.0 and 2.0.0)
 
@@ -292,7 +270,10 @@ corpus cases `time_basis_*.json` (their `format_version` and TB-1's reason).
 A plan may state an inclusive window START, written
 `restore.point_in_time: "<start>/<end>"`
 ([the plan field](drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
-A restore from a stated start is format 1.7.0 and carries this block; the
+Guard G-WIN is amended, not removed: a start stated in the approved plan is the
+plan's own (`InheritedFromSpec`), is never earlier than the archive set's floor (refused, never moved
+to it), is re-derived by phase 5 from the spec and the manifest, and is signed
+here. A restore from a stated start is format 1.7.0 and carries this block; the
 contract is [`PROD-11.1-replay-selection.md`](../to-do/decisions/PROD-11.1-replay-selection.md).
 A restore of a partition SUBSET (`restore.partitions`) is format 2.0.0, below.
 
@@ -348,30 +329,12 @@ document carrying the block:
 | SEL-2 | a stated start at or after the end |
 | SEL-3 | a complete block whose `window` is not the block's start (absent for a 2.0.0 subset from the floor) and end |
 
-A block that is not an object of the types below is refused when the
-document is read; an unknown key in it is ignored, as everywhere in the
-document. That is why a partition subset could not be added to the 1.7.0
-block as a MINOR: a 1.23.0 reader would ignore it and read the restore as
-every partition (OD-9). Each arm reads only the new block, or judges an
-existing field against it, and can only refuse: MINOR under OD-7 (a). Both
-readers print one `replay selection:` coverage line for a document carrying
-the block (above), and for a sampled `pass` the `sample coverage:` line is
-QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms
-S to epoch-ms E: …; no record before the start was expected, and a sampled
-check does not prove that none was restored`); `logweir drill show` shows
-`sample.coverage_note`, which opens with the writer's sentence.
-
-**The version only rises.** A restore that states a start AND is sampled
-(FX-23's 1.6.0) is 1.7.0; each step that raises the version keeps the newer
-of the two (`scorecard::newer_format_version`, by major and then minor), so no
-step can lower a version an earlier step chose.
-
-**The number.** 1.7.0; 1.6.0 is FX-23's. A renumber moves
-`scorecard::FORMAT_VERSION_WITH_SELECTION` and `scorecard::SELECTION_SINCE_MINOR`
-together, the frozen schema file's name, `docs/verify_scorecard.py`'s
-`SCORECARD_SELECTION_SINCE_MINOR`, the parity script's
-`SCORECARD_SELECTION_VERSION`, and the corpus cases `selection_*.json` (their
-`format_version` and SEL-1's reason).
+A block that is not an object of these types is refused when the document is
+read; an unknown key in it is ignored, as everywhere in the document — which is
+why a partition subset could not be added to the 1.7.0 block as a MINOR
+(OD-9). For a sampled `pass` both readers QUALIFY the `sample coverage:` line by
+the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms
+E: …`). A restore that states a start AND is sampled (FX-23's 1.6.0) is 1.7.0.
 
 #### Format 2.0.0: a partition subset (PROD-11.1b, OD-9 (a))
 
@@ -390,10 +353,11 @@ The owner decided OD-9 (a) on 2026-10-09: a restore that states a partition
 subset (`restore.partitions`,
 [the plan field](drill-spec.md#a-partition-subset-restorepartitions-prod-111b))
 signs format **2.0.0**, and only then; every other document stays 1.x, byte
-for byte. It is the format's first MAJOR
-([stability](../stability.md#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)):
-2.0.0 is 1.7.0's fields with a different meaning for two existing ones, which
-a 1.x reader would read as every partition restored —
+for byte. It is the format's first MAJOR, and it carries the owner's recorded
+decision the [compatibility rule](../stability.md#the-v010-tag-is-the-compatibility-boundary)
+requires. 2.0.0 is 1.7.0's fields with a different meaning for two existing
+ones, which a 1.x reader would read as every partition restored (the
+PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0) —
 
 - **`integrity.verification.complete.partitions[]`** lists every SELECTED
   partition of every restored topic (and, with nothing expected, any other
@@ -402,10 +366,11 @@ a 1.x reader would read as every partition restored —
 - **the sampled lane's fields** — `sample.partitions`, the per-partition count
   bound, the engine-report check — are the selected partitions'.
 
-So every reader before it (`verify_scorecard.py` before 1.27.0, `logweir drill
-verify` and `drill show` before PROD-11.1b) refuses a 2.0.0 document as an
-unsupported major instead of reading it. The media type keeps `version=1.0.0`,
-so an older reader reaches that refusal rather than a payload-type mismatch.
+The schema [`schemas/logweir-drill-scorecard-2.0.0.json`](../../schemas/logweir-drill-scorecard-2.0.0.json)
+pins `format_version` to `2.x.y`. `format_version_with_selection` writes 2.0.0
+exactly when the signed block names a subset; a start-only restore is 1.7.0.
+`logweir drill verify`, `drill show` and `verify_scorecard.py` from 1.27.0
+read major 2 for this shape alone and refuse a major above 2, naming 2.0.0.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -441,34 +406,17 @@ inclusive)`, and the start clauses above).
 
 Every arm of major 1 holds for a 2.0.0 document (the evidence-zeroing arms,
 IV-1 to IV-7, US-1 to US-3, SEL-1 to SEL-3 among them). Both readers print the
-subset in their `replay selection:` line — `ONLY … (every partition of any
-other restored topic), from … to …, in N engine run(s); no record of another
-partition of these topics was restored or expected` over a verdict that
-PASSED (either lane proves it: the sampled lane held those partitions empty;
-the complete lane counts a record there as unexpected), and `… was expected`
-otherwise — followed by the start clause when one is stated; and for a
-sampled `pass` the line `sample coverage: a sampled pass over a partition
-subset from <the archive's floor | epoch-ms S> to epoch-ms E: every selected
-partition was held to its own count bound over that window, every other
-partition of a narrowed topic was held empty, …`.
+subset in their `replay selection:` line, ending `no record of another
+partition of these topics was restored or expected` only over a verdict that
+PASSED (the sampled lane held those partitions empty; the complete lane counts
+a record there as unexpected), and `… was expected` otherwise.
 
 **Every other surface says partial.** The signed block is copied, never
-recomputed, to the surfaces that do not print the document: the `Restore`
-status' `integrity.selection` (with `scope: partial` and the `SELECTION`
-printer column, [kubernetes.md](../kubernetes.md)), the product API's
-`selection` on both restore reads and the operation view's
-`verificationScope` ([api.md](../api.md)), the console's History list, detail
-and operation view (`partial: partitions 0, 2 of topic orders`, and a
-complete-coverage sentence over every SELECTED partition). An unnarrowed restore shows
-none of these, exactly as before.
-
-**The number.** 2.0.0. A renumber moves
-`scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS` and
-`scorecard::PARTITION_SUBSETS_MAJOR` together, the justfile's
-`scorecard_schema_version` and the current schema file's name,
-`docs/verify_scorecard.py`'s `SCORECARD_PARTITION_SUBSETS_VERSION` and
-`SCORECARD_PARTITION_SUBSETS_MAJOR`, the parity script's
-`SCORECARD_SUBSET_VERSION`, and the corpus cases `subsets_*.json`.
+recomputed: the `Restore` status' `integrity.selection` (with `scope: partial`
+and the `SELECTION` printer column), the product API's `selection` and the
+operation view's `verificationScope` ([api.md](../api.md)), and the console's
+History list, detail and operation view (`partial: partitions 0, 2 of topic
+orders`). An unnarrowed restore shows none of these.
 
 ### `target.original_name` (format 1.8.0)
 
@@ -545,30 +493,17 @@ original name: declarative owners looked for in plan, kafkaTopicResources: order
 A one-person confirmation's first line reads `approved by ordinary (the
 requester re-typed every original topic name)`.
 
-**The version only rises.** Each step that raises the version keeps the newer
-one (`scorecard::newer_format_version`), so an original-name restore from a
-stated start is 1.8.0, never 1.7.0.
-
 **A window is allowed; a partition subset is not.** A restore under the
 original topic names may state a window start or end
 ([`source.selection`](#sourceselection-format-170-and-200), a start and its
-end): every partition is restored, bounded in time, and the document is 1.8.0.
-It never states a partition subset, which is what format 2.0.0 is for: the
-block is format 1's only, the 2.0.0 schema does not describe it, and ON-14
-refuses the pair.
-
-**The number.** 1.8.0; 1.7.0 is PROD-11.1's, and 2.0.0 is PROD-11.1b's
-partition-subset format, which this block is never part of. The schema file is
-`schemas/logweir-drill-scorecard-1.8.0.json`: the frozen 1.7.0 file plus this
-block. It is itself FROZEN since PROD-16.2; format 1's newest, generated file is
-`schemas/logweir-drill-scorecard-1.9.0.json` (the frozen 1.8.0 file plus
-`approval.console`, `logweir_core::schema::scorecard_format_1_schema`). A renumber moves
-`scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME` and
-`scorecard::ORIGINAL_NAME_SINCE_MINOR` together, the justfile's
-`scorecard_format_1_schema_version` and this schema file's name,
-`docs/verify_scorecard.py`'s `SCORECARD_ORIGINAL_NAME_SINCE_MINOR`, the parity
-script's `SCORECARD_ORIGINAL_NAME_VERSION`, and the corpus cases `original_name_*.json`
-(their `format_version` and ON-1's reason).
+end): every partition is restored, bounded in time, and the document is 1.8.0,
+never 1.7.0. It never states a partition subset, which is what format 2.0.0 is
+for: the block is format 1's only, and the 2.0.0 schema is byte for byte the
+file PROD-11.1b published and does not describe it. A later 1.x minor that IS
+meant for subset restores too says so, and moves 2.x with it. The schema file
+`schemas/logweir-drill-scorecard-1.8.0.json` is the frozen 1.7.0 file plus this
+block, itself frozen since PROD-16.2; format 1's newest, generated file is
+`-1.9.0.json` (`logweir_core::schema::scorecard_format_1_schema`).
 
 ## `approval`
 
@@ -582,7 +517,8 @@ script's `SCORECARD_ORIGINAL_NAME_VERSION`, and the corpus cases `original_name_
 | `approval.self_attested` | bool | `true` when the approving key **equals** the signing key: the same party planned, ran and vouches for the result. **The WRITER never refuses to sign such a run; it labels it.** Treat `true` as a reason to seek corroboration. **The READERS treat this field as a CLAIM, not a finding**: both derive the answer from `approval.key_id` against the key that verified the signature, and refuse a document whose claim disagrees with that derivation (`drill verify` exit 4, `verify_scorecard.py` exit 1). The two are not in tension — a self-attested run is signed and labelled; a document that *lies about* being self-attested, in either direction, is refused. That narrows the accepted set without changing the format: no field is added, removed or retyped, `format_version` stays `1.0.0`, and no document Logweir has ever written is refused, because the writer has always derived the field correctly. |
 
 **What `approver`, `approved_at` and `key_id` mean, by how the run was
-authorised** (`target.original_name.approval_mode`'s words):
+authorised** (`target.original_name.approval_mode`'s words; the documents
+themselves are in [approval-documents.md](approval-documents.md)):
 
 | mode | `approver` | `approved_at` | `key_id` |
 |---|---|---|---|
@@ -591,10 +527,16 @@ authorised** (`target.original_name.approval_mode`'s words):
 | `ordinary` (confirm) | the requester's `<issuer>#<subject>` | when the console signed the confirmation (`issuedAt`) | the console key |
 | `consoleApproval` (two-person) | the approver's `<issuer>#<subject>` | when the second person approved (`approvedAt`), never the request's time | the console key, which is expected in this mode |
 
+The approval-mode vocabulary is one set (`logweir_core::scorecard`'s
+constants); `docs/verify_scorecard.py` holds a copy that
+`two_reader_parity.rs::the_approval_mode_vocabulary_is_the_same_set_in_both_readers`
+holds to it member for member.
+
 ### `approval.console` (format 1.9.0 and 2.1.0)
 
 PROD-16.2: present exactly when a second person approved the run in the
-console. Absent on every other document.
+console. Absent on every other document. A partition-subset restore approved in
+the console is allowed (2.1.0).
 
 ```json
 "console": {
@@ -619,20 +561,13 @@ approver's `<issuer>#<subject>`; `approval.key_id` that is not
 `approval.approved_at` that is not the block's; and an original-name document
 whose `approval_mode` is `consoleApproval` without the block, or the block
 beside another mode. From 1.9.0 `target.original_name.approval_mode` may be
-`consoleApproval`; under 1.8.0 that value is refused by the version. Both
-readers print one line:
+`consoleApproval`; under 1.8.0 that value is refused by the version, and ON-5 is
+split by version as PROD-01.3 split `target.auth.mode`, so a 1.8.0 document is
+judged in the same words as before. Both readers print one line:
 
 ```text
 console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z (the request expired at 2026-10-10T13:00:00Z); the console key c0c0… signed the request and the approval, which is expected in this mode: no personal key is involved
 ```
-
-What older readers print (measured): an older `logweir drill verify` prints
-`approval:  <issuer>#<subject> (<ticket>)` with no key id and no word about
-the console; `verify_scorecard.py` before 1.29.0 prints no approval line. A
-1.9.0 document is accepted by both and the block ignored; a 1.28.0 reader
-refuses an original-name document naming `consoleApproval` (ON-5). A 2.1.0
-document is accepted by readers from 1.27.0 (`verify_scorecard.py`) and
-refused by older ones by its major.
 
 ## `phases`
 
@@ -712,28 +647,20 @@ Copied verbatim from your spec, plus the verdict.
 | `topics`, `partitions` | integer | How many of each were selected. Under complete coverage (1.4.0), every topic and partition the complete block lists. |
 | `records_expected` | integer | **The canary size**: how many records this drill set out to reconcile — `records_per_partition` summed over the partitions actually selected. It is **not** how many records the manifest says the window holds; those differ by orders of magnitude on a real archive. Under complete coverage (1.4.0) the canary is the expected output of every compared partition, so this is `integrity.verification.complete.replay.expected` — the whole expected output only when `complete.covered` is `true` (an uncompared partition is never decoded and contributes 0). |
 | `records_restored` | integer | **How many records the check READ BACK from the restored topics** — not how many the restore wrote, which is every archived record in the window. Under a sampled check, the records phase 7 consumed from each sampled partition, at most `records_per_partition` each, summed over the sampled partitions. Under complete coverage (1.4.0), `integrity.verification.complete.replay.restored`: every restored record read back from a compared partition, and the count an uncompared partition holds. |
-| `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md). |
+| `anchor` | string | The vocabulary is `head`, `tail`, `random`; **v0.1 implements only `head`** and REFUSES the other two at phase 0 with exit 3 rather than silently substituting. The scorecard field is a plain string (the closed enum lives on the input spec, `logweir_core::spec::Anchor`, which is where a bad value has to be caught); a v0.1.0 scorecard therefore always reads `head`. See [stability.md](../stability.md#sampleanchor-accepts-only-head-in-v01-tail-and-random-are-refused). |
 | `coverage_note` | string | What the drill itself says about how representative the window is. Read it. |
 | `unsampled_topics` | array of strings, **optional** (format 1.6.0) | The restored topics with records in the window that `sample.max_partitions` left without a sampled partition: sorted, each once, never empty. **Absent** names none — and in a document before 1.6.0 says nothing, because its writer's cap kept the first partitions in manifest order and recorded nothing about the rest. See [below](#sampleunsampled_topics-format-160). |
 
-### The block is REQUIRED, and both readers now enforce that
-
-`sample` is in the schema's top-level `required` list and none of its fields is
-nullable — reading rule 3 above says every optional field states what its null
-means, and none of these does. `records_expected` in particular is the canary
-size the whole `integrity` result is measured against, so a document without it
-cannot be checked at all.
-
-For one release only one reader acted on that. `logweir drill verify` refuses a
-missing `sample` block at parse time (the field is `SampleInfo`, not an
-`Option`), exiting **1** with ``signature verified but the payload is not a
-scorecard: missing field `sample` ``; `docs/verify_scorecard.py` skipped the
-block silently and printed **`VALID`**. Since `verify_scorecard.py` `1.5.0` it refuses
-the same document, exiting **1** with `INVALID: the document has no sample
-block; it is not a drill scorecard`, and refuses a `records_expected` that is
-not an integer with `INVALID: sample.records_expected is not an integer`. The
-pair is walked by both readers in
-`crates/logweir/tests/two_reader_parity.rs::two_reader_parity_on_documents_refused_before_the_invariants`.
+The block is REQUIRED (in the schema's top-level `required` list) and none of
+its fields is nullable; a document without it cannot be checked at all, because
+`records_expected` is the canary size the whole `integrity` result is measured
+against. Both readers refuse it: `logweir drill verify` at parse time (exit
+**1**, ``signature verified but the payload is not a scorecard: missing field
+`sample` ``), `docs/verify_scorecard.py` since its `1.5.0` (exit **1**,
+`INVALID: the document has no sample block; it is not a drill scorecard`, and
+`INVALID: sample.records_expected is not an integer` for a non-integer). See
+[every required field](#every-required-field-and-its-type-both-readers-refuse-the-same-shapes)
+for the rest of the shape rules.
 
 ### `sample.unsampled_topics` (format 1.6.0)
 
@@ -744,19 +671,35 @@ pair is walked by both readers in
 }
 ```
 
-A sampled verification reconciles the first `records_per_partition` records of
-the partitions phase 4 selects, and `sample.max_partitions` caps how many. Since
-FX-23 the cap keeps one partition of every restored topic with records in the
-window first — round-robin across topics in manifest order — and only then a
-second of any; the kept partitions are listed in manifest order. When the cap
-is below the number of such topics, the topics it could not reach are named
-here. Their partitions were not reconciled record by record; every one of them
-was still held to its own count bound and, after an engine restore, to the
-engine's offset report (see
-[what a sampled `pass` guarantees](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
-Before FX-23 the cap kept the FIRST partitions in manifest order — the order the
-engine restores topics in — which is how an engine stopped early by a SIGTERM
-could be sampled only over the topics it had finished.
+FX-23 closed a false `pass`: an engine stopped by a SIGTERM finishes the topic
+it is on, exits 0 and never starts the rest, and the default sampled check used
+to sign `pass` over that restore whenever `sample.max_partitions` truncated the
+sample to the topics that finished and the one aggregate count bound had slack.
+Since FX-23 a sampled verification makes three checks more:
+
+- **The count bound is held per mapped partition** as well as summed, and a
+  segment the window cuts across proves one record when its first or last
+  record's timestamp is inside the window. A correct restore of an archive
+  whose record timestamps do not run backwards within a segment cannot fail
+  it. When they do run backwards, a record older than every segment's first
+  record is dropped by every restore of that archive
+  ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)),
+  and the per-partition bound now fails that restore; so does a duplicate from
+  the engine's non-idempotent producer. Failing is the safer verdict.
+- **Phase 7 reads the engine's offset report** — streaming, keeping only its
+  partition entries — and fails a restore whose report has no entry for a
+  mapped partition the manifest proves holds records in the window. The report
+  is only ever a NEGATIVE signal: an entry vouches for nothing, and a missing or
+  unreadable report checks nothing (logged). The engine adapter removes a
+  report already at the path before the engine runs, so an earlier run's file
+  is never read or uploaded as this run's.
+- **`sample.max_partitions` keeps one partition of every topic with records in
+  the window first** — round-robin across topics in manifest order — and only
+  then a second of any; the kept partitions are listed in manifest order. When
+  the cap is below the number of such topics, the topics it could not reach are
+  named here. Their partitions were not reconciled record by record; every one
+  of them was still held to its own count bound and to the engine's offset
+  report ([what a sampled `pass` guarantees](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
 
 Three arms, enforced by both readers in the same position (after
 `integrity.verification`, before `redactions`) and words, fire only on a
@@ -771,117 +714,16 @@ document carrying the field:
 Both readers print one `sample coverage:` line naming the topics; nothing is
 printed when the field is absent.
 
-**The version marks the build (review M2).** Only a build with FX-23's
-checks — the per-partition count bound, every-topic sampling and the
-engine-report check — writes 1.6.0, and it writes 1.6.0 for EVERY sampled-lane
-scorecard it signs, whether or not it names an unsampled topic (the
-orchestrator's decision, 2026-10-08). A sampled 1.4.0 or 1.5.0 document is
-byte-for-byte the shape an earlier build signed, and the scorecard names no
-`logweir` build. So a 1.6.0-or-later sampled `pass` proves those checks ran;
-an earlier one proves what it always proved. Both readers print a
+**The version marks the build (review M2).** Only a build with FX-23's checks
+writes 1.6.0, and it writes 1.6.0 for EVERY sampled-lane scorecard it signs,
+whether or not it names an unsampled topic (the orchestrator's decision,
+2026-10-08; `scorecard::format_version_with_sample`). A sampled 1.4.0 or 1.5.0
+document is byte-for-byte the shape an earlier build signed, and the scorecard
+names no `logweir` build. So a 1.6.0-or-later sampled `pass` proves those
+checks ran; an earlier one proves what it always proved. Both readers print a
 second `sample coverage:` line for every sampled `pass` saying which
-([the guide](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)). A reader that predates 1.6.0 ignores the
-field and applies every other check: it is a MINOR bump under
-[OD-7](../to-do/product-expansion.md#owner-decisions) (a), arms that read only
-a new optional field.
-
-**The number.** 1.6.0; 1.5.0 is PROD-01.3's. Written for every sampled-lane
-document (`scorecard::format_version_with_sample`); a complete verification's
-scorecard is the 1.4.0 or 1.5.0 document it was. A renumber moves
-`scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS` and
-`UNSAMPLED_TOPICS_SINCE_MINOR` together, the justfile's
-`scorecard_schema_version` and this schema file's name,
-`docs/verify_scorecard.py`'s `SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR`, the
-parity script's `SCORECARD_UNSAMPLED_VERSION`, and the corpus cases
-`unsampled_topics_*.json` (their `format_version` and US-1's reason).
-
-### EVERY required block, and the `u64` domain (`1.6.0`)
-
-`sample` was one of eleven, and until `verify_scorecard.py` `1.6.0` the script
-checked seven of them. Measured at `6619090` on documents derived from
-`e2e/fixtures/invariants/unmodified_example.json`, a scorecard with `target`,
-`target_diff` or `topic_parity` deleted was refused by `logweir drill verify`
-(exit **1**, ``missing field `target` ``) and printed **`VALID`** here — the
-same divergence `sample` was in, three more times. `1.6.0` takes the block list
-from the struct instead of growing it one arm at a time, and
-`crates/logweir/tests/two_reader_parity.rs::every_required_block_has_a_shape_corpus_case`
-refuses to let the two drift apart.
-
-The list is also **in the struct's declaration order**, because that is the
-order `serde` reports a missing field in. On a document missing several blocks
-the two readers named different ones — `measured` from `drill verify` and
-`integrity` from the script; they now both name `measured`.
-
-`1.6.0` also bounds the **domain** of every integer field the Rust reader types
-as `u64`: the four `measured.rto_*_seconds`, `objectives.rto_seconds`,
-`sample.records_expected`, `sample.records_restored`,
-`integrity.records_sampled`, `integrity.records_sampled_matching`,
-`integrity.mismatches` and `phases[].duration_ms`. Python's `int` is unbounded,
-so `isinstance(v, int)` mirrored serde's *type* and not its domain, and
-`"records_expected": 18446744073709551616` — one past `u64::MAX` — printed
-`VALID` here while `drill verify` exited **1**. Both readers now refuse it, and
-both refuse a negative value; the Rust texts are serde's own and are recorded
-per-reader in `e2e/fixtures/invariants/shape-index.json`.
-
-### Every required field that is NOT a block, and `null` on a plain `u64` (`1.7.0`)
-
-Blocks were half the shape. `Scorecard` has **six** required fields whose type is
-not a block — `format_version`, `run_id`, `outcome`, `last_phase_completed`,
-`requested_at` and `phases` — and none carries `#[serde(default)]`, so
-`serde_json` refuses a document missing one at parse time exactly as it does for
-a block. Measured at `7e85937` on documents derived from
-`e2e/fixtures/invariants/unmodified_example.json`: with `run_id`, `requested_at`
-or `phases` absent, `logweir drill verify` exited **1** (``missing field
-`run_id` ``) and `docs/verify_scorecard.py` printed **`VALID`**; with `outcome`
-absent the script refused, but on an *invariant* about `engine.matrix_verdict`
-rather than on the missing field. Since `1.7.0` it refuses each with `INVALID:
-the document has no <name> field; it is not a drill scorecard`, and
-`crates/logweir/tests/two_reader_parity.rs::every_required_non_block_field_has_a_shape_corpus_case`
-keeps that list derived from the struct.
-
-`1.7.0` also stops treating every `u64` as nullable. Five of the eleven are
-`Option<u64>` in Rust — the four `measured.rto_*_seconds` and
-`objectives.rto_seconds` — and those accept `null` from both readers. The other
-six are plain `u64`, where `serde_json` says `invalid type: null, expected u64`;
-the script skipped them, so `sample.records_restored: null`,
-`integrity.records_sampled: null`, `integrity.records_sampled_matching: null`,
-`integrity.mismatches: null` and `phases[].duration_ms: null` each printed
-`VALID` here against exit **1** there. The optionality is now part of the list
-the walker re-derives from the struct, so it cannot drift.
-
-### The TYPE of every required non-block field (`1.8.0`)
-
-`1.7.0` checked those six fields for PRESENCE and said so plainly: "the six
-fields carry five different Rust types and share no JSON shape, so a type check
-here would be five guesses rather than one rule". They share no JSON shape, but
-each Rust type implies exactly one — `String` and `DateTime<Utc>` are strings on
-the wire, the `Outcome` enum is a kebab-case string, `i8` is a number, and
-`Vec<PhaseRecord>` is an array — so the implication is a rule, read off the
-struct, and `1.8.0` reads it.
-
-Measured at `b99239a` over the release binary, on documents derived from
-`e2e/fixtures/invariants/unmodified_example.json` and signed:
-
-| document | `drill verify` | `verify_scorecard.py` `1.7.0` | `1.8.0` |
-|---|---|---|---|
-| `run_id: 42` | **1** — ``invalid type: integer `42`, expected a string`` | **0 `VALID`** | 1 — `run_id is not a string` |
-| `phases: "x"` | **1** — `invalid type: string "x", expected a sequence` | **0 `VALID`** | 1 — `phases is not an array` |
-| `requested_at: 5` | **1** — ``invalid type: integer `5`, expected an RFC 3339 formatted date and time string`` | **0 `VALID`** | 1 — `requested_at is not a string` |
-| `outcome: 7` | **1** — `expected value` | 1, on the `engine.matrix_verdict` *invariant* | 1 — `outcome is not a string` |
-| `last_phase_completed: "7"` | **1** — `invalid type: string "7", expected i8` | 1 — `is not an integer` | unchanged |
-| `format_version: 1` | **1** — ``invalid type: integer `1`, expected a string`` | 1 — `not a parseable semver` | unchanged (GC12 runs first) |
-
-The mapping from Rust type to JSON type lives in
-`crates/logweir/tests/two_reader_parity.rs::json_type_of` and in
-`scripts/check-invariant-corpus.sh`, both outside `docs/`, and a required
-non-block field of an unmapped Rust type fails those gates loudly rather than
-arriving at the script untyped.
-
-**What neither reader claims.** The script's field loop still runs after its
-block loop, so a document missing a plain field *and* a block is named for the
-block here and for whichever comes first in the struct there. Recorded rather
-than closed: full order parity needs one merged loop over all seventeen required
-fields.
+([the guide](../verify-a-scorecard.md#what-a-sampled-pass-guarantees-and-what-it-does-not)).
+A complete verification's scorecard is the 1.4.0 or 1.5.0 document it was.
 
 ## `target_diff`, `integrity`, `topic_parity`
 
@@ -897,7 +739,7 @@ fields.
 | `integrity.partial_reason` | string \| null | **Required and non-BLANK when `result` is `partial`** — null, `""` and whitespace-only are all refused, by **both** readers, with the same message. See [`partial_reason` must SAY something](#partial_reason-must-say-something). The `drill show` footer renders it. |
 | `integrity.records_sampled` | integer | Measured against `sample.records_expected`. |
 | `integrity.records_sampled_matching` | integer | How many reconciled byte-for-byte. |
-| `integrity.mismatches` | integer | How many did not. A **compacted** target topic is reported through this path as a mismatch, not as `partial` — see [stability.md](../stability.md). |
+| `integrity.mismatches` | integer | How many did not. A **compacted** target topic is reported through this path as a mismatch, not as `partial` — see [stability.md](../stability.md#a-compacted-target-topic-is-reported-as-a-mismatch-not-as-partial). |
 | `integrity.pass_rate_measured` | float \| null | `matching / sampled`. **Null in three cases**, and a `byte-fingerprint` document with a null rate is well-formed: the level is not `byte-fingerprint`; not every selection reached a conclusion; or `records_sampled` is 0 (a zero denominator is withheld, never published as NaN). |
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `integrity.verification` | object, **optional** (1.4.0) | What the verdict COVERED: `sampled` or `complete` coverage, what it compared against, whether header order was verified, the verified partitions' capture gaps and pruned ranges, and a complete verification's archive integrity and replay comparison. See [below](#integrityverification-format-140). ABSENT means not recorded, read as sampled and never as complete. |
@@ -930,39 +772,58 @@ count and replication factor come from metadata, not DescribeConfigs, and are
 classified whatever the coverage — where the source's value is recorded (next).
 
 **A replication factor or partition count the source's record lacks (FX-21).**
-Phase 7 compares the source's replication factor from the archive's manifest
-(`source_replication_factor`), else from the bound receipt's
-`topic_configuration` (format 1.3.0), and its partition count from the
-manifest (`original_partition_count`). Where none records the value — engine
-0.23.3 records the factor for the first topic a backup saves only, and an
-archive before engine 0.17 records neither — the value is not compared: it is
-named in `not_assessed` as `"<target topic>: replication_factor
-(notRecorded)"` (or `partition_count`), with the fail-safe twin below. A
-writer before FX-21 compared the target's own value with itself there, so its
-silence about such a topic's factor is not parity
-([stability](../stability.md#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
-Logweir's engine build `0.23.3+logweir.2` records every topic's factor.
+Engine 0.23.3 records `source_replication_factor` in the manifest for the FIRST
+topic a backup saves only, and a writer before FX-21 compared the TARGET's own
+factor with itself in its place, so every other topic's difference was signed
+as no divergence. Phase 7 now compares the source's replication factor from the
+archive's manifest (`source_replication_factor`), else from the bound receipt's
+`topic_configuration[<topic>].replication_factor` (format 1.3.0), and its
+partition count from the manifest (`original_partition_count`). The manifest's
+comes first, so every document whose manifest records the factor is decided
+exactly as before. Where none records the value — and an archive before engine
+0.17 records no partition count — it is named in `not_assessed` as
+`"<target topic>: replication_factor (notRecorded)"` (or `partition_count`),
+with the fail-safe twin below. The twin's `<key>`, the text after the last
+`": "`, is `replication_factor not assessed (notRecorded)`, never one of the
+four settings the restore decides, so arm NR-5 does not read it as a deviation
+`not_reconstructed` must name. Logweir's engine build `0.23.3+logweir.2`
+(patch 0002) records every topic's factor.
+
+**Telling a writer before FX-21 from one after it.** No marker was added; old
+evidence is not re-read. A reader decides from fields every scorecard carries,
+then reads the archive:
+
+- `engine.version` and `engine.digest`. A runner image declares them from its
+  `/etc/logweir/engine-identity` (PROD-00.2), and its engine and its `logweir`
+  are built from one commit. `engine.version` `0.23.3+logweir.2` (build-input
+  digest
+  `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
+  `third_party/kafka-backup-builds.txt`) or a later `+logweir.<n>` names a
+  runner with FX-21's phase 7: its silence about a topic's replication factor
+  is parity. Any other value (`0.23.3+logweir.1`, OSO's `0.23.3`, an older
+  release) names a writer before FX-21. A standalone CLI install that pairs a
+  `logweir` and an engine of different builds is told apart by neither field:
+  read the manifest.
+- The archive's manifest, named by `source.backup_id` and pinned by
+  `source.manifest_sha256` (and `source.manifest_version_id` on a versioned
+  bucket). For a document from a writer before FX-21, a topic whose
+  `topics[].source_replication_factor` the manifest lacks (absent or `null`)
+  has no replication-factor finding, whatever `topic_parity` lists for it: its
+  silence there is the defect, not parity.
 
 **The fail-safe entry.** For every topic it names in `not_assessed`, phase 7
 also writes `"<target topic>: configuration not assessed (<why>)"` into
 `unexpected_divergence` (and, for an FX-21 entry, `"<target topic>:
 replication_factor not assessed (notRecorded)"` or its `partition_count`
-twin). `not_assessed` is new in 1.1.0, so a reader that
-predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
-before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
-had, and must not see a clean list for a topic nobody assessed. For
-`targetReadDenied` the writer before FX-4 compared the source's record with
-the refused read as an empty map. That listed the source's overrides, but with
-the pinned engine a topic with overrides never reaches phase 7 under such an
-identity (the table above), so for the topics that do, which recorded none,
-its list was empty: the entry ends that silence. A configuration key never
-contains a space, so a parser of `"<topic>: <key>"` entries tells this one
-apart; `not_assessed` stays the authoritative list.
-Measured on the live 1.1.0 scorecards of FX-4's fix round with readers built
-before FX-4 (main `804c5b2f`): `logweir drill show` prints the entry in its
-`topic parity` row, and `logweir drill verify` and `verify_scorecard.py` 1.14.0
-accept each document; the 1.0.0 scorecard the pre-FX-4 writer signed for the
-same `targetReadDenied` restore says nothing about the topic.
+twin). `not_assessed` is new in 1.1.0, so a reader that predates it —
+`verify_scorecard.py` before 1.15.0, a `logweir drill show` built before FX-4,
+a person with a 1.0.0 guide — reads only the two arrays it always had, and
+must not see a clean list for a topic nobody assessed. For `targetReadDenied`
+the writer before FX-4 compared the source's record with the refused read as an
+empty map, so its list was empty for the topics that reach phase 7: the entry
+ends that silence. A configuration key never contains a space, so a parser of
+`"<topic>: <key>"` entries tells this one apart; `not_assessed` stays the
+authoritative list.
 
 **What "assessed" covers.** An assessed topic's parity compares the configuration
 OVERRIDES the engine captured (explicit topic-level settings on its 24-key
@@ -970,23 +831,24 @@ allowlist) with the restored topic's values. A value the source inherited from a
 broker default is not in the archive's record and is never compared: a source
 whose `message.timestamp.type` is `LogAppendTime` from the broker's default,
 restored as `CreateTime`, shows no divergence under `not_assessed: []` (measured
-live by FX-4). The receipt's `config_coverage` records that effective value and
-its source for FX-8; the other effective values are PROD-05.1's. `not_assessed: []` is the claim that every mapped topic was
+live by FX-4). `not_assessed: []` is the claim that every mapped topic was
 assessed, and only phase 7 writes it; ABSENT — every 1.0.0 document, and one
 whose phase 7 never ran — means not recorded and is never read as that claim.
 `logweir drill verify`, `docs/verify_scorecard.py` and `logweir drill show` all
 say so in words (`configuration parity: NOT ASSESSED for …` / `not recorded`).
+
 Phase 3 qualifies its collisions the same way, in its own optional
 `target_diff.not_assessed`: one `"<target topic>: configuration (<why>)"` entry,
 with `<why>` one of the first three reasons above, for every collision whose
 SOURCE configuration was not captured. Such a collision's
 `differing config: […]` names only what the archive's own record shows, and an
 empty list there proves nothing. The collision strings themselves are byte for
-byte what a writer before FX-4 produced. `[]` is the claim that every
-collision's difference was assessed (vacuously, with no collision), and only
-phase 3 writes it; ABSENT means not recorded. Phase 0 refuses a mapped target
-topic that already exists, so a collision reaches a scorecard only when one
-appears between phase 0 and phase 3.
+byte what a writer before FX-4 produced: a qualifier inside the existing string
+would be a change to an existing field's content, which OD-7 did not rule.
+`[]` is the claim that every collision's difference was assessed (vacuously,
+with no collision), and only phase 3 writes it; ABSENT means not recorded.
+Phase 0 refuses a mapped target topic that already exists, so a collision
+reaches a scorecard only when one appears between phase 0 and phase 3.
 
 Neither reader adds an invariant for either field — they are informational —
 but both refuse a value serde cannot read as an array of strings
@@ -1034,7 +896,8 @@ before, and a scratch drill writes `not_reconstructed: []`.
 phase 7 never ran. It is never read as "everything was reconstructed"; `[]` is
 that claim, and only phase 7 writes it. A `newTopic` document without the
 field predates the distinction, and both readers say what its `intended`
-entries are (below).
+entries are (below): old evidence read as a weaker claim than its label, never
+a stronger one, and no verdict changes.
 
 **Five arms**, in both readers and in this order, fire only on a document
 that carries the field, so every document without it is decided exactly as
@@ -1054,6 +917,27 @@ document that breaks them, and in particular cannot sign `not_reconstructed:
 settings. Both readers also refuse a `not_reconstructed`, an
 `intentionally_deviated` or an `unexpected_divergence` that is not an array of
 strings (`shape-index.json`).
+
+**The classification (FX-3).**
+
+- **The field and its five arms are MINOR** under the owner's OD-7 (a). Each arm
+  fires only on a document carrying the field, and judges it against
+  `format_version` (NR-1) or against the two lists every reader already has
+  (NR-2 to NR-5), as FX-4's receipt arms 6 and 7 judge `config_coverage`.
+- **NR-4 and NR-5 are MINOR under OD-7 too** (added after FX-3's review, F1).
+  They fire only on a 1.2.0 or later `newTopic` document that carries the
+  field, and they can only refuse. No document an earlier writer produced
+  carries the field, so none changes verdict.
+- **The content of the two existing lists is MINOR: the owner ruled it on
+  2026-10-07, OD-7's third case** ([the rule](../stability.md#the-v010-tag-is-the-compatibility-boundary)).
+  In a `newTopic` document, entries of the existing shape
+  `"<target topic>: <key>"` leave `intentionally_deviated` and are written into
+  `unexpected_divergence` instead. That is new content in two existing fields,
+  and it can only move a reader's verdict to the safer side, from intended to
+  not intended. It makes no verdict stronger, and no verdict moves at all: no
+  reader built before FX-3 has a `topic_parity` arm (NR-1 to NR-5 judge only
+  documents that carry the new field), and `outcome` does not depend on it. A
+  scratch drill's lists are unchanged.
 
 **What both readers print.** `logweir drill verify` and
 `docs/verify_scorecard.py` print the same `reconstruction:` sentence, and
@@ -1114,6 +998,9 @@ and compares the two by `x-original-offset`, headers in order. The contract —
 the expected-output model and what filters, partition subsets, compaction and
 transformations do to it — is
 [`PROD-08.1-integrity-contract.md`](../to-do/decisions/PROD-08.1-integrity-contract.md).
+A complete verification can pass a restore the sampled check fails, and fail one
+it passes: the exact per-partition model replaces the manifest's first/last
+count bound ([the limitation](../stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1145,13 +1032,16 @@ transformations do to it — is
 | `complete.partitions[]` | object[] | One entry per partition of every restored topic, sorted (unchanged in 1.7.0: a restore from a stated start restores every partition, so its `replay` counts are each partition's over `[window.start_ms, window.end_ms]`; **in 2.0.0, one entry per SELECTED partition** of every restored topic, plus any other partition the target holds a record in, with nothing expected — [the subset format](#format-200-a-partition-subset-prod-111b-od-9-a)): `topic` (archive side), `partition`, `target_topic`, `compared` (false when this partition was not compared), `segments`, `segments_verified`, `records_decoded`, `offset_holes`, `replay` (the eight counts above, for this partition), and `findings`: the first 20 findings in words (which offsets are missing, duplicated, out of order or different, and why a partition was not compared), and one more saying how many were left out. The counts are complete; the words illustrate. |
 
 **Absent means not recorded.** Every document before 1.4.0 — and one whose
-phase 7 never ran — is read as a SAMPLED verdict, never a complete one. Every
-1.4.0 run that reaches phase 7 writes the block. The legacy counters carry the
-complete comparison under complete coverage: `integrity.records_sampled` is the
+phase 7 never ran — is read as a SAMPLED verdict, never a complete one, and both
+readers print an `integrity coverage: not recorded` line for it. Every 1.4.0 run
+that reaches phase 7 writes the block. The legacy counters carry the complete
+comparison under complete coverage: `integrity.records_sampled` is the
 expected records of the compared partitions, `records_sampled_matching` their
 matching records, and `sample.records_expected` the expected records of the
 compared partitions too — the whole expected output only when
-`complete.covered` is `true`.
+`complete.covered` is `true`; `sample.partitions` and `sample.topics` are every
+partition and topic it verified. Each keeps its meaning, so a reader that
+predates the block reads a large sample, never a complete one.
 
 Seven arms, enforced by both readers in the same position (after
 `source.time_basis`, before `redactions`) and words, fire only on a document
@@ -1173,44 +1063,51 @@ gaps and pruned ranges the verified partitions record — or the one line saying
 the coverage was not recorded; `logweir drill show` renders the same in its
 qualifiers footer (`integrity.verification`).
 
-**The number.** 1.4.0; 1.3.0 is FX-8's. A renumber moves
-`logweir_core::FORMAT_VERSION` and `scorecard::VERIFICATION_SINCE_MINOR`
-together, the justfile's `scorecard_schema_version` and this schema file's
-name, `docs/verify_scorecard.py`'s `FORMAT_VERSION` and
-`SCORECARD_VERIFICATION_SINCE_MINOR`, the parity script's
-`SCORECARD_VERIFICATION_VERSION`, and the literal pins in
-`crates/logweir-core/src/lib.rs`, `docs/test_verify_scorecard.py` and the
-corpus cases `verification_*.json` (their `format_version` and IV-1's reason).
-
 ### `partial_reason` must SAY something
 
 A `partial` integrity result is a statement that the check did not finish, and
-`partial_reason` is the only place the document says why. Until Task 4 the two
-readers disagreed about what counted as saying why:
-
-- **Rust** tested `partial_reason.is_none()`, so `""` — and `"   "` — was
-  accepted **and signed**.
-- **`docs/verify_scorecard.py`** tested Python truthiness, so `""` was refused
-  and `"   "`, being a truthy string, was accepted.
-
-So `partial_reason: ""` was a document Logweir would sign and the auditor's own
-verifier would refuse, in the exact file whose docstring says that if the two
-readers disagree "the signed-scorecard format is broken". Both now apply the
-same predicate — Rust
+`partial_reason` is the only place the document says why. Both readers apply
+the same predicate — Rust
 `partial_reason.as_deref().unwrap_or("").trim().is_empty()`, Python
 `not str(integrity.get("partial_reason") or "").strip()` — in the same position
 with the byte-identical message
 `integrity.result is 'partial' but partial_reason is null`. `drill verify`
-exits **4** (GC11); the Python verifier exits **1**.
+exits **4** (GC11); the Python verifier exits **1**. Until Task 4 Rust accepted
+and signed `""` and `"   "`, and Python accepted `"   "`.
 
-Like the `evidence` arm below, this is a **retroactive tightening of the 1.0.0
-reader, not a format change**: no byte of the format changes, the accepted set
-narrows, and no document Logweir has ever written is refused —
-`crates/logweir/src/drill/phase7_verify.rs` builds the field as
+This is a **retroactive tightening of the 1.0.0 reader, not a format change**:
+no byte of the format changes, the accepted set narrows, and no document
+Logweir has ever written is refused — `phase7_verify.rs` builds the field as
 `(!notes.is_empty()).then(|| notes.join("; "))`, so it is either absent or says
-something. `crates/logweir/tests/two_reader_parity.rs` runs both readers over
-`e2e/fixtures/invariants/` and compares their refusal text, so the agreement is
-checked rather than asserted.
+something.
+
+## Every required field and its type: both readers refuse the same shapes
+
+`Scorecard` has eleven required blocks (`sample` among them) and six required
+fields that are not blocks — `format_version`, `run_id`, `outcome`,
+`last_phase_completed`, `requested_at` and `phases` — and none carries
+`#[serde(default)]`, so `logweir drill verify` refuses a document missing one
+at parse time (exit **1**, ``missing field `<name>` ``). `docs/verify_scorecard.py`
+refuses the same documents, each change a narrowing of the 1.0.0 reader:
+
+| Since script | It refuses |
+|---|---|
+| `1.5.0` | a missing `sample` block, and a `records_expected` that is not an integer |
+| `1.6.0` | a missing required block, taking the block list from the struct in its declaration order (the order `serde` reports a missing field in); and an integer outside the `u64` domain, or negative, for every field the Rust reader types as `u64`: the four `measured.rto_*_seconds`, `objectives.rto_seconds`, `sample.records_expected`, `sample.records_restored`, `integrity.records_sampled`, `integrity.records_sampled_matching`, `integrity.mismatches` and `phases[].duration_ms` |
+| `1.7.0` | a missing required non-block field (`INVALID: the document has no <name> field; it is not a drill scorecard`), and `null` on the six plain `u64` fields; the five `Option<u64>` fields (`measured.rto_*_seconds`, `objectives.rto_seconds`) accept `null` from both readers |
+| `1.8.0` | a required non-block field of the wrong JSON type, read off the Rust type: `String` and `DateTime<Utc>` are strings, the `Outcome` enum a kebab-case string, `i8` a number, `Vec<PhaseRecord>` an array (`run_id is not a string`, `phases is not an array`, `requested_at is not a string`, `outcome is not a string`) |
+
+The Rust texts are serde's own and are recorded per reader in
+`e2e/fixtures/invariants/shape-index.json`.
+`crates/logweir/tests/two_reader_parity.rs` (`every_required_block_has_a_shape_corpus_case`,
+`every_required_non_block_field_has_a_shape_corpus_case`, and
+`json_type_of`, mirrored in `scripts/check-invariant-corpus.sh`) keeps the lists
+derived from the struct, and a required field of an unmapped Rust type fails
+those gates loudly. **What neither reader claims:** the script's field loop
+still runs after its block loop, so a document missing a plain field *and* a
+block is named for the block here and for whichever comes first in the struct
+there. Full order parity needs one merged loop over all seventeen required
+fields.
 
 ## `engine_subreport`
 
@@ -1248,43 +1145,25 @@ object is mutable" or "the put was not conditional". The document deliberately
 under-claims — which is what guarantees a valid Logweir signature can never
 cover an unsubstantiated WORM or create-only assertion.
 
-### The zeroing is ENFORCED, and that is a reader tightening, not a format change
-
-For one release the paragraph above was a sentence and nothing else: the writer
-zeroed the four fields, `docs/verify_scorecard.py` printed the guarantee on
-every successful verification, and no validator checked it — while the two
-signed fixtures this repository ships as its worked example carried
-`create_only_enforced: true` and verified `VALID`.
-
-Both readers now refuse it. `Scorecard::validate_invariants`
-(`crates/logweir-core/src/scorecard.rs`) and
+**The zeroing is ENFORCED.** `Scorecard::validate_invariants` and
 `docs/verify_scorecard.py::check_invariants` each carry the same arm,
 immediately after the Global-Constraint-12 major-version refusal and before
 every other rule, testing `version_id`, `retain_until`, `immutable` and
 `create_only_enforced` in that order with byte-identical messages. A `1.0.x`
 scorecard with any of the four set is refused by both — `drill verify` exits
-**4** (GC11), the Python verifier exits **1**.
-
-**This is a deliberate RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format
-change** — `format_version` stays `1.0.0` and **Global Constraint 12 holds**:
-
-- No byte of the format changes. No field is added, renamed or removed, and
-  `schemas/logweir-drill-scorecard-1.0.0.json` is untouched.
-- The accepted set **narrows**. Narrowing what a reader accepts is not a major
-  bump under GC12, which reserves a major for a changed *identity rule*.
-- The writer's zeroing at `crates/logweir/src/drill/phase8_score.rs` is
-  **unconditional**, so **no document Logweir has ever written is refused**.
-  The only documents this arm refused when it landed were the two committed
-  fixtures, which were re-minted in the same change.
-- A document written by a **non-Logweir path** that carries a post-put claim
-  **is** now refused, and that is precisely the intent: the guarantee is that a
-  valid signature over a 1.0.x scorecard cannot cover a storage claim the
-  signer was not in a position to make.
-
-The arm is scoped to major 1, so a future major remains free to redefine the
-block. `docs/verify_scorecard.py` reports which invariant set ran on its
-success path (`verifier: verify_scorecard.py <SCRIPT_VERSION>`); `SCRIPT_VERSION`
-tracks the invariant set and is **not** the format version.
+**4** (GC11), the Python verifier exits **1**. This is a deliberate
+**retroactive tightening of the 1.0.0 reader, not a format change**, and
+Global Constraint 12 holds: no byte of the format changes and
+`schemas/logweir-drill-scorecard-1.0.0.json` is untouched; the accepted set
+narrows, and GC12 reserves a major for a changed *identity rule*; the writer's
+zeroing in `phase8_score.rs` is unconditional, so no document Logweir has ever
+written is refused (the two committed fixtures that carried
+`create_only_enforced: true` were re-minted in the same change); and a document
+from a **non-Logweir path** that carries a post-put claim **is** refused, which
+is the intent. The arm is scoped to major 1, so a future major remains free to
+redefine the block. `docs/verify_scorecard.py` reports which invariant set ran
+(`verifier: verify_scorecard.py <SCRIPT_VERSION>`); `SCRIPT_VERSION` tracks the
+invariant set and is **not** the format version.
 
 The real readback is published in a **second signed document**, the put receipt
 (`<run_id>.receipt.json` + `.sig`, payload type
@@ -1301,23 +1180,10 @@ python3 docs/verify_scorecard.py --payload-type receipt \
 Always `[]` in v0.1. `--redact` is a v0.1.1 feature and the only redactable
 paths will be `/target/cluster_id` and `/approval/approver`.
 
-### That sentence is ENFORCED, and that is a reader tightening, not a format change
-
-For one release the sentence above was prose and nothing else. The field
-existed, no reader checked it and no surface displayed it, so a third party
-could hand an auditor a scorecard carrying
-
-```json
-"redactions": [{"path": "/measured/rpo_seconds", "reason": "customer policy", "present": false}]
-```
-
-and **both** readers printed `VALID` while the document itself said a field the
-auditor reads first had been removed.
-
-Both readers now refuse a non-empty `redactions`.
-`Scorecard::validate_invariants` (`crates/logweir-core/src/scorecard.rs`) and
-`docs/verify_scorecard.py::check_invariants` each carry the same arm, **last**,
-after every other rule, with the byte-identical message
+**That sentence is ENFORCED.** Both readers refuse a non-empty `redactions`.
+`Scorecard::validate_invariants` and `docs/verify_scorecard.py::check_invariants`
+each carry the same arm, **last**, after every other rule, with the
+byte-identical message
 
 ```
 redactions is non-empty but format_version <the document's own version> has no way to produce one; --redact is a v0.1.1 feature
@@ -1326,44 +1192,26 @@ redactions is non-empty but format_version <the document's own version> has no w
 `drill verify` exits **4** (GC11); the Python verifier exits **1**. The
 position is part of the contract and is mutant-tested: a document that violates
 this arm *and* an earlier one reports the **earlier** arm's message, from both
-readers.
+readers. It is a **retroactive tightening of the 1.0.0 reader, not a format
+change**, by the same argument as the `evidence` arm: no byte of the format
+changes, the accepted set narrows, and no document Logweir has ever written is
+refused, because no v0.1 code path constructs a `Redaction`. A document from a
+non-Logweir path that carries one is refused: it was edited after signing-time
+construction or came from a reader-incompatible producer.
 
-### And every surface that shows you a scorecard now says so
-
-Refusing it in the two verifiers is half the fix. The field was also *displayed
-by nothing*, on **three** surfaces, so a redacted document looked whole
-everywhere a human or a dashboard actually reads one. All three now carry it:
+Every surface that shows a scorecard also says so:
 
 | Surface | What it shows for a non-empty `redactions` |
 |---|---|
 | `drill show --format table` | A line in the **qualifiers** footer: the count and every removed path, plus a note that `drill verify` and `docs/verify_scorecard.py` both refuse the document. `show` does not verify and its exit code is unchanged — a redaction is a qualifier, not a "this reader cannot honestly render this" condition. |
 | Prometheus textfile (`--metrics-textfile`) | `logweir_drill_redactions{cluster="…"}`, emitted **unconditionally** — `0` for a whole document — so `logweir_drill_redactions > 0` is a valid alert. A count, never a path label: paths are document-controlled and would be unbounded cardinality. |
 
-`--format json` needed no change: it prints the signed bytes, so the array was
-always visible there. The put receipt needed none either — it binds the
-scorecard by digest and reports storage facts, and echoes no scorecard field.
-
-**The `reason` strings are deliberately not displayed** by the footer. A non-empty `redactions` is by construction a document no
-Logweir writer produced, so its `reason` is free text that arrived with the
-document, and that surface is read by a human deciding how much to
-trust what they are looking at. The **path** is the whole actionable signal.
-
-**This is a deliberate RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format
-change** — `format_version` stays `1.0.0` and **Global Constraint 12 holds**,
-by the identical argument recorded for the `evidence` arm above:
-
-- No byte of the format changes. No field is added, renamed or removed, and
-  `schemas/logweir-drill-scorecard-1.0.0.json` is untouched.
-- The accepted set **narrows**. Narrowing what a reader accepts is not a major
-  bump under GC12, which reserves a major for a changed *identity rule*.
-- **No document Logweir has ever written is refused**, because no v0.1 code
-  path constructs a `Redaction` — `redactions` is only ever `vec![]`. Every
-  committed fixture carries `[]` and none of them was re-minted for this
-  change.
-- A document from a **non-Logweir path** that carries a redaction **is** now
-  refused, and that is the intent: v0.1 has no writer that can produce one, so
-  a non-empty array means the document was edited after signing-time
-  construction or came from a reader-incompatible producer.
+`--format json` prints the signed bytes, so the array is always visible there.
+The put receipt binds the scorecard by digest and echoes no scorecard field.
+**The `reason` strings are deliberately not displayed** by the footer: a
+non-empty `redactions` is by construction a document no Logweir writer
+produced, so its `reason` is free text that arrived with the document, and the
+**path** is the whole actionable signal.
 
 A `2.x` document never reaches this arm — `refuse_unreadable_major` refuses it
 first. In **0.1.1**, `--redact` **replaces** this arm with a path whitelist

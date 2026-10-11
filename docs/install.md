@@ -193,7 +193,7 @@ docker inspect --format '{{json .RepoDigests}}' docker.io/vladyslavhaina/logweir
 
 Retagging cannot make newly built bytes match an older compiled digest. Prefer
 a controller built from the checkout and the override above. See
-[kubernetes.md](kubernetes.md) §14 for the recorded image-resolution findings.
+[kubernetes.md](kubernetes.md#images) for what `ErrImageNeverPull` means.
 
 A local build is **author-only** and **never satisfies spec §16 clause 1**,
 including a local `registry:2` fallback: it does not prove public pullability.
@@ -1477,7 +1477,7 @@ a standing rehearsal authorization minted by an earlier build creates one (v1
 mints none, [kubernetes.md](kubernetes.md) §7g); an installation that never
 minted one can apply these CRDs and roll the controller back safely, and one
 that did must remove those `Approval`s first — see
-[kubernetes.md, "The one widening that is NOT rollback-safe"](kubernetes.md#the-one-widening-that-is-not-rollback-safe-approvalspecsubjectrefkind). The one field that stopped
+[kubernetes.md, *Rolling back*](kubernetes.md#rolling-back). The one field that stopped
 being required — `Restore.spec.approvalRef` — is still required in effect: CEL
 demands exactly one of it and `spec.authorization`, so an unauthorised `Restore`
 remains unrepresentable. An older controller reading a
@@ -1489,7 +1489,7 @@ controller**, never the other way round.
 
 Schema-specific field verification,
 controller rollout checks, and the safe additive rollback boundary are in
-[kubernetes.md, “Upgrade, rollback and legacy Jobs”](kubernetes.md#upgrade-rollback-and-legacy-jobs).
+[kubernetes.md, *Upgrade*](kubernetes.md#upgrade).
 
 ### Bind every existing credential Secret after the upgrade (FX-20)
 
@@ -1553,7 +1553,7 @@ object, by name, with a dry run**:
 5. **Resume the schedules.**
 
 The mechanism, every refusal surface and the residuals are in
-[kubernetes.md §20.10](kubernetes.md#2010-every-other-credential-reference-is-bound-too-fx-20).
+[kubernetes.md, *Credential binding*](kubernetes.md#credential-binding).
 Rollback is safe: an older controller and runner ignore the binding key and the
 new status fields.
 

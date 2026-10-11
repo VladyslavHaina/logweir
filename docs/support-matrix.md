@@ -347,7 +347,7 @@ Every credentialed mode also passes through the credential **binding**: a
 runner refuses a projected password or client key whose Secret does not carry
 the `logweir-binding` of the connection it was projected for
 (`CredentialBindingMismatch`, before any client exists) —
-[kubernetes.md](kubernetes.md), "Client authentication modes".
+[kubernetes.md](kubernetes.md#credential-binding).
 
 ## Managed providers: what is not verified
 

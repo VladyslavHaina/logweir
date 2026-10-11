@@ -598,7 +598,7 @@ function archive(view) {
 // other six have no phase to be: they are distinctions `logweir-api`'s status
 // normalization draws that the resource does not record, and this table shows
 // the API's own word rather than rounding it to a phase the controller never
-// wrote. `ui/README.md` lists all ten.
+// wrote. `schemas/logweir-api-v1.openapi.json` lists all ten.
 const PHASE_OF = Object.freeze({
   pending: "Pending",
   running: "Running",
@@ -2489,7 +2489,7 @@ function requestBody(plural, object) {
     }
     for (const field of [
       "timeZone", "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
-      "retry", "activeDeadlineSeconds", "retention",
+      "retry", "activeDeadlineSeconds",
     ]) {
       if (spec[field] !== undefined && spec[field] !== null) {
         body[field] = spec[field];

@@ -947,6 +947,12 @@ fn section_markers(line: &str) -> Vec<(usize, usize, u32)> {
 ///
 /// A `§15` that means Task 24's own `## 15. The evidence credential…` is not a
 /// UI pointer and is untouched by all of this.
+///
+/// PROD-17.1 B10 rewrote the guide by task, with unnumbered headings, and kept
+/// the old numbers in one table, *Section numbers before v1*, because code,
+/// messages and other documents still cite them. The UI section's number is
+/// now the one that table's `Serving the UI` row gives, and every pointer is
+/// still checked against it.
 #[test]
 fn ui_section_pointers_name_the_heading_that_exists() {
     let kubernetes = read("docs/kubernetes.md");
@@ -954,17 +960,19 @@ fn ui_section_pointers_name_the_heading_that_exists() {
     let headings: Vec<u32> = kubernetes
         .lines()
         .filter_map(|line| {
-            let rest = line.strip_prefix("## ")?;
-            let (number, title) = rest.split_once(". ")?;
+            let rest = line.strip_prefix("| \u{a7}")?;
+            let (number, rest) = rest.split_once(" | ")?;
+            let (title, _) = rest.split_once(" | ")?;
             (title.trim() == "Serving the UI").then(|| number.trim().parse::<u32>().ok())?
         })
         .collect();
     assert_eq!(
         headings.len(),
         1,
-        "docs/kubernetes.md must carry exactly one `## <N>. Serving the UI` heading; \
-         found {}. Every pointer in the tree is checked against that number, so two \
-         headings (or none) leaves the pointers checked against nothing",
+        "docs/kubernetes.md must carry exactly one `| \u{a7}<N> | Serving the UI |` row in \
+         its *Section numbers before v1* table; found {}. Every pointer in the tree is \
+         checked against that number, so two rows (or none) leaves the pointers checked \
+         against nothing",
         headings.len()
     );
     let heading = headings[0];
@@ -1010,7 +1018,7 @@ fn ui_section_pointers_name_the_heading_that_exists() {
                 number,
                 heading,
                 "{relative}:{line_number} points at section {number} for the UI section, \
-                 but `docs/kubernetes.md`'s heading is `## {heading}. Serving the UI`. \
+                 but `docs/kubernetes.md` maps that section as \u{a7}{heading}. \
                  The line reads:\n  {}\nA renumbering upstream of that heading does not \
                  conflict in git and does not break a link — it silently aims the \
                  reader at a different section",
@@ -1320,7 +1328,7 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     assert!(
         install.contains("apply --server-side --force-conflicts -f charts/logweir/crds/")
             && install.contains("--for=condition=Established")
-            && install.contains("#upgrade-rollback-and-legacy-jobs"),
+            && install.contains("(kubernetes.md#upgrade)"),
         "install docs must order CRD apply/wait before Helm upgrade and cross-link details"
     );
 
@@ -2465,7 +2473,7 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
         callers, named,
         "the files that read an object BY VERSION are not the ones this test maps to a role. A \
          new reader needs {ACTION} on its role's grant: add it to READERS with the role, and \
-         name the action in that role's rows of docs/kubernetes.md §7a and docs/install.md. A \
+         name the action in that role's rows of docs/kubernetes.md and docs/install.md. A \
          reader that stopped making the read leaves a grant the docs may stop asking for."
     );
 
@@ -2498,8 +2506,14 @@ fn the_documented_grants_name_the_version_read_of_every_role_that_makes_one() {
     // What the tables rest on is said beside them: measured where it was
     // measured, and labelled where it was not.
     assert!(
-        kubernetes.contains("**The read of a pinned version (FX-7, FX-14): `s3:GetObjectVersion`"),
-        "docs/kubernetes.md §7a must keep the paragraph that says which store was measured"
+        kubernetes.contains("**The read of a pinned version.**")
+            && kubernetes
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("MinIO serves it under `s3:GetObject` (measured 2026-10-09)"),
+        "docs/kubernetes.md's grants section must keep the paragraph that says which store was \
+         measured"
     );
 
     // The bound receipt's read: the `archiveRead` readers still read the

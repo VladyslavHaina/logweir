@@ -436,7 +436,8 @@ pub fn desired_execution_inputs_for(
 /// install points its runners at a non-AWS store, and removing them would
 /// break every upgrade at the moment of the upgrade. What closes the defect
 /// there is moving OFF the legacy path to an explicitly created
-/// `BackupDestination`, and until an operator does, `docs/kubernetes.md` §20 names the
+/// `BackupDestination`, and until an operator does, `docs/kubernetes.md` (*What a
+/// destination-backed run carries*) names the
 /// forwarding as the reason a controller-level `AWS_ALLOW_HTTP=true` is a
 /// cluster-wide setting.
 ///
@@ -677,7 +678,7 @@ pub fn plan_backup_spec(
 /// every id they could add makes the backup REFUSE, never widen. Task 22 moved
 /// the drill path's allowlist into the `logweir-approval-bundle` Secret
 /// because there it authorises a restore TARGET, which is the opposite
-/// direction. `docs/kubernetes.md` §10 carries this reason in prose.
+/// direction.
 ///
 /// [`FrozenInputs::allowed_clusters`] renders the same document from frozen
 /// inputs; for inputs resolved from `cluster` the two are equal.

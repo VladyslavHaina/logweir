@@ -15,8 +15,8 @@
 #
 # Until a verified `Approval` exists, this object sits at
 # `phase: Pending`, `reason: ApprovalNotVerified` — which is the design and not
-# a stall. The five checks and their refusal vocabulary are in
-# `docs/kubernetes.md` §8.
+# a stall. The checks and their refusal vocabulary are in
+# `docs/reference.md` (`Approval`).
 #
 # `mode: scratch` CREATES TOPICS UNDER `topicNaming.prefix` AND DELETES THEM
 # AGAIN in phase 9. Those scratch topics are the only thing tag 1 deletes

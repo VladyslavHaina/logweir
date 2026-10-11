@@ -213,7 +213,7 @@ export const MUTATION_PHASES = Object.freeze({
 // stepper wants a reachable target and the submit does not -- so wiring the
 // walk into the render path would CHANGE BEHAVIOUR, which PLAT-18.1 must not.
 // PLAT-18.2 owns the stepper and is where the two are reconciled and this is
-// enforced. `ui/README.md` says the same, so no reader assumes otherwise.
+// enforced.
 export const WIZARD_STEPS = Object.freeze([
   "archive", "recoveryPoint", "pointInTime", "target", "preflight", "plan",
 ]);

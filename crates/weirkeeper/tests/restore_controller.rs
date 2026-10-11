@@ -7462,7 +7462,7 @@ fn patch_bodies(bodies: &[SeenBody], suffix: &str) -> Vec<Value> {
 /// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**, and the
 /// row the D3 W2 record implies.
 ///
-/// `charts/logweir/README.md:53` says every status write in this crate is a
+/// `charts/logweir/README.md:59-60` says every status write in this crate is a
 /// `resourceVersion`-preconditioned merge PATCH. Defect STATUS-PATCH-NO-RV is
 /// that this reconciler's nine writes were not: the merge patch went out with
 /// no `metadata` at all, so a pass computing from a stale watch-cache copy

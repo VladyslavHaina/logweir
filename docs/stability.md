@@ -1,5 +1,10 @@
 # Stability
 
+What this project promises to keep stable, what it does not, and the limits it
+states rather than leaves to be discovered. Each signed format's fields and
+versions are in [formats/](formats/); exit codes and the runner's output lines
+are in [reference.md](reference.md).
+
 A fresh clone must run `just engine` before `cargo test --workspace`; CI does
 this in the `build` job.
 
@@ -7,12 +12,12 @@ this in the `build` job.
 
 Read this before adding a field to the scorecard.
 
-`format_version` is `1.0.0` and has been throughout the build. Up to and
-including the v0.1.0 tag, adding a field to
-`schemas/logweir-drill-scorecard-1.0.0.json` was an internal edit: no document
-had been published, no reader existed, and the schema could be regenerated
-freely. **The tag ends that.** From v0.1.0 onward, every scorecard in an
-adopter's evidence bucket is a document some reader may already parse, so:
+`format_version` was `1.0.0` throughout the build. Up to and including the
+v0.1.0 tag, adding a field to `schemas/logweir-drill-scorecard-1.0.0.json` was
+an internal edit: no document had been published, no reader existed, and the
+schema could be regenerated freely. **The tag ends that.** From v0.1.0 onward,
+every scorecard in an adopter's evidence bucket is a document some reader may
+already parse, so:
 
 - **Adding an optional field is a MINOR bump** — `1.1.0` — with a new schema
   file beside the old one. It is not a free edit and it is not "still 1.0.0".
@@ -32,7 +37,7 @@ adopter's evidence bucket is a document some reader may already parse, so:
 
   The first MAJOR the owner has decided is [OD-9](to-do/product-expansion.md#owner-decisions)
   (a), 2026-10-09: a partition-subset restore's scorecard is format **2.0.0**
-  ([below](#scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major)).
+  ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
   On 2026-10-07 the owner added a third, general case (FX-7's review V3 and
   FX-3):
@@ -45,19 +50,19 @@ adopter's evidence bucket is a document some reader may already parse, so:
     `archive.manifest_version_id`. So is FX-3's move of the new-topic
     deviations from `intentionally_deviated` to `unexpected_divergence`. So is
     FX-8's refusal `PointInTimeByProducerTime`, a new cause for exit 3
-    ([below](#scorecard-format-130-sourcetime_basis-fx-8)). So is PROD-08.1's
-    sampled-lane order check, a new cause for `fail-integrity`, and its
-    phase-0 refusals of a plan that asks for two verifications at once, new
+    ([the format](formats/drill-scorecard.md#sourcetime_basis-format-130)). So is
+    PROD-08.1's sampled-lane order check, a new cause for `fail-integrity`, and
+    its phase-0 refusals of a plan that asks for two verifications at once, new
     causes for exit 3
-    ([below](#scorecard-format-140-integrityverification-prod-081)). So is
-    FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
+    ([the format](formats/drill-scorecard.md#integrityverification-format-140)).
+    So is FX-16's refusal `PointBindingSetMismatch`, a new cause for exit 3: a
     point-bound plan that restored another set under the point's receipt is
     now refused before any target is created
-    ([below](#a-point-bound-plan-restores-its-points-own-set-fx-16)). So are
+    ([below](#a-bound-points-receipt-is-verified-and-restores-its-own-set-d3-55-fx-16)). So are
     FX-21's `topic_parity` entries for a replication factor or partition
     count the archive does not record: not assessed where a writer before
     FX-21 signed a match
-    ([below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
+    ([the format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
 
   Nothing else is ruled: any other change to an existing field's content is
   still a MAJOR bump.
@@ -69,2812 +74,220 @@ adopter's evidence bucket is a document some reader may already parse, so:
 The reason this is written down rather than left to judgement: the first change
 after a release is the one most likely to be treated as if the release had not
 happened. It has. **Do not let the first post-release addition inherit a
-pre-release ruling by accident.**
+pre-release ruling by accident.** The receipt, the catalog point and the
+approval documents take the same rule.
 
-### The first post-tag addition: format 1.1.0 (FX-4)
+## The signed formats
 
-FX-4 is that first addition, and it takes the rule above, not a pre-release
-ruling. Three documents move to `1.1.0`, each with a new schema file beside its
-frozen `1.0.0` one:
+Each format page has a **Versions** table: what each version adds, which
+documents carry it, what an older reader does with it and what a rollback
+writes.
 
-| Document | New optional field | Schema |
+| Document | Versions | Defined in |
 |---|---|---|
-| Drill scorecard | `topic_parity.not_assessed`, `target_diff.not_assessed` | `schemas/logweir-drill-scorecard-1.1.0.json` |
-| Backup receipt | `config_coverage` | `schemas/logweir-backup-receipt-1.1.0.json` |
-| Catalog point record | `topics[].config_coverage` | `schemas/logweir-catalog-point-1.1.0.json` |
-
-- **Absent means unknown.** A missing `config_coverage` is UNKNOWN coverage and
-  never `captured`; a missing `not_assessed` (either one) is "not recorded" and
-  never "every topic assessed". A 1.0.0 document is decided exactly as before.
-- **The media types keep `version=1.0.0`.** That names the envelope's major,
-  which did not change; the catalog index entry also stays `1.0.0`.
-- **Six receipt arms are added, and they are MINOR** under the owner's decision
-  OD-7 of 2026-10-05 (the rule above): arms 6–11 read only the new block, so no
-  document without it changes verdict, and the corpus and parity gates re-prove
-  that on every `just lint`.
-- **Readers built before FX-4 accept every 1.1.0 document** and ignore the new
-  fields (measured: `docs/formats/backup-receipt.md`, "Upgrade, rollback and old
-  receipts"). They check none of the six arms and print no coverage.
-- **A topic whose configuration parity was not assessed is never silent to
-  them.** Phase 7 also writes one entry, `"<target topic>: configuration not
-  assessed (<why>)"`, into the scorecard's existing `unexpected_divergence`
-  for every topic it names in `not_assessed`, so a reader that predates
-  `not_assessed` sees a divergence, never a clean list
-  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-  That widens what an existing array's entries can say, and OD-7's follow-up
-  ruling of 2026-10-05 makes it MINOR (the rule above): it can only weaken an
-  older reader's verdict.
-- **The collision strings are unchanged.** Each `target_diff.collisions[]`
-  entry is byte for byte what a writer before FX-4 produced. Phase 3 names a
-  collision whose configuration difference it could not assess in the new
-  optional `target_diff.not_assessed` instead
-  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)),
-  because a qualifier inside the existing string would be a change to an
-  existing field's content, which OD-7 did not rule.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.0.0
-  documents again, and their coverage then reads unknown. The 1.1.0 documents
-  already written stay valid under both readers.
-
-### Format 1.2.0 (FX-3): what a `newTopic` restore did not reconstruct
-
-FX-3 is the scorecard's second post-tag addition, and only the scorecard
-moves: to `1.2.0`, with a new schema file beside its frozen `1.0.0` and `1.1.0`
-ones. FX-3 does not touch the receipt or the catalog point; FX-7 moved those to
-their own `1.2.0`
-([its section](#a-backup-set-that-already-exists-is-never-written-again-versioned-buckets-pin-the-manifest-fx-7)).
-
-| Document | New optional field | Schema |
-|---|---|---|
-| Drill scorecard | `topic_parity.not_reconstructed` | `schemas/logweir-drill-scorecard-1.2.0.json` |
-
-- **What it fixes.** Phase 7 labelled four deviations the restore's own topic
-  creation makes — `cleanup.policy`, `retention.ms`, `partition_count`,
-  `replication_factor` — `intentionally_deviated` in every mode, with a
-  scratch-only rationale, so a `newTopic` restore signed lost compaction and
-  replication factor 1 as intended. A `newTopic` restore now writes each one
-  into `not_reconstructed` AND into the existing `unexpected_divergence`, and
-  never into `intentionally_deviated`; a scratch drill is unchanged and writes
-  `not_reconstructed: []`
-  ([the scorecard format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
-- **Absent means not recorded.** Every 1.0.0 and 1.1.0 document, and a 1.2.0
-  one whose phase 7 never ran, is decided exactly as before. Both readers also
-  print that a `newTopic` document from before 1.2.0 labelled the settings it
-  did not reconstruct `intended`: old evidence read as a weaker claim than its
-  label, never a stronger one, and no verdict changes.
-- **The field and its five arms are MINOR** under the owner's OD-7 (a), the
-  rule above. Each arm fires only on a document carrying the field, and judges
-  it against `format_version` (NR-1) or against the two lists every reader
-  already has (NR-2 to NR-5), as FX-4's receipt arms 6 and 7 judge
-  `config_coverage` against `format_version` and `source.topics`.
-- **NR-4 and NR-5 are MINOR under OD-7 too** (added after FX-3's review, F1).
-  They fire only on a 1.2.0 or later document that carries the field and whose
-  `target.mode` is `newTopic`, and they can only refuse. NR-4 refuses such a
-  document whose `intentionally_deviated` is not empty. NR-5 refuses one whose
-  `unexpected_divergence` names a setting the restore decides that
-  `not_reconstructed` omits. That is the document a writer would sign if the
-  mode were lost on its way to phase 7: the scratch labels beside
-  `not_reconstructed: []`, which claims that nothing was left unreconstructed.
-  Phase 8 refuses to sign it, and both readers refuse it. No document an
-  earlier writer produced carries the field, so none changes verdict.
-- **The content of the two existing lists is MINOR: the owner ruled it on
-  2026-10-07, OD-7's third case** (the rule above). In a `newTopic` document,
-  entries of the existing shape `"<target topic>: <key>"` leave
-  `intentionally_deviated` and are written into `unexpected_divergence`
-  instead. That is new content in two existing fields, and it can only move a
-  reader's verdict to the safer side, from intended to not intended: what an
-  older reader showed as intended it now shows as unexpected. It makes no
-  verdict stronger, and no verdict moves at all: no reader built before FX-3
-  has a `topic_parity` arm (NR-1 to NR-5 judge only documents that carry the
-  new field), and `outcome` does not depend on it (measured, the next bullet).
-  A scratch drill's lists are unchanged.
-- **Readers built before FX-3 accept every 1.2.0 document** (measured on FX-3's
-  live and synthetic 1.2.0 scorecards with `logweir` and `verify_scorecard.py`
-  1.15.0 at main `b8b9263f`, and with the released `v0.1.5` runner image and
-  script 1.13.0; FX-7's script 1.16.0, over the live ones, the same way): every
-  one exits 0, prints no reconstruction line, and its `logweir drill show` lists
-  each not-reconstructed setting under `unexpected [...]`, never under
-  `intended [...]`. They do not run NR-1 to NR-5, so they also accept a 1.2.0
-  document only this build refuses.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0
-  documents again, with the old labels; the 1.2.0 documents already written
-  stay valid under both readers.
-
-### Scorecard format 1.3.0: `source.time_basis` (FX-8)
-
-FX-8 adds one nested optional block to the drill scorecard,
-`source.time_basis`, and moves the scorecard to **1.3.0**
-(`schemas/logweir-drill-scorecard-1.3.0.json`, with 1.1.0 and FX-3's 1.2.0
-frozen beside it).
-(1.2.0 is FX-3's; a renumber moves the files listed in
-[the scorecard format](formats/drill-scorecard.md#sourcetime_basis-format-130).) The block says which
-source topics a restore's time selection read by **producer time** (recorded as
-`LogAppendTime`, accepted by the plan's `restore.time_basis: producerTime`) and
-which it selected by time with **no recorded timestamp type**
-([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
-
-- **Absent means not recorded.** A document without the block — every
-  scorecard before 1.3.0 — never reads as "every selection used the topics' own
-  clocks", and both readers print a `time basis: not recorded` line for it.
-  Every 1.3.0 run that reaches the decision writes the block, so its two empty
-  lists are a claim, as far as the archive manifest's segment bounds show: a
-  plan with no point in time whose window end is at or after every segment's
-  first and last timestamp is not counted as a selection, though out-of-order
-  timestamps inside a segment can still leave a later record out (PROD-01.1b,
-  [the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
-- **The block is additive and optional: MINOR.** The owner's 2026-10-07
-  ruling on OD-7's third case names this field: a field that labels a result is
-  additive and optional.
-- **Four arms, TB-1 to TB-4, read only the new block: MINOR** under OD-7 (a).
-  No document without the block changes verdict; the corpus
-  (`e2e/fixtures/invariants/`) and the parity gate re-prove that on every
-  `just lint`.
-- **The new refusal, `PointInTimeByProducerTime` (exit 3), is a new cause for
-  an existing value, and it can only move a verdict to the safer side** — a
-  plan that ran and was signed `pass` is now refused before any target is
-  created — so it is MINOR under OD-7's third case. It changes what an
-  installation does: a point-in-time restore over a
-  topic recorded as `LogAppendTime` that ran before FX-8 is refused after it
-  ([the limitation](#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
-- **The backup receipt's format does not change.** FX-4 already records each
-  topic's effective `message.timestamp.type`; both readers now print one
-  `time basis:` line per topic it records as `LogAppendTime`, saying that the
-  receipt's covered window is that topic's producer time.
-- **The plan grammar gains `restore.time_basis`**, optional, one value. A
-  runner built before FX-8 ignores it (the grammar ignores unknown keys).
-- **Readers built before FX-8** accept every 1.3.0 document — the major is
-  unchanged and the block is a nested optional field they ignore — and print no
-  time-basis line.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0
-  documents again with no block, runs the selections FX-8 refuses, and signs
-  them without a label — the pre-FX-8 behaviour. The 1.3.0 documents already
-  written stay valid under both readers.
-
-### Scorecard format 1.4.0: `integrity.verification` (PROD-08.1)
-
-PROD-08.1 adds one nested optional block to the drill scorecard,
-`integrity.verification`, and moves the scorecard to **1.4.0**
-(`schemas/logweir-drill-scorecard-1.4.0.json`, with FX-8's 1.3.0 frozen beside
-it). The block says what a verdict COVERED — a sample, or every selected record
-— and, for a complete verification, what it found
-([the scorecard format](formats/drill-scorecard.md#integrityverification-format-140);
-[the plan field](formats/drill-spec.md#samplecoverage-and-samplecomplete_max_records-prod-081);
-[the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
-
-- **Absent means not recorded, read as sampled.** A document without the block
-  — every scorecard before 1.4.0 — is never read as a complete verification,
-  and both readers print an `integrity coverage: not recorded` line for it.
-  Every 1.4.0 run that reaches phase 7 writes the block.
-- **The block is additive and optional: MINOR.**
-- **Seven arms, IV-1 to IV-7, are MINOR under OD-7 (a).** Each fires only on a
-  document carrying the block and judges the block, or `integrity.result`
-  against it (IV-6, as NR-2 to NR-5 judge the existing parity lists against
-  `not_reconstructed`), and each can only refuse. No document without the block
-  changes verdict; the corpus (`e2e/fixtures/invariants/`) and the parity gate
-  re-prove that on every `just lint`.
-- **A complete verification fills the existing counters with the complete
-  comparison**: `integrity.records_sampled` is the expected records of the
-  compared partitions, `sample.records_expected` the same (the whole expected
-  output only when `complete.covered` is `true`),
-  `sample.partitions` and `sample.topics` every partition and topic it
-  verified. Each field keeps its meaning — how many records the drill set out
-  to reconcile, and how many it did — and a reader that predates the block
-  reads a large sample, never a complete one.
-- **Two new causes for existing values, each only to the safer side (OD-7's
-  third case).** The sampled lane now FAILS a selection whose restored head
-  repeats or goes backwards in `x-original-offset` (it used to key the head by
-  that header in a map, where a duplicate collapsed and order was invisible):
-  a new cause for `fail-integrity`. And phase 0 now refuses, exit 3, a plan
-  asking for two verifications at once (`coverage: complete` with
-  `max_partitions`; `complete_max_records` with sampled coverage, or `0`).
-  Neither makes any verdict stronger.
-- **A complete verification can pass a restore the sampled check fails, and
-  fail one it passes** — the point. The exact per-partition model replaces the
-  manifest's first/last count bound, so PROD-01.1's correct point-in-time
-  restore over an out-of-order segment passes complete coverage, and its
-  skipped segment and below-the-floor record fail it
-  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
-  Both are new runs under a new plan value, signed with the block; no earlier
-  document is re-read.
-- **Readers built before PROD-08.1** accept every 1.4.0 document — the major
-  is unchanged and the block is a nested optional field they ignore — and print
-  no coverage line. They do not run IV-1 to IV-7.
-- **The plan grammar gains `sample.coverage` and `sample.complete_max_records`**,
-  both omitted from the serialised plan at their defaults. A runner built
-  before PROD-08.1 ignores them, runs a sampled check, and signs no block.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0
-  documents again, sampled, with no block; the 1.4.0 documents already written
-  stay valid under both readers.
-
-### Receipt and catalog-point format 1.3.0: `topic_configuration` (PROD-05.1)
-
-PROD-05.1 adds one optional block to the backup receipt, `topic_configuration`,
-and its per-topic copy to the catalog point record, `topics[].configuration`,
-and moves both documents to **1.3.0**
-(`schemas/logweir-backup-receipt-1.3.0.json` and
-`schemas/logweir-catalog-point-1.3.0.json`, FX-7's 1.2.0 files frozen beside
-them). Per named topic it records the source's partition count and replication
-factor, the configuration entries Logweir's own read returned with their
-source and portability class, and the topic's declarative owner, with a
-top-level `owner_detection` saying where the run looked for owners
-([the receipt format](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130);
-[the model and the portability table](to-do/decisions/PROD-05.1-configuration-model.md)).
-
-- **Absent means not recorded.** A receipt without the block — every receipt
-  before 1.3.0 — records no topic's configuration model, and a reader that
-  needs one has none; never "no configuration". Within the block, a topic whose
-  configuration read was denied or failed records NO entries (arm 15), never an
-  empty set.
-- **Every receipt this build signs carries the block**, pinned or not, so every
-  one is 1.3.0. FX-7's statement that an unpinned receipt is FX-4's 1.1.0
-  document byte for byte holds for builds before PROD-05.1; a 1.3.0 receipt
-  without a pin still has no `manifest_version_id` key.
-- **Ten arms, 12 to 21, are MINOR under OD-7 (a).** Each fires only on a
-  document carrying the block (arm 20 also on one carrying `owner_detection`
-  without it, which no writer produces), and judges it against
-  `config_coverage` and `source.topics` the way FX-4's arm 7 judges
-  `config_coverage` against `source.topics`. No document without the block
-  changes verdict; the corpus (`e2e/fixtures/invariants/`, a case for each
-  refusing half of every arm) and the parity gate re-prove that on every
-  `just lint`.
-- **An owner nobody looked for is not "no owner".** `owner_detection` empty —
-  every `Backup` and `BackupSchedule` the controller runs today, which passes
-  neither a declaration nor `KafkaTopic` resources (PROD-05.1a) — makes both
-  readers print `owner not checked` for an un-owned topic and the product API
-  publish `applyRoute: unknown`, never the admin-API route a later restore
-  would act on.
-- **The class is the writer's.** The arms judge a class against its source and
-  value, never against the key, so a later table refinement cannot make an
-  older receipt refuse itself; a restore re-derives the class from its own
-  table and fails closed on a disagreement (PROD-05.2).
-- **The catalog record's existing `topics[].partitions` is now filled** from
-  the receipt (it was always absent: no receipt recorded a count). Its meaning
-  is unchanged — the source's partition count — and `reader::cross_check`
-  refuses a record whose count the receipt does not back. Its one reader,
-  rehearsal selection's `maxPartitions` filter, can only refuse more points
-  with a count than without one.
-- **The plan grammar gains `source.topic_owners`**, omitted from the serialised
-  plan when absent (an empty list is kept: it says no topic has a declared
-  owner, and the receipt records `declared` among the places the run looked); a
-  runner built before PROD-05.1 ignores it and records no owner. Phase −1
-  refuses, exit 3, a declaration it cannot record or a topic declared twice.
-- **Readers built before PROD-05.1** (`verify_scorecard.py` 1.19.0 and earlier,
-  and an older `logweir`) accept every 1.3.0 document — the major is unchanged
-  and the block is an optional field they ignore — print no model line, and do
-  not run arms 12 to 21.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.1.0 or
-  1.2.0 receipts and records again; the 1.3.0 documents already written stay
-  valid under both readers. A catalog synced by an older runner lists no
-  topics for a point (the console then says the source's layout is not
-  published, and defaults as FX-5 did).
-
-### Three new auth modes: receipt and catalog point 1.4.0, scorecard 1.5.0 (PROD-01.3)
-
-PROD-01.3 adds `scramSha256`, `plain` (SASL/PLAIN, over TLS only) and `mtls`
-to the closed set of auth modes. Two existing fields carry the mode in signed
-documents — the backup receipt's `source.auth.mode` and the scorecard's
-`target.auth.mode` — and the catalog point record copies the receipt's.
-
-- **The value set is versioned, and only a document that names a new value
-  moves.** A receipt or catalog point naming one of the three is **1.4.0** (on
-  builds before PROD-03.0, which writes every receipt as 1.5.0), a
-  scorecard **1.5.0**; every document of a `plaintext` or `scramSha512` run is
-  written at the version it always was, byte for byte. Each new schema file
-  differs from the frozen one beside it in that field's description only.
-- **MINOR, under OD-7's third case** (2026-10-07): this is new content in an
-  existing field that can only move an older reader's verdict to the safer
-  side. A reader built before PROD-01.3 refuses such a document (the mode is
-  outside the two it knows) — never accepts it as something stronger — and
-  decides every other document exactly as before. Each reader's one auth arm
-  becomes three statements, mirrored in both: the closed two below the new
-  version (unchanged), a new value under a version that predates it (refused),
-  and the closed five from the new version. The corpus
-  (`e2e/fixtures/invariants/`, three cases per document) and the parity gate
-  re-prove it on every `just lint`; `verify_scorecard.py` is 1.21.0.
-- **Two runner terminal states are added**, each a refusal that names its
-  cause: `PlainWithoutTls` (SASL/PLAIN without TLS) and
-  `CredentialBindingMismatch` (a projected credential whose Secret's
-  `logweir-binding` does not name the connection — the PROD-01.3 security
-  follow-up, [kubernetes.md](kubernetes.md) §20.9). Both are new causes for
-  exit 3 and can only refuse.
-- **The `KafkaCluster` CRD is additive**: three enum values appended,
-  `auth.clientCertificate`, `status.credentialBinding`, and three CEL rules
-  that are vacuously true for every object an earlier release could write.
-  **One existing behaviour changes, deliberately:** every credentialed
-  connection now needs its Secret bound (`logweir-binding`), or its runs are
-  refused — the upgrade step is in [kubernetes.md](kubernetes.md) §20.9.
-- **The product API no longer accepts `auth.credentialRef`** on a connection
-  create (`422 existing_credential_refused`); the credential is entered once in
-  `auth.credential`. A pre-release API change (below), listed in the release
-  notes.
-- **A credential value is no longer part of a create's idempotency identity**
-  (connections and destinations): the digests the API publishes on the object
-  and in the audit record are taken with every write-only value replaced by
-  `<write-only>`, because a digest over the value let anyone who could read the
-  object confirm a guessed credential offline. A same-key retry that changes
-  only the value now replays instead of answering `409 idempotency_conflict`;
-  a retry spanning the upgrade of a create that carried a value answers `409`
-  (retry with a new key).
-- **Rollback.** An older `logweir` cannot parse a spec naming a new mode, so it
-  writes no 1.4.0/1.5.0 document; those already written stay valid for every
-  reader from PROD-01.3 on, and older readers refuse them (the safe direction).
-  An older controller and runner ignore the binding pair; a bound Secret keeps
-  working with them.
-
-### Scorecard format 1.6.0: `sample.unsampled_topics`, and a stricter sampled check (FX-23)
-
-FX-23 closes a false `pass`: an engine stopped by a SIGTERM finishes the topic
-it is on, exits 0 and never starts the rest, and the default sampled check
-signed `pass` over that restore whenever `sample.max_partitions` truncated the
-sample to the topics that finished and the one aggregate count bound had slack
-(PROD-07.1's review, H1; measured live on the compose stack). Three changes, each only to the safer
-side:
-
-- **The count bound is held per mapped partition** as well as summed, and a
-  segment the window cuts across proves one record when its first or last
-  record's timestamp is inside the window. A new cause for the existing
-  `fail-integrity` (OD-7's third case). A correct restore of an archive whose
-  record timestamps do not run backwards within a segment cannot fail it: the
-  engine restores every record whose own timestamp is in the window into the
-  same partition, and the manifest's segment timestamps are its first and last
-  records'. When they do run backwards (several producers with skewed clocks,
-  `CreateTime`), a record older than every segment's first record is dropped by
-  every restore of that archive
-  ([the limitation](#recovery-point-selection-uses-segment-first-and-last-timestamps)),
-  and the per-partition bound now fails that restore where the sum's slack
-  across sibling partitions used to absorb it; so does a duplicate from the
-  engine's non-idempotent producer. Both pre-exist for the sum, and failing is
-  the safer verdict. One test moved with it: a 5,900-record target against a manifest
-  proving 5,901 (`windowed_reconciliation.rs`) was a pass and is now a fail.
-- **Phase 7 reads the engine's offset report** — streaming, keeping only its
-  partition entries and skipping the per-record `detailed_mappings` section
-  as it passes, so memory does not grow with the restore — and fails a restore
-  whose report has no entry for a mapped partition the manifest proves holds
-  records in the window — another new cause for `fail-integrity`. The report is only
-  ever a NEGATIVE signal: an entry vouches for nothing, and a missing or
-  unreadable report checks nothing (logged). The engine adapter removes a
-  report already at the path before the engine runs, so an earlier run's file
-  (a reused `--offset-report-out`) is never read or uploaded as this run's.
-- **`sample.max_partitions` keeps one partition of every topic first**
-  (round-robin across topics in manifest order) instead of the first N in
-  manifest order, and the scorecard names the topics it could not reach in the
-  new optional **`sample.unsampled_topics`**, format **1.6.0**
-  (`schemas/logweir-drill-scorecard-1.6.0.json`, with PROD-01.3's 1.5.0 frozen
-  beside it; [the format](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
-  Every SAMPLED-lane scorecard this build signs is 1.6.0, named topics or not;
-  a complete verification's is the 1.4.0 or 1.5.0 one it was. Three arms, US-1 to US-3, read only that field (US-3
-  judges it against `integrity.verification.coverage`, as IV-6 judges
-  `integrity.result`) and can only refuse: MINOR under OD-7 (a). The corpus and
-  the parity gate re-prove them on every `just lint`; `verify_scorecard.py` is
-  1.22.0.
-- **1.6.0 marks the build (review M2; the orchestrator's decision,
-  2026-10-08).** Because every sampled scorecard this build signs is 1.6.0, a
-  1.6.0-or-later sampled `pass` proves these checks ran, and a sampled 1.4.0 or
-  1.5.0 `pass` comes from an earlier build and proves what it always proved.
-  Both readers print a `sample coverage:` line for every sampled `pass` saying
-  which. Every sampled document changes version, from 1.4.0 (or 1.5.0) to
-  1.6.0, and nothing else in it changes: a reader that predates 1.6.0 reads
-  it exactly as before (same major, an optional field it ignores).
-- **Readers built before FX-23** accept every 1.6.0 document — the major is
-  unchanged and the field is nested and optional — and print nothing about
-  the topics the sample left out.
-- **Rollback.** An older `logweir` samples the first N partitions again, judges
-  one aggregate bound, ignores the engine report and writes no 1.6.0 document;
-  the 1.6.0 documents already written stay valid under both readers. Its
-  `pass` over an early-stopped restore is the defect this section closes.
-
-### A source replication factor the archive does not record is not assessed (FX-21)
-
-Engine 0.23.3 records `source_replication_factor` in the archive's manifest
-for the FIRST topic a backup saves only: its `merge_manifests` carries the
-partition count of a topic the stored manifest already holds and drops the
-factor, and the configuration capture puts every topic into the manifest
-before the first save. Phase 7 then used the TARGET's own factor (the plan's)
-in place of the missing one, so every other topic's replication-factor
-difference was signed as no divergence. Found by PROD-05.1; measured live by
-FX-21 on a three-topic `cluster3` backup (factors 3, 2 and 3): OSO's 0.23.3
-and Logweir's `0.23.3+logweir.1` recorded one factor of three, and the writer
-before FX-21 signed the other two topics with no `replication_factor` entry at
-all.
-
-- **The writer.** Phase 7 compares a topic's replication factor only where the
-  source's is recorded: the manifest's `source_replication_factor`, else the
-  verified receipt's `topic_configuration[<topic>].replication_factor`
-  (format 1.3.0, Logweir's own metadata read). The manifest's comes first, so
-  every document whose manifest records the factor is decided exactly as
-  before. Where neither records one, the topic's factor is named in
-  `topic_parity.not_assessed` as `"<target topic>: replication_factor
-  (notRecorded)"`, and the fail-safe twin `"<target topic>: replication_factor
-  not assessed (notRecorded)"` goes into `unexpected_divergence`, FX-4's marker
-  shape. A partition count the manifest does not record (an archive written
-  before engine 0.17) is the same case: `partition_count (notRecorded)`.
-- **The engine.** Patch 0002 (`third_party/kafka-backup-patches/`) makes
-  `merge_manifests` carry the factor as it carries the partition count, so
-  Logweir's build `0.23.3+logweir.2` records every topic's factor; measured on
-  the same three topics, 3 of 3, each the broker's.
-- **No new field and no version: MINOR, OD-7's third case.** The entries are
-  new content in two existing fields, and they can only move a reader's
-  verdict to the safer side: what a writer before FX-21 signed as matching is
-  now not assessed, and no entry makes any verdict stronger. `outcome` does
-  not depend on either list. Every reader since format 1.1.0 prints the new
-  `not_assessed` entries in its `configuration parity: NOT ASSESSED for …`
-  line, and a reader older than that sees the twin in `unexpected_divergence`.
-  The twin's `<key>`, the text after the last `": "`, is `replication_factor
-  not assessed (notRecorded)`, never one of the four settings the restore
-  decides, so arm NR-5 does not read it as a deviation `not_reconstructed`
-  must name (a unit row in each reader). FX-21 adds no format version of
-  its own: the scorecard carries whatever version the rest of the run writes
-  (1.4.0; 1.5.0 for PROD-01.3's auth modes; 1.6.0 for a sampled run since FX-23).
-- **No new marker; the writer identity and the manifest tell the documents
-  apart** (the orchestrator's decision on FX-21's review M2). Old evidence is
-  not re-read. A reader decides which writer signed a scorecard from fields
-  every scorecard already carries, then reads the archive:
-  - `engine.version` and `engine.digest`. A runner image declares them from
-    its `/etc/logweir/engine-identity` (PROD-00.2), and its engine and its
-    `logweir`, whose phase 7 wrote the document, are built from one commit.
-    `engine.version` `0.23.3+logweir.2` (build-input digest
-    `sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8`,
-    `third_party/kafka-backup-builds.txt`) or a later `+logweir.<n>` names a
-    runner with FX-21's phase 7: its silence about a topic's replication
-    factor is parity, because a factor it could not compare is named
-    `notRecorded`. Any other value (`0.23.3+logweir.1`, OSO's `0.23.3`, an
-    older release) names a writer before FX-21. The scorecard carries no
-    `logweir` version of its own, so a standalone CLI install that pairs a
-    `logweir` and an engine of different builds is told apart by neither
-    field: read the manifest.
-  - The archive's manifest, named by `source.backup_id` and pinned by
-    `source.manifest_sha256` (and `source.manifest_version_id` on a versioned
-    bucket). For a document from a writer before FX-21, a topic whose
-    `topics[].source_replication_factor` the manifest lacks (absent or `null`)
-    has no replication-factor finding, whatever `topic_parity` lists for it:
-    its silence there is the defect, not parity.
-- **Rollback.** An older `logweir` writes the old documents again (the
-  silence above); the documents this build wrote stay valid for every reader.
-  Rolling the engine back to `+logweir.1` or to OSO's 0.23.3
-  (`ENGINE_SOURCE=oso`) records one factor per backup again; this build then
-  names the rest `notRecorded` where no 1.3.0 receipt is bound, and compares
-  the receipt's factor where one is.
-
-### Scorecard format 1.7.0: `source.selection`, a restore from a stated window start (PROD-11.1)
-
-A plan may state an inclusive window START, written as the interval form of
-`restore.point_in_time`, `"<start>/<end>"`
-([the plan field](formats/drill-spec.md#a-window-start-restorepoint_in_time-startend-prod-111)).
-Guard G-WIN is amended, not removed: a start STATED in the approved plan is the
-plan's own (`InheritedFromSpec`), is never earlier than the archive set's floor
-(refused, never moved to it), is re-derived by phase 5 from the spec and the
-manifest, and is signed
-([the decision record](to-do/decisions/PROD-11.1-replay-selection.md) §2).
-
-- **The signed block.** A restore from a stated start carries
-  `source.selection {window_start_ms, window_end_ms}` and is format **1.7.0**
-  (MINOR): arms SEL-1 to SEL-3 read only the block or judge an existing field
-  against it and can only refuse (OD-7 (a)). Every other document is the one
-  it was. Each version step keeps the newer minor, so a sampled restore from a
-  start is 1.7.0, never 1.6.0.
-- **Every verdict is the window's.** Samples are drawn from the stated start,
-  the count bound and the per-partition presence check are over
-  `[start, end]`, and a complete verification expects every archived record
-  whose own timestamp is in that window. Every partition of every restored
-  topic is restored: the block narrows the window, never the partitions.
-- **Nothing an older reader prints about it is false** (review N2). What
-  1.21.0, 1.22.0 and main's `logweir drill verify` print for a sampled and a
-  complete document is quoted in
-  [`verify-a-scorecard.md`](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves):
-  a sampled pass's per-partition guarantee holds over the window, and a
-  complete pass's `every selected record compared` is true. They print
-  nothing that names the start: the field that does is the free-text
-  `sample.coverage_note` (it opens with `replay selection: … from epoch-ms S
-  (the plan's stated window start, inclusive) …`), which `logweir drill show`
-  of any version prints; a complete block's `window.start_ms` is the start
-  too, while a sampled document's `sample.window_start` is its sample window,
-  which an unnarrowed document can share. This release's readers print a
-  `replay selection:` line and qualify a sampled pass by the window.
-- **Each lane claims only what it proves about records before the start**
-  (review N1). Only a complete verification that passed proves none was
-  restored (a restored record below the start is `unexpected`, and IV-6 holds
-  a complete pass to none); a sampled check does not, because a segment
-  straddling the start counts all of its records into the per-partition
-  bound. The writer's coverage note never says none was restored, and both
-  readers say it only over a complete pass
-  ([the format](formats/drill-scorecard.md#sourceselection-format-170-and-200)).
-- **Partition subsets are format 2.0.0** (PROD-11.1b, below). PROD-11.1
-  refused them by name (`PartitionSubsetsAwaitOwnerDecision`): a
-  subset-narrowed 1.7.0 document would be misread by every reader before it
-  (its unselected partitions read as restored), so it is a MAJOR change under
-  OD-7, which the owner decided as OD-9.
-- **A runner built before PROD-11.1 refuses a plan stating a start**: it reads
-  `point_in_time` as one instant, so the interval form does not parse
-  (`drill spec does not parse`, exit 1), and it creates and signs nothing. It
-  never restores from the floor what the plan said to restore from a start.
-
-### Scorecard format 2.0.0: a partition-subset restore (PROD-11.1b), the first MAJOR
-
-**The owner's decision.** [OD-9](to-do/product-expansion.md#owner-decisions),
-decided (a) on 2026-10-09: a scorecard for a partition-subset restore is
-written as format **2.0.0**, and only then; every other scorecard stays 1.x.
-Older verifiers refuse a 2.0.0 document instead of reading it as a full
-restore. This is the format's first MAJOR, and it carries the owner's recorded
-decision the rule above requires.
-
-**Why MAJOR.** A restore that states `restore.partitions`
-([the plan field](formats/drill-spec.md#a-partition-subset-restorepartitions-prod-111b))
-restores only the selected partitions of each narrowed topic, and two EXISTING
-fields then name the selection, not the topic: `integrity.verification.complete.partitions[]`
-lists the selected partitions (1.4.0 defined it as "one entry per partition
-of every restored topic"), and the sampled lane's count bound, presence check
-and engine-report check are the selected partitions'. A 1.x reader would
-read the narrowed restore as every partition restored and verified (the
-PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
-`source.selection` is ignored by a 1.x reader, so no MINOR could carry it.
-
-**What 2.0.0 is.** 1.7.0's fields, with `source.selection` required and its
-`partitions` (non-empty) and `engine_runs` required in it; `window_start_ms`
-is optional there (absent: the window started at the archive's floor). The
-schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
-which pins `format_version` to `2.x.y`; every 1.x schema up to 1.7.0 is frozen
-beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`
-([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151))
-was format 1's newest minor until PROD-16.2 froze it; 1.9.0 is format 1's
-newest, generated, and 2.1.0 format 2's. The media type keeps `version=1.0.0`, so an older
-reader reaches its major refusal rather than a payload-type mismatch
-([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
-
-- **Written for a subset, and only then.** `format_version_with_selection`
-  writes 2.0.0 exactly when the signed block names a subset; a start-only
-  restore is 1.7.0 and an unnarrowed one the 1.4.0, 1.5.0 or 1.6.0 document it
-  was, byte for byte. Every version step keeps the newer version, by major and
-  then minor, so no later step lowers 2.0.0.
-- **The readers.** `logweir drill verify`, `drill show` and
-  `verify_scorecard.py` 1.27.0 read major 2 for that shape alone (arm PS-1: a
-  2.x document without `source.selection.partitions` is refused before any
-  arm), apply every major-1 arm to it, and add PS-2 (a 1.x block is a start
-  only) to PS-5 ([the arms](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
-  A major above 2 is refused, naming 2.0.0.
-- **Every older reader refuses it**, never prints it `VALID`:
-  `verify_scorecard.py` before 1.27.0 and a `logweir` built before PROD-11.1
-  as a newer major; a `logweir` built between PROD-11.1 and PROD-11.1b as a
-  newer major, or (a subset from the archive's floor, whose block has no
-  start) at deserialisation, one step earlier
-  ([measured](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
-  An adopter who verifies subset restores upgrades the verifier first.
-- **Older runners refuse a subset plan.** A subset is written only beside an
-  interval form of `point_in_time` (`"<start>/<end>"`, or `"../<end>"` from the
-  archive's floor). A runner built before PROD-11.1 cannot parse either and
-  refuses the plan (`drill spec does not parse`, exit 1) instead of ignoring
-  the unknown `partitions` key and restoring every partition — the residual the
-  PROD-11.1 record's §6 left; a runner built between PROD-11.1 and PROD-11.1b
-  refuses it too (`"../<end>"` does not parse; beside `"<start>/<end>"` it
-  refuses the key by name). A subset beside a plain instant does not parse in
-  this release, so no Logweir plan carries one.
-- **Standing authorizations still refuse any selection**: a rehearsal
-  restores every partition from the archive's floor (`plan_within_scope`).
-- **Rollback.** An older runner refuses subset plans (above) and an older
-  reader refuses 2.0.0 documents; 2.0.0 scorecards already written stay
-  verifiable with this release's readers and later. Start-only and
-  unnarrowed documents are unchanged in both directions.
-
-### Receipt and catalog-point format 1.5.0: `schema_dependency` (PROD-03.0)
-
-PROD-03.0 adds one optional block to the backup receipt, `schema_dependency`,
-and its per-topic copy to the catalog point record,
-`topics[].schema_dependency`, and moves both documents to **1.5.0**
-(`schemas/logweir-backup-receipt-1.5.0.json` and
-`schemas/logweir-catalog-point-1.5.0.json`, PROD-01.3's 1.4.0 files frozen
-beside them). Per named topic it records whether the archived keys or values
-carry Confluent wire-format framing (magic byte 0 and a plausible schema id),
-the schema ids seen (the 16 smallest and a count) and how much was judged
-(`sampled` or `complete`), or why nothing was (`notAssessed` with a reason)
-([the receipt format and the detection contract](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150)).
-
-- **Within Never #2.** The judgement reads archived BYTES only: no schema
-  registry is contacted, no schema is resolved, and nothing is captured from a
-  registry. A `schemaDependent` topic is said to be "schema-dependent, registry
-  not captured" so an operator knows what a restore will not bring back. Never
-  #2 is unchanged; whether to narrow it is OD-2's open item #2.
-- **Absent means not assessed.** A receipt without the block — every receipt
-  before 1.5.0 — and a `notAssessed` entry are never read as "not
-  schema-dependent", on any surface.
-- **Every receipt this build signs carries the block**, for every auth mode,
-  pinned or not, so every one is 1.5.0 (which defines every earlier minor's
-  fields and values), and every catalog record it writes is 1.5.0.
-- **Eight arms, 22 to 29, are MINOR under OD-7 (a).** Each fires only on a
-  document carrying the block and judges it against `source.topics` and
-  `records`; no document without the block changes verdict. The threshold (at
-  least one record, and one in ten of a side's non-null records, framed) is
-  the format's: arm 28 holds `dependent` to the counts, so a writer cannot sign
-  a verdict its counts contradict. The corpus (a case for every arm, three
-  accepted 1.5.0 documents) and the parity gate re-prove it on every
-  `just lint`.
-- **Detection never fails a backup and is bounded.** It runs after the archive
-  and manifest exist, streams at most two segments per partition for at most
-  eight partitions per topic, keeps six bytes of each key and value, and stops
-  at 16 MiB stored per segment, a zstd window of 8 MiB, 256 MiB decompressed
-  per segment and 120 s per backup (a hard stop); past a cap, or on any failure
-  (a caught panic included), the topic is `notAssessed` with its reason. It
-  adds at most about 17 MB of memory, measured (the worst case is a 16 MiB
-  incompressible segment held while scanned). A block the receipt's own arms
-  would refuse is signed as `notAssessed` instead, so it never leaves a backup
-  unsigned.
-- **Readers built before PROD-03.0** (`verify_scorecard.py` 1.23.0 and earlier,
-  and an older `logweir`) accept every 1.5.0 document — the major is unchanged
-  and the block is an optional field they ignore — print no schema line and do
-  not run arms 22 to 29.
-- **Rollback** is safe in both directions: an older runner writes 1.3.0/1.4.0
-  receipts and records with no block (their topics then read not assessed), and
-  the 1.5.0 documents already written stay valid under every reader.
-
-### Receipt and catalog-point format 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
-
-PROD-01.4a adds one optional block to the backup receipt, `generations`, and
-its per-topic copy to the catalog point record, `topics[].identity`, and moves
-both documents to **1.6.0** (`schemas/logweir-backup-receipt-1.6.0.json` and
-`schemas/logweir-catalog-point-1.6.0.json`, PROD-03.0's 1.5.0 files frozen
-beside them). Per named topic it records the topic ID (KIP-516) Logweir's own
-DescribeTopics read returned immediately before the engine and immediately
-after it — through `logweir-rdkafka-ffi`, the one crate OD-6 (a2) lets call
-librdkafka directly — in Kafka's text form, or `null` with the reason
-([the receipt format](formats/backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-160);
-[the decision record](to-do/decisions/PROD-01.4-topic-identity.md)).
-
-- **`null` means unknown, never "the same".** A null ID says why
-  (`noTopicId` from a broker below inter-broker protocol 2.8, `notAuthorized`,
-  `topicNotFound`, `readFailed`, `notRead`, `reservedTopicId`), and the
-  generation rule (`logweir_core::topic_identity`) never reads two unknown IDs
-  as one generation: two different pre-capture IDs are a new generation, two
-  equal ones the same generation only when the later capture's own after-read
-  recorded the same ID too, anything else not established. Kafka's reserved
-  IDs (`AAAAAAAAAAAAAAAAAAAAAA`, `AAAAAAAAAAAAAAAAAAAAAQ`), which no topic is
-  ever given, are never recorded (arm 38) and never accepted from a catalog
-  record by either verifier, so no two points read as one generation through a
-  sentinel. A receipt without
-  the block — every receipt before 1.6.0 — has every topic's generation
-  unknown.
-- **Every receipt this build signs carries the block**, so every one is at
-  least 1.6.0 (1.7.0 when its backup selected consumer groups, PROD-04.1),
-  whatever its auth mode or pin; 1.6.0 includes every earlier minor. The
-  statements above that a receipt is 1.3.0 (PROD-05.1), 1.4.0 (PROD-01.3) or
-  1.5.0 (PROD-03.0) hold for builds before PROD-01.4a.
-- **Five arms, 36 to 40, are MINOR under OD-7 (a).** Each fires only on a
-  document carrying the block, and judges it against `source.topics` the way
-  arm 7 judges `config_coverage`. No document without the block changes
-  verdict; the corpus (`e2e/fixtures/invariants/`, a case per refusing arm and
-  three accepted shapes) and the parity gate re-prove that on every `just
-  lint`; `verify_scorecard.py` is 1.25.0. Two different recorded IDs are not
-  refused — they are what the run observed — and both readers say so.
-- **Readers built before PROD-01.4a** accept every 1.6.0 document — the major
-  is unchanged and the block is an optional field they ignore — print no topic
-  ID, and do not run arms 36 to 40. A 1.6.0 receipt naming one of PROD-01.3's
-  modes is refused by a reader before PROD-01.3, exactly as a 1.4.0 one.
-- **Rollback** is safe in both directions. An older `logweir` writes 1.3.0,
-  1.4.0 or 1.5.0 receipts and records again, with no IDs; the 1.6.0 documents
-  already written stay valid under both readers.
-- **The `unsafe` perimeter grows by one call.** `rd_kafka_DescribeTopics` joins
-  the group and ACL calls in `logweir-rdkafka-ffi` under the same rules (owned
-  values, every object destroyed once, bounded, inputs refused before
-  sending); every other crate keeps `forbid(unsafe_code)`
-  (`scripts/check-unsafe-scope.sh`). Its exit is PROD-01.4b: a released
-  rust-rdkafka that wraps DescribeTopics safely.
-
-### Receipt and catalog-point format 1.7.0: `consumer_positions` (PROD-04.1)
-
-PROD-04.1 adds one optional block to the backup receipt, `consumer_positions`,
-a new document beside the receipt that the block binds by digest — the
-positions document, format 1.0.0
-(`schemas/logweir-consumer-positions-1.0.0.json`) — and the block's
-digest-bound summary to the catalog point record, and moves the receipt and the
-record to **1.7.0** (`schemas/logweir-backup-receipt-1.7.0.json` and
-`schemas/logweir-catalog-point-1.7.0.json`, PROD-01.4a's 1.6.0 files frozen
-beside them). It records, for every consumer group a backup selected, exactly
-one outcome — captured, excluded with a reason, or failed — and for a captured
-group its position counts in the receipt and every position in the document,
-each judged against the partition's marks and the archive's offsets
-([the receipt format](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170)).
-
-- **Absent means no group was selected**, never "no positions": every receipt
-  before 1.7.0, and every later one whose backup selects none, which is
-  written as the document it was before PROD-04.1, byte for byte, with no
-  positions document. A partition with no committed offset is counted, never
-  offset 0, and a group that is not captured carries no position at all.
-- **The receipt stays bounded.** Its block depends on the selection only —
-  at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
-  selection whose summary could exceed it as JSON writes it (escapes
-  counted) is refused by name before anything runs — never on partitions, so
-  the receipt stays inside the one bound the catalog, the controller and the
-  evidence fetch read it under (5,131,072 bytes, the topic budget of
-  [kubernetes.md](kubernetes.md) §7b.5, whose base counts this block); the
-  positions grow in their own document, which none of them reads. (Since
-  1.8.0 the receipt does grow on partitions, by `source_watermarks`, within
-  a 32 KiB budget: see below.)
-- **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
-  MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
-  document without it changes verdict; the document's run only when a reader
-  is given it. The corpus (`e2e/fixtures/invariants/`, a case per arm in
-  `backup-receipt-index.json` and `consumer-positions-index.json`) and the
-  parity gate re-prove both on every `just lint`; `verify_scorecard.py` is
-  1.26.0.
-- **The plan grammar gains `source.consumer_groups`**, and the CLI
-  `--consumer-group`, both omitted when empty; a runner built before PROD-04.1
-  ignores the plan key and refuses the flag. The `Backup` and `BackupSchedule`
-  CRDs gain `spec.consumerGroups`; the frozen execution inputs carry it only
-  when present, and the run-policy digest only when non-empty, so every
-  existing plan keeps its bytes and its digest. More than 100 ids, a blank,
-  repeated or control-character id, or one over 255 bytes is refused by name.
-- **Positions are not atomic with the records.** The receipt says when they
-  were observed and which groups were active, and never claims a consistent
-  cut; a topic whose marks regressed during the capture fails the groups
-  holding a position on it.
-- **Kafka 3.7.x types no group**, so every selected group is
-  `GroupTypeNotCaptured` there (PROD-04.0 §14.1): a stated limit, not a guess.
-- **Readers built before PROD-04.1** (`verify_scorecard.py` 1.25.0 and earlier)
-  accept every 1.7.0 document and say nothing about the positions; reading
-  positions needs 1.26.0 or a `logweir` from PROD-04.1 on. **Rollback** is safe
-  for documents: the 1.7.0 receipts, their positions documents and the records
-  already written stay valid. An older controller refuses a frozen run that
-  carries `consumerGroups` (`PlanConfigMapConflict`).
-
-### Receipt format 1.8.0: `source_watermarks` and the empty capture (PROD-02.1)
-
-PROD-02.1 adds one optional block, `source_watermarks` (per named topic, each
-partition's `[low, high]` watermark read before the engine), and the EMPTY
-CAPTURE: the empty window `[t, t)` beside it, for a backup of a source whose
-records all expired
-([the receipt format](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180)).
-Arms 41–45 read only the block and arm 4 admits the empty window only beside
-it, so it is MINOR under OD-7: an older reader refuses an empty capture (the
-safer verdict) and reads an ordinary 1.8.0 receipt as the 1.7.0 one under it.
-Absent is coverage NOT RECORDED, never complete. The block grows with the
-partition count and the writer caps it at **32 KiB** (32,768 bytes, about
-430–650 partitions); over that it is not recorded, so it stays inside the
-receipt's base budget and never pushes a receipt over the one bound every
-reader caps it at (5,131,072 bytes, FX-33). `verify_scorecard.py` is 1.30.0.
-
-### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
-
-The owner's decision OD-2 (2026-10-05) narrowed Never #1 (below) to a LIVE
-topic and allowed one path: a restore under the source's ORIGINAL topic names
-into topics that do not exist, created by the run itself, exclusively
-([the plan field](formats/drill-spec.md#targettopic_namingoriginal_name-prod-151),
-[kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
-
-- **The signed block.** Such a restore carries `target.original_name` and is
-  format **1.8.0** (MINOR): arms ON-1 to ON-14 read only the block or judge an
-  existing field against it (`target`; for ON-13 `integrity.verification` and
-  the outcome; for ON-14 `source.selection`), and can only refuse (OD-7 (a)).
-  Every other document is the one it was; each version step keeps the newer
-  version.
-- **1.8.0 is a minor of format 1, and the block never appears in a 2.x
-  document.** Format 2.0.0 (above) is a partition-subset restore's document
-  and nothing else, and a restore under the original topic names restores
-  WHOLE topics (next bullet). So the two never meet: 2.0.0 stays "1.7.0's
-  fields with the subset meaning", `schemas/logweir-drill-scorecard-2.0.0.json`
-  is byte for byte the file PROD-11.1b published and does not describe the
-  block, and `schemas/logweir-drill-scorecard-1.8.0.json` (the frozen 1.7.0
-  file plus the block) was format 1's newest minor. Both are frozen since
-  PROD-16.2, which generates `-1.9.0.json` and `-2.1.0.json` in their place
-  (`just schema-check`). Arm ON-1 reads major 1 on purpose, where
-  format 1's older optional blocks are also defined under major 2, and arm
-  ON-14 refuses the block beside `source.selection.partitions` in either
-  reader. A later 1.x minor that IS meant for subset restores too says so, and
-  moves 2.x with it.
-- **An original-name restore restores whole topics.** A plan that carries the
-  `original_name` block and `restore.partitions` is refused,
-  `OriginalNameNeedsWholeTopics`, by the same rule as the coverage refusal
-  below and at the same boundaries: the runner before it dials anything (exit
-  3) and again at phase 0, `logweir drill approve`, both readiness checks, and
-  the controller before any Job (`ExecutionSpecInvalid`). There is no CEL rule
-  for it: the `Restore` CRD declares no partitions, so the plan bytes are the
-  only place a subset is written and the controller's plan check is the
-  Kubernetes boundary. The product API passes plan bytes through and does not
-  read them for this. Without the rule the run would create each topic under
-  its production name with every partition, fill only the selected ones, and
-  sign that as covered; the partitions left out could never be restored under
-  that name afterwards, because a restore into an existing topic is refused.
-  **A stated window stays allowed**, a start (`"<start>/<end>"`) or an end:
-  whole partitions, bounded in time, signed as 1.8.0 with a start-only
-  `source.selection`. A partition subset under a PREFIX is PROD-11.1b's and is
-  unchanged.
-  A verifier older than `1.28.0` and a `logweir` built before PROD-15.1 accept
-  the document, ignore the block and print no `original name:` line
-  ([verify-a-scorecard.md](verify-a-scorecard.md#what-the-verifier-line-means-and-why-its-version-moves)).
-- **A separate approval subject, inside the signed bytes.** A per-run approval
-  document v1 gains the optional `approval_subject`; an authorization document
-  v2 gains the optional `approvalSubject`. Only `originalName` is written;
-  absent is an ordinary approval, read exactly as before. An original-name
-  plan needs the subject and the subject authorises nothing else, in the
-  runner (both directions, exit 3) and in the controller's admission
-  (`ApprovalSubjectMismatch`, terminal). **OD-10:** an authorization document
-  v2 under an `Ordinary` policy (a one-person confirmation) of an
-  original-name restore also carries `originalNameConfirmation.typedTopics`,
-  the original topic names the requester re-typed, held to the plan's topics
-  at every boundary; it is absent on every other document and refused there.
-- **Authorization document v2 format 2.1.0.** A v2 document that carries
-  `approvalSubject` or `originalNameConfirmation` is written with
-  `formatVersion: "2.1.0"`; every document without them is written as
-  `"2.0.0"` and is byte for byte what it was (the standing authorization's
-  1.1.0 is the same pattern, PROD-08.1a). The DSSE payload type is unchanged
-  (`application/vnd.logweir.restore-authorization+json;version=2.0.0` names
-  the v2 family). **This build's readers** (the controller and the runner,
-  through one function) accept 2.1.0 and REFUSE either field under a version
-  that predates it — `AuthorizationDocumentInvalid`, "defined from
-  formatVersion 2.1.0" — so a 2.0.0 document can never name the original-name
-  subject. A minor adds optional fields only, so a 2.1.0 document without the
-  fields is read as a 2.0.0 one. **A reader built before the fields** reads
-  major 2 and refuses a document that carries either as an unknown field
-  (`AuthorizationDocumentInvalid`, exit 3 in a runner; the safer verdict,
-  OD-7's third case): it never reads one as an ordinary authorization.
-  Every 2.1.0 document this build writes carries at least one of the two, so
-  every one of them is refused there. The v1 approval document has no version
-  field: its `approval_subject` is an optional key an older v1 reader ignores,
-  and the ORIGINAL-NAME PLAN is what that older runner refuses (below), so an
-  ignored subject authorises nothing.
-- **An original-name restore requires complete verification.** A plan that
-  carries the `original_name` block without `sample.coverage: complete` is
-  refused, `OriginalNameNeedsCompleteCoverage`: by the runner before it dials
-  anything (exit 3), by `logweir drill approve --approval-subject
-  original-name`, by the controller before any Job (`ExecutionSpecInvalid`,
-  and a CEL rule on `Restore.spec`), by the product API
-  (`original_name_requires_complete`) and by the console, which selects
-  complete coverage for such a restore and locks the choice. A sampled check
-  can pass a record another producer wrote into the restored name; the
-  complete check names it. Arm ON-13 holds the signed document to the same
-  rule: the block beside a sampled verification, or beside a pass that records
-  none, is refused by both readers.
-- **A stopped creation step is named on exit 1, and nothing is deleted.** The
-  runner's last stdout line is `failure-reason=TargetTopicAppeared` (a mapped
-  name appeared after phase 0) or `failure-reason=CreatedTopicsLeft` (creation
-  stopped for another reason and left a topic this run created, or one it
-  asked for and cannot account for), and the line before it is
-  `target-topics-appeared={"appeared":[…],"left":[…],"unconfirmed":[…],
-  "appearedCount":n,"leftCount":n,"unconfirmedCount":n}` (plus
-  `"unconfirmedSeen"` beside an unconfirmed name): legal topic names only, at
-  most 100 per list with the list's full count beside it, and the first two
-  keys the ones every earlier runner wrote. One definition serves the writer
-  and the reader, `logweir_core::creation_stop`.
-  - **The closed set of `failure-reason=` states is per kind**
-    (`logweir_core::guard::RESTORE_FAILURE_REASONS`: the two above, beside
-    exit 1; `BACKUP_FAILURE_REASONS`: RECEIPT-DUP's two). A Backup's log can
-    no longer lift a restore-only state onto a `Backup`, nor a Restore's a
-    backup-only one.
-  - **A controller lifts the pair only from the log's last two non-empty
-    lines**, in that order, keeps only names its own Restore's plan maps
-    (counts held to the plan's size), refuses a `target-topics-appeared=`
-    value longer than 76 KB before parsing it, and reads the last 256 lines
-    of the log. An older controller reads `appeared` and `left` from the same
-    line and ignores the rest; one older still reports a plain exit 1.
-  - **The runner prints every error text on one line**
-    (`logweir::exit::one_line`: every line-breaking code point becomes a
-    visible escape), so no plan-chosen or broker-chosen string can start a
-    line a controller reads by key. **What is NOT guaranteed:** the place
-    rule cannot tell the runner's own last lines from text an OLDER runner
-    image was made to print last, since stdout and stderr reach the pod log
-    as one stream. With such an image the names are shown as its log gives
-    them, held to the plan's own names; an operator checks them against the
-    cluster before acting ([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names-prod-151)).
-    The Kafka client's own stderr logging and the other lines a controller
-    reads by key (`refusal-reason=`, the evidence keys) are not covered by
-    this row.
-  - **Every stop of the step names what it may have left.** `left` is exactly
-    what the run's own `CreateTopics` answers say it created. A name it asked
-    for without a definite answer (the whole call failed, no answer for the
-    name, or an error other than "already exists") that the cluster lists
-    when the run looks again is `unconfirmed`: "exists now; this restore
-    asked the cluster to create it and got no definite answer, so it may be
-    this restore's or someone else's: check what it holds and who writes to
-    it before you remove it" — never `left`, never `appeared`. When the run
-    cannot list the cluster either, every such name is listed and the
-    sentence says "may exist now". The look is one read: a topic the broker
-    finishes creating after it is not named.
-  - **No code path deletes a topic under an original name**: a topic this run
-    created before it stopped is left in place, empty, and named with what to
-    do ("created by this restore and left empty; remove it yourself once you
-    have checked nothing writes to it"). Kafka has no conditional delete, so
-    any cleanup could lose a record a producer wrote between the check and
-    the delete. An inventory row over every source file of the workspace
-    (`crates/logweir/tests/no_topic_delete_inventory.rs`) pins that the one
-    broker delete call is the scratch-scoped deleter's and that the real
-    creator names none.
-- **An older runner refuses an original-name plan**: it ignores the
-  `original_name` block and sees an empty prefix, which maps every topic onto
-  itself, so its guard refuses the plan at phase 0 (exit 3) before anything is
-  written. An older controller ignores `topicNaming.originalName` and its
-  runner refuses the plan the same way.
-- **The `Restore` CRD** gains `spec.target.topicNaming.originalName`, allowed
-  only in `newTopic` mode with an empty prefix and only with `spec.coverage:
-  complete` (two CEL rules), and `status.targetTopicsAppeared` (three lists,
-  a count beside each, `unconfirmedSeen`; every field additive); rolling the
-  CRDs back prunes them from stored objects, whose plans are unchanged and are
-  then refused as above.
-- **What stays refused**: a name that exists, in any mode; an identity mapping
-  in a scratch drill; a target that may be the source cluster unless every
-  broker reports `auto.create.topics.enable=false`; a declarative owner found
-  unless the plan chose the owner path, and an owner looked for nowhere; a
-  sampled verification; a partition subset. Nothing — teardown, a lost race, a
-  stopped creation step — deletes a topic under its original name.
-
-### Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0: two-person approval in the console (PROD-16.2)
-
-- **The policy snapshot** gains `approverSignature: Console` as its last key,
-  only when set; every existing policy's bytes and digest are unchanged. An
-  older controller, console or runner refuses the key (`deny_unknown_fields`).
-- **Authorization document v2 2.2.0** adds `approver {issuer, subject}` and
-  `approvedAt`, both or neither. 2.0.0 and 2.1.0 documents are written byte for
-  byte as before; the DSSE payload type is unchanged. This build refuses
-  either field under a version before 2.2.0; an older reader refuses them as
-  unknown fields (the safer verdict).
-- **Scorecard 1.9.0 (format 1) and 2.1.0 (format 2)** add the optional
-  `approval.console` ([the format](formats/drill-scorecard.md#approvalconsole-format-190-and-210)),
-  written only for a run a second person approved in the console; arms CA-1 to
-  CA-8 read the block or hold an existing field against it, and can only
-  refuse (OD-7 (a) and its third case). `target.original_name.approval_mode`
-  gains the member `consoleApproval` from 1.9.0; ON-5 is split by version as
-  PROD-01.3 split `target.auth.mode`, so a 1.8.0 document is judged in the same
-  words as before. `-1.8.0.json` and `-2.0.0.json` are frozen; `-1.9.0.json`
-  and `-2.1.0.json` are generated. A partition-subset restore approved in the
-  console is allowed (2.1.0). An older `logweir drill verify` accepts a 1.9.0
-  document and prints `approval:  <issuer>#<subject> (<ticket>)` (no key id);
-  `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line;
-  a 1.28.0 reader refuses an original-name document naming `consoleApproval`
-  by its own ON-5; readers before 1.27.0 refuse a 2.1.0 document by its
-  major. No MAJOR.
-- **The approval-mode vocabulary is one set** (`logweir_core::scorecard`'s
-  constants); `docs/verify_scorecard.py` holds a copy that
-  `two_reader_parity.rs::the_approval_mode_vocabulary_is_the_same_set_in_both_readers`
-  holds to it member for member. `verify_scorecard.py` 1.29.0.
-
-### The product API's OpenAPI document is pre-release, and says so
-
-`schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
-only one the rule above does **not** cover. `info.version` is
-`1.0.0-alpha.2`: still pre-release, the state the scorecard left behind at
-v0.1.0. **Its consumers now exist** — the `logweir-console` image
-(`Dockerfile.console`) carries `logweir-api`, the chart deploys it under
-`api.console.*`, and the static console's typed client (PLAT-18.1) reads it —
-but the binary is still `publish = false` and no client outside this repository
-is supported. The owner decided on 2026-10-07 not to freeze it before the first
-release candidate: the `-alpha.N` suffix moves once per release candidate, and
-that candidate's release notes list the changes since the previous one. The
-freeze at `1.0.0`, after which the MINOR/MAJOR rule below applies verbatim,
-belongs to PROD-14.2, once the approval simplification (PROD-16) and the rows
-that change the API have merged. Until then the console and the API ship and
-upgrade together, and [release-notes.md](release-notes.md) says so.
-
-While that holds, adding, retyping or removing a field is a pre-release bump of
-the `-alpha.N` suffix and needs no maintainer approval — but it is never a
-silent edit, because two gates compare the checked-in bytes against the
-generator: `just schema-check` regenerates and `diff -u`s it (as
-`scripts/ci-check.sh` does), and
-`crates/logweir-api/tests/contract.rs::the_checked_in_openapi_document_is_what_the_types_generate`
-does the same comparison in-process. Regenerate with `just schema` and review
-the diff.
-
-The rule changes the day anything consumes it — the console image, the typed UI
-client (PLAT-18.1), or any client outside this repository. From then on the
-scorecard's rule applies verbatim: **adding an optional field is MINOR,
-removing or retyping one is MAJOR**, and the asymmetry decides what goes in. It
-is why `Operation` carries no `jobName`: PLAT-14.1 owns the final normalized
-operation mapping, and a field left out today costs a MINOR bump to add,
-whereas a field frozen in today costs a MAJOR bump to remove. Prefer the
-reversible direction until the owning task rules.
-
-## Known limitations of v0.1
-
-- **A drill posts no notification.** Its webhook, Slack and PagerDuty post
-  is withdrawn (release notes, item 74), and a plan that names a sink is
-  refused ([`docs/formats/drill-spec.md`](formats/drill-spec.md)). Alert on
-  the runner's metrics textfile or the `Restore`'s conditions instead.
-
-- **Backups and drills are separate commands.** `logweir backup run` captures
-  the source cluster and writes a signed backup receipt; `logweir restore run`
-  and `logweir drill run` consume an existing archive. The historical
-  `--from-cluster` flag is not implemented. See the [quickstart](quickstart.md)
-  and [backup receipt format](formats/backup-receipt.md).
-
-  A drill does not contact the source cluster: its scorecard has
-  `source.captured_by_logweir: false`, null
-  `measured.rpo_source_relative_seconds`, and
-  `rpo_source_relative_unmeasured_reason: "source cluster never contacted"`.
-  `last_phase_completed` never takes `-1`. The schema already reserves these
-  fields and validates their pairing; a separately created backup receipt
-  does not turn a drill's archive-relative RPO into source-relative RPO.
-
-- **The YAML parser is archived.** The drill spec and both rendered engine
-  documents are YAML, parsed by `serde_yaml` 0.9, which resolves to
-  `0.9.34+deprecated` — an archived crate (RUSTSEC-2024-0370). It is kept for
-  v0.1 deliberately: no alternative was evaluated, and swapping the parser under
-  the two renderers that Global Constraints 4 and 7 pin is not a release-week
-  change. **Revisit before v0.2.** `deny.toml` carries the matching `ignore`
-  entry and points here; this paragraph is what it points at, and it was missing
-  until 2026-09-05 — `deny.toml`'s comment claimed a sentence in this document
-  that did not exist.
-
-- **No musl release target.** `rdkafka` vendors and compiles `librdkafka` from
-  C, which does not cross-compile to musl without substantially more work than
-  v0.1 has ([ADR 0004](architecture.md#adr-0004-kafka-client)). This is not contradicted by
-  the `Dockerfile` cross-compiling to `x86_64-unknown-linux-gnu` and
-  `aarch64-unknown-linux-gnu`: each glibc target has a one-package Debian
-  toolchain and multiarch copies of every C library librdkafka wants, and musl
-  has neither. `release.yml` does not
-  attempt a musl build. Earlier tags carried a non-blocking attempt; it failed
-  in `openssl-sys`, which finds no musl OpenSSL on the runner, on every tagged
-  run (v0.1.1 through v0.1.5), so it was removed rather than kept as a
-  permanently failing job. No release ships a musl binary. Do not assume one.
-
-- **Release execution remains an evidence requirement.** The checked-in
-  [release checklist](tag1-checklist.md) records which release obligations are
-  blocked; [gates.md](gates.md) records dated workflow results. A local test
-  of workflow YAML does not prove that a published artifact was pulled and
-  executed. Update those records when the corresponding run is observed.
-
-  The runner release image is built once, checked with
-  `scripts/check-image.sh`, and those same bytes are pushed only after the
-  check succeeds. `crates/logweir/tests/workflow_lint.rs` tests that ordering.
-  The published digest and a locally built digest are different artifacts.
-
-- **The sample window in `examples/drill.yaml` is illustrative and will not
-  match your archive.** `sample.window_start` / `sample.window_end` name the
-  point-in-time range you are recovering to, so a checked-in example cannot
-  carry a correct one. A window that overlaps no segment is REFUSED with exit
-  1 — "a drill over an empty window would report a pass that means nothing" —
-  rather than reported as a pass over nothing. The e2e harness rebinds those
-  two fields at run time, and only those two.
-
-- **The exit-code contract is nearly invisible under Kubernetes** unless the
-  Job is shaped with `restartPolicy: Never` and `backoffLimit: 0`. Exit 2 ("a
-  drill ran and did not pass — a scorecard WAS signed") otherwise renders as a
-  generic `Error`, indistinguishable from exit 1 ("nothing ran, no artifact").
-  Full details, and the retry behaviour that is actively harmful, in
-  [kubernetes.md](kubernetes.md).
-
-- **A drill that verified correctly and could not clean up still exits `0`.**
-  Phase 9 deletes the scratch topics the restore created on your cluster, and it
-  runs *after* phase 8 has signed and uploaded the drill result. A broker that
-  refuses a deletion — `TOPIC_DELETION_DISABLED`, an ACL, a topic held open —
-  therefore leaves real topics on a real cluster on a run the exit code calls a
-  pass. What v0.1 guarantees is that it **says so**, on all three surfaces, on
-  the run that left them:
-  - the metric `logweir_drill_teardown_topics_failed{cluster}`, emitted on every
-    scorecard-carrying path, `0` included, so `> 0` is a valid alert
-    ([metrics.md](metrics.md));
-  - a `WARN` on that run's log naming every failed topic, carrying the run id as
-    a field on the event; and
-  - a clause on `drill run`'s summary line naming the count and the topics. A
-    clean run's line is unchanged.
-
-  The warning names the missing grant when the broker refused the deletion for
-  authorization (``the restore principal lacks `Delete` on topic `…` ``), and the
-  runner's `teardown-failed=` line puts each leftover topic on
-  `Restore.status.teardown.failed`. **A run that fails after its creation
-  step completed**, from phase 6 onwards (exit 1, 3 or 4), tears down what that
-  step created by phase 9's rule (scratch
-  mode, `teardown: delete`, never an original name), logs what it removed, and
-  names what it could not with the same warning and line. It signs nothing and
-  writes no attestation, as before (FX-44).
-
-  The signed teardown attestation
-  (`logweir/drills/{run_id}.teardown.json`) has always been honest about this —
-  a refused topic goes in `topics_failed` and never in `topics_deleted` — and
-  remains the durable record. **Whether a leftover topic should also change the
-  process exit code is an open question this release does not answer** (stage-2
-  ruling R-C): making it exit 4 would be a behaviour change after the result has
-  already been signed and uploaded, and it is deferred to its own decision
-  rather than made in passing. `teardown_failure_does_not_change_the_exit_code`
-  pins the current behaviour in both directions, so the question cannot be
-  answered by accident.
-
-  The same holds, with one surface fewer, for a teardown attestation that could
-  not be **persisted**: it is a `WARN` at the call site and nothing else, the
-  exit code is unchanged, and **the durable signal is the document's absence
-  from the bucket** — there is no metric for it in v0.1. An operator who wants
-  to detect it checks for the `.teardown.json` key beside each drill's
-  scorecard.
-
-- **Fixtures document more than the current writer emits.** Some scorecard
-  fixtures populate `engine_subreport`, which the current writer always sets
-  to null. Their `last_phase_completed` and zeroed evidence fields do match
-  runtime output. Keep these signed format examples and their pinned test keys;
-  [fixture notes](../e2e/fixtures/README.md) explain regeneration.
-
-- **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
-  `logweir-store`'s `Store::from_url`/`Store::read_only_from_url` build
-  the S3 client with `object_store` 0.14's `AmazonS3Builder::from_env()`,
-  which applies `object_store`'s OWN credential chain (static keys, then web
-  identity / IRSA, ECS, EKS Pod Identity, IMDS). That is **not** the AWS SDK
-  chain: `~/.aws/credentials` profiles, `AWS_PROFILE` and SSO are
-  unsupported. State it plainly here because an adopter discovering it at
-  drill time is a support ticket.
-
-- **MSRV is 1.89**, raised from 1.82 by `object_store` 0.14's aws/azure/gcp/http
-  feature set (Global Constraint 9 fixes that crate, version and feature set,
-  so the toolchain floor moves instead). Rust edition 2024, required by that
-  dependency tree's RustCrypto crates (`digest`/`crypto-common`/
-  `block-buffer`), is only supported starting rustc 1.85; several other
-  transitive dependencies (`crc-fast`, the `icu_*` crates, `idna_adapter`,
-  pulled in through `reqwest`) then raise the floor further to 1.89.
-
-- **Create-only evidence puts: MinIO and SeaweedFS are the S3-compatible
-  backends Logweir has repeatable rows for**
-  ([the support matrix's archive backends](support-matrix.md#archive-backends);
-  SeaweedFS 4.48 since PROD-01.2). Three facts follow, and they are stated
-  separately because only the second is verified here:
-  1. `object_store` 0.14 implements `PutMode::Create` on AWS S3 via the
-     conditional `If-None-Match` put.
-  2. MinIO and SeaweedFS 4.48 are the S3-compatible backends with a row in
-     this repository; RustFS and versitygw were each run once by hand
-     (PROD-01.5) and are untested by the matrix's definition. **Real AWS S3
-     is NOT exercised** — Global Constraint 17 forbids provisioning a
-     cloud resource, and no task in this plan supplies a bucket, a region or a
-     credential source. The AWS leg is `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` and is
-     confirmed by the first adopter run, not by this plan.
-  3. Any other S3-compatible backend that answers `NotSupported` (or
-     `NotImplemented`) to `PutMode::Create` takes the HEAD-then-PUT fallback in
-     `Store::put_create_only`, which reports `create_only_enforced: false` to
-     its caller. That fallback is not equivalent: between the HEAD and the PUT
-     there is a window in which a concurrent writer can create the object, so
-     it is a genuinely weaker guarantee, not a cosmetic difference. **The
-     signed scorecard does not distinguish the two cases** — it publishes
-     `create_only_enforced: false` either way, for the reason in the next
-     bullet — so the only way to know which path a given backend takes is to
-     test that backend, as MinIO was tested here.
-
-- **The signed scorecard's `evidence` block cannot establish upload facts.**
-  The scorecard is signed before upload. Logweir therefore zeroes the fields
-  that cannot yet be known:
-
-  ```json
-  "evidence": { "create_only_enforced": false, "immutable": false,
-                "retain_until": null, "version_id": null }
-  ```
-
-  These values mean no storage proof was available at signing time, not that
-  the object is mutable or unversioned. The post-upload readback is a separate
-  signed document:
-
-  ```text
-  logweir/drills/<run_id>.receipt.json
-  logweir/drills/<run_id>.receipt.sig
-  ```
-
-  The put receipt records `create_only_enforced`, `version_id`, `immutable`,
-  `retain_until`, observation time and `scorecard_sha256`, which binds it to
-  the exact scorecard bytes. Its payload type is
-  `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`.
-  A receipt upload failure is a logged warning and does not change the drill
-  result; a missing receipt means no storage evidence was published.
-
-  `object_store` 0.14 models no Object Lock/WORM readback API for the enabled
-  backends, so `Store::object_lock_readback` returns `None` and the immutable
-  fields remain unproven even for a bucket with Object Lock configured.
-
-### Controller image architecture and release evidence
-
-The shared image workflow records digests after native execution and registry
-verification. Main publication and versioned releases reuse it; check the
-exact Actions run before deploying a digest. The release checklist records
-evidence per candidate.
-
-The workflow builds `linux/amd64` and `linux/arm64` variants of all four
-images (the runner since PROD-00.2) on native runners, checks each variant,
-and assembles a manifest list after checking the resulting artifacts; a `sign`
-job then signs each list keylessly and attests the runner's SBOM and SLSA
-provenance ([install.md](install.md#verify-the-images)). The runtime supports
-`scripts/check-image-weirkeeper.sh --no-exec` for inspecting a foreign
-architecture without executing it.
-
-`Dockerfile.weirkeeper` refuses cross-compilation because its `aws-lc-sys`
-build reads host headers. A cross attempt failed on `sys/types.h` in the
-recorded 2026-09-11 trial; the native arm64 build took 182 s with cached base
-layers. These are historical measurements, not build-time guarantees.
-
-Local rebuilds change image digests. The runner pin in
-`crates/weirkeeper/src/job.rs` is a digest; the Helm chart uses `:latest` for the
-Logweir repositories by the owner's 2026-09-12 decision. Third-party chart
-images remain digest-pinned. See the [chart guide](../charts/logweir/README.md)
-for the pull-policy and registry consequences.
-
-### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
-
-`sample.anchor` chooses WHICH records in the sampled window a drill reconciles.
-The spec vocabulary is `head`, `tail` and `random`, and **v0.1 implements only
-`head`.** A plan naming either of the other two is REFUSED at phase 0 with
-**exit 3** — before anything runs, no scorecard written, nothing uploaded — and
-the message names the limitation.
-
-Why they are refused rather than run: phase 4 honours the anchor when choosing
-which ARCHIVE records to fingerprint, while phase 7 reconciles by reading the
-restored topic's FIRST `sample.records_per_partition` records. For `head` those
-are the same records. For `tail` and `random` they are not, so the drill would
-compare two different sets and report a healthy backup as a failure.
-
-The two are refused for different reasons, which matters if you are wondering
-how hard they are to add. `tail` is not expensive — reading the last N records
-of the target is a bounded read — it is **unsound**: the target's last N records
-are the last N of the RESTORED window, which match the archive's last N in the
-sampled window only if the restore wrote every in-window record contiguously,
-and that is the very property the drill is measuring. `random` is unsound in the
-same way and additionally unbounded, since reaching offsets spread across the
-window means reading the whole span between them. Measured on
-this repository's own compose stack (338 records per partition, 25 sampled):
-`random` overlapped in 2 offsets and scored `pass_rate_measured: 0.08` with
-`outcome: fail-integrity` against a byte-for-byte correct restore.
-
-Refusing is deliberate, and it is not the same as quietly substituting `head`:
-running a different sample than the approved plan named would make the signed
-scorecard record an anchor the drill never applied.
-
-**What to do:** set `sample.anchor: head`, or omit the field — `head` is the
-default. If you were relying on `random` to rotate coverage across runs, rotate
-the sampled WINDOW between drills instead; that varies which records are
-examined while keeping the anchor at `head`.
-
-An unrecognised spelling (`sample.anchor: sideways`) is a different failure: the
-spec does not parse, and the drill exits **1** naming the offending value. It
-can never degrade to head-like behaviour, because `anchor` is a closed enum
-rather than a free-form string.
-
-### A compacted target topic is reported as a mismatch, not as `partial`
-
-`integrity.result: partial` exists for a sample the drill could not fully
-examine, and a compacted topic — which legitimately holds fewer records than
-the archive — reads like the obvious case for it. **v0.1 does not classify it
-that way.** Distinguishing "compaction removed this record on purpose" from
-"the restore or the archive lost it" needs a specific mismatch cross-referenced
-against the target's `cleanup.policy`, and phase 7 does not attempt it. A
-compacted target is reported through the same path a real mismatch takes:
-`integrity.result: fail`, with the offsets logged.
-
-This is the safe direction — a drill over a compacted topic FAILS rather than
-passing — but it means you cannot run a meaningful drill against a compacted
-scratch topic in v0.1. Restore into a scratch topic with
-`cleanup.policy=delete`, which is what phase 6 creates by default.
-
-### A `newTopic` restore does not reconstruct the source's topic settings
-
-A restore creates every target topic itself, the same way in both modes: the
-manifest's partition count, the plan's `default_replication_factor` (1 when
-the plan names none), `retention.ms=-1`, `message.timestamp.type=CreateTime`,
-and the target broker's default for everything else, `cleanup.policy`
-included. That is what a scratch drill needs. For a `newTopic` restore — the
-recovery itself — it means the source's compaction, retention and replication
-factor are **not reconstructed**: a compacted source comes back as a
-delete-policy topic with infinite retention (nothing is deleted and nothing is
-compacted), and a replication-factor-3 source comes back at the plan's factor.
-The records are restored; these are the topic's settings.
-
-Since scorecard format 1.2.0 (FX-3) the signed scorecard says so: each such
-setting the archive's record shows is named in `topic_parity.not_reconstructed`
-and in `unexpected_divergence`, never in `intentionally_deviated`, and both
-readers print `reconstruction: source settings NOT RECONSTRUCTED for …`. A
-scorecard signed before 1.2.0 labels the same settings `intentionally_deviated`;
-in a `newTopic` document that label means not reconstructed, and both readers
-of this build say it.
-
-"Not reconstructed" means, until PROD-05.1 captures topic configuration with
-coverage and portability and PROD-05.2 applies a reviewed target configuration:
-
-- **Apply the source settings after the restore is verified**, never before:
-  `cleanup.policy` and `retention.ms` with `kafka-configs.sh --alter` (a
-  retention shorter than the restored records' age deletes them at the next
-  retention check), and the replication factor with a partition reassignment.
-  Logweir does neither.
-- **It covers only what the archive recorded.** The comparison reads the
-  configuration OVERRIDES the engine captured; a setting the source inherited
-  from its broker's defaults is not in that record and is never named, and a
-  topic whose configuration was not captured is in `not_assessed`
-  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-  The replication factor is compared from the manifest, else from the bound
-  receipt's `topic_configuration`, either way; where neither records one it is
-  named in `not_assessed` (FX-21,
-  [below](#a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21)).
-- **The partition count is reconstructed** — phase 6 creates the manifest's
-  count — so `partition_count` reaches `not_reconstructed` only if a topic
-  changes between creation and verification.
-- **A scratch drill is unaffected.** Its deviations are intended, as before,
-  and its scorecard says `not_reconstructed: []`.
-
-### `engine_subreport` is always null in v0.1
-
-The scorecard reserves `engine_subreport` for the upstream engine's own
-verbatim evidence report. **v0.1 never populates it.** Logweir never runs the
-engine's `validation run` subcommand (phase 7's unused call to it was removed
-in v1, release-notes item 74), so nothing is ever written under
-`logweir/<run_id>/engine-validation/` for phase 8 to retain — the field is
-simply `null`.
-
-The structured log explains the missing report. The signed scorecard cannot
-include that phase-8 warning because signing freezes its phase list before
-phase 8's own record is appended. Read null as "no engine sub-report retained",
-not as a successful upstream validation. Populated format fixtures are
-explained in the [fixture notes](../e2e/fixtures/README.md).
-
-`e2e/tests/full_drill.rs::the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
-records this limitation and fails when the implementation changes.
-
-### A crashed restore is not resumable in v0.1
-
-The rendered `restore.checkpoint_state` path is **pod-local and is never uploaded**. If the
-restore process dies mid-run, there is no checkpoint to resume from: the drill re-runs from
-phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
-imply resumability, and Logweir does not offer it in v0.1.
-
-### An archive holding transaction markers is refused unless the plan allows it
-
-The pinned engine captures with `READ_UNCOMMITTED` and archives transaction control records as
-ordinary records; the restore replays every archived record non-transactionally. A restored
-transactional topic therefore holds aborted records, records of transactions open at backup time,
-and one record per commit or abort marker, all visible to every consumer. Logweir does not claim
-transactional recovery. Measured by
-`e2e/tests/record_semantics.rs::transactional_topic_committed_input_versus_restored_output`
-([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)): seven
-markers and five aborted or open-transaction records came back as data, and the drill was signed
-`pass`.
-
-Since PROD-01.1a, before it creates anything on the target, a restore reads the selected
-partitions' segments that its window overlaps and every segment after the window's end (a marker
-there can close a transaction with records in the window; segments whose last record is before
-the window's start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
-`x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
-or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
-message names the topics, the partitions and the count. To restore such an archive as it is, state
-`restore.allow_transaction_markers: true` in the plan. The field is inside `plan_hash`, so the
-changed plan needs a new approval. Under the override the check is skipped, and the signed
-scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A standing
-authorization cannot state it either: a run under one whose plan states the override is refused as
-outside the signed scope, because no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
-the run with `GuardRefused`. A segment after the window that the store does not hold or the check
-cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
-output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
-a transaction closed there is not seen. Cost: the check reads each restored segment once more
-before the engine reads it, plus, for a point-in-time restore, every segment after the point: a
-restore of an old window reads the archive's tail after it. On a large archive that is about one
-more read of the selected partitions.
-
-The record's shape is the only signal: the check does not read the source. A record of your own
-with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, and the override gets
-past it. These cases are not detected, and their records are still restored as data: a
-transaction open at backup time whose marker is not in the archive, a transaction opened after the
-backup began, a transaction whose marker is in a segment after the window that could not be read
-(the note above says so), a transaction whose marker is in a segment whose last record is before a
-stated window start (out-of-order timestamps put it there, and the engine skips that segment too),
-and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
-
-### Recovery-point selection uses segment first and last timestamps
-
-The archive describes each segment by its first and last record timestamps, not its minimum and
-maximum, and both the engine's segment selection and Logweir's window floor and count bound read
-those. When record timestamps are out of order within a segment: a record older than every
-segment's first record is dropped from every restore of that archive, full or point-in-time — a
-full restore's drill fails its count check, and a point-in-time drill can pass (measured: the same
-archive at a point the affected segment straddles was signed `pass`); a point-in-time restore
-omits a record at or before the point when its segment's first record is after the point, and the
-drill passes; and a correct point-in-time restore fails the count check when a segment whose first
-and last records are inside the window holds a later record. Measured by three rows of
-`e2e/tests/record_semantics.rs`
-([decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment)):
-`non_monotonic_create_time_below_the_window_floor` (the dropped record, and both verdicts),
-`non_monotonic_create_time_skipped_at_the_point_in_time` (the omission, signed `pass`) and
-`non_monotonic_create_time_inside_a_wholly_inside_segment` (the correct restore signed
-`fail-integrity`).
-
-Since PROD-08.1 a plan can ask for **complete coverage** (`sample.coverage:
-complete`), which selects the expected output by each archived record's own
-timestamp and compares every restored record with it, so the same three rows
-read differently there: the skipped record and the record below the floor are
-reported missing and the restore is signed `fail-integrity` (at the point too),
-and the correct point-in-time restore is signed `pass`. The restores themselves
-are unchanged — the engine still selects by first and last timestamps, and the
-floor still drops the record — until PROD-01.1b. Measured by the same rows'
-complete restores
-([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
-
-### `LogAppendTime` sources are restored with the producers' timestamps
-
-For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
-producer set, not the broker's append time, and the restored topic reports it as `CreateTime`.
-Restored timestamps differ from what the source reported, and a point-in-time restore would select
-by the producers' clocks: in the measured case, a recovery point in 2001 restored records the broker
-appended in 2026, and the drill passed. Since FX-8 that point-in-time restore is refused unless the
-plan accepts it (the next section); a full restore still runs, and its drill passes. Measured by
-`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
-([decision record §2.3](to-do/decisions/PROD-01.1-record-semantics.md#23-a-logappendtime-source)).
-
-### A point-in-time over a `LogAppendTime` source is refused unless the plan selects by producer time
-
-Since FX-8, a restore whose plan selects records **by time** — it states `restore.point_in_time`,
-or its `sample.window_end` is earlier than the newest timestamp the archive manifest records for
-the topic — over a source topic whose timestamp type is **recorded** as `LogAppendTime` is refused,
-exit 3, `refusal-reason=PointInTimeByProducerTime`, after the archive is described and before any
-target topic is created. The message names each refused topic and the record that made it
-`LogAppendTime`: the archive manifest's topic override `message.timestamp.type=LogAppendTime`, or
-the effective value the bound, verified backup receipt recorded at backup time (FX-4's
-`config_coverage`; the only record of a broker-wide default). Phase 0 has run by then, so on a
-target broker whose own default is `LogAppendTime` its override probe has created and deleted one
-probe topic first ([the exit-3 exception](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)).
-
-A plan that states `restore.time_basis: producerTime`, approved with it (the field is inside
-`plan_hash`), runs, and its signed scorecard lists the topic under
-`source.time_basis.producer_time` ([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
-That is a restore **by the producers' clocks**, said in the signed document; it is not a restore by
-the broker's append time, which needs an archive that keeps it (PROD-00.3c).
-
-**Where nothing records the type, the restore runs and says so.** A plan bound to no receipt, a
-receipt from before format 1.1.0, or a backup whose configuration read failed records no
-effective type, and a topic without a manifest override then has none. Such a selection runs, and
-the scorecard lists the topic under `source.time_basis.not_recorded`: the clock it selected by is
-unknown. It is never read as `CreateTime` (rule 3: old evidence is never read as a stronger
-guarantee), and it is not refused, because that would stop every point-in-time restore of every
-archive written before FX-4, where a `CreateTime` topic's selection is right.
-
-Measured by
-`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output` (the topic-override
-arm: refused with no target topic, then run and labelled with the opt-in) and
-`e2e/tests/config_coverage.rs::fx8_a_broker_default_log_append_time_is_refused_from_the_bound_receipt`
-(the broker-default arm, and the same archive unbound reading `not_recorded`).
-
-### A repeated header key keeps one copy
-
-The pinned engine holds a record's headers as a map, both when it captures and when it restores.
-When a record carries the same header key more than once, only one copy is archived and restored:
-at the first copy's position, with the last copy's value, and the drill does not detect it. A
-record that already carried `x-original-offset` (a topic that was itself restored) keeps only the
-backup's own, so its earlier lineage is lost, and a drill that samples such a record fails.
-Measured by `e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`
-([decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
-
-### A broker outage during a restore can leave a partial target with duplicates
-
-The engine resends a produce whose acknowledgement it did not receive, and does not produce
-idempotently, so a lost acknowledgement duplicates that batch in the target. An outage long
-enough for the broker to re-register can also end the restore early: Logweir then exits 1 with no
-scorecard, and the partial target — duplicates included — remains. A stall longer than Logweir's
-own 20-second client timeout can also fail a restore whose target is complete. No measured fault
-run was signed `pass`, and none reached the drill's comparison either, so what the drill makes of
-a duplicated target was not measured. Measured by
-`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`, an `#[ignore]`d
-row that freezes the broker and runs alone with `--ignored`
-([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
-Since PROD-08.1, a duplicated target that DOES reach phase 7 is counted:
-complete coverage reports each repeated `x-original-offset` as a duplicate and
-fails the restore, and the sampled check fails a duplicate inside the head it
-reads (measured over a duplicated target on the real broker by
-`e2e/tests/record_semantics.rs::complete_coverage_over_faulted_targets_on_the_real_broker_and_archive`).
-
-### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
-
-Logweir dials a cluster with **two different clients**, and a SCRAM adopter
-configures both.
-
-1. **Logweir's own client** is librdkafka (`rdkafka`, the `ssl` and `sasl`
-   features). It sets `security.protocol` to `SASL_SSL` when `auth.tls` is true
-   and `SASL_PLAINTEXT` otherwise, with `sasl.mechanism: SCRAM-SHA-512`.
-2. **The engine's client** is `kafka-backup`'s own, driven by the
-   `security:` block Logweir renders into `backup.yaml`, `restore.yaml` and
-   `validation.yaml` — `security_protocol`, `sasl_mechanism`, `sasl_username`,
-   `sasl_password`.
-
-**The trust stores are separate, and this is Global Constraint 29.** The
-engine falls back to bundled `webpki-roots` unless `ssl_ca_location` is set
-[U:crates/kafka-backup-core/src/kafka/tls.rs:22-23,126-129]; Logweir's rdkafka
-path uses the runtime image's `ca-certificates`. Since PLAT-07.1 a **private-CA
-adopter configures one thing**: `KafkaCluster.spec.auth.tlsCa` on Kubernetes, or
-`LOGWEIR_SOURCE_TLS_CA_FILE` / `LOGWEIR_TARGET_TLS_CA_FILE` for a standalone
-run. The runner hands that one file to both clients — librdkafka's
-`ssl.ca.location` and the engine's rendered `ssl_ca_location` — so the two
-cannot disagree ([kubernetes.md](kubernetes.md) §20.2). (Tag 1 rendered no
-`ssl_ca_location`; that sentence described v0.1 and no longer describes this
-build.)
-
-**Use each client's mechanism spelling.** librdkafka expects
-`SCRAM-SHA-512`; the engine's YAML parser expects `SCRAM-SHA512`. The engine
-keys must be nested under `security:`, not directly under `source` or
-`target`. A wrong spelling fails parsing; wrongly nested keys trigger the
-engine's unknown-key warnings, which Logweir rejects. The rendering tests in
-`crates/logweir-engine-oso/tests/render_scram.rs` cover both requirements.
-
-**The password is never in a spec, a plan, a rendered document, a receipt or a
-plan hash.** It is projected into the runner's environment as
-`LOGWEIR_SOURCE_PASSWORD` (source/backup) or `LOGWEIR_TARGET_PASSWORD`
-(target/restore); the rendered documents carry the literal
-`sasl_password: ${LOGWEIR_*_PASSWORD}` and the engine substitutes it out of its
-own process environment. There is **no CLI flag** for it, at any command.
-
-The credential failure modes are:
-
-- An unset password variable exits **1** before the engine starts.
-- Newline, carriage return, double quote, single quote or `$` exits **3** with
-  `refusal-reason=CredentialNotRenderable`. Errors name the variable and
-  character class, never the password. The pinned engine currently expands
-  variables in one pass, but `$` remains refused across future engine changes.
-- The placeholder expands into an unquoted YAML plain scalar. A space before
-  `#`, a `: ` sequence or a leading flow indicator can cause a parse error or
-  truncate the password and fail authentication. Newline refusal prevents
-  inserting another YAML key. Double-quoting would introduce backslash escape
-  interpretation, so the renderer does not use it.
-
-**Local SCRAM has end-to-end coverage.** The compose stack includes
-`SASL://kafka-broker-1:9096`, `SASLEXT://localhost:9097` and `scram-setup`.
-`e2e/tests/scram.rs` tests successful and incorrect-password authentication
-through librdkafka, backup through the engine's own client, and a full drill.
-Run these with `just e2e`; the default offline suite does not dial the stack.
-
-**MSK-specific behavior remains [UNVERIFIED — needs an MSK cluster].**
-MSK's TLS endpoints and Secrets Manager credential projection require a real
-MSK run. Local SASL_PLAINTEXT tests do not establish private-CA or MSK TLS
-compatibility. MSK IAM / OAUTHBEARER remains unimplemented; the
-[compatibility contract](support-matrix.md#the-compatibility-contract) records
-that distinction, and every managed provider there is untested or
-unsupported. SCRAM-SHA-512 over TLS, the mode MSK's SCRAM endpoint needs, has
-no repeatable local row either.
-
-### The unit suite dials nothing; the e2e suite dials
-
-The default `cargo test --workspace` suite must not contact a broker, bucket,
-cluster or webhook. `just time-unit-suite` enforces 120 s for the whole suite
-and **15 s for any individual test**; it refuses while ports 9092 or 9000
-answer. Use `just e2e` separately for tests that need the compose stack.
-[The gate reference](gates.md) describes all checks and prerequisites.
-
-A refused address is not a fast test double: librdkafka retries for its fixed
-20 s metadata timeout even when the endpoint is unreachable. Use a
-`ClusterReader` double in the default suite. Likewise, S3 configuration with
-no credentials can fall through to IMDS at `169.254.169.254`; test storage
-classification through the pure evaluator and reserve real clients for e2e.
-The source audit in `no_network_in_unit_tests.rs` complements the timing gate.
-
-Run mutation tests in an isolated worktree with a disposable target directory:
-
-```bash
-just mutant "test --workspace --lib doctor"
-just mutant-clean
-```
-
-`just deps-count` fails above 50,000 files in `target/debug/deps` and prints
-the count on each run. This guards against accumulated mutation artifacts
-making Cargo's fingerprint checks dominate test time.
-
-**Image smoke checks require Docker.** `just smoke` builds the runner image
-for `$LOGWEIR_IMAGE_PLATFORM` (this host's architecture by default) and checks
-both binaries' architecture, dynamic linkage, versions, the engine's declared
-identity, approval signing and license files. It does not contact an archive
-or broker. The runner builder executes natively and cross-compiles Rust,
-Logweir's and the engine's, for the image's platform; only foreign
-runtime-stage commands use emulation. Measured on the arm64 development host
-for PROD-00.2 (cold, 8 CPUs given to Docker): the engine stage alone 767 s,
-with its `cargo build` 8 min 31 s natively for arm64.
-
-Historical development-host measurements (2026-09-09, arm64): the runner's
-cold builder took 121 s, including a 92.1 s Cargo layer; a cached rebuild took
-4 s, and the direct image check took 2 s. The former emulated Cargo layer
-took 3027 s, **33x** the native cross-compile. Cache state, dependency changes
-and host load change these figures; they are not release budgets.
-
-## Measured scale limits (PLAT-20.2)
-
-These are the sizes the product bounds itself to, and what working at those
-sizes was measured to cost. The bounds are contracts; the milliseconds are one
-machine's measurements and are **not** budgets.
-
-**The bounds.**
-
-| Surface | Bound | Beyond it |
-|---|---|---|
-| Topic discovery | `maxTopics` 20,000 by default, 50,000 installation ceiling (`hardMaxTopics`); chunks of 2,500 names / 768 KiB, at most 64 | the inventory is `truncated: true` with `MaxTopics` or `RelayLimit` ([kubernetes.md](kubernetes.md) §7c) |
-| The topics of one backup (FX-33) | **1,000 topics**, named or resolved, at a budget of **5,000 bytes a topic** in the receipt: a receipt of at most **5,131,072 bytes** and a catalog record of at most **6,131,072 bytes**. A dynamic selection is also at most 256 KiB of names. This was 5,000 resolved names, and unbounded for a named list | refused before the engine runs, by name (`BackupSelectionTooLarge`; a dynamic selection's `Backup` is `SelectionTooLarge`); nothing is left out to fit. Split the selection across schedules ([kubernetes.md](kubernetes.md) §7b.5) |
-| Catalog view (history from an archive) | the newest `spec.sync.viewLimit` points, 100–5,000, in at most 8 page `ConfigMap`s | counted and histogrammed over the whole archive, `truncated: true`; the rest is `logweir catalog list` against the archive (§7d) |
-| Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
-| API list page | 200 objects | follow `nextCursor` |
-| Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
-| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per namespace (`runs.*`); scheduled runs and rehearsals not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([kubernetes.md](kubernetes.md) *Manual runs may queue*) |
-| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per namespace per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
-
-**How it was measured.** Offline and in process, with no cluster: the product
-API's real router over its strict in-process fake API server (so each figure
-includes that fake's JSON encoding, and excludes network latency, etcd and a
-real API server's own cost), the controller's and the runner's pure discovery
-steps over synthetic inventories, and the console's own render functions in
-node. The harnesses are checked in and re-runnable:
-
-```bash
-cargo test --release -p logweir-api  --test scale -- --ignored --nocapture --test-threads=1
-cargo test --release -p weirkeeper   --test scale -- --ignored --nocapture --test-threads=1
-cargo test --release -p logweir-kafka --test scale -- --ignored --nocapture --test-threads=1
-MEASURE_ROWS=5000 MEASURE_TOPICS=5000 node scripts/plat18-2-measure.mjs
-```
-
-Recorded 2026-09-23 at `306cebf` plus the harness commit, release builds, on an
-Apple M4 (10 cores, 32 GiB, macOS 26.6.2), rustc 1.89.0, node 25.6.1, on a host
-shared with other builds (load average 4–7 throughout). Medians of five runs
-(Rust) or seven (node); a walk reports every request.
-
-| What | Size | Result |
-|---|---|---|
-| Runner: assemble an inventory from the broker's listing | 10,000 / 20,000 / 50,000 topics | 4.1 / 8.2 / 18.1 ms |
-| Controller: decode and verify the relay | 10,000 / 20,000 / 50,000 topics (0.55 / 1.1 / 2.8 MB) | 3.1 / 4.2 / 10.2 ms |
-| Controller: split into chunks, and index them | 10,000 / 20,000 / 50,000 topics (4 / 8 / 20 chunks) | 2.2 / 3.3 / 8.1 ms; index < 0.01 ms |
-| Controller: classify a dynamic selection (10 exact, 5 prefix exclusions) | 10,000 / 20,000 / 50,000 topics | 0.6 / 0.9 / 2.1 ms |
-| API: page a stored inventory at 200 | 10,000 topics (51 requests) / 50,000 (251) | median 0.40 / 0.42 ms per page, max 0.83 ms; at most 2 chunk reads a page |
-| API: a search that matches nothing | 10,000 topics / 50,000 topics | 1 request, 2.7 ms, 4 chunk reads / 3 requests, median 5.6 ms, 8, 8 and 4 chunk reads |
-| API: walk the largest catalog view at 200 | 5,000 points in 8 pages, no `Backup`s (26 requests) | median 12.3 ms, max 20.3 ms, 311 ms in all |
-| API: the same, beside 2,000 `Backup`s for the verdict join | 26 requests | median 26.9 ms, max 35.8 ms, 687 ms in all; 4 `LIST`s a request |
-| API: walk the console's list budget at 200 (status load) | 5,000 `Backup`s / 5,000 `Restore`s (25 requests each) | median 6.2 / 6.0 ms, max 7.1 ms; one `LIST` a page |
-| API: one operation read among 5,000 `Backup`s | — | median 0.05 ms |
-| Console: render the history list | 1,000 rows / 5,000 rows | 8.7 / 23.7 ms (2.9 MB of markup at 5,000) |
-| Console: render the backups list | 1,000 / 5,000 rows | 5.7 / 20.9 ms |
-| Console: restore wizard with a point's frozen topics | 2,000 / 5,000 topics | topic subset 5.7 / 18.9 ms; whole wizard 9.8 / 27.9 ms |
-
-**What the numbers say.** Nothing measured here is near a budget the product
-has: the discovery steps are milliseconds against a discovery Job's
-300-second deadline, and every API request stays in tens of milliseconds at the
-largest size the product will page. Two shapes are worth knowing:
-
-- **A catalog point page re-reads its view from the first page.** The cursor
-  is a row offset, so a request deep into the view parses and digest-checks
-  every page before it, and walking a whole 5,000-point view costs about as
-  much as 13 full reads of it. It is bounded — a request never reads more than
-  eight pages — and the `Backup` verdict join, not the view, is the larger
-  cost. A page-and-line cursor (the inventory route's shape) would make each
-  request constant; it is not needed at these sizes.
-- **A walk ends with one empty page when the total is an exact multiple of the
-  page size** (26 requests for 5,000 points, 51 for 10,000 topics): the route
-  cannot tell that the row filling a page was the last one.
-
-**Not measured here:** a real API server and network, browser layout and paint
-(the console's datagrid shows one page at a time; PLAT-18.2 timed Chromium
-separately), the broker's metadata round trip, and a catalog sync's walk of an
-archive in object storage, which is storage-bound and needs a bucket.
-
-**Measured live, on docker-desktop (2026-09-24, PoC install, main `86a554e6`).**
-The same surfaces through the real path — Traefik, TLS, the console's two
-replicas, the Kubernetes API server, the demo MinIO — over an archive of **258
-real points** (one schedule's runs, two topics each; the host could not sustain
-more, below). One machine, not budgets:
-
-| What | Measured |
+| Drill scorecard | 1.0.0–1.9.0, 2.0.0, 2.1.0 | [formats/drill-scorecard.md](formats/drill-scorecard.md#versions) |
+| Backup receipt | 1.0.0–1.8.0 | [formats/backup-receipt.md](formats/backup-receipt.md#versions) |
+| Consumer positions document | 1.0.0 | [formats/backup-receipt.md](formats/backup-receipt.md#two-documents-the-receipts-summary-and-the-positions-document) |
+| Catalog point record | 1.0.0–1.7.0 | [formats/catalog-point.md](formats/catalog-point.md#versions) |
+| Put receipt, teardown attestation | 1.0.0 | [verify-a-scorecard.md](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
+| Approval document v1, authorization document v2 (2.0.0–2.2.0), standing rehearsal authorization (1.0.0, 1.1.0) | as listed | [formats/approval-documents.md](formats/approval-documents.md) |
+| Protection event (unsigned, no longer written) | 1.0.0 | [formats/protection-event.md](formats/protection-event.md) |
+
+### Format policy
+
+`format_version` in the signed scorecard, the put receipt, the backup receipt
+and the catalog point is semver, and so is the standing authorization's
+`formatVersion`. A **minor** bump adds optional fields only — existing readers
+keep working by ignoring what they don't recognise. A reader **ignores unknown
+fields** on a document whose major matches what it supports, and **refuses** a
+document whose major is higher than it supports, rather than guessing at a
+shape it has never seen. Two documents refuse unknown fields instead: the
+authorization document v2, whose older readers refuse a newer minor's field
+(the safer verdict, [the format](formats/approval-documents.md#the-authorization-document-v2)),
+and the protection event, which is no longer written (release notes, item 74).
+
+### Where the per-version sections went
+
+This page carried one section per format version until v1. Each is now a row
+of its format's Versions table:
+
+| Section before v1 | Now |
 |---|---|
-| Catalog `Full` sync, create → `Synced` | 58.5 s (the sync Job 53 s); 258 of 258 `Available` and `Verified`, one page, not truncated |
-| Topic discovery, start → result | 27.0 s fresh (a check Job); 0.1 s when a fresh identical result is reused |
-| `GET …/backups`, every page (limit 200) | 258 rows in 2 pages, 3.0 s, 276 KB |
-| `GET …/catalogs/{name}/points`, every page | 258 rows in 2 pages, 6.6 s, 228 KB |
-| Schedule detail | p50 123 ms, max 220 ms (10 reads) |
-| Operation status of one run | p50 71 ms / p95 222 ms one at a time; p50 54 ms / p95 116 ms eight at a time (100 reads in 0.8 s) |
-| Session, namespaces, destinations, protection, catalog reads | p50 15–33 ms |
-| Console render in Chromium (viewer) | backups list 1.5–2.0 s, history 0.8–1.4 s, schedule detail 1.8–2.1 s, catalog detail 0.7–1.0 s |
+| <a id="the-first-post-tag-addition-format-110-fx-4"></a>The first post-tag addition: format 1.1.0 (FX-4) | [scorecard](formats/drill-scorecard.md#versions), [receipt](formats/backup-receipt.md#versions) and [catalog point](formats/catalog-point.md#versions) 1.1.0 |
+| <a id="format-120-fx-3-what-a-newtopic-restore-did-not-reconstruct"></a>Format 1.2.0 (FX-3) | [the scorecard's `not_reconstructed`](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120) |
+| <a id="scorecard-format-130-sourcetime_basis-fx-8"></a>Scorecard format 1.3.0 (FX-8) | [`source.time_basis`](formats/drill-scorecard.md#sourcetime_basis-format-130) |
+| <a id="scorecard-format-140-integrityverification-prod-081"></a>Scorecard format 1.4.0 (PROD-08.1) | [`integrity.verification`](formats/drill-scorecard.md#integrityverification-format-140) |
+| <a id="receipt-and-catalog-point-format-130-topic_configuration-prod-051"></a>Receipt and catalog point 1.3.0 (PROD-05.1) | [`topic_configuration`](formats/backup-receipt.md#topic_configuration--the-topic-configuration-model-format-130) |
+| <a id="three-new-auth-modes-receipt-and-catalog-point-140-scorecard-150-prod-013"></a>Three new auth modes (PROD-01.3) | the receipt's [1.4.0](formats/backup-receipt.md#versions) and the scorecard's [1.5.0](formats/drill-scorecard.md#versions) rows; [credential binding](kubernetes.md#credential-binding) |
+| <a id="scorecard-format-160-sampleunsampled_topics-and-a-stricter-sampled-check-fx-23"></a>Scorecard format 1.6.0 (FX-23) | [`sample.unsampled_topics`](formats/drill-scorecard.md#sampleunsampled_topics-format-160) |
+| <a id="a-source-replication-factor-the-archive-does-not-record-is-not-assessed-fx-21"></a>A source replication factor the archive does not record (FX-21) | [`topic_parity`](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means) |
+| <a id="scorecard-format-170-sourceselection-a-restore-from-a-stated-window-start-prod-111"></a>Scorecard format 1.7.0 (PROD-11.1) | [`source.selection`](formats/drill-scorecard.md#sourceselection-format-170-and-200) |
+| <a id="scorecard-format-200-a-partition-subset-restore-prod-111b-the-first-major"></a>Scorecard format 2.0.0 (PROD-11.1b) | [format 2.0.0](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a) |
+| <a id="receipt-and-catalog-point-format-150-schema_dependency-prod-030"></a>Receipt and catalog point 1.5.0 (PROD-03.0) | [`schema_dependency`](formats/backup-receipt.md#schema_dependency--does-a-restore-need-a-schema-registry-format-150) |
+| <a id="receipt-and-catalog-point-format-160-the-topics-id-before-and-after-the-engine-prod-014a"></a>Receipt and catalog point 1.6.0 (PROD-01.4a) | [`generations`](formats/backup-receipt.md#generations--the-topics-id-before-and-after-the-engine-format-160) |
+| <a id="receipt-and-catalog-point-format-170-consumer_positions-prod-041"></a>Receipt and catalog point 1.7.0 (PROD-04.1) | [`consumer_positions`](formats/backup-receipt.md#consumer_positions--consumer-position-evidence-format-170) |
+| <a id="receipt-format-180-source_watermarks-and-the-empty-capture-prod-021"></a>Receipt format 1.8.0 (PROD-02.1) | [`source_watermarks`](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180) |
+| <a id="scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151"></a>Scorecard format 1.8.0 (PROD-15.1) | [`target.original_name`](formats/drill-scorecard.md#targetoriginal_name-format-180), [the approval subject](formats/approval-documents.md#the-per-run-approval-document-v1), [restoring under the original names](kubernetes.md#restoring-under-the-original-topic-names) |
+| <a id="scorecard-190-and-210-authorization-document-220-two-person-approval-in-the-console-prod-162"></a>Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0 (PROD-16.2) | [`approval.console`](formats/drill-scorecard.md#approvalconsole-format-190-and-210), [the authorization document](formats/approval-documents.md#the-authorization-document-v2) |
+| <a id="the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"></a>The standing rehearsal authorization | [formats/approval-documents.md](formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110) |
+| <a id="logweir-notify-delivers-exit-codes-and-its-notify-result-lines-plat-142"></a>`logweir notify deliver` (PLAT-14.2) | withdrawn in v1 (release-notes item 74): clap refuses the subcommand |
+| <a id="refusal-detail-carries-a-guard-refusals-reason-code-and-sentence-fx-34"></a>`refusal-detail=` (FX-34), and the other runner output contracts (I8, the progress channel, `teardown-failed=`, `teardown-key=`, `logweir check run`, `logweir-retention`) | [reference.md](reference.md#runner-output-lines); the mixed-version rules [below](#mixed-versions) |
 
-**What limited the archive's size is the host, and one product gap.** Every
-run and every evidence read is its own pod of the `linux/amd64` runner image
-(the runner had no arm64 variant before PROD-00.2), which docker-desktop on
-Apple silicon ran under emulation: an evidence fetch
-took 78 s at the median (p90 167 s), four at a time per namespace
-(`checks.maxEvidenceFetchActivePerNamespace`), so verification drained at about
-two runs a minute. **Nothing bounded manual "Back up now" in that build**
-(`86a554e6`); since release-note item 15 (P10, [release-notes.md](release-notes.md))
-at most `runs.maxManualBackupsActivePerNamespace` (default `4`) manual `Backup`s
-run at once per namespace, the rest wait `Queued`, and the console answers
-`429` past 10 "Back up now" requests per person, per namespace, per minute. On
-that build a hundred accepted
-requests became a hundred simultaneous runner pods, which hit the node's
-110-pod limit, turned the node `NotReady` and drew MinIO `503 SlowDown` on
-evidence reads; even at sixteen pods in flight the node went `NotReady` again.
-Seed a large archive at a pace the cluster sustains, or on nodes that run
-`amd64` natively. [UNVERIFIED — a 1,000-point archive was not reached live; 258 points were measured, and the offline rows above carry the 5,000-row bounds.]
+## The product API's OpenAPI document is pre-release, and says so
 
-**The regression checks are on work, not time.** A wall-clock assertion on a
-shared CI host is a flaky test, so `crates/logweir-api/tests/scale.rs` asserts
-the bounds above instead, in the default suite: a point page reads the catalog
-once, at most 8 page `ConfigMap`s and at most 4 `Backup` pages however large
-the view and the namespace; a topic search reads at most 8 chunks even when it
-matches nothing in 50,000 topics; and walking the console's 5,000-row budget is
-one bounded `LIST` per page with no per-item read. Each was shown to fail when
-its bound is removed.
+`schemas/logweir-api-v1.openapi.json` is the one checked-in schema the rule
+above does **not** cover. `info.version` is `1.0.0-alpha.2`. Its consumers are
+the console image and its typed client (PLAT-18.1); the binary is
+`publish = false`, and no client outside this repository is supported, so the
+console and the API ship and upgrade together. The owner decided on 2026-10-07
+not to freeze it before the first release candidate: the `-alpha.N` suffix
+moves once per release candidate, whose release notes list the changes; the
+freeze at `1.0.0`, after which the MINOR/MAJOR rule applies verbatim, belongs to
+PROD-14.2. Until then a field change is a pre-release bump that needs no
+maintainer approval, but never a silent edit: `just schema-check` and
+`crates/logweir-api/tests/contract.rs::the_checked_in_openapi_document_is_what_the_types_generate`
+compare the checked-in bytes with the generator (regenerate with `just schema`).
+Adding an optional field is MINOR and removing or retyping one MAJOR, so prefer
+leaving a field out (it is why `Operation` carries no `jobName`).
 
-## Recorded rulings that have no ADR yet
+## The CLI, and what is not a contract
 
-### A `Backup` frozen against a saved destination is REFUSED by an older controller, not run
+- **CLI flags and exit codes are stable within a major.** A given Logweir major
+  version does not remove or repurpose a flag, nor change the meaning of an
+  exit code, without a major bump. New flags and new exit codes may be added in
+  a minor. The exit codes are in [reference.md](reference.md#exit-codes).
+- **Explicit non-contracts.** The Rust crates in this workspace
+  (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
+  `logweir`) are **not** a stable API before 1.0. Only the signed document
+  formats and the `logweir` CLI's flags and exit codes are covered by the
+  promises above; internal crate APIs may change in any release before 1.0.
 
-A `Backup` that names `spec.destinationRef` freezes a `destination` block into
-its immutable `execution-inputs.json`. Every struct in that grammar is
-`deny_unknown_fields`, so a controller rolled back to a release that predates
-destination-backed execution **refuses such a run** rather than executing it.
+## Mixed versions
 
-That is deliberate and it is the safe direction: an older controller cannot
-render the complete explicit `AWS_*` set the frozen block describes, so running
-the plan would address the store with whatever happened to be in the
-controller's own environment — which is the defect saved destinations exist to
-close. The same rollback also meets the sentinel `archive.url`
-(`logweir-destination://<name>`), which the old `storage_url_for` refuses as an
-unknown scheme, so the run ends terminally as `ArchiveUrlUnreadable` before any
-POST.
+A controller and its runner image are one rollout: `helm upgrade` of the
+packaged chart moves both (`controllerImage` and `runnerImage` are rendered
+into one Deployment). These are the rules for the times they differ.
 
-**Planning a downgrade:** let destination-backed runs reach a terminal phase
-first, or expect them to end `Failed` with that reason. Nothing is written to
-the wrong place either way, and legacy inline-`archive` objects are unaffected.
-See `docs/kubernetes.md` §7b.3 and §10.
+### The runner image must be at least as new as the controller
 
-### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
+The controller passes `--line-token` to every `Restore` and `Backup` Job it
+creates ([refusal detail](reference.md#refusal-detail)). **A runner that does
+not know the flag is not supported under this controller.** It stops while
+parsing its arguments, before any work: exit 1, stdout empty, and stderr
+opening with `error: unexpected argument '--line-token' found`. The object says
+`exitCode: 1`, `exitReason: operational` and names no cause. This is EVERY
+runner image published before this change, the images published from `main`
+since `v0.2.0-rc.1` included, and not only an older release. No tagged
+release's runner loses a working run to it: since PROD-00.2 (release-notes
+item 35) a runner image published before that change declares no engine, the
+controller gives it none, and its runs already stop at exit 1 before the engine
+starts. The execution-contract version is not what refuses anything here: it is
+`"2"` in `v0.2.0-rc.1` and now. To roll back, move both together or the
+controller first. (A Job a controller had created before the upgrade has no
+token and its run is unaffected.) What it looks like and what to do are in
+[the guide](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
 
-Exit 3 means "refused by a guard, before anything runs", and there is exactly one write that
-happens before the approval is verified: on a target broker whose effective
-`log.message.timestamp.type` is `LogAppendTime` — and only then — phase 0 creates the first mapped
-target topic with `message.timestamp.type=CreateTime`, reads the value back, and deletes the topic
-again on both branches. The reason it is a write and not a read is that no read answers the
-question: whether a broker on `LogAppendTime` honours a per-topic `CreateTime` override is a
-property of the broker, so the only way to find out is to ask this one, and getting it wrong means
-every restored timestamp is silently replaced by the restore's wall clock. The probe is confined to
-the drill's own scratch namespace (`TopicDeleter` refuses every name outside
-`target.topic_mapping_prefix`), it runs only after phase 0 has established that no mapped target
-topic exists, so the name it creates was free, and it is deleted before any verdict is returned —
-but on a `LogAppendTime` broker an exit-3 run has therefore created and deleted one topic, and this
-sentence is the record of it.
-
-Since FX-4 a target whose broker configuration phase 0 may not read is exit 1 before the probe.
-Before, rust-rdkafka answered the refused read as an empty configuration, phase 0 took the Apache
-default `CreateTime`, and the probe was skipped
-([the ruling](#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
-
-Since FX-18 phase 0 reads the probe's value back, and creates each target
-topic, only once the cluster serves the topic: it waits, bounded, until every
-partition has a leader that answers, and a topic still not served at the bound
-is exit 1 naming it, never a pass and never a guessed value.
-
-### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
-
-A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&
-timestamp <= end`, so a record whose timestamp equals `restore.point_in_time` exactly **is**
-restored when the engine reads its segment (see the end of this ruling).
-The `BackupReceipt`'s covered range is half-open in the other direction: `covered.from_ms`
-is the oldest segment's inclusive start and `covered.to_ms` is the newest segment's end **plus one
-millisecond** (`backup/phase_run.rs`), so it is the first instant the archive does *not* cover.
-Copying a `covered.to_ms` into a `restore.point_in_time` therefore names an instant the archive
-does not cover, and the restore readiness check's `archive.coverage` refuses it
-(`PointInTimeAfterCoverage`, `oldest < point_in_time <= newest`); so does a `point_in_time` equal
-to `covered.from_ms`, a window of one instant (`PointInTimeBeforeCoverage`). The console therefore
-offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-PIT-EXCLUSIVE),
-while treating `point_in_time` as exclusive would silently drop the boundary record. Both
-documents' floors are the minimum segment start over the topics that document names, so a
-receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
-same topics — unless the plan states its own inclusive start, `restore.point_in_time:
-"<start>/<end>"` (PROD-11.1), which must be at or after that floor (a start before it is refused,
-never moved to it) and is signed in `source.selection`. Both rules apply to the records the engine reads: it selects segments by their first
-and last record timestamps, and a segment's start is its first record's timestamp, not its
-minimum, so with out-of-order timestamps a record at or before the point can sit in a segment that
-is never read, and a record older than every segment's first record is below every floor — see
-[Recovery-point selection uses segment first and last timestamps](#recovery-point-selection-uses-segment-first-and-last-timestamps).
-
-### Interface I8's third stdout line is CONDITIONAL: `offset-report-key=` is present exactly when the engine wrote a report
-
-A `logweir restore run` (or its `drill run` alias) that signed a scorecard — a pass at exit 0, and
-a drill result that did not pass at exit 2 (see the amendment below) — prints its evidence keys as
-the last lines of stdout, in this order:
-
-```
-scorecard-key=logweir/drills/<run_id>.json
-sidecar-key=logweir/drills/<run_id>.sig
-offset-report-key=logweir/drills/<run_id>.offsets.json
-```
-
-**The third line is present exactly when the run completed a restore AND the engine wrote its
-offset-mapping report to the path the plan named.** The engine writes that file only from a
-completed restore, and its own write failure is a warning rather than an error, so a restore that
-finished can legitimately leave nothing at the path. When that happens `phase8_score` records no
-offset-report key or digest in the signed scorecard, uploads nothing, emits a `tracing::warn!`
-naming the run, the path and the error — and the run still **exits 0 with two key lines**. It is
-not a finding: exits 1, 3 and 4 write no artifact at all by contract (and print no key line), and a
-scorecard whose
-`evidence.offset_report_*` pair is absent is a well-formed 1.0.0 document that both readers accept
-(the pair is present-or-absent together, never half of one).
-
-**So a reader must scan for a key by NAME and treat the third as optional** — never take "the third
-line from the end", and never treat its absence as an error. That is the same rule plan erratum E4
-draws for `refusal-reason=`: a pod log is stdout and stderr merged in nondeterministic order, so
-every reader in this project scans a bounded tail and matches by key name
-(`KEY_SCAN_TAIL_LINES = 16`, `controllers::backup::evidence_keys`). It was 8
-until D3 W2 raised it: contract v2's `teardown-key=` line left a passing
-restore at seven of the eight, and because the scan matches by key NAME an
-overrun is a silently absent status field rather than an error. The window is
-now a budget with its margin written down — see `docs/kubernetes.md` §10.
+The other directions: a new runner under an older controller prints the line
+without a token, and the older controller ignores it; a code the controller
+does not know is not shown, while the state on `refusal-reason=` and the exit
+code are recorded as always; a Job with no token, read by this controller,
+has no line read as a reason, and its message is byte for byte what it was.
 
 ### Interface I8 is amended: exit 2 prints the signed failure's keys too
 
-**Amended 2026-09-23 (FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5, PLAT-14.3).** I8 said the three
-key lines are printed *only on exit 0*. It now reads: **the key lines are printed by every run that
-signed and put a scorecard — exit 0 and exit 2 — and by no other.** Exit 2 is "a drill ran and did
-not pass; a SIGNED scorecard was written", and a signed failure nobody can name is evidence lost: a
-controller could never record `Restore.status.evidence`, verify it, or copy its `outcome`, so a
-failed rehearsal carried no proof of why it failed. All three exit-2 paths print them — a scored
-`fail-objective`/`fail-integrity` run, phase 5's `preflight-failed` jump and phase 6's no-op
-interception — with the same order, the same "nothing after them" rule, and the same conditional
-third line (the two paths that completed no restore have no offset report and print two lines).
+**Amended 2026-09-23 (D3 §2.5, PLAT-14.3).** The evidence key lines are printed
+by every run that signed and put a scorecard — exit 0 and exit 2 — and by no
+other ([the lines](reference.md#logweir-restore-run--drill-run)). **The exit code
+stays authoritative for success:** at exit 2 the controller records and
+verifies the signed FAILURE and copies its `outcome`, the `Restore` stays
+`phase: Failed`, `Verified` is never `True` over a non-zero `exitCode`
+(`ExitCodeNotZero`), and the API's `result.status` is `notPass`.
 
-**The exit code stays authoritative for success.** Keys at exit 2 name a signed FAILURE. The
-controller records them (`EvidenceRecorded=True`), fetches and verifies the document with the same
-verifier as a pass, and copies its `outcome` — and the `Restore` is still `phase: Failed`, its
-`Verified` condition is never `True` over a recorded non-zero `exitCode` (`ExitCodeNotZero`, even if
-the document were to say `pass`), the API's `result.status` is `notPass`, and a rehearsal is recorded
-`lastFailed`. A scorecard that verifies `Valid` at exit 2 is a *verified failure*.
+- *A new runner under an older controller* (`7487682`): nothing becomes a pass,
+  but that controller writes `Restore.status.completion` for an exit-2 run
+  whose signed failure verifies `Valid`, and the console shows cutover guidance
+  over a restore that did not reconcile. **Roll the controller out before the
+  runner**, and roll the runner back before the controller.
+- *An older runner under a newer controller* prints no keys at exit 2: one
+  `Failed` condition, no evidence, and no `EvidenceKeysUnreadable`.
 
-**Mixed versions.**
+### Execution contract v2: what v1 still buys
 
-- *A new runner under an older controller.* The controller this amendment was made against
-  (`7487682`) already reads the key lines by name at any exit code: it records the keys and verifies
-  the document, and nothing becomes a pass — its badge reads `outcome`, which the signed failure's
-  own document says is not `pass`, and its rehearsal projection requires exit 0. It raises no
-  `EvidenceRecorded` condition at exit 2, and its rehearsal projection may record the failure before
-  the verdict lands; the failure is still a failure. **But it writes `Restore.status.completion`
-  for an exit-2 run whose signed failure verifies `Valid`** — its completion gate reads only the
-  verdict — and the console then renders the completion panel, with its cutover guidance, over a
-  restore whose data did not reconcile. The newer controller publishes completion only for a run
-  that passed (exit 0, `outcome: pass`, a green verdict). **Roll the controller out before the
-  runner**, and roll the runner back before the controller. A controller that ignored key lines
-  at a non-zero exit would simply leave the evidence unrecorded, which is the pre-amendment state.
-- *An older runner under a newer controller.* The runner prints no keys at exit 2, so the status is
-  exactly what it was: one `Failed` condition, no `status.evidence`, no verification, no `outcome`.
-  No `EvidenceKeysUnreadable` is raised at exit 2 — its absence is what that runner promised.
-- *Readers.* Anything that treated "a `scorecard-key=` line is present" as "the run passed" was
-  already wrong under E4 and is now wrong in practice: read the exit code (or `Restore.status.exitCode`)
-  for success, and the keys only to find the document.
+`logweir_core::execution_contract::VERSION` is `"2"` (decision D3 §8,
+Amendment I), so an old binary refuses `--execution-contract-version 2` before
+dispatch rather than run a plan whose checks it does not implement. **v1 is
+still accepted, for already-created legacy Restores only**: a v1 invocation
+carrying v2 material — a `source.point` block, a standing rehearsal
+authorization, an approval-policy snapshot or a confirmation-issuer public key
+— is **refused by name, exit 3**. Let the in-flight legacy Restore finish (or
+delete it) and create the new one. **Every v2 addition is additive and
+absent-tolerant**, each all-or-nothing as a block:
 
-### The runner progress channel is OPTIONAL, bounded and contract-versioned (D3 §2.4)
-
-Both runners announce where they are on stdout. The channel exists because a controller reading a
-pod log has no other way to tell "the engine is still running" from "the archive exists and the
-receipt is being signed": a `tracing` line is JSON on the same merged stream and is filtered by
-`RUST_LOG`, so it is not a contract anything can read.
-
-```
-progress-contract=2
-progress-phase=0:admit
-progress-phase=1:approval
-…
-progress-phase=9:teardown
-```
-
-`logweir backup run` has no numbered phases after admission, so every line it emits is at `-1`,
-over five named steps in this order:
-
-```
-progress-contract=2
-progress-phase=-1:admit
-progress-phase=-1:engine
-progress-phase=-1:readback
-progress-phase=-1:sign
-progress-phase=-1:upload
-```
-
-**`progress-contract=<version>` is the version of the progress grammar that follows. It equals
-the execution contract version when one is stamped, and the version the binary implements
-otherwise. It is printed once, before the first `progress-phase=` line. Absence is not an error.**
-
-Both readings occur, and the difference is worth naming. `logweir restore run` under a controller
-prints the version the controller stamped — so a v1 invocation prints `progress-contract=1`.
-`logweir backup run` prints the version this BINARY implements, because a Backup Job carries no
-execution-contract environment at all on this build and there is nothing else it could truthfully
-say; the same is true of `logweir restore run` invoked standalone. The value is
-`logweir_core::execution_contract::VERSION`, `"2"` since decision D3's Amendment I.
-
-**Absence is not an error.** A runner that predates the channel prints nothing; a controller that
-sees no progress line simply has no phase to report. That is also what happens when the channel
-declines to say something: the line is produced by a filter over a **closed vocabulary** — the ten
-restore phase names and the five backup step names, and nothing else is renderable at any phase
-number. A caller that reached the formatter with a projected password, a URL with userinfo, a
-broker error, a record's bytes or a string containing a newline gets silence rather than a
-sanitised half-truth, because a charset rule would not help: `hunter2` is lowercase alphanumeric.
-Every line the channel can produce is at most 96 bytes, so the optional channel can never push the
-mandatory evidence keys out of the controller's bounded tail.
-
-**Read it by key name, never by position.** Same rule as `refusal-reason=` and
-`offset-report-key=`, for the same reason (plan erratum E4).
-
-### `teardown-failed=` names what a teardown left (FX-44)
-
-```
-teardown-failed=[{"topic":"drill-orders","error":"the restore principal lacks `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization failed)"}]
-```
-
-Printed once, by phase 9 or by the teardown of a run that failed after its creation step,
-whenever that teardown left a topic; never otherwise. Kafka-legal names only, at most 256 entries,
-each `error` at most 256 characters on one line. It is printed before the summary line, so it
-moves none of the keys below. The controller reads the last one in its tail and copies it,
-held to the Restore's mapped target names, to `Restore.status.teardown.failed`. An older
-controller ignores it.
-
-### `teardown-key=` is printed exactly when phase 9 attested, and it comes BEFORE interface I8's keys
-
-```
-teardown-key=logweir/drills/<run_id>.teardown.json
-scorecard-key=logweir/drills/<run_id>.json
-sidecar-key=logweir/drills/<run_id>.sig
-offset-report-key=logweir/drills/<run_id>.offsets.json
-```
-
-The line names the signed teardown attestation (`PAYLOAD_TYPE_TEARDOWN`), which is what says
-honestly which scratch topics were deleted and which the broker refused. It is **conditional in
-exactly the way `offset-report-key=` is**: it is printed when, and only when, phase 9's create-only
-put of that object succeeded. A teardown whose attestation could not be written prints no line at
-all — a line naming a key nothing was written to would be the worst possible output, and the
-warning on the log says what to do instead.
-
-**It goes in front of interface I8's three keys**, exactly as PLAT-15.1's `catalog-key=` goes in
-front of interface I7's two. I8's contract is "`scorecard-key=`, `sidecar-key=`,
-`offset-report-key=`, as the FINAL stdout lines of a successful run, with nothing after them", and
-that is unchanged.
-
-**It is not restricted to exit 0.** A restore that ran every phase and did not pass exits 2 — and
-that is precisely the run whose leftover topics matter, since a rehearsal's leftovers block the next
-scheduled slot. (Before I8's amendment above that run printed no evidence keys at all; it now prints
-them after this line, exactly as exit 0 does.) The key is carried on the scorecard's
-phase-9 record, which is pushed after phase 8 froze and signed the document, so nothing that
-delivers it can reach the signed bytes.
-
-### `refusal-detail=` carries a guard refusal's reason code and sentence (FX-34)
-
-```
-refusal-detail={"token":"<the Job's line token>","code":"StorageRegionInvalid","message":"source.storage.region is not an S3 region name: …"}
-refusal-reason=GuardRefused
-```
-
-`logweir restore run` (and its `drill run` alias) and `logweir backup run` print this line at
-**every exit 3 and at no other exit**, immediately before `refusal-reason=`. Interface I9 is
-unchanged: `refusal-reason=<TerminalState>` is still the final stdout line of a refused run, and the
-human line on stderr and the tracing lines are what they were. The two lines are the last two the
-runner writes, in one write, and the detail line is printed also for a refusal that has nothing to
-say (its `message` is then `the refusal carried no sentence`).
-
-**Why a second line.** `refusal-reason=` names a state from a closed list, and most refusals have
-none of their own: they are a plain `GuardRefused`. The sentence that says which guard fired and
-what to change was on the human line only, in a pod log that goes with the pod, so a `Restore` or a
-`Backup` said "the runner exited 3 (guard-refused)" and nothing more (PoC batch 5, finding F-1).
-
-**The value is one JSON object: two string members, and a third when the run was given a token.**
-
-| member | what it is |
+| Addition | Absent means |
 |---|---|
-| `token` | The value of `--line-token`, when the run was started with one; written first. ABSENT when it was not (a run started by a person). The runner never prints it anywhere else. |
-| `code` | A member of the CLOSED set of reason codes that kind of run can print (below). It is the name the refusal's sentence opens with (`<Code>: ` or `<Code>. `) when that name is in the set, and `GuardRefused` otherwise; a sentence that opens with any other word keeps the word. ASCII letters and digits, a letter first, at most 64 bytes. |
-| `message` | The rest of the refusal's sentence, cleaned: printable ASCII and `§ – — … →` are kept, a run of whitespace or control characters is one space, a run of anything else is one `U+FFFD`; a URL has no query string and no userinfo; credential shapes read `[redacted]`. At most 760 bytes, cut on a character boundary, and a cut sentence ends with `…`. |
-
-The line is at most 2048 bytes, so CRI's 16 KiB line split never divides it.
-
-**`--line-token <hex>` and the line token.** A new flag of `restore run`, `drill run` and
-`backup run`: 32 to 128 lower-case hex digits. `weirkeeper` writes it, as the last two arguments of
-the `runner` container of every `Restore` and `Backup` Job it creates: 40 digits (160 bits) from the
-operating system's random source, fresh for each Job object, derived from nothing. A value that is
-not shaped like one is a usage error (exit 1), and so is the flag given twice. It is not a
-credential (it is in the Job's pod template for anyone who can read the Job) and it is treated as
-one in output: it is in that pod template and in the runner's one line, and in no status,
-condition, event, annotation, API response or controller log line.
-
-**A reader honours the line only when it carries the Job's token, and that is the whole test of
-whose line it is.** A pod log is stdout and stderr merged into one stream, the sentence repeats
-text from the plan, the broker and the archive, and the plan's author can start a line in the log.
-The runner escapes every line break in the error text it prints itself (`logweir::exit::one_line`,
-PROD-15.1); the Kafka client's own stderr logging is not escaped, and it can repeat a plan value
-that holds a line break. So neither a line's shape nor its place says who wrote it. The token does: it is made
-when the Job is built, and a plan is older than its Job. `weirkeeper` therefore does NOT read this
-line by key name over a tail, as erratum E4 reads the others. It reads the Job's token off the
-Job, takes the LAST `refusal-detail=` line whose `token` equals it (compared in constant time), and
-ignores every other one: a line with no token, with another Job's, or that is not the JSON object.
-A Job with no token has no line that is read. The line it takes must then be at most 2048 bytes,
-carry a code of that kind's closed set, agree with the `refusal-reason=` line written after it,
-and its sentence is cleaned again whatever the runner did. A line that carries the token and fails
-one of those is reported as "no readable reason"; another line is never used in its place.
-`logweir_core::refusal_detail` is the one implementation of both sides. What the controller does
-with it is in [docs/kubernetes.md](kubernetes.md#what-a-refused-run-says-about-why-fx-34).
-
-**The closed sets, one per kind of run.** Adding a code to a set is additive; a reader that predates
-the code does not show that line (it shows "the runner gave no readable reason").
-
-| run | codes |
-|---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
-| `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
-
-**The two lines agree.** Both come from one refusal: the state on `refusal-reason=` is the detail's
-code (when the code is one of I9's states and the sentence named it with `: `) or `GuardRefused`.
-
-**Mixed versions.**
-
-- *A new runner under an older controller.* The older controller passes no `--line-token`, so the
-  line is printed without a token; it scans for `refusal-reason=` by name and ignores a line it
-  does not know. The status is what it was.
-- *A runner that does not know the flag, under this controller.* **Not supported: the runner
-  image must be at least as new as the controller.** The controller passes `--line-token` to every
-  `Restore` and `Backup` Job it creates, and such a runner stops while parsing its arguments,
-  before any work: exit 1, stdout empty, and stderr opening with
-  `error: unexpected argument '--line-token' found`. The object says `exitCode: 1`,
-  `exitReason: operational` and names no cause. This is EVERY runner image published before this
-  change, the images published from `main` since `v0.2.0-rc.1` included, and not only an older
-  release. No tagged release's runner loses a working run to it: since PROD-00.2 (release-notes
-  item 35) a runner image published before that change declares no engine, the controller gives it
-  none, and its runs already stop at exit 1 before the engine starts. The execution-contract
-  version is not what refuses anything here: it is `"2"` in `v0.2.0-rc.1` and now. One
-  `helm upgrade` of the packaged chart moves both images in one rollout (`controllerImage` and
-  `runnerImage` are rendered into one Deployment); the three ways the pair can still differ, what
-  it looks like and what to do are in
-  [docs/kubernetes.md](kubernetes.md#the-runner-image-must-be-at-least-as-new-as-the-controller).
-  To roll back, move both together or the controller first. (A Job a controller had created
-  before the upgrade has no token and its run is unaffected.)
-- *A newer runner whose code this controller does not know.* The line is not shown; the state on
-  `refusal-reason=` and the exit code are recorded as always.
-- *A Job with no token, read by this controller* (it was created before the upgrade). No line is
-  read as a reason, and the condition's message is byte for byte what it was before this line
-  existed.
-
-**Not printed by the other two binaries that exit 3.** `logweir check run` prints
-`refusal-reason=CheckContractMismatch` and nothing else on stdout, and `logweir-retention` prints
-`retention-refusal=<code>` for the one refusal the controller names. Their contracts are below and
-are unchanged, and none of them is given a line token.
-
-### Execution contract v2: what v1 still buys, and what it may no longer carry
-
-`logweir_core::execution_contract::VERSION` is `"2"` (decision D3 §8, Amendment I). The bump is the
-whole reason the version exists: v2 carries the recovery point binding, the standing rehearsal
-authorization and the two stdout lines above, so an old binary must refuse the new
-`--execution-contract-version` argument *before dispatch* rather than run a plan whose checks it
-does not implement.
-
-**v1 is still accepted, for already-created legacy Restores only.** A runner holds no cluster
-credential, so it cannot read a `Restore`'s creation timestamp and cannot ask anyone whether an
-object is "legacy". What it can see is whether the invocation carries v2 material — a `source.point`
-block, a standing rehearsal authorization, an approval-policy snapshot or a confirmation-issuer
-public key. **A v1 invocation carrying any of them is refused by name, exit 3**, because those are
-exactly the things a Restore created after the rollout has. Let the in-flight legacy Restore finish
-(or delete it) and create the new one; a legacy object is not upgraded in place.
-
-**Every v2 addition is additive and absent-tolerant**, and each is all-or-nothing as a block:
-
-| addition | where | absent means |
-|---|---|---|
-| `source.point` | the plan document | the archive set comes from `source.backup`; no binding is checked. Under a **v1** contract a plan carrying it is refused by name, exit 3 — it is v2 material like the rest |
-| `LOGWEIR_EXECUTION_AUTHORIZATION_KIND` | Job environment | `approval` — the per-run `Approval`, tag 1's shape |
-| `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization. Standing authorizations are withdrawn (PROD-17.1): a complete contract naming the `standing` kind is refused by name, exit 3 |
-| `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | Job environment | the synthesized `legacy-governed-v1` policy |
-| `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | Job environment | the legacy single-key bundle |
-| `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256` | Job environment | no evidence keyring is mounted — which the controller renders exactly when the plan carries `source.point`, so a point-bound plan without it is refused `PointUntrusted` (below) |
-
-The optional bundle members (`--policy-snapshot`, `--confirmation-key`, `--evidence-keys`) are
-digest-pinned in **both** directions: a pinned digest with nothing mounted is a lost bundle member,
-and a mounted member with no pinned digest is material the controller never committed to. Both are
-refused. Supplying either of the first two to a standalone invocation — one with no execution
-contract at all — is refused too, because nothing could make unpinned material trustworthy and
-silently ignoring it would let an operator believe an authorization was enforced when nothing bound
-it to the run. `--evidence-keys` is the exception, because it only ever NARROWS: it is the anchor a
-point-bound plan's receipt signature must verify against, a standalone run of such a plan (the
-disaster path) cannot proceed without it, and a keyring the operator wrote can refuse a receipt but
-never authorise a run.
-
-### One `backup_id` is one engine run: the execution claim (RECEIPT-DUP)
-
-Before this fix a second `logweir backup run` under a `backup_id` that had already been backed up —
-a Kubernetes Backup Job lost and re-created from its frozen inputs, or a standalone run reusing a
-spec's `backup_id` — ran the engine again, the engine replaced `<prefix>/<backup_id>/manifest.json`,
-and the first run's signed receipt stopped matching the archive whenever the topic had advanced.
-`backup run` now wins a create-only claim, `logweir/backups/<backup_id>/execution.claim.json`,
-immediately before the engine starts ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
-What changes for an operator:
-
-- **A second run under one `backup_id` exits 1 naming `ExecutionAlreadyClaimed`** — no engine run,
-  no receipt. It used to exit 0 and append to the set. A standalone `backup run` that reused a fixed
-  `backup_id` on a schedule must now use a fresh id per run (`--backup-id-override`); under
-  Kubernetes every execution already has its own id. Exit 1 is retryable, so a schedule **with
-  `spec.retry` configured** starts a new execution `<uid>-<slot>-r<k>`; without `spec.retry` (the
-  default) the slot is recorded `RunFailed` and the next slot runs normally, and a manual `Backup`
-  is retried by creating a new one.
-- **An evidence store that does not honour conditional create now refuses every backup**, exit 4
-  naming `ExecutionClaimUnproven`, before the engine starts — including a store that accepts
-  `If-None-Match: *` and overwrites anyway, which the runner detects by creating the claim twice.
-  Such a store used to take backups whose receipts were "create-only" only in name. MinIO honours the
-  header; AWS S3 is `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` like the rest of
-  this document's S3 claims.
-- **No permission is added.** The claim is `s3:PutObject` under `logweir/*`, which the runner already
-  holds; it is never read back, so no `s3:GetObject` or `s3:ListBucket` under `logweir/` is needed.
-  Without that grant the refusal is exit 4 as before, now before the engine instead of after it.
-- **Old archives are untouched and still verify.** Nothing about the receipt, its sidecar, the
-  catalog record or the manifest changed shape; a set written by an older build may hold two
-  receipts, and both stay two catalog points.
-
-**Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
-is lost and re-created after the upgrade finds no claim — the older run never wrote one — and,
-**since FX-7, is refused anyway**: after winning its claim the runner refuses a set that already
-holds its manifest or a segment, exit 1 `ExecutionAlreadyClaimed`, before the engine starts (the
-next section). **Rollback.** An older runner ignores the claim objects (they are not
-receipts) and the set check, and returns to the old behaviour; the claims stay in the bucket,
-harmlessly, and are honoured again after a re-upgrade.
-
-### A backup set that already exists is never written again; versioned buckets pin the manifest (FX-7)
-
-The execution claim stops a second run of an execution that took a claim. A set written by a build
-without the claim carries none, so the claim alone let a later run of the same `backup_id` start —
-a Backup Job lost across the upgrade and re-created with the new runner image, or a standalone
-`backup run` reusing a `backup_id` an older build wrote to (RECEIPT-DUP-UPGRADE-WINDOW). Measured on
-engine 0.21.0 (compose slot 3; a `v0.1.5` runner for the first run), such a second run exited 0,
-signed a second receipt, rewrote the first run's segment objects in place (segments are keyed by
-start offset) and — because its manifest merge keeps the first run's entry for every existing key —
-could leave the manifest bytes IDENTICAL: the first receipt's manifest digest still matched while
-the data under it had changed ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
-What changes for an operator:
-
-- **A run over a set that already exists exits 1 naming `ExecutionAlreadyClaimed`**, with no engine
-  run and no receipt, whoever wrote the set — the same state, message class and remedy (a new
-  `backup_id`) as a claim that exists. After winning its claim, as the last refusal before the engine,
-  the runner looks for the set's manifest (`<prefix>/<backup_id>/manifest.json`) and for any segment
-  under `<prefix>/<backup_id>/topics/` — a finished set, or segments of a run that died or is still
-  running — and either refuses the run. Other objects there (an upstream archive's consumer-groups
-  snapshot, say) are not the engine's output in Logweir's configuration and do not refuse it. A read
-  that fails transiently (a transport error, a timeout, a 5xx the client already retried) is exit 1,
-  retried by a schedule under a new execution id; any other failed read (a 403, a wrong bucket) is
-  exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
-  already lists and reads the archive prefix.
-- **On a versioned bucket a receipt pins its manifest's version** —
-  `archive.manifest_version_id`, receipt and catalog record format `1.2.0`, the MINOR after FX-4's `1.1.0`
-  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). When the
-  current version is not the pin, a point-bound restore and the catalog read the pinned version BY
-  ID. If the bucket still holds it, the set was written again there after the point was signed (by
-  a runner from before these checks, after a rollback, or by anything else), which the digest alone
-  cannot see when the manifest bytes came out identical: exit 3 `PointBindingMismatch`, and
-  `Conflict` in the catalog. If the bucket does not hold it — a version id belongs to one bucket, so
-  every byte-for-byte copy of the archive, an unversioned bucket, and a version that was expired or
-  deleted are this case — the digest decides, as for a point without a pin, and the runner's log and
-  the entry's remedy say the pin could not be checked in this bucket. A read of the pinned version
-  that fails otherwise (a 403 without `s3:GetObjectVersion`) is exit 1 / `Unreadable`. Only the
-  manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
-  build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
-  selectable.
-- **The pin is checked only where the bucket still holds the pinned version and serves it by id.**
-  A version that was expired or DELETED, a copy synced after the set was written again, or a store
-  that cannot read by version leaves the digest alone, which an identical manifest over rewritten
-  segments passes ([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
-  Object Lock retention covering a point's lifetime keeps its pinned version. Where the signing
-  bucket's catalog says `Conflict` and a copy's says `Available`, believe the `Conflict`: no code
-  merges the two views for you yet (PROD-09.2 owns that merge).
-- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key) — on builds before PROD-05.1. From PROD-05.1 every receipt is `1.3.0` (it carries `topic_configuration`), from PROD-03.0 `1.5.0` (it carries `schema_dependency` too), from PROD-01.4a `1.6.0` (it carries `generations` too), and an unpinned one still has no `manifest_version_id` key.
-  There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
-  the segment digests the manifest records.
-- **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
-  `logweir catalog sync` never infers a pin for one.
-- **The owner ruled this cause MINOR on 2026-10-07 (FX-7 review, V3).** `availability: Conflict`
-  gains a cause: a pinned manifest version this bucket still holds that is no longer the current
-  one. Only a point whose receipt carries the new optional `archive.manifest_version_id` can reach
-  it, and it can only move a point toward not restorable, so it is the general MINOR case in the
-  rule above. The cause lives once in `crates/logweir/src/catalog/pin.rs` (`judge`'s `Superseded`
-  arm and `SUPERSEDED_CAUSE`).
-
-**Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
-runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by
-neither the claim nor the set check: let such a Job finish before upgrading the runner. **Rollback.**
-An older runner ignores the pin (its reader ignores unknown fields inside major 1) and no longer
-refuses an existing set; an older catalog reader reports a superseded point by its digest alone.
-Rolled back while a `Backup` is in flight, an older runner whose Job is re-created re-runs the
-engine over the set: on a versioned bucket this build's point is then `Conflict`, and on an
-unversioned bucket nothing reports it (the first point keeps verifying over rewritten segments).
-Let in-flight `Backup`s finish before rolling the runner back.
-
-### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
-
-rust-rdkafka 0.36.2 never reads librdkafka's per-resource DescribeConfigs error
-(`src/admin.rs:1121-1159`). A topic or broker the principal may not
-DescribeConfigs comes back as a SUCCESS with ZERO entries, which every caller
-used to read as a resource with no configuration. Kafka never answers a
-successful describe that way: an authorised resource gets every config entry,
-and an empty list comes only beside a per-resource error
-(`ConfigHelper.scala:54-98` at 4.3.1). `logweir-kafka` now turns an empty
-answer into an error. For a topic the error is NotAuthorized, or unknown topic
-when the principal's metadata says so; for the broker it is NotAuthorized.
-Measured on the compose stack
-(`e2e/tests/config_coverage.rs::a_denied_describe_configs_is_a_refusal_at_every_reader`).
-librdkafka answered the denied principal with 0 entries, against 31 for a
-topic and 289 for the broker under the super user.
-
-What changes for an operator:
-
-- **Phase 0 exits 1** when the restore identity may not read the target's
-  broker configuration. It used to assume `CreateTime` and skip the
-  `LogAppendTime` probe. Grant the restore identity DescribeConfigs on the
-  Cluster resource; Describe does not imply it.
-- **Readiness check `target.timestampBound` reads `unknown`
-  (`BrokerConfigsNotReadable`)** for the same identity. It used to read
-  `ready` (`TimestampWithinBound`) because it found no bound.
-- **Phase 2 exits 1** when an EXISTING mapped target topic's configuration may
-  not be read, instead of recording it as empty. So does phase 0's probe
-  readback.
-- **Phase 7 never compares a refused target read as empty.** The topic is
-  named in `topic_parity.not_assessed` with `targetReadDenied`, and its
-  partition count and replication factor are still classified. Phase 7 meets
-  this only for a topic whose backup recorded no configuration overrides: for
-  one that did, the pinned engine's restore describes the target topic itself
-  (`restore_topic_configs`, on by default) and phase 6 exits 1 with no
-  scorecard (measured on the compose stack, 2026-10-05).
-- **A backup never fails for it.** The topic's `config_coverage` reads
-  `captureDenied` ([the format](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
-
-**The limit.** Which error it was is read from the principal's metadata for
-the topic, not from the per-resource code, which the binding does not expose.
-For a visible topic `captureDenied` is therefore an inference: the only
-per-resource errors Kafka returns for an existing, validly named topic are the
-authorizer's and an internal broker error. Reading the code (owner choice
-AP-OC1) turns it into an observation; it never makes the answer `captured`.
-One behaviour was left unchanged by FX-4 and is changed by PROD-01.2 (the
-next ruling): a broker that ANSWERS but lacks the `log.message.timestamp.type`
-key was read as the Apache default. It is now not recorded.
-
-### An endpoint's capability is read from the endpoint, and a value it did not report is not recorded (PROD-01.2)
-
-A Kafka-compatible endpoint is not always Apache Kafka, and two readers
-treated a key missing from a SUCCESSFUL answer as the Apache default. Measured
-on Redpanda v26.2.4, whose broker resource answers nine configuration keys and
-neither the broker's timestamp type nor a record-timestamp bound
-(`e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`).
-
-What changes for an operator:
-
-- **`Restore.status.topicPreflight.timestampType` is absent** when the target's
-  broker did not report its timestamp type. It used to say `CreateTime`. The
-  refusal for a broker that reports `LogAppendTime` and does not honour the
-  per-topic override is unchanged, and applies only to a reported value. Every
-  target topic is still created with `message.timestamp.type=CreateTime`
-  pinned.
-- **Readiness check `target.timestampBound` reads `unknown`
-  (`TimestampBoundNotReported`)** when the broker's answer carries neither
-  bound key. It used to read `ready`, "declares no record-timestamp bound".
-  Every Apache Kafka broker reports at least one of the two keys, so nothing
-  changes there. A plan rendered by an older controller gets the same answer
-  under `BrokerConfigsNotReadable`, a code that controller already reads.
-- **Four capability rows** say, before a backup or restore, what the endpoint
-  itself cannot do: `connection.engineProtocol`, `target.engineProtocol`,
-  `connection.topicConfigsReadable` and `connection.groupTypes`
-  ([kubernetes.md §21.6c](kubernetes.md), and
-  [the compatibility contract](support-matrix.md#capability-checks)). The two
-  engine rows read each broker's own ApiVersions answer, because the engine
-  sends fixed request versions and never negotiates, and they answer for a
-  cluster only when every broker of it answered: a broker that did not, or a
-  bootstrap address nobody answered at, leaves the row `unknown`, never
-  `ready`. A controller from this build lists them in every `Backup` and
-  `Restore` check plan; an older runner refuses such a plan, so the runner
-  image moves with the controller (`runnerImage` in the chart).
-- **A marker topic the restore identity may not Describe** is refused as
-  before (exit 3), and the message now says it does not exist or is not
-  describable, and names the grant. Kafka lists only the topics a principal
-  may describe, so the two cannot be told apart from a listing.
-- **A cluster whose advertised brokers cannot be reached** makes
-  `connection.authenticated` say so, when the bootstrap address answered and
-  named the cluster. `logweir cluster-probe` still reads only the cluster id
-  and answers `reachable=true` for such a cluster.
-- **versitygw's `404 XAdminUserNotFound`** (an unknown access key) is a
-  refused credential (`InvalidCredentials`) and no longer a missing object
-  (PROD-01.5 C6). A genuine `NoSuchKey` is still not-found, whatever its
-  bucket, prefix or key spell: an object store's answer is read from its own
-  HTTP status and the `<Code>` of its error document, never from a word found
-  in the error's text, which echoes all three names.
-
-No signed document changes. The rule every capture path is held to: when the
-endpoint cannot answer, the receipt, the catalog and the status say "not
-recorded" with the reason, and never record an empty answer as a fact. Topic
-IDs, topic configuration, consumer positions, replication factors and schema
-dependency already did
-([the sweep](to-do/decisions/PROD-01.2-compatibility-contract.md#6-capture-paths-swept-unsupported-metadata-never-appears-captured)).
-
-### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
-
-Before PLAT-15.2's review fix, the runner's point binding checked digests only — the receipt's
-bytes, its re-derived point id, its manifest digest and the manifest's bytes — so an archive whose
-writer could replace the receipt AND the manifest together would pass. The runner now also verifies
-the receipt's DSSE sidecar (`<receipt>.sig`) against the mounted evidence keyring with the same
-verifier `logweir drill verify` uses (`logweir_evidence::verify::verify_detached`), and judges the
-key that verified with `logweir_core::trust::decide` for `EvidenceSigning` at the receipt's own
-`finished_at`. The check runs after the digest checks and before the manifest is read, so a
-refusal constructs no client and creates no target topic.
-[`docs/formats/drill-spec.md`](formats/drill-spec.md) has the keyring's format and its lifecycle
-semantics (a retired key keeps what it signed before `retired_at`; a key revoked for compromise
-verifies nothing).
-
-**Migration.** A `Restore` or rehearsal whose plan carries `source.point` gets the keyring from a
-controller at this version; one without `source.point` (a plan that names its backup set only) renders
-byte-for-byte the bundle it rendered before and is unaffected. Upgrade the controller and the
-runner image together: a runner at this version handed a point-bound plan by an older controller
-refuses it `PointUntrusted` ("no evidence-signing keyring"), and a runner older than this version
-does not know `--evidence-keys` and fails argument parsing (exit 1, a usage error) before any work. A point-bound
-`Restore` admitted by the older controller whose immutable approval bundle was already created but
-whose Job was not yet created when the controller was replaced renders a different bundle now, and
-is refused `ApprovalBundleConflict` (terminal) rather than run without the keyring: delete it and create it
-again. A standalone `logweir restore run` of a point-bound plan now needs `--evidence-keys`.
-
-### A point-bound plan restores its point's own set (FX-16)
-
-The binding above proves that the receipt a plan names is intact, signed and over a manifest the
-archive holds. Until FX-16 nothing proved that the set the run then RESTORED was that receipt's
-set: `source.backup` chose it (`latestCompleted` or an id), and every decision the runner takes
-from the receipt — phases 3 and 7's configuration parity (FX-4's coverage), the time basis (FX-8's
-recorded timestamp types) and FX-7's pin verdict — was applied to whatever set that was. A plan
-bound to point A that named set B restored B's records under A's word; the controller's readiness
-check refuses such a plan (`CatalogPointBindingMismatch`), the runner did not. The runner now
-refuses it, exit 3, the message opening `PointBindingSetMismatch` (the general
-`refusal-reason=GuardRefused` line, like `PointBindingMismatch`), in two places:
-
-- **In the binding, before any broker is contacted**, when `source.backup` is not the receipt's
-  `backup_id`. **`latestCompleted` with `source.point` is refused there**, even when the point's set
-  happens to be the newest: it names whichever set is newest when the run starts, so the same
-  approved plan would restore another set after the next backup. A bound plan names its point's
-  own set, `source.backup: <the receipt's backup_id>` — what the console, the catalog route and
-  every rehearsal already render. **And there too when, under the plan's `source.storage`, the
-  engine would read the set somewhere other than the manifest the receipt attests** (fix round,
-  review M-1). The engine is told only the storage and the set id and loads
-  `<prefix>/<backup_id>/manifest.json`, so a plan whose prefix is a parent of the point's set (with
-  another same-id set at that path), or a plan pointed at a copy under another prefix, would
-  restore an object the point does not describe; the refusal names both keys and the prefix the
-  set was written under.
-- **After the set is described and before phase 2**, when the set the engine is about to restore
-  is not the one the binding verified: its set id, the digest of the manifest just read, or the
-  version that read answered (the manifest written again between the binding and the restore's
-  read). The set is selected by the point's manifest key — the engine's key — never as the first
-  listed set carrying the id, so a same-id copy listed first neither refuses a truthful plan nor is
-  described in its place (review L-1); a listing that does not show that key is exit 1. Phase 0 has run by then, so on a target whose own default is `LogAppendTime` its probe
-  topic has been created and deleted, the documented exception
-  ([above](#exit-3-has-one-documented-exception-phase-0s-logappendtime-override-probe)); no target
-  topic of the restore is created and the engine never starts.
-
-The binding also reads the receipt, its signature, the manifest and the pinned version through the
-archive handle the restore itself uses: under the store contract that is the controller-named
-credential and CA (`LOGWEIR_ARCHIVE_CREDENTIALS`, `LOGWEIR_ARCHIVE_CA_FILE`), where before it was the
-legacy environment-driven client, which ignored the CA and honoured a stray `AWS_ENDPOINT_URL`.
-
-**Compatibility.** A new cause for exit 3 that can only move a run to the safer side (refused
-instead of restoring another set under the point's word): MINOR under OD-7's third case. No
-format changes. A plan without `source.point` is untouched.
-**Migration.** A hand-written point-bound plan (the standalone disaster path) that says
-`backup: latestCompleted` is refused after the upgrade: name the point's set instead, which needs a
-new approval because the plan bytes change. So is one whose `source.storage` prefix is not the one
-the set was written under (the refusal names it); a copy of the archive that keeps the original
-keys, in another bucket, restores as before. Console, catalog and rehearsal plans already name it.
-**Rollback.** An older runner restores whatever `source.backup` names again; no archive, catalog
-or evidence object changes in either direction.
-
-### The standing rehearsal authorization is SIGNED, and the runner checks the signature
-
-**Withdrawn (PROD-17.1).** The runner no longer reads a standing authorization: it refuses
-`--standing-authorization` and `--authorization-keys` by name (exit 1) and a contract naming the
-`standing` kind (exit 3). `logweir-core` still reads the documents already signed, and the
-verifiers still verify the scorecards they authorised. The rest of this section is the format as
-it was signed.
-
-D3 §4.3(e) says the bundle carries "the authorization document, its signatures, the trusted public
-keys, the scope and the rendered plan". All five are mounted, and the runner verifies them before
-any data-plane work — because §4.3's own first sentence names the adversary this exists for: *a
-controller that could mint its own authorization*. A scope pinned only by a digest the controller
-set would prove nothing against exactly that adversary.
-
-```
---standing-authorization <path>   the signed document; its DSSE sidecar is read from
-                                  <path> with the extension replaced by .sig, the same
-                                  convention --approval already uses
---authorization-keys <path>       the trusted public keys the signature anchors in
-```
-
-The document is canonical JSON with the DSSE payload type
-`application/vnd.logweir.standing-rehearsal-authorization+json;version=1.0.0`:
-
-```json
-{
-  "formatVersion": "1.0.0",
-  "kind": "StandingRehearsalAuthorization",
-  "subjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": "RehearsalSchedule",
-                 "namespace": "team-a", "name": "weekly-orders", "uid": "…"},
-  "scope": {"templateDigest": "sha256:…", "targetClusterId": "…",
-            "topicPrefix": "rehearsal-3f2a91c7-", "topics": ["orders"],
-            "maxPartitions": 200, "recordsPerPartition": 25,
-            "deadlineSeconds": 3600, "modes": ["scratch"]},
-  "issuedAt": "2026-06-01T00:00:00Z",
-  "expiresAt": "2026-07-01T00:00:00Z"
-}
-```
-
-The scope is D3 §4.3's `RehearsalScope` (`logweir_core::rehearsal_scope`). Each field bounds the plan
-a slot may run:
-
-| Field | What it bounds |
-|---|---|
-| `templateDigest` | `sha256` over the canonical JSON of the schedule's `spec` minus `suspend`: the binding to one schedule template. The controller recomputes it each slot; the runner does not check it (below). |
-| `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
-| `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
-| `topics` | The source topics the authorization covers, by exact name. |
-| `maxPartitions` | The partition ceiling: each slot's sampled plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. **A scope that authorises `coverage: complete` signs exactly `0`** (format 1.1.0, below): a complete plan states no bound (it checks every partition), so this build never reads it for one, and 0 is what makes every older reader refuse every plan under the scope. The schedule's own `spec.bounds.maxPartitions` still bounds the point a slot selects, inside `templateDigest`. |
-| `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
-| `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
-| `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
-| `coverage` (format 1.1.0, optional) | The verification coverage the signer authorises; the plan's `sample.coverage` must be exactly it (PROD-08.1a). **Absent means `sampled`** — every 1.0.0 scope — so a scope signed before the field authorises sampled rehearsals only, and a complete plan under it is refused by name. `complete` (with `maxPartitions: 0`) admits a complete plan (which states no `max_partitions`) and refuses a sampled one. |
-| `completeMaxRecords` (format 1.1.0, optional) | Only beside `coverage: complete`: the most archived records one complete verification may decode. The plan's `sample.complete_max_records` must be present and no larger. Absent: the work is bounded by `deadlineSeconds` alone. |
-
-**Format 1.1.0 (PROD-08.1a).** `coverage` and `completeMaxRecords` are optional scope fields
-defined from `formatVersion` 1.1.0. `logweir drill approve --standing` (withdrawn in v1,
-release-notes item 73) minted 1.1.0 exactly when the scope carried one of them, and 1.0.0 — byte for
-byte as before — otherwise; the DSSE payload type is
-unchanged. This build refuses either field under a document whose minor is below 1 or not a number,
-`completeMaxRecords` beside a scope that does not authorise complete coverage, a bound of 0, and
-**a scope that authorises `coverage: complete` with any `maxPartitions` but 0** (the minter refuses
-to sign one, naming the value to write; the runner, the controller's slot and `admit_standing` and
-the `Approval` controller refuse to read one). The 0 is what keeps the format MINOR: OD-7 allows a
-change only when it can move a reader's verdict to the safer side, and every reader, of every
-version, is on that side:
-
-- **This build, a scope that states no `coverage` (every 1.0.0 document) or states `sampled`:** it
-  admits exactly the sampled plans a 1.0.0 reader admitted, and refuses every complete plan by
-  name. An older reader refused a complete plan with no `max_partitions` as an unbounded sample;
-  one with `max_partitions` was refused by the phase 0 of a runner from item 30 of the release
-  notes on, and run as the sampled plan it also is by an older runner. Either way this build only
-  refuses more.
-- **This build, a 1.1.0 scope that states `complete` (and `maxPartitions: 0`):** it admits a
-  complete plan with no `max_partitions` (when the scope signs `completeMaxRecords`, only one whose
-  `complete_max_records` is present and no larger), which every older reader refuses, and refuses
-  every sampled plan by its coverage. This is the new authority, and only a document that signs it
-  grants it.
-- **A runner or controller built before 1.1.0, the same complete-only document:** its admission
-  checks the major only and its scope type ignores unknown fields, so it reads a SAMPLED scope with
-  a partition bound of 0, and runs nothing under it. Its `Approval` controller refuses the scope
-  (`ScopeInvalid`: a bound of 0 is not a positive bound), so the `Approval` is never `Verified`, and
-  its rehearsal slot and its `admit_standing` both need a `Verified` one: no `Restore` and no Job.
-  Its plan-in-scope check — the runner's, and the controller's — refuses an ordinary sampled plan
-  (its bound is above 0) and a complete plan (no bound: unbounded), before any client. The only
-  plans that check passes state `max_partitions: 0`, and they sample no partition: a runner from
-  item 30 on refuses `complete` beside any bound at phase 0, and every build's phase 7 refuses an
-  empty selection before any verdict (exit 1, no scorecard), so none can be signed a pass. A rehearsal slot is refused earlier still: an older controller's
-  `templateDigest` omits `bounds.coverage`, so it no longer matches the signed one.
-- **An older minter** (`logweir drill approve --standing` before 1.1.0) refuses a `scope.json` with
-  `maxPartitions: 0` before signing anything, so it cannot mint a complete-only authorization at
-  all; one that does not state `coverage` mints a sampled scope as before.
-
-Proved against a build from before the format (`main` at `1c3a1b5e`): its runner binary refuses the
-ordinary sampled plan and the complete plan under a complete-only document this build minted, and
-its `Approval` controller refuses the document (`crates/logweir/tests/execution_contract_v2.rs`,
-`an_older_runner_refuses_every_plan_under_a_complete_only_scope_this_build_mints`, run with
-`LOGWEIR_OLDER_RUNNER`). With a positive `maxPartitions` beside `coverage: complete` — which no
-reader of this build accepts — the same older runner admits the sampled plan; that is why the 0 is
-required. As with every scope field, roll the controller and the runner out together.
-
-Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
-approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through
-authorization document v2 — `docs/kubernetes.md` §8), so its readers require `GovernedApproval`
-whatever a namespace is bound to. A field that NARROWS what a scope authorises needs more: a
-reader that predates it ignores it and would admit what the field excluded, so it ships beside a
-value of an existing field that such a reader already refuses everything under (format 1.1.0's
-`maxPartitions: 0`, above). A higher `formatVersion` major is refused.
-
-**The runner's order, and what each step buys.** The signature is checked over the envelope bytes
-*before* they are parsed, so nothing read out of the document is believed until those exact bytes
-are known to be signed. The key that verified is then judged on its **usage**. The current and
-standing contract accepts `GovernedApproval` only, under every approval policy. A
-`ConsoleConfirmation` key fails closed here; merely finding such a key in the resolved policy cannot
-authorise a rehearsal. A key carrying only `EvidenceSigning` is likewise
-refused even when its signature is perfectly good — the installation's own evidence identity must
-never be able to authorise its own rehearsals (D3 §7.3). Both faults are reported as
-`KeyUsageMismatch` and never as a bad signature, because an operator told "bad signature" about a
-genuinely signed document goes looking at the wrong thing.
-
-**`…_REHEARSAL_SCHEDULE_UID` is a verified binding.** The environment says which schedule this run
-claims to be; the signed document's `subjectRef.uid` says which schedule the human authorised; the
-runner requires them to agree. What the runner does **not** check is `scope.templateDigest` —
-whether the scope matches the schedule's sealed spec. That is recomputed from the
-`RehearsalSchedule`'s own spec and was the controller's each-slot check (D3 §4.3(a)), withdrawn
-in v1 with the kind (release-notes item 73); a runner holding no cluster credential cannot read
-that spec at all.
-
-**The expiry is checked, against the node's clock, as a second line of defence.** `issuedAt` must
-not be in the future, `expiresAt` must not have passed, and `expiresAt - issuedAt` must not exceed
-the 90 days D3 §4.3 permits. A Job's node clock is not a trusted time source, so this does not
-replace the controller's each-slot expiry check — but it does refuse a bundle replayed weeks later,
-which nothing else would. An expired document refuses under `AuthorizationExpired`; every other
-authorization fault refuses under `AuthorizationInvalid`. Both are D3 §4.3's own controller skip
-reasons, reused so the controller's `status.lastSkipped.reason` and the runner's refusal say the
-same word about the same fault.
-
-**Key lifecycle stays the controller's.** The mounted keyring carries `{keyId, publicKeyPem,
-usages}` and no lifecycle: `state`, `notBefore`/`notAfter` and revocation are `TrustPolicy`
-resolution's to evaluate (`logweir_core::trust::decide`), and they are evaluated before the keyring
-is written. The runner re-checks what it can — that the signature verifies under a key the
-controller pinned, and that the key may authorise.
-
-**No new exit code.** Both new refusals live inside Global Constraint 11's existing four:
-
-| situation | code | `refusal-reason=` |
-|---|---|---|
-| a contract naming a standing rehearsal authorization (withdrawn, PROD-17.1) | 3 | `GuardRefused`, the message says it is withdrawn; `--standing-authorization` and `--authorization-keys` themselves are usage errors, exit 1 |
-| a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
-| a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
-| a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), under whose storage the engine would read another manifest than the receipt's, or whose restored set's id, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |
-| a bound point whose receipt carries no signature, a signature no mounted evidence key verifies, or a key whose lifecycle or usage refuses it — or a point-bound plan with no evidence keyring | 3 | `GuardRefused`, message opens `PointUntrusted` |
-| a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
-
-`logweir_core::guard::TERMINAL_STATES` is a closed list (four elements since FX-8, none of them a
-state above), so every refusal above classifies as the general `GuardRefused` and carries its state
-name as the first token of the message. Promoting `PointBindingMismatch`, `PointBindingSetMismatch`,
-`PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and `AuthorizationExpired` to
-declared terminal states is a change to that list and to the controller's mapping, and is not made
-here.
-
-### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
-
-Withdrawn in v1 (release notes, item 74): the subcommand is gone with the
-alert sinks it served, and an argv that names it is refused by clap
-(`unrecognized subcommand 'notify'`).
-
-### `logweir check run`'s exit codes, its frames and the one key it may write (D2 §4.2)
-
-`logweir check run --plan <path> --check-contract-version 1` is the **one** check runner
-(decision D2 §4.2, seam ruling S1). Six plan kinds — `topicInventory`, `operationReadiness`,
-`restorePreflight`, `destinationAccess`, `evidenceFetch`, `catalogSync` — share one argv surface,
-one frame format and one closed error vocabulary, because a second runner would be a second place
-the contract could drift from what the controller parses. There is deliberately no
-`logweir topics discover`, no `logweir catalog controller-sync` and no per-kind subcommand.
-
-**`timeoutSeconds` has two ceilings, and that is the one bound that is not uniform.** Five of the
-kinds are bounded probes and may ask for at most **600** seconds; a `catalogSync` is a paged walk
-of an adopter's own bucket, whose cost is set by how many recovery points they hold, and may ask
-for at most **1800**. The `RecoveryCatalog` controller asks for 900. A single 600-second ceiling
-refused every sync plan at startup step 4, before a credential was read, and
-`the_controllers_sync_plan_is_one_the_runner_accepts` is the guard that now holds the two sides
-together.
-
-**`catalogSync` writes nothing at all** — not even the create-only readiness marker a
-`destinationAccess` may write. It reads the durable catalog through the destination's `archiveRead`
-grant, reports a signature verdict and a signer key id **and never a trust decision**, and relays
-the result as the `details` body `docs/kubernetes.md` §7d specifies. A walk that could not start
-relays **no body**, because a body that parses is a body the controller publishes in place of the
-view it already has.
-
-**The invocation.** The controller writes it (`weirkeeper::check::job::runner_argv` and
-`runner_job_spec`); nothing else may:
-
-```
-argv: check run --plan /check/check-plan.json --check-contract-version 1
-env:  LOGWEIR_CHECK_CONTRACT_VERSION=1
-      LOGWEIR_CHECK_PLAN_SHA256=sha256:<64 lowercase hex>
-      LOGWEIR_CHECK_SUBJECT_UID=<uid>
-      RUST_LOG=warn        TMPDIR=/work
-```
-
-**No network before the plan verifies.** The runner parses argv, reads the plan bytes once,
-compares their SHA-256 against `$LOGWEIR_CHECK_PLAN_SHA256`, parses strictly with
-`deny_unknown_fields`, and requires the plan's `subjectUid` to equal `$LOGWEIR_CHECK_SUBJECT_UID`
-— all before a client is built. A plan `ConfigMap` swapped under a running Job therefore cannot be
-executed against the wrong object, and a plan a newer controller wrote with a field this runner
-does not understand is refused rather than partly honoured.
-
-**An `evidenceFetch` object may name only `evidence.payload` or `evidence.sidecar`, and no two
-objects may name the same one.** A stream is one ordered run of part frames whose digest the end
-frame declares once, so an object on `result` or `details` — the two streams the runner writes
-itself — would make the relay unreadable with no way to say why. Both shapes are a named refusal
-at exit 3 rather than a silent `ResultUnreadable`.
-
-**Stdout is the machine contract and carries frames only.** `logweir-check-topic=` lines,
-`logweir-check-part=` lines, and one final `logweir-check-end=` line, each at most 4,096 bytes
-including its newline. The end line declares, per stream, how many parts were printed and their
-SHA-256, plus the topic-line count and digest; a reader that cannot verify all of them reports
-`ResultUnreadable` and never publishes the log content. **Stderr carries JSON tracing at `warn`**
-and nothing a controller parses — a pod log has no stream selector, so nothing on stderr is
-machine-readable (erratum E4).
-
-**The exit codes.**
-
-| code | meaning |
-|---|---|
-| **0** | an end line was printed, **whatever the per-check states**. A `notReady` check is a RESULT, not a runner failure, and the controller reads the relayed codes rather than the exit status. |
-| **1** | an operational failure before a result existed: no end line, so the relay does not verify and the controller reports `ResultUnreadable`. |
-| **3** | a contract refusal (the four startup steps above). `refusal-reason=CheckContractMismatch` is printed on stdout and **no frame is printed at all**. |
-
-**2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
-Global Constraint 11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and
-signed" and 4 for "signing or lock-proof failed"; a check signs nothing and writes no artifact, so
-either code would make a check indistinguishable from a drill result to every reader of the exit
-contract, including `weirkeeper::conditions::reason_for_exit`. **Do not read a bare exit 0 as
-"everything passed"** — read the relayed result.
-
-**An old runner image does not fail this way.** A build without the `check` subcommand rejects it
-as an unknown subcommand and exits 1 with a clap usage error, which the controller maps to
-`RunnerContractUnsupported` (D2 §4.3). That is why the version handshake is checked in argv **and**
-in the environment: a rollout that upgraded one and not the other is refused rather than guessed at.
-
-**What a check may do to the world.**
-
-* It **never invokes the engine binary.** Nothing under `crates/logweir/src/check/` names an engine
-  invocation, so `scripts/check-no-oso.sh` passes unchanged.
-* It **never writes**, except the optional create-only readiness marker
-  `logweir/readiness/<destinationUid>.json`, put with `PutMode::Create` through
-  `Store::put_create_only` under Global Constraint 6's `logweir/` root. **"Already exists" counts as
-  write-authorised**: S3 and MinIO authorise a `PUT` before they evaluate the `If-None-Match`
-  precondition, so a 412 proves the grant. It is reported as `MarkerAlreadyPresent` rather than
-  `MarkerWritten`, because "I wrote it" and "it was already there" are different facts. **The
-  marker is written as the destination's `evidenceWrite` grant.** A plan whose destination
-  separates that grant from the checked one carries `evidenceWrite: {credentials: static |
-  workloadIdentity, secretName | serviceAccountName}` — a reference, never a value — and the
-  runner builds the marker handle from `LOGWEIR_EVIDENCE_AWS_*` or the injected identity only,
-  never from the destination grant's `AWS_*`; a projected variable that is missing is
-  `CredentialSecretKeyMissing`, not a fall-back. That handle is used for create-only puts of the
-  one marker key and nothing else. An absent `evidenceWrite` means the two grants are one, and such a plan is byte-identical to
-  what earlier controllers rendered; an older runner refuses a plan that carries the field (exit 3,
-  `deny_unknown_fields`). **The evidence-read probe follows the same rule**: `evidenceRead` names
-  its grant, its keys arrive as `LOGWEIR_EVIDENCE_READ_AWS_*`, and a `controllerIdentity` or
-  `notConfigured` grant is answered `unknown` (`EvidenceReadNotConfigured`) with no request.
-  **A destination plan lists the `SecretKeys` grants whose binding it compares** (FX-20c):
-  `grantBindings: [{role, secretName}]`, references only, absent when empty (so such a plan is
-  byte-identical to an earlier controller's), on the three readiness kinds only and one role per
-  request; an older runner refuses a plan that carries it (exit 3, `deny_unknown_fields`). Each
-  listed grant arrives as a binding-only pair, `LOGWEIR_<ROLE>_GRANT_BINDING[_EXPECTED]`, with
-  no credential beside it, and the runner answers the blocking `destination.credentialBound`
-  row (`CredentialBound`, or `CredentialBindingMismatch` naming each refused grant) with no
-  request. The id and the ready code are additive members of the closed vocabularies.
-* It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
-  targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
-  topic has no counterpart here.
-* It **never prints a credential.** Every message, remedy, fact, scope, bounded detail sample and
-  `details` line passes `logweir_core::check_contract::redact` and a 512-character cap, and no
-  broker or object-store error string is ever interpolated into a frame — the code carries the
-  classification and the message names the operation and the object. A value that is a KEY PATH
-  (an archive object key, a topic name) has every *shape* rule applied over the whole string and
-  the *long-run* rule applied per `/` segment, because `/`, `-`, `=` and the digits are all in the
-  base64 alphabet and an ordinary archive key is one 70-character run: redacting it whole protects
-  nothing and deletes the only fact the line carried. **Exactly one field is written verbatim** —
-  an `evidenceFetch` result's `key`, which is the plan's own key echoed back so the controller can
-  tell three answers apart.
-* It **never dials TLS without SASL.** `auth.mode: plaintext` with `tls: true` is a shape the
-  saved-connection contract does not support, and it is **refused rather than dialled in the
-  clear** — the same refusal `logweir cluster-probe` and the controller already make (PLAT-07.1).
-  A check's broker configuration carries no private copy: `security.protocol`, `sasl.*`, the
-  hostname pin and the trust anchor all come from the one implementation the drill reader shares.
-* **Every network call is time-bounded** by the plan's own `timeoutSeconds`: per-call timeouts on
-  the broker side, `request_timeout` plus a retry cap on the object-store side.
-
-**An empty inventory and a failed one are different answers.** A `topicInventory` that ran against
-a cluster showing no topic declares `topicLines: {"count": 0, …}`; one whose broker never answered
-declares **no** `topicLines` block at all and carries a `connection.authenticated` row with the
-classified code. Reading the first as the second — or either as "the cluster is empty" — is the
-PLAT-09.1 defect the distinction exists to prevent: a successful Kafka listing never proves full
-visibility, because the broker silently omits topics the principal cannot `DESCRIBE`.
-
-### `logweir-retention`'s exit codes, its key lines, and what its record does and does not prove (D3 §6.5)
-
-`logweir-retention run --plan <path> --retention-contract-version 1 [--dry-run]` is the **one**
-supported enforcer, and it is a **separate binary** from `logweir` on purpose. D-SEAMS **S1** says
-there is one check runner; this is its third recorded exception, and the reason is structural
-rather than convenient: *deletion linkage must not be reachable from the everyday binary*. A
-`logweir retention run` subcommand would link `crates/logweir-reaper` — the one crate in the
-workspace that names an object-store delete — into the same executable an operator uses to take a
-backup, verify a receipt or print a scorecard, and `scripts/check-no-archive-write.sh` check 3
-would have nothing left to prove.
-
-**The invocation.** The controller writes it
-(`weirkeeper::controllers::retention_policy::build_job`); nothing else may:
-
-```
-command: logweir-retention
-argv:    run --plan /retention/plan.json --retention-contract-version 1
-env:     LOGWEIR_RETENTION_PLAN_SHA256=sha256:<64 lowercase hex>
-         LOGWEIR_RETENTION_POLICY_UID=<uid>
-         LOGWEIR_RETENTION_POLICY_GENERATION=<int>
-         LOGWEIR_RETENTION_SCOPE_PREFIX=<spec.scope.prefix>
-         LOGWEIR_RETENTION_RUN_ID=<run id>
-         LOGWEIR_RETENTION_APPROVER=<audit id | subject | unattended>
-         LOGWEIR_RETENTION_MAX_DELETIONS / _MAX_OBJECTS
-         LOGWEIR_RETENTION_LOCATION=<the destination's DestinationLocation, as JSON>
-         AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY        ← the DELETE-capable grant
-         LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID / …_SECRET_ACCESS_KEY  ← the evidenceWrite grant
-```
-
-**Every binding variable is required except `LOGWEIR_RETENTION_APPROVER`** (absent means
-`unattended`). An absent or blank one is refused by name, exit 3, nothing deleted. The two
-ceilings are whole numbers of at least 1. Since FX-10 (2026-10-05), a ceiling the worker cannot
-read is refused (`CapUnreadable`) rather than replaced by 50 or 20 000. The controller has
-projected both on every enforcement Job since the worker existed, so a supported pairing never
-meets that refusal.
-
-**The contract version is checked before the plan is read.** A newer controller handing this
-binary a plan shape it does not implement is refused by name rather than partially obeyed — the
-same handshake execution contract v2 uses, and for the same reason.
-
-**The scope arrives twice and both copies must agree.** `LOGWEIR_RETENTION_SCOPE_PREFIX` is what
-the Job was told; the plan document carries its own `scope_prefix`. A worker that took the scope
-from the plan alone would accept a plan that widened its own scope, so the two are compared and a
-disagreement is a refusal.
-
-**The exit codes.**
-
-| code | meaning |
-|---|---|
-| **0** | every planned point completed, or `--dry-run` finished having deleted nothing |
-| **1** | at least one point did not complete — `Orphaned` (manifest gone, a segment refused) or `Kept` (the manifest itself refused), with its closed code |
-| **3** | the plan was REFUSED **before anything ran**: a digest that is not the approved one, an unknown field, another media type, another policy or generation, a widened scope, a key outside `<scope>/<backupId>/`, a key under `logweir/`, a plan over a ceiling, or no record sink. **Zero objects deleted.** |
-
-**2 and 4 are never returned**, and that is a contract rather than an accident. Global Constraint
-11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and signed" and 4 for
-"signing or lock-proof failed"; this binary produces no drill result and signs nothing, so either
-code would make a deletion failure indistinguishable from a drill outcome to every reader of the
-exit contract, `weirkeeper::conditions::reason_for_exit` included.
-
-**Stdout is key lines, read by name and never by position**, the same rule `notify-result=` and
-`refusal-reason=` follow:
-
-```
-retention-plan=sha256:… points=3 objects=19
-retention-point=lwp1-… state=Deleted objects=7
-retention-point=lwp1-… state=Orphaned objects=3 code=AccessDenied
-retention-record=logweir/retention/<policyUid>/<runId>.json sha256=sha256:…
-retention-result=deleted=2 failed=1 objects=10
-```
-
-**A dry run asks for no credential at all.** The preview is the validation plus the plan echo, and
-requiring a delete-capable Secret to produce one would make a preview need the authority it exists
-to avoid.
-
-**Bounded retry, by code.** Three attempts per key — **two waits, because three attempts have two
-gaps** — of 1 s and 4 s, and **only** for a 5xx or a timeout. D3 §6.5 writes the backoff as
-"1 s/4 s/16 s", which reads as three numbers; a third wait would come after the last attempt, i.e.
-sixteen seconds of holding a Job open to learn nothing. `AccessDenied`, `Locked` and `PreconditionFailed` are answered once — a second
-attempt at a policy decision is three seconds of nothing — and `NotFound` is success, because a key
-an interrupted run already removed is a key this run wanted removed. That last rule is what makes
-completion idempotent: a `Orphaned` point's leftover segment keys are exactly what the next plan
-names.
-
-**Execution order per point**: the intent tombstone, then the **manifest**, then the segments, then
-the completion tombstone. Manifest first, so a run interrupted halfway leaves a set the catalog
-reports `Missing` rather than a plausible-looking `Partial` one.
-
-#### The retention record is create-only and **unsigned** in this build
-
-D3 §6.5 calls for the enforcement record to be signed with the runner signing key. **It is not
-signed here**, and the reason is recorded rather than glossed: signing would make
-`logweir-retention` link `crates/logweir-evidence`, whose reaching set
-`scripts/check-one-signer.sh` holds to exactly `{logweir, e2e}`. Widening that allowlist is a
-security decision about the signer, taken in `scripts/check-one-signer.sh` and
-`crates/logweir/tests/one_signer_gate.rs`, and it is not one a deletion feature gets to make on its
-way past.
-
-What the record and the tombstones therefore **do** prove: they are written with
-`PutMode::Create` under `logweir/`, by the `evidenceWrite` grant, to a prefix the run's own
-delete-capable credential cannot reach or remove; they name the policy identity and generation, the
-approved plan digest, the approver reference, the rules as applied, every deleted point with its
-object count and every failure with its closed code. They are therefore tamper-evident against the
-retention principal, and against anyone who can only delete.
-
-What they **do not** prove: anything against a principal holding `s3:PutObject` under `logweir/`.
-Such a principal cannot replace the record — `PutMode::Create` refuses a second put — but it can
-**pre-empt** it: the run id is deterministic and derivable from the status, so a plausible document
-written at `logweir/retention/<uid>/<runId>.json` before the run makes the real put fail, which the
-worker reports on stderr and does not treat as fatal. The run still exits on its real outcome and
-the per-point tombstones are the surviving trail, but the top-level record is then an attacker's
-document. That is exactly the gap a signature closes.
-
-Closing it is either a reviewed widening of the one-signer allowlist for this binary, or a signing
-step performed by something that already holds the key; **neither is implemented, and no surface may
-describe the record as signed until one is.** That sentence is enforced rather than advisory:
-`scripts/check-withdrawn-claim.sh` carries eight paraphrases of it in its `PHRASES` list, in the
-same defect class as the original withdrawn signing claim, and fails the build on any shipped
-surface that restates it — the CRD's `doc` string and its ten generated copies included.
-
-**What W14 must assert instead of a signature:** that the record exists at
-`logweir/retention/<uid>/<runId>.json`; that its bytes digest to
-`status.lastEnforcement.recordSha256`, which the controller now publishes; that a second put at the
-same key is refused; that each deleted point's intent tombstone exists and predates its deletion;
-and — the one that actually matters — that the delete-capable principal can neither `PutObject` nor
-`DeleteObject` under `logweir/`, probed directly.
-
-### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
-
-Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once
-for `kafka-backup restore` at phase 6. Since v0.1.x Logweir hashes the exact bytes it writes at
-phase 5 and refuses at phase 6 if the re-rendered document does not match, naming both digests.
-
-The refusal is **exit 1** — an operational error, no artifact written. It is deliberately not
-exit 3: the exit-code contract reserves `3` for a plan refused by a guard *before anything runs*,
-and by phase 6 the admission guard has passed, the plan has been rendered and the engine's own
-`validate-restore` has already executed. The ADR that would normally record this decision is gated
-on an open question and is deferred; this section is the record.
+| `source.point` (the plan) | the set comes from `source.backup`, and no binding is checked |
+| `LOGWEIR_EXECUTION_AUTHORIZATION_KIND` | `approval` — the per-run `Approval` |
+| `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | no standing authorization. Standing authorizations are withdrawn (PROD-17.1): a complete contract naming the `standing` kind is refused by name, exit 3 |
+| `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | the synthesized `legacy-governed-v1` policy |
+| `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | the legacy single-key bundle |
+| `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256` | no evidence keyring, which the controller renders exactly when the plan carries `source.point`; a point-bound plan without it is refused `PointUntrusted` |
+
+The optional bundle members (`--policy-snapshot`, `--confirmation-key`,
+`--evidence-keys`) are digest-pinned in **both** directions, and the first two
+are refused on a standalone invocation. `--evidence-keys` only ever NARROWS, so
+a standalone run of a point-bound plan (the disaster path) needs it.
+
+### A bound point's receipt is verified, and restores its own set (D3 §5.5, FX-16)
+
+Before any data moves, the runner verifies a bound point's receipt sidecar
+against the mounted evidence keyring and judges the key for `EvidenceSigning`
+at the receipt's `finished_at`; and it refuses, exit 3
+`PointBindingSetMismatch`, a plan whose `source.backup` is not the receipt's
+`backup_id` (**`latestCompleted` beside `source.point` included**), whose
+`source.storage` would have the engine read another manifest, or whose
+described set is not the one it verified
+([the plan field](formats/drill-spec.md#sourcepoint-execution-contract-v2)).
+FX-16's refusal is a new cause for exit 3 only to the safer side, MINOR under
+OD-7's third case; no format changes.
+
+- **Upgrade the controller and the runner image together.** A runner at this
+  version handed a point-bound plan by an older controller refuses it
+  `PointUntrusted`, and an older runner does not know `--evidence-keys` (exit
+  1). A point-bound `Restore` whose approval bundle an older controller made
+  before its Job existed is refused `ApprovalBundleConflict`: delete it and
+  create it again.
+- **A hand-written point-bound plan** that says `backup: latestCompleted`, or
+  whose `source.storage` prefix is not the one the set was written under, is
+  refused after the upgrade: name the point's set, which needs a new approval.
+  A copy of the archive that keeps the original keys restores as before.
+- **Rollback.** An older runner restores whatever `source.backup` names; no
+  archive, catalog or evidence object changes in either direction.
+
+### Saved destinations, the execution claim and an existing set
+
+- **A `Backup` frozen against a saved destination is REFUSED by an older
+  controller, not run**: its grammar is `deny_unknown_fields`, and its
+  `storage_url_for` refuses the sentinel `archive.url`
+  (`logweir-destination://<name>`), so the run ends `ArchiveUrlUnreadable`
+  before any POST and nothing is written to the wrong place. Let
+  destination-backed runs reach a terminal phase before a downgrade.
+- **One `backup_id` is one engine run (RECEIPT-DUP), and a set that already
+  exists is never written again (FX-7)**
+  ([the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+  A standalone `backup run` that reused a fixed `backup_id` must use a fresh id
+  per run (`--backup-id-override`). Let a Backup Job whose older runner is
+  still RUNNING finish before upgrading. An older runner ignores the claims
+  and the set check, so let in-flight `Backup`s finish before rolling the
+  runner back: re-run over a set, it leaves this build's point `Conflict` on a
+  versioned bucket and is seen by nothing on an unversioned one.
 
 ### The Amendment G status additions are additive, and absent means *not observed*
 
 `Backup.status.{progress,capture}`, `Restore.status.{progress,completion,teardown}`
-and `*.status.evidence.verification.{signedAt,trust}` are all optional blocks on
-kinds that already existed. Nothing is converted, nothing is rewritten, and an
-object written before them is read exactly as the controller that created it
-read it.
-
-**The rule, everywhere: an absent field means *not observed*, never a default
-that flatters the object.** That is a compatibility promise and it is worth
-stating as one, because the flattering reading is always the convenient one:
+and `*.status.evidence.verification.{signedAt,trust}` are optional blocks on
+kinds that already existed. An object written before them is read exactly as
+the controller that created it read it. **An absent field means *not
+observed*, never a default that flatters the object:**
 
 | Absent | What is reported |
 |---|---|
@@ -2884,357 +297,529 @@ stating as one, because the flattering reading is always the convenient one:
 | a catalog point's `partitions` | the size bound is not enforced, recorded as `sizeBasis: unknown` |
 | a record's `execution` | provenance unknown |
 
-**Neither `basis: None` nor `basis: Unverified` is a conclusion.** `None` means
-the document carried no signing time, so the comparison had nothing to compare;
-`Unverified` means the stored status predates the field the comparison needs and
-nothing has been compared yet. Both are re-read **once**, through the same
-bounded path, on the next policy event; neither may render green. The next
-section is the whole of that rule, and the allow-list form it takes — only
-`Current` and `Historical` mean a comparison happened — is what keeps it correct
-under a build nobody has written yet.
+### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
+
+A `Backup` or `Restore` that finished before `status.evidence.verification.signedAt`
+and `.trust` existed carries neither. **Only `trust.basis: Current` or
+`Historical` means a signing time was compared with the key's validity
+window**; such a block without `signedAt` stays `Untrusted` /
+`SignedOutsideValidity`. Anything else — no `trust` block, no `basis`,
+`basis: None`, `basis: Unverified`, or a spelling a later build invents —
+compared nothing, so the controller reads the run's own document **once**,
+through the original evidence path, checks its bytes against the recorded
+digest and takes `signedAt` from it; until that succeeds the verdict is
+`NotAttempted`, never green. An unlisted signer, a key-usage mismatch and a
+`KeyCompromise` revocation still change such an object's verdict at once. The
+allow-list is what stays correct under a build nobody has written yet. Both
+fields are additive, so a rollback is unaffected
+([when trust changes](kubernetes.md#when-trust-changes)).
+
+## Known limitations of v0.1
+
+- **A drill posts no notification.** Its webhook, Slack and PagerDuty post is
+  withdrawn (release notes, item 74), and a plan that names a sink is refused
+  ([the plan field](formats/drill-spec.md#notifications)). Alert on the
+  runner's metrics textfile or the `Restore`'s conditions instead.
+- **Backups and drills are separate commands.** `logweir backup run` captures
+  the source cluster and writes a signed backup receipt; `logweir restore run`
+  and `logweir drill run` consume an existing archive. The historical
+  `--from-cluster` flag is not implemented. A drill does not contact the source
+  cluster: its scorecard has `source.captured_by_logweir: false`, null
+  `measured.rpo_source_relative_seconds`, and
+  `rpo_source_relative_unmeasured_reason: "source cluster never contacted"`; a
+  separately created backup receipt does not turn a drill's archive-relative
+  RPO into source-relative RPO.
+- **The YAML parser is archived.** The drill spec and both rendered engine
+  documents are YAML, parsed by `serde_yaml` 0.9, which resolves to
+  `0.9.34+deprecated` — an archived crate (RUSTSEC-2024-0370). It is kept for
+  v0.1 deliberately: no alternative was evaluated. **Revisit before v0.2.**
+  `deny.toml` carries the matching `ignore` entry and points here.
+- **No musl release target.** `rdkafka` compiles `librdkafka` from C, which
+  does not cross-compile to musl without much more work
+  ([ADR 0004](architecture.md#adr-0004-kafka-client)); `release.yml` does not
+  attempt one, and no release ships a musl binary.
+- **Release execution remains an evidence requirement.** The
+  [release checklist](tag1-checklist.md) records which release obligations are
+  blocked and [gates.md](gates.md) records dated workflow results; a local test
+  of workflow YAML does not prove that a published artifact was pulled and
+  executed. The runner release image is built once, checked with
+  `scripts/check-image.sh`, and those same bytes are pushed only after the
+  check succeeds (`crates/logweir/tests/workflow_lint.rs`).
+- **The sample window in `examples/drill.yaml` is illustrative and will not
+  match your archive.** A window that overlaps no segment is REFUSED with exit
+  1 rather than reported as a pass over nothing.
+- **The exit-code contract is nearly invisible under Kubernetes** unless the
+  Job is shaped with `restartPolicy: Never` and `backoffLimit: 0`; otherwise
+  exit 2 renders as a generic `Error`, indistinguishable from exit 1
+  ([the guide](kubernetes.md#read-a-runs-exit-code)).
+- **A drill that verified correctly and could not clean up still exits `0`.**
+  Phase 9 deletes the scratch topics *after* phase 8 signed and uploaded the
+  result. A topic the broker would not delete is named on that run — the metric
+  `logweir_drill_teardown_topics_failed{cluster}` (`0` included, so `> 0` is a
+  valid alert), a `WARN` naming the missing grant, the summary line, and
+  `teardown-failed=` (copied to `Restore.status.teardown.failed`) — and the
+  signed teardown attestation (`logweir/drills/{run_id}.teardown.json`) is the
+  durable record; one that could not be persisted is a `WARN` only, and its
+  absence from the bucket is the signal. A run that fails after its creation
+  step (exit 1, 3 or 4) tears down what that step created by the same rule,
+  never an original name (FX-44). **Whether a leftover topic should change the
+  exit code is an open question** (stage-2 ruling R-C);
+  `teardown_failure_does_not_change_the_exit_code` pins today's answer.
+- **Fixtures document more than the current writer emits.** Some scorecard
+  fixtures populate `engine_subreport`, which the writer always sets to null
+  ([fixture notes](../e2e/fixtures/README.md)).
+- **S3 credentials come from `object_store`'s own chain, not the AWS SDK's.**
+  `Store::from_url` builds the S3 client with `object_store` 0.14's
+  `AmazonS3Builder::from_env()` (static keys, then web identity / IRSA, ECS,
+  EKS Pod Identity, IMDS). `~/.aws/credentials` profiles, `AWS_PROFILE` and SSO
+  are unsupported.
+- **MSRV is 1.89**, raised from 1.82 by `object_store` 0.14's feature set
+  (edition 2024 needs rustc 1.85; `crc-fast`, the `icu_*` crates and
+  `idna_adapter` raise the floor to 1.89).
+- **Create-only evidence puts.** MinIO and SeaweedFS 4.48 are the
+  S3-compatible backends with a row in this repository
+  ([archive backends](support-matrix.md#archive-backends)). **Real AWS S3 is
+  NOT exercised**: the AWS leg is
+  `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` and is
+  confirmed by the first adopter run, not by this plan. A backend that answers
+  `NotSupported` to `PutMode::Create` takes the HEAD-then-PUT fallback in
+  `Store::put_create_only`, a genuinely weaker guarantee (on AWS S3,
+  `object_store` 0.14 uses the conditional `If-None-Match` put).
+- **The signed scorecard's `evidence` block cannot establish upload facts**: it
+  is signed before upload, so the four fields are zeroed
+  ([the format](formats/drill-scorecard.md#evidence--makes-no-claim-about-the-upload)),
+  and the readback is the separately signed put receipt; a missing one means no
+  storage evidence was published. `object_store` 0.14 models no Object Lock
+  readback, so the immutable fields stay unproven even on an Object Lock
+  bucket.
+- **Images.** Every image is built for `linux/amd64` and `linux/arm64` on
+  native runners ([install.md](install.md#verify-the-images));
+  `scripts/check-image-weirkeeper.sh --no-exec` inspects a foreign architecture
+  without executing it, and `Dockerfile.weirkeeper` refuses cross-compilation
+  because its `aws-lc-sys` build reads host headers. Local rebuilds change image
+  digests; the chart uses `:latest` for the Logweir repositories by the owner's
+  2026-09-12 decision.
+
+### `sample.anchor` accepts only `head` in v0.1; `tail` and `random` are refused
+
+A plan naming `tail` or `random` is REFUSED at phase 0 with **exit 3**, nothing
+written, and the message names the limitation. Phase 7 reconciles the restored
+topic's FIRST `sample.records_per_partition` records, which match the
+archive's sampled records only for `head`; `tail` is unsound for the property
+the drill measures, and `random` is unsound and unbounded (measured: `random`
+scored `pass_rate_measured: 0.08`, `fail-integrity`, against a byte-for-byte
+correct restore). Refusing is not substituting `head`: a signed scorecard must
+not record an anchor the drill never applied. Set `sample.anchor: head` or omit
+it; to rotate coverage, rotate the sampled WINDOW between drills. An
+unrecognised spelling does not parse and exits **1**.
+
+### A compacted target topic is reported as a mismatch, not as `partial`
+
+Phase 7 does not tell "compaction removed this record" from "the restore or the
+archive lost it", so a compacted target reads `integrity.result: fail` with the
+offsets logged. That is the safe direction, but a drill against a compacted
+scratch topic means nothing in v0.1: restore into a topic with
+`cleanup.policy=delete`, which is what phase 6 creates by default.
+
+### A `newTopic` restore does not reconstruct the source's topic settings
+
+A restore creates every target topic itself, in both modes: the manifest's
+partition count, the plan's `default_replication_factor` (1 when it names
+none), `retention.ms=-1`, `message.timestamp.type=CreateTime`, and the target
+broker's default for everything else, `cleanup.policy` included. For a
+`newTopic` restore the source's compaction, retention and replication factor
+are therefore **not reconstructed**, and since scorecard format 1.2.0 the
+signed scorecard names each in `topic_parity.not_reconstructed`; in a
+`newTopic` document signed before 1.2.0 the `intentionally_deviated` label means
+the same ([the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120)).
+**Apply the source settings after the restore is verified**, never before:
+`cleanup.policy` and `retention.ms` with `kafka-configs.sh --alter` (a retention
+shorter than the restored records' age deletes them at the next retention
+check), and the replication factor with a partition reassignment. Logweir does
+neither. Only the overrides the engine captured are compared: a setting
+inherited from the broker's defaults is never named. A scratch drill is
+unaffected.
+
+### `engine_subreport` is always null in v0.1
+
+Logweir never runs the engine's `validation run` subcommand (phase 7's unused
+call was removed in v1, release-notes item 74), so the field is always `null`.
+Read null as "no engine sub-report retained", not as a successful upstream
+validation.
+`e2e/tests/full_drill.rs::the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
+fails when that changes.
+
+### A crashed restore is not resumable in v0.1
+
+The rendered `restore.checkpoint_state` path is **pod-local and is never
+uploaded**, so a restore that dies mid-run re-runs from phase 0.
+
+### An archive holding transaction markers is refused unless the plan allows it
+
+The pinned engine captures with `READ_UNCOMMITTED` and restores every archived
+record non-transactionally, so a restored transactional topic holds aborted
+records, records of transactions open at backup time, and one record per commit
+or abort marker, all visible to every consumer
+([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)).
+Logweir does not claim transactional recovery. Since PROD-01.1a a restore, before
+it creates anything, counts the records in its window's segments and every
+later segment that are shaped like a marker (key `00 00 00 00` or
+`00 00 00 01`, a 6-byte value starting `00 00`, no header but
+`x-original-offset` and `x-original-timestamp`), and refuses, exit 3,
+`refusal-reason=TransactionMarkersInArchive`, naming topics, partitions and the
+count. To restore such an archive as it is, state
+`restore.allow_transaction_markers: true` (inside `plan_hash`); the check is
+then skipped and `sample.coverage_note` says so. A segment in the window the
+check cannot decode refuses the run; one after the window that cannot be read
+does not, and the note counts it. The shape is the only signal: a record of
+your own with that shape is counted too, and a transaction whose marker the
+archive lacks, or that sits in an unread segment, is not detected (PROD-01.1b,
+PROD-00.3a).
+
+### Recovery-point selection uses segment first and last timestamps
+
+The archive describes each segment by its first and last record timestamps,
+not its minimum and maximum, and the engine's segment selection and Logweir's
+window floor and count bound read those. With timestamps out of order within a
+segment, a record older than every segment's first record is dropped from every
+restore of that archive; a point-in-time restore can omit a record at or before
+the point and still pass; and a correct point-in-time restore can fail the
+count check (three rows of `e2e/tests/record_semantics.rs`;
+[decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment)).
+**Complete coverage** (PROD-08.1) selects the expected output by each record's
+own timestamp, so the omitted and dropped records fail it and the correct
+restore passes. The restores themselves are unchanged until PROD-01.1b.
+
+### `LogAppendTime` sources are restored with the producers' timestamps
+
+For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the
+timestamp each producer set, and the restored topic reports it as `CreateTime`
+(measured by
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`;
+[decision record §2.3](to-do/decisions/PROD-01.1-record-semantics.md#23-a-logappendtime-source)).
+A full restore runs and its drill passes; a point-in-time restore is refused
+unless the plan accepts it (next).
+
+### A point-in-time over a `LogAppendTime` source is refused unless the plan selects by producer time
+
+Since FX-8, a restore whose plan selects records **by time** over a source topic
+whose timestamp type is **recorded** as `LogAppendTime` is refused, exit 3,
+`refusal-reason=PointInTimeByProducerTime`, before any target topic is created
+(phase 0 has run, so on a `LogAppendTime` target its probe topic has been
+created and deleted, [the exit-3 exception](reference.md#exit-codes)). A plan
+that states `restore.time_basis: producerTime` runs, and its scorecard lists the
+topic under `source.time_basis.producer_time`: a restore **by the producers'
+clocks**, not by the broker's append time, which needs an archive that keeps it
+(PROD-00.3c). Where nothing records the type, the selection runs and the topic
+is listed under `source.time_basis.not_recorded`, never read as `CreateTime`
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
+
+### A repeated header key keeps one copy
+
+The pinned engine holds a record's headers as a map, so a header key repeated
+in one record is archived and restored once — at the first copy's position,
+with the last copy's value — and the drill does not detect it. A record that
+already carried `x-original-offset` keeps only the backup's own, and a drill
+that samples such a record fails
+(`e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`;
+[decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
+
+### A broker outage during a restore can leave a partial target with duplicates
+
+The engine resends a produce whose acknowledgement it did not receive, and does
+not produce idempotently, so a lost acknowledgement duplicates that batch. An
+outage long enough for the broker to re-register can end the restore early,
+exit 1 with no scorecard, leaving the partial target; a stall past Logweir's
+20-second client timeout can fail a restore whose target is complete
+(`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`;
+[decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+A duplicated target that reaches phase 7 fails: complete coverage counts each
+repeated `x-original-offset`, and the sampled check fails a duplicate in the
+head it reads.
+
+### SASL: two clients, two trust stores, and one password variable
+
+Logweir dials a cluster with **two clients**, its own librdkafka client and the
+engine's, and their trust stores are separate (Global Constraint 29): a
+private-CA adopter configures one file, `KafkaCluster.spec.auth.tlsCa` (or
+`LOGWEIR_SOURCE_TLS_CA_FILE` / `LOGWEIR_TARGET_TLS_CA_FILE` standalone), and
+the runner hands it to both ([install.md](install.md#two-clients-two-trust-stores)).
+**The password is never in a spec, a plan, a rendered document, a receipt or a
+plan hash**, and there is **no CLI flag** for it: it is projected as
+`LOGWEIR_SOURCE_PASSWORD` or `LOGWEIR_TARGET_PASSWORD`, and a value the engine
+document cannot carry is refused, exit 3, `CredentialNotRenderable`
+([saved connections](kubernetes.md#saved-connections)). Local SCRAM is covered
+end to end by `e2e/tests/scram.rs` (`just e2e`).
+**MSK-specific behavior remains [UNVERIFIED — needs an MSK cluster].**
+MSK IAM / OAUTHBEARER is unimplemented, and SCRAM-SHA-512 over TLS has no
+repeatable local row ([the compatibility contract](support-matrix.md#the-compatibility-contract)).
+
+### The unit suite dials nothing; the e2e suite dials
+
+The default `cargo test --workspace` suite must not contact a broker, bucket,
+cluster or webhook (`just time-unit-suite`: 120 s for the suite, **15 s for any
+individual test**); `just e2e` runs the rows that need the compose stack
+([the gate reference](gates.md)). Run mutation tests in an isolated worktree
+with `just mutant "<cargo args>"`, and clear them with `just mutant-clean`. The runner builder cross-compiles natively:
+the former emulated Cargo layer took **33x** the native cross-compile
+(2026-09-09, arm64), a measurement and not a release budget.
+
+## Measured scale limits (PLAT-20.2)
+
+These are the sizes the product bounds itself to. The bounds are contracts;
+the timings measured at them are one machine's and are **not** budgets.
+
+| Surface | Bound | Beyond it |
+|---|---|---|
+| Topic discovery | `maxTopics` 20,000 by default, 50,000 installation ceiling (`hardMaxTopics`); chunks of 2,500 names / 768 KiB, at most 64 | the inventory is `truncated: true` with `MaxTopics` or `RelayLimit` ([topic discovery](kubernetes.md#topic-discovery)) |
+| The topics of one backup (FX-33) | **1,000 topics**, named or resolved, at a budget of **5,000 bytes a topic** in the receipt: a receipt of at most **5,131,072 bytes** and a catalog record of at most **6,131,072 bytes**. A dynamic selection is also at most 256 KiB of names | refused before the engine runs, by name (`BackupSelectionTooLarge`; a dynamic selection's `Backup` is `SelectionTooLarge`); nothing is left out to fit. Split the selection across schedules ([the budget](kubernetes.md#one-backup-names-at-most-1000-topics)) |
+| Catalog view (history from an archive) | the newest `spec.sync.viewLimit` points, 100–5,000, in at most 8 page `ConfigMap`s | counted and histogrammed over the whole archive, `truncated: true`; the rest is `logweir catalog list` against the archive ([the catalog](kubernetes.md#the-recovery-catalog)) |
+| Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
+| API list page | 200 objects | follow `nextCursor` |
+| Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
+| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per namespace (`runs.*`); scheduled runs not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([manual runs](kubernetes.md#concurrency-and-manual-runs)) |
+| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per namespace per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
+
+**What was measured.** Offline and in process (2026-09-23, release builds on
+an Apple M4), with harnesses that re-run:
+
+```bash
+cargo test --release -p logweir-api  --test scale -- --ignored --nocapture --test-threads=1
+cargo test --release -p weirkeeper   --test scale -- --ignored --nocapture --test-threads=1
+cargo test --release -p logweir-kafka --test scale -- --ignored --nocapture --test-threads=1
+MEASURE_ROWS=5000 MEASURE_TOPICS=5000 node scripts/plat18-2-measure.mjs
+```
+
+At the largest sizes the product pages, nothing was near a budget: discovery
+steps took at most 18 ms for 50,000 topics against a 300-second Job deadline,
+API pages stayed in tens of milliseconds, and the console rendered 5,000 rows
+in under 30 ms. A catalog point page re-reads its view from the first page
+(the cursor is a row offset), bounded at eight pages a request. Live on
+docker-desktop (2026-09-24, 258 real points), a `Full` catalog sync took 58.5 s;
+on that build a hundred accepted "Back up now" requests became a hundred runner
+pods and turned the node `NotReady`, which release-notes item 15 (P10) bounded.
+[UNVERIFIED — a 1,000-point archive was not reached live; 258 points were measured, and the offline rows above carry the 5,000-row bounds.]
+
+**The regression checks are on work, not time.** `crates/logweir-api/tests/scale.rs`
+asserts the bounds in the default suite — a point page reads at most 8 page
+`ConfigMap`s and 4 `Backup` pages, a topic search at most 8 chunks, and the
+console's 5,000-row walk one bounded `LIST` per page — and each was shown to
+fail when its bound is removed.
+
+## Recorded rulings that have no ADR yet
+
+### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
+
+A `Restore`'s window is closed: the engine's filter is `timestamp >= start &&
+timestamp <= end`, so a record whose timestamp equals `restore.point_in_time`
+**is** restored when its segment is read. The receipt's `covered.to_ms` is the
+newest segment's end **plus one millisecond**, the first instant the archive
+does *not* cover. So copying `covered.to_ms` into a `point_in_time` is refused
+by the readiness check (`PointInTimeAfterCoverage`, `oldest < point_in_time <=
+newest`), and so is a `point_in_time` equal to `covered.from_ms`
+(`PointInTimeBeforeCoverage`); the console offers `[from_ms + 1 ms, to_ms - 1
+ms]` and defaults to its end. Both floors are the minimum segment start over
+the topics a document names, and a stated start (`"<start>/<end>"`, PROD-11.1)
+must be at or after it ([segment first and last timestamps](#recovery-point-selection-uses-segment-first-and-last-timestamps)).
+
+### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
+
+Exit 3 means "refused by a guard, before anything runs", and there is exactly
+one write before the approval is verified: on a target broker whose effective
+`log.message.timestamp.type` is `LogAppendTime`, and only then, phase 0 creates
+the first mapped target topic with `message.timestamp.type=CreateTime`, reads
+the value back, and deletes it again on both branches, because no read answers
+whether such a broker honours the override. The probe stays inside
+`target.topic_mapping_prefix` (`TopicDeleter` refuses every other name), runs
+only after phase 0 found no mapped target topic, and is deleted before any
+verdict. A target whose broker configuration phase 0 may not read is exit 1
+before the probe (FX-4), and a probe or target topic the cluster does not serve
+within the bound is exit 1 naming it (FX-18).
+
+### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
+
+Logweir hashes the exact `restore.yaml` bytes it writes at phase 5 (for
+`kafka-backup validate-restore`) and refuses at phase 6 if the re-rendered
+document does not match, naming both digests. It is **exit 1**, an operational
+error with no artifact: exit 3 is reserved for a refusal before anything runs,
+and by phase 6 the engine's own `validate-restore` has executed.
+
+### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
+
+rust-rdkafka 0.36.2 never reads librdkafka's per-resource DescribeConfigs error
+(`src/admin.rs:1121-1159`): a topic or broker the principal may not
+DescribeConfigs comes back as a SUCCESS with ZERO entries, which Kafka never
+answers for an authorised resource (`ConfigHelper.scala:54-98` at 4.3.1). So
+`logweir-kafka` turns an empty answer into an error, NotAuthorized or unknown
+topic (`e2e/tests/config_coverage.rs::a_denied_describe_configs_is_a_refusal_at_every_reader`):
+phase 0 exits 1 when the restore identity may not read the target's broker
+configuration (grant DescribeConfigs on the Cluster resource; Describe does not
+imply it), and phase 2 and the probe readback exit 1 on an existing topic's;
+`target.timestampBound` reads `unknown` (`BrokerConfigsNotReadable`); phase 7
+names the topic `targetReadDenied` in `not_assessed`; and a backup never fails
+for it — the topic's coverage reads `captureDenied`
+([the format](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+For a visible topic `captureDenied` is an inference from the principal's
+metadata (owner choice AP-OC1 would make it an observation); it never makes the
+answer `captured`.
+
+### An endpoint's capability is read from the endpoint, and a value it did not report is not recorded (PROD-01.2)
+
+A Kafka-compatible endpoint is not always Apache Kafka (measured on Redpanda
+v26.2.4,
+`e2e/tests/compat_contract.rs::redpanda_backs_up_and_refuses_a_restore_before_it_starts`).
+**When the endpoint cannot answer, the receipt, the catalog and the status say
+"not recorded" with the reason, and never record an empty answer as a fact**
+([the sweep](to-do/decisions/PROD-01.2-compatibility-contract.md#6-capture-paths-swept-unsupported-metadata-never-appears-captured)).
+So `Restore.status.topicPreflight.timestampType` is absent when the broker did
+not report its timestamp type (target topics are still created with
+`CreateTime` pinned); `target.timestampBound` reads `unknown`,
+`TimestampBoundNotReported`, when the broker reports neither bound key; four
+capability rows (`connection.engineProtocol`, `target.engineProtocol`,
+`connection.topicConfigsReadable`, `connection.groupTypes`) say what the
+endpoint cannot do and are never `ready` for a broker that did not answer
+([the rows](kubernetes.md#what-the-rows-check),
+[capability checks](support-matrix.md#capability-checks)); and an object
+store's answer is read from its HTTP status and error `<Code>`, never from a
+word in its text (versitygw's `404 XAdminUserNotFound` is a refused credential,
+`InvalidCredentials`). A marker topic the restore identity may not Describe is
+refused as before (exit 3), and the message says it does not exist or is not
+describable and names the grant; `connection.authenticated` says when a
+cluster's advertised brokers cannot be reached (`logweir cluster-probe` still
+reads only the cluster id). An older runner refuses a plan that lists the new rows,
+so the runner image moves with the controller. No signed document changes.
 
 ### `RetentionPolicy` in `Enforce` is where the deletion boundary moves, and it is an installation decision
 
-Stated rather than implied, because it is the one thing in this product that
-cannot be undone.
+In every other mode Logweir writes only under its own `logweir/` prefix,
+create-only, and holds no object-store delete capability anywhere. `Enforce`
+gives the controller no delete verb, and the deleting crate is not linked into
+it: it turns the controller's authority to CREATE A JOB into a deletion
+capability **in the namespace that holds the retention credential**, the same
+residual class as the signing oracle. The hard boundary is that credential's own
+scope — the policy's prefix, never `logweir/`. Arming it takes four things held
+by different places: `logweir-retention-admin` setting `mode: Enforce`, the
+`logweir-retention` ServiceAccount (chart value `retention.enabled`, no
+Kubernetes verb), the prefix-scoped credential, and an administrator's approval
+of the current `planSha256` ([enforcing](kubernetes.md#enforcing)).
+`logweir-retention` is a **separate binary** so that `crates/logweir-reaper`,
+the one crate that names an object-store delete, is never linked into the
+everyday binary (`scripts/check-no-archive-write.sh` check 3).
 
-In every other mode, and in every build before `Enforce` is set, Logweir writes
-only under its own `logweir/` prefix with create-only semantics and holds no
-object-store delete capability anywhere. Enabling `Enforce` does not give the
-controller a delete verb — the controller still holds none, on any Kubernetes
-resource but the two transient check kinds, and the deleting crate is not
-linked into its process. What it does is turn the controller's existing
-authority to CREATE A JOB into a deletion capability **in the namespace that
-holds the retention credential**. That is the same residual class as the
-signing oracle: a component that can create a pod in a namespace can do
-whatever a credential in that namespace can do.
+#### The retention record is create-only and **unsigned** in this build
 
-The hard boundary is therefore the credential's own scope — prefix-only, never
-`logweir/` — and not any Kubernetes permission. Four things must all be true
-before an object is removed, and they are deliberately held by different
-places:
-
-1. `logweir-retention-admin`, bound in that namespace, sets `mode: Enforce`.
-   It is a role of its own precisely so the operator who authored the policy is
-   not also the person who armed it.
-2. The `logweir-retention` ServiceAccount exists there (chart value
-   `retention.enabled`). It is granted no Kubernetes verb at all; it exists so
-   the deleting pod has a name an audit trail can use.
-3. An object-store credential scoped to the policy's own prefix is available to
-   that namespace. This is the boundary.
-4. An administrator approves the current plan by its `planSha256`. A stale
-   hash is refused with zero deletes.
-
-Evidence of what a run did is written where the delete-capable credential
-cannot reach it: a create-only record under `logweir/`, whose key refuses a
-second put, plus a per-point intent tombstone written **before** that point's
-first delete. The record is unsigned, and this document says so rather than
-letting a reader assume otherwise.
-
-### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
-
-`status.evidence.verification.signedAt` and `.trust` arrived with the trust
-lifecycle. A `Backup` or `Restore` that finished before them carries neither,
-and the new rule compares a key's validity window against a signing time — so
-on those objects there is nothing on the status to compare.
-
-**Measured, not predicted.** On the 2026-09-18 lab upgrade, five objects
-written on 2026-09-14 (three `Backup`s, two `Restore`s) moved from `Valid` to
-`Untrusted` with the reason *"the document carries no signing-time field"*,
-while their phase, exit code and `status.reason` did not move at all. No
-archive had been read and no signature re-checked. Nothing was wrong with those
-receipts; their *status shape* predated the field the rule needs, and the
-refusal reported that as a fact about the documents.
-
-**The ruling.** A status that predates `signedAt` and a document that claims no
-signing time are different facts and get different answers.
-
-The question is never *which build wrote this block* — nothing on the status
-says so — but **is this block evidence that a signing time was ever compared to
-the key's validity window?** Exactly two answers mean yes:
-
-* `trust.basis: Current` or `trust.basis: Historical`. Both are reachable only
-  through the window comparison, and the comparison is unreachable without a
-  claim, so such a block had one. It stays `Untrusted` /
-  `SignedOutsideValidity` if it carries no `signedAt`, and the fail-closed rule
-  is unchanged.
-* **Anything else** — no `trust` block, a `trust` block with no `basis`,
-  `basis: None`, `basis: Unverified`, or a spelling a later build invents —
-  compared nothing. On a policy event the controller performs **one** bounded
-  `get` of the run's own receipt or scorecard, through the same evidence path
-  that produced the original verdict, checks the bytes against the `sha256` the
-  run recorded, and takes `signedAt` from the document exactly as a fresh run
-  does. The signature is not re-checked: it was checked over these same bytes
-  when the run finished, and the digest is what says they are the same bytes.
-
-**Enumerating the bases that mean something, rather than the shapes that do
-not, took three lab runs.** Two earlier attempts keyed on the presence of a
-`trust` block and then on the literal string `Unverified`, and the objects in
-the field matched neither: an intermediate build had already re-derived them
-and stamped `{basis: "None", keyState: "Active", policy: {name:
-legacy-roster-v1}}` with no `signedAt`, so they read as "a document that claims
-nothing", no re-read was scheduled, and three consecutive upgrades reported the
-same five objects `Untrusted`. The allow-list form is the one that stays
-correct under a build nobody has written yet.
-
-**What it costs, and how it is bounded.** A document that genuinely carries no
-signing time is written by a current build as `basis: None` with no `signedAt` —
-the same bytes as that legacy re-stamp. The two are indistinguishable on the
-status, so such a document is re-read too. That is the price of the only thing
-that can tell them apart, which is reading the document; guessing the other way
-is what left five sound archives marked `Untrusted`.
-
-It is read **once**. A terminal object is reconciled every `REQUEUE_SECS` (15
-seconds), not only when a `TrustPolicy` changes, so "one bounded re-read" needed
-something on the object to be bounded by:
-
-* a read that **succeeds** writes `signedAt`, and the object is ordinary again;
-* a read that **completes and finds none** writes
-  `trust.signingTimeRead: absent` — the absence is the document's, and asking
-  again can only get the same answer;
-* a read the store answers with a document **over the controller's read cap**
-  (FX-31, `docs/kubernetes.md` §7b.4) writes `trust.signingTimeRead: overCap`:
-  the document was not read, the stored verdict stays on an unverified basis,
-  and asking again would get the same size back;
-* a read that **learns nothing** (the archive did not answer, or there was no
-  reader) writes `trust.retryAfter`, fifteen minutes ahead. Reconciles inside
-  that window resolve no destination, issue no `get` and write nothing.
-
-So the steady cost of an unreachable archive is one `get` and one small patch
-per object per quarter hour, and an archive that comes back is picked up within
-one window. Without that bound it was one `get` every fifteen seconds per
-object, for ever, for verdicts that provably cannot change.
-
-Until a read succeeds, the object is neither withdrawn nor presented:
-`result` becomes **`NotAttempted`** — no verification was attempted under this
-policy — with `trust.basis: Unverified`, while `matchedKeyId` and `verifiedAt`
-keep recording the original observation. It is `result` and not only the basis
-because `ui/pages/backups.js`, the product API's status projection and the
-`SIGNED` printer column all read `result` alone, and `NotAttempted` is the value
-every one of them already fails closed on; the badge is the literal word
-`unverified` and the `Verified` condition is `False` with reason
-`VerificationNotAttempted`. An unreachable archive leaves the object there and
-the next attempt is tried once `trust.retryAfter` has passed — the `Unverified`
-basis is itself the mark that the status still predates `signedAt`, so the retry
-survives any number of failed passes, and a pass that changes nothing writes
-nothing. A destination whose `evidenceRead` grant only a pod may hold is never
-repaired by the controller, and the `detail` says so.
-
-A digest mismatch at the recorded key takes the same path with a `detail`
-beginning "digest mismatch at"; no claim is taken from bytes that are not the
-bytes the run reported writing.
-
-**What does not wait for the read.** An unlisted signer, a key-usage mismatch
-and a `KeyCompromise` revocation still change a pre-`signedAt` object's verdict
-immediately. None of those rows consults the signing time, so none of them is
-delayed by an archive that will not answer, by a backoff that has not expired,
-nor by a kube API failure while resolving the evidence path, which is recorded
-as "no read was attempted" rather than failing the reconcile.
-
-One consequence worth stating: while an object sits on `NotAttempted`, its
-stored `verifiedAt` is no longer accepted as an independent observation (that
-rule admits only a `Valid` or `Untrusted` block), so a `KeyCompromise`
-revocation arriving in that window reads `Revoked` rather than
-`RecordedBeforeRevocation`. Both are `Untrusted` and neither is green; the
-difference is one sentence, and it errs toward refusing.
-
-**Rollback** is unaffected: both fields are additive, an older controller
-ignores them and reports the `result` it finds, and a repaired object reads as
-`Valid` there too. The operator-facing detail is in `docs/kubernetes.md`
-§15.2c.
+D3 §6.5 calls for the enforcement record to be signed. **It is not signed
+here**: signing would make `logweir-retention` link `crates/logweir-evidence`,
+whose reaching set `scripts/check-one-signer.sh` holds to exactly
+`{logweir, e2e}`, and widening that is a decision about the signer, not one a
+deletion feature makes on its way past. The record and the per-point
+tombstones are written with `PutMode::Create` under `logweir/`, by the
+`evidenceWrite` grant the delete-capable credential cannot reach, so they are
+tamper-evident against the retention principal; they prove nothing against a
+principal holding `s3:PutObject` under `logweir/`, which could pre-empt the
+record at its deterministic key. **No surface may describe the record as signed
+until a signing path exists**, and `scripts/check-withdrawn-claim.sh` fails the
+build on a shipped surface that does.
 
 ### Guard G-PITR: upstream's six point-in-time tests contain zero assertions, so Logweir proves the boundary itself
 
 `kafka-backup` 0.21.0 declares six point-in-time tests —
-`crates/kafka-backup-core/tests/integration_suite/pitr_accuracy.rs:25,40,54,66,78,86`: accuracy,
-boundary-inclusive, multi-partition consistency, millisecond precision, empty window, and
-`test_full_restore_no_pitr`. Every one of them is `#[ignore = "requires Docker"]` with a body that
-is one `println!` and a comment beginning "This test would:", and the file
-**contains zero assertions** (`grep -c assert` → 0). The filter at the centre of this product has no
-executable evidence upstream, the `<=` boundary included. The source-level answer is readable and
-inclusive — `r.timestamp >= s && r.timestamp <= e`
-(`crates/kafka-backup-core/src/restore/helpers.rs:74-82`) — so Logweir's guard **confirms a stated
-expectation** rather than discovering one.
-
-**The recorded result.**
+`crates/kafka-backup-core/tests/integration_suite/pitr_accuracy.rs:25,40,54,66,78,86` —
+each ignored, with a body that is one `println!`: the file
+**contains zero assertions**, at v0.23.3 too. The source-level filter is inclusive,
+`r.timestamp >= s && r.timestamp <= e`
+(`crates/kafka-backup-core/src/restore/helpers.rs:74-82`), so Logweir's guard
+confirms a stated expectation.
 `e2e/tests/pitr_boundary.rs::pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time`
-is run by `just pitr` with the compose stack live. The 2026-09-10 measurement
-used engine **0.21.0**, digest
-`sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
-and Apache Kafka **3.7.1** (KRaft).
-
-On 2026-10-08 PROD-00.3f re-ran the row with the **0.23.3** pin (digest
-`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`, Kafka
-3.7.1, compose slot 4): 1 passed, the same six of nine records, and both readers
-accept the signed result. Upstream's `pitr_accuracy.rs` at v0.23.3 still
-contains zero assertions.
-
-At the fixed recovery point `T = 1_760_000_000_000`, each of three partitions
-contains records at `T − 1 ms`, `T` and `T + 1 ms`. The restore returns
-**six of the nine records**: the first two from each partition. The boundary
-record retains its timestamp and partition; its `x-original-offset` header
-identifies its source offset. No `T + 1 ms` record is returned.
-
-The standing test uses `sample.records_per_partition: 25`, matching the
-examples. With this value the recorded 2026-09-11 rerun passed in 38 s, with
-both readers accepting the signed result. This covers the repaired
-reconciliation bug where a segment straddling the recovery point used to
-inflate the minimum number of records the window must contain.
-
-The aggregate lower bound counts only segments **wholly inside** the window;
-straddling segments contribute only to the upper bound. All three fixture
-segments straddle `T`, so the count bound is **[0, 9]** and six restored
-records fit it. Since FX-23 each partition is also held to its own bound, and a
-straddling segment whose first record (`T − 1 ms`) is inside the window proves
-that one record: **[1, 3]** per partition, which two restored records fit. Each partition reports `claimed=0`, one verified segment and
-two verified records. The payload set proves the inclusive boundary; the
-manifest's segment-level counts establish a bound, not exact equality.
+(`just pitr`, compose stack live) holds records at `T − 1 ms`, `T` and
+`T + 1 ms` in each of three partitions, `T = 1_760_000_000_000`; the restore
+returns **six of the nine records**, the first two from each partition, with
+the boundary record's timestamp, partition and `x-original-offset` intact.
+Measured on 2026-09-10 with engine **0.21.0** (digest
+`sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`) and
+Apache Kafka 3.7.1, and on 2026-10-08 with the 0.23.3 pin (digest
+`sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`):
+the same six of nine, accepted by both readers. All three fixture segments
+straddle `T`, so the count bound is **[0, 9]** in total and **[1, 3]** per
+partition since FX-23: the payload set proves the boundary, and the counts
+only bound it.
 
 ### A broker on `LogAppendTime` honours a per-topic `CreateTime` override (Task 8, residual 3)
 
-Apache Kafka 3.7.1 (KRaft, node 1001) whose effective `log.message.timestamp.type` is
-**`LogAppendTime`** **honours a per-topic `message.timestamp.type=CreateTime` override** — measured
-by execution, with the broker setting applied as a dynamic config and reverted (and the revert
-asserted) in the same step. Two consequences, and they pull in opposite directions, which is why the
-sentence is recorded rather than assumed: phase 0's override probe can therefore succeed on such a
-broker, so `TargetTopicConfigRefused`'s binary arm is unreachable on this stack by construction (its
-deterministic arm is
-`crates/logweir/tests/topic_preflight.rs::a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`);
-and a topic that states the override keeps the timestamps its producer states, which is what makes
-G-PITR's fixture possible at all. MSK is a different broker and is not covered by this measurement —
-spec §10's MSK item 4 stays `[UNVERIFIED — needs an MSK cluster]` (Global Constraint 17 forbids the
-spend).
+Apache Kafka 3.7.1 (KRaft) whose effective `log.message.timestamp.type` is
+**`LogAppendTime`**
+**honours a per-topic `message.timestamp.type=CreateTime` override** — measured by execution, with the broker setting applied as a
+dynamic config and reverted in the same step. So phase 0's probe can succeed
+there (`TargetTopicConfigRefused`'s deterministic arm is
+`crates/logweir/tests/topic_preflight.rs::a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`),
+and G-PITR's fixture keeps its producers' timestamps. MSK stays
+`[UNVERIFIED — needs an MSK cluster]`.
 
 ## Engine compatibility and support policy
 
-- **Engine version floors, and why each exists (spec §7.2).** `kafka-backup`
-  **0.16.0** is the floor for the unknown-config-key warning mechanism
-  `OsoCliEngine` parses off stderr/stdout (`Ignoring unknown config key
-  ...`); below it, a dropped rendered key fails silently instead of aborting
-  the run. `kafka-backup` **0.21.0** is the floor for the full drill as
-  shipped — it is the version this plan verified every vendored struct and
-  CLI behaviour against (`docs/UPSTREAM-VERSIONS.md` in the planning repo;
-  `ae5a102f93b5270927d95d4ccec184b577febb10`). The floor is not the pin:
-  since PROD-00.2 the engine the images ship is Logweir's build of OSO's
-  **0.23.3** source, `0.23.3+logweir.2` since FX-21's patch 0002
-  (*Supported engine pin*, below).
-
-- **Runtime image floor.** The `kafka-backup` binary is dynamically
-  linked against **glibc >= 2.36** (`ldd`, 2026-10-08: libc, libm and
-  libgcc_s only, for Logweir's build and OSO's 0.23.3 release alike; the
-  image's **libssl3** is for Logweir's own librdkafka), and performs TLS
-  connections that need a CA bundle — hence `debian:bookworm-slim` plus
-  `ca-certificates` and `libssl3` in the runtime stage, never a musl or
-  distroless base (see the `Dockerfile`'s own comment).
-
-- **Format policy.** `format_version` in the signed scorecard and the
-  put-receipt is semver. A **minor** bump adds optional fields only —
-  existing readers keep working by ignoring what they don't recognise. A
-  reader **ignores unknown fields** on any document whose major matches what
-  it supports, and **refuses** a document whose major is higher than it
-  supports, rather than guessing at a shape it has never seen.
-
-  The protection event
-  ([formats/protection-event.md](formats/protection-event.md)) was the one
-  exception: it refused unknown fields. It is no longer written (release
-  notes, item 74).
-
-- **CLI flags and exit codes are stable within a major.** A given Logweir
-  major version does not remove or repurpose a flag, nor change the meaning
-  of an exit code, without a major bump. New flags and new exit codes may be
-  added in a minor.
-
-- **Supported engine pin.** The engine the images ship is **Logweir's build
-  of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.2` (PROD-00.2, OD-3; build 2
-  adds FX-21's patch 0002, the manifest records every topic's replication
-  factor): the
-  vendored source of OSO's newest release on 2026-10-07 (tag commit
-  `afb160e7`) plus Logweir's patch folder, built for linux/amd64 and
-  linux/arm64 (`third_party/kafka-backup-build.env`; its `engine.digest` is the
-  build-input digest). `doctor` accepts exactly that version, as a whole token,
-  and names OSO's own 0.23.3 binary (image digest
-  `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`
-  in `third_party/kafka-backup-binary.digest`) as the one-release rollback.
+- **Floors (spec §7.2).** `kafka-backup` **0.16.0** is the floor for the
+  unknown-config-key warning `OsoCliEngine` parses (`Ignoring unknown config
+  key ...`); below it, a dropped rendered key fails silently. **0.21.0** is the
+  floor for the full drill, the version every vendored struct and CLI behaviour
+  was verified against. An archive written before 0.21 carries no segment
+  sha256, so a drill over it reports `integrity.result: partial`, never `pass`.
+- **Runtime image floor.** The engine binary links **glibc >= 2.36** and needs
+  a CA bundle: `debian:bookworm-slim` with `ca-certificates` and `libssl3`,
+  never a musl or distroless base.
+- **Supported engine pin.** The images ship **Logweir's build of OSO 0.23.3**,
+  `kafka-backup 0.23.3+logweir.2` (PROD-00.2, OD-3; build 2 adds FX-21's patch
+  0002): OSO's 2026-10-07 release source (tag commit `afb160e7`) plus
+  Logweir's patch folder, for linux/amd64 and linux/arm64
+  (`third_party/kafka-backup-build.env`). `doctor` accepts exactly that
+  version, as a whole token, and names OSO's own 0.23.3 binary (image digest
+  `sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db`,
+  `third_party/kafka-backup-binary.digest`) as the one-release rollback;
   `engine.version` and `engine.digest` in signed documents name whichever ran.
-  The release replaced 0.21.0 with PROD-00.3f, which
-  evaluated it from source and on the compose stack
-  ([decision record](to-do/decisions/PROD-00-engine-route.md) §12): the
-  segment format, the three subcommands Logweir runs and every key it renders
-  are unchanged, and no capability gap the decision record lists is fixed by
-  it. The full-drill **floor** stays 0.21.0. Older archive-manifest fixtures
-  exercise parsing compatibility, not full runtime support. The old two-minor
-  support table conflicted with the stated full-drill floor and is superseded
-  by the [support matrix](support-matrix.md). Moving the pin is a recorded
-  decision (OD-3, decided 2026-10-07: Logweir follows the newest OSO release,
-  and builds it from source with its own patches, which PROD-00.2 landed),
-  never a routine bump: the guards `crates/logweir/tests/engine_pin.rs` and
-  `engine_build.rs` fail until every place that names the build, PROD-01.1's
-  measured contract included, names the new one and the build-input digest is
-  re-recorded.
-
-  Two engine behaviours since 0.22.0 are refused by Logweir rather than
-  inherited:
-
-  - an `http://` storage endpoint beside `allow_http: false` is no longer a
-    refusal in the engine, which derives plaintext from the scheme. Logweir
-    refuses that combination at phase 0 (exit 3) and in every engine document
-    it renders (C15);
-  - `path_style: true` is honoured, but a custom endpoint still forces
-    path-style, so `VirtualHosted` addressing with an endpoint stays refused
-    as `AddressingUnsupportedByEngine` (C16).
-
-  What OSO's operators run:
-
-  - `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0
-    (2026-09-07), through v0.4.0 (2026-10-06). Its v0.2.22–v0.2.25 default to
-    v0.19.1.
-  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a
-    library; its 1.4.0, 1.4.1 and 1.4.2 (2026-10-06/07) link 0.23.0, 0.23.1
-    and 0.23.3.
-
-  Archives written by engines before 0.21 carry no segment sha256, so a drill
-  over one reports `integrity.result: partial`, never `pass`.
-
-- **Explicit non-contracts.** The Rust crates in this workspace
-  (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
-  `logweir`) are **not** a stable API before 1.0. Only the signed document
-  formats (scorecard, put-receipt, teardown attestation) and the `logweir`
-  CLI's flags and exit codes are covered by the stability promises above;
-  internal crate APIs may change in any release before 1.0.
+  PROD-00.3f evaluated 0.23.3: the segment format, the three subcommands Logweir
+  runs and every key it renders are unchanged
+  ([decision record](to-do/decisions/PROD-00-engine-route.md) §12). Moving the
+  pin is a recorded decision (OD-3), never a routine bump:
+  `crates/logweir/tests/engine_pin.rs` and `engine_build.rs` fail until every
+  place that names the build names the new one.
+- **Two engine behaviours since 0.22.0 are refused, not inherited:** an
+  `http://` storage endpoint beside `allow_http: false` (exit 3, C15), and
+  `VirtualHosted` addressing with a custom endpoint, which the engine forces to
+  path-style (`AddressingUnsupportedByEngine`, C16).
+- **What OSO's operators run.** `strimzi-backup-operator` has defaulted to
+  engine v0.22.0 since its v0.3.0 (2026-09-07); its v0.2.22–v0.2.25 default to
+  v0.19.1. `kafka-backup-operator` 1.4.0 to 1.4.2 link `kafka-backup-core`
+  0.23.0 to 0.23.3; 1.3.0 links 0.19.2. The [support matrix](support-matrix.md)
+  says which archives each can feed.
 
 ## Kubernetes: what the control plane does not stop, and what it was built against
 
 **O0, default (a): none of this stops a cluster-admin, and that is accepted and
 stated rather than implied.** Logweir's Kubernetes surface narrows *who can
-change what*, and it does so with real mechanisms — each Restore owns an
-immutable approval-bundle ConfigMap, the immutable Job template pins the
-SHA-256 of every mounted public input (including the allowlist), and the runner
-checks those bytes before constructing a data-plane client;
-`--approver-key-ids` pins which approver key ids a run accepts and
-refuses anything outside the set with exit 3 before phase 0 dials; and
-`subject_kind` is inside the signed bytes so an approval cannot be retargeted at
-another kind of object. **None of that is a claim about a cluster-admin.**
+change what*, with real mechanisms — each Restore owns an immutable
+approval-bundle ConfigMap, the immutable Job template pins the SHA-256 of every
+mounted public input, and the runner checks those bytes before constructing a
+data-plane client; `--approver-key-ids` pins which approver key ids a run
+accepts, refusing anything else with exit 3 before phase 0 dials; and
+`subject_kind` is inside the signed bytes so an approval cannot be retargeted
+at another kind of object. **None of that is a claim about a cluster-admin.**
 Anyone holding `create pods` in the runner's namespace can mount the signing
 Secret and sign whatever they like with no Logweir crate involved
-(`scripts/check-one-signer.sh`'s header states the same thing about the
-narrowed link-time gate), and anyone who can create pods or replace the Job
-template can replace the execution contract wholesale. The boundary this product draws is between *namespace
-users* and *the operator's own trust roster*, not between an adopter and their
-own cluster administrator. A document that said otherwise would be a guarantee
-the code does not deliver, which is the defect class these pages exist to
-remove.
+(`scripts/check-one-signer.sh`'s header says the same), and anyone who can
+create pods or replace the Job template can replace the execution contract
+wholesale. The boundary this product draws is between *namespace users* and
+*the operator's own trust roster*, not between an adopter and their own cluster
+administrator.
 
 **The Kubernetes client pair, and the toolchain it was resolved against.**
 `crates/weirkeeper` is built against **`kube 0.99.0`** (`default-features =
 false`, features `client`, `runtime`, `derive`, `rustls-tls`) and
 **`k8s-openapi 0.24.0`** (feature `v1_29`), resolved and pinned under Rust
 **`1.89.0`** (`rust-toolchain.toml`). `kube 0.99`'s own `rust-version` is
-`1.81.0`, comfortably below the pin, and `k8s-openapi 0.24` is the release that
-exposes the `v1_29` feature Global Constraint 25's minimum Kubernetes needs —
-so the pair was taken as resolved, with no `cargo update --precise` anywhere.
-The versions are declared in `crates/weirkeeper/Cargo.toml` and in the
-workspace root's pin-list comment; this page is where the *reason* lives, so a
-future bump has something to disagree with.
+`1.81.0`, below the pin, and `k8s-openapi 0.24` is the release that exposes the
+`v1_29` feature Global Constraint 25's minimum Kubernetes needs, so the pair
+was taken as resolved, with no `cargo update --precise`. The versions are
+declared in `crates/weirkeeper/Cargo.toml` and the workspace root's pin-list
+comment; this page is where the *reason* lives.
 
 ## Deliberately not in tag 1
 
@@ -3251,7 +836,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07), through v0.4.0 (2026-10-06); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine (0.23.3 since PROD-00.3f), so what matters is the archive. The CLI drill reads 0.21, 0.22 and 0.23 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | Not implemented: the engine's own validation run is never executed (v1 removed phase 7's unused call, release-notes item 74), and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
-| 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` is withdrawn and ignored; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |
+| 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` is withdrawn and ignored; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md#retention); [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
 | 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
@@ -3270,7 +855,7 @@ These are not scheduled. They are refused.
 
 | # | Entry | Why it is a never, not a later |
 |---|---|---|
-| 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. **Narrowed by the owner's decision [OD-2](to-do/product-expansion.md#owner-decisions) (2026-10-05) to exactly that: a LIVE topic.** A restore under the source's ORIGINAL topic name into a topic that does NOT exist is not this entry: it is PROD-15.1's one original-name path, behind its own approval subject (`originalName`), and it still only writes a topic it created itself, exclusively, after proving the name absent, the target another cluster or auto-creation disabled, and no declarative owner unless the owner path is chosen ([kubernetes.md](kubernetes.md) §12, "Restoring under the original topic names (PROD-15.1)"). A name that exists, in any mode, and an identity mapping in a scratch drill stay refused. |
+| 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. **Narrowed by the owner's decision [OD-2](to-do/product-expansion.md#owner-decisions) (2026-10-05) to exactly that: a LIVE topic.** A restore under the source's ORIGINAL topic name into a topic that does NOT exist is not this entry: it is PROD-15.1's one original-name path, behind its own approval subject (`originalName`), and it still only writes a topic it created itself, exclusively, after proving the name absent, the target another cluster or auto-creation disabled, and no declarative owner unless the owner path is chosen ([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names), "Restoring under the original topic names (PROD-15.1)"). A name that exists, in any mode, and an identity mapping in a scratch drill stay refused. |
 | 2 | **Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE** | Each is a separate product surface with its own trust model. Logweir moves records and reconciles bytes; it does not resolve schemas, evaluate a registry's RBAC, or hold field-level encryption keys. |
 | 3 | **MSK ZK-to-KRaft migration, and the word "migration"** | Logweir is not a migration tool and the word is avoided on every surface, because a document that says "migration" is a document somebody will act on as though it were one. |
 | 4 | **Multi-cluster or fleet views, and the words** | One controller per cluster. There is no fleet object, no cross-cluster list and no aggregated view, and the vocabulary is kept out of the UI and the docs for the same reason as the previous row. |

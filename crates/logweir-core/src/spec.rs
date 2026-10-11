@@ -1182,8 +1182,8 @@ impl AuthSpec {
     /// `None` under `Plaintext`, which is not the same as an empty username,
     /// and `None` under `Mtls`, whose identity is the client certificate — a
     /// file the plan names nowhere, so for `mtls` G-ID binds the mode and the
-    /// transport and NOT the principal (`docs/kubernetes.md`, "Client
-    /// authentication modes").
+    /// transport and NOT the principal (`docs/kubernetes.md`, *Saved
+    /// connections*).
     pub fn username(&self) -> Option<&str> {
         match self {
             AuthSpec::Plaintext | AuthSpec::Mtls { .. } => None,

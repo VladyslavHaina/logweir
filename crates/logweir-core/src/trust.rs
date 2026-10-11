@@ -755,7 +755,7 @@ pub fn usable_for_verification(key: &TrustedKey, now: DateTime<Utc>) -> Verifica
 /// `weirkeeper::controllers::approval` writes the variant name onto
 /// `status.conditions[type=Verified].reason`, and `KeyIdExpired` is the string
 /// today's roster path already writes (`controllers/approval.rs`) and that
-/// `docs/kubernetes.md` §8 lists among the nine. Renaming it here would change
+/// `docs/reference.md` (`Approval`) lists. Renaming it here would change
 /// a published refusal vocabulary in a commit that is about key lifecycle.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SigningRefusal {
