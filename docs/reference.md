@@ -321,6 +321,7 @@ retention-point=lwp1-… state=Deleted objects=7
 retention-point=lwp1-… state=Orphaned objects=3 code=AccessDenied
 retention-record=logweir/retention/<policyUid>/<runId>.json sha256=sha256:…
 retention-result=deleted=2 failed=1 objects=10
+retention-refusal=CapUnreadable variable=LOGWEIR_RETENTION_MAX_OBJECTS
 ```
 
 The contract version is checked before the plan is read; the scope arrives
@@ -332,8 +333,21 @@ sink. Per point it writes the intent tombstone, then deletes the **manifest**
 (so an interrupted run leaves a set the catalog reports `Missing`, never a
 plausible `Partial`), then the segments, then writes the completion tombstone.
 
-`retention-refusal=<code>` names the one refusal the controller reads
-(`CredentialBindingMismatch`). A key is tried three times, waiting 1 s and 4 s,
+Every exit 3 prints one `retention-refusal=<code>` line (FX-15). The code is
+one of 22: `NotRun`, `UnknownArgument`, `ContractVersion`, `NoPlanPath`,
+`PlanUnreadable`, `BindingIncomplete`, `GenerationNotANumber`,
+`CapUnreadable`, `LocationUnreadable`, `NoRecordCredential`,
+`CredentialBindingMismatch`, `PortUnavailable`, `PlanUnparseable`,
+`PlanWrongFormat`, `PlanDigestMismatch`, `PlanPolicyMismatch`,
+`RetentionScopeViolation`, `PlanManifestNotFirst`, `PlanOverCap`,
+`PlanEmptyLine`, `PlanDuplicatePoint`, `PlanDuplicateKey`. For
+`BindingIncomplete`, `CapUnreadable`, `GenerationNotANumber` and
+`LocationUnreadable` the line adds ` variable=<name>`: the binding variable's
+name, never its value. The controller reads both from closed tables and names
+the refusal on the policy's status
+([`RetentionPolicy`](#retentionpolicy)). A controller older than FX-15 reads
+only `CredentialBindingMismatch`; an older worker prints no line for the
+others. A key is tried three times, waiting 1 s and 4 s,
 only for a 5xx or a timeout; `AccessDenied`, `Locked` and `PreconditionFailed`
 are answered once, and `NotFound` is success. Per point the state is `Deleted`,
 `Kept` or `Orphaned`, with a closed code such as `AccessDenied`, `Locked`,
@@ -493,6 +507,13 @@ A walk stopped by a budget names `catalogStoppedFor: objectBudget` or
 | `Enforced` | `RunInProgress`, `RunComplete`, `UnattendedDeletionEnabled` (True); `RecommendationOnly`, `AwaitingApproval`, `PlanSuperseded`, `PlanExpired`, `ActiveRestore`, `UnsupportedSchedule`, `LeaseNotHeld`, `PlanConfigMapConflict`, `RunNotRecorded`, `RunFailed`, `NothingToDo`, `NothingFitsCeiling`, `ViewIncomplete`, `ViewExpired`, `JobNameConflict`, `EvidenceGrantUnusable`, `CredentialBindingMismatch`, `PodCreationForbidden` (False) |
 | `ExternalLifecycleConflict` | `DeclaredExpiryConflicts`, `NoConflict` |
 | `EnforcementDegraded` | `ConsecutiveRunFailures`, `Healthy` |
+
+A run the worker refused (exit 3) is `Enforced=False`, `RunFailed`, and the
+message names the refusal, for example `retention run <id> was REFUSED before
+deleting anything (exit 3, CapUnreadable (LOGWEIR_RETENTION_MAX_OBJECTS)); the
+archive is untouched`; `EnforcementDegraded`'s message says `the last run
+exited 3, refused <code>`. Only `CredentialBindingMismatch` is a reason of its
+own, and it is held (FX-15).
 
 `status.enforcement`: `RecommendationOnly`, `LogweirWorker`,
 `ExternalLifecycleDeclared`. Each of `status.guarantees` (`ageExpiry`,

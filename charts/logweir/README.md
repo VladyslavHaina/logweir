@@ -116,7 +116,8 @@ evidence locations are dropped and the ceilings revert, with one advisory
 `Preflight` row and one `WARN` line. The `runs` block renders only when a value
 differs from its default; an install that set it rolls the controller back with
 the chart. `legacyArchiveAddressing` is rendered from `archive.s3.*`, and empty
-without an endpoint. An attestation has nine required fields: `id`, `namespace`,
+without an endpoint; its `allowHttp` and `virtualHostedStyle` are published
+for older readers and read by nothing (FX-15). An attestation has nine required fields: `id`, `namespace`,
 `kafkaCluster`, `clusterId`, `principal`, `attestedBy`, `attestedAt`,
 `expiresAt`, `statement`. It applies on an exact match of the four identifiers,
 before `expiresAt`, to an untruncated listing, and **Logweir never verifies the
@@ -516,7 +517,9 @@ a public image too.
 date from 2026-09-12 and **were never measured on MSK**
 ([support-matrix.md](../../docs/support-matrix.md#managed-kafka-providers)):
 
-- SASL/SCRAM on MSK is port **9096**, `SASL_SSL` with `SCRAM-SHA-512`.
+- SASL/SCRAM on MSK is port **9096**, `SASL_SSL` with `SCRAM-SHA-512`. The
+  mode has a repeatable local row (PROD-01.2a); MSK itself has not been run
+  against.
 - The credential lives in **AWS Secrets Manager**: sync it into a Kubernetes
   Secret under the key `password` and name it in `kafka.secretRef`.
 - **A password containing `"`, `'`, `$`, CR or LF is refused by the runner**

@@ -27,10 +27,10 @@ its record is in the next entry, whose twenty-seven items are what that
 candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
-62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77 and 78 so far.
-Items continue the next entry's numbering. No candidate is cut from this entry
-yet, so it carries no candidate record; when one is, its record follows
-[the release checklist](tag1-checklist.md) as the next entry's does.
+62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
+81 and 82 so far. Items continue the next entry's numbering. No candidate is
+cut from this entry yet, so it carries no candidate record; when one is, its
+record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
 ### The operator-facing changes after `v0.2.0-rc.1`
 
@@ -1601,6 +1601,80 @@ Remove `spec.retention` from a schedule to clear the condition.
 **Rollback:** roll the chart's CRDs, the controller and the console back
 together; the older controller writes the report again on its next reconcile.
 
+#### 79. A refused retention run says why on its RetentionPolicy (FX-15)
+
+**Changed.** Every exit-3 refusal of `logweir-retention` prints one
+`retention-refusal=<code>` line, plus ` variable=<name>` when the refusal is
+about one binding variable (its name, never its value), and
+`Enforced=False/RunFailed` and `EnforcementDegraded` name it, for example
+`(exit 3, CapUnreadable (LOGWEIR_RETENTION_MAX_OBJECTS))`. Until now only
+`CredentialBindingMismatch` was named; every other refusal read "REFUSED its
+plan", and the reason was only in a pod log the Job's TTL collects. The 22 codes
+are in [reference.md](reference.md#logweir-retention). Nothing about what is
+deleted, held or scheduled changes, and no CRD changes.
+**Do:** nothing.
+**Scope:** controller rows for five refusal classes, each against the line-dropped run (only the two messages differ), worker rows for all 22 codes, a process row over the shipped binary, and six mutants.
+[UNVERIFIED — no live install has run this build's refusal yet.]
+**Rollback:** roll the controller back; an older controller shows the generic
+sentence again, and an older worker prints no line for these refusals.
+
+#### 80. A setting the existing target topic does not report counts as differing in the drill's configuration diff (FX-47)
+
+**Changed.** When phase 3 finds a target topic that already exists, the
+signed `target_diff` line lists the source settings that differ:
+`differing config: [...]`. A source setting the target does not report (a
+Kafka 3.5 target for `message.timestamp.before.max.ms`, or a Redpanda target)
+was left out, as if it agreed. It is now listed as differing, the rule phase 7 already follows.
+Only values change, not the format. The case is narrow: phase 0 refuses a run
+whose mapped topic exists, so it needs a topic created between phases 0 and 2,
+and that run then fails at creation.
+**Do:** nothing.
+**Scope:** a phase-3 row with its control (the old default restored fails it); the FX-4 collision line is unchanged byte for byte.
+**Rollback:** an older `logweir` leaves an unreported setting out again;
+documents this build wrote stay valid.
+
+#### 81. SCRAM-SHA-512 over TLS, RustFS, versitygw and a directory archive have repeatable rows, and a weekly job re-runs them (PROD-01.2a, PROD-00.3o)
+
+**Changed.** Only how the repository is tested. SCRAM-SHA-512 over TLS (Amazon
+MSK's SCRAM mode), RustFS 1.0.0, versitygw v1.8.0 and a local directory
+archive (`backend: filesystem`) move from untested to supported in
+[the support matrix](support-matrix.md#archive-backends), each with a
+repeatable row: the `auth` profile's `SCRAM512TLS` listener runs on every pull
+request, and RustFS and versitygw are opt-in compose profiles. A weekly
+workflow, `compat-weekly.yml`, re-runs the rows that need a profile
+(Confluent Platform, Redpanda, the S3 servers beside MinIO, the directory
+archive and Karapace), and its `operator-archives` job drills an archive
+written by the engine every published version pinned (OSO's 0.21.0) with the
+shipped engine. MSK itself is still unrun.
+**Do:** nothing. No binary, image, chart value or signed document changes.
+**Scope:** the new rows and their controls on compose slots 1 and 2 (a wrong mechanism refused on the SCRAM-SHA-512 listener, a directory archive missing its manifest, a stopped versitygw), and the archive drill with its corrupted-segment control.
+[UNVERIFIED — compat-weekly.yml has not run on GitHub yet; its first scheduled run is the proof.]
+**Rollback:** revert the change; nothing deployed is affected.
+
+#### 82. The engine is build `0.23.3+logweir.3`: the restore checkpoint honours its interval (PROD-00.3g)
+
+**Changed.** Patch `0003-restore-checkpoint-interval-and-hash.patch`: the
+engine saves its restore checkpoint inside a topic every
+`checkpoint_interval_secs`, not only after each topic, and its hash leaves out
+the run's checkpoint and offset-report paths and map order. Logweir never reads
+the checkpoint, so nothing Logweir does changes. The engine is `kafka-backup
+0.23.3+logweir.3` (build-input digest
+`sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4`), and
+`logweir doctor` accepts only that version. **Caveat:** a resumed restore still
+has no offset mapping for the segments it skips; since this patch that can be
+part of a partition, and the engine's phase 3 then extrapolates those offsets,
+so offsets must not be applied after a resume. Logweir never resumes, and
+renders `reset_consumer_offsets: false` and `auto_consumer_groups: false`.
+**Do:** roll the controller and the runner images together, as for item 35. A
+standalone CLI install replaces its engine with build 3 and exports
+`LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3` and
+`LOGWEIR_ENGINE_DIGEST=sha256:e602a0a785e34e3f0e3ec7f01fef2f7146ec27f8aa69d6c9aecaf99f7ad4cef4`
+([quickstart.md](quickstart.md), step 4).
+**Scope:** the patch's unit tests (they fail on the unpatched source), two live resume rows on compose (build 2 fails both), `full_drill` and `record_semantics` with build 3, and CI's engine-oracle check.
+[UNVERIFIED — no PoC drill has signed engine build 3 yet; the next image refresh runs one.]
+**Rollback:** roll both images back together; the engine is build 2 again,
+and its documents say so. Documents build 3 signed stay valid.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1658,7 +1732,7 @@ In addition to the next entry's six, in its order.
 
 **The roll:**
 - **Move `controllerImage` and `runnerImage` in one `helm upgrade`, and never
-  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65 and 67). This
+  the controller alone** (items 28, 35, 41, 48, 57, 60, 61, 65, 67 and 82). This
   controller gives every `Restore` and `Backup` Job a `--line-token` argument,
   and every runner image published before that change, the images of this
   same entry included, stops on it: the object says `exitCode: 1`,
@@ -1673,7 +1747,8 @@ In addition to the next entry's six, in its order.
 - **Verify an image digest before you deploy it** with the pinned commands in
   [install.md](install.md#verify-the-images) (item 35). A standalone CLI install
   replaces its engine with Logweir's build and exports
-  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (items 28, 35 and 41),
+  `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.3` and its digest (items 28, 35, 41
+  and 82),
   and every spec that names an `http://` archive endpoint says
   `allow_http: true` (item 28).
 - **Back up the console key too, once it exists** (item 29):
@@ -1733,8 +1808,8 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77 and 78, in the order of the next entry's upgrade
-path. What each item changes, and what it needs beyond the actions above:
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81 and 82, in the order of the next
+entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
 |---|---|---|
@@ -1789,6 +1864,10 @@ path. What each item changes, and what it needs beyond the actions above:
 | 76 | no image | a bundle install moved to the chart once |
 | 77 | the controller | nothing |
 | 78 | the CRDs, the controller, the API, the console | nothing |
+| 79 | the controller and the retention worker | nothing, in either order |
+| 80 | the runner's phase 3 | nothing |
+| 81 | only how the repository is tested | nothing |
+| 82 | the engine in the runner image | the controller and runner images rolled together |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
@@ -1812,7 +1891,7 @@ rollback steps:
    charts/logweir/crds/`) before rolling the controller back; Helm does not
    re-create it.
 7. **Roll the chart, the CRDs, the controller, the runner and the console back
-   together** (items 28, 33, 60, 61, 65, 67, 74 and 78). After the roll an
+   together** (items 28, 33, 60, 61, 65, 67, 74, 78 and 82). After the roll an
    older runner accepts more than 1,000 topics again and an older controller
    reads a receipt under 1 MiB again, so a backup of about 300 topics or more
    is `NotAttempted` again (item 65). If it must be two steps, the controller

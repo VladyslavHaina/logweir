@@ -2227,6 +2227,30 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a schedule's spec.retention stops reporting",
             "RetentionReportWithdrawn",
         ),
+        // FX-15 (2026-10-11, item 79): every refused retention run is named on
+        // its policy's status; the line the worker prints for it.
+        (
+            "a refused retention run says why",
+            "retention-refusal=<code>",
+        ),
+        // FX-47 (2026-10-11, item 80): a setting the existing target does not
+        // report counts as differing; the signed line it lands in.
+        (
+            "an unreported target setting counts as differing",
+            "`differing config: [...]`",
+        ),
+        // PROD-01.2a and PROD-00.3o (2026-10-11, item 81): the hand-run cells
+        // get repeatable rows; the weekly workflow that re-runs them.
+        (
+            "the matrix's hand-run cells get rows and a weekly job",
+            "compat-weekly.yml",
+        ),
+        // PROD-00.3g (2026-10-11, item 82): engine build 3; the patch that
+        // makes it.
+        (
+            "the engine is build 3",
+            "0003-restore-checkpoint-interval-and-hash.patch",
+        ),
     ];
     assert_eq!(
         items.len(),
