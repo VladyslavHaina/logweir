@@ -149,6 +149,8 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
 | `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation (Approver role; never the requester); in an unbound namespace an approver records the two `logweir drill approve` files. See *Approval policy*. |
+| `GET /api/v1/namespaces/{ns}/restores/{name}/approval-request` | PROD-16.2: a two-person request as the approver is shown it — every field from bytes the console verified its own signature on — and whether this session may approve. Reader of approvals. See *Two-person approval in the console*. |
+| `POST /api/v1/namespaces/{ns}/restores/{name}/console-approval` | PROD-16.2: the second person's click. Body `{"confirmationSha256": "sha256:…"}` and nothing else (Approver role; never the requester; shared mode only). |
 | `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. PROD-16.1: `operatorMode` (`confirm` \| `two-person` \| `strict`) and `basis` (`binding` \| `configured` \| `freshInstall` \| `legacy`) — why an unbound namespace resolves as it does; the create's `authorization` carries `operatorMode` too. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
@@ -279,6 +281,103 @@ references and a verification verdict. `discovery` and `preflight` answer a
 check has no archive result and no signed evidence, and publishing an empty
 `verification` for one would invite a console to render a verdict that can never
 arrive.
+
+#### Two-person approval in the console (PROD-16.2)
+
+A namespace bound to a `two-person` policy (`mode: Governed` with
+`approverSignature: Console`; `GET .../approval-policy` answers `operatorMode:
+"two-person"`, and `consoleApprovalAvailable` says whether THIS console can
+take part) takes its approval from a second signed-in person, and from nothing
+else: `POST .../restores/{name}/approval` refuses a countersignature there
+(`409 policy_mismatch`, `countersignature_not_accepted`).
+
+**The request.** `POST .../restores` is the route it always was. The create's
+`authorization` answers `state: "awaitingApproval"`, `operatorMode:
+"two-person"` and `confirmationName`. Refused before anything is created, in
+addition to the rows above:
+
+| request | answer |
+|---|---|
+| through the administrator (`localAdmin`) console, whose one identity cannot be two people | `409 policy_mismatch` |
+| a requester whose identity a console approval cannot compare — an issuer or a subject that is empty, longer than 255 characters or not visible ASCII, an issuer containing `#`, a Kubernetes system identity | `409 policy_mismatch`; the sentence carries the identity bounded and escaped, never raw |
+| no change ticket (the policy is `Governed`) | `422`, field `ticket`, `required` |
+| a ticket the approver could not be shown faithfully (not printable ASCII, or over 1024 characters) | `422`, field `ticket`, `not_showable` (not echoed) |
+| a plan whose approval scope cannot be shown in full — more than 1024 topics, more than 8192 listed partitions, a topic that is not a Kafka name before or after its mapping, a value that is not printable ASCII of at most 1024 characters, a plan that does not parse, a plan that names a notification sink (a webhook, Slack or PagerDuty; the wizard names none) | `422`, field `planBytes`, `scope_incomplete` |
+
+**`GET .../restores/{name}/approval-request`** (`getApprovalRequest`) answers
+`ApprovalRequestResponse`. The console reads the stored request, **verifies its
+own signature over the stored bytes**, checks that they name this Restore, its
+UID, its plan and the namespace's current policy digest, and only then projects
+anything. `state` is:
+
+| `state` | meaning | fields beside it |
+|---|---|---|
+| `pending` | this console's request for exactly this Restore, plan and policy, inside its window, not approved | `requester`, `planHash`, `approvalSubject`, `ticket`, `issuedAt`, `expiresAt`, `confirmationSha256`, `scopeComplete` and `scope` (below) |
+| `approved` | an `Approval` exists under the Restore's `approvalRef` (whoever wrote it; the controller judges it) | the same; `approver` and `approvedAt` only when this console signed it |
+| `expired` | the window closed; submit the Restore again | the same |
+| `notConfirmed` | none stored, or the stored object does not carry this console's signature, or it names another Restore, plan or policy | **none**: nothing of such an object is shown |
+
+**`scope`** is everything the approver approves, from the plan the request
+names by hash (never from the Restore object's other fields): `source`
+(archive location, endpoint, region, plain HTTP, backup set, bound point),
+`recovery` (point in time, window start, time basis), `target` (bootstrap
+servers, auth mode and principal, mode, topic prefix, replication factor,
+teardown, and for an original-name restore `ownerStatement`: the requester's
+`owners` — absent when the plan states nothing, `[]` when it states none — and
+`ownerPath`), **`topics` — every one, `{source,
+target, originalName, partitions?}`, never a slice** — `topicsCount`,
+`verification` and `evidence`. It is present exactly when `scopeComplete` is
+`true`; otherwise `scopeIncomplete` (`tooManyTopics`, `planUnreadable`,
+`valueNotShowable`, …) and `scopeSentence` say why and what to do, and nobody
+is offered the click.
+
+`approve {offered, refusal?, sentence}` says whether this session is offered
+the click and, when not, why (`notPending`, `localAdmin`, `notApprover`,
+`requester`, `notSecondPerson`, `scopeIncomplete`), decided with the rules the
+click is held to.
+It is advisory: the click is checked again. `409 policy_mismatch` in a
+namespace that is not two-person.
+
+**`POST .../restores/{name}/console-approval`** (`approveInConsole`) takes
+`{"confirmationSha256": "sha256:<64 hex>"}` — the value the view showed — and
+no other field: a body carrying anything else, or a malformed hash, is refused
+(`400` or `422`) and nothing is read from it. It names the request that was
+reviewed; it supplies nothing of the approval. No `Idempotency-Key`: the
+`Approval` is named by the Restore's own immutable `approvalRef`. `201` with
+the `Approval` (`replayed: false`); the same approver's second click is `200`,
+`replayed: true`, and stores nothing. The checks, in order, and what each
+answers:
+
+| check | refusal |
+|---|---|
+| the session, and the Approver role in this namespace, read from the binding table on this request; an Administrator is not an Approver unless bound as one | `401`; `403 forbidden` (or `404` for a namespace the actor holds nothing in) |
+| the request's `Origin` (exact; absent is refused), the session's synchroniser token, and `application/json` | `403 origin_mismatch`, `403 forbidden`, `415`; a `GET` approves nothing |
+| this is the shared console | `409 policy_mismatch` (`local_admin_cannot_approve`) |
+| the namespace's policy is two-person | `409 policy_mismatch` (`not_a_console_approval_policy`) |
+| **the console's own signature on the stored request**; then that it names this Restore, UID, plan and the current policy digest | `409 policy_mismatch` (`confirmation_not_verified`, `confirmation_not_bound`); `404` (`confirmation_absent`) |
+| the request has not expired | `409 state_conflict` (`request_expired`) |
+| `confirmationSha256` is the stored request's | `409 state_conflict` (`request_changed`): open it again and review it |
+| the approval scope, re-derived now from the request and its plan, is complete | `409 state_conflict` (`scope_incomplete`) |
+| **the approver is not the requester** — the same issuer once lower-cased and without a trailing `/`, another subject once lower-cased; an identity that cannot be compared is never a second person | `403 forbidden` (`self_approval_forbidden`) |
+| the approval lies inside the request's window by the console's clock | `409 state_conflict` (`approval_outside_window`) |
+| nothing else holds the `Approval`'s name | `409 state_conflict` (`already_approved`); never replaced |
+
+The stored `Approval` is the request's document with `approver {issuer,
+subject}` and `approvedAt` added, as `formatVersion` `2.2.0`, signed again by
+the console's `ConsoleConfirmation` key: one signature, no second key. The
+controller verifies it at the `Approval` verdict and at `Restore` admission, and
+the runner again, each from the signed bytes (`docs/kubernetes.md` §8).
+
+**The audit record** of a click carries, in its notes, `requester` and
+`approverPrincipal`, and for each of the two the issuer, the subject and the
+SHA-256 of the whole `<issuer>#<subject>` (`requesterIssuer`,
+`requesterSubject`, `requesterSha256`, `approverIssuer`, `approverSubject`,
+`approverSha256`) — a note is bounded at 200 bytes, so the digest is what tells
+two long identities apart — with `planHash`, `policyDigest`, `scope`
+(`complete`, or `incomplete:<reason>`), `scopeTopicsShown` and
+`scopeTopicsInPlan`, `separation` (`distinct` or `refused`), `approvedAt`,
+`expiresAt`, the stored `approval`, and on a refusal the `failureCode` in the
+parentheses above.
 
 `schemas/logweir-api-v1.openapi.json` is the generated contract. `just schema`
 rewrites it and `just schema-check` fails on drift, as does
@@ -493,7 +592,7 @@ It is `NotRecorded` when the status does not record an accounting that closes:
 an evaluation an older controller wrote, one whose members an older CRD pruned,
 or one where two controllers' numbers stand in one block after a rollback of
 the controller image alone (the counts do not add up, or the status's `kept`
-list is not `keptCount` long). That controller's `kept` list holds the points
+list is not `keptCount` long, up to the status's bound of 500). That controller's `kept` list holds the points
 the ceiling held back, so the API does not pass it on as kept and derives no
 count from it. `candidateCount` and `candidates` are this plan in both cases.
 
@@ -544,6 +643,13 @@ itself still reads `result: Valid`. `NotAttempted`, `Pending` (the evidence
 fetch is still running), an absent result, a passing `Valid`, and a `Valid` on
 `trust.basis: Unverified` (nothing has been compared yet) leave the row in
 charge; `backupVerdict` is absent then, and absent never means "verified".
+
+**A point whose catalog record could not be read is listed too (FX-33)**: a
+record over the bound Logweir reads (a backup of more than 1,000 topics an
+older runner wrote), one that is not a record, or a missing one. Such a row
+carries its `pointId`, `availability`, `selectable: false` and a `remedy` that
+says why; `backupId`, `runId` and `receiptKey` are empty and there is no
+`recoveryPointAt`, window, location or topic list.
 
 **The join degrades per object, never per page.** `Backup` objects are read
 through a lenient projection of the three fields the rule needs, so one object

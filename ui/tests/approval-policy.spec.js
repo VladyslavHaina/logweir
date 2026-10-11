@@ -148,6 +148,7 @@ test("the_policy_read_and_the_countersign_submission_are_the_two_published_route
       operatorMode: "strict", basis: "binding",
       requireDistinctPrincipal: true, installationDigest: "sha256:" + "b".repeat(64),
       ordinaryConfirmationAvailable: false, ticketRequired: true,
+      consoleApprovalAvailable: false,
       maxAgeSeconds: 86400, digest: "sha256:" + "c".repeat(64),
       confirmationKeyId: "d".repeat(64),
     },

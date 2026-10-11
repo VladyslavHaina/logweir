@@ -40,8 +40,10 @@ use crate::app::AppState;
 use crate::audit::AuditContext;
 use crate::problem::ApiError;
 
-/// The issuer string of the local administrator actor.
-pub const LOCAL_ADMIN_ISSUER: &str = "urn:logweir:local-admin";
+/// The issuer string of the local administrator actor — the one constant
+/// every reader of a console approval refuses (PROD-16.2), so the console
+/// that mints the identity and the readers that refuse it cannot drift.
+pub const LOCAL_ADMIN_ISSUER: &str = logweir_core::approval_policy::LOCAL_ADMIN_ISSUER;
 
 /// How the current actor was authenticated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]

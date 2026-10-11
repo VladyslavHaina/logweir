@@ -918,8 +918,101 @@ const APPROVAL_POLICY = shapeOf(
     operatorMode: str, basis: str,
     requireDistinctPrincipal: bool, installationDigest: str,
     ordinaryConfirmationAvailable: bool, ticketRequired: bool,
+    // PROD-16.2: whether THIS console takes a second person's approval here
+    // (a two-person policy, the shared console, its key present).
+    consoleApprovalAvailable: bool,
   },
   { maxAgeSeconds: int, digest: str, confirmationKeyId: str },
+);
+
+// PROD-16.2: whether this session may approve a two-person request, decided
+// by the server with the rules the click is held to, and the one sentence the
+// page shows either way. `refusal` is read as a string and never switched on:
+// the sentence is the server's.
+const APPROVE_OFFER = shapeOf(
+  "ApproveOfferView", { offered: bool, sentence: str }, { refusal: str },
+);
+
+// PROD-16.2: THE APPROVAL SCOPE -- everything a second person approves, from
+// the plan the request names by hash: source, recovery point, target cluster,
+// EVERY topic and the name it is restored under, the verification and the
+// evidence. `topicsCount` restates the list's length so the page can check it
+// rendered every one.
+const SCOPE_STORAGE = shapeOf(
+  "ScopeStorageView",
+  { backend: str, location: str, plaintextHttp: bool },
+  { endpoint: str, region: str },
+);
+const SCOPE_SOURCE = shapeOf(
+  "ScopeSourceView",
+  { storage: objectOf(SCOPE_STORAGE), backup: str },
+  { pointId: str, receiptSha256: str },
+);
+const SCOPE_RECOVERY = shapeOf(
+  "ScopeRecoveryView",
+  { pointInTime: str, pointInTimeStated: bool },
+  { windowStart: str, timeBasis: str },
+);
+// Review S-1: the requester's owner statement for an original-name restore,
+// as the plan signs it. `owners` ABSENT is "not declared", EMPTY is "the
+// requester states there is none".
+const SCOPE_OWNER = shapeOf("ScopeOwnerView", { topic: str, kind: str, reference: str });
+const SCOPE_OWNER_STATEMENT = shapeOf(
+  "ScopeOwnerStatementView", { ownerPath: bool }, { owners: listOf(objectOf(SCOPE_OWNER)) },
+);
+const SCOPE_TARGET = shapeOf(
+  "ScopeTargetView",
+  {
+    bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str,
+    replicationFactor: int, teardown: str,
+  },
+  { authUsername: str, ownerStatement: objectOf(SCOPE_OWNER_STATEMENT) },
+);
+const SCOPE_TOPIC = shapeOf(
+  "ScopeTopicView",
+  { source: str, target: str, originalName: bool },
+  { partitions: listOf(int) },
+);
+const SCOPE_VERIFICATION = shapeOf(
+  "ScopeVerificationView", { coverage: str, windowStart: str, windowEnd: str },
+);
+const APPROVAL_SCOPE = shapeOf(
+  "ApprovalScopeView",
+  {
+    source: objectOf(SCOPE_SOURCE), recovery: objectOf(SCOPE_RECOVERY),
+    target: objectOf(SCOPE_TARGET), topics: listOf(objectOf(SCOPE_TOPIC)), topicsCount: int,
+    verification: objectOf(SCOPE_VERIFICATION), evidence: objectOf(SCOPE_STORAGE),
+  },
+  { planName: str },
+);
+
+// PROD-16.2: a two-person request as the approver is shown it. Every optional
+// field comes from the request's SIGNED bytes (and the plan they name by
+// hash), after the console verified its own signature on them; a request that
+// does not verify carries none of them. `state` is pending | approved |
+// expired | notConfirmed, read as a string by the one function that renders
+// it (`ui/pages/approvals.js`). `scopeComplete` is the server's word on
+// whether `scope` is the whole of what is approved.
+const APPROVAL_REQUEST = shapeOf(
+  "ApprovalRequestView",
+  {
+    namespace: str, restore: str, restoreUid: str, approvalName: str, confirmationName: str,
+    policy: str, policyDigest: str, state: str, stateSentence: str,
+    approve: objectOf(APPROVE_OFFER), scopeComplete: bool,
+  },
+  {
+    requester: str, planHash: str, approvalSubject: str,
+    scopeIncomplete: str, scopeSentence: str, scope: objectOf(APPROVAL_SCOPE),
+    ticket: str, issuedAt: str, expiresAt: str, confirmationSha256: str,
+    approver: str, approvedAt: str,
+  },
+);
+
+// PROD-16.2: the second person's click. ONE field, which names the request
+// the approver was shown by the hash of its signed bytes; nothing an
+// authorization carries is ever sent from this page.
+const CONSOLE_APPROVAL_REQUEST = shapeOf(
+  "ConsoleApprovalRequest", { confirmationSha256: str },
 );
 
 // PLAT-19.2: a governed approver's countersigned sidecar.
@@ -1022,6 +1115,7 @@ const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL
 // beside the view itself, as `OPERATION_DETAIL_RESPONSE`. `Operation` -- the
 // frozen sixteen -- stays declared above: it is that shape's required floor.
 const APPROVAL_POLICY_RESPONSE = readOnlyItem("ApprovalPolicyResponse", APPROVAL_POLICY);
+const APPROVAL_REQUEST_RESPONSE = readOnlyItem("ApprovalRequestResponse", APPROVAL_REQUEST);
 
 // ------------------------------------------- D1 W7: the three W6 answers
 
@@ -1771,6 +1865,8 @@ export const CONSOLE_REQUESTS = Object.freeze({
   backups: CREATE_BACKUP_REQUEST,
   // PLAT-19.2: a governed approver's countersignature, keyed by the action.
   "restores:approval": SUBMIT_APPROVAL_REQUEST,
+  // PROD-16.2: a second person's approval in the console, keyed by the action.
+  "restores:console-approval": CONSOLE_APPROVAL_REQUEST,
 });
 
 /** Checks a body this client BUILT against the shape the server publishes.
@@ -1845,6 +1941,19 @@ export const CONSOLE_SHAPES = Object.freeze({
   ApprovalPolicyView: APPROVAL_POLICY,
   ApprovalPolicyResponse: APPROVAL_POLICY_RESPONSE,
   SubmitApprovalRequest: SUBMIT_APPROVAL_REQUEST,
+  ApproveOfferView: APPROVE_OFFER,
+  ScopeStorageView: SCOPE_STORAGE,
+  ScopeSourceView: SCOPE_SOURCE,
+  ScopeRecoveryView: SCOPE_RECOVERY,
+  ScopeTargetView: SCOPE_TARGET,
+  ScopeOwnerView: SCOPE_OWNER,
+  ScopeOwnerStatementView: SCOPE_OWNER_STATEMENT,
+  ScopeTopicView: SCOPE_TOPIC,
+  ScopeVerificationView: SCOPE_VERIFICATION,
+  ApprovalScopeView: APPROVAL_SCOPE,
+  ApprovalRequestView: APPROVAL_REQUEST,
+  ApprovalRequestResponse: APPROVAL_REQUEST_RESPONSE,
+  ConsoleApprovalRequest: CONSOLE_APPROVAL_REQUEST,
   ApprovalResponse: APPROVAL_RESPONSE,
   ApprovalPacketResponse: APPROVAL_PACKET_RESPONSE,
   ArchiveRequest: ARCHIVE_REQUEST,
@@ -2062,6 +2171,12 @@ export function decodeConsoleItem(plural, value) {
 /** PLAT-19.2: a namespace's effective approval policy. @returns {Decoded} */
 export function decodeApprovalPolicy(value) {
   return decodeWith(APPROVAL_POLICY_RESPONSE, value);
+}
+
+/** PROD-16.2: a two-person request as the approver is shown it.
+ *  @returns {Decoded} */
+export function decodeApprovalRequest(value) {
+  return decodeWith(APPROVAL_REQUEST_RESPONSE, value);
 }
 
 /** @returns {Decoded} */

@@ -1009,5 +1009,254 @@
   "python_exit": 1,
   "reason": "target.original_name is present beside source.selection.partitions; a restore under the original topic names restores whole topics, never a partition subset",
   "arm": "target.original_name is present beside source.selection.partitions; a "
+ },
+ {
+  "id": "console_approval_1_9_accepted",
+  "file": "console_approval_1_9_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_2_1_partition_subset",
+  "file": "console_approval_2_1_partition_subset.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_1_9_original_name",
+  "file": "console_approval_1_9_original_name.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_1_9_issuer_with_a_trailing_slash",
+  "file": "console_approval_1_9_issuer_with_a_trailing_slash.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_1_9_same_instant_another_offset",
+  "file": "console_approval_1_9_same_instant_another_offset.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_1_9_approved_at_the_requests_instant",
+  "file": "console_approval_1_9_approved_at_the_requests_instant.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
+ },
+ {
+  "id": "console_approval_under_format_1_8_0",
+  "file": "console_approval_under_format_1_8_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console is present but format_version \"1.8.0\" does not define it: the block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2",
+  "arm": "approval.console is present but format_version "
+ },
+ {
+  "id": "console_approval_under_format_2_0_0",
+  "file": "console_approval_under_format_2_0_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console is present but format_version \"2.0.0\" does not define it: the block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2",
+  "arm": "approval.console is present but format_version "
+ },
+ {
+  "id": "console_approval_mode_governed",
+  "file": "console_approval_mode_governed.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console.mode is not \"consoleApproval\"",
+  "arm": "approval.console.mode is not "
+ },
+ {
+  "id": "console_approval_the_requester_approves",
+  "file": "console_approval_the_requester_approves.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is the requester (the issuer and the subject are compared without case); a two-person approval needs a second person, and no role changes that",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_the_requester_in_another_case",
+  "file": "console_approval_the_requester_in_another_case.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is the requester (the issuer and the subject are compared without case); a two-person approval needs a second person, and no role changes that",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_two_issuers",
+  "file": "console_approval_two_issuers.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver and the requester come from two issuers; whether a subject of one is a subject of the other cannot be known, so a principal of another issuer is never a second person",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_approver_with_whitespace",
+  "file": "console_approval_approver_with_whitespace.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is not in a form that can be compared: a console approval compares an issuer and a subject made of visible ASCII characters only (no space, no control character, nothing outside ASCII; the issuer without `#`; each at most 255 characters, as OpenID Connect bounds `sub`), and an identity it cannot compare cannot be shown to be a second person",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_approver_outside_ascii",
+  "file": "console_approval_approver_outside_ascii.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is not in a form that can be compared: a console approval compares an issuer and a subject made of visible ASCII characters only (no space, no control character, nothing outside ASCII; the issuer without `#`; each at most 255 characters, as OpenID Connect bounds `sub`), and an identity it cannot compare cannot be shown to be a second person",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_requester_without_a_subject",
+  "file": "console_approval_requester_without_a_subject.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the requester is not in a form that can be compared: a console approval compares an issuer and a subject made of visible ASCII characters only (no space, no control character, nothing outside ASCII; the issuer without `#`; each at most 255 characters, as OpenID Connect bounds `sub`), and an identity it cannot compare cannot be shown to be a second person",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_approver_subject_over_255",
+  "file": "console_approval_approver_subject_over_255.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is not in a form that can be compared: a console approval compares an issuer and a subject made of visible ASCII characters only (no space, no control character, nothing outside ASCII; the issuer without `#`; each at most 255 characters, as OpenID Connect bounds `sub`), and an identity it cannot compare cannot be shown to be a second person",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_local_admin_approves",
+  "file": "console_approval_local_admin_approves.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is the in-cluster administrator console's one identity, which cannot be one of two people; a console approval needs two people the same identity provider vouches for",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_local_admin_requests",
+  "file": "console_approval_local_admin_requests.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the requester is the in-cluster administrator console's one identity, which cannot be one of two people; a console approval needs two people the same identity provider vouches for",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_service_account_requests",
+  "file": "console_approval_service_account_requests.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the requester is a Kubernetes system identity (a service account, a node or a system user), not a person; a console approval is between two people",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_approved_before_the_request",
+  "file": "console_approval_approved_before_the_request.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console.approved_at is before requested_at or not before request_expires_at; an approval is given after the request was made and before it expires",
+  "arm": "approval.console.approved_at is before requested_at or not before "
+ },
+ {
+  "id": "console_approval_approved_at_the_expiry",
+  "file": "console_approval_approved_at_the_expiry.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console.approved_at is before requested_at or not before request_expires_at; an approval is given after the request was made and before it expires",
+  "arm": "approval.console.approved_at is before requested_at or not before "
+ },
+ {
+  "id": "console_approval_approver_is_a_key_label",
+  "file": "console_approval_approver_is_a_key_label.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.approver is not approval.console.approver as \"<issuer>#<subject>\"; under a console approval the approver a scorecard names is the second person the console attested",
+  "arm": "approval.approver is not approval.console.approver as "
+ },
+ {
+  "id": "console_approval_with_a_distinct_personal_key",
+  "file": "console_approval_with_a_distinct_personal_key.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.key_id is not approval.console.confirmation_key_id; under a console approval the console's key signs the approval, so the approver's key is the console key (expected in this mode), and a distinct personal key is not a console approval",
+  "arm": "approval.key_id is not approval.console.confirmation_key_id; under a "
+ },
+ {
+  "id": "console_approval_blank_console_key",
+  "file": "console_approval_blank_console_key.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.key_id is not approval.console.confirmation_key_id; under a console approval the console's key signs the approval, so the approver's key is the console key (expected in this mode), and a distinct personal key is not a console approval",
+  "arm": "approval.key_id is not approval.console.confirmation_key_id; under a "
+ },
+ {
+  "id": "console_approval_time_is_the_requests",
+  "file": "console_approval_time_is_the_requests.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.approved_at is not approval.console.approved_at; under a console approval the approval time is the instant the second person approved, never the request's",
+  "arm": "approval.approved_at is not approval.console.approved_at; under a console "
+ },
+ {
+  "id": "original_name_console_mode_without_the_block",
+  "file": "original_name_console_mode_without_the_block.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_mode is \"consoleApproval\" exactly when approval.console is present; a console approval names who approved, and a governed, ordinary or v1 approval carries no console approver",
+  "arm": "approval.console is present; a console approval names who approved, and a "
+ },
+ {
+  "id": "original_name_governed_beside_the_console_block",
+  "file": "original_name_governed_beside_the_console_block.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_mode is \"consoleApproval\" exactly when approval.console is present; a console approval names who approved, and a governed, ordinary or v1 approval carries no console approver",
+  "arm": "approval.console is present; a console approval names who approved, and a "
+ },
+ {
+  "id": "console_approval_same_person_and_a_personal_key",
+  "file": "console_approval_same_person_and_a_personal_key.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console does not name two people: the approver is the requester (the issuer and the subject are compared without case); a two-person approval needs a second person, and no role changes that",
+  "arm": "approval.console does not name two people: "
+ },
+ {
+  "id": "console_approval_under_1_8_0_beside_a_governed_original_name",
+  "file": "console_approval_under_1_8_0_beside_a_governed_original_name.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "approval.console is present but format_version \"1.8.0\" does not define it: the block is defined from 1.9.0 of format 1 and from 2.1.0 of format 2",
+  "arm": "approval.console is present but format_version "
+ },
+ {
+  "id": "original_name_console_mode_under_format_1_8_0",
+  "file": "original_name_console_mode_under_format_1_8_0.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_mode is a value defined from 1.9.0 and format_version \"1.8.0\" predates it",
+  "arm": "target.original_name.approval_mode is a value defined from "
+ },
+ {
+  "id": "original_name_1_9_standing_approval",
+  "file": "original_name_1_9_standing_approval.json",
+  "rust_exit": 4,
+  "python_exit": 1,
+  "reason": "target.original_name.approval_mode is not one of the four values this format defines; it is \"v1Approval\", \"governed\", \"ordinary\" or \"consoleApproval\" and nothing else",
+  "arm": "target.original_name.approval_mode is not one of the four values this "
+ },
+ {
+  "id": "original_name_1_9_governed_accepted",
+  "file": "original_name_1_9_governed_accepted.json",
+  "rust_exit": 0,
+  "python_exit": 0,
+  "reason": ""
  }
 ]

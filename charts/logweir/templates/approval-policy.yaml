@@ -31,13 +31,32 @@ confirmation in the console) or `strict` (a personal-key approval) beside the
 internal `Ordinary` and `Governed`; this template RENDERS THE INTERNAL NAMES
 (`logweir.approvalPolicy.internalMode`, the chart's half of the one mapping
 `logweir_core::approval_policy::OperatorMode` holds), so an image-only
-rollback reads the same document it always did. `two-person` is PROD-16.2 and
-refused. `approvalPolicy.default` (`confirm` | `strict` | empty) is rendered
+rollback reads the same document it always did. `approvalPolicy.default`
+(`confirm` | `strict` | empty; `two-person` is not a default) is rendered
 as `defaultMode` ONLY when set: empty leaves the decision to the fresh-install
 marker, which the identity hook writes only on a fresh install with a console
 (`logweir.freshInstallConfirm`), so an upgraded install's unbound namespaces
 stay `legacy-governed-v1`. A set `default` is a field an older binary refuses
 at start — fail closed on rollback.
+
+PROD-16.2 — TWO-PERSON APPROVAL IN THE CONSOLE. A policy written
+`mode: two-person` (or `mode: Governed` with `approverSignature: Console`) is
+RENDERED as `mode: Governed` and `approverSignature: Console`: a second person
+signs in to the shared console and clicks Approve, and the console signs the
+approval. The setting is inside the policy's snapshot digest, so a request made
+under it is never approved under a personal key or the reverse. An older
+controller or console refuses a document that carries `approverSignature` at
+start (an unknown field: fail closed on rollback), so the key is rendered ONLY
+for such a policy and every other document is byte for byte what it was.
+
+IT RENDERS ONLY WITH A SHARED CONSOLE (`api.console.enabled` and
+`api.console.mode=shared`). The second person is a second identity the
+identity provider vouches for; the in-cluster administrator console has one
+identity, and an install with no console has nobody to click. Anywhere else
+this template FAILS, by name, before anything installs — a chart-only refusal:
+the document itself is one the binary reads, and the binary's own refusals
+(the administrator console neither requests nor approves under such a policy)
+stand behind it.
 
 THE REFUSALS HERE ARE THE BINARY'S, MADE EARLIER. `logweir_core::approval_policy`
 refuses the same documents at controller and console start, and a document the
@@ -53,13 +72,31 @@ rule added to one side and not the other is a red row.
 {{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces .Values.approvalPolicy.default -}}true{{- end -}}
 {{- end -}}
 
-{{- /* PROD-16.1: an operator mode name, or an internal one, as the internal one. */ -}}
+{{- /* PROD-16.1: an operator mode name, or an internal one, as the internal one.
+       PROD-16.2: `two-person` is Governed, with the console as the approver's
+       signature (`logweir.approvalPolicy.console`). */ -}}
 {{- define "logweir.approvalPolicy.internalMode" -}}
 {{- $m := . | default "" -}}
 {{- if or (eq $m "confirm") (eq $m "Ordinary") -}}Ordinary
 {{- else if or (eq $m "strict") (eq $m "Governed") -}}Governed
+{{- else if eq $m "two-person" -}}Governed
 {{- else -}}{{ $m }}
 {{- end -}}
+{{- end -}}
+
+{{- /* PROD-16.2: whether ONE policy takes its approval from the console: it is
+       written `mode: two-person`, or carries `approverSignature: Console`. */ -}}
+{{- define "logweir.approvalPolicy.console" -}}
+{{- if or (eq (.mode | default "") "two-person") (eq (.approverSignature | default "") "Console") -}}true{{- end -}}
+{{- end -}}
+
+{{- /* PROD-16.2: whether ANY declared policy does. */ -}}
+{{- define "logweir.approvalPolicy.anyConsole" -}}
+{{- $any := "" -}}
+{{- range $policy := (.Values.approvalPolicy.policies | default list) -}}
+{{- if include "logweir.approvalPolicy.console" $policy -}}{{- $any = "true" -}}{{- end -}}
+{{- end -}}
+{{- $any -}}
 {{- end -}}
 
 {{- define "logweir.approvalPolicy.document" -}}
@@ -69,7 +106,13 @@ defaultMode: {{ . }}
 {{- end }}
 {{- $policies := list -}}
 {{- range $policy := (.Values.approvalPolicy.policies | default list) -}}
-{{- $policies = append $policies (merge (dict "mode" (include "logweir.approvalPolicy.internalMode" $policy.mode)) (omit $policy "mode")) -}}
+{{- $rendered := merge (dict "mode" (include "logweir.approvalPolicy.internalMode" $policy.mode)) (omit $policy "mode" "approverSignature") -}}
+{{- /* PROD-16.2: the one spelling the binary's document has, and only for a
+       policy that says so, so every other document is what it was. */ -}}
+{{- if include "logweir.approvalPolicy.console" $policy -}}
+{{- $rendered = merge (dict "approverSignature" "Console") $rendered -}}
+{{- end -}}
+{{- $policies = append $policies $rendered -}}
 {{- end }}
 policies:
 {{ toYaml $policies | indent 2 }}
@@ -149,7 +192,7 @@ outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
 {{- $names := list -}}
 {{- if $p.default -}}
 {{- if eq $p.default "two-person" -}}
-{{- fail "approvalPolicy.default is two-person (two-person approval in the console), which is not available in this release. Use confirm or strict, or leave it empty: a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1." -}}
+{{- fail "approvalPolicy.default is two-person, which is not a default: two-person approval in the console is set per namespace. Declare a policy with mode: two-person in approvalPolicy.policies and bind each namespace to it in approvalPolicy.namespaces. approvalPolicy.default is confirm, strict, or empty (a fresh install with a console then starts in confirm, and an upgraded one keeps legacy-governed-v1)." -}}
 {{- end -}}
 {{- if not (has $p.default (list "confirm" "strict")) -}}
 {{- fail (printf "approvalPolicy.default is %q; it is `confirm`, `strict`, or empty (the fresh-install marker decides)." $p.default) -}}
@@ -169,13 +212,22 @@ outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
 {{- fail (printf "approvalPolicy.policies declares %q twice." $policy.name) -}}
 {{- end -}}
 {{- $names = append $names $policy.name -}}
-{{- if eq ($policy.mode | default "") "two-person" -}}
-{{- fail (printf "approvalPolicy.policies[%d] (%s) is two-person (two-person approval in the console), which is not available in this release; use confirm (Ordinary) or strict (Governed)." $i $policy.name) -}}
-{{- end -}}
-{{- if not (has $policy.mode (list "Governed" "Ordinary" "confirm" "strict")) -}}
-{{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `confirm` (Ordinary) or `strict` (Governed)." $i ($policy.mode | default "")) -}}
+{{- if not (has $policy.mode (list "Governed" "Ordinary" "confirm" "strict" "two-person")) -}}
+{{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `confirm` (Ordinary), `two-person` (Governed, approved by a second person in the console) or `strict` (Governed, approved with a personal key)." $i ($policy.mode | default "")) -}}
 {{- end -}}
 {{- $mode := include "logweir.approvalPolicy.internalMode" $policy.mode -}}
+{{- /* PROD-16.2: who signs the approval. The binary's three refusals, first. */ -}}
+{{- if hasKey $policy "approverSignature" -}}
+{{- if ne (toString $policy.approverSignature) "Console" -}}
+{{- fail (printf "approvalPolicy.policies[%d].approverSignature is %q; it is `Console` (a second person approves in the console) or absent (a personal GovernedApproval key)." $i (toString $policy.approverSignature)) -}}
+{{- end -}}
+{{- if eq $mode "Ordinary" -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) sets approverSignature: Console on a confirm (Ordinary) policy, which has no approver; two-person approval in the console is mode: two-person." $i $policy.name) -}}
+{{- end -}}
+{{- if eq $policy.mode "strict" -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) sets approverSignature: Console and mode: strict, which is a personal-key approval; say mode: two-person for approval in the console, or drop approverSignature for a personal key." $i $policy.name) -}}
+{{- end -}}
+{{- end -}}
 {{- if and (eq $mode "Ordinary") (not $p.allowOrdinaryConfirmation) -}}
 {{- fail (printf "approvalPolicy.policies[%d] (%s) is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0): set the floor, or use a Governed policy." $i $policy.name) -}}
 {{- end -}}
@@ -191,8 +243,8 @@ outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
 {{- end -}}
 {{- end -}}
 {{- range $key, $_ := $policy -}}
-{{- if not (has $key (list "name" "mode" "maxAgeSeconds" "requireDistinctPrincipal")) -}}
-{{- fail (printf "approvalPolicy.policies[%d] carries unknown field %q; a policy has name, mode, maxAgeSeconds and requireDistinctPrincipal." $i $key) -}}
+{{- if not (has $key (list "name" "mode" "maxAgeSeconds" "requireDistinctPrincipal" "approverSignature")) -}}
+{{- fail (printf "approvalPolicy.policies[%d] carries unknown field %q; a policy has name, mode, maxAgeSeconds, requireDistinctPrincipal and approverSignature." $i $key) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -208,6 +260,19 @@ outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
 {{- end -}}
 {{- if not (has $policy $names) -}}
 {{- fail (printf "approvalPolicy.namespaces.%s names policy %q, which approvalPolicy.policies does not declare." $ns $policy) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+PROD-16.2: TWO-PERSON APPROVAL NEEDS THE SHARED CONSOLE. Last, after every
+refusal the binary also makes, so a malformed policy is named as that. This one
+is the chart's alone: the document is well formed, and what is missing is two
+identities to tell apart.
+*/ -}}
+{{- range $i, $policy := ($p.policies | default list) -}}
+{{- if include "logweir.approvalPolicy.console" $policy -}}
+{{- if not (and $.Values.api.enabled $.Values.api.console.enabled (eq ($.Values.api.console.mode | default "") "shared")) -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) is two-person: a second person signs in to the console and clicks Approve, which needs api.console.enabled=true and api.console.mode=shared (this render has %s). The in-cluster administrator console has one identity, which cannot be two people, and without a console nobody can approve. Run the shared console, or use mode: strict (a personal key) or mode: confirm (one person) for this policy." $i $policy.name (ternary (printf "api.console.mode=%s" ($.Values.api.console.mode | default "\"\"")) "no console" (and $.Values.api.enabled $.Values.api.console.enabled))) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

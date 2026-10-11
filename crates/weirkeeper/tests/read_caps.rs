@@ -6,12 +6,13 @@
 //! serves every namespace, and each restart read it again. These rows hold the
 //! controller's five read paths to their caps:
 //!
-//! * `verify_evidence` — the document under `caps::CONTROLLER_DOCUMENT` (the
-//!   evidence relay's 1 MiB), the sidecar under `caps::SIDECAR` (64 KiB);
-//! * `observe_archive` — the receipt under the document cap, the sidecar's
+//! * `verify_evidence` — the document under the cap of what it is (FX-33:
+//!   `caps::CONTROLLER_RECEIPT` for a backup receipt, `caps::CONTROLLER_DOCUMENT`,
+//!   1 MiB, for everything else), the sidecar under `caps::SIDECAR` (64 KiB);
+//! * `observe_archive` — the receipt under the receipt cap, the sidecar's
 //!   presence by `HEAD`;
 //! * `observe_scorecard` — the scorecard under the document cap;
-//! * `read_signing_time` — the document under the document cap;
+//! * `read_signing_time` — the document under its own kind's cap;
 //! * the retention report — each manifest under `caps::CONTROLLER_MANIFEST`.
 //!
 //! Over the cap: `NotAttempted` (or "not observed", or `skipped`) NAMING the
@@ -120,8 +121,9 @@ fn an_oversized_receipt_is_not_attempted_naming_the_cap_while_a_normal_one_verif
         "the control verifies: {r:?}"
     );
 
-    // ONE BYTE over the cap.
-    let big = vec![b' '; usize::try_from(caps::CONTROLLER_DOCUMENT).unwrap() + 1];
+    // ONE BYTE over the cap — a RECEIPT's own (FX-33), which is what
+    // `verify` reads this document as.
+    let big = vec![b' '; usize::try_from(caps::CONTROLLER_RECEIPT).unwrap() + 1];
     let over = Store::in_memory("logweir/");
     put(&over, PAYLOAD_KEY, &big);
     put(&over, SIDECAR_KEY, &sidecar);
@@ -129,8 +131,8 @@ fn an_oversized_receipt_is_not_attempted_naming_the_cap_while_a_normal_one_verif
     assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
     let detail = r.detail.clone().expect("a refusal carries its sentence");
     assert!(
-        names(&detail, caps::CONTROLLER_DOCUMENT) && detail.contains(PAYLOAD_KEY),
-        "the detail names the key and the 1 MiB cap: {detail}"
+        names(&detail, caps::CONTROLLER_RECEIPT) && detail.contains(PAYLOAD_KEY),
+        "the detail names the key and the receipt cap: {detail}"
     );
     assert_eq!(
         not_attempted_class(&detail),
@@ -154,7 +156,7 @@ fn a_receipt_reported_at_gigabytes_is_refused_without_reading_its_body() {
     let r = verify(&store, &sha256_prefixed(b"{}"));
     assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
     let detail = r.detail.expect("a refusal carries its sentence");
-    assert!(names(&detail, caps::CONTROLLER_DOCUMENT), "{detail}");
+    assert!(names(&detail, caps::CONTROLLER_RECEIPT), "{detail}");
     assert!(
         detail.contains("the store reports 5368709120 bytes"),
         "{detail}"
@@ -279,9 +281,9 @@ fn the_signing_time_re_read_names_the_cap() {
         payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
     };
     match read_signing_time(Some(&store), &need) {
-        // Settled, not retried (review F8).
+        // Settled, not retried (review F8). The cap is the receipt's own.
         SigningTime::OverCap(detail) => {
-            assert!(names(&detail, caps::CONTROLLER_DOCUMENT), "{detail}")
+            assert!(names(&detail, caps::CONTROLLER_RECEIPT), "{detail}")
         }
         other => panic!("an oversized document yields no signing time, got {other:?}"),
     }
@@ -503,15 +505,17 @@ fn run_child(mode: &str, root: &Path) {
                     report.skipped[0].reason
                 );
                 assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
+                // FX-33: the receipt under its own cap, the scorecard under
+                // the document cap.
                 assert!(
                     r.detail
                         .as_deref()
-                        .is_some_and(|d| names(d, caps::CONTROLLER_DOCUMENT)),
+                        .is_some_and(|d| names(d, caps::CONTROLLER_RECEIPT)),
                     "{r:?}"
                 );
                 assert!(refused.is_some_and(|d| names(&d, caps::CONTROLLER_DOCUMENT)));
                 assert!(
-                    matches!(&signing_time, SigningTime::OverCap(d) if names(d, caps::CONTROLLER_DOCUMENT))
+                    matches!(&signing_time, SigningTime::OverCap(d) if names(d, caps::CONTROLLER_RECEIPT))
                 );
                 assert!(report.skipped[0]
                     .reason

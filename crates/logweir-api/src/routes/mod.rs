@@ -6,6 +6,7 @@ pub mod backups;
 pub mod cadence_previews;
 pub mod catalogs;
 pub mod connections;
+pub mod console_approval;
 pub mod destinations;
 pub mod health;
 pub mod namespaces;

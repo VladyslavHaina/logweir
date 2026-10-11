@@ -1,0 +1,1 @@
+{"payloadType":"application/vnd.logweir.backup-receipt+json;version=1.0.0","signatures":[{"keyid":"917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd","sig":"MEUCIHHdFyLxJz5mifeyKygLfBLboMx91AhLk3YT4aoJKyvoAiEAmsyQKerU3bt9XaI4qRQkcZahbruYmM3QWhDRi8/mMwA="}]}

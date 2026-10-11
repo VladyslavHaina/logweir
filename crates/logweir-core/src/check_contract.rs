@@ -53,8 +53,32 @@ pub const MAX_TOPICS_CEILING: u32 = 50_000;
 pub const MAX_READINESS_TOPICS: usize = 1_000;
 /// `evidenceFetch` object cap.
 pub const MAX_EVIDENCE_OBJECTS: usize = 3;
-/// `evidenceFetch` payload cap: 1 MiB.
-pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = 1024 * 1024;
+/// `evidenceFetch` payload CEILING — the most bytes of one signed document a
+/// plan may ask a check Job to relay, whatever the document is.
+///
+/// **FX-33: [`crate::topic_budget::MAX_RECEIPT_BYTES`]** (5,131,072), the
+/// largest backup receipt Logweir writes; it was 1 MiB, which a receipt of
+/// about 300 topics passed, and such a run was never verified. The relay
+/// decides the number, not the reverse: base64 in
+/// [`PART_MAX_BASE64_CHARS`]-character frames turns this payload into about
+/// 6.6 MiB of pod log, inside the 8 MiB the controller reads
+/// (`weirkeeper::check::relay::RELAY_LIMIT_BYTES`, itself below the kubelet's
+/// default 10 MiB log rotation); a 6 MiB payload would be 8.1 MiB and would
+/// not arrive. `weirkeeper`'s `the_largest_receipt_fits_the_relay` holds the
+/// two together.
+///
+/// `weirkeeper` asks for, and measures the relayed document against, the cap
+/// of the document kind it expects (`verification::controller_cap_for`):
+/// this number for a backup receipt, which it never parses into a tree, and
+/// [`MAX_EVIDENCE_SCORECARD_BYTES`] for a scorecard, which it does.
+pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = crate::topic_budget::MAX_RECEIPT_BYTES;
+/// The cap of a relayed document that is NOT a backup receipt — a drill
+/// scorecard: 1 MiB, the cap every evidence fetch had before FX-33. The
+/// controller parses such a document into a `serde_json::Value` (about 37
+/// times its size at worst), so it is not raised with the receipt's. Applied
+/// by the controller to the bytes it receives, and asked for in the plan.
+pub const MAX_EVIDENCE_SCORECARD_BYTES: u64 = 1024 * 1024;
+const _: () = assert!(MAX_EVIDENCE_SCORECARD_BYTES <= MAX_EVIDENCE_PAYLOAD_BYTES);
 /// `evidenceFetch` sidecar cap: 64 KiB.
 pub const MAX_EVIDENCE_SIDECAR_BYTES: u64 = 64 * 1024;
 /// A result carries at most this many per-check entries (D2 §6.4).

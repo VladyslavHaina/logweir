@@ -15,3 +15,8 @@ This directory is the single list of cases, and two gates read it:
 
 When you add a refusal to either side, add its case here, and both gates must
 then refuse it.
+
+A refusal that is the CHART's alone does not belong here. A `two-person`
+policy (PROD-16.2) is a document the binary reads; what the chart refuses is
+rendering it without a shared console, and `scripts/check-chart.sh` holds that
+in its own rows (section 9b).

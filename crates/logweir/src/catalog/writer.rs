@@ -61,6 +61,24 @@ pub fn from_receipt(
             inputs.receipt_key
         )
     })?;
+    project(receipt, receipt_bytes, inputs)
+}
+
+/// [`from_receipt`]'s projection, WITHOUT the receipt's invariants: every
+/// field copied exactly as `from_receipt` copies it.
+///
+/// **FX-33.** `backup run` measures, before the engine, the largest record
+/// this run could sign (`crate::backup::document_budget`), from a receipt
+/// whose after-the-engine fields are each at their longest. That receipt is a
+/// SIZE, not a claim — it would not pass arm 26 — so it cannot go through
+/// [`from_receipt`]; and a second copy of this projection would measure a
+/// record this function does not write. Nothing else calls this: a record is
+/// only ever DERIVED from a receipt that holds its invariants.
+pub fn project(
+    receipt: &BackupReceipt,
+    receipt_bytes: &[u8],
+    inputs: &RecordInputs,
+) -> Result<CatalogPoint, String> {
     // The topic rows come from `records`, which arm 3 has just established is
     // exactly the named topic set — so this projection needs no fallback and
     // cannot invent a count. `BTreeMap` order is the topic names' own order,

@@ -212,6 +212,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
 | `tests/complete-coverage.spec.js` | **PROD-08.1a**: complete coverage -- the wizard's closed advanced choice with its cost, unticked by default; the plan line exactly when ticked and the old bytes when not (the golden pair `plan-complete.golden.yaml`, which `ui_lint.rs` also parses into `RestoreSpec`); the review row and cost; the Restore's declaration; the draft; the mounted wizard; the API's coverage decoded and projected; the list row, the detail and the operation view saying sampled or complete with every partition's counts; and `covered: false` never green, even beside a forged pass -- each row with its negative control. |
+| `tests/backups-page-binding.spec.js` | **FX-35**: a restore opened on a Backup is bound to that run's point exactly as the catalog flow binds it (control: the catalog flow's plan for the same point), and one whose point no catalog lists says so and carries no binding (control: the same run with its point listed); both mount the wizard in console mode through the real client and decoders. |
 | `tests/time-basis.spec.js` | **FX-8**: the restore wizard's time-basis box -- unticked by default and never ticked by the page, the note under it (what it means, the refusal it avoids, and that the page cannot see each topic's timestamp type), the plan line `time_basis: "producerTime"` exactly when ticked and pre-FX-8 bytes when not (the golden pair `plan-time-basis.golden.yaml`, which `ui_lint.rs` also parses into the runner's `RestoreSpec`), the hash it moves, the review row, the draft, the mounted wizard, and the Restore detail's row read from the approved plan -- each row with its negative control. |
 | `tests/schema-dependency.spec.js` | **PROD-03.0**: the restore review, the recovery-point step and the catalog page name the schema-dependent topics with their sides and schema ids and say "Registry not captured: applications may not read these records after restore."; a `notDetected` topic is not named, and a topic without the field (or `notAssessed`) is said to be not assessed, never "no registry needed" -- over the fixture the product API's own row answers, each row with its negative control. |
 | `tests/replication-factor.spec.js` | **FX-5**: the restore wizard's replication factor -- the default rule (the source's factor capped at the target's brokers, else the target's broker count at most 3, else the grammar's 1 said as such), the broker count read from a discovery of the target (a fresh one, or one past its freshness alone, which sets the default with its age and refuses nothing), the 4-broker boundary of the ceiling, the input, the `ReplicationFactorExceedsBrokers` refusal on step 4, in the stepper, on the review step and in the submit, the review row with where the factor came from, the sentence that the factor can differ from the source's (on both steps and in this README and the quickstart), the readiness warning that names the factor, the draft, and both mounts' reads (a Backup point and a catalog point) -- each row with its negative control. |
@@ -861,6 +862,59 @@ here). Legacy (`kubectl proxy`) mode cannot know the policy, cannot
 sign a confirmation and has no countersign route (D0): it keeps today's governed
 flow unchanged.
 
+### Two-person: a second person approves in the console (PROD-16.2)
+
+A namespace whose policy read says `mode: governed` and `operatorMode:
+two-person` takes its approval from a **second person signed in to the shared
+console**. There is no key in this mode and nothing to copy, sign or paste, and
+the page is built so that there is nowhere to do any of that:
+
+* **The submit step** (`approvalPolicyBlock`) says so and asks for the change
+  ticket; it shows no command. When the read says `consoleApprovalAvailable:
+  false` -- the in-cluster administrator console, whose one identity cannot be
+  two people, or a console key that is not there yet -- it says that and Create
+  is disabled (`policyRefusal`); the product API refuses the same request with
+  nothing created.
+* **The approvals page** reads `GET .../restores/{name}/approval-request` and
+  renders the request **as the server shows it** (`renderConsoleApprovalPanel`):
+  who asked, the Restore and its UID, the plan hash, the policy and its digest,
+  the ticket, when it was asked and when it expires -- and **the whole approval
+  scope** (`renderApprovalScope`): the source archive and backup set, the
+  recovery point, the target cluster's bootstrap servers, **every topic and the
+  name it is restored under** (original names marked, partition subsets listed
+  number by number), the verification and where the evidence goes. Every one of
+  those is the server's, taken from bytes the console verified its own
+  signature on and the plan they name by hash, and every one is rendered as
+  text. The topic list is never sliced: it scrolls inside the panel
+  (`.approval-scope-topics`) and a long name wraps. The page never reads the
+  stored confirmation in this mode, never parses a document, and shows none.
+  A request the console did not confirm shows its state sentence and **no
+  field**.
+* **The Approve button is drawn only when the server offered it**
+  (`consoleApprovalOffered`): the view's `approve.offered` is exactly `true`
+  for a `pending` request of this Restore's name and UID, it carries a
+  well-formed `confirmationSha256`, the login holds `approvalSubmit`, the link
+  agrees with the Restore, and **the server said the scope is complete**
+  (`scopeComplete: true`, with as many topics as its `topicsCount`). Otherwise
+  the page shows the server's own sentence -- you are the requester, you are not
+  an approver here, the request expired, it is already approved, or it cannot
+  be shown in full (`scopeSentence`: split the restore, or approve it under
+  `strict`).
+* **The click sends one value** (`submitConsoleApproval`, `POST
+  .../restores/{name}/console-approval`): `confirmationSha256`, the hash of the
+  request that was shown, exactly as the server gave it. It names what was
+  reviewed and supplies nothing an authorization carries. The console decides
+  who the approver is from the sign-in and signs who approved and when.
+
+None of this is the security boundary: the product API checks the Approver
+role, that the approver is not the requester, the request's own signature, its
+expiry and the request's origin again on the click
+(`crates/logweir-api/tests/console_approval.rs`). What the page owes is to not
+teach an approver to trust what they should not, and
+`ui/tests/console-approval.spec.js` holds it to that, one negative control per
+behaviour. A mode word this page does not know is read as strict, never as "no
+key needed". Legacy (`kubectl proxy`) mode shows no request and has no click.
+
 ## The restore route, and the point it names
 
 **The wizard is bound to a recovery point somebody chose, and never picks one
@@ -995,7 +1049,7 @@ runner re-reads that receipt and manifest before it contacts a broker and
 refuses a mismatch (exit 3 `PointBindingMismatch`), and refuses a plan or a
 restored set that is not the point's own set (exit 3 `PointBindingSetMismatch`,
 FX-16); this plan pins `source.backup` to the point's set for that reason. A plan built from a
-`Backup` carries no `point` block and is byte-identical to before
+`Backup` whose point no catalog lists carries no `point` block and is byte-identical to before
 (`ui/tests/fixtures/plan-point.golden.yaml` beside `plan.golden.yaml`). Step 5
 sends `restore.catalogPoint {catalog, pointId}` and nothing else, so the
 controller re-reads the row when the check runs. A draft is kept per point: a
@@ -1008,6 +1062,15 @@ connect an archive when there are none). `#/catalog`'s table links every row
 the rule offers and says why a selectable row is not offered; it shows the
 controller's `backupVerdict` beside the verification word and a banner when
 `backupVerdictsIncomplete` is set.
+
+**A restore started from a Backup is bound to its point (FX-35).** The wizard
+opened on a `Backup` (`#/restore?backup=..&uid=..`, the link the History,
+Backups and Schedules pages give) names the run's point by its receipt digest,
+finds it in a catalog over the run's own destination, and builds the catalog
+flow's plan for it: the same `source.point`, the Backup's topics filled in. When
+no catalog lists the point yet, step 2 and the review say the plan is NOT bound
+and why, and the run's scorecard will report each topic's timestamp type NOT
+RECORDED; the review's *recorded by the point* row says which.
 
 **A run the controller wrote no window for (CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).**
 A `Succeeded` destination-backed run whose own verdict is absent or
@@ -3079,7 +3142,8 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   recorded.
   Legacy mode reads the custom resource, which has no such member, and applies
   the controller's rule itself wherever the lists in hand are whole: the four
-  counts add up and the `kept` list is `keptCount` long. A negative number is
+  counts add up (with `skippedCount` where the status has it) and the `kept`
+  list is `keptCount` long, up to the status's bound of 500. A negative number is
   never a count. **The catalog view has its own row with three answers**
   (`evaluationView`): "not the whole archive" for `viewIncomplete: true`,
   printed with or without the accounting, with the sentence under it; "the
@@ -3090,7 +3154,10 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   owed), so where the report names none and a RetentionPolicy in the namespace
   is not recommendation-only, the panel says it cannot tell which destination
   that policy governs, lists the policies, and prints neither the no-deletion
-  sentence nor "this schedule's own recommendation and nothing else".
+  sentence nor "this schedule's own recommendation and nothing else". **A
+  failed read of the namespace's RetentionPolicies is not an empty list**
+  (FX-42): a refusal, a 5xx or an answer the decoder rejects makes the panel
+  say the read failed and why, and print neither line either.
 
 **The four D3 kinds are not in the legacy in-cluster UI's ClusterRole.** The
 chart's role is unchanged by this change, so under the Helm UI the three D3 tabs
@@ -3255,12 +3322,15 @@ NODE_PATH="$(npm root -g)" node scripts/plat12-13-ui-e2e.mjs
 ## What this page does not do
 
 It does not mint an approval, hold a key, or submit the cluster-scoped
-`TrustRoster`. There is no "Approve" button that produces a signature anywhere
-in it: the approver runs `logweir drill approve` where their private key lives,
-and the approvals page takes the two files that command wrote -- as UTF-8 text,
-verbatim -- and refuses anything whose name ends `.pem` or `.key` or whose
-content carries a private-key header, with the message **this page never accepts
-a private key**. The roster is a cluster-admin step -- see the trust-roster step in
+`TrustRoster`. Nothing in it produces a signature: under a strict or an unbound
+namespace the approver runs `logweir drill approve` where their private key
+lives, and the approvals page takes the two files that command wrote -- as
+UTF-8 text, verbatim -- and refuses anything whose name ends `.pem` or `.key` or
+whose content carries a private-key header, with the message **this page never
+accepts a private key**. The one "Approve" button it has is a two-person
+namespace's (PROD-16.2, above), and it signs nothing either: it sends the hash
+of the request the approver was shown, and the console -- not the page --
+records who approved and signs that. The roster is a cluster-admin step -- see the trust-roster step in
 [the installation guide](../docs/install.md) -- and the page surfaces that
 snippet rather than submitting it.
 

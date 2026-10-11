@@ -15,13 +15,15 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest version (PROD-11.1b's 2.0.0); the writer writes
-            // 2.0.0 only for a restore that states a partition subset, 1.8.0
-            // for one under the original topic names (PROD-15.1; that file is
-            // format 1's newest, `schemas/logweir-drill-scorecard-1.8.0.json`),
-            // 1.7.0 for one that states a window start only, 1.6.0 for every
-            // other sampled drill (FX-23), and 1.4.0/1.5.0 for a complete one.
-            logweir_core::scorecard::FORMAT_VERSION_WITH_PARTITION_SUBSETS
+            // The newest version (PROD-16.2's 2.1.0); the writer writes
+            // 2.1.0 only for a partition-subset restore a second person
+            // approved in the console and 2.0.0 for any other partition
+            // subset, 1.9.0 for any other restore approved in the console
+            // (format 1's newest, `schemas/logweir-drill-scorecard-1.9.0.json`),
+            // 1.8.0 for one under the original topic names (PROD-15.1), 1.7.0
+            // for one that states a window start only, 1.6.0 for every other
+            // sampled drill (FX-23), and 1.4.0/1.5.0 for a complete one.
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
         )),
         "{s}"
     );

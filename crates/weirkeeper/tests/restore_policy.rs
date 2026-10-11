@@ -168,6 +168,8 @@ fn document(policy: &str, mode: ApprovalMode) -> RestoreAuthorization {
         ticket: (mode == ApprovalMode::Governed).then(|| "CHG-4711".to_string()),
         approval_subject: None,
         original_name_confirmation: None,
+        approver: None,
+        approved_at: None,
     }
 }
 

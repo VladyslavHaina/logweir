@@ -4,6 +4,10 @@ The CLI writes a Prometheus textfile at `--metrics-file`; it has no HTTP
 metrics endpoint. node_exporter's textfile collector scrapes the file. For
 persistent mounts, see [kubernetes.md §5](kubernetes.md).
 
+The engine's own Prometheus server is off: every backup and restore document
+Logweir renders sets `metrics: {enabled: false}`, so neither a runner pod nor a
+CLI run opens the engine's port 8080.
+
 Every metric is written by [`crates/logweir/src/metrics.rs`](../crates/logweir/src/metrics.rs)
 and rendered by [`../dashboards/logweir.json`](../dashboards/logweir.json).
 

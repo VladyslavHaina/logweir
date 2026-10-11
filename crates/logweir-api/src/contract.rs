@@ -3894,8 +3894,9 @@ pub enum OperatorModeView {
     /// One-person confirmation in the console (internal `Ordinary`).
     #[serde(rename = "confirm")]
     Confirm,
-    /// Two-person approval in the console (PROD-16.2; never served by this
-    /// build).
+    /// Two-person approval in the console (PROD-16.2: internal `Governed`
+    /// with `approverSignature: Console`): a second person signs in to the
+    /// shared console and clicks Approve.
     #[serde(rename = "two-person")]
     TwoPerson,
     /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
@@ -4035,6 +4036,14 @@ pub struct ApprovalPolicyView {
     /// Whether a submission here must carry a change ticket (an explicit
     /// Governed binding; D0).
     pub ticket_required: bool,
+    /// PROD-16.2: whether THIS console will take a second person's approval
+    /// here: `true` for a `two-person` policy when the console runs in shared
+    /// mode and holds its confirmation key. `false` under `two-person` means
+    /// this is the in-cluster administrator console, whose one identity
+    /// cannot be two people (nothing can be requested or approved through
+    /// it), or the key is not there yet. Always `false` for `confirm` and
+    /// `strict`.
+    pub console_approval_available: bool,
 }
 
 /// `GET .../approval-policy`.
@@ -4066,6 +4075,334 @@ pub struct SubmitApprovalRequest {
     /// At most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_bytes: Option<String>,
+}
+
+/// `POST .../restores/{name}/console-approval` (PROD-16.2) — the second
+/// person's click. The body names the request the approver was shown and
+/// NOTHING the approval is built from: requester, subject, UID, plan hash,
+/// policy and expiry come only from the stored request, after the console
+/// verified its own signature on it. An unknown field is refused.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConsoleApprovalRequest {
+    /// `sha256:` and 64 lowercase hex characters: `confirmationSha256` as
+    /// `GET .../approval-request` showed it. COMPARED with the stored
+    /// request's bytes and never copied: a request that changed between the
+    /// view and the click is refused (409 `state_conflict`).
+    pub confirmation_sha256: String,
+}
+
+/// Where a two-person request stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalRequestState {
+    /// The console's own request, verified, bound to this Restore, this plan
+    /// and the namespace's current policy, inside its window, and not yet
+    /// approved.
+    Pending,
+    /// An Approval already exists under the Restore's `approvalRef`.
+    Approved,
+    /// The request's window has closed; it authorises nothing. Submit the
+    /// Restore again.
+    Expired,
+    /// There is no request this console confirmed for this Restore, this plan
+    /// and the current policy: none was stored, the stored one does not carry
+    /// this console's signature, or it names another Restore, plan or policy.
+    /// Nothing of such an object is shown, and it is never approved.
+    NotConfirmed,
+}
+
+/// Why THIS session is not offered the Approve button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApproveRefusal {
+    /// The request is not pending (see `state`).
+    NotPending,
+    /// This console is the in-cluster administrator console.
+    LocalAdmin,
+    /// The session holds no Approver role in this namespace. An Administrator
+    /// is not an Approver unless separately bound as one.
+    NotApprover,
+    /// The session is the requester.
+    Requester,
+    /// The session's identity, or the requester's, cannot establish a second
+    /// person: it is not in a form that can be compared, it is a machine
+    /// identity, or the two come from different issuers.
+    NotSecondPerson,
+    /// The request cannot be shown in full (`scopeComplete: false`), so
+    /// nobody is offered it: a second person approves only what they were
+    /// shown, all of it. The click is refused for the same reason.
+    ScopeIncomplete,
+}
+
+/// PROD-16.2: an object-store location a plan names, in the parts a reviewer
+/// reads. Never a credential: a plan carries none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeStorageView {
+    /// `s3`, `azure`, `gcs` or `filesystem`.
+    pub backend: String,
+    /// The location in one line, e.g. `s3://bucket/prefix`.
+    pub location: String,
+    /// The S3 endpoint the plan states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The S3 region the plan states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Whether the plan allows this location over plain HTTP.
+    pub plaintext_http: bool,
+}
+
+/// PROD-16.2: where a restore's records come from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeSourceView {
+    /// The archive.
+    pub storage: ScopeStorageView,
+    /// The backup set: an id, or `latestCompleted`.
+    pub backup: String,
+    /// The catalog point the plan is bound to, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point_id: Option<String>,
+    /// That point's signed receipt, by digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_sha256: Option<String>,
+}
+
+/// PROD-16.2: the instant restored to, and the window restored from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeRecoveryView {
+    /// The recovery point.
+    pub point_in_time: DateTime<Utc>,
+    /// Whether the plan states it (`restore.point_in_time`); when it does
+    /// not, the recovery point is the end of the plan's check window.
+    pub point_in_time_stated: bool,
+    /// The inclusive start of the replayed window, when the plan narrows it;
+    /// absent restores from the archive's floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_start: Option<DateTime<Utc>>,
+    /// `producerTime` when the plan accepts producer time for its selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_basis: Option<String>,
+}
+
+/// PROD-16.2: the cluster a restore writes into, as its plan states it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTargetView {
+    /// The bootstrap servers the runner dials.
+    pub bootstrap_servers: Vec<String>,
+    /// How it authenticates there (`plaintext`, `scramSha512`, …).
+    pub auth_mode: String,
+    /// The SASL principal the plan authenticates as, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_username: Option<String>,
+    /// The replication factor of every topic the run creates.
+    pub replication_factor: i16,
+    /// `target.teardown`: what happens to a SCRATCH run's targets afterwards
+    /// (`delete`: the topics the run created are deleted; a `newTopic`
+    /// restore deletes nothing whatever it says).
+    pub teardown: String,
+    /// `scratch` or `newTopic`.
+    pub mode: String,
+    /// The prefix every source topic is mapped through; empty for a restore
+    /// under the original topic names.
+    pub topic_prefix: String,
+    /// For a restore under the original topic names only: the requester's
+    /// statement about declarative owners, which alone decides whether such
+    /// a run writes. Absent for every other restore.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_statement: Option<ScopeOwnerStatementView>,
+}
+
+/// PROD-16.2 (review S-1): the requester's owner statement for an
+/// original-name restore, as the plan signs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeOwnerStatementView {
+    /// The owners stated. ABSENT: the plan states nothing (the run has
+    /// nowhere to look from the console and refuses). EMPTY: the requester
+    /// states no declarative owner manages any restored name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owners: Option<Vec<ScopeOwnerView>>,
+    /// Whether the plan chooses the owner path: restore although an owner
+    /// manages a name, with its reconciliation paused.
+    pub owner_path: bool,
+}
+
+/// PROD-16.2: one declarative owner the requester states.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeOwnerView {
+    /// The restored name it manages.
+    pub topic: String,
+    /// `strimzi` or `external`.
+    pub kind: String,
+    /// Where it is defined.
+    pub reference: String,
+}
+
+/// PROD-16.2: one source topic and the name it is restored under.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeTopicView {
+    /// The topic in the archive.
+    pub source: String,
+    /// The topic written on the target.
+    pub target: String,
+    /// Whether this is a write under the source's ORIGINAL name.
+    pub original_name: bool,
+    /// The partitions restored, when the plan narrows this topic to a
+    /// subset: every number, never a count. Absent is every partition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions: Option<Vec<i32>>,
+}
+
+/// PROD-16.2: how the restore is checked afterwards.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeVerificationView {
+    /// `sampled` or `complete`.
+    pub coverage: String,
+    /// The window the check reads.
+    pub window_start: DateTime<Utc>,
+    /// Its end.
+    pub window_end: DateTime<Utc>,
+}
+
+/// PROD-16.2: **the approval scope** — everything a second person approves
+/// beside the request's own fields (requester, Restore, plan hash, subject,
+/// policy, ticket, expiry). Every value comes from the plan the request names
+/// by hash, never from a field of the Restore object; `topics` is EVERY
+/// topic, never a slice (`topicsCount` is its length, restated so a page can
+/// check it rendered them all). Present only when it is complete.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalScopeView {
+    /// The plan's own name, when it states one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// Where the records come from.
+    pub source: ScopeSourceView,
+    /// The instant restored to and the window restored from.
+    pub recovery: ScopeRecoveryView,
+    /// The cluster written into.
+    pub target: ScopeTargetView,
+    /// Every source topic and the name it is restored under, in the plan's
+    /// order.
+    pub topics: Vec<ScopeTopicView>,
+    /// How many topics the plan names: always `topics`' length.
+    pub topics_count: usize,
+    /// How the restore is checked.
+    pub verification: ScopeVerificationView,
+    /// Where the evidence is written.
+    pub evidence: ScopeStorageView,
+}
+
+/// Whether this session may approve, decided by the server with the same
+/// rules the click is held to. Advisory: the click is checked again.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveOfferView {
+    /// Whether the Approve button is offered to this session.
+    pub offered: bool,
+    /// Why not, when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ApproveRefusal>,
+    /// One sentence for the page: what approving means, or why this session
+    /// cannot.
+    pub sentence: String,
+}
+
+/// PROD-16.2: a two-person request as the approver is shown it. Every field
+/// from `requester` to `confirmationSha256` comes from the request's signed
+/// bytes, AFTER the console verified its own signature on them; none is read
+/// from the stored object's metadata.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestView {
+    /// The namespace.
+    pub namespace: String,
+    /// The Restore the request is for.
+    pub restore: String,
+    /// That Restore's UID, now.
+    pub restore_uid: String,
+    /// The Approval the Restore references (`spec.approvalRef.name`), which a
+    /// click creates.
+    pub approval_name: String,
+    /// The stored request, `<approvalName>-confirmation`.
+    pub confirmation_name: String,
+    /// The namespace's current policy.
+    pub policy: String,
+    /// Its snapshot digest.
+    pub policy_digest: String,
+    /// Where the request stands.
+    pub state: ApprovalRequestState,
+    /// One sentence saying so.
+    pub state_sentence: String,
+    /// Who asked, `<issuer>#<subject>`, as the console attested them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+    /// The plan hash the request names — the Restore's own, recomputed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    /// What is being approved: an ordinary restore, or one under the original
+    /// topic names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_subject: Option<ApprovalSubjectView>,
+    /// Whether `scope` is everything a second person approves, in full.
+    /// `false` for a request that cannot be shown whole — its plan is not the
+    /// one the request names, cannot be read, names more topics than a
+    /// request shows, or carries a value a page cannot show faithfully — and
+    /// then nobody is offered it and the click refuses it by name. Always
+    /// `false` for a request that is not confirmed.
+    pub scope_complete: bool,
+    /// Why the scope is not complete: a stable word (`tooManyTopics`,
+    /// `planUnreadable`, …). Absent when it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_incomplete: Option<String>,
+    /// One sentence saying why and what to do. Absent when it is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_sentence: Option<String>,
+    /// The approval scope: source, recovery point, target cluster, every
+    /// topic and the name it is restored under, any partition subset and the
+    /// verification coverage — from the plan the request names by hash.
+    /// Present exactly when `scopeComplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ApprovalScopeView>,
+    /// The change ticket the requester gave.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// When the console signed the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<DateTime<Utc>>,
+    /// When it stops authorising anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// `sha256:<hex>` of the request's signed bytes: what a click must name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_sha256: Option<String>,
+    /// Who approved, `<issuer>#<subject>`, when an approval this console
+    /// signed exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+    /// When they approved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
+    /// Whether this session may approve.
+    pub approve: ApproveOfferView,
+}
+
+/// `GET .../restores/{name}/approval-request`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalRequestResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The request.
+    pub item: ApprovalRequestView,
 }
 
 /// `GET .../operations/{kind}/{name}`.

@@ -2387,3 +2387,261 @@ fn a_whole_drill_sampling_across_a_straddling_segment_signs_pass_and_both_reader
         "the auditor's verifier must report the outcome it read: {stdout}"
     );
 }
+
+// =======================================================================
+// PROD-16.2 — the approval-mode vocabulary is ONE SET in both readers
+// =======================================================================
+
+/// The small program the vocabulary row runs under the auditor's interpreter:
+/// it loads `docs/verify_scorecard.py` AS A MODULE (never a copy of its
+/// text), prints the two names that hold the vocabulary there, and judges
+/// each document it is handed with the script's own `check_invariants`.
+const VOCABULARY_PROBE: &str = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("verify_scorecard", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+documents = json.load(open(sys.argv[2]))
+print(json.dumps({
+    "original_name_approval_modes": list(mod.ORIGINAL_NAME_APPROVAL_MODES),
+    "approval_mode_console": mod.APPROVAL_MODE_CONSOLE,
+    "verdicts": {word: mod.check_invariants(doc) for word, doc in documents.items()},
+}))
+"#;
+
+/// An original-name document of `version` that says it was authorised by
+/// `word`, made otherwise exactly what the writer signs for that word: the
+/// typed confirmation beside `ordinary` (ON-11), and `approval.console`
+/// beside `consoleApproval` from 1.9.0 (CA-8, CA-5 to CA-7). So the ONLY
+/// thing that can refuse it is the word not being a member of the set that
+/// version defines (ON-5).
+fn original_name_document_approved_by(word: &str, version: &str) -> Value {
+    use logweir_core::scorecard::{APPROVAL_MODE_CONSOLE, APPROVAL_MODE_ORDINARY};
+    let mut doc = read_json(&corpus().join("original_name_1_8_accepted.json"));
+    doc["format_version"] = Value::from(version);
+    doc["target"]["original_name"]["approval_mode"] = Value::from(word);
+    if word == APPROVAL_MODE_ORDINARY {
+        doc["target"]["original_name"]["confirmation"] =
+            Value::from(logweir_core::original_name::CONFIRMATION_TYPED_TOPIC_NAMES);
+    }
+    if word == APPROVAL_MODE_CONSOLE && logweir_core::scorecard::defines_console_approval(version) {
+        let key = "c0".repeat(32);
+        doc["approval"]["approver"] = Value::from("https://idp.example#bob");
+        doc["approval"]["key_id"] = Value::from(key.clone());
+        doc["approval"]["approved_at"] = Value::from("2026-10-10T12:04:00Z");
+        doc["approval"]["console"] = serde_json::json!({
+            "mode": APPROVAL_MODE_CONSOLE,
+            "requester": {"issuer": "https://idp.example", "subject": "alice"},
+            "approver": {"issuer": "https://idp.example", "subject": "bob"},
+            "requested_at": "2026-10-10T12:00:00Z",
+            "approved_at": "2026-10-10T12:04:00Z",
+            "request_expires_at": "2026-10-10T13:00:00Z",
+            "confirmation_key_id": key,
+        });
+    }
+    doc
+}
+
+/// **PROD-16.2 (the coordinator's addition 1): `approval_mode` is a closed
+/// vocabulary inside SIGNED evidence, and its two definitions are held to
+/// each other member for member.**
+///
+/// Rust has ONE definition (`logweir_core::scorecard::APPROVAL_MODE_*` and the
+/// sets built from them; the runner's words and the route table's are those
+/// constants). `docs/verify_scorecard.py` shares no code with it, on purpose,
+/// so it holds its own copy — and this row is what fails when a member exists
+/// in one and not the other:
+///
+/// 1. the script's `ORIGINAL_NAME_APPROVAL_MODES`, read from the LOADED module
+///    under the auditor's interpreter, is core's set, in order, and its
+///    `APPROVAL_MODE_CONSOLE` is core's word;
+/// 2. BEHAVIOUR, not only text: for every word phase 1 can report
+///    (`APPROVAL_MODES`), and for words nobody defines, both readers judge an
+///    original-name document carrying it the same way, in the same words, at
+///    1.8.0 AND at 1.9.0 — accepted exactly for the members of the set that
+///    version defines, refused by ON-5 otherwise (under 1.8.0 the member
+///    1.9.0 added is refused by the version, in a sentence that names it);
+/// 3. the runner's words are core's, and every row of the approval route
+///    table maps to a member.
+///
+/// KILLS: a member added to `scorecard.rs` and not to the script (1 fails on
+/// the set; 2 fails on the word, which Rust accepts and Python refuses), and
+/// the reverse; a member renamed on one side; a set check that is dropped
+/// from ON-5 on one side (2: the undefined words).
+#[test]
+fn the_approval_mode_vocabulary_is_the_same_set_in_both_readers() {
+    use logweir::drill::phase1_approval as runner;
+    use logweir_core::approval_policy::ApprovalRoute;
+    use logweir_core::scorecard::{
+        APPROVAL_MODES, APPROVAL_MODE_CONSOLE, APPROVAL_MODE_GOVERNED, APPROVAL_MODE_ORDINARY,
+        APPROVAL_MODE_STANDING, APPROVAL_MODE_V1, ORIGINAL_NAME_APPROVAL_MODES,
+    };
+
+    // The words under test: every defined one, and four nobody defines (the
+    // operator's word for the mode, a near miss in case, the empty string and
+    // the policy's own word).
+    let mut words: Vec<&str> = APPROVAL_MODES.to_vec();
+    words.extend(["two-person", "ConsoleApproval", "", "Governed"]);
+    const AT_1_8_0: &str = logweir_core::scorecard::FORMAT_VERSION_WITH_ORIGINAL_NAME;
+    const AT_1_9_0: &str = logweir_core::scorecard::FORMAT_VERSION_WITH_CONSOLE_APPROVAL;
+    let label = |word: &str, version: &str| format!("{version} {word}");
+    let documents: serde_json::Map<String, Value> = [AT_1_8_0, AT_1_9_0]
+        .iter()
+        .flat_map(|version| {
+            words.iter().map(move |w| {
+                (
+                    format!("{version} {w}"),
+                    original_name_document_approved_by(w, version),
+                )
+            })
+        })
+        .collect();
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("documents.json");
+    std::fs::write(&input, serde_json::to_vec(&documents).unwrap()).unwrap();
+    let out = Command::new(require_python())
+        .current_dir(root())
+        .args(["-I", "-c", VOCABULARY_PROBE, "docs/verify_scorecard.py"])
+        .arg(&input)
+        .output()
+        .expect("run the vocabulary probe");
+    assert!(
+        out.status.success(),
+        "the probe ran: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let python: Value = serde_json::from_slice(&out.stdout).expect("the probe prints JSON");
+
+    // 1. The set itself.
+    let python_set: Vec<&str> = python["original_name_approval_modes"]
+        .as_array()
+        .expect("a tuple of words")
+        .iter()
+        .map(|w| w.as_str().expect("a word"))
+        .collect();
+    assert_eq!(
+        python_set,
+        ORIGINAL_NAME_APPROVAL_MODES.to_vec(),
+        "docs/verify_scorecard.py's ORIGINAL_NAME_APPROVAL_MODES is not \
+         logweir_core::scorecard::ORIGINAL_NAME_APPROVAL_MODES, member for member"
+    );
+    assert_eq!(
+        python["approval_mode_console"], APPROVAL_MODE_CONSOLE,
+        "docs/verify_scorecard.py's APPROVAL_MODE_CONSOLE is not core's word"
+    );
+
+    // 2. The same verdict, in the same words, for every word at each version.
+    use logweir_core::scorecard::ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0;
+    for (version, set) in [
+        (AT_1_8_0, ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0.to_vec()),
+        (AT_1_9_0, ORIGINAL_NAME_APPROVAL_MODES.to_vec()),
+    ] {
+        for word in &words {
+            let key = label(word, version);
+            let rust = serde_json::from_value::<logweir_core::scorecard::Scorecard>(
+                documents[&key].clone(),
+            )
+            .expect("a scorecard")
+            .validate_invariants()
+            .err()
+            .map(|e| e.0)
+            .unwrap_or_default();
+            let script = python["verdicts"][&key].as_str().expect("a verdict");
+            assert_eq!(rust, script, "the two readers disagree about {key:?}");
+            let member = set.contains(word);
+            assert_eq!(
+                rust.is_empty(),
+                member,
+                "{key:?} is accepted exactly when the word is a member of that version's set: \
+                 {rust}"
+            );
+            if member {
+                continue;
+            }
+            if *word == APPROVAL_MODE_CONSOLE {
+                // The member 1.9.0 added, under 1.8.0: refused BY THE VERSION.
+                assert_eq!(
+                    rust,
+                    "target.original_name.approval_mode is a value defined from 1.9.0 and \
+                     format_version \"1.8.0\" predates it"
+                );
+                continue;
+            }
+            assert!(
+                rust.starts_with("target.original_name.approval_mode is not one of "),
+                "{key:?} is refused by ON-5 and nothing else: {rust}"
+            );
+            // The sentence names the whole set of that version, so a reader
+            // of the refusal sees the vocabulary, and no word outside it.
+            for known in &set {
+                assert!(rust.contains(&format!("{known:?}")), "{rust}");
+            }
+            assert_eq!(
+                rust.contains(&format!("{APPROVAL_MODE_CONSOLE:?}")),
+                version == AT_1_9_0,
+                "{rust}"
+            );
+        }
+    }
+    // The set a 1.8.0 document is held to is the set PROD-15.1 published:
+    // every word of 1.9.0's but the one it added.
+    assert_eq!(
+        ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0.to_vec(),
+        ORIGINAL_NAME_APPROVAL_MODES
+            .into_iter()
+            .filter(|w| *w != APPROVAL_MODE_CONSOLE)
+            .collect::<Vec<_>>()
+    );
+
+    // 3. One definition on the Rust side: the runner's words are core's, the
+    // standing word is in the general set and not the original-name one, and
+    // every row of the route table maps to a member of both.
+    assert_eq!(
+        [
+            runner::APPROVAL_MODE_V1,
+            runner::APPROVAL_MODE_GOVERNED,
+            runner::APPROVAL_MODE_ORDINARY,
+            runner::APPROVAL_MODE_CONSOLE,
+            runner::APPROVAL_MODE_STANDING,
+        ],
+        [
+            APPROVAL_MODE_V1,
+            APPROVAL_MODE_GOVERNED,
+            APPROVAL_MODE_ORDINARY,
+            APPROVAL_MODE_CONSOLE,
+            APPROVAL_MODE_STANDING,
+        ]
+    );
+    assert_eq!(runner::APPROVAL_MODE_V1, APPROVAL_MODES[0]);
+    assert!(APPROVAL_MODES.contains(&APPROVAL_MODE_STANDING));
+    assert!(!ORIGINAL_NAME_APPROVAL_MODES.contains(&APPROVAL_MODE_STANDING));
+    for route in [
+        ApprovalRoute::RequesterConfirms,
+        ApprovalRoute::SecondPersonInConsole,
+        ApprovalRoute::PersonalKey,
+    ] {
+        assert!(
+            ORIGINAL_NAME_APPROVAL_MODES.contains(&route.approval_mode()),
+            "{route:?}"
+        );
+    }
+    // No Rust source outside core spells a member as a literal where it
+    // decides something: the runner and the readers name the constants.
+    for rel in [
+        "crates/logweir/src/drill/phase1_approval.rs",
+        "crates/logweir/src/drill/mod.rs",
+        "crates/logweir/src/verify.rs",
+        "crates/logweir/src/show.rs",
+    ] {
+        let src = code_only(&std::fs::read_to_string(root().join(rel)).expect(rel));
+        let production = src.split("#[cfg(test)]").next().unwrap_or(&src);
+        for word in [APPROVAL_MODE_CONSOLE, APPROVAL_MODE_V1] {
+            assert!(
+                !production.contains(&format!("{word:?}")),
+                "{rel} spells the approval mode {word:?} as a literal; name \
+                 logweir_core::scorecard's constant"
+            );
+        }
+    }
+}

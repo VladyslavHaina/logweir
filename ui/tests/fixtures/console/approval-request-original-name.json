@@ -1,0 +1,83 @@
+{
+  "item": {
+    "approvalName": "approval-x",
+    "approve": {
+      "offered": true,
+      "sentence": "You are an approver in this namespace and not the requester. Approving records your identity and the time, and the console signs both; the Restore then runs once weirkeeper verifies it."
+    },
+    "confirmationName": "approval-x-confirmation",
+    "confirmationSha256": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "expiresAt": "2026-10-10T13:00:00Z",
+    "issuedAt": "2026-10-10T12:00:00Z",
+    "namespace": "team-a",
+    "planHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "approvalSubject": "originalName",
+    "policy": "prod-pair",
+    "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requester": "https://idp.example#alice",
+    "restore": "restore-x",
+    "restoreUid": "uid-x",
+    "state": "pending",
+    "stateSentence": "The console confirmed this request and it is waiting for a second person to approve it.",
+    "ticket": "CHG-4711",
+    "scopeComplete": true,
+    "scope": {
+      "planName": "orders-pitr-4471",
+      "source": {
+        "storage": {
+          "backend": "s3",
+          "location": "s3://kafka-backups/drill-demo",
+          "endpoint": "http://localhost:9000",
+          "region": "us-east-1",
+          "plaintextHttp": true
+        },
+        "backup": "01JB7Z0000000000000000000B"
+      },
+      "recovery": {
+        "pointInTime": "2026-09-07T14:05:00Z",
+        "pointInTimeStated": true
+      },
+      "target": {
+        "bootstrapServers": [
+          "kafka-0.target:9092",
+          "kafka-1.target:9092"
+        ],
+        "authMode": "plaintext",
+        "mode": "newTopic",
+        "topicPrefix": "",
+        "replicationFactor": 1,
+        "teardown": "delete",
+        "ownerStatement": {
+          "owners": [],
+          "ownerPath": false
+        }
+      },
+      "topics": [
+        {
+          "source": "orders",
+          "target": "orders",
+          "originalName": true
+        },
+        {
+          "source": "payments",
+          "target": "payments",
+          "originalName": true
+        }
+      ],
+      "topicsCount": 2,
+      "verification": {
+        "coverage": "complete",
+        "windowStart": "2026-09-07T12:00:00Z",
+        "windowEnd": "2026-09-07T15:00:00Z"
+      },
+      "evidence": {
+        "backend": "s3",
+        "location": "s3://logweir-evidence/logweir/",
+        "endpoint": "http://localhost:9000",
+        "region": "us-east-1",
+        "plaintextHttp": true
+      }
+    }
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6G"
+}
