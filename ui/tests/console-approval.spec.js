@@ -1,4 +1,4 @@
-// console-approval.spec.js -- PROD-16.2: two-person approval in the console.
+// console-approval.spec.js -- two-person approval in the console.
 // A second person signs in and clicks Approve; no key, nothing to copy, sign
 // or paste.
 //
@@ -54,7 +54,7 @@ import {
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
 // What the page is handed: the request view through the decoder the console's
-// own read applies (FX-48), never a member off the raw fixture.
+// own read applies, never a member off the raw fixture.
 const request = (name) => decoded("approval-request-" + name + ".json").item;
 
 function transport(answer) {
@@ -89,7 +89,7 @@ async function consoleMode(approver) {
 const VIEW_URL = "/api/v1/namespaces/team-a/restores/restore-x/approval-request";
 const CLICK_URL = "/api/v1/namespaces/team-a/restores/restore-x/console-approval";
 
-// ================================================================ the client
+// THE CLIENT.
 
 test("the_request_view_and_the_click_are_the_two_published_routes", async () => {
   await consoleMode(true);
@@ -166,7 +166,7 @@ test("a_request_view_that_lies_about_its_shape_is_a_contract_failure", () => {
   assert.throws(() => decodeApprovalRequest(offer), (error) => isContractFailure(error));
 });
 
-// ============================================================ the approvals page
+// THE APPROVALS PAGE.
 
 const SUBJECT = Object.freeze({
   kind: "Restore", name: "restore-x", uid: "uid-x", planHash: "sha256:" + "e".repeat(64),
@@ -349,11 +349,10 @@ test("an_approved_request_names_the_approver_and_is_never_green", () => {
 });
 
 test("an_original_name_request_shows_the_requesters_owner_statement", () => {
-  // REVIEW S-1 (HIGH): the plan's owner statement alone decides whether an
-  // original-name write goes ahead from the console, so it is shown.
-  // REVIEW P2-5: rendered from the fixture AS THE CONTRACT DECODES IT, so a
-  // contract that drops `ownerStatement` fails here (as unknown, and as a
-  // statement that reads "nothing stated").
+  // The plan's owner statement alone decides whether an original-name write
+  // goes ahead from the console, so it is shown -- rendered from the fixture AS
+  // THE CONTRACT DECODES IT, so a contract that drops `ownerStatement` fails
+  // here (as unknown, and as a statement that reads "nothing stated").
   const decoded = decodeApprovalRequest(fixture("console/approval-request-original-name.json"));
   assert.deepEqual(decoded.unknown, [], "every field of the original-name view is declared");
   const named = decoded.value.item;
@@ -384,8 +383,8 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
   undeclared.scope.target.ownerStatement = { ownerPath: false };
   assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: undeclared }))
     .includes("states nothing about declarative owners"));
-  // REVIEW P2-4: owner_path with NO owners declared reads as the run acts --
-  // it refuses (nowhere to look) -- never as "writes ... although an owner".
+  // owner_path with NO owners declared reads as the run acts -- it refuses
+  // (nowhere to look) -- never as "writes ... although an owner".
   const pathAlone = structuredClone(named);
   pathAlone.scope.target.ownerStatement = { ownerPath: true };
   const pathAloneHtml = renderConsoleApprovalPanel(view(TWO_PERSON, { request: pathAlone }));
@@ -401,9 +400,9 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
 });
 
 test("a_plan_allowing_transaction_markers_says_so_to_the_second_person", () => {
-  // integrate-10 (PROD-16.2 review S-1's class): PROD-01.1a's override changes
-  // what the run writes, so the approver sees it. Decoded through the
-  // contract, so a contract that drops `allowTransactionMarkers` fails here.
+  // The transaction-marker override changes what the run writes, so the
+  // approver sees it. Decoded through the contract, so a contract that drops
+  // `allowTransactionMarkers` fails here.
   const read = decode("approval-request-pending.json", (body) => {
     body.item.scope.target.allowTransactionMarkers = true;
   });
@@ -444,7 +443,7 @@ test("an_original_name_request_marks_every_name_it_writes_under", () => {
   assert.ok(!ordinary.includes("original name</strong>"));
 });
 
-// ======================================== what is approved is what was shown
+// WHAT IS APPROVED IS WHAT WAS SHOWN.
 
 /** A pending request whose scope names `n` topics of `width` characters. */
 function scoped(n, width) {
@@ -651,7 +650,7 @@ test("the_empty_approvals_table_says_what_approving_means_under_two_person", () 
   assert.ok(noApprovalSentence(null).includes("logweir drill approve"));
 });
 
-// ================================================================ the wizard
+// THE WIZARD.
 
 test("the_submit_step_says_two_person_needs_a_second_person_and_no_key", () => {
   const block = approvalPolicyBlock(TWO_PERSON, "CHG-1");
@@ -685,7 +684,7 @@ test("the_submit_step_says_two_person_needs_a_second_person_and_no_key", () => {
   assert.match(approvalPolicyBlock(CONFIRM), /id="approval-policy-ordinary"/);
 });
 
-// ============================================ the page as the approver sees it
+// THE PAGE AS THE APPROVER SEES IT.
 
 /** An API double serving one Restore (under its original names), the
  *  namespace's policy and the request view -- what `mountApprovals` reads. */
@@ -725,10 +724,10 @@ async function approverPage(policy, request) {
 }
 
 test("the_whole_page_under_two_person_never_shows_the_one_person_original_name_sentence", async () => {
-  // REVIEW P2-1 (MEDIUM): the v1 sentence -- its `logweir drill approve`
-  // hint and "the runner refuses ... if a declarative owner manages a name"
-  // -- sat ABOVE the two-person panel. Under two-person the requester's own
-  // statement decides that, and the panel says so.
+  // The v1 sentence -- its `logweir drill approve` hint and "the runner
+  // refuses ... if a declarative owner manages a name" -- must not sit above
+  // the two-person panel: under two-person the requester's own statement
+  // decides that, and the panel says so.
   const named = decodeApprovalRequest(
     fixture("console/approval-request-original-name.json")).value.item;
   const html = await approverPage(TWO_PERSON, named);
@@ -744,8 +743,8 @@ test("the_whole_page_under_two_person_never_shows_the_one_person_original_name_s
 });
 
 test("a_window_end_is_shown_to_the_millisecond_the_run_uses", () => {
-  // REVIEW P2-2 (MEDIUM): the engine applies both ends to the millisecond;
-  // a `.999` end read as the second before it.
+  // The engine applies both ends to the millisecond; a `.999` end must not
+  // read as the second before it.
   const scope = structuredClone(request("pending").scope);
   scope.recovery.pointInTime = "2026-09-07T14:05:00.999Z";
   scope.recovery.windowStart = "2026-09-07T14:00:00.001Z";

@@ -1,5 +1,5 @@
-//! PROD-01.3 security follow-up: the SEEDED-SECRET SCAN OF THE LOG for the
-//! write-only connection credential.
+//! The SEEDED-SECRET SCAN OF THE LOG for the write-only connection
+//! credential.
 //!
 //! A TEST BINARY OF ITS OWN, deliberately. It installs a thread-local
 //! `tracing` subscriber, and `tracing` caches each call site's interest
@@ -15,8 +15,6 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use support::{connections, mtls_body, sasl_body, TestApp, SEEDED_PASSWORD};
-
-// ------------------------------------------------------------ log capture
 
 #[derive(Clone, Default)]
 struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);

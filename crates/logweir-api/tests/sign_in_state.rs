@@ -1,11 +1,10 @@
-//! FX-13a: a sign-in `state` is single-use on each replica, and the
-//! provider's single-use authorization code is the backstop across replicas.
+//! A sign-in `state` is single-use on each replica, and the provider's
+//! single-use authorization code is the backstop across replicas.
 //!
-//! WHAT WAS WRONG. The login cookie is sealed and stateless: it opens for 600
-//! seconds and nothing recorded that its `state` had been used. Someone who
-//! kept a copy could drive `/auth/callback` with it again and again, and every
-//! callback was a token request to the provider, authenticated as this client
-//! (FX-13's review, M1: one login cookie, five callbacks, five token POSTs).
+//! The login cookie is sealed and stateless: it opens for 600 seconds, and
+//! without a record of used states someone who kept a copy could drive
+//! `/auth/callback` with it again and again, each callback a token request to
+//! the provider authenticated as this client.
 //!
 //! WHAT IS ASSERTED. Once the cookie has opened and its `state` matched, and
 //! before the code is exchanged, the callback redeems the state in the
@@ -22,7 +21,7 @@
 //! * a full record forgets its oldest entry and never refuses a new sign-in;
 //!   a replay of a forgotten state meets the same provider backstop.
 //!
-//! NOTHING IS WRITTEN TO KUBERNETES (the orchestrator's note of 2026-10-09):
+//! NOTHING IS WRITTEN TO KUBERNETES:
 //! every row asserts the callback made no Kubernetes write at all, and ends
 //! with `assert_strict` on a fake API server that records any request outside
 //! the console's surface.
@@ -49,8 +48,6 @@ use http::Request;
 use serde_json::{json, Value};
 use support::idp::{Grant, MockIdp, TestKey};
 use support::{FakeKube, SharedApp, SharedOptions, TestResponse, ISSUER, SHARED_HOST};
-
-// ------------------------------------------------------------ log capture
 
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -125,16 +122,14 @@ impl Buffer {
 
 /// Capture this thread's logs, as JSON lines, for the life of the guard.
 ///
-/// EVERY ROW IN THIS FILE CALLS THIS FIRST, INCLUDING ONE THAT READS NO LOG
-/// (FX-13a review, L1). The subscriber is the thread's default, not the
-/// process's, and `tracing-core` decides once, when a log statement is first
-/// reached, whether anyone wants it. While exactly one subscriber exists in
-/// the process it asks only the reaching thread's default (0.1.36,
+/// EVERY ROW IN THIS FILE CALLS THIS FIRST, INCLUDING ONE THAT READS NO LOG.
+/// The subscriber is the thread's default, not the process's, and
+/// `tracing-core` decides once, when a log statement is first reached,
+/// whether anyone wants it. While exactly one subscriber exists in the
+/// process it asks only the reaching thread's default (0.1.36,
 /// `callsite.rs`, `Rebuilder::JustOne`). So a row on a thread with no
 /// subscriber that reaches a statement first switches it off for the
-/// capturing row too: that row's WARN and audit lines go missing and it fails
-/// for no product reason. Measured before this rule: 31 runs in 40 failed
-/// with the concurrent row not capturing, under a two-row filter.
+/// capturing row too, whose WARN and audit lines then go missing.
 fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let buffer = Buffer::default();
     let subscriber = tracing_subscriber::fmt()
@@ -145,8 +140,6 @@ fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let guard = tracing::subscriber::set_default(subscriber);
     (buffer, guard)
 }
-
-// ------------------------------------------------------------------ setup
 
 fn now() -> i64 {
     chrono::DateTime::parse_from_rfc3339("2026-09-15T12:00:00Z")
@@ -300,7 +293,7 @@ fn sealed_login_cookie(started: &Started) -> &str {
     started.cookie.split_once('=').expect("a cookie pair").1
 }
 
-/// **Nothing secret reached the logs** (FX-13a review, L2): not the `state`,
+/// **Nothing secret reached the logs**: not the `state`,
 /// an authorization code, the nonce, the login cookie's sealed value or a
 /// session cookie's.
 ///
@@ -386,8 +379,6 @@ fn assert_refused_by_the_provider(response: &TestResponse, label: &str) {
     assert!(session_of(response).is_none(), "{label}: no session");
     assert!(clears_login_cookie(response), "{label}: cookie cleared");
 }
-
-// -------------------------------------------------------------------- rows
 
 /// **A replay on the same replica is refused by name, audited, and makes no
 /// token request — even well inside the 600 s.** The first callback is the

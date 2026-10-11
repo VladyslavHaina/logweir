@@ -68,8 +68,7 @@ fn err(m: impl Into<String>) -> EngineError {
 pub fn decode_segment(bytes: &[u8]) -> Result<Vec<ArchivedRecord>, EngineError> {
     // The legacy JSON fallback. Pre-declared degradation, never a panic.
     // `first()` rather than `bytes.len() >= 1 && bytes[0] == ...`: the latter is
-    // clippy::len_zero, and Task 1's justfile and ci.yml both run
-    // `cargo clippy --workspace --all-targets -- -D warnings`.
+    // clippy::len_zero, and CI runs clippy with `-D warnings`.
     if bytes.first() == Some(&b'[') || bytes.starts_with(b"{") {
         return Err(err("legacy JSON segment: byte fingerprints unavailable"));
     }
@@ -276,7 +275,7 @@ fn opt_bytes(
 }
 
 // ---------------------------------------------------------------------------
-// PROD-03.0: a STREAMING scan that keeps only each record's prefix bytes.
+// A STREAMING scan that keeps only each record's prefix bytes.
 // ---------------------------------------------------------------------------
 
 /// What [`scan_segment`] keeps of one record: its offset and at most the
@@ -595,8 +594,8 @@ impl<R: std::io::Read> std::io::Read for Capped<R> {
 /// many records were handed over.
 ///
 /// Bounded in memory whatever the segment says, for a reader that runs inside
-/// a backup that already succeeded (PROD-03.0's detector) or before a restore
-/// (PROD-01.1a's marker check). Beyond the `bytes` the caller holds, it
+/// a backup that already succeeded (the schema-dependency detector) or before
+/// a restore (the transaction-marker check). Beyond the `bytes` the caller holds, it
 /// allocates a few hundred KiB of stream buffers, one record's header keys
 /// (at most 65,535 of `prefix` bytes) and, for zstd, a window of at most
 /// 2^[`ZSTD_WINDOW_LOG_MAX`] bytes:

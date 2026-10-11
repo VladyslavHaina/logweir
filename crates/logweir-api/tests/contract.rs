@@ -83,8 +83,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
             "/api/v1/namespaces/{ns}/preflights/{id}/details",
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
-            // D3 W11: the stream, the read families and the one write
-            // among them.
+            // The stream, the read families and the one write among them.
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
             "/api/v1/namespaces/{ns}/protection-policies",
             "/api/v1/namespaces/{ns}/protection-policies/{name}",
@@ -111,10 +110,9 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    // 56 + PLAT-19.2's two (submitGovernedApproval, getApprovalPolicy) +
-    // PROD-16.2's two (getApprovalRequest, approveInConsole), less the two
-    // rehearsal-schedule reads withdrawn in v1 and PROD-17.1 A4's one
-    // (createDestinationFromLegacy).
+    // 56, plus the approval-policy and two-person routes (submitGovernedApproval,
+    // getApprovalPolicy, getApprovalRequest, approveInConsole), less the two
+    // withdrawn rehearsal-schedule reads and createDestinationFromLegacy.
     assert_eq!(operation_ids.len(), 57);
 }
 
@@ -359,11 +357,6 @@ fn response_schemas_carry_no_credential_or_document_bytes() {
             // reference field names a Secret and carries no data.
             let flag = property_schema.get("type") == Some(&Value::String("boolean".into()));
             for word in forbidden {
-                // TWO NAMED EXCEPTIONS. `credentialRef` is a Secret NAME and
-                // carries no data; `csrfToken` is the synchronizer token the
-                // browser is meant to receive (null until PLAT-17.2 issues
-                // sessions). Everything else that reads like a credential is
-                // a defect.
                 // THREE NAMED EXCEPTIONS, EACH A REFERENCE AND NOT A VALUE.
                 // `credentialRef` and `secretName` are Secret NAMES; a name is
                 // what this service returns instead of anything about the
@@ -434,15 +427,13 @@ fn every_problem_code_is_documented() {
 
 /// **No two published types share a schema name.**
 ///
-/// REGRESSION REASON, AND IT WAS REAL. `schemars` keys
-/// `components/schemas` by a type's SHORT name, so two types called
-/// `EvaluationView` in two route modules become ONE schema: the second
-/// registration overwrites the first, both `$ref`s point at whichever won, and
-/// nothing anywhere reports it. D3 W11 shipped exactly that pair — a
-/// retention evaluation and a trust evaluation — and the document published
-/// `planSha256` where the trust policy's `serverTime` should have been. A
-/// generated document is only a contract if the generator cannot quietly
-/// disagree with the types.
+/// REGRESSION REASON. `schemars` keys `components/schemas` by a type's SHORT
+/// name, so two types called `EvaluationView` in two route modules become
+/// ONE schema: the second registration overwrites the first, both `$ref`s
+/// point at whichever won, and nothing anywhere reports it -- a retention
+/// evaluation and a trust evaluation would publish `planSha256` where the
+/// trust policy's `serverTime` should be. A generated document is only a
+/// contract if the generator cannot quietly disagree with the types.
 ///
 /// The scan is over declarations rather than over the document, because the
 /// document is a map and a map cannot show a duplicate key.

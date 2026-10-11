@@ -1,5 +1,5 @@
-//! The runner half of the saved-connection contract's TLS trust — PLAT-07.1,
-//! Global Constraint 29.
+//! The runner half of the saved-connection contract's TLS trust (Global
+//! Constraint 29).
 //!
 //! A private CA has to reach BOTH of a runner's TLS clients: librdkafka's
 //! `ssl.ca.location` and the engine's `ssl_ca_location`. The controller
@@ -214,28 +214,16 @@ fn a_backup_plan_takes_the_projected_ca_or_refuses_it() {
     );
 }
 
-/// **ONE PROJECTED PATH, BOTH TLS CLIENTS, MEASURED** — PLAT-07.1 review
-/// finding H2.
+/// **ONE PROJECTED PATH, BOTH TLS CLIENTS, MEASURED.**
 ///
-/// Global Constraint 29's runner half was stated in prose and asserted in two
-/// halves that never met: `the_client_takes_a_ca_only_over_tls` checked the
-/// shape of `AuthConfig`, `the_engine_document_carries_the_same_path_as_
-/// ssl_ca_location` checked the rendered document, and nothing compared the
-/// two. A review mutant that denied the backup runner's OWN librdkafka reader
-/// the projected CA — while the engine still received it — survived all 725
-/// rows.
-///
-/// This row starts where the runner starts: one environment variable, read
-/// through the one reader (`tls_ca::projected_ca_file`). From that single
-/// value it builds what librdkafka is actually handed
+/// From one environment variable, read through the one reader
+/// (`tls_ca::projected_ca_file`), this builds what librdkafka is handed
 /// (`RdKafkaReader::client_config`, the map `connect` dials with) and what the
-/// engine is actually handed (the rendered `backup.yaml`), and asserts the
-/// SAME string appears as `ssl.ca.location` and as `ssl_ca_location`.
-///
-/// Half-wiring is fail-closed today (the un-CA'd client falls back to the
-/// image's public roots and the handshake fails), so the blast radius is a
-/// broken run rather than an insecure dial — but it survives every gate, and
-/// D2's discovery and preflight check Jobs reuse this seam.
+/// engine is handed (the rendered `backup.yaml`), and asserts the SAME string
+/// appears as `ssl.ca.location` and as `ssl_ca_location`. Half-wiring fails
+/// closed (the un-CA'd client falls back to the image's public roots), so it
+/// is a broken run rather than an insecure dial, but it survives every other
+/// gate.
 ///
 /// NOTHING DIALS: `client_config` returns a map, and `create()` is never
 /// called on it.
@@ -314,7 +302,7 @@ fn one_projected_path_reaches_both_tls_clients() {
 
     // Hostname verification travels with it: the engine's rustls client
     // verifies the broker hostname with no way to turn that off, so
-    // librdkafka must be pinned to the same behaviour (finding H1).
+    // librdkafka must be pinned to the same behaviour.
     assert_eq!(
         config.get("ssl.endpoint.identification.algorithm"),
         Some("https")
@@ -340,16 +328,12 @@ fn one_projected_path_reaches_both_tls_clients() {
 }
 
 /// **EVERY CLIENT-CONSTRUCTION SITE HANDS ITS CLIENTS THE PROJECTED PATH
-/// ITSELF** — PLAT-07.1 review finding H2, the half a value test cannot reach.
+/// ITSELF.**
 ///
 /// `one_projected_path_reaches_both_tls_clients` proves the two clients agree
-/// when they are handed the same value. It cannot prove that the four sites
-/// that build a real client actually hand it: `backup::run`, `probe::dial`,
-/// `drill::context` and `doctor::check_target` all need a broker, so no
-/// in-process row reaches their wiring. That is exactly where the review's
-/// surviving mutant lived — `with_tls_ca_file(source_tls_ca.clone().filter(|_|
-/// false))` in `backup::run` denied the runner's OWN librdkafka reader the CA
-/// while the engine kept it, and all 725 rows passed.
+/// when handed the same value; it cannot prove that the four sites that build
+/// a real client (`backup::run`, `probe::dial`, `drill::context`,
+/// `doctor::check_target`) hand it, because each needs a broker.
 ///
 /// So this is a SOURCE row, the shape `auth_binding::
 /// no_construction_site_hardcodes_plaintext` already uses for interface I1's
@@ -441,28 +425,16 @@ fn every_construction_site_hands_its_clients_the_path_it_read() {
         sites.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );
 
-    // THE ONE SITE WHOSE CA DOES NOT COME FROM AN ENVIRONMENT VARIABLE, and
-    // the reason it is named here rather than exempted by a prefix rule.
+    // THE ONE SITE WHOSE CA DOES NOT COME FROM AN ENVIRONMENT VARIABLE, named
+    // here rather than exempted by a prefix rule. An execution Job carries one
+    // connection, projected under a fixed variable; one CHECK plan can carry a
+    // source, a target and up to two destinations, each with its own CA, so D2
+    // §4.2 renders the trust files into the plan `ConfigMap` and the plan NAMES
+    // the path per connection (`check_contract::ConnectionPlan::ca_file`).
     //
-    // The four rows below read `LOGWEIR_SOURCE_TLS_CA_FILE` /
-    // `LOGWEIR_TARGET_TLS_CA_FILE` through `tls_ca::projected_ca_file`,
-    // because an execution Job is rendered with exactly one connection and the
-    // controller projects its trust anchor under a fixed variable name. A
-    // CHECK Job is not: one check plan can carry a source connection, a target
-    // connection and up to two destinations, each with its own CA, so D2 §4.2
-    // renders the trust files into the plan `ConfigMap`
-    // (`source-ca.pem`, `target-ca.pem`, `archive-ca.pem`, `evidence-ca.pem`)
-    // and the plan NAMES the path per connection
-    // (`check_contract::ConnectionPlan::ca_file`). Four connections cannot
-    // share two variable names, and adding four more variables would put the
-    // "which side is this?" decision back in the runner — which is the defect
-    // finding H2 names, reached from the other end.
-    //
-    // What the exemption does NOT relax: the site still hands the path it was
-    // given to `AuthConfig::with_tls_ca_file`, which refuses a CA on a
-    // connection that is not TLS, and `crates/logweir/tests/check_cli.rs`
-    // asserts the check runner confines its dial to one function. It is
-    // spelled as an exact path so a FIFTH site cannot inherit the exemption.
+    // The site still hands the path to `AuthConfig::with_tls_ca_file`, which
+    // refuses a CA on a connection that is not TLS, and the exact path keeps a
+    // FIFTH site from inheriting the exemption.
     const PLAN_PROJECTED: &str = "src/check/kafka.rs";
     let (plan_projected, env_projected): (Vec<_>, Vec<_>) = sites
         .iter()

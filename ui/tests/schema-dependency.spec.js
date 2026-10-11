@@ -1,4 +1,4 @@
-// schema-dependency.spec.js -- PROD-03.0: the catalog page and the restore
+// schema-dependency.spec.js -- the catalog page and the restore
 // wizard name the topics whose archived records carry Confluent wire-format
 // framing, with the schema ids they reference, and say "registry not
 // captured: applications may not read these records after restore".
@@ -9,14 +9,12 @@
 // the product API to, for the entries the runner lists from the record
 // (`crates/logweir/tests/check_cli.rs`). One fixture, three readers.
 //
-// AND IT REACHES EVERY ROW THE WAY IT REACHES THE PAGE (FX-48). Until then
-// these rows handed `pointTopics` straight to the renderers, and every one of
-// them passed while the console showed nothing: `PointTopicView` did not
-// declare `schemaDependency`, so `decodeCatalogPoints` -- which stands between
-// the API and both pages at run time -- dropped it (PoC batch 6, F-1). Each
-// row now builds the `PointPageResponse` the route answers, holds it to the
-// published schema, and reads it with `readCatalogPoints`, the pages' own
-// read. `fx48_the_declaration_is_what_carries_the_note_to_the_page` is the
+// AND IT REACHES EVERY ROW THE WAY IT REACHES THE PAGE. Each row builds the
+// `PointPageResponse` the route answers, holds it to the published schema,
+// and reads it with `readCatalogPoints`, the pages' own read -- because
+// `decodeCatalogPoints` stands between the API and both pages, and a
+// `schemaDependency` it dropped would be green over renderers handed the raw
+// rows. `fx48_the_declaration_is_what_carries_the_note_to_the_page` is the
 // control that says why that matters.
 //
 // EVERY ROW CARRIES ITS NEGATIVE CONTROL: the same input with the one fact the
@@ -295,9 +293,7 @@ test("prod030_the_catalog_page_names_each_points_schema_dependent_topics", async
   assert.equal(byId(quiet, "catalog-schema-dependency"), null);
 });
 
-// ===========================================================================
-// FX-48: the declaration is what carries the note to the page
-// ===========================================================================
+// THE DECLARATION IS WHAT CARRIES THE NOTE TO THE PAGE.
 
 test("fx48_the_points_schema_dependency_survives_the_decoder_whole", () => {
   // THE DECODER'S OWN ROW. What the API sends for a topic arrives on the
@@ -324,9 +320,9 @@ test("fx48_the_points_schema_dependency_survives_the_decoder_whole", () => {
 });
 
 test("fx48_the_declaration_is_what_carries_the_note_to_the_page", async () => {
-  // THE NEGATIVE CONTROL OF THE WHOLE FILE. `before` is `PointTopicView` as
-  // `ui/contract.js` declared it until FX-48 -- no `schemaDependency` -- inside
-  // the point shape as it is declared today.
+  // THE NEGATIVE CONTROL OF THE WHOLE FILE. `before` is `PointTopicView`
+  // declared without `schemaDependency`, inside the point shape as it is
+  // declared today.
   const before = shapeOf("PointTopicView", { name: str, applyRoute: str },
     { partitions: int, replicationFactor: int, configCoverage: str, owner: str });
   const pointBefore = shapeOf("PointView", D3_SHAPES.PointView.required,
@@ -350,10 +346,10 @@ test("fx48_the_declaration_is_what_carries_the_note_to_the_page", async () => {
   assert.equal(byId(renderPlanStep(await preparePlan(wizard), wizard),
     "review-schema-dependency-warning"), null);
 
-  // (2) WHY EVERY ROW STAYED GREEN. The same bytes, handed to the renderer
-  // WITHOUT the decoder -- which is what this file did until FX-48 -- carry
-  // the sentence whatever the decoder declares. This is the one place a page
-  // function is given the wire document, and it is here to be the control.
+  // (2) WHY A ROW COULD STAY GREEN. The same bytes, handed to the renderer
+  // WITHOUT the decoder, carry the sentence whatever the decoder declares.
+  // This is the one place a page function is given the wire document, and it
+  // is here to be the control.
   const undecoded = renderPoints(answer, "team-a", "archive", "dest-a");
   assert.ok(visible(byId(undecoded, "catalog-schema-dependency"))
     .includes(SCHEMA_REGISTRY_NOT_CAPTURED),
@@ -392,9 +388,9 @@ test("fx48_every_value_the_api_sends_is_rendered_as_text", async () => {
 // `e2e/tests/schema_dependency.rs` over a live backup's catalog point) renders
 // through the same functions these rows hold, so a renamed or replaced
 // renderer cannot leave the live row printing something these rows never
-// checked -- and it DECODES the point first (FX-48), with the decoder the
-// console's own read uses, so the live row cannot be green over a member the
-// console drops.
+// checked -- and it DECODES the point first, with the decoder the console's
+// own read uses, so the live row cannot be green over a member the console
+// drops.
 test("prod030_the_live_rows_emitter_renders_through_the_functions_held_here", () => {
   const emitter = readFileSync(fileURLToPath(new URL("./emit-schema-dependency.js",
     import.meta.url)), "utf8");

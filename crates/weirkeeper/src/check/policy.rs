@@ -77,35 +77,21 @@ impl Default for ChecksPolicy {
     }
 }
 
-/// Manual-run concurrency limits — the `runs` block (P10, 2026-09-24).
+/// Manual-run concurrency limits: the `runs` block.
 ///
-/// # Why a manual run has a ceiling at all
+/// A `BackupSchedule` bounds its own runs, and D1 §8.3 keeps manual runs
+/// outside that ("Back up now" must work while the nightly run is going), so
+/// without this nothing bounds them and a burst of manual requests becomes as
+/// many simultaneous runner pods. It caps the runner Jobs a namespace's
+/// operators can have active at once, queueing the rest in creation order
+/// (`crate::run_pool`). Scheduled, catch-up and retry `Backup`s are neither
+/// counted nor queued: their own policy bounds them, and a slot that waited
+/// behind a browser click would miss its window.
 ///
-/// A `BackupSchedule` bounds its own runs (`concurrencyPolicy`,
-/// `maxActiveRuns`), and D1 §8.3 keeps manual runs OUTSIDE that on purpose:
-/// "Back up now" must work while the nightly run is still going. Until this
-/// block nothing bounded them at all, and one operator's hundred accepted
-/// `POST …/backups` became a hundred simultaneous runner pods — the PoC node
-/// hit its 110-pod limit and went `NotReady`. This is the same argument
-/// [`ChecksPolicy`] makes for interactive checks, applied to the other
-/// interactive surface: a ceiling on how many runner Jobs a namespace's
-/// operators can have ACTIVE at once, with everything above it queued in
-/// creation order (`crate::run_pool`).
-///
-/// # What it does not touch
-///
-/// Scheduled, catch-up and retry `Backup`s are neither counted nor queued:
-/// their own policy bounds them,
-/// and a slot that waited behind a browser click would miss its window. The
-/// ceilings are the administrator's (this `ConfigMap` lives in the release
-/// namespace), never a tenant's.
-///
-/// # Absent is the defaults
-///
-/// A policy document written before this block existed parses with
-/// [`RunsPolicy::default`], so an upgrade that keeps an older `ConfigMap`
-/// still bounds manual runs. Inside the block both fields are required, as in
-/// `checks`: a half-written block is a refused document, not a guessed one.
+/// A document written before this block parses with [`RunsPolicy::default`],
+/// so an upgrade that keeps an older `ConfigMap` still bounds manual runs.
+/// Inside the block both fields are required: a half-written block is refused,
+/// not guessed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RunsPolicy {
@@ -118,28 +104,26 @@ pub struct RunsPolicy {
 impl Default for RunsPolicy {
     fn default() -> Self {
         Self {
-            // FOUR, THE `checks` NUMBER. One namespace's operators rarely
-            // need more than a handful of ad-hoc captures at once, and four
-            // amd64 runner pods is what the smallest supported node carries
-            // beside the controller, the console and the checks.
+            // Four, the `checks` number: one namespace rarely needs more ad-hoc
+            // captures at once, and four runner pods is what the smallest
+            // supported node carries beside the controller and console.
             max_manual_backups_active_per_namespace: 4,
-            // TWO. A restore WRITES into a Kafka cluster; two at once is
-            // already more than an incident usually wants, and the rest wait
+            // Two: a restore writes into a Kafka cluster, and the rest wait
             // with their approval intact.
             max_manual_restores_active_per_namespace: 2,
         }
     }
 }
 
-/// The value `discovery.defaultMaxTopics` carries on the wire since FX-10
-/// withdrew it — see [`DiscoveryPolicy::withdrawn_default_max_topics`].
+/// The value the withdrawn `discovery.defaultMaxTopics` carries on the wire;
+/// see [`DiscoveryPolicy::withdrawn_default_max_topics`].
 ///
 /// `charts/logweir/templates/policy.yaml` renders `min(this, hardMaxTopics)`,
 /// and `weirkeeper/tests/chart_policy.rs` reads both, so the two cannot drift.
 pub const WITHDRAWN_DEFAULT_MAX_TOPICS: u32 = 20_000;
 
-/// The value `preflight.defaultTimeoutSeconds` carries on the wire since FX-10
-/// withdrew it — see [`PreflightPolicy::withdrawn_default_timeout_seconds`].
+/// The value the withdrawn `preflight.defaultTimeoutSeconds` carries on the
+/// wire; see [`PreflightPolicy::withdrawn_default_timeout_seconds`].
 pub const WITHDRAWN_DEFAULT_TIMEOUT_SECONDS: u32 = 120;
 
 fn withdrawn_default_max_topics() -> u32 {
@@ -160,44 +144,27 @@ pub struct DiscoveryPolicy {
     pub retention_seconds: u32,
     /// How many terminal discoveries per connection UID are kept.
     pub keep_per_connection: u32,
-    /// **WITHDRAWN (FX-10, 2026-10-05). Read by nothing, on purpose.**
+    /// Withdrawn, and read by nothing on purpose.
     ///
-    /// It was documented as "the `maxTopics` a request that names none gets",
-    /// and no request ever names none: the `TopicDiscovery` CRD defaults
-    /// `spec.request.maxTopics` to 20 000 at admission, the typed field is an
-    /// `i32` with the same serde default, and the console API writes the value
-    /// explicitly. So an administrator who set it changed nothing. The knob is
-    /// gone from `values.yaml`; a request's own `maxTopics` and
+    /// No request ever omits `maxTopics`: the `TopicDiscovery` CRD defaults it
+    /// to 20 000 at admission, the typed field has the same serde default, and
+    /// the console API writes it explicitly. A request's own `maxTopics` and
     /// [`Self::hard_max_topics`] are the two bounds.
     ///
-    /// **Why the field is still parsed, with a default and no rule.** Two
-    /// documents must keep working across an upgrade and a rollback:
+    /// Still parsed, with a default and no rule, so two documents keep working
+    /// across an upgrade and a rollback: one an older chart rendered still
+    /// carries the key (and `deny_unknown_fields` would fail it closed over a
+    /// value that does nothing), and an older controller requires the key, so
+    /// the chart keeps rendering [`WITHDRAWN_DEFAULT_MAX_TOPICS`]. Keeping it
+    /// at its wire name and position also keeps [`Policy::digest`] of an
+    /// unchanged document byte-identical, so retained `Preflight`s are not
+    /// downgraded with `PolicyChanged`; an install that had set another value
+    /// sees its digest change once.
     ///
-    /// * a document an OLDER chart rendered, or an administrator wrote, still
-    ///   carries the key — and `deny_unknown_fields` would refuse it, which
-    ///   fails closed (every attestation and every evidence location
-    ///   discarded) over a value that does nothing;
-    /// * a controller OLDER than FX-10 requires the key, so the chart keeps
-    ///   rendering it with [`WITHDRAWN_DEFAULT_MAX_TOPICS`] (never from a
-    ///   value) for an image-only rollback and for the old pod during a rolling
-    ///   upgrade.
-    ///
-    /// Keeping it in the struct, at its old wire name and position, also keeps
-    /// [`Policy::digest`] of an UNCHANGED document byte-identical across the
-    /// upgrade, so a default install's retained `Preflight`s are not
-    /// downgraded to `unknown` with `PolicyChanged`. An install that had set
-    /// the old value to anything other than what the chart now renders gets
-    /// the fixed value instead: its document, and so its digest, changes once,
-    /// and its still-valid `ready` `Preflight`s read `unknown`
-    /// (`policyChanged`) until they are run again.
-    ///
-    /// No range rule applies: a value nothing reads must not be able to fail
-    /// the document closed. The TYPE still applies: any whole number from 0 to
-    /// 4 294 967 295 is accepted, and `null`, a negative, a fraction, a quoted
-    /// number or a larger number is refused like any malformed field (the
-    /// whole document fails closed, as it did before FX-10). The chart never
-    /// renders a configured value here, so only a hand-written document can
-    /// meet that refusal.
+    /// No range rule: a value nothing reads must not fail the document closed.
+    /// The type still applies (a whole number up to `u32::MAX`), so `null`, a
+    /// negative, a fraction or a quoted number fails it like any malformed
+    /// field; the chart never renders one.
     #[serde(rename = "defaultMaxTopics", default = "withdrawn_default_max_topics")]
     pub withdrawn_default_max_topics: u32,
     /// The ceiling a request's `maxTopics` is clamped to.
@@ -226,13 +193,10 @@ impl Default for DiscoveryPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PreflightPolicy {
-    /// **WITHDRAWN (FX-10, 2026-10-05). Read by nothing, on purpose.**
-    ///
-    /// It was documented as "the `timeoutSeconds` a request that names none
-    /// gets", and no request names none: the `Preflight` CRD defaults
-    /// `spec.request.timeoutSeconds` to 120 at admission, and the console API
-    /// writes the value explicitly. A request's own `timeoutSeconds` (30..600)
-    /// is the budget. Parsed with a default and no rule for the reasons
+    /// Withdrawn, and read by nothing on purpose: the `Preflight` CRD defaults
+    /// `spec.request.timeoutSeconds` to 120 at admission and the console API
+    /// writes it explicitly, so a request's own `timeoutSeconds` (30..600) is
+    /// the budget. Parsed with a default and no rule for the reasons
     /// [`DiscoveryPolicy::withdrawn_default_max_topics`] gives; the chart
     /// renders [`WITHDRAWN_DEFAULT_TIMEOUT_SECONDS`].
     #[serde(
@@ -292,14 +256,13 @@ pub struct EvidencePolicy {
 /// The legacy inline-archive addressing an upgrade keeps working with — D2
 /// §4.4's `legacyArchiveAddressing` block.
 ///
-/// **`allow_http` and `virtual_hosted_style` are parsed and read by nothing,
-/// by decision (FX-15).** A restore readiness check takes transport and
-/// addressing from the PLAN, as the restore runner does (D-SEAMS S5), so a
-/// reader of these copies would make the check and the run disagree. The
-/// chart keeps publishing them, because dropping them would change every
-/// install's policy digest, and this parser keeps accepting them (the v0.1.x
-/// shims stay, OD-12). `weirkeeper/tests/chart_policy.rs` fails, naming the
-/// field, on any reader added later.
+/// `allow_http` and `virtual_hosted_style` are parsed and read by nothing: a
+/// restore readiness check takes transport and addressing from the plan, as the
+/// restore runner does (seam S5), and a reader of these copies would make the
+/// check and the run disagree. The chart keeps publishing them, since dropping
+/// them would change every install's policy digest;
+/// `weirkeeper/tests/chart_policy.rs` fails, naming the field, on any reader
+/// added later.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LegacyArchiveAddressing {
@@ -336,8 +299,8 @@ pub struct Policy {
     pub evidence: EvidencePolicy,
     #[serde(default)]
     pub legacy_archive_addressing: LegacyArchiveAddressing,
-    /// Manual-run ceilings (P10). Absent in a document written before the
-    /// block existed, which is [`RunsPolicy::default`].
+    /// Manual-run ceilings. Absent in a document written before the block
+    /// existed, which is [`RunsPolicy::default`].
     #[serde(default)]
     pub runs: RunsPolicy,
 }
@@ -366,13 +329,10 @@ impl Policy {
     /// two collections that could turn a listing into a completeness claim or
     /// an unlisted bucket into an allowed one.
     ///
-    /// A METHOD ON A VALUE, not a constant. [`Policy::fail_closed`] is
-    /// `defaults().closed()`, and today the two are observationally equal
-    /// because both collections already default to empty — which is exactly
-    /// why a reviewer's `fail_closed() -> defaults()` mutant was a no-op and
-    /// survived. Taking `self` gives the rule something to do and therefore
-    /// something to test: `fail_closed_clears_the_two_collections_whatever_the_defaults_hold`
-    /// hands it a policy that carries both and asserts they are gone.
+    /// A method on a value rather than a constant: today [`Policy::fail_closed`]
+    /// equals `defaults()` because both collections default to empty, so taking
+    /// `self` is what gives the rule something to do and test
+    /// (`fail_closed_clears_the_two_collections_whatever_the_defaults_hold`).
     #[must_use]
     pub fn closed(mut self) -> Self {
         self.discovery.visibility_attestations.clear();
@@ -444,10 +404,9 @@ impl Policy {
             "runs.maxManualRestoresActivePerNamespace",
             "must be at least 1; a limit of 0 would queue every manual Restore forever",
         )?;
-        // NO RULE FOR `discovery.defaultMaxTopics` OR
-        // `preflight.defaultTimeoutSeconds` (FX-10): both are withdrawn and read
-        // by nothing, and a document must not fail closed over a value that
-        // changes nothing.
+        // No rule for the withdrawn `discovery.defaultMaxTopics` or
+        // `preflight.defaultTimeoutSeconds`: a document must not fail closed
+        // over a value that changes nothing.
         rule(
             self.discovery.hard_max_topics >= 1
                 && u64::from(self.discovery.hard_max_topics)
@@ -668,13 +627,11 @@ impl PolicyCache {
 
     /// Record a load.
     ///
-    /// **`record` and not `put`.** `scripts/check-no-archive-write.sh` refuses
-    /// the token `.put(` anywhere under `crates/weirkeeper/src` — deliberately
-    /// UNANCHORED, because an object-store write reached through any receiver
-    /// is the thing Global Constraint 6 forbids and a narrower pattern is how
-    /// such a gate stops catching anything. A cache setter called `put` is a
-    /// false positive, and the right response to a false positive on a gate
-    /// this important is to rename the setter, not to widen the gate.
+    /// `record`, not `put`: `scripts/check-no-archive-write.sh` refuses the
+    /// token `.put(` anywhere under `crates/weirkeeper/src`, deliberately
+    /// unanchored because an object-store write through any receiver is what
+    /// Global Constraint 6 forbids. A false positive there is answered by
+    /// renaming the setter, not by widening the gate.
     pub fn record(&self, now: DateTime<Utc>, load: PolicyLoad) {
         if let Ok(mut guard) = self.entry.lock() {
             *guard = Some((now, load));
@@ -705,30 +662,13 @@ pub async fn load(
         Some(cm) => from_data(cm.data.as_ref()),
         None => PolicyLoad::Defaulted(Policy::defaults()),
     };
-    // A REFUSED POLICY SAYS SO, ONCE PER CACHE MISS — D2 W11 fix round 1,
-    // review finding F1.
-    //
-    // THE FAILURE THIS CLOSES IS THE QUIET ONE. A document this loader refuses
-    // becomes `Policy::fail_closed()`, which discards EVERY
-    // `visibilityAttestation` and EVERY `controllerIdentityLocation` the
-    // administrator wrote: `attestedComplete` becomes unreachable, the
-    // evidence allowlist becomes empty, and the ceilings and retention windows
-    // revert to the compiled-in defaults. Until this line the only signal
-    // anywhere was one advisory `configuration.policy notReady
-    // PolicyUnreadable` row on a `Preflight` — which nobody sees unless they
-    // happen to run one and read it. The controller log is where an operator
-    // looks when an attestation "did not work", so the reason belongs there,
-    // naming the failing rule.
-    //
-    // ONCE PER CACHE MISS AND NOT PER RECONCILE: this runs only past the
-    // 30-second cache, so a permanently bad document costs two lines a minute
-    // rather than one per pass of every check in the installation.
-    //
-    // THE REASON IS ALREADY REDACTED. `unreadable()` runs `redact` over the
-    // `PolicyError`'s `Display`, and a policy document is administrator-authored
-    // configuration that carries no credential by construction — but a parse
-    // error can quote the content it choked on, so the redaction stays on the
-    // path to the log as well as to the status.
+    // A refused policy says so in the log, once per cache miss. A refused
+    // document becomes `Policy::fail_closed()`, discarding every attestation
+    // and evidence location the administrator wrote and reverting the limits
+    // to the defaults, and otherwise the only signal is an advisory
+    // `configuration.policy` row on a `Preflight` nobody may run. Once per
+    // cache miss (30 s), not per reconcile. The reason is already redacted:
+    // a parse error can quote the document's content.
     if let PolicyLoad::Unreadable { reason, .. } = &load {
         tracing::warn!(
             namespace = %namespace,

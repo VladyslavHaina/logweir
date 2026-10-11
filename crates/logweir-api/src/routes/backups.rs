@@ -1,4 +1,4 @@
-//! Backups: `Backup` projections, and the canonical manual run (PLAT-06.2).
+//! Backups: `Backup` projections, and the canonical manual run.
 //!
 //! ONE CR PATH (D1 §8.1). "Back up now" and "Run first backup now" both create
 //! a `Backup` with `spec.trigger.kind: Manual` and `triggeredBy: manual` — the
@@ -97,9 +97,7 @@ pub async fn get_one(
     ))
 }
 
-// ======================================================================
-// PLAT-06.2: "Back up now" and "Run first backup now"
-// ======================================================================
+// "BACK UP NOW" AND "RUN FIRST BACKUP NOW".
 
 /// The create route identifier. It is part of the idempotency scope, so it is
 /// also part of the object's name.
@@ -318,7 +316,7 @@ fn build(
                 },
                 topics,
                 all_user_topics,
-                // PROD-04.1: an ad-hoc run from the API selects no consumer
+                // An ad-hoc run from the API selects no consumer
                 // group; a run copied from a schedule carries the schedule's.
                 consumer_groups: None,
                 archive,
@@ -444,7 +442,7 @@ pub async fn create(
         }
     }
 
-    // P10: THE PER-ACTOR CREATE LIMIT — `429 rate_limited` with
+    // THE PER-ACTOR CREATE LIMIT -- `429 rate_limited` with
     // `Retry-After` past `rateLimits.manualBackupsPerMinute` per actor, per
     // namespace, per minute. After every refusal that is about the request
     // itself (a malformed run does not spend the window), before the object
@@ -508,14 +506,11 @@ pub async fn create(
 /// Map a `weirkeeper::policy` field path onto the REQUEST's own field names,
 /// so a console can highlight the input the person typed.
 ///
-/// `FieldError.field` IS A PATH AND NOTHING ELSE. It used to return
-/// `"scheduleRef.name (topics)"` for a from-schedule run, which is a path with
-/// a parenthetical glued on: `ui/contract.js` types the field as a plain
-/// string with no parser, so a console doing
+/// `FieldError.field` IS A PATH AND NOTHING ELSE. `ui/contract.js` types the
+/// field as a plain string with no parser, so a console doing
 /// `errors.find(e => e.field === "scheduleRef.name")` to highlight the
-/// schedule picker found nothing and fell back to an unhighlighted generic
-/// 422. The offending schedule field belongs in the MESSAGE, which is already
-/// a sentence.
+/// schedule picker must find exactly that path; the offending schedule field
+/// belongs in the MESSAGE, which is already a sentence.
 fn field_for(field: &str, from_schedule: bool) -> String {
     if from_schedule {
         // The person typed a schedule name; the input to highlight is the

@@ -1,17 +1,17 @@
-//! `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` — PLAT-14.2's
-//! read half: is this data protected, and by when.
+//! `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` -- the read
+//! half of protection health: is this data protected, and by when.
 //!
 //! THE THREE THINGS THIS PAGE EXISTS TO KEEP APART. "A schedule is enabled",
 //! "a run succeeded" and "there is a recovery point I could actually restore
-//! from" are three different claims, and collapsing them is the defect
-//! PLAT-14.2 names. So the projection publishes `health` beside
+//! from" are three different claims, and collapsing them is the defect this
+//! surface exists to prevent. So the projection publishes `health` beside
 //! `availabilityBasis` (how availability was decided), the schedules' OWN
 //! readiness beside the objective, and `lastAvailablePoint` — the newest point
 //! that is available, which is not the same object as `lastAttempt`.
 //!
-//! ALERT DELIVERY IS WITHDRAWN (OD-12). The view publishes no notification
-//! routes and no delivery state (PROD-17.1 C2); a withdrawn policy field is
-//! reported by the policy's own `NotificationsDelivered` condition.
+//! ALERT DELIVERY IS WITHDRAWN. The view publishes no notification routes and
+//! no delivery state; a withdrawn policy field is reported by the policy's
+//! own `NotificationsDelivered` condition.
 
 use axum::extract::State;
 use axum::response::Response;

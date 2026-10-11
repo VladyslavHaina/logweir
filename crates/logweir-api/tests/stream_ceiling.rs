@@ -1,5 +1,5 @@
 //! The connection ceiling is WALL CLOCK from subscribe, even for a client that
-//! never reads (review finding F3).
+//! never reads.
 //!
 //! ITS OWN TEST BINARY, ON PURPOSE. `StreamBounds` is a process global and
 //! `operation_stream.rs` shares one setting across its file so its rows cannot
@@ -90,17 +90,16 @@ async fn open_without_reading(app: &TestApp, namespace: &str) -> axum::response:
 /// **A client that never reads does not hold its slot past the ceiling, and
 /// the buffered stream still ends with its reason.**
 ///
-/// REGRESSION REASON, MEASURED BY THE REVIEWER. The ceiling used to be checked
-/// only BETWEEN sends. A client that opened the stream and stopped reading
-/// filled the eight-frame channel, parked the producer in `tx.send(...).await`
-/// and kept its task and its stream slot for as long as it held the socket
-/// open and silent — 1.212 s against a 120 ms ceiling. Memory was bounded (the
-/// channel is), so this is a liveness and slot finding: four silent sockets
-/// per `(actor, namespace)` are held indefinitely instead of for five minutes,
-/// and `docs/api.md` states flatly that the connection closes after 300 s.
+/// The ceiling must not be checked only BETWEEN sends: a client that opens
+/// the stream and stops reading fills the eight-frame channel, parks the
+/// producer in `tx.send(...).await` and would keep its task and its stream
+/// slot for as long as it held the socket open and silent. Memory is bounded
+/// (the channel is), so this is a liveness and slot property: four silent
+/// sockets per `(actor, namespace)` must not be held indefinitely, and
+/// `docs/api.md` states flatly that the connection closes after 300 s.
 ///
-/// The probe is the ceiling itself: hold every slot with non-reading clients,
-/// then wait for one to come back. Before the fix none ever does.
+/// The probe is the ceiling itself: hold every slot with non-reading
+/// clients, then wait for one to come back.
 #[tokio::test]
 async fn a_client_that_never_reads_releases_its_slot_at_the_ceiling() {
     let app = app(NS_HELD);

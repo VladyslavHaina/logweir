@@ -1,4 +1,4 @@
-// approval-policy.spec.js -- PLAT-19.2 and PLAT-12.1's policy routing, in the
+// approval-policy.spec.js -- approval-policy routing, in the
 // console: a submitted Restore goes where the namespace's FROZEN approval
 // policy sends it, and a governed approver countersigns through one panel.
 //
@@ -106,7 +106,7 @@ const ORDINARY = Object.freeze({
   requester: "urn:logweir:local-admin#admin", expiresAt: "2026-09-22T12:15:00Z",
 });
 
-// ================================================================ the client
+// THE CLIENT.
 
 test("a_console_restore_create_carries_the_frozen_policy_decision_on_the_object", async () => {
   await consoleMode();
@@ -179,10 +179,9 @@ test("the_policy_read_and_the_countersign_submission_are_the_two_published_route
 });
 
 test("a_console_approval_verified_for_this_restore_reads_verified_and_an_older_uid_does_not", async () => {
-  // FOUND LIVE (PLAT-19.2): the client projected the verified subject as
-  // `status.verifiedSubject`, which no page reads; `approvalState` reads the
-  // CRD's `verifiedSubjectRef`. A console-mode Approval the controller had
-  // verified showed "awaiting verification" for ever.
+  // The client projects the verified subject as the CRD's
+  // `verifiedSubjectRef`, which `approvalState` reads; any other name would
+  // leave a verified console-mode Approval "awaiting verification" for ever.
   await consoleMode();
   const approval = fixture("console/approval.json");
   const bound = approval.item.verifiedSubject;
@@ -215,10 +214,10 @@ test("a_console_approval_verified_for_this_restore_reads_verified_and_an_older_u
 });
 
 test("a_consumed_approval_whose_signer_was_later_compromised_is_never_green", async () => {
-  // REVIEW M1 (poc-fixes-2), the console half. weirkeeper keeps the record of
-  // an admission -- the authorization, the key id, Consumed=True -- and turns
-  // Verified False (RecordedBeforeRevocation) when a key it names is revoked
-  // for KeyCompromise. D3 section 7.4: "never green". The fixture is the SAME
+  // The console half. weirkeeper keeps the record of an admission -- the
+  // authorization, the key id, Consumed=True -- and turns Verified False
+  // (RecordedBeforeRevocation) when a key it names is revoked for
+  // KeyCompromise. D3 section 7.4: "never green". The fixture is the SAME
   // bytes the Rust rows read: `crates/logweir-api/tests/approval_revoked_after_use.rs`
   // projects a CR into it, and `crates/weirkeeper/tests/approval_policy.rs`
   // checks the controller writes that shape.
@@ -261,9 +260,8 @@ test("a_consumed_approval_whose_signer_was_later_compromised_is_never_green", as
 });
 
 test("a_console_approval_record_goes_to_the_restores_own_route_byte_for_byte", async () => {
-  // CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE (found live). The v1 form's create
-  // used to answer "no create route for Approval; use kubectl". It now posts
-  // the two files, exactly as typed, to the Restore's approval route.
+  // The v1 form posts the two files, exactly as typed, to the Restore's
+  // approval route.
   await consoleMode();
   const approval = fixture("console/approval.json");
   const documents = {
@@ -286,7 +284,7 @@ test("a_console_approval_record_goes_to_the_restores_own_route_byte_for_byte", a
   }
 });
 
-// ================================================================ the wizard
+// THE WIZARD.
 
 /** An API double: `get` answers from a table and records every read. */
 function readsOnly(table) {
@@ -340,10 +338,10 @@ test("a_governed_or_legacy_submission_routes_to_awaiting_approval", async () => 
 });
 
 test("awaiting_approval_opens_the_approvals_page_of_the_restore_that_was_created", async () => {
-  // FOUND LIVE (PLAT-19.2). In console mode the product API mints the
-  // Restore's name (`rst-...`); the page's minted `restoreName` is never an
-  // object. The approvals route must name the CREATED Restore and its own
-  // `spec.approvalRef`, or the approver lands on "no restore named ...".
+  // In console mode the product API mints the Restore's name (`rst-...`); the
+  // page's minted `restoreName` is never an object. The approvals route must
+  // name the CREATED Restore and its own `spec.approvalRef`, or the approver
+  // lands on "no restore named ...".
   const governed = Object.assign({}, ORDINARY, {
     mode: "governed", policy: "prod-governed", state: "awaitingApproval",
   });
@@ -385,7 +383,7 @@ test("the_submit_step_says_what_the_policy_requires", () => {
   }
 });
 
-// ============================================================ the approvals page
+// THE APPROVALS PAGE.
 
 const SUBJECT = Object.freeze({
   kind: "Restore", name: "restore-x", uid: "uid-x", planHash: "sha256:" + "e".repeat(64),

@@ -1,5 +1,5 @@
-//! PROD-16.2 at the controller — **two-person approval in the console**, at
-//! both of its checkpoints: the `Approval` verdict
+//! **Two-person approval in the console**, at the controller's two
+//! checkpoints: the `Approval` verdict
 //! (`controllers::approval::evaluate_authorization_v2`) and `Restore`
 //! admission (`controllers::restore::admit_with_policy`, then the bundle the
 //! runner is given).
@@ -227,9 +227,7 @@ fn words(result: &Result<Verified, ApprovalRefusal>) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The fixture is what it says
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_fixture_names_the_policies_this_build_computes_and_holds_no_private_key() {
@@ -254,14 +252,12 @@ fn the_fixture_names_the_policies_this_build_computes_and_holds_no_private_key()
         .starts_with("{\"formatVersion\":\"2.1.0\","));
 }
 
-// ---------------------------------------------------------------------------
 // The Approval verdict
-// ---------------------------------------------------------------------------
 
 /// **A second person's approval in the console verifies on the console's
 /// signature alone**, under its `ConsoleConfirmation` usage, and the verdict
-/// names the APPROVER's principal — what `status.approver` and the scorecard
-/// carry. No `GovernedApproval` key is trusted here at all.
+/// names the APPROVER's principal (what `status.approver` and the scorecard
+/// carry). No `GovernedApproval` key is trusted here at all.
 ///
 /// KILLS: a controller that still asks a two-person policy for a personal
 /// countersignature; one that records the requester as the approver.
@@ -297,7 +293,7 @@ fn a_console_approval_verifies_on_the_consoles_signature_and_names_the_approver(
 
 /// **The request is not an approval.** The document the approver was shown,
 /// written straight into the Approval the Restore references, stays pending
-/// for ever — and a personal-key countersignature on it changes nothing: a
+/// for ever, and a personal-key countersignature on it changes nothing: a
 /// two-person namespace takes no personal-key document.
 #[test]
 fn a_two_person_request_authorises_nothing_with_or_without_a_personal_countersignature() {
@@ -453,7 +449,7 @@ fn the_approval_verdict_refuses_the_approver_fields_under_an_older_version() {
     }
 }
 
-/// **An approval binds one Restore, one plan, one policy** — the UID
+/// **An approval binds one Restore, one plan, one policy**, the UID
 /// included, so it never follows a Restore deleted and recreated under the
 /// same name.
 #[test]
@@ -490,7 +486,7 @@ fn the_approval_verdict_binds_the_restore_its_uid_its_plan_and_the_policy() {
 
 /// **A strict namespace is what it was.** Its request countersigned by a
 /// personal key verifies under that key; console only, it is pending; and a
-/// console-approved document is refused there twice over — one that names the
+/// console-approved document is refused there twice over: one that names the
 /// two-person policy by its digest, and one that names the STRICT policy's
 /// own digest and carries an approver all the same (countersigned, too).
 #[test]
@@ -580,9 +576,7 @@ fn the_approval_verdict_needs_the_consoles_own_signature_over_these_bytes() {
     assert_eq!(reason(&refused), "KeyRevoked", "{refused:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Restore admission
-// ---------------------------------------------------------------------------
 
 /// The Restore the fixture's documents are for, over `plan`.
 fn restore(f: &Fixture, plan: &str, original_name: bool) -> Restore {
@@ -631,7 +625,7 @@ fn cluster(f: &Fixture) -> KafkaCluster {
 }
 
 /// An Approval carrying one fixture case, WITH THE STATUS A VERIFIED VERDICT
-/// UNDER `provenance` WOULD HAVE — whatever the Approval controller would in
+/// UNDER `provenance` WOULD HAVE, whatever the Approval controller would in
 /// fact have said of it. Admission must re-derive its own verdict from the
 /// signed bytes and not take that status's word.
 fn approval_object(
@@ -686,8 +680,8 @@ fn admit(f: &Fixture, case: &str, bound: &ApprovalPolicy, now: DateTime<Utc>) ->
     )
 }
 
-/// **Restore admission admits a console-approved Restore** — and re-derives,
-/// from the signed bytes, every refusal the Approval verdict makes, even when
+/// **Restore admission admits a console-approved Restore**, and re-derives
+/// from the signed bytes every refusal the Approval verdict makes, even when
 /// the Approval's status says `verified: true` under the right policy. A
 /// stale, defective or forged verdict is never what a Job is created on.
 ///
@@ -823,7 +817,7 @@ fn restore_admission_refuses_a_console_approval_under_any_other_policy() {
     assert_eq!(strict_ok, RestoreAdmission::Ok);
 }
 
-/// **THE COMBINATION WITH PROD-15.1, AT ADMISSION.** An original-name restore
+/// **Original-name restores, at admission.** An original-name restore
 /// approved by a second person is admitted on the subject and the approver;
 /// the request alone is not; an ORDINARY console approval never authorises an
 /// original-name plan; and typed names beside a second person are refused.
@@ -878,12 +872,10 @@ fn restore_admission_holds_an_original_name_console_approval_to_the_plans_subjec
     );
 }
 
-// ---------------------------------------------------------------------------
 // The bundle: the console's signature, verified once more
-// ---------------------------------------------------------------------------
 
 /// **The bundle of a console-approved Restore mounts the console key as the
-/// approver key, beside the `Console` snapshot — and is written only after
+/// approver key, beside the `Console` snapshot, and is written only after
 /// the console's signature verified once more**, against the console key the
 /// namespace's trust carries now, over the exact bytes it mounts.
 ///
@@ -953,9 +945,9 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
         "{withdrawn}"
     );
 
-    // NEGATIVE CONTROL, A STRICT NAMESPACE: its bundle is what it always was
-    // — the personal key as the approver, the snapshot without the setting —
-    // and no signature is re-verified here for it.
+    // NEGATIVE CONTROL, A STRICT NAMESPACE: its bundle is unchanged (the
+    // personal key as the approver, the snapshot without the setting) and
+    // no signature is re-verified here for it.
     let strict = approval_bundle_config_map_with_policy(
         &restore(&f, "planBytes", false),
         &parse_plan(&restore(&f, "planBytes", false)).expect("the plan parses"),
@@ -982,9 +974,7 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
         .contains("approverSignature"));
 }
 
-// ---------------------------------------------------------------------------
-// The coordinator's addition 4: the controller decides from the table
-// ---------------------------------------------------------------------------
+// The controller decides from the table
 
 /// **The controller decides from `ApprovalPolicy::route`, at the verdict AND
 /// at admission, and refuses the pair that is no row.** A bound policy with
@@ -992,18 +982,18 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
 /// installation document (`ApprovalPolicySet::parse` refuses it, so the
 /// controller refuses to start on one written with `kubectl`); built here in
 /// memory, as a later code path might build one, it verifies and admits
-/// NOTHING, whatever document is offered under it — the console-approved one,
+/// NOTHING, whatever document is offered under it: the console-approved one,
 /// the request, a strict request with its countersignature.
 ///
-/// And the three rows, each by its own document and no other row's:
+/// And the rows, each by its own document and no other row's:
 ///
 /// | bound policy | the document it admits | every other fixture document |
 /// |---|---|---|
 /// | `Governed` + `Console` | `approved` | refused |
 /// | `Governed` + personal key | `strict-request-countersigned` | refused |
 ///
-/// (`Ordinary` + personal key, the one-person confirmation, is PROD-16.1's
-/// and has its own rows in `approval_policy.rs`.)
+/// (`Ordinary` + personal key, the one-person confirmation, has its own rows
+/// in `approval_policy.rs`.)
 ///
 /// KILLS: a `route()` that maps the fourth pair to any row; a verdict or an
 /// admission that decides from `mode` alone, or from `approver_signature`

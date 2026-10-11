@@ -24,17 +24,11 @@ pub struct TargetState {
 /// entry, which is the normal case on a scratch cluster.
 ///
 /// A topic the target DOES have, but whose metadata carried an error (leader
-/// election, an authorization gap, a topic mid-delete — see
-/// `TopicMeta::error`'s own doc comment), is a DIFFERENT fact: it might hold
-/// any number of records and its config might or might not differ, and we
-/// simply do not know. Neither skipping it (which phase 3 would read as
-/// "absent — safe to create fresh") nor inserting a `TopicState` built from
-/// its `partitions: 0` and empty reads (which phase 3 would read as "present
-/// but empty") is honest — both would let an auditor draw a conclusion this
-/// phase never actually established. This function refuses the WHOLE read
-/// instead, so the distinction lives in the return type itself: `Err` here
-/// can never be mistaken for a legitimate `Ok` that records absence or
-/// emptiness, which a log line alone would not guarantee.
+/// election, an authorization gap, a topic mid-delete; `TopicMeta::error`)
+/// is a different fact: its records and config are unknown. Skipping it
+/// would read as "absent, safe to create" and an empty `TopicState` as
+/// "present but empty", so the whole read is refused, and an `Err` can never
+/// be mistaken for an `Ok` that records absence or emptiness.
 pub fn run(reader: &dyn ClusterReader, of_interest: &[String]) -> Result<TargetState, DrillError> {
     let cluster_id = reader.cluster_id()?;
     let existing = reader.list_topics()?;

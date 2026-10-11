@@ -1,56 +1,45 @@
-//! `BackupSchedule` — the kind whose policy an operator edits, and the one
+//! `BackupSchedule`: the kind whose policy an operator edits, and the one
 //! field editing may never reach.
 //!
-//! # What PLAT-05.1 changed, and the one thing it did not
+//! # Every field is mutable except `sourceRef`
 //!
-//! Until D1 this spec carried an object-level seal that made `suspend` the one
-//! mutable field, so changing a cron expression meant creating a second
-//! schedule and draining the first. D1 §5.1 inverts that: **every field is
-//! mutable except `sourceRef`**, because a schedule's identity is the cluster
-//! it protects and nothing else. One schedule's history must not mix two
-//! clusters, so `sourceRef` keeps its seal ([`SOURCE_REF_IMMUTABLE_RULE`], D1's
-//! rule R1) and everything else — cadence, zone, deadlines, catch-up, retry,
-//! topics, archive, destination, retention, concurrency, suspend — is future
-//! policy the next admission reads.
+//! D1 §5.1: a schedule's identity is the cluster it protects and nothing else.
+//! One schedule's history must not mix two clusters, so `sourceRef` keeps its
+//! seal ([`SOURCE_REF_IMMUTABLE_RULE`], D1's rule R1), and everything else
+//! (cadence, zone, deadlines, catch-up, retry, topics, archive, destination,
+//! retention, concurrency, suspend) is future policy the next admission reads.
 //!
-//! That is safe because a **run** is still immutable. Each created `Backup`
-//! copies the policy and records `spec.scheduleRef {uid, generation,
-//! runPolicySha256}`, and PLAT-06.1 freezes the resolved settings into an
-//! immutable ConfigMap before any Job exists. An edit therefore changes the
-//! next admission and can never reach a run that already exists.
+//! That is safe because a **run** is immutable: each created `Backup` copies
+//! the policy and records `spec.scheduleRef {uid, generation,
+//! runPolicySha256}`, and the resolved settings are frozen into an immutable
+//! ConfigMap before any Job exists, so an edit can never reach a run that
+//! already exists.
 //!
-//! `destinationRef` WAS SEALED BY THE OLD RULE AND IS NOW MUTABLE, and that is
-//! a decision rather than an oversight: D1 §5.1 makes `archive` mutable, and
-//! `archive` and `destinationRef` are two spellings of one location (the
-//! sentinel rule below binds them). Sealing one while the other moves would be
-//! an immutability claim an operator could route around by editing the
-//! spelling the seal did not name.
+//! `destinationRef` is mutable because `archive` is (D1 §5.1), and the two are
+//! spellings of one location (the sentinel rule below binds them): sealing one
+//! while the other moves would be an immutability claim an operator could
+//! route around.
 //!
-//! # Why R1 is still an object-level rule
+//! # Why R1 is an object-level rule
 //!
-//! The obvious shape — `self.sourceRef == oldSelf.sourceRef` on
-//! `.spec.sourceRef` — DOES NOT HOLD for an optional field, because a
-//! per-field transition rule is evaluated only when `oldSelf` exists at that
-//! path, so an absent → present transition never fires it. `sourceRef` is
-//! required today, but a rule whose soundness depends on a `required:` list
-//! somebody may edit is a rule that stops working silently. R1 is therefore on
-//! `.spec`, where it is evaluated on every update, and it carries its own
+//! `self.sourceRef == oldSelf.sourceRef` on `.spec.sourceRef` does not hold
+//! for an optional field: a per-field transition rule is evaluated only when
+//! `oldSelf` exists at that path, so an absent → present transition never
+//! fires it. `sourceRef` is required today, but a rule whose soundness depends
+//! on an editable `required:` list stops working silently. R1 is therefore on
+//! `.spec`, evaluated on every update, with its own
 //! `has(self.x) == has(oldSelf.x)` half.
 //!
-//! # One disclosed divergence, with its reason
-//!
-//! Critique B M3 supplied a map-shaped rule text:
+//! # Why the map-shaped rule cannot ship
 //!
 //! ```text
 //! self.filter(k, k != 'suspend').all(k, has(oldSelf[k]) == has(self[k]) && (!has(self[k]) || self[k] == oldSelf[k]))
 //! ```
 //!
-//! It cannot ship, and this is MEASURED rather than argued. Kubernetes CEL
-//! exposes a structural-schema **object** as a message type, not as a map, so
-//! `self.filter(…)` and `oldSelf[k]` do not typecheck against it and the CRD is
-//! REJECTED at `kubectl apply` time by the API server's rule compilation.
-//! Applied to a live `docker-desktop` API server (Task 15b, 2026-09-09) on a
-//! throwaway probe CRD, `kubectl apply` exited 1 with:
+//! Kubernetes CEL exposes a structural-schema **object** as a message type,
+//! not a map, so `self.filter(…)` and `oldSelf[k]` do not typecheck and the
+//! API server rejects the CRD at `kubectl apply`. Measured on a live API
+//! server with a throwaway probe CRD:
 //!
 //! ```text
 //! spec.validation.openAPIV3Schema.properties[spec].x-kubernetes-validations[0].rule:
@@ -58,8 +47,8 @@
 //!   ERROR: <input>:1:50: invalid argument to has() macro
 //! ```
 //!
-//! This note exists so the next reader does not "restore" the map form. The
-//! rejected string is above; it is quoted here and nowhere else.
+//! The rejected string is quoted here and nowhere else, so nobody "restores"
+//! the map form.
 //!
 //! # What is deliberately NOT in CEL
 //!

@@ -1,9 +1,9 @@
 //! Approvals: public metadata in lists and single reads; the raw approval
 //! and sidecar documents ONLY through the explicit packet route, which is a
-//! separate action (`approvalPacketRead`) so PLAT-17.2 can bind it to
-//! operator/approver roles alone. A governed approval is SUBMITTED through
-//! `POST .../restores/{name}/approval` (`routes::restores::submit_approval`,
-//! PLAT-19.2); this module adds the namespace's effective approval policy.
+//! separate action (`approvalPacketRead`) bound to operator/approver roles
+//! alone. A governed approval is SUBMITTED through
+//! `POST .../restores/{name}/approval` (`routes::restores::submit_approval`);
+//! this module adds the namespace's effective approval policy.
 
 use axum::extract::State;
 use axum::response::Response;
@@ -93,7 +93,7 @@ pub async fn packet(
 pub const ROUTE_POLICY: &str = "GET /api/v1/namespaces/{ns}/approval-policy";
 
 /// `GET .../approval-policy` — the namespace's effective approval policy
-/// (PLAT-19.2; D0: "Approver: read effective policy").
+/// (D0: "Approver: read effective policy").
 ///
 /// Readable by every role that may read approvals, because the operator's
 /// wizard needs to say BEFORE submitting whether the Restore will run on the
@@ -108,8 +108,8 @@ pub async fn policy(
     authorize(&state, &actor, &ns, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
     let settings = state.approval();
-    // PROD-16.1: the policies as a create here would see them, the
-    // fresh-install marker applied.
+    // The policies as a create here would see them, the fresh-install marker
+    // applied.
     let policies = crate::approval::effective_policies(settings, state.kube())
         .await
         .map_err(crate::kube::KubeFailure::into_api_error)?;
@@ -118,7 +118,7 @@ pub async fn policy(
     let key = settings
         .confirmation_key()
         .map_err(|reason| ApiError::new(crate::problem::ProblemCode::InternalError, reason))?;
-    // PROD-16.2: by the table. A bound policy is one of its rows.
+    // By the table. A bound policy is one of its rows.
     let route = bound.map(crate::approval::route_of).transpose()?;
     let ordinary = route == Some(ApprovalRoute::RequesterConfirms);
     let operator_mode = ApprovalRoute::of(&effective);
@@ -142,7 +142,7 @@ pub async fn policy(
                     && key.is_some()
                     && route.is_some_and(|r| r.console_may_request(state.console_kind())),
                 ticket_required: bound.is_some_and(|p| p.mode == ApprovalMode::Governed),
-                // PROD-16.2: a second person approves here only through the
+                // A second person approves here only through the
                 // shared console, and only once the console holds its key.
                 console_approval_available: key.is_some()
                     && route.is_some_and(|r| r.console_may_approve(state.console_kind())),

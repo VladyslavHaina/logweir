@@ -61,9 +61,9 @@ export class Fake {
     this.disabled = "disabled" in attributes;
   }
   get firstChild() { return this.children.length === 0 ? null : this.children[0]; }
-  // A VIEW HANDED A WINDOW HAS ONE (P16's rows): `render.js`'s `replace` reads
-  // and restores the page's scroll through `ownerDocument.defaultView`. With
-  // none -- every other row -- there is no document, as before.
+  // A VIEW HANDED A WINDOW HAS ONE: `render.js`'s `replace` reads and restores
+  // the page's scroll through `ownerDocument.defaultView`. With none -- every
+  // other row -- there is no document.
   get ownerDocument() { return this.view.document; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); return child; }
   appendChild(child) {
@@ -127,11 +127,10 @@ export function fakeView(options) {
           element.value = element.attributes.value || "";
           element.checked = "checked" in element.attributes;
         } else if (match[1] === "select") {
-          // THE OPTION MARKED `selected`, wherever the attribute sits in its
-          // tag -- a browser's rule. The first cut matched only `value="x"
-          // selected>`, so an option spelled `value="x" selected data-name=`
-          // (the cluster selector) or `value="x" data-name="n" selected` (the
-          // destination selector) read as the FIRST option (P13's rows).
+          // THE OPTION MARKED `selected`, wherever the attribute sits in its tag -- a
+          // browser's rule: `value="x" selected data-name=` (the cluster selector) and
+          // `value="x" data-name="n" selected` (the destination selector) are both
+          // selected, not the FIRST option.
           const end = chunk.html.indexOf("</select>", match.index);
           const options = chunk.html.slice(match.index, end).match(/<option\b[^>]*>/g) || [];
           const parsed = options.map((o) => attributesOf(o));

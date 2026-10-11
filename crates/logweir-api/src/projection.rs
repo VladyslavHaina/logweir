@@ -70,16 +70,14 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
                 AuthMode::Mtls => ConnectionAuthMode::Mtls,
             },
             username: cluster.spec.auth.username.clone(),
-            // PLAT-07.1 gave the credential reference a `passwordKey`. The
-            // projection stays NAME-ONLY: a data key is not a value, but which
-            // key a Secret holds a password under is still a detail of the
-            // reference, and widening this view is PLAT-17's decision to make
-            // deliberately rather than a consequence of a rebase.
+            // The projection stays NAME-ONLY: a data key is not a value, but which key
+            // a Secret holds a password under is still a detail of the reference, and
+            // widening this view is a deliberate decision, not a side effect.
             credential_ref: cluster.spec.auth.secret_ref.as_ref().map(|r| NameRef {
                 name: r.name.clone(),
             }),
             tls: cluster.spec.auth.tls,
-            // PROD-01.3: the Secret NAME only, like `credential_ref` — never
+            // The Secret NAME only, like `credential_ref` -- never
             // its keys' values, which this service cannot read anyway.
             client_certificate_ref: cluster.spec.auth.client_certificate.as_ref().map(|r| {
                 NameRef {
@@ -291,7 +289,7 @@ pub fn all_user_topics(spec: &weirkeeper::crds::selection::AllUserTopics) -> All
 }
 
 /// WHERE A RECOVERY POINT IS, published from the two fields that record it and
-/// from nothing else (BACKUP-PROJECTION-NO-DESTINATION).
+/// from nothing else.
 ///
 /// `spec.destinationRef` is what the run ASKED for and `status.destination` is
 /// what the controller FROZE. Both are published, and neither is invented from
@@ -393,7 +391,7 @@ pub fn backup(object: &BackupCr) -> Backup {
     }
 }
 
-/// P10's `queue` block, published ONLY while the run is queued: a block the
+/// The `queue` block, published ONLY while the run is queued: a block the
 /// controller has not cleared yet beside a run that already left the queue is
 /// not a statement about that run any more.
 fn queue_view(
@@ -443,7 +441,7 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             topic_prefix: object.spec.target.topic_naming.prefix.clone(),
             original_name: object.spec.target.topic_naming.is_original_name(),
         },
-        // PROD-15.1: the subject this restore's approval must carry.
+        // The subject this restore's approval must carry.
         approval_subject: if object.spec.target.topic_naming.is_original_name() {
             crate::contract::ApprovalSubjectView::OriginalName
         } else {
@@ -456,7 +454,7 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .into_iter()
             .take(MAX_LIST_ENTRIES)
             .collect(),
-        // PROD-15.1: a stopped creation step's three lists, verbatim (the
+        // A stopped creation step's three lists, verbatim (the
         // CRD bounds each at this view's bound), with a count beside each and
         // the one instruction for each list that needs one. Logweir deletes
         // none of them.
@@ -464,7 +462,7 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .and_then(|s| s.target_topics_appeared.as_ref())
             .map(creation_stop_view),
         queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
-        // FX-8 (review M-2): the signed time basis, ALL OF IT OR NOTHING. A
+        // The signed time basis, ALL OF IT OR NOTHING. A
         // list past this view's bound is not truncated: a partial list would
         // be a claim the signed document does not make, so the field is
         // omitted, which reads as "not recorded" and never as "none".
@@ -480,14 +478,14 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
                 not_recorded: tb.not_recorded.clone(),
             }),
         coverage: restore_coverage(object),
-        // PROD-11.1b: the signed selection, so a list row never reads a
+        // The signed selection, so a list row never reads a
         // narrowed restore as a restore of everything.
         selection: crate::status::selection_view(status.and_then(|s| s.integrity.as_ref())),
         operation: summary(&operation),
     }
 }
 
-/// **PROD-08.1a.** A Restore's coverage: what `spec` asks for (absent read as
+/// **Coverage.** A Restore's coverage: what `spec` asks for (absent read as
 /// sampled) and what `status.integrity` copied from the signed scorecard.
 #[must_use]
 pub fn restore_coverage(object: &RestoreCr) -> crate::contract::RestoreCoverageView {
@@ -553,7 +551,7 @@ pub fn creation_stop_view(
     }
 }
 
-/// **PROD-15.1 review 2, L9.** The approval subject an `Approval`'s document
+/// The approval subject an `Approval`'s document
 /// is SHOWN with: for an authorization document v2, read through the typed
 /// parser every enforcing reader uses
 /// (`logweir_core::approval_policy::RestoreAuthorization::from_bytes`, with
@@ -593,8 +591,8 @@ pub fn approval(object: &ApprovalCr) -> Approval {
         created_at: created_at(object),
         subject_ref: subject_ref(object),
         plan_hash: object.spec.plan_hash.clone(),
-        // PROD-15.1: what the SIGNED document authorises, read the way
-        // every enforcing reader reads it (review 2, L9).
+        // What the SIGNED document authorises, read the way every enforcing reader
+        // reads it.
         approval_subject: approval_subject_view(object),
         approval_bytes_length: object.spec.approval_bytes.len(),
         sidecar_bytes_length: object.spec.sidecar_bytes.len(),

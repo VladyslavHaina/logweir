@@ -1,25 +1,13 @@
 // contract-coverage.spec.js -- nothing the product API publishes is dropped on
 // the way to a page, and no test hands a page a document it is never given.
 //
-// THE DEFECT THIS FILE IS FOR (FX-48; PoC batch 6, F-1 and F-4). A console
-// page never reads a response. It reads what `ui/contract.js` DECODED, and a
-// decoder copies declared members only. Two reads lost what the API had
-// published, on a live install, with the whole suite green:
-//
-//   * `PointTopicView` did not declare `schemaDependency`, so the catalog page
-//     showed no "Registry not captured" note and the restore review said "not
-//     assessed" for a point every other reader called schema-dependent. The
-//     rows that held the note fed the fixture file straight to the renderers.
-//   * the Restore detail read the operation route -- which answers
-//     `OperationViewResponse` -- with the narrower `OperationResponse`, so
-//     `completion.integrityLevel` never arrived and the Integrity table read
-//     "-" for a level the API had sent.
-//
-// THE OLD DRIFT ARMS COULD NOT SEE EITHER. `contract.spec.js` and `d3.spec.js`
-// compare each shape's REQUIRED set with the document's, and refuse a member
-// declared here that the document does not publish. Neither asks the opposite
-// question -- what does the document publish that this client drops? -- and
-// both walk two hand-written maps, which `PointTopicView` was in neither of.
+// A console page never reads a response: it reads what `ui/contract.js`
+// DECODED, and a decoder copies declared members only. So a member the API
+// publishes and a shape omits (a `schemaDependency`, a
+// `completion.integrityLevel` read through a narrower response shape) is
+// lost on the way to the page with the whole suite green -- unless a row
+// asks what the document publishes that this client drops. The drift arms in
+// `contract.spec.js` and `d3.spec.js` ask only the opposite question.
 //
 // FIVE ARMS, EACH MECHANICAL.
 //
@@ -94,9 +82,7 @@ import {
 const TESTS = fileURLToPath(new URL("./", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
-// ===========================================================================
-// 1. the declarations
-// ===========================================================================
+// 1. THE DECLARATIONS.
 
 /** MEMBERS THE DOCUMENT PUBLISHES AND THE CONSOLE DELIBERATELY DOES NOT READ,
  *  as `"Schema.member": "why"`.
@@ -109,10 +95,9 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
  *  longer publishes, fails below: a stale exemption hides the next omission. */
 const IGNORED_MEMBERS = Object.freeze({});
 
-/** The shapes that describe a Kubernetes custom resource and not a document of
- *  the product API. EMPTY since the legacy decoders went (PROD-17.1 C4): every
- *  declared shape is now a published one, and "not published" is no hiding
- *  place. */
+/** The shapes that describe a Kubernetes custom resource and not a product
+ *  API document. EMPTY: every declared shape is a published one, and "not
+ *  published" is no hiding place. */
 const CUSTOM_RESOURCE_SHAPES = Object.freeze([]);
 
 function declaredMembers(shape) {
@@ -323,8 +308,8 @@ test("a_nested_member_is_decoded_by_the_shape_the_document_names_for_it", () => 
 });
 
 test("the_comparison_names_a_member_a_shape_drops", () => {
-  // A GUARD WITHOUT A MUTANT IS NOT A GUARD, SO THE MUTANT IS A ROW. This is
-  // `PointTopicView` exactly as `ui/contract.js` declared it before FX-48.
+  // A GUARD WITHOUT A MUTANT IS NOT A GUARD, SO THE MUTANT IS A ROW:
+  // `PointTopicView` declared without `schemaDependency`.
   const before = shapeOf("PointTopicView", { name: str, applyRoute: str },
     { partitions: int, replicationFactor: int, configCoverage: str, owner: str });
   assert.deepEqual(undeclaredMembers(before, DEFINITIONS), ["PointTopicView.schemaDependency"],
@@ -357,9 +342,7 @@ test("the_comparison_names_a_member_a_shape_drops", () => {
   assert.equal(bool.what, "a boolean", "the kit's scalars say what they are");
 });
 
-// ===========================================================================
-// 3. the fixtures (before the routes: the routes serve them)
-// ===========================================================================
+// 3. THE FIXTURES (before the routes: the routes serve them).
 
 test("every_console_fixture_is_listed_is_an_instance_and_survives_its_decoder", () => {
   const files = readdirSync(CONSOLE_FIXTURE_DIRECTORY).filter((f) => f.endsWith(".json")).sort();
@@ -422,9 +405,7 @@ test("a_document_of_the_first_sixteen_members_alone_is_refused_by_the_operation_
   assert.equal(detail.value.item.completion, null);
 });
 
-// ===========================================================================
-// 2. the routes
-// ===========================================================================
+// 2. THE ROUTES.
 
 const NS = "team-a";
 
@@ -907,20 +888,14 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   }
 });
 
-// ===========================================================================
-// 5. the projections
-// ===========================================================================
-//
-// WHY A DECODE THAT LOSES NOTHING IS NOT ENOUGH. The five older kinds
-// (`ui/client.js`) and the four D3 families (`ui/operation-watch.js`) are not
-// handed to a page as decoded: a projection copies them, member by member,
-// into the custom resource's shape, so that one renderer reads both modes.
-// A member the projection does not copy is decoded, declared, in no `unknown`
-// list -- and gone. That is where the retention report's `note` once stopped,
-// and where this sweep found `approvalSubject` and `target.originalName`:
-// both required members of the published `Restore`, both decoded, neither
-// projected, so the approval page of a shared console said an original-name
-// Restore needed an `ordinary` approval.
+// 5. THE PROJECTIONS. A decode that loses nothing is not enough: the five
+// older kinds (`ui/client.js`) and the four D3 families
+// (`ui/operation-watch.js`) are copied member by member into the custom
+// resource's shape so one renderer reads both modes, and a member the
+// projection does not copy is decoded, declared, in no `unknown` list -- and
+// gone (an original-name Restore's `approvalSubject` and
+// `target.originalName` would make the approval page ask for an `ordinary`
+// approval).
 //
 // THE CHECK IS DIFFERENTIAL, SO IT NEEDS NO LIST OF MEMBERS. Each projected
 // read is run over its fixtures through the real client; then each leaf of
@@ -1390,9 +1365,7 @@ test("every_member_a_projected_read_decodes_reaches_what_the_page_is_handed", as
   }
 });
 
-// ===========================================================================
-// 4. the tests
-// ===========================================================================
+// 4. THE TESTS.
 
 /** A member taken straight off an undecoded console fixture: the loader's
  *  call, a closing parenthesis, and a `.` or a `[`. Three spellings of the
@@ -1482,9 +1455,7 @@ test("the_lint_refuses_each_spelling_and_ignores_a_whole_document", () => {
   }
 });
 
-// ===========================================================================
-// 4. the mount halves, through the console client (PROD-17.1 C4)
-// ===========================================================================
+// The mount halves, through the console client.
 
 /** A transport answering every published route from [`ANSWERS`] (or from
  *  `overrides`, by the same key), recording each request; a route this row has
@@ -1525,12 +1496,10 @@ function mountNode() {
 const mountedHtml = (node) => (node.children[node.children.length - 1] || {}).html || "";
 
 test("every_page_s_mount_half_reads_through_the_console_client_and_renders", async () => {
-  // THE MUTANT THIS EXISTS FOR ACTUALLY HAPPENED: two mount halves kept
-  // calling bare `list`/`get` identifiers that were no longer defined, every
-  // render row stayed green (they call the render halves), and the page showed
-  // `list is not defined` in an error box. This drives the MOUNT halves through
-  // the default client. It replaced a row that did the same through the
-  // withdrawn `kubectl proxy` mode.
+  // Every render row calls the render halves, so a mount half calling an
+  // identifier that no longer exists (`list is not defined` in an error box)
+  // would leave them all green. This drives the MOUNT halves through the
+  // default client.
   const wire_ = consoleTransport();
   const [clusters, schedules, backups, history, keys] = await Promise.all([
     import("../pages/clusters.js"),
@@ -1576,12 +1545,9 @@ test("every_page_s_mount_half_reads_through_the_console_client_and_renders", asy
 });
 
 test("a_standalone_approvals_visit_in_the_console_offers_the_waiting_restore_and_no_form", async () => {
-  // THE JOURNEY `scripts/plat12-13-ui-e2e.mjs` PROVED BEHIND `kubectl proxy`
-  // ("standalone approvals page offers selection and no assumed subject"),
-  // here through the console client: `#/approvals` with no subject lists the
-  // Restore waiting for an approval as a link to its own page, and offers no
-  // form, because a form would have to assume which Restore it approves.
-  // The list's one Restore, still waiting: no controller has moved it on.
+  // `#/approvals` with no subject lists the Restore waiting for an approval as
+  // a link to its own page, and offers no form, because a form would have to
+  // assume which Restore it approves. The list's one Restore is still waiting.
   const restores = wire("restores-list.json");
   restores.items[0].operation = {
     state: "pending", stateReason: "AwaitingApproval", terminal: false,

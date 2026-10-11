@@ -1,18 +1,17 @@
-//! **FX-34**: what the bounded exit-3 log read ([`weirkeeper::refusal::read`])
-//! returns and what it LOGS.
+//! What the bounded exit-3 log read ([`weirkeeper::refusal::read`]) returns
+//! and what it LOGS.
 //!
-//! A pod Kubernetes already collected is not an error and not a WARN (FX-19);
-//! a refused or failed read is one WARN; and no line this controller logs
+//! A pod Kubernetes already collected is not an error and not a WARN; a
+//! refused or failed read is one WARN; and no line this controller logs
 //! carries a byte of the pod's log.
 //!
 //! # Every row here installs a capturing subscriber
 //!
 //! `tracing` caches a callsite's interest the first time the callsite is hit.
 //! A binary that mixes capturing rows with rows that install no subscriber can
-//! cache "never" and drop the capturing rows' events (FX-37). So this file
-//! holds ONLY rows that capture, each through [`capture`], and the rows about
-//! statuses live in `tests/restore_controller.rs` and
-//! `tests/backup_controller.rs`.
+//! cache "never" and drop the capturing rows' events. So this file holds ONLY
+//! rows that capture, each through [`capture`], and the rows about statuses
+//! live in `tests/restore_controller.rs` and `tests/backup_controller.rs`.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -339,8 +338,8 @@ fn assert_unreadable_before_a_status(
 /// same read answered 404 is `PodGone` at `debug`, so what this row asserts
 /// is this failure's and not every failure's.
 ///
-/// KILLS: a transport failure reported as a pod that is gone (the review's
-/// mutant R16); the failure returned as an error that fails the reconcile.
+/// KILLS: a transport failure reported as a pod that is gone; the failure
+/// returned as an error that fails the reconcile.
 #[tokio::test]
 async fn a_connection_that_drops_before_the_status_is_an_answer_and_one_warning() {
     let asked = Arc::new(Mutex::new(None));
@@ -364,9 +363,9 @@ async fn a_connection_that_drops_before_the_status_is_an_answer_and_one_warning(
 /// read, and the reason is shown. So what refuses them in the second arm is
 /// the break, not the bytes.
 ///
-/// KILLS: a broken stream reported as a pod that is gone (the review's mutant
-/// R15); a broken stream read as a short log, which would show a reason from
-/// a body nobody saw the end of.
+/// KILLS: a broken stream reported as a pod that is gone; a broken stream
+/// read as a short log, which would show a reason from a body nobody saw the
+/// end of.
 #[tokio::test]
 async fn a_log_body_that_breaks_after_some_bytes_is_an_answer_and_one_warning() {
     let detail = refusal_detail_line(RefusingRun::Restore, Some(&token()), SENTENCE);

@@ -1,32 +1,26 @@
 //! The `TrustRoster` reconciler: parse both lists, report expiry, and say so
 //! in one condition.
 //!
-//! # It is small, and that is the design
+//! # Small by design
 //!
-//! The roster has no side effects to reconcile — no Job, no topic, no object
-//! key. What it has is a claim an operator cannot check by reading the YAML:
-//! *every* `spkiPem` on it is a key this build can actually parse, and these
-//! particular ids are past their `notAfter`. `kubectl get trustroster` renders
-//! `LOADED` and `EXPIRED` from
-//! `crates/weirkeeper/src/crds/trust_roster.rs`'s printer columns, so this
-//! reconciler is what makes those two columns mean something.
+//! The roster has no side effect to reconcile. It carries a claim an operator
+//! cannot check by reading the YAML: every `spkiPem` parses, and these ids are
+//! past their `notAfter`. This reconciler is what makes the `LOADED` and
+//! `EXPIRED` printer columns mean something.
 //!
 //! # Why expiry is reported here and not derived by each consumer
 //!
-//! `status.expiredKeyIds` is declared *so no consumer has to derive expiry
-//! itself from a clock it does not share with the controller*
-//! (`crds/trust_roster.rs`). Task 27's keys page renders the column; it does
-//! not recompute it. [`evaluate`] — the *approval* one — still checks the
-//! matched key's `notAfter` against its own `now`, because a status field is
-//! not part of anything anyone signed and an approval must never be admitted
-//! on the strength of one.
+//! `status.expiredKeyIds` exists so no consumer derives expiry from a clock it
+//! does not share with the controller; the keys page renders it.
+//! [`evaluate`] (the approval one) still checks the matched key's `notAfter`
+//! against its own `now`, because a status field is part of nothing anyone
+//! signed and an approval must never be admitted on one.
 //!
 //! # An unparseable PEM is `Loaded=False`, and every approval fails with it
 //!
-//! Not a warning, and not a skipped entry. `evaluate` refuses **every**
-//! approval against a roster with one bad entry (its check 2), so this
-//! condition and that refusal are two views of one rule: a partially loaded
-//! roster is not a roster.
+//! `evaluate` refuses every approval against a roster with one bad entry (its
+//! check 2), so this condition and that refusal are two views of one rule: a
+//! partially loaded roster is not a roster.
 //!
 //! # No private key material, here or anywhere
 //!
@@ -88,14 +82,9 @@ pub struct RosterVerdict {
 
 /// Parse both lists, collect expiry, and say which.
 ///
-/// A PURE FUNCTION, for the same reason [`super::approval::evaluate`] is one:
-/// the property is a function of a spec and a clock, and a test that has to
-/// build a route table to reach it is a test about `kube`.
-///
-/// EXPIRY IS COLLECTED EVEN WHEN A PEM FAILS TO PARSE. `notAfter` is a
-/// timestamp on the entry and needs no key material, so an operator with one
-/// bad PEM still gets told which of their other keys have lapsed instead of
-/// having to fix one problem to see the next.
+/// Pure, like [`super::approval::evaluate`]. Expiry is collected even when a
+/// PEM fails to parse: `notAfter` needs no key material, so an operator with
+/// one bad PEM still learns which other keys have lapsed.
 #[must_use]
 pub fn evaluate(spec: &TrustRosterSpec, now: DateTime<Utc>) -> RosterVerdict {
     let mut expired_key_ids = Vec::new();
@@ -137,11 +126,8 @@ pub fn evaluate(spec: &TrustRosterSpec, now: DateTime<Utc>) -> RosterVerdict {
 /// Both lists, in `approverKeys`-then-`signingKeys` order, each tagged with
 /// the field name a message should name.
 ///
-/// ONE ITERATOR SO NEITHER LIST CAN BE FORGOTTEN. The first draft of this
-/// reconciler could have walked `approverKeys` only and looked complete —
-/// `the_roster_reconciler_expires_keys_from_both_lists` is the test that would
-/// have caught it, and this helper is what makes both walks above use the same
-/// source.
+/// One iterator, so neither list can be forgotten
+/// (`the_roster_reconciler_expires_keys_from_both_lists`).
 fn lists(spec: &TrustRosterSpec) -> impl Iterator<Item = (&'static str, &KeyEntry)> {
     spec.approver_keys
         .iter()
@@ -158,15 +144,10 @@ pub fn status_for(
     now: DateTime<Utc>,
 ) -> TrustRosterStatus {
     let existing = roster.status.as_ref().and_then(|s| s.conditions.as_ref());
-    // EVERY CONDITION THIS RECONCILER DOES NOT OWN, CARRIED FORWARD — PLAT-19.1.
-    //
-    // A JSON merge patch REPLACES arrays (RFC 7386), so a status carrying only
-    // `[Loaded]` DELETES whatever else is on the object. Until PLAT-19.1
-    // nothing else wrote here and the array could be built from scratch;
-    // `controllers::trust_policy` now writes `Superseded` (D3 §7.5), and
-    // without this carry the two reconcilers would delete each other's
-    // condition on every pass — the same hot loop `verification::carry_verified`
-    // was written for, measured at 133 reconciles a second (erratum E11(d)).
+    // Every condition this reconciler does not own is carried forward: a JSON
+    // merge patch replaces arrays, and `controllers::trust_policy` writes
+    // `Superseded` here, so without the carry the two reconcilers would delete
+    // each other's condition on every pass.
     let mut conditions: Vec<Condition> = existing
         .map(|c| {
             c.iter()
@@ -186,17 +167,13 @@ pub fn status_for(
             message: Some(verdict.message.clone()),
         },
     ));
-    // `Superseded` IS RECOMPUTED HERE, NOT JUST CARRIED — PLAT-19.1 review
-    // finding F2, second half. `trust_policy::reconcile_policy` runs only for a
-    // policy that EXISTS, so deleting every policy left `Superseded=True` on
-    // this roster forever: a rollback-in-place advertised the opposite of what
-    // was happening. This reconciler requeues every 300 s whether or not a
-    // policy exists, so it is the one that can clear it. Both writers call the
-    // same function, so they cannot disagree about what the condition means.
-    //
-    // AFTER `Loaded`, not before: this reconciler's OWN condition stays
-    // `conditions[0]`, which is the position it has held since Task 16b and
-    // which `approval_controller.rs`'s transition-time assertions read.
+    // `Superseded` is recomputed here, not just carried:
+    // `trust_policy::reconcile_policy` runs only for a policy that exists, so
+    // deleting every policy would leave `Superseded=True` forever. This
+    // reconciler requeues whether or not a policy exists, and both writers call
+    // the same function. After `Loaded`, so this reconciler's own condition
+    // stays `conditions[0]`, which `approval_controller.rs`'s transition-time
+    // assertions read.
     conditions.push(superseded_condition(roster, policies, now));
     TrustRosterStatus {
         loaded: Some(verdict.loaded),
@@ -215,14 +192,12 @@ pub async fn reconcile_roster(
     client: &kube::Client,
 ) -> Result<RosterVerdict, ReconcileError> {
     let name = roster.name_any();
-    // ONE CLOCK READ. Two reads — one for the verdict, one for the status —
-    // could put a key's expiry and the condition that reports it on either
-    // side of the same instant.
+    // One clock read, so a key's expiry and the condition reporting it cannot
+    // straddle two instants.
     let now = Utc::now();
     let verdict = evaluate(&roster.spec, now);
-    // THE WHOLE POLICY SET, because `Superseded` is a statement about which of
-    // them displaces this roster and that is not answerable from one object.
-    // The `trustpolicies` `list` grant PLAT-19.1 added already covers it.
+    // The whole policy set: whether one displaces this roster is not answerable
+    // from one object.
     let policies: Api<TrustPolicy> = Api::all(client.clone());
     let all = policies
         .list(&kube::api::ListParams::default())
@@ -230,26 +205,18 @@ pub async fn reconcile_roster(
         .map_err(ReconcileError::Api)?;
     let status = status_for(roster, &verdict, &all.items, now);
 
-    // CLUSTER-SCOPED: `Api::all`, no namespace. `TrustRoster` is the one kind
-    // in this group that is not namespaced, and cluster scope is the point —
-    // in Kubernetes the strong form of "a separate file argument the drill
-    // spec cannot widen" is "a different RBAC subject".
+    // Cluster-scoped: `TrustRoster` is the one kind in this group that is not
+    // namespaced, and in Kubernetes the strong form of "a separate file the
+    // drill spec cannot widen" is "a different RBAC subject".
     let api: Api<TrustRoster> = Api::all(client.clone());
-    // SEAM S7's precondition (PLAT-19.1 review finding F6). This roster's
-    // `status.conditions` now has TWO writers doing read-modify-write on an
-    // array an RFC 7386 merge patch REPLACES, so a pass computing from a stale
-    // watch-cache copy must be refused rather than silently delete the other
-    // writer's condition.
+    // Seam S7's precondition: `status.conditions` has two read-modify-write
+    // writers on an array a merge patch replaces, so a pass computing from a
+    // stale cache copy must be refused rather than delete the other's
+    // condition.
     let patch = with_precondition(&roster.metadata, &name, json!({ "status": status }))?;
-    // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-1.
-    // This reconciler's own status patch is what wakes it, so a patch that
-    // changed nothing but the clock spun it at 133 reconciles a second on an
-    // object nobody had touched (12,107 in 91.2 s, measured live).
-    //
-    // THE VERDICT IS STILL LOGGED. The skip is about the WRITE, not about
-    // observability: an operator reading the log still sees one line per
-    // reconcile, and the reconcile rate is now the requeue's (one per 300 s)
-    // rather than the loop's.
+    // No write when nothing changed: this reconciler's own status patch wakes
+    // it, so a clock-only change would spin it. The verdict is still logged on
+    // every reconcile.
     if status_unchanged(
         roster
             .status
@@ -278,11 +245,10 @@ pub async fn reconcile_roster(
         warn!(roster = %name, reason = verdict.reason, "trust roster not loaded");
     }
     if name != ROSTER_NAME {
-        // NOT A REFUSAL — this reconciler reports on whatever roster exists.
-        // But `Approval` verification resolves `trustrosters/default` and
-        // nothing else, so a roster under any other name authorises nothing
-        // and an operator has to be told rather than left with a `LOADED
-        // true` column that changes no behaviour.
+        // Not a refusal, but `Approval` verification resolves
+        // `trustrosters/default` only, so a roster under another name
+        // authorises nothing and the operator is told rather than shown a
+        // `LOADED true` that changes no behaviour.
         warn!(
             roster = %name,
             resolved = ROSTER_NAME,
@@ -296,10 +262,9 @@ pub async fn reconcile_roster(
 /// The `kube::runtime` reconcile entry point.
 async fn reconcile(roster: Arc<TrustRoster>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     reconcile_roster(&roster, &ctx.client).await?;
-    // A roster's verdict is a function of its spec AND OF THE CLOCK: a key
-    // whose `notAfter` passes at 03:00 must appear in `expiredKeyIds` without
-    // anybody editing the object. `await_change()` would leave the column
-    // stale until the next edit, so the requeue is what keeps expiry honest.
+    // A roster's verdict depends on the clock: a key whose `notAfter` passes
+    // at 03:00 must appear in `expiredKeyIds` with nobody editing the object,
+    // so the requeue keeps expiry honest.
     Ok(Action::requeue(std::time::Duration::from_secs(300)))
 }
 
@@ -316,17 +281,14 @@ fn error_policy(roster: Arc<TrustRoster>, err: &ReconcileError, _ctx: Arc<Contex
 /// Run the `TrustRoster` controller until the process ends.
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<TrustRoster> = Api::all(client.clone());
-    // Task 19: this reconciler holds NO archive handle. Spelled out
-    // rather than defaulted, so the one context field that is a
+    // No archive handle, spelled out so the one context field that is a
     // capability is visible at every construction site.
     let ctx = Arc::new(Context {
         client,
         archive: None,
-        // Task 33 (and Task 37's pull policy beside it): this reconciler
-        // creates no runner Job, so the image and policy this process was
-        // handed would be carried and never read. The default here is
-        // "unused", never "no override is configured" — see
-        // `super::Context::runner_image`.
+        // No runner Job, so the runner image is unused here; the default
+        // means "unused", never "no override configured" (see
+        // `super::Context::runner_image`).
         runner_image: crate::job::RunnerImage::default(),
     });
     async move {

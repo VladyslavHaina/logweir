@@ -1,12 +1,11 @@
-// list-verdict.spec.js -- CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED, and the
-// scorecard facts a Restore shows before its evidence verified
-// (SCORECARD-FACTS-UNVERIFIED-SHOWN). Folded into PLAT-18.2's review round.
+// list-verdict.spec.js -- a console list row reads the API's verdict, and a
+// Restore's scorecard facts are a claim before its evidence verified.
 //
-// THE DEFECT. In console mode a list item's `OperationSummary` carries
+// In console mode a list item's `OperationSummary` carries
 // `verificationState` and `verifiedSuccess` (the controller's own green-badge
-// rule, computed by the API); `ui/client.js`'s projection dropped both and
-// supplied no exit code, so every console list row -- a Valid backup included
-// -- read "no verification was recorded for this run". These rows drive the
+// rule, computed by the API); a projection that dropped both and supplied no
+// exit code would make every console list row -- a Valid backup included --
+// read "no verification was recorded for this run". These rows drive the
 // real transport (the one platform call stubbed) in both modes.
 
 import { test } from "node:test";
@@ -112,13 +111,13 @@ test("a_console_restore_list_row_reads_its_summary_too", async () => {
   }
 });
 
-// THE EXIT CODE STAYS AUTHORITATIVE (rehearsal-fix review, LOW-4). Since
-// interface I8's amendment an exit-2 restore publishes a signed failure that
-// verifies Valid. The legacy Restore badge mirrors the controller's rule
-// (`weirkeeper::verification::restore_badge`): a recorded non-zero exitCode is
-// never green, even beside a planted `outcome: pass`; an absent exitCode is
-// judged on the outcome. NEGATIVE CONTROL: the same object at exit 0 is green,
-// so the refusal below is the exit code's and not the fixture's.
+// THE EXIT CODE STAYS AUTHORITATIVE. An exit-2 restore publishes a signed
+// failure that verifies Valid, so the legacy Restore badge mirrors the
+// controller's rule (`weirkeeper::verification::restore_badge`): a recorded
+// non-zero exitCode is never green, even beside a planted `outcome: pass`;
+// an absent exitCode is judged on the outcome. NEGATIVE CONTROL: the same
+// object at exit 0 is green, so the refusal below is the exit code's and not
+// the fixture's.
 test("a_legacy_restore_badge_is_never_green_over_a_non_zero_exit_code", () => {
   const cr = fixture("d3/restore-completed-newtopic.json");
   assert.equal(cr.status.evidence.verification.result, "Valid");
@@ -174,7 +173,7 @@ test("a_console_detail_takes_the_merged_fields_off_the_absent_list", async () =>
   }
 });
 
-// ------------------------------------------ SCORECARD-FACTS-UNVERIFIED-SHOWN
+// Scorecard facts before the evidence verified.
 
 test("a_restores_scorecard_facts_are_labelled_its_unverified_claim_unless_it_verified", () => {
   const valid = fixture("restore-valid-pass.json");

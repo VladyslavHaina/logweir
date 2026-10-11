@@ -1,8 +1,6 @@
 //! Tests `impl DataEngine for OsoCliEngine` against the fixture stubs under
-//! `e2e/fixtures/fake-engine*.sh` — the real, Docker-extracted `kafka-backup`
-//! binary (Task 13) does not exist on this machine (broken daemon proxy), so
-//! these are what stand in for it. See task-12-report.md's "what remains
-//! unproven" section for exactly what these tests cannot cover.
+//! `e2e/fixtures/fake-engine*.sh`, which stand in for the real `kafka-backup`
+//! binary.
 use logweir_core::engine::{
     BackupSetRef, CoverageState, DataEngine, EngineError, EngineReport, PhaseObserver, RestorePlan,
     SampleSelection, StorageUrl, WindowFloorSource,
@@ -113,7 +111,7 @@ fn preflight_against_a_clean_engine_is_valid_and_honoured_with_no_warnings() {
 /// `render_restore::render` unconditionally writes `header_preflight: full` —
 /// an engine that warns it ignored `restore.header_preflight` is below the
 /// declared floor and `preflight()` must abort rather than report a false
-/// "clean" result. This is the brief's own default fixture (no env vars): its
+/// "clean" result. This is the default fixture (no env vars): its
 /// unconditional warning is `restore.header_preflight`, which IS a key we
 /// always render.
 #[test]
@@ -174,11 +172,9 @@ fn restore_against_a_clean_engine_succeeds_with_no_warnings() {
         "../../e2e/fixtures/fake-engine-clean.sh",
         Store::in_memory("logweir"),
     );
-    // T0-14: `restore()` now refuses when there is no phase-5 render to
-    // compare its own against, so every caller must have run `preflight()` on
-    // the SAME engine value first — which is what the orchestrator does
-    // (`crates/logweir/src/drill/mod.rs:595` then `:643`). Nothing else about
-    // this test changed.
+    // `restore()` refuses when there is no phase-5 render to compare its own
+    // against, so every caller runs `preflight()` on the SAME engine value
+    // first, as the orchestrator does.
     engine.preflight(&plan()).unwrap();
     let mut obs = RecordingObserver::default();
     let facts = engine.restore(&plan(), &mut obs).unwrap();
@@ -199,12 +195,11 @@ fn restore_maps_a_nonzero_exit_code_to_an_operational_error() {
         "../../e2e/fixtures/fake-engine-fail.sh",
         Store::in_memory("logweir"),
     );
-    // T0-14, as above. This stub deliberately fails `validate-restore` too
-    // (that is `preflight_reports_operational_error_on_malformed_stdout`), so
-    // the result is discarded: what is needed here is only that phase 5 wrote
+    // As above. This stub deliberately fails `validate-restore` too (that is
+    // `preflight_reports_operational_error_on_malformed_stdout`), so the result
+    // is discarded: what is needed here is only that phase 5 wrote
     // `restore.yaml` and recorded its digest, which happens before the stub is
-    // spawned. The assertions below are unchanged and still exercise the
-    // exit-code mapping in `restore()`.
+    // spawned.
     let _ = engine.preflight(&plan());
     let mut obs = RecordingObserver::default();
     let err = engine.restore(&plan(), &mut obs).unwrap_err();
@@ -219,14 +214,14 @@ fn restore_points_config_at_the_file_it_just_wrote() {
         "../../e2e/fixtures/fake-engine-argv-check.sh",
         Store::in_memory("logweir"),
     );
-    // T0-14, as above.
+    // As above.
     engine.preflight(&plan()).unwrap();
     let mut obs = RecordingObserver::default();
     let facts = engine.restore(&plan(), &mut obs).unwrap();
     assert_eq!(facts.exit_code, 0);
 }
 
-// --- FX-23: the engine's offset report ---
+// --- the engine's offset report ---
 
 /// `plan()` with its offset report in a fresh directory this test owns.
 fn plan_reporting_to(dir: &Path) -> RestorePlan {
@@ -340,12 +335,12 @@ fn read_engine_report_answers_absent_unreadable_or_the_entries() {
 
 // --- list_backup_sets() / describe() / fingerprints(), against a Store built
 // with Store::read_only_from_url — proving the archive is read through a
-// handle that physically cannot put (controller amendment), not merely one
-// that happens not to call put in these tests. ---
+// handle that physically cannot put, not merely one that happens not to call
+// put in these tests. ---
 
 const NONE_KBAK_RELATIVE: &str = "b1/topics/orders/partition=0/segment-00000000000000000100.bin";
 
-/// A consumer-groups snapshot the pinned engine wrote (FX-1); provenance in
+/// A consumer-groups snapshot the pinned engine wrote; provenance in
 /// `e2e/fixtures/README.md`.
 const REAL_SNAPSHOT: &str = "../../e2e/fixtures/consumer-groups-snapshot.json";
 
@@ -390,9 +385,7 @@ fn seed_archive(dir: &Path) {
     std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
     std::fs::write(&manifest_path, manifest).unwrap();
 
-    // FX-1: the engine's REAL, non-empty snapshot (four groups), not the
-    // invented `captured_at`/`state`/list shape that stood here before and
-    // that no engine writes.
+    // The engine's REAL, non-empty snapshot (four groups).
     std::fs::copy(REAL_SNAPSHOT, dir.join("b1/consumer-groups-snapshot.json")).unwrap();
 
     let segment_path = dir.join(NONE_KBAK_RELATIVE);
@@ -457,19 +450,15 @@ fn the_archive_is_read_through_a_store_that_cannot_physically_put() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fix 3 (post-review): `describe()`'s sibling-snapshot read used to
-/// collapse EVERY `get` failure into `None` ("no snapshot"), so a permission
-/// error, a timeout, or a truncated read was recorded identically to genuine
-/// absence — `consumer_group_snapshot_sha256: None` then flows into the
-/// signed scorecard as a positive claim the store never actually
-/// established. This constructs a sibling file that EXISTS but cannot be
-/// read (mode 000) and asserts `describe()` propagates the failure rather
-/// than reporting `None`.
+/// `describe()` does not collapse a sibling-snapshot `get` failure into
+/// `None` ("no snapshot"): a permission error, a timeout or a truncated read
+/// recorded as absence would flow into the signed scorecard
+/// (`consumer_group_snapshot_sha256: None`) as a claim the store never
+/// established. This constructs a sibling file that EXISTS but cannot be read
+/// (mode 000) and asserts `describe()` propagates the failure.
 ///
-/// Assumes a non-root test runner: root bypasses Unix permission bits
-/// entirely, which would make the constructed failure never actually occur
-/// and this assertion vacuous. True for `cargo test` in this environment and
-/// for ordinary (non-containerized-as-root) CI runners.
+/// Assumes a non-root test runner: root bypasses Unix permission bits, which
+/// would make the constructed failure never occur and this assertion vacuous.
 #[test]
 #[cfg(unix)]
 fn describe_reports_an_error_when_the_snapshot_sibling_is_unreadable_not_none() {
@@ -497,7 +486,7 @@ fn describe_reports_an_error_when_the_snapshot_sibling_is_unreadable_not_none() 
     // primary manifest read, which must have already succeeded for this
     // point to be reached at all).
     assert!(err.to_string().contains("storage:"), "{err}");
-    // FX-1: the typed read shares the one object reader, so it cannot report
+    // The typed read shares the one object reader, so it cannot report
     // an object it could not read as absent or as unreadable content either.
     let err = engine.consumer_group_snapshot(&set).unwrap_err();
     assert!(err.to_string().contains("storage:"), "{err}");
@@ -507,7 +496,7 @@ fn describe_reports_an_error_when_the_snapshot_sibling_is_unreadable_not_none() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// --- FX-1: the consumer-groups snapshot through the engine handle ----------
+// --- the consumer-groups snapshot through the engine handle ----------
 
 /// An archive holding one backup set, `s1`, with `snapshot` as its
 /// consumer-groups sibling, or no sibling at all.
@@ -534,13 +523,10 @@ fn one_set_archive(tag: &str, snapshot: Option<&[u8]>) -> (PathBuf, OsoCliEngine
     (dir, engine, set)
 }
 
-/// **FX-1's regression row at the seam both callers share.** Before FX-1 this
-/// `describe()` returned `operational: s1/consumer-groups-snapshot.json:
-/// invalid type: map, expected a sequence`, and that is what failed every
-/// drill (exit 1, no scorecard) and every backup receipt of an archive holding
-/// a real snapshot. Now the set is described, and the typed read returns the
-/// engine's groups exactly (`vendored_parse.rs` checks every position against
-/// the broker's account).
+/// A real snapshot is described, and the typed read returns the engine's
+/// groups exactly (`vendored_parse.rs` checks every position against the
+/// broker's account). Misreading its shape fails every drill (exit 1, no
+/// scorecard) and every backup receipt of an archive holding one.
 #[test]
 fn a_real_non_empty_snapshot_is_described_and_read_back_as_the_engine_wrote_it() {
     use logweir_engine_oso::engine::ConsumerGroupSnapshotRead;
@@ -587,8 +573,7 @@ fn a_real_non_empty_snapshot_is_described_and_read_back_as_the_engine_wrote_it()
         }
         other => panic!("expected Parsed, got {other:?}"),
     }
-    // FX-1 fix round (M1): a snapshot the engine really wrote is nothing to
-    // warn about.
+    // A snapshot the engine really wrote is nothing to warn about.
     let (facts2, notices) = engine.describe_with_notices(&set).unwrap();
     assert!(notices.is_empty(), "{notices:?}");
     assert_eq!(
@@ -598,18 +583,16 @@ fn a_real_non_empty_snapshot_is_described_and_read_back_as_the_engine_wrote_it()
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **FX-1's error mapping.** A snapshot that is not the engine's shape used to
-/// fail `describe()` with `EngineError::Operational` — the variant the drill
-/// and the backup define as "says nothing about the archive" (exit 1, no
-/// artifact, "fix the environment and re-run", which no re-run could fix).
+/// A snapshot that is not the engine's shape is never
+/// `EngineError::Operational` — the variant the drill and the backup define as
+/// "says nothing about the archive" (exit 1, no artifact, "fix the environment
+/// and re-run", which no re-run could fix).
 ///
-/// Now `describe()` publishes what it always published — present, with the
-/// digest of the bytes — and the typed read reports the content as
-/// `Unreadable`, with the reason: a VALUE about the archive, never an
-/// `Operational` error — and, since the fix round, a NOTICE beside the facts,
-/// which `drill run` and `backup run` print. Two such objects: the invented
-/// shape that stood in the vendored file before FX-1 (`offsets` a list), and
-/// one that is not JSON.
+/// `describe()` publishes it as present, with the digest of the bytes; the
+/// typed read reports the content as `Unreadable`, with the reason (a VALUE
+/// about the archive), and a NOTICE goes beside the facts, which `drill run`
+/// and `backup run` print. Two such objects: a shape with `offsets` as a list,
+/// and one that is not JSON.
 #[test]
 fn a_snapshot_that_is_not_the_engines_shape_is_reported_unreadable_and_refuses_nothing() {
     use logweir_engine_oso::engine::ConsumerGroupSnapshotRead;
@@ -644,10 +627,10 @@ fn a_snapshot_that_is_not_the_engines_shape_is_reported_unreadable_and_refuses_n
                     "{tag}: {reason}"
                 );
                 assert!(reason.contains(needle), "{tag}: {reason}");
-                // FX-1 fix round (M1): and it is TOLD. `describe_with_notices`
-                // — what `drill run` and `backup run` call — returns exactly
-                // one notice about the same object and the same bytes, with the
-                // same reason, beside the same facts.
+                // And it is TOLD. `describe_with_notices` — what `drill run`
+                // and `backup run` call — returns exactly one notice about the
+                // same object and the same bytes, with the same reason, beside
+                // the same facts.
                 let (facts2, notices) = engine
                     .describe_with_notices(&set)
                     .unwrap_or_else(|e| panic!("{tag}: {e}"));
@@ -758,18 +741,14 @@ fn b1_ref() -> BackupSetRef {
     }
 }
 
-/// Fix (post-review): the ambiguity `task-12-report.md` documented — two
-/// backup sets sharing a topic/partition with an overlapping window used to
-/// merge their segments in `fingerprints()`, with no way at the trait
-/// boundary to tell them apart. That made the archive side a strict
-/// SUPERSET of what a real restore populated: a healthy restore reads as a
-/// mismatch (extra fingerprints), which is a false FAIL on a signed
-/// attestation — the worst direction for this product. `SampleSelection` now
-/// carries `set: BackupSetRef`, and `fingerprints()` resolves against exactly
-/// that one manifest (`Store::segment_keys_for_set`). This test is the
-/// SAME two-backup-set setup as before the fix, with the SAME assertion
-/// inverted: 5, not 10 — b3's segments, though they match topic/partition/
-/// window, are no longer visible when the request names b1.
+/// Two backup sets sharing a topic/partition with an overlapping window: the
+/// archive side must be exactly the requested set, never their union. A
+/// superset would read a healthy restore as a mismatch (extra fingerprints), a
+/// false FAIL on a signed attestation. `SampleSelection` carries
+/// `set: BackupSetRef`, and `fingerprints()` resolves against exactly that one
+/// manifest (`Store::segment_keys_for_set`): 5 records, not 10 — b3's
+/// segments, though they match topic/partition/window, are not visible when
+/// the request names b1.
 #[test]
 fn fingerprints_are_scoped_to_the_requested_set_not_merged_across_sets() {
     let dir = unique_dir("fp-scoped");
@@ -866,10 +845,10 @@ fn make_kbak_segment(records: &[(i64, i64, &[u8], &[u8])]) -> Vec<u8> {
     out
 }
 
-/// The test the coordinator asked for directly: two backup sets carrying the
-/// SAME offsets (200, 201) with DIFFERENT bytes. Proves `fingerprints()`
-/// returns the requested set's OWN content, not merely a same-sized result —
-/// scoping by manifest key, not by a coincidental record count.
+/// Two backup sets carrying the SAME offsets (200, 201) with DIFFERENT bytes.
+/// Proves `fingerprints()` returns the requested set's OWN content, not merely
+/// a same-sized result — scoping by manifest key, not by a coincidental record
+/// count.
 #[test]
 fn fingerprints_come_from_the_requested_set_when_two_sets_share_offsets_with_different_bytes() {
     let dir = unique_dir("fp-identity");
@@ -1130,13 +1109,6 @@ fn count_larger_than_available_returns_everything() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// DELETED (Task 21c fix round 1): `an_unknown_anchor_is_an_operational_error`.
-// `SampleSelection.anchor` is `logweir_core::spec::Anchor`, a closed enum, so
-// there is no unknown anchor to construct and `select_sample` has no
-// catch-all arm left to test — the compiler now enforces what that test
-// asserted at run time. Recorded here rather than silently removed, because a
-// vanished test name should always be explainable.
-
 /// Builds a backup set with TWO segments in the manifest, both matching the
 /// query window: `hs/.../segment-...400.bin` (offsets 400-402, WRITTEN to
 /// disk) and `hs/.../segment-...500.bin` (offsets 500-502, deliberately
@@ -1173,11 +1145,10 @@ fn seed_two_segment_archive_with_a_missing_later_segment(dir: &std::path::Path) 
     }
 }
 
-/// The "honest form" the coordinator asked for: not a re-check of output
-/// length (which a full traversal that happens to produce the right count
-/// would also pass), but a fixture where reading the segment `head` is
-/// supposed to skip would ITSELF fail — proving the skip actually happened,
-/// not merely that the answer came out right.
+/// Not a re-check of output length (which a full traversal that happens to
+/// produce the right count would also pass), but a fixture where reading the
+/// segment `head` is supposed to skip would ITSELF fail — proving the skip
+/// actually happened, not merely that the answer came out right.
 ///
 /// `count: 3` is satisfied entirely by the first (400-402) segment, so
 /// `head` must never attempt the second (500-502) segment, which does not
@@ -1224,17 +1195,12 @@ fn head_short_circuits_before_reading_a_later_unneeded_segment() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// REGRESSION (Task 21c, found against MinIO). A manifest body stores every
-/// segment key RELATIVE to the configured storage prefix
-/// (`{backup_id}/topics/...`), and `Store::get` operates in the fully-qualified
-/// key space. `describe()` copied the relative key straight into
-/// `SegmentFacts.key`, and `phase7_verify::segment_evidence` then handed that
-/// to `Store::get` — so on any archive with a non-empty prefix (which is every
-/// real one) phase 7 died with "object not found at
-/// drill-demo/topics/orders/partition=1/segment-…" before it could verify
-/// anything. `storage.rs`'s `segments_in_manifest` already carried this exact
-/// fix and its doc comment already described this exact failure; the
-/// `describe()` call site was simply missed.
+/// A manifest body stores every segment key RELATIVE to the configured
+/// storage prefix (`{backup_id}/topics/...`), and `Store::get` operates in the
+/// fully-qualified key space, so `describe()` must put the qualified key in
+/// `SegmentFacts.key`: phase 7 hands it to `Store::get`, and on any archive
+/// with a non-empty prefix (every real one) a relative key is "object not
+/// found" before anything is verified.
 ///
 /// The prefix here is `logweir` only because `put_create_only` refuses to seed
 /// an in-memory store anywhere else (Global Constraint 6); what the test needs
@@ -1296,11 +1262,11 @@ fn describe_returns_segment_keys_that_store_get_can_actually_resolve() {
     assert_eq!(bytes, segment);
 }
 
-/// **PROD-04.1, AP-04.1-7: positions imported from an engine snapshot carry
-/// group type `unknown`**, never a consumer group's: the engine records no
-/// type and keeps a streams group's positions untyped (PROD-04.0 §3.7). The
-/// real snapshot imports every group with every position; an unreadable one
-/// imports nothing (never a partial import); no object imports nothing.
+/// **Positions imported from an engine snapshot carry group type `unknown`**,
+/// never a consumer group's: the engine records no type and keeps a streams
+/// group's positions untyped. The real snapshot imports every group with every
+/// position; an unreadable one imports nothing (never a partial import); no
+/// object imports nothing.
 #[test]
 fn an_engine_snapshot_imports_with_group_type_unknown_and_never_partially() {
     use logweir_engine_oso::engine::{ConsumerGroupSnapshotRead, IMPORTED_GROUP_TYPE};

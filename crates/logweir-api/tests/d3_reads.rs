@@ -34,7 +34,7 @@ fn fixture(name: &str) -> Value {
 
 /// A PEM header, assembled at run time.
 ///
-/// The repository rule (`WORKER-RULES.md`, 2026-09-18) is that a fixture which
+/// The repository rule (`WORKER-RULES.md`) is that a fixture which
 /// LOOKS like a secret must be built rather than written, so no source line
 /// carries the contiguous literal. The value only has to be distinctive enough
 /// for the leak scans below to find it if it ever reached a response.
@@ -86,9 +86,7 @@ fn at(app: &TestApp, rfc3339: &str) {
     app.clock.set(rfc3339.parse().expect("an instant"));
 }
 
-// ======================================================================
-// Protection
-// ======================================================================
+// PROTECTION.
 
 #[tokio::test]
 async fn protection_health_is_published_beside_its_basis_and_its_schedules() {
@@ -173,9 +171,7 @@ async fn a_protection_response_names_no_secret_and_no_sink() {
     assert!(item.get("notifications").is_none(), "{item}");
 }
 
-// ======================================================================
-// Retention
-// ======================================================================
+// RETENTION.
 
 #[tokio::test]
 async fn retention_publishes_what_is_actually_enforcing_and_never_the_credential() {
@@ -378,9 +374,7 @@ async fn the_degraded_condition_is_published_as_a_flag() {
     assert_eq!(v["item"]["enforcementDegraded"], false);
 }
 
-// ======================================================================
-// Catalogs
-// ======================================================================
+// CATALOGS.
 
 #[tokio::test]
 async fn a_catalog_publishes_ten_counts_a_window_flag_and_its_signers() {
@@ -479,11 +473,10 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
     // point" builds `source.point {point_id, receipt_key, receipt_sha256,
     // manifest_sha256}`; without these four it cannot, and keys and digests
     // are all that is published — never content.
-    // **CATALOG-RECEIPTKEY-REDACTED.** `!is_empty()` was not a test of this
-    // field: `[redacted].receipt.json` is not empty, and that is exactly what
-    // every live point published, because the run id in the key is a
-    // 26-character ULID and the redactor's free-component budget is 24. The
-    // binding has to be the KEY, so the row asks for the key.
+    // `!is_empty()` is not a test of this field: `[redacted].receipt.json` is
+    // not empty, and a 26-character ULID run id in the key exceeds the
+    // redactor's free-component budget of 24. The binding has to be the KEY, so
+    // the row asks for the key.
     for item in v["items"].as_array().unwrap() {
         let key = item["receiptKey"]
             .as_str()
@@ -825,9 +818,7 @@ async fn a_connect_request_names_exactly_one_location_and_bounded_numbers() {
     assert_eq!(app.fake.count("recoverycatalogs", NS_A), 0);
 }
 
-// ======================================================================
-// Trust
-// ======================================================================
+// TRUST.
 
 /// **§7.7: a stale or generation-behind evaluation is `unknown`, not `valid`.**
 ///
@@ -949,9 +940,7 @@ fn has_key(value: &Value, key: &str) -> bool {
     }
 }
 
-// ======================================================================
-// Paging and authorization
-// ======================================================================
+// PAGING AND AUTHORIZATION.
 
 #[tokio::test]
 async fn every_family_pages_with_a_cursor_bound_to_its_own_route() {
@@ -1112,9 +1101,7 @@ async fn connecting_an_archive_is_refused_to_a_viewer_and_an_approver() {
     assert_eq!(shared.app.fake.count("recoverycatalogs", NS_B), 0);
 }
 
-// ======================================================================
-// Fix round 1 — the review's F2 and F4
-// ======================================================================
+// TRUST POLICY NARROWING AND LEGACY-URL REDACTION.
 
 /// A cluster-scoped policy governing four namespaces, of which the reader
 /// administers one.
@@ -1138,15 +1125,13 @@ fn wide_policy(name: &str, namespaces: &[&str], default: bool) -> Value {
     policy
 }
 
-/// **F2: a namespace administrator cannot enumerate the installation.**
+/// **A namespace administrator cannot enumerate the installation.**
 ///
-/// REGRESSION REASON, MEASURED. The first round admitted any actor holding
-/// `trustPolicy.read` in any one bound namespace and then served EVERY
-/// `TrustPolicy` whole: an administrator bound only in `team-a` read
-/// `spec.namespaces`, `status.boundNamespaces` and `conflicts[].namespace` for
-/// the entire installation. D0's matrix row is "installation-admin only,
+/// An actor holding `trustPolicy.read` in one bound namespace must not read
+/// `spec.namespaces`, `status.boundNamespaces` and `conflicts[].namespace`
+/// for the entire installation. D0's matrix row is "installation-admin only,
 /// cluster scope"; this model has no installation-scoped role, so the
-/// deviation is narrowed instead — a policy is served only when it governs a
+/// deviation is narrowed instead -- a policy is served only when it governs a
 /// namespace the reader administers or is the installation `default`, and
 /// every namespace-bearing list is filtered to the administered set with
 /// `namespacesFiltered` saying so.
@@ -1272,13 +1257,11 @@ async fn the_default_policy_is_in_scope_and_an_unfiltered_one_says_so() {
     assert_eq!(unfiltered["item"]["namespaces"], json!(["team-a"]));
 }
 
-/// **F4: a legacy archive URL comes back with its userinfo redacted.**
+/// **A legacy archive URL comes back with its userinfo redacted.**
 ///
-/// REGRESSION REASON. The line that does it had no test at all: the reviewer
-/// planted `url: a.url.clone()` and the whole 358-test suite passed. The row
-/// that looked like the guard sent a URL with no userinfo in it. `POST`
-/// refuses a userinfo URL by field, so one can only arrive by `kubectl apply`
-/// — which is exactly the legacy-archive adoption path this family exists for.
+/// `POST` refuses a userinfo URL by field, so one can only arrive by
+/// `kubectl apply` -- exactly the legacy-archive adoption path this family
+/// exists for -- and a guard row must send a URL that has userinfo in it.
 #[tokio::test]
 async fn an_archive_url_that_carries_userinfo_comes_back_redacted() {
     let secret = concat!("arch1ve-", "p455w0rd-in-a-url");
@@ -1330,10 +1313,7 @@ async fn an_archive_url_that_carries_userinfo_comes_back_redacted() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// CATALOG-LIST-IGNORES-REFUSED-VERDICT — the controller's reached verdict
-// outranks a (possibly stale) view row
-// ======================================================================
+// THE CONTROLLER'S REACHED VERDICT OUTRANKS A (POSSIBLY STALE) VIEW ROW.
 
 /// A `Backup` whose own evidence verdict is `result`, over `digest`.
 fn verdict_backup(name: &str, digest: &str, result: &str) -> Value {
@@ -1479,7 +1459,7 @@ async fn a_backup_listing_past_its_bound_is_published_as_truncated() {
     assert_eq!(v["backupVerdictsIncomplete"], "Truncated");
 }
 
-// ---- review M1: the join degrades per object, never per page -------------
+// The join degrades per object, never per page.
 
 /// ONE `Backup` this build cannot type — a trigger kind a newer build wrote,
 /// and no `spec` at all — does not blank the point list, and the refusal on
@@ -1649,7 +1629,7 @@ async fn listed_with_topics(topics: Value, detection: Option<Value>) -> (Value, 
     (listed, others)
 }
 
-/// **PROD-05.1: the point view publishes a point's topics** — the recorded
+/// **The point view publishes a point's topics** -- the recorded
 /// partition count, replication factor, configuration coverage and owner
 /// kind — with the apply route a declarative owner implies, and an entry that
 /// lists none publishes none (absent is NOT PUBLISHED, never "no topics").
@@ -1689,7 +1669,7 @@ async fn the_point_view_publishes_each_topics_recorded_layout_and_apply_route() 
     }
 }
 
-/// **M2 (fix round): an owner nobody looked for is never the admin-API
+/// **An owner nobody looked for is never the admin-API
 /// route.** A point whose run looked for owners nowhere (`ownerDetection`
 /// empty — every controller-run Backup today) publishes `applyRoute:
 /// unknown` for each topic without an owner, and so does a view that does not
@@ -1719,9 +1699,9 @@ async fn an_owner_never_looked_for_publishes_an_unknown_apply_route() {
     }
 }
 
-/// **M3 (fix round): an absent count stays absent in the API.** A topic whose
-/// replication factor was not recorded (engine 0.23.3 keeps it for the first
-/// topic only, FX-21), and one whose partition count was not, are published
+/// **An absent count stays absent in the API.** A topic whose replication
+/// factor was not recorded (engine 0.23.3 keeps it for the first topic
+/// only), and one whose partition count was not, are published
 /// WITHOUT the key — never `1`, never `0` — so the console says the factor is
 /// not recorded rather than defaulting from an invented one.
 #[tokio::test]
@@ -1782,7 +1762,7 @@ async fn listed_with_positions(cp: Value) -> (Value, Vec<Value>) {
     (listed, others)
 }
 
-/// **PROD-04.1: the point view publishes the consumer position evidence** —
+/// **The point view publishes the consumer position evidence** --
 /// when the positions were observed, how long before the recovery point
 /// (the snapshot's freshness), and per group its outcome and how many
 /// positions relate to archived data; a point that carries none publishes
@@ -1827,7 +1807,7 @@ async fn the_point_view_publishes_the_consumer_position_summary_and_its_freshnes
     }
 }
 
-/// **PROD-03.0: the point view publishes each topic's schema dependency** —
+/// **The point view publishes each topic's schema dependency** --
 /// the verdict, the basis or reason, the sides that need a registry and the
 /// ids they name — exactly as the shared fixture
 /// `ui/tests/fixtures/console/catalog-point-schema-dependency.json` says: its

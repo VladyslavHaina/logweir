@@ -2,11 +2,11 @@
 //!
 //! `charts/logweir/templates/ui/api-config.yaml` writes the file and
 //! `crate::config` reads it; two sides that must agree are held together by
-//! reading the chart's checked-in renders here (the worker rule: a fixture two
-//! sides agree on is read by both sides' tests). The PoC chart gaps made this
-//! row necessary: `oidc.caBundleFile` (G1) and `trustedProxyService` (G6) are
-//! keys the template emits and `deny_unknown_fields` would refuse by name if
-//! the two spellings ever drifted.
+//! reading the chart's checked-in renders here (a fixture two sides agree on
+//! is read by both sides' tests): `oidc.caBundleFile` and
+//! `trustedProxyService` are keys the template emits and
+//! `deny_unknown_fields` would refuse by name if the two spellings ever
+//! drifted.
 
 use std::path::Path;
 
@@ -64,7 +64,7 @@ fn the_shared_render_carries_the_issuer_ca_and_the_proxy_service() {
     assert!(shared.require_trusted_proxy);
 }
 
-/// **P10 review L2: the chart renders `rateLimits` only away from THIS
+/// **The chart renders `rateLimits` only away from THIS
 /// binary's defaults**, so an older console image (which refuses the unknown
 /// key and does not start) keeps starting on a default install. The values
 /// file ships the defaults, the template's guard names them, and the default
@@ -105,7 +105,7 @@ fn rate_limits_are_rendered_only_away_from_the_binarys_defaults() {
     }
 }
 
-/// **FX-15: every `api.console` value this binary reads reaches the parsed
+/// **Every `api.console` value this binary reads reaches the parsed
 /// `Config` at a NON-default value.** `examples/tuned.values.yaml` (localAdmin)
 /// and `examples/console-tuned.values.yaml` (shared) set each one away from
 /// its default; their renders' configurations are parsed by the real

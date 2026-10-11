@@ -1,13 +1,12 @@
-//! `RecoveryCatalog` — the durable list of what can actually be recovered,
+//! `RecoveryCatalog`: the durable list of what can actually be recovered,
 //! read from object storage rather than from Kubernetes.
 //!
 //! # Why it is a kind and not a field on the destination
 //!
-//! A destination is storage configuration and is nearly immutable. A catalog
-//! has a mutable sync trigger, its own bounded view, its own Jobs and its own
-//! failure modes — and it must exist for archives that PREDATE this
-//! installation, which is the whole point of PLAT-15.2's "connect an existing
-//! archive" (ADR 0008 Amendment G).
+//! A destination is storage configuration and nearly immutable. A catalog has
+//! a mutable sync trigger, its own bounded view, its own Jobs and its own
+//! failure modes, and it must exist for archives that predate this
+//! installation ("connect an existing archive", ADR 0008 Amendment G).
 //!
 //! # `syncRequest` is the one mutable field, and it is a token
 //!
@@ -24,8 +23,7 @@
 //! owned by the sync Job. **No `delete` verb is added anywhere**: the sync Job
 //! carries a TTL, Kubernetes garbage-collects the Job, and its pages go with
 //! it. If syncing stops for longer than the TTL the view disappears and this
-//! object reports `Stale` and then `ViewExpired` — honest, and the archive is
-//! untouched.
+//! object reports `Stale` and then `ViewExpired`; the archive is untouched.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,7 +34,7 @@ use super::{ArchiveRef, Condition, LocalRef, SpecRule, Time};
 ///
 /// The clause order is the field order of [`RecoveryCatalogSpec`], minus
 /// `syncRequest`. Object-level for the reason
-/// [`super::backup_schedule::SUSPEND_ONLY_RULE`] is.
+/// [`super::backup_schedule::SOURCE_REF_IMMUTABLE_RULE`] is.
 pub const SYNC_REQUEST_ONLY_RULE: &str = "has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.legacyArchive) == has(oldSelf.legacyArchive) && (!has(self.legacyArchive) || self.legacyArchive == oldSelf.legacyArchive) && has(self.sync) == has(oldSelf.sync) && (!has(self.sync) || self.sync == oldSelf.sync)";
 
 /// The message [`SYNC_REQUEST_ONLY_RULE`] travels with.

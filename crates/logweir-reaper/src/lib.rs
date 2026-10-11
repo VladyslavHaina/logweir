@@ -1,12 +1,11 @@
 #![forbid(unsafe_code)]
-//! The one sanctioned deleter — decision D3 §6.5, ADR 0008 Amendment H.
+//! The one sanctioned deleter.
 //!
 //! # What this crate is for
 //!
-//! Tag 1's statement was *no Logweir component holds any delete capability
-//! against object storage*. Amendment H makes it version-scoped: it is true
-//! wherever a `RetentionPolicy` is not in `mode: Enforce`, and where it is,
-//! **this crate is the only place in the workspace that names an object-store
+//! No Logweir component holds a delete capability against object storage,
+//! except where a `RetentionPolicy` is in `mode: Enforce`, and there **this
+//! crate is the only place in the workspace that names an object-store
 //! delete**. `weirkeeper`, `logweir-store`, `logweir` and `logweir-api` do not
 //! link it; `scripts/check-no-archive-write.sh` check 3 proves the reaching set
 //! over `cargo metadata` is exactly `{logweir-retention}`, and adding an edge
@@ -53,10 +52,6 @@ pub mod archive;
 
 pub use archive::{ArchiveReaper, Credentials};
 
-// ---------------------------------------------------------------------------
-// The constants the plan and the record are written against
-// ---------------------------------------------------------------------------
-
 /// The plan document's media type — it must equal this exactly.
 pub const PLAN_MEDIA_TYPE: &str = "application/vnd.logweir.retention-plan+json;version=1.0.0";
 
@@ -69,21 +64,14 @@ pub const RECORD_FORMAT_VERSION: &str = "1.0.0";
 /// The evidence root nothing here may delete under.
 pub const EVIDENCE_ROOT: &str = "logweir/";
 
-/// The per-key attempt ceiling — D3 §6.5's bounded retry.
+/// The per-key attempt ceiling: bounded retry.
 pub const MAX_ATTEMPTS: u32 = 3;
 
 /// The waits BETWEEN attempts: 1 s, then 4 s.
 ///
-/// **Two waits, because three attempts have two gaps** (review `d3w9` L1).
-/// D3 §6.5 writes the backoff as "1 s/4 s/16 s", which reads as three numbers;
-/// with [`MAX_ATTEMPTS`] at 3 the third would be a wait after the last attempt,
-/// i.e. sixteen seconds of holding a Job open to learn nothing. The consistent
-/// reading of §6.5 is the two gaps, and this is them.
+/// **Two waits, because three attempts have two gaps.** A third wait would come
+/// after the last attempt and hold a Job open to learn nothing.
 pub const BACKOFF_SECONDS: [u64; 2] = [1, 4];
-
-// ---------------------------------------------------------------------------
-// The plan, as the worker reads it
-// ---------------------------------------------------------------------------
 
 /// One line of the plan — everything deleting one point means.
 ///
@@ -111,36 +99,26 @@ pub struct PlanLine {
     /// Whether the worker must enumerate the set directory for the keys the
     /// plan could not name.
     ///
-    /// # Why this exists, and what it costs
-    ///
-    /// D3 §6.4 step 6 asks the plan to carry "the complete, explicit list of
-    /// object keys to delete". The catalog view the evaluation reads carries a
-    /// point's `manifestKey` and **not** its segment keys — D3 W8's contract
-    /// says so in terms ("`topics` is deliberately ABSENT … the window is
-    /// bounded by bytes") and the same bound excludes a segment list — and the
-    /// controller holds no archive credential for the destination with which to
-    /// go and look. So a plan written today names the manifest and the set
-    /// prefix, and the worker enumerates the rest.
-    ///
-    /// That is exactly the second half of D3 §6.5's wrong-prefix rule, which
-    /// requires every key to "have been listed from that point's own manifest
-    /// or **set directory**". What an administrator approves is therefore the
-    /// exact point set, the exact manifest keys and the exact key BOUND — not
-    /// a per-key list — and [`validate_listed_key`] re-checks every enumerated
-    /// key against that bound before it is deleted. When the view grows a
-    /// segment-key field this flag goes to `false` and nothing else changes.
+    /// The catalog view the evaluation reads carries a point's `manifestKey`
+    /// and **not** its segment keys, and the controller holds no archive
+    /// credential for the destination. So a plan names the manifest and the set
+    /// prefix, and the worker enumerates the rest. What an administrator
+    /// approves is therefore the exact point set, the exact manifest keys and
+    /// the exact key BOUND, not a per-key list, and [`validate_listed_key`]
+    /// re-checks every enumerated key against that bound before it is deleted.
+    /// When the view grows a segment-key field this flag goes to `false` and
+    /// nothing else changes.
     #[serde(default)]
     pub enumerate_set: bool,
     /// Every key the plan could name, manifest first. Explicit: never a glob.
     pub object_keys: Vec<String>,
-    /// Other points whose receipts name this SAME set and are removed with it
-    /// (review M2). Two receipts over one set that are both due used to render
-    /// two lines with one manifest key, which [`validate_plan`] refuses as
-    /// `DuplicateKey` — the whole plan, on every run. One line per set, with
-    /// every point it removes named here, keeps each delete attributable to one
-    /// line and each point attributable in the record (one outcome and one
-    /// pair of tombstones per point). Absent — and so byte-identical to a
-    /// plan from before this field — when the set has one point.
+    /// Other points whose receipts name this SAME set and are removed with it.
+    /// One line per set (two lines with one manifest key would be refused as
+    /// `DuplicateKey`), with every point it removes named here, keeps each
+    /// delete attributable to one line and each point attributable in the
+    /// record (one outcome and one pair of tombstones per point). Absent, and
+    /// so byte-identical to a plan without the field, when the set has one
+    /// point.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub co_point_ids: Vec<String>,
 }
@@ -150,15 +128,14 @@ pub struct PlanLine {
 /// **Field for field with `weirkeeper::retention_plan::PlanDocument`**, and
 /// both carry `deny_unknown_fields`, so drift between them is total rather than
 /// partial: one added field on the writer would make every plan
-/// `Refusal::Unreadable` and every run exit 3, discovered at 04:17. The two
-/// types cannot be one type — the crates must not link each other, which is the
-/// whole point of `scripts/check-no-archive-write.sh` check 3 — so the
-/// agreement is asserted instead, by
-/// `crates/logweir/tests/retention_plan_wire.rs`, which is in a crate that may
-/// read both files (review `d3w9` L6).
+/// `Refusal::Unreadable` and every run exit 3. The two types cannot be one type
+/// (the crates must not link each other, which is the point of
+/// `scripts/check-no-archive-write.sh` check 3), so the agreement is asserted
+/// by `crates/logweir/tests/retention_plan_wire.rs`, in a crate that may read
+/// both files.
 ///
 /// **It carries no instant and no generation.** See `PlanDocument`'s own note:
-/// a digest that moves on its own can never be approved (review `d3w9` C1).
+/// a digest that moves on its own can never be approved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct Plan {
@@ -166,11 +143,8 @@ pub struct Plan {
     pub format: String,
     /// The document version.
     pub format_version: String,
-    /// The policy's namespace.
     pub policy_namespace: String,
-    /// The policy's name.
     pub policy_name: String,
-    /// The policy's UID.
     pub policy_uid: String,
     /// The destination's location id.
     pub location_id: String,
@@ -182,7 +156,6 @@ pub struct Plan {
     pub keep_days: Option<i64>,
     /// `minUsablePoints`, as applied.
     pub min_usable_points: i64,
-    /// The lines.
     pub lines: Vec<PlanLine>,
 }
 
@@ -196,10 +169,6 @@ impl Plan {
             .collect()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Refusals — everything that happens BEFORE the first delete
-// ---------------------------------------------------------------------------
 
 /// Why a plan was refused. **Nothing was deleted when one of these is
 /// returned**, which is what makes them exit 3 rather than exit 1.
@@ -263,7 +232,6 @@ pub enum Refusal {
          disagrees with its own declaration is refused"
     )]
     ManifestNotFirst {
-        /// The point.
         point_id: String,
         /// What the line's key list starts with.
         first: String,
@@ -288,18 +256,16 @@ pub enum Refusal {
     #[error("point `{0}` is named more than once in the plan; each point is removed by one line")]
     DuplicatePoint(String),
     /// A key appears on two lines: one delete could then be attributed to two
-    /// points, and D3 §6.5 requires every delete to be attributable to exactly
+    /// points, and every delete must be attributable to exactly
     /// one plan line.
     #[error(
         "key `{key}` appears on point `{first}` and on point `{second}`; a delete must be \
          attributable to exactly one plan line"
     )]
     DuplicateKey {
-        /// The key.
         key: String,
         /// The first point naming it.
         first: String,
-        /// The second.
         second: String,
     },
 }
@@ -310,10 +276,6 @@ pub enum Refusal {
 /// **Every check here runs before a single delete is issued**, and the error
 /// type says so: a [`Refusal`] is the exit-3 arm, and the caller has deleted
 /// nothing when it sees one.
-///
-/// # Errors
-///
-/// [`Refusal`] — see its variants.
 pub fn parse_plan(bytes: &[u8], approved_sha256: &str) -> Result<Plan, Refusal> {
     // THE DIGEST FIRST, over the exact bytes on disk, before the JSON is even
     // looked at. A plan whose bytes are not the approved bytes is not this
@@ -356,10 +318,10 @@ pub struct RunBinding {
 ///
 /// [`Refusal`] — nothing has been deleted when this returns one.
 pub fn validate_plan(plan: &Plan, binding: &RunBinding) -> Result<(), Refusal> {
-    // THE UID AND NOT A GENERATION. The generation is not in the plan bytes
-    // (review `d3w9` C1) and could not be compared here if it were wanted: what
-    // binds this plan to this run is the policy's identity, its scope and the
-    // approved digest `parse_plan` already checked over the exact bytes.
+    // THE UID AND NOT A GENERATION. The generation is not in the plan bytes and
+    // could not be compared here if it were wanted: what binds this plan to
+    // this run is the policy's identity, its scope and the approved digest
+    // `parse_plan` already checked over the exact bytes.
     if plan.policy_uid != binding.policy_uid {
         return Err(Refusal::PolicyMismatch {
             found: plan.policy_uid.clone(),
@@ -465,10 +427,6 @@ pub fn validate_plan(plan: &Plan, binding: &RunBinding) -> Result<(), Refusal> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The delete seam
-// ---------------------------------------------------------------------------
-
 /// How a delete failed, in a CLOSED vocabulary.
 ///
 /// Never a raw object-store error body: those carry bucket names, request ids
@@ -493,27 +451,27 @@ pub enum DeleteError {
     /// A timeout or a transport failure. **Retried.**
     Timeout,
     /// The run reached its own `maxObjectsPerRun` ceiling with keys still to
-    /// go. **Not a failure of anything** (review `d3w9` M2): it is the bound
-    /// working, the leftovers are named, and the next run completes them.
+    /// go. **Not a failure of anything**: it is the bound working, the
+    /// leftovers are named, and the next run completes them.
     ///
-    /// It has its own code so that
-    /// `status.lastEnforcement.failed[].code` can be read as "this needs
-    /// attention" everywhere else, and so the controller can decline to count
-    /// it toward `consecutiveRunFailures` — three bounded runs on a large
-    /// archive used to set `EnforcementDegraded` and stop scheduling for good.
+    /// It has its own code so that `status.lastEnforcement.failed[].code` can
+    /// be read as "this needs attention" everywhere else, and so the controller
+    /// can decline to count it toward `consecutiveRunFailures`: three bounded
+    /// runs on a large archive must not set `EnforcementDegraded` and stop
+    /// scheduling for good.
     BudgetExhausted,
     /// The key's current version carries a provider version id: the bucket
     /// is versioned (every S3 Object Lock bucket is), so a DELETE by key would
     /// write a DELETE MARKER over the object and remove nothing — and a legal
     /// hold or retention period on the version is never consulted, because no
-    /// version is being deleted. **Not retried, and nothing is deleted** (defect
-    /// OBJECT-LOCK-DELETE-MARKER): recording `Deleted` for a key that only got a
+    /// version is being deleted. **Not retried, and nothing is deleted**:
+    /// recording `Deleted` for a key that only got a
     /// marker is the false record this code exists to prevent. See
     /// [`Deleter::probe_versioning`].
     VersionedBucket,
     /// The HEAD that establishes whether a delete would land as a marker was
     /// refused (typically `AccessDenied`: the credential lacks `s3:GetObject`
-    /// on `<prefix>/*`, which D3 §6.5's documented scope includes). **Not
+    /// on `<prefix>/*`, which the documented scope includes). **Not
     /// retried, and nothing is deleted**: "could not tell" never authorises a
     /// delete.
     VersionProbeRefused,
@@ -530,14 +488,13 @@ pub enum DeleteError {
 /// specific version (where the provider would refuse a held one) nor tell,
 /// after the fact, that it wrote a marker. What it CAN read is
 /// `ObjectMeta::version`, which the S3 client fills from `x-amz-version-id` on
-/// a HEAD. Measured on the lab MinIO (`claude/artifacts/ctl-batch-2/
-/// minio-version-header-probe.txt`): present on a versioned bucket, a
-/// `--with-lock` bucket, and an object written while versioning was enabled
-/// in a now-suspended bucket; absent on a plain bucket and on an object written
+/// a HEAD. Measured on MinIO: present on a versioned bucket, a `--with-lock`
+/// bucket, and an object written while versioning was enabled in a
+/// now-suspended bucket; absent on a plain bucket and on an object written
 /// while versioning was suspended.
 ///
 /// **`Versioned` proves a delete by key would be a marker. `Unversioned` does
-/// NOT prove it would remove the object** (review H1, measured on MinIO): an
+/// NOT prove it would remove the object** (measured on MinIO): an
 /// object stored BEFORE versioning was enabled is a null version, its HEAD
 /// carries no version id, and under Enabled versioning a delete by key still
 /// writes a marker over it. That case is caught by the bucket-level signal —
@@ -572,8 +529,8 @@ impl DeleteError {
         }
     }
 
-    /// Whether another attempt could plausibly succeed — D3 §6.5's "only on
-    /// 5xx/timeouts".
+    /// Whether another attempt could plausibly succeed: only on 5xx and
+    /// timeouts.
     #[must_use]
     pub fn retryable(self) -> bool {
         matches!(self, Self::ServerError | Self::Timeout)
@@ -584,7 +541,7 @@ impl DeleteError {
     /// A `Locked` is a provider-authoritative legal hold. `object_store` 0.14
     /// exposes no WORM readback, so "legal hold respected" means exactly "a
     /// provider refusal is authoritative and recorded" — never "Logweir knows
-    /// the hold exists" (D3 §16).
+    /// the hold exists".
     #[must_use]
     pub fn is_hold(self) -> bool {
         matches!(self, Self::Locked)
@@ -652,10 +609,6 @@ impl Lister for NoListing {
 pub trait Deleter {
     /// Remove exactly this key. Idempotent: a key that is already gone is
     /// [`DeleteError::NotFound`], which [`execute`] treats as done.
-    ///
-    /// # Errors
-    ///
-    /// [`DeleteError`], classified.
     fn delete_exact(&self, key: &str) -> Result<(), DeleteError>;
 
     /// Whether a delete of this key BY KEY would remove it, or only write a
@@ -683,7 +636,7 @@ pub trait Sleeper {
 #[error("{0}")]
 pub struct SinkError(pub String);
 
-/// Where the per-point tombstones go — D3 §6.5's execution order.
+/// Where the per-point tombstones go.
 ///
 /// **Create-only, under `logweir/`, which this run's delete credential cannot
 /// reach.** The intent is written BEFORE the manifest delete and the completion
@@ -695,7 +648,7 @@ pub trait TombstoneSink {
     /// and answer the provider's VERSION ID for the object written, if it gave
     /// one (`PutResult::version`, from `x-amz-version-id`).
     ///
-    /// **The version id is load-bearing** (review H1): the sink writes into
+    /// **The version id is load-bearing**: the sink writes into
     /// the same bucket the run deletes from, and a provider returns one exactly
     /// when versioning is Enabled on that bucket now — in which case a delete
     /// by key would only write a marker, whatever a key's own HEAD says.
@@ -732,11 +685,9 @@ pub struct Tombstone {
     pub stage: String,
     /// The run that wrote it.
     pub run_id: String,
-    /// The policy UID.
     pub policy_uid: String,
     /// The plan digest that authorised it.
     pub plan_sha256: String,
-    /// The point.
     pub point_id: String,
     /// The archive set.
     pub backup_id: String,
@@ -773,10 +724,6 @@ impl Sleeper for ThreadSleeper {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The outcome
-// ---------------------------------------------------------------------------
-
 /// What happened to one point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointState {
@@ -805,7 +752,6 @@ impl PointState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PointOutcome {
-    /// The point id.
     pub point_id: String,
     /// `Deleted`, `Orphaned` or `Kept`.
     pub state: String,
@@ -862,8 +808,7 @@ impl Outcome {
             .all(|p| p.state == PointState::Deleted.as_str())
     }
 
-    /// Whether the ONLY thing that stopped this run was its own object ceiling
-    /// — review `d3w9` M2.
+    /// Whether the ONLY thing that stopped this run was its own object ceiling.
     ///
     /// A run like that exits 1 (work remains) and must **not** count toward
     /// `consecutiveRunFailures`: three bounded runs on a large archive would
@@ -890,7 +835,7 @@ pub struct Limits {
 
 /// Run the plan.
 ///
-/// # Order, per point, per D3 §6.5
+/// # Order, per point
 ///
 /// 1. The manifest key. If it does not go, the point is `Kept` and its segments
 ///    are not touched: deleting segments out from under a live manifest is the
@@ -923,7 +868,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
     };
     for line in &plan.lines {
         if limits.dry_run {
-            // THE PREVIEW ENUMERATES (review `d3w9` M1). A plan this build
+            // THE PREVIEW ENUMERATES. A plan this build
             // writes names the manifest and the set's bound, so the plan's own
             // key list is 1 while the run removes everything under the bound.
             // A preview that printed 1 is how an administrator approves a
@@ -933,7 +878,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             // plan's own keys, which is the honest answer for a caller that
             // holds no list grant.
             let keys = resolve_keys(line, lister).unwrap_or_else(|_| line.object_keys.clone());
-            // AND IT SAYS WHEN THE RUN WOULD REFUSE (review L9). A dry run
+            // AND IT SAYS WHEN THE RUN WOULD REFUSE. A dry run
             // writes no tombstone, so the bucket-level signal the run reads
             // ([`TombstoneSink::put_create_only`]'s version id) does not exist
             // here; the manifest's own HEAD is what the preview can ask. A
@@ -990,11 +935,11 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
         //     not deleted: "every deletion is attributable" is a precondition,
         //     not a report.
         //
-        //     AND THE INTENT IS THE BUCKET'S VERSIONING PROBE (review H1). The
+        //     AND THE INTENT IS THE BUCKET'S VERSIONING PROBE. The
         //     tombstone is PUT into the SAME bucket (one `DestinationLocation`
         //     holds the archive prefix and `logweir/`), and a provider answers
         //     a PUT with a version id exactly when versioning is ENABLED on the
-        //     bucket now — measured on MinIO by the ctl-batch-2 review: a
+        //     bucket now — measured on MinIO: a
         //     version id from an Enabled bucket, none from a plain or a
         //     Suspended one. Under Enabled versioning EVERY delete by key is a
         //     marker, including of an object stored before versioning was
@@ -1051,7 +996,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
         for key in keys.iter().skip(1) {
             if out.objects_deleted >= limits.max_objects {
                 remaining.push(key.clone());
-                // NAMED, not `Unclassified` (review `d3w9` M2). A run that
+                // NAMED, not `Unclassified`. A run that
                 // stopped on its own ceiling and a run that could not read the
                 // bucket are different findings and are fixed in different
                 // places.
@@ -1070,7 +1015,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             }
         }
 
-        // 2b. THE BUCKET, AGAIN, AFTER THE DELETES (re-check RH1). The intent
+        // 2b. THE BUCKET, AGAIN, AFTER THE DELETES. The intent
         //     proved versioning was not Enabled when this line started; it
         //     proves nothing about the minutes the deletes took. Versioning
         //     switched on in between turns every later delete by key into a
@@ -1199,7 +1144,6 @@ fn resolve_keys<L: Lister>(line: &PlanLine, lister: &L) -> Result<Vec<String>, S
 /// Who a run is, for the tombstones it writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunAttribution {
-    /// The run id.
     pub run_id: String,
     /// The policy UID — the tombstone key's first segment.
     pub policy_uid: String,
@@ -1286,20 +1230,16 @@ fn write_check<T: TombstoneSink>(
 
 /// One key, with the bounded retry. `true` when the key is gone.
 ///
-/// # A delete marker is not a deletion (defect OBJECT-LOCK-DELETE-MARKER)
+/// # A delete marker is not a deletion
 ///
 /// Every key is probed first ([`Deleter::probe_versioning`]). On a versioned
-/// bucket — and every S3 Object Lock bucket is one — a DELETE with no version
-/// id is ANSWERED 204 and removes nothing: the provider writes a delete marker,
+/// bucket (and every S3 Object Lock bucket is one) a DELETE with no version id
+/// is ANSWERED 204 and removes nothing: the provider writes a delete marker,
 /// the data survives as a noncurrent version, and a legal hold on it is never
-/// consulted because no version was asked for. The first landing recorded such
-/// a point `Deleted` (live: harness-rows-11 `object-lock`, a held point
-/// `Deleted` with its data intact under markers). `object_store` 0.14 can
-/// neither delete by version (where the provider would refuse a held one) nor
-/// read the marker header off the response, so the worker REFUSES the
-/// combination — PLAT-16.2's "reject unsupported combinations rather than
-/// claiming" — and says so with [`DeleteError::VersionedBucket`], deleting
-/// nothing for that key.
+/// consulted because no version was asked for. `object_store` 0.14 can neither
+/// delete by version (where the provider would refuse a held one) nor read the
+/// marker header off the response, so the worker REFUSES the combination with
+/// [`DeleteError::VersionedBucket`], deleting nothing for that key.
 fn attempt<D: Deleter, S: Sleeper>(
     deleter: &D,
     sleeper: &S,
@@ -1362,11 +1302,7 @@ fn probe<D: Deleter, S: Sleeper>(
     Err(last)
 }
 
-// ---------------------------------------------------------------------------
-// The attributable record
-// ---------------------------------------------------------------------------
-
-/// The signed-record document — D3 §6.5's "attributable deletion".
+/// The attributable deletion record.
 ///
 /// Written under `logweir/retention/<policyUid>/<runId>.json`, create-only, to
 /// a prefix this run's own credential cannot delete from.
@@ -1375,7 +1311,7 @@ fn probe<D: Deleter, S: Sleeper>(
 /// `PutMode::Create`, so it cannot be silently replaced by the retention
 /// principal, and it names the plan digest, the approver reference, the policy
 /// identity and generation, every point removed with its object count and every
-/// failure with its closed code. It is **not** signed in this landing — see
+/// failure with its closed code. It is **not** signed: see
 /// `docs/stability.md`, "the retention record is create-only and unsigned in
 /// v1" — so it is tamper-evident against the retention principal and not
 /// against a principal with `s3:PutObject` under `logweir/`.
@@ -1386,15 +1322,10 @@ pub struct Record {
     pub format: String,
     /// The document version.
     pub format_version: String,
-    /// The run id.
     pub run_id: String,
-    /// The policy's namespace.
     pub policy_namespace: String,
-    /// The policy's name.
     pub policy_name: String,
-    /// The policy's UID.
     pub policy_uid: String,
-    /// The generation.
     pub policy_generation: i64,
     /// The plan digest that authorised this run.
     pub plan_sha256: String,
@@ -1403,7 +1334,6 @@ pub struct Record {
     pub approver: String,
     /// The destination's location id.
     pub location_id: String,
-    /// The scope prefix.
     pub scope_prefix: String,
     /// `keepLast`, as applied.
     pub keep_last: Option<i64>,
@@ -1428,13 +1358,12 @@ pub struct Record {
 /// What the caller knows that the plan does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordContext {
-    /// The run id.
     pub run_id: String,
     /// The policy generation this run was created at.
     ///
     /// It comes from the Job's environment and NOT from the plan: the plan
-    /// carries no generation, because approving one bumps it (review `d3w9`
-    /// C1). The record wants it anyway — it is a fact about the run, and an
+    /// carries no generation, because approving one bumps it. The record wants
+    /// it anyway — it is a fact about the run, and an
     /// auditor asking "which revision of the policy authorised this" needs it.
     pub policy_generation: i64,
     /// The approver reference, or `"unattended"`.

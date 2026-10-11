@@ -1,5 +1,5 @@
 #![cfg(feature = "e2e")]
-//! The explicit store options (D2 W2) against a REAL S3-compatible server.
+//! The explicit store options against a REAL S3-compatible server.
 //!
 //! # Gating
 //!
@@ -68,7 +68,7 @@ fn location(bucket_name: &str, prefix: &str) -> StorageUrl {
         region: Some("us-east-1".into()),
         endpoint: Some(endpoint()),
         // MinIO with a custom endpoint is path-style, which is also the only
-        // addressing engine 0.21.0 can honour here (D2 G4).
+        // addressing engine 0.21.0 can honour here.
         path_style: true,
         allow_http: true,
     }
@@ -208,7 +208,7 @@ fn a_missing_key_and_a_missing_bucket_are_different_answers() {
     );
 }
 
-/// D-SEAMS S5 end to end: with `allow_http: false` — what a `TLS` destination
+/// End to end: with `allow_http: false` — what a `TLS` destination
 /// renders — the very same explicit credentials cannot reach a plaintext
 /// MinIO, whatever `AWS_ALLOW_HTTP` says. The request is refused while it is
 /// being built, so nothing leaves the process.

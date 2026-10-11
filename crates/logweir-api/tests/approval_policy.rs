@@ -1,4 +1,4 @@
-//! PLAT-19.2 (and PLAT-12.1's policy routing) at the product API: a Restore
+//! Approval-policy routing at the product API: a Restore
 //! submission is routed by the namespace's frozen approval policy — to
 //! execution under Ordinary, to Awaiting approval under Governed and under the
 //! legacy synthesis — and a governed approval is submitted by a DIFFERENT
@@ -112,9 +112,7 @@ fn verify(document: &str, sidecar: &str, key: &logweir_evidence::keys::Verifying
     .is_ok()
 }
 
-// ---------------------------------------------------------------------------
-// Routing a submission by the frozen policy (PLAT-12.1)
-// ---------------------------------------------------------------------------
+// ROUTING A SUBMISSION BY THE FROZEN POLICY.
 
 /// **Existing installations keep their approval requirement.** An unbound
 /// namespace signs nothing and routes to Awaiting approval, exactly as before.
@@ -421,9 +419,9 @@ async fn a_governed_approval_name_must_leave_room_for_its_confirmation() {
     );
 }
 
-/// **localAdmin confirms, as the local administrator** (PROD-16.1, amending
-/// review H1 and D0's "does not expose Ordinary"): an Ordinary (`confirm`)
-/// binding served by the in-cluster administrator console is confirmed in one
+/// **localAdmin confirms, as the local administrator**: an Ordinary
+/// (`confirm`) binding served by the in-cluster administrator console is
+/// confirmed in one
 /// click, and the signed document names the one principal that console has,
 /// `urn:logweir:local-admin#admin` — whoever can reach the console can
 /// confirm, the residual SECURITY.md states. NEGATIVE CONTROL for the
@@ -544,7 +542,7 @@ async fn a_governed_request_carries_a_ticket_into_the_signed_document() {
 }
 
 /// An approval name ending in `-confirmation` would collide with another
-/// governed Restore's confirmation object (review L4): refused under
+/// governed Restore's confirmation object: refused under
 /// Governed, before anything exists.
 #[tokio::test]
 async fn a_governed_approval_name_may_not_end_in_the_confirmation_suffix() {
@@ -608,9 +606,7 @@ async fn the_effective_policy_is_readable_per_namespace() {
     assert!(unbound["item"].get("digest").is_none());
 }
 
-// ---------------------------------------------------------------------------
-// Governed approval submission and separation of duties (D0)
-// ---------------------------------------------------------------------------
+// GOVERNED APPROVAL SUBMISSION AND SEPARATION OF DUTIES (D0).
 
 /// The confirmation's exact bytes, countersigned by `approver`.
 fn countersigned(app: &TestApp, ns: &str, approver: &SigningKey) -> String {
@@ -715,7 +711,7 @@ fn v1_files(plan_hash: &str) -> (String, String) {
     (document, serde_json::to_string(&sidecar).expect("json"))
 }
 
-/// **CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE** (found live): in an UNBOUND
+/// **Today's approval files through the console**: in an UNBOUND
 /// namespace the approver records the two `logweir drill approve` files
 /// through the product API, stored EXACTLY as they arrived as the Approval
 /// the Restore names; a replay of the same files answers 200 and a different
@@ -883,7 +879,7 @@ async fn a_recorded_approval_must_be_this_restores_v1_document() {
     );
 }
 
-/// **No private key is ever stored** (review L3): the approval route refuses
+/// **No private key is ever stored**: the approval route refuses
 /// private-key text in either field, server-side, before anything is read or
 /// written, and never echoes it. The control is the same route with the real
 /// files (`an_unbound_namespace_records_todays_approval_files_exactly`).
@@ -984,8 +980,8 @@ async fn shared_create_with(
     .await
 }
 
-/// `team-a` bound to the ORDINARY policy, served by a SHARED console (review
-/// H1: D0's `localAdmin` mode does not expose Ordinary). alice operates, bob
+/// `team-a` bound to the ORDINARY policy, served by a SHARED console. alice
+/// operates, bob
 /// approves.
 fn ordinary_app() -> (SharedApp, Console) {
     let console = console("team-ordinary");

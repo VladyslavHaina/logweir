@@ -1,5 +1,5 @@
-//! Guard **G-ID** — the plan binds the principal — and the rest of Task 6's
-//! named acceptance (interface **I1**).
+//! Guard **G-ID** — the plan binds the principal — and the rest of the auth
+//! acceptance (interface **I1**).
 //!
 //! # Why the binding is the point, and not the connectivity
 //!
@@ -72,9 +72,7 @@ fn drill_spec_text(username: &str, tls: bool) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// G-ID
-// ---------------------------------------------------------------------------
+// G-ID.
 
 /// The mutable half a controller holds: a `KafkaCluster` object, live, at
 /// render time.
@@ -110,10 +108,9 @@ fn render_as_a_controller_would(spec_text: &str, live: &KafkaClusterView) -> (Re
     // plan `plan_hash` covers; the live view is available to it here and is
     // not among its arguments, which is the structural half of G-ID.
     //
-    // The `BackupSetFacts` argument is guard **G-WIN**'s: since Task 9 the
-    // window's floor comes from the archive manifest and from nothing else, so
-    // plan construction needs the manifest's facts. This one's earliest
-    // covered timestamp is the spec's own `sample.window_start`, which is what
+    // The `BackupSetFacts` argument is guard **G-WIN**'s: the window's floor
+    // comes from the archive manifest and from nothing else. This one's
+    // earliest covered timestamp is the spec's own `sample.window_start`, which
     // keeps every G-ID assertion below about the PRINCIPAL and nothing else.
     let facts = one_segment_facts(ts("2026-08-29T00:00:00Z").timestamp_millis());
     let plan = logweir::drill::build_plan(&spec, &set, &mapping, &facts, "01J9X", None)
@@ -134,7 +131,7 @@ fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
 
 /// One topic, one partition, one segment starting at `start_ms` — the minimum
 /// a manifest needs for `BackupSetFacts::earliest_covered_timestamp_ms` to
-/// answer, which plan construction now requires (guard **G-WIN**).
+/// answer, which plan construction requires (guard **G-WIN**).
 fn one_segment_facts(start_ms: i64) -> logweir_core::engine::BackupSetFacts {
     use logweir_core::engine::{BackupSetFacts, PartitionFacts, SegmentFacts, TopicFacts};
     BackupSetFacts {
@@ -250,25 +247,16 @@ fn rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The two documents
-// ---------------------------------------------------------------------------
+// The two documents.
 
 /// `auth.mode` and `auth.username` land in the backup receipt and in the
 /// restore scorecard.
 ///
-/// **What this branch can and cannot assert, stated rather than blurred.**
 /// The backup half runs for real: `backup::execute_with`, in process, over
-/// doubles (critique A F1 — the binary would need a broker for the cluster id
-/// and an archive for the drill), and the mapping from its `BackupOutcome`
-/// onto Task 5's own `ReceiptAuth` type is asserted over that type. The
-/// receipt is not yet WRITTEN by this build — `--receipt-out` is interface
-/// I6, refused by `phase_minus1_admit::local` until Task 5b lands it — and the
-/// scorecard's `target.auth` block (`AuthSummary`, both readers, the schema)
-/// is Task 5b's too, in this same slot. So the SCORECARD half is asserted
-/// through the values `drill::target_info` will use, which
+/// doubles, and the mapping from its `BackupOutcome` onto `ReceiptAuth` is
+/// asserted over that type. The SCORECARD half is asserted through the values
+/// `drill::target_info` uses, which
 /// `the_scorecard_auth_block_and_auth_spec_agree` below pins byte for byte.
-/// Nothing here claims a field that does not exist.
 #[test]
 fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     // ---- the receipt's source: a real run, over doubles ----
@@ -276,12 +264,11 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     let reader = Reader::new("SOURCE-0000001");
     // EMPTY: the engine double writes the manifest when it runs, as the real
     // engine does — a run refuses an execution whose backup set already
-    // exists (FX-7, `phase_run::refuse_an_existing_set`).
+    // exists (`phase_run::refuse_an_existing_set`).
     let store = std::sync::Arc::new(Store::in_memory(ARCHIVE_PREFIX));
     let engine = StubEngine::writing_into(store.clone());
-    // Six arguments since Task 5b: the ARCHIVE store and the EVIDENCE
-    // store are separate parameters (`backup::execute_with`), and this row
-    // cares about neither destination — one in-memory store plays both.
+    // The ARCHIVE store and the EVIDENCE store are separate parameters; this
+    // row cares about neither destination, so one in-memory store plays both.
     let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(
         outcome.source_auth,
@@ -296,7 +283,7 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     // renders `sasl_username` from (**G-ID**, backup side).
     assert_eq!(engine.recorded_plan().source_auth, outcome.source_auth);
 
-    // ---- and onto Task 5's receipt type, through the I1 accessors ----
+    // ---- and onto the receipt type, through the I1 accessors ----
     let spec: logweir_core::spec::BackupSpec =
         serde_yaml::from_str(&std::fs::read_to_string(&f.args.spec).unwrap()).unwrap();
     let receipt_auth = ReceiptAuth {
@@ -335,14 +322,11 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     );
 }
 
-/// The same-slot late binding to Task 5b (interface **I1** ↔ its
-/// `AuthSummary`), exactly as **I33** closes the CRD enums.
-///
 /// Three surfaces have to agree on two strings: the YAML an adopter writes,
-/// the CRD an adopter applies, and the signed documents a reader parses. This
-/// asserts Logweir's half — the serde tag values and the `{mode, username}`
-/// JSON shape — so that when Task 5b lands `scorecard::AuthSummary` and both
-/// readers' tolerant read, the agreement is a test and not a comment.
+/// the CRD an adopter applies, and the signed documents a reader parses
+/// (interface **I1** and `AuthSummary`, as **I33** closes the CRD enums). This
+/// asserts Logweir's half: the serde tag values and the `{mode, username}`
+/// JSON shape.
 #[test]
 fn the_scorecard_auth_block_and_auth_spec_agree() {
     // 1. `mode_str()` is exactly the two strings, and nothing else.
@@ -398,10 +382,7 @@ fn the_scorecard_auth_block_and_auth_spec_agree() {
     }
 
     // 4. The `{mode, username}` object round-trips through serde_json with
-    //    exactly those keys — the shape Task 5b's `AuthSummary` declares. It
-    //    is asserted here over a MIRROR of that shape, because `AuthSummary`
-    //    lands in Task 5b's commit in this same slot; the controller
-    //    reconciles at rebase if the shape differs.
+    //    exactly those keys, asserted over a MIRROR of `AuthSummary`'s shape.
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug)]
     struct AuthSummaryMirror {
         mode: String,
@@ -424,8 +405,8 @@ fn the_scorecard_auth_block_and_auth_spec_agree() {
         summary
     );
 
-    // 5. Task 5's `ReceiptAuth` — which IS landed — has that shape already,
-    //    so the two documents cannot disagree about the key names.
+    // 5. `ReceiptAuth` has that shape, so the two documents cannot disagree
+    //    about the key names.
     let receipt = ReceiptAuth {
         mode: "scramSha512".into(),
         username: Some("logweir".into()),
@@ -433,39 +414,19 @@ fn the_scorecard_auth_block_and_auth_spec_agree() {
     assert_eq!(serde_json::to_string(&receipt).unwrap(), json);
 }
 
-// ---------------------------------------------------------------------------
-// The structural rows
-// ---------------------------------------------------------------------------
+// The structural rows.
 
-/// No construction site hard-codes the plaintext arm any more.
-///
-/// Two of the three did, each with a comment explaining that `TargetSpec`
-/// carried no auth block to render a `ScramSha512` from — so SASL was
-/// unreachable from any shipped spec, and `doctor` reported "target
-/// unreachable" against a cluster that was reachable and merely required
-/// authentication.
+/// No construction site hard-codes the plaintext arm: SASL must be reachable
+/// from a shipped spec, or `doctor` reports "target unreachable" against a
+/// cluster that merely requires authentication.
 ///
 /// Comment lines are stripped before the scan: the files legitimately DISCUSS
-/// the arm they used to pin, and a test that could not tell prose from code
-/// would force the history out of the source.
-///
-/// # The file list is DERIVED — Task 16b, plan erratum E11(e), finding M-2
-///
-/// This row used to iterate a FIXED list, `["drill/mod.rs", "doctor.rs",
-/// "backup/mod.rs"]`. Task 15c then added a fourth sanctioned site,
-/// `probe.rs`, and this row did not notice — it could not: a list is not a
-/// rule, and the fifth site would have been invisible too. The list is now
-/// computed by walking `crates/logweir/src/**`, so every site that constructs
-/// is checked by existing.
-///
-/// THE FULL RULE LIVES IN ONE PLACE AND IT IS NOT HERE:
-/// `no_network_in_unit_tests.rs::the_one_construction_site_rule_is_derived_from_the_tree`
-/// owns the allowlist of sanctioned sites and their reasons, walks
-/// `crates/weirkeeper/src/**` as well, and additionally asserts that each
-/// site confines the dialling constructor to one named function. This row is
-/// Task 6's own narrower claim, kept under its own name and derived rather
-/// than listed — no second allowlist, and none needed: the claim below holds
-/// for EVERY file that constructs, sanctioned or not.
+/// the arm. The file list is DERIVED by walking `crates/logweir/src/**`, so
+/// every site that constructs is checked by existing. The full rule (the
+/// allowlist of sanctioned sites, `crates/weirkeeper/src/**` too, one named
+/// function per site) is
+/// `no_network_in_unit_tests.rs::the_one_construction_site_rule_is_derived_from_the_tree`;
+/// the claim here holds for EVERY file that constructs, sanctioned or not.
 #[test]
 fn no_construction_site_hardcodes_plaintext() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -522,7 +483,7 @@ fn no_construction_site_hardcodes_plaintext() {
 }
 
 /// The archive-side `SourceSpec` carries no auth block, and the two
-/// broker-side specs do (critique A F15).
+/// broker-side specs do.
 ///
 /// `SourceSpec` is `{storage, backup, topics}` — the drill's ARCHIVE location.
 /// It has no `bootstrap_servers` and dials no broker, so a SCRAM block on it
@@ -654,7 +615,7 @@ fn no_password_reaches_a_rendered_document() {
 ///
 /// An ABSENT variable is operational (exit 1): nothing was refused, the plan
 /// is probably fine, and the fix is to project the Secret — which is exactly
-/// what "retry" means to Task 18's cron reconciler. An UNRENDERABLE value is a
+/// what "retry" means to the cron reconciler. An UNRENDERABLE value is a
 /// guard refusal (exit 3), because no projection of that value will ever work.
 /// The process-level halves of both are in `tests/cli_exit_codes.rs`.
 #[test]
@@ -777,9 +738,7 @@ fn an_unrenderable_projected_password_is_a_credential_refusal() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Doubles and fixtures for the one in-process run
-// ---------------------------------------------------------------------------
+// Doubles and fixtures for the one in-process run.
 
 const ARCHIVE_PREFIX: &str = "logweir/";
 
@@ -806,14 +765,11 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
     )
     .unwrap();
     std::fs::write(&allowed, "{\"allowed_cluster_ids\": [\"SCRATCH-0000001\"]}").unwrap();
-    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key.
-    // Since Task 5b `execute_with` SIGNS the receipt, so a bare
-    // `PathBuf::from("signer.pem")` — which was enough while the function
-    // wrote nothing — now fails the run with `key error: signer.pem: No such
-    // file or directory`. Same pattern as `tests/backup_run.rs`'s own
-    // fixture: the key lives and dies with the `TempDir`, and the throwaway
-    // fixture key under `e2e/fixtures/signed/` stays reserved for the corpus
-    // walkers, which verify against a checked-in PUBLIC pem.
+    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key:
+    // `execute_with` SIGNS the receipt. Same pattern as `tests/backup_run.rs`'s
+    // own fixture: the key lives and dies with the `TempDir`, and the
+    // throwaway fixture key under `e2e/fixtures/signed/` stays reserved for
+    // the corpus walkers.
     let key = SigningKey::generate_p256();
     let key_path = dir.path().join("signer.pem");
     std::fs::write(&key_path, key.to_pkcs8_pem().unwrap()).unwrap();
@@ -843,7 +799,7 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
 struct StubEngine {
     plans: std::sync::Mutex<Vec<logweir_core::engine::BackupPlan>>,
     /// Where `backup` writes its manifest, as the real engine does DURING the
-    /// run (FX-7: a set that exists before the engine starts is refused).
+    /// run (a set that exists before the engine starts is refused).
     archive: std::sync::Arc<Store>,
 }
 

@@ -41,7 +41,7 @@ use crate::audit::AuditContext;
 use crate::problem::ApiError;
 
 /// The issuer string of the local administrator actor — the one constant
-/// every reader of a console approval refuses (PROD-16.2), so the console
+/// every reader of a console approval refuses, so the console
 /// that mints the identity and the readers that refuse it cannot drift.
 pub const LOCAL_ADMIN_ISSUER: &str = logweir_core::approval_policy::LOCAL_ADMIN_ISSUER;
 

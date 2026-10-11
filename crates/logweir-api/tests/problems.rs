@@ -20,9 +20,9 @@ use support::{FakeKube, Fault, Options, TestApp, HOST, NS_A, ORIGIN};
 /// the end so a new code cannot be added without a producing test or an
 /// explicit reservation.
 const RESERVED_FOR_LATER_STAGES: [ProblemCode; 2] = [
-    // PLAT-17.2 session authenticator.
+    // The session authenticator.
     ProblemCode::SessionExpired,
-    // PLAT-19.2 approval policy: `policy_mismatch` is now produced
+    // Approval policy: `policy_mismatch` is produced
     // (approval_policy::a_submission_outside_a_governed_binding_is_policy_mismatch);
     // `approval_required` stays reserved.
     ProblemCode::ApprovalRequired,
@@ -480,14 +480,14 @@ fn every_code_is_produced_or_reserved() {
         "kubernetes_unavailable", // kubernetes_failures_map_to_stable_codes_without_echoing_messages
         "upstream_timeout",       // a_kubernetes_call_past_its_deadline_is_upstream_timeout
         "internal_error",         // render-only: an invariant failure has no honest trigger
-        // D2 W12.
+        // Destinations and topic discoveries.
         "destination_invalid", // destinations::the_rules_are_evaluated_before_the_object_exists
         "destination_location_immutable", // a_rejected_rotation_is_reported_as_an_immutable_location
         "transport_downgrade_forbidden", // destinations::update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext
         "result_integrity_failed", // topic_discoveries::a_chunk_that_fails_its_integrity_check_refuses_the_page
-        // D1 W6.
+        // Manual backups.
         "policy_changed", // manual_backups::an_expected_generation_that_moved_is_policy_changed
-        // PLAT-19.2.
+        // Approval policy.
         "policy_mismatch", // approval_policy::a_submission_outside_a_governed_binding_is_policy_mismatch
     ]
     .into_iter()
@@ -531,7 +531,7 @@ async fn a_rejected_rotation_is_reported_as_an_immutable_location() {
             None,
             &serde_json::json!({
                 "expectedGeneration": 3,
-                // FX-20: a Secret the seeded destination already names.
+                // A Secret the seeded destination already names.
                 "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
             })
             .to_string(),

@@ -1,12 +1,11 @@
-// restore-subset.spec.js -- PLAT-11.2's behaviour arm: the topic subset, the
-// exact mapping preview, the recovery limits, the readiness gate before a
-// submit, and the fresh-target retry.
+// restore-subset.spec.js -- the topic subset, the exact mapping preview, the
+// recovery limits, the readiness gate before a submit, and the fresh-target
+// retry.
 //
-// EVERY ROW CARRIES ITS NEGATIVE CONTROL, in the shape the lean loop asks for
-// a console change: an assertion that FAILS when the behaviour is absent. They
-// are written as a second assertion over the state the behaviour is about --
-// "and with the behaviour's input removed, the page does NOT say this" -- so a
-// mutant that deletes the rule leaves the row red rather than vacuously green.
+// EVERY ROW CARRIES ITS NEGATIVE CONTROL: a second assertion over the same
+// state with the behaviour's input removed ("the page does NOT say this"), so
+// a mutant that deletes the rule leaves the row red rather than vacuously
+// green.
 //
 // Pure functions from a JSON object to an HTML string, as everything in this
 // directory is: no DOM, no network, no clock.
@@ -128,7 +127,7 @@ function preflight(planHash, over) {
   );
 }
 
-// ------------------------------------------------- 1. the subset and its mapping
+// 1. THE SUBSET AND ITS MAPPING.
 
 test("the_wizard_restores_a_chosen_subset_and_the_request_is_the_preview", () => {
   const state = wizardState();
@@ -161,11 +160,9 @@ test("the_wizard_restores_a_chosen_subset_and_the_request_is_the_preview", () =>
   assert.deepEqual(body.topicMapping, topicMapping(state));
   assert.deepEqual(body.topicMapping, [{ source: "payments", target: prefix + "payments" }]);
 
-  // THE CONTROL IS THE IDENTITY ITSELF, not a locally built array compared
-  // with the thing it was built from -- that earlier form could not fail for
-  // any value and the review said so. What can fail: `restoreBody` must return
-  // rows EQUAL to `topicMapping(state)` for a state the test moves underneath
-  // it, so a body that cached, reordered or rebuilt them is caught.
+  // THE CONTROL IS THE IDENTITY ITSELF: `restoreBody` must return rows EQUAL
+  // to `topicMapping(state)` for a state the test moves underneath it, so a
+  // body that cached, reordered or rebuilt them is caught.
   state.fields.topics = ["orders"];
   assert.deepEqual(
     restoreBody(state, { bytes: "b", hash: "sha256:h", restoreName: "r", approvalName: "a" })
@@ -174,10 +171,9 @@ test("the_wizard_restores_a_chosen_subset_and_the_request_is_the_preview", () =>
     "the declared rows follow the selection, they are not a snapshot of an earlier one",
   );
   assert.deepEqual(topicMapping(state), [{ source: "orders", target: prefix + "orders" }]);
-  // The mutant that renames a row after the preview is planted in the SOURCE
-  // (`restoreBody`'s `topicMapping(s)`) and killed by this row; the product
-  // API's own `mapping_mismatch` rail is exercised live and in
-  // `crates/logweir-api/tests/resources.rs`.
+  // A mutant that renames a row after the preview, planted in `restoreBody`'s
+  // `topicMapping(s)`, is killed by this row; the product API's own
+  // `mapping_mismatch` rail is in `crates/logweir-api/tests/resources.rs`.
   assert.notEqual(
     mappedTopicName(prefix, "orders"),
     "somewhere-else",
@@ -211,10 +207,9 @@ test("a_duplicate_mapping_is_refused_before_the_submit_and_names_both_rows", () 
   );
   const step = stepStates(state)[3];
   assert.equal(step.status, "attention", "and step 4 does not read `done` over a refused mapping");
-  // AND THE REFUSAL IS ON SCREEN ON THE KEYSTROKE, not only after a submit has
-  // been refused by the server -- the window refusal in step 3 works the same
-  // way. Without this the page would show a mapping it has already decided it
-  // will not send, and the live journey found exactly that.
+  // AND THE REFUSAL IS ON SCREEN ON THE KEYSTROKE, not only after the server
+  // refused a submit (as step 3's window refusal works): otherwise the page
+  // would show a mapping it has already decided not to send.
   const rendered = renderTopicSubset(state);
   assert.ok(rendered.includes("id=\"subset-complaint\""), rendered);
   assert.ok(rendered.includes("both map to the target topic"));
@@ -298,7 +293,7 @@ test("an_invalid_prefix_and_an_illegal_mapped_name_are_refused_by_name", () => {
   assert.equal(isKafkaTopicName("x".repeat(MAX_TOPIC_NAME_CHARS + 1)), false);
 });
 
-// --------------------------------------------------- 2. the limits, from constants
+// 2. THE LIMITS, FROM CONSTANTS.
 
 test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", () => {
   const state = wizardState();
@@ -319,9 +314,9 @@ test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", ()
   );
 
   const html = renderRecoveryLimits(state);
-  // FX-5: THE FACTOR IS SHOWN WITH WHERE IT CAME FROM. With nothing read -- no
-  // source factor, no broker count -- it is the grammar's own default, pinned
-  // above, and the panel says that is what it is rather than printing a bare 1.
+  // THE FACTOR IS SHOWN WITH WHERE IT CAME FROM. With nothing read -- no source
+  // factor, no broker count -- it is the grammar's own default, pinned above,
+  // and the panel says so rather than printing a bare 1.
   assert.ok(html.includes(">" + String(LIMITS.defaultReplicationFactor.value) +
     " (the plan grammar&#39;s default: neither the source&#39;s replication factor nor the " +
     "target&#39;s broker count is known to this console)<"),
@@ -360,7 +355,7 @@ test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", ()
   assert.ok(other.includes("will not guess one"));
 });
 
-// --------------------------------------------- 3. the readiness gate before a submit
+// 3. THE READINESS GATE BEFORE A SUBMIT.
 
 test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send_an_archive", () => {
   const prepared = { bytes: "plan bytes\n", hash: "sha256:" + "a".repeat(64) };
@@ -663,10 +658,8 @@ test("a_stale_preflight_and_a_target_change_both_refuse_the_submit", () => {
   assert.equal(readinessRefusal(state, prepared), null);
 
   // AN UNCHECKED PLAN IS A WARNING AND NOT A REFUSAL, and says what was not
-  // looked for. This is legacy mode's arm too: it has no readiness route, so
-  // its result is absent and it lands here. (An earlier draft had a second arm
-  // keyed on `readiness.unavailable`, which nothing in the wizard sets -- a
-  // refusal-bypass and a sentence no reader could reach. It is gone.)
+  // looked for. Legacy mode lands here too: it has no readiness route, so its
+  // result is absent.
   const unchecked = wizardState();
   assert.equal(readinessRefusal(unchecked, prepared), null);
   assert.ok(renderPlanStep(prepared, unchecked).includes("id=\"readiness-not-run\""));
@@ -675,17 +668,13 @@ test("a_stale_preflight_and_a_target_change_both_refuse_the_submit", () => {
 });
 
 test("a_target_swap_invalidates_the_verdict_even_when_the_plan_bytes_do_not_move", () => {
-  // D2 SECTION 6.6's SECOND INVALIDATION CAUSE. The API returns a result as
-  // applicable only while `binding.inputsDigest` still matches its
-  // recomputation from current objects, and `referentChanged:<Kind>/<name>` is
-  // one of the reasons: "Choosing another target or destination, or a
-  // recreated one, changes a referent UID, so the result is stale."
-  //
-  // THE PLAN HASH CANNOT SEE THAT. Two `KafkaCluster` objects with the same
-  // bootstrap servers and the same auth render IDENTICAL plan bytes, so the
-  // hash arm holds and a `ready` verdict about the OTHER cluster stayed on
-  // screen with the submit enabled. The live journey sat in exactly this blind
-  // spot and recorded it as a journey limitation; it was a product gap.
+  // A REFERENT CHANGE INVALIDATES THE VERDICT (D2 section 6.6): the API returns
+  // a result as applicable only while `binding.inputsDigest` still matches its
+  // recomputation, and `referentChanged:<Kind>/<name>` is one of the reasons.
+  // THE PLAN HASH CANNOT SEE THAT: two `KafkaCluster` objects with the same
+  // bootstrap servers and auth render IDENTICAL plan bytes, so the hash arm
+  // alone would keep a `ready` verdict about the OTHER cluster on screen with
+  // the submit enabled.
   const clusters = fixture("wizard-clusters.json");
   const items = clusters.items;
   const twin = JSON.parse(JSON.stringify(items[0]));
@@ -710,11 +699,10 @@ test("a_target_swap_invalidates_the_verdict_even_when_the_plan_bytes_do_not_move
     "the twin renders the SAME plan bytes, which is what makes the hash arm blind here",
   );
 
-  // AND THE SUBMIT IS REFUSED, not merely warned about. D2 section 6.6 puts a
-  // referent change and a plan-hash change under one rule, so the two must
-  // produce the same answer: refused until the check is run again. An earlier
-  // fix DELETED the verdict, which landed on the "nothing has run" arm and
-  // PERMITTED the submit -- the second review named the asymmetry.
+  // AND THE SUBMIT IS REFUSED, not merely warned about: D2 section 6.6 puts a
+  // referent change and a plan-hash change under one rule, so both are refused
+  // until the check runs again. Deleting the verdict instead would land on the
+  // "nothing has run" arm and PERMIT the submit.
   const refused = readinessRefusal(state, prepared);
   assert.ok(typeof refused === "string", "the submit is refused after a target swap");
   assert.ok(refused.includes("referentChanged"),
@@ -751,11 +739,9 @@ test("a_target_swap_invalidates_the_verdict_even_when_the_plan_bytes_do_not_move
 test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () => {
   // THE RUNNER'S GRAMMAR CARRIES TWO PREFIX KEYS AND READS A DIFFERENT ONE PER
   // MODE (`logweir_core::spec::target_topic_prefix`): `topic_naming.prefix` for
-  // `newTopic`, `topic_mapping_prefix` for `scratch`. Only the first used to be
-  // updated by an edit, so in `scratch` the preview, the declared mapping and
-  // the API rail all used a prefix THE RUN DOES NOT USE -- "submitted
-  // topics/mapping equal the preview" was false for that mode. Found by the
-  // independent review.
+  // `newTopic`, `topic_mapping_prefix` for `scratch`. An edit must move both, or
+  // in `scratch` the preview, the declared mapping and the API rail would use a
+  // prefix THE RUN DOES NOT USE.
   for (const mode of ["newTopic", "scratch"]) {
     const state = wizardState();
     state.fields.target.mode = mode;
@@ -788,14 +774,11 @@ test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () =>
     assert.deepEqual(mappingProblems(state), Object.create(null), mode);
   }
 
-  // AND `effectivePrefix` PICKS THE MODE'S KEY WHEN THEY DISAGREE, which is the
-  // only condition under which it does any work. `setTopicPrefix` keeps them
-  // equal, so a state built THROUGH the setter cannot tell the two readings
-  // apart -- a mutant that made `effectivePrefix` always read `topicPrefix`
-  // survived the rows above for exactly that reason. This arm builds the
-  // disagreement by hand, which is the state any other producer of a fields
-  // object (a hand-written harness, a future prefill, the pre-fix code) could
-  // still hand this page, and asserts the reading follows the runner's rule.
+  // AND `effectivePrefix` PICKS THE MODE'S KEY WHEN THEY DISAGREE, the only
+  // condition under which it does any work. `setTopicPrefix` keeps them equal,
+  // so a state built through the setter cannot tell the readings apart; this
+  // arm builds the disagreement by hand (the state a hand-written harness or a
+  // future prefill could hand this page) and asserts the runner's rule.
   const skewed = wizardState();
   skewed.fields.target.topicPrefix = "naming-";
   skewed.fields.target.topicMappingPrefix = "mapping-";
@@ -808,8 +791,8 @@ test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () =>
   assert.equal(topicMapping(skewed)[0].target, "mapping-orders",
     "and the preview follows the key the RUN reads, not the other one");
 
-  // EVERY WRITE PATH, because the divergence came from three call sites each
-  // moving one key: a restored draft and an edit prefill as well as the input.
+  // EVERY WRITE PATH: a restored draft and an edit prefill as well as the
+  // input.
   const drafted = wizardState();
   drafted.fields.target.mode = "scratch";
   assert.equal(applyWizardDraft(drafted, Object.assign(wizardDraftValues(wizardState()), {
@@ -843,7 +826,7 @@ test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () =>
   );
 });
 
-// ------------------------------------------------------ 4. the fresh-target retry
+// 4. THE FRESH-TARGET RETRY.
 
 test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval", () => {
   // An earlier mount in this file asked for the session with no server
@@ -889,7 +872,7 @@ test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval",
   // AND THE SELECTOR IS REACHABLE. The retry route names no point, so the
   // wizard renders its selector first and `defaultPrefixFor` is called with no
   // instant: it must answer "" rather than throw, or the retry link replaces
-  // the whole page with a render error. A live journey met exactly that.
+  // the whole page with a render error.
   const noPoint = initialState("logweir-t27", fixture("wizard-clusters.json"), backups,
     { uid: "", backup: "", retryOf: failedName });
   assert.equal(noPoint.pointState, "none", "the retry route lands on the selector");
@@ -999,7 +982,7 @@ test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval",
   );
 });
 
-// ------------------------------------------------------- 5. the timestamp boundary
+// 5. THE TIMESTAMP BOUNDARY.
 
 test("a_point_outside_the_disclosed_window_is_refused_and_the_bounds_are_shown", () => {
   const state = wizardState();
@@ -1007,10 +990,9 @@ test("a_point_outside_the_disclosed_window_is_refused_and_the_bounds_are_shown",
   assert.equal(typeof covered.fromMs, "number");
   assert.equal(typeof covered.toMs, "number");
 
-  // WIZARD-DEFAULT-PIT-EXCLUSIVE. `windowCovered` is HALF-OPEN (`toMs` is the
-  // first instant NOT covered) and the runner refuses a point AT the floor, so
-  // the range a plan may name is [fromMs + 1, toMs - 1] -- inclusive at BOTH of
-  // those ends.
+  // `windowCovered` is HALF-OPEN (`toMs` is the first instant NOT covered) and
+  // the runner refuses a point AT the floor, so the range a plan may name is
+  // [fromMs + 1, toMs - 1], inclusive at BOTH of those ends.
   for (const at of [covered.fromMs + 1, covered.toMs - 1]) {
     state.fields.pointInTime = new Date(at).toISOString();
     assert.ok(
@@ -1018,10 +1000,9 @@ test("a_point_outside_the_disclosed_window_is_refused_and_the_bounds_are_shown",
       "a point ON the accepted bound is inside: " + state.fields.pointInTime,
     );
   }
-  // AND THE COMPLAINT PARAGRAPH IS WHAT DISTINGUISHES THE TWO STATES, because
-  // the bound itself is printed beside the input in every state: a test that
-  // asserted "the window message is on the page" would hold for an accepted
-  // point too. The live journey's negative control caught exactly that.
+  // AND THE COMPLAINT PARAGRAPH IS WHAT DISTINGUISHES THE TWO STATES: the bound
+  // itself is printed beside the input in every state, so "the window message
+  // is on the page" would hold for an accepted point too.
   state.fields.pointInTime = new Date(covered.toMs - 1).toISOString();
   assert.ok(!renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""));
   state.fields.pointInTime = new Date(covered.toMs).toISOString();

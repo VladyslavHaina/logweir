@@ -1,5 +1,5 @@
-//! **FX-34: the Job's line token.** What it is made from, where it is put,
-//! how it is read back, and the places its text may be written.
+//! **The Job's line token.** What it is made from, where it is put, how it
+//! is read back, and the places its text may be written.
 //!
 //! A runner's `refusal-detail=` line is honoured only when it carries the
 //! token of the Job the runner belongs to (`weirkeeper::refusal`). That is
@@ -329,9 +329,8 @@ fn the_token_is_read_back_off_the_job_and_only_from_where_it_is_written() {
 /// `LineToken` has no `Display`, and its `Debug` prints no value, so
 /// `expose_token` is the only way out; this row counts every mention of that
 /// name in every crate's product source, HOWEVER IT IS SPELLED: a method call
-/// (`token.expose_token()`), a path (`token.map(LineToken::expose_token)`,
-/// which the first version of this row did not see) or anything else. The
-/// one definition is set aside.
+/// (`token.expose_token()`), a path (`token.map(LineToken::expose_token)`) or
+/// anything else. The one definition is set aside.
 ///
 /// So the token cannot reach a status, a condition, an event, an annotation
 /// or a log line THROUGH THE TYPE, and a change that adds a third mention

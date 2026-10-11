@@ -1,5 +1,5 @@
 #![cfg(feature = "e2e")]
-//! The recovery catalog against a REAL S3-compatible server (PLAT-15.1).
+//! The recovery catalog against a REAL S3-compatible server.
 //!
 //! # Gating
 //!
@@ -55,8 +55,7 @@ const ROOT_USER: &str = "minioadmin";
 const ROOT_PASSWORD: &str = "minioadmin";
 
 /// The stack this process addresses, read as the e2e package reads it (the
-/// same module, compiled in), so these rows run on any compose slot
-/// (PROD-01.5b).
+/// same module, compiled in), so these rows run on any compose slot.
 #[path = "../../../e2e/tests/harness/stack.rs"]
 #[allow(dead_code)]
 mod stack;
@@ -458,7 +457,7 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
             .0,
     );
 
-    // The DAY SHARD WALK against a real backend (review finding F5): the fixture
+    // The DAY SHARD WALK against a real backend: the fixture
     // engine reports a capture on 2026-09-15, so a window anchored on that day
     // reaches the point in one shard listing rather than by walking the whole
     // log prefix.
@@ -519,7 +518,7 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
     }
 }
 
-/// **RECEIPT-DUP against a real server.** The execution claim is only a lock on
+/// **Against a real server**, the execution claim is only a lock on
 /// a store that ENFORCES `If-None-Match: *`: the first run here takes the claim
 /// and proves it (its second create is refused), and a second run of the SAME
 /// execution is refused `ExecutionAlreadyClaimed` before its engine — so the

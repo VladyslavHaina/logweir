@@ -9,15 +9,8 @@ use std::path::Path;
 
 /// One mapping from `Outcome` to its wire string, shared by the metric label,
 /// the `drill run` summary line and `drill show`'s table so the three can never
-/// disagree.
-///
-/// It is a one-line delegation to `Outcome::wire_name` and not a second match,
-/// which is the fix: this function's own comment used to claim the mapping was
-/// "shared ... so the two can never disagree" while `crate::show` rendered a
-/// THIRD spelling from Rust `Debug` (`Pass`, `ByteFingerprint/Pass`,
-/// `Honoured`). The spelling now lives beside the enum, next to the
-/// `#[serde(rename_all)]` attribute that decides the JSON, and is pinned
-/// against it variant by variant.
+/// disagree. It delegates to `Outcome::wire_name`, which sits beside the
+/// `#[serde(rename_all)]` attribute that decides the JSON.
 pub fn outcome_str(o: &Outcome) -> &'static str {
     o.wire_name()
 }
@@ -25,31 +18,16 @@ pub fn outcome_str(o: &Outcome) -> &'static str {
 /// The exit code this scorecard's `outcome` produces, as a number a dashboard
 /// can alert on.
 ///
-/// This exists because of a Kubernetes fact verified on a live cluster: a
-/// Job's exit code appears ONLY in
-/// `pod.status.containerStatuses[].state.terminated.exitCode`; it is absent
-/// from Job status, and `kubectl get pods` renders both `1` and `2` as a
-/// generic "Error". At the delivery layer the distinction between "Logweir
-/// could not do its job" (1, no artifact) and "a drill ran and did not pass"
-/// (2, a SIGNED artifact exists) is therefore nearly invisible to an
-/// operator — and the second is the most valuable result this product
-/// produces.
+/// A Job's exit code appears ONLY in
+/// `pod.status.containerStatuses[].state.terminated.exitCode`: it is absent
+/// from Job status, and `kubectl get pods` renders both `1` and `2` as "Error".
+/// Without this metric, "could not do its job" (1, no artifact) and "a drill
+/// ran and did not pass" (2, a signed artifact) look nearly the same.
 ///
-/// So the metrics file states it explicitly. Since T0-7, EVERY terminal path
-/// writes it — exits 1, 3 and 4 through `write_minimal_textfile`, exits 0 and 2
-/// through `write_textfile` — so the file's own existence no longer carries any
-/// information. Two things replace it:
-///
-/// * **Staleness is the absence signal.** node_exporter publishes the file's
-///   mtime as `node_textfile_mtime_seconds`, which carries no Logweir label at
-///   all; `time() - node_textfile_mtime_seconds{file=~".*logweir.*"} > 8d` is
-///   therefore the query that catches a CronJob whose pod never started, and it
-///   works identically on the paths where the cluster id was never learned.
-/// * **Absence of `logweir_drill_runs_total` INSIDE a present file** means the
-///   run ended before a scorecard existed. That family, and every other
-///   scorecard-derived one, is written only by `write_textfile`.
-///
-/// See [docs/metrics.md](../../../docs/metrics.md).
+/// Every terminal path writes the file, so its existence says nothing.
+/// Staleness (`node_textfile_mtime_seconds`) is the absence signal, and
+/// `logweir_drill_runs_total` missing from a present file means the run ended
+/// before a scorecard existed. See [docs/metrics.md](../../../docs/metrics.md).
 fn exit_code_for(o: &Outcome) -> u8 {
     match o {
         Outcome::Pass => crate::exit::ExitCode::Ok as u8,
@@ -65,11 +43,9 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
     let mut o = String::new();
     let cluster = &sc.target.cluster_id;
     let outcome = outcome_str(&sc.outcome);
-    // R-11a: a COMMENT, not a label. A ULID is unbounded cardinality — strictly
-    // worse than `triggered_by`, which this file's own header already refuses —
-    // and node_exporter's textfile collector passes comment lines over. The
-    // minimal shape carries the identical line, so an operator reading either
-    // file with `cat` sees which run wrote it.
+    // A COMMENT, not a label: a ULID is unbounded cardinality, and
+    // node_exporter's textfile collector passes comment lines over. The
+    // minimal shape carries the identical line.
     o.push_str(&format!("# logweir run_id={}\n", sc.run_id));
     o.push_str("# HELP logweir_drill_runs_total Drill runs by outcome.\n");
     o.push_str("# TYPE logweir_drill_runs_total counter\n");
@@ -138,22 +114,13 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         sc.integrity.mismatches
     ));
 
-    // T0-11. Beside `fingerprint_mismatches` because the two answer the same
-    // question — what went wrong that the outcome alone does not say.
-    //
-    // UNCONDITIONAL, `0` included, for the reason `logweir_drill_redactions`
-    // above is: a gauge that appears only when it is non-zero cannot be alerted
-    // on with `> 0`, because to PromQL an absent series and a clean teardown
-    // are the same thing. Emitting the zero keeps the two absences distinct —
-    // `0` means phase 9 ran and cleaned up; the series missing from a PRESENT
-    // file means the run ended before a scorecard existed (the minimal shape
-    // `write_minimal_textfile` writes on exits 1, 3 and 4).
-    //
-    // A COUNT, not a topic label: topic names are cluster-controlled text and
-    // would be unbounded label cardinality — the same rule that keeps
-    // `triggered_by` and `redactions[].path` out of this file. The names are on
-    // the WARN line, on the summary line and in the signed teardown
-    // attestation, all three of which have a reader who can hold them.
+    // Beside `fingerprint_mismatches`: both say what went wrong that the
+    // outcome alone does not. UNCONDITIONAL, `0` included, as
+    // `logweir_drill_redactions` is: to PromQL an absent series and a clean
+    // teardown look the same, and `> 0` cannot alert on an absent series. A
+    // COUNT, not a topic label: topic names are cluster-controlled text and
+    // unbounded cardinality. The names are on the WARN line, the summary line
+    // and the signed teardown attestation.
     o.push_str(
         "# HELP logweir_drill_teardown_topics_failed Scratch topics phase 9 could not delete.\n\
          # TYPE logweir_drill_teardown_topics_failed gauge\n",
@@ -189,7 +156,7 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         "logweir_drill_integrity_result{{cluster=\"{cluster}\",result=\"{result}\"}} 1\n"
     ));
 
-    // PROD-08.1a: HOW MUCH was verified, beside how it came out. One series
+    // HOW MUCH was verified, beside how it came out. One series
     // per document carrying `integrity.verification` (format 1.4.0); none for
     // an older one, which is "not recorded" and never read as complete. A
     // complete verification adds whether it COVERED every partition: 0 is a
@@ -231,18 +198,12 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
         sc.evidence.immutable as u8
     ));
 
-    // T0-3, the display half. Nothing here carried a redaction signal, so a
-    // dashboard showed a clean drill over a document that says a field was
-    // removed. Emitted UNCONDITIONALLY, including the `0` every v0.1 run
-    // writes: a series that only appears when it is non-zero cannot be alerted
-    // on with `logweir_drill_redactions > 0`, because an absent series and a
-    // whole document look identical to PromQL. `logweir_drill_fingerprint_mismatches`
-    // above is unconditional for the same reason.
-    //
-    // A COUNT, not a path label: `redactions[].path` is document-controlled
-    // text and would be unbounded label cardinality — the same rule that keeps
-    // `triggered_by` out of this file. The paths are rendered by
-    // `drill show`'s qualifiers footer.
+    // UNCONDITIONAL, including the `0` every v0.1 run writes: a series that
+    // appears only when non-zero cannot be alerted on with
+    // `logweir_drill_redactions > 0`, because an absent series and a whole
+    // document look identical to PromQL. A COUNT, not a path label:
+    // `redactions[].path` is document-controlled text and unbounded
+    // cardinality; `drill show`'s qualifiers footer renders the paths.
     o.push_str(
         "# HELP logweir_drill_redactions Scorecard fields removed before signing; 0 for a \
          whole document. Non-zero means BOTH verifiers refuse this document.\n\
@@ -260,9 +221,7 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
 }
 
 /// The two families BOTH shapes of the file carry, written once so the shapes
-/// cannot drift. A metric name must have exactly one `# HELP` text, and two
-/// copies of that string is two chances for the minimal file to describe
-/// `logweir_drill_exit_code` differently from the full one.
+/// cannot drift: a metric name must have exactly one `# HELP` text.
 fn push_exit_code(o: &mut String, cluster: &str, code: u8) {
     o.push_str(
         "# HELP logweir_drill_exit_code The process exit code this run produced \
@@ -275,13 +234,9 @@ fn push_exit_code(o: &mut String, cluster: &str, code: u8) {
     ));
 }
 
-/// T0-7 rung 2. The one series that says a drill ran AT ALL, and when.
-///
-/// The value is read from the clock at emit time on every call — never a
-/// constant, never a field carried in from elsewhere — because the whole point
-/// is that it moves when a run happens and stops moving when runs stop.
-/// (Global Constraint 1: the clock is read in `crates/logweir`, and this is in
-/// `crates/logweir`.)
+/// The one series that says a drill ran AT ALL, and when. The clock is read at
+/// every call (Global Constraint 1 allows it in `crates/logweir`), because the
+/// value must move when a run happens and stop moving when runs stop.
 fn push_last_run_timestamp(o: &mut String, cluster: &str) {
     o.push_str(
         "# HELP logweir_drill_last_run_timestamp_seconds Unix seconds at which this drill run \
@@ -296,20 +251,15 @@ fn push_last_run_timestamp(o: &mut String, cluster: &str) {
 
 /// The textfile a terminal path with NO scorecard leaves behind (exits 1, 3, 4).
 ///
-/// It is deliberately a SUBSET of `write_textfile`'s output, never a different
-/// vocabulary: the same two metric names with the same label, so a dashboard
-/// panel does not have to know which path produced the file. Everything derived
-/// from a scorecard is absent, because no scorecard exists — and absence of
-/// `logweir_drill_runs_total` is itself the signal that no drill result was
-/// produced.
+/// A SUBSET of `write_textfile`'s output, never a different vocabulary, so a
+/// panel need not know which path produced the file. Absent
+/// `logweir_drill_runs_total` is itself the signal that no drill result exists.
 ///
-/// `cluster` is `None` when the run never reached phase 2, which is where the
-/// id is learned from the live broker (`phase2_target.rs`). It is then emitted
-/// as the literal `unknown`: the spec file does not carry a cluster id and is
-/// not parsed here (R-11b — a new failure surface at the exact moment the
-/// process is already failing), and the label is never omitted, because a
-/// series that sometimes has a label and sometimes does not is a Prometheus
-/// modelling error.
+/// `cluster` is `None` before phase 2 learns the id from the live broker, and
+/// is then emitted as `unknown`: the spec file is not parsed here (a new
+/// failure surface at the moment the process is already failing), and the
+/// label is never omitted, because a series whose label comes and goes is a
+/// Prometheus modelling error.
 pub fn write_minimal_textfile(
     path: &Path,
     cluster: Option<&str>,
@@ -318,7 +268,7 @@ pub fn write_minimal_textfile(
 ) -> std::io::Result<()> {
     let cluster = cluster.unwrap_or("unknown");
     let mut o = String::new();
-    // R-11a: a comment, not a label. See `write_textfile`.
+    // A comment, not a label. See `write_textfile`.
     o.push_str(&format!("# logweir run_id={run_id}\n"));
     push_exit_code(&mut o, cluster, code as u8);
     push_last_run_timestamp(&mut o, cluster);
@@ -326,9 +276,6 @@ pub fn write_minimal_textfile(
 }
 
 /// Write-then-rename: node_exporter must never read a half-written file.
-///
-/// ONE atomic writer for both shapes. Two copies of the rename dance is two
-/// chances to lose it.
 fn write_atomically(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("prom.tmp");
     {

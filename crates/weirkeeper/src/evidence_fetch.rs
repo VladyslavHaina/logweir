@@ -1,34 +1,28 @@
-//! The evidence-fetch check Job — D2 §3.8 option **C**, §3.9, §4.2.
+//! The evidence-fetch check Job (D2 §3.8 option C, §3.9, §4.2).
 //!
-//! # Why a Job reads the evidence, and the controller still decides
+//! # A Job reads the evidence; the controller decides
 //!
 //! A `BackupDestination` whose `evidenceRead` grant is `SecretKeys` or
-//! `WorkloadIdentity` (or `ArchiveReadGrant`, which resolves to the
-//! destination's `archiveRead` grant and so to one of those two) names a
-//! credential only a POD may hold: the controller has no verb on `secrets`
-//! and must not get one (D2 §3.8 option B, rejected). So the controller asks a
-//! short `evidenceFetch` check Job in the object's own namespace to `GET` the
-//! two evidence objects with exactly that grant and relay their bytes as
-//! framed stdout. The kubelet projects the credential; the controller never
-//! sees it.
+//! `WorkloadIdentity` (or `ArchiveReadGrant`, which resolves to one of those)
+//! names a credential only a pod may hold: the controller has no verb on
+//! `secrets` and must not get one (D2 §3.8 option B, rejected). So a short
+//! `evidenceFetch` check Job in the object's namespace `GET`s the two evidence
+//! objects with that grant and relays their bytes as framed stdout; the kubelet
+//! projects the credential.
 //!
-//! **The Job is a courier, not a verifier.** Everything that decides the
-//! verdict happens here, in the controller, over the relayed bytes, through
-//! the SAME code the controller's own read-only handle feeds
-//! (`verification::verify_fetched`): the digest is recomputed and compared
-//! with the digest THE RUNNER reported (never one the relay declared), the
-//! document is bound to this run, and the DSSE sidecar is checked against the
+//! The Job is a courier, not a verifier. The verdict is decided here, over the
+//! relayed bytes, by the code the controller's own read-only handle feeds
+//! (`verification::verify_fetched`): the digest is recomputed and compared with
+//! the digest the runner reported (never one the relay declared), the document
+//! is bound to this run, and the DSSE sidecar is checked against the
 //! namespace's resolved trust. A forged relay cannot produce `Valid` without a
-//! signing key the installation trusts, and cannot substitute another signed
-//! document because the runner's digest pins which bytes this run wrote.
+//! trusted signing key, nor substitute another signed document, because the
+//! runner's digest pins the bytes this run wrote.
 //!
-//! # What this module owns, and what it leaves to the reconcilers
-//!
-//! The Job's lifecycle: its name, its plan `ConfigMap`, its projections, the
-//! per-namespace slot, its observation and the relay's interpretation
-//! ([`advance`]). The `Backup` and `Restore` reconcilers own what the verdict
-//! MEANS on their status — a receipt's window and records, a scorecard's
-//! outcome — because those are different documents with different facts.
+//! This module owns the Job's lifecycle (name, plan `ConfigMap`, projections,
+//! per-namespace slot, observation, relay interpretation: [`advance`]); the
+//! `Backup` and `Restore` reconcilers own what the verdict means on their
+//! status.
 //!
 //! # What the Job is given, exhaustively
 //!
@@ -112,11 +106,10 @@ pub struct Request {
     pub payload_key: String,
     /// Its detached DSSE sidecar's key.
     pub sidecar_key: String,
-    /// **FX-33.** The document's media type, from the reconciler that asked:
-    /// a `Backup`'s fetch is for a backup receipt, a `Restore`'s for a drill
-    /// scorecard. It is the controller's own knowledge of what it is about to
-    /// hold, and [`Self::payload_cap`] is derived from it and from nothing
-    /// the pod says.
+    /// The document's media type, from the reconciler that asked (a backup
+    /// receipt or a drill scorecard): the controller's own knowledge of what it
+    /// is about to hold, from which [`Self::payload_cap`] is derived, never
+    /// from anything the pod says.
     pub payload_type: &'static str,
 }
 
@@ -134,10 +127,10 @@ impl Request {
     }
 }
 
-/// [`Relayed::Unread`]'s sentence for an object over the cap an evidence
-/// fetch relays it under — FX-31's, and FINAL: it begins with the key, so no
-/// transient prefix of `verification::not_attempted_class` matches, and the
-/// object is not fetched again.
+/// [`Relayed::Unread`]'s sentence for an object over the cap a fetch relays it
+/// under. Final: it begins with the key, so no transient prefix of
+/// `verification::not_attempted_class` matches, and the object is not fetched
+/// again.
 #[must_use]
 pub fn over_relay_cap_detail(key: &str, cap: u64, relayed: Option<u64>) -> String {
     match relayed {
@@ -195,12 +188,10 @@ pub fn plan_documents(
                 credentials,
                 grant_bindings: Vec::new(),
             },
-            // EXACTLY TWO OBJECTS, EACH AT THE CAP OF WHAT IT IS, WITH THE ONE
-            // ROLE THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any
-            // other role, and a cap over the contract's ceiling, on the
-            // runner's side too. The pod is ASKED for at most the document's
-            // own cap (FX-33: a receipt's, or a scorecard's); what it sends
-            // is bounded by `Request::payload_cap` where it is read.
+            // Exactly two objects, each at the cap of what it is, with the one
+            // role the contract allows (`CheckPlan::validate` refuses others on
+            // the runner's side too). What the pod sends is bounded by
+            // `Request::payload_cap` where it is read.
             objects: vec![
                 EvidenceObjectRequest {
                     role: DestinationRole::EvidenceRead,
@@ -238,22 +229,21 @@ pub const CONTRACT_ENV: [&str; 4] = [
     "RUST_LOG",
 ];
 
-/// The check Job for one attempt — **pure**.
+/// The check Job for one attempt.
 ///
-/// # THE CREDENTIAL IS THE `evidenceRead` GRANT, AND NOTHING ELSE
-///
-/// `destination` is a resolution FOR `DestinationRole::EvidenceRead`, so
+/// The credential is the `evidenceRead` grant and nothing else: `destination`
+/// is a resolution for `DestinationRole::EvidenceRead`, so
 /// [`ResolvedDestination::job_env`] projects that grant's Secret keys (or runs
-/// as that grant's ServiceAccount) and no other. No signer volume, no
-/// connection, no second destination. `LOGWEIR_ARCHIVE_CA_FILE` is dropped:
-/// it names the execution pod's `/plan` mount, which a check pod does not
-/// have — the plan's `caFile` is what the runner reads.
+/// as its ServiceAccount). No signer volume, no connection, no second
+/// destination. `LOGWEIR_ARCHIVE_CA_FILE` is dropped: it names the execution
+/// pod's `/plan` mount, which a check pod lacks; the runner reads the plan's
+/// `caFile`.
 ///
 /// # Errors
 ///
-/// [`ResolvedDestination::check_job_namespace`]'s refusal, as a sentence: a
-/// bare Secret name resolves in the POD's namespace, so a Job anywhere else
-/// would project whichever Secret happens to carry that name there.
+/// [`ResolvedDestination::check_job_namespace`]'s refusal: a bare Secret name
+/// resolves in the pod's namespace, so a Job elsewhere would project whichever
+/// Secret carries that name there.
 pub fn job_spec(
     namespace: &str,
     owner: &RunnerOwner,
@@ -427,12 +417,10 @@ fn answer<'a>(
                  relayed"
             ));
         }
-        // THE CAP IS THE CONTROLLER'S, NOT ONLY THE RUNNER'S (review MEDIUM-1).
-        // `truncated` is the runner's own report, and a pod that relays more
-        // than it was asked for without saying so is exactly the pod whose
-        // report is not to be trusted. So the controller measures what it
-        // received against the contract's per-object cap, and against the
-        // length the relay declared for it.
+        // The cap is the controller's, not only the runner's: a pod that relays
+        // more than asked without saying so is the pod whose `truncated` report
+        // cannot be trusted, so what was received is measured against the cap
+        // and the declared length.
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len > cap {
             return Answer::Unreadable(over_relay_cap_detail(key, cap, Some(len)));
@@ -489,9 +477,9 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
             )
         }
     };
-    // FX-33: THE CAP OF THE DOCUMENT KIND THIS FETCH IS FOR, from the
-    // controller's own request — not the contract's ceiling, not the plan's
-    // `maxBytes`, not the length the relay declares.
+    // The cap of the document kind this fetch is for, from the controller's own
+    // request: not the contract's ceiling, the plan's `maxBytes` or the relay's
+    // declared length.
     let payload = answer(
         relay,
         &results,
@@ -658,23 +646,17 @@ fn foreign_detail(namespace: &str, job_name: &str, owner: &RunnerOwner) -> Strin
 
 /// One pass over one attempt's evidence-fetch Job.
 ///
-/// # Idempotent across restarts, by construction
-///
-/// The Job's name is [`cjob::evidence_fetch_job_name`] of the subject's UID
-/// and the attempt, so a pass that finds no status record of a Job it already
-/// created recomputes the same name and FINDS it (`GET` first, and a `409` on
-/// create is resolved the same way). One attempt, one Job — never two.
-///
-/// # SEC-PODLOG
-///
-/// The pod log is read only through [`check::observe`], which reads only a
-/// pod whose controller owner is THIS Job's UID; a pod wearing the Job's label
-/// that another principal created is ignored.
+/// Idempotent across restarts: the Job's name is
+/// [`cjob::evidence_fetch_job_name`] of the subject's UID and the attempt, so a
+/// pass with no status record of a Job it created recomputes the name and
+/// finds it (`GET` first; a `409` on create resolves the same way). The pod log
+/// is read only through [`check::observe`], which reads only a pod whose
+/// controller owner is this Job's UID.
 ///
 /// # Errors
 ///
-/// [`kube::Error`] for an API failure. Every answer about the fetch itself is
-/// a [`Step`].
+/// [`kube::Error`] for an API failure. Every answer about the fetch itself is a
+/// [`Step`].
 pub async fn advance(inputs: &Inputs<'_>) -> Result<Step, kube::Error> {
     let namespace = inputs.namespace;
     let name = cjob::evidence_fetch_job_name(&inputs.owner.uid, inputs.attempt);
@@ -1014,23 +996,16 @@ pub fn retry_due_in(
     u64::try_from(secs).ok()
 }
 
-/// How long after a verdict a terminal pass still checks that the recorded
-/// Job got its TTL.
-///
-/// An HOUR, and bounded on purpose (review LOW-4). The TTL is patched only
-/// after the verdict commits; a `set_ttl` that fails makes that pass return an
-/// error, and the controller's error policy requeues it within seconds, so a
-/// transient failure is repaired on the next pass inside this window. A
-/// controller that dies between the two writes and stays down longer than
-/// this leaves the Job to ownerReference garbage collection when its `Backup`
-/// or `Restore` goes — at most [`MAX_ATTEMPTS`] small finished Jobs per run.
-/// A window rather than "forever" because a terminal `Backup` is reconciled
-/// every 15 seconds for its whole life, and one `GET` per pass per verified
-/// run, forever, is a cost with no finding behind it.
+/// How long after a verdict a terminal pass still checks that the recorded Job
+/// got its TTL: an hour. A failed `set_ttl` errors the pass and is requeued
+/// within seconds, so a transient failure is repaired inside this window; a
+/// controller down longer leaves at most [`MAX_ATTEMPTS`] small finished Jobs
+/// per run to ownerReference collection. A window rather than forever, because
+/// a terminal `Backup` is reconciled every 15 seconds for its whole life.
 pub const TTL_REPAIR_WINDOW_SECONDS: i64 = 3600;
 
-/// Patch the TTL onto the recorded evidence-fetch Job when the verdict has
-/// been committed and the Job never got one — review LOW-4.
+/// Patch the TTL onto the recorded evidence-fetch Job when the verdict has been
+/// committed and the Job never got one.
 ///
 /// Sends nothing unless ALL hold: the verdict is not `Pending` (the Job's
 /// relay may still be needed), it was reached within
@@ -1091,42 +1066,26 @@ pub async fn repair_ttl(
     Ok(true)
 }
 
-// ---------------------------------------------------------------------------
-// The controller's OWN read, retried — PoC defect P12
-// ---------------------------------------------------------------------------
+// The controller's own read, retried.
 //
-// A `Backup` or `Restore` whose evidence the CONTROLLER reads — an inline-
-// archive run through the one global handle (D2 §3.10), or a destination whose
-// `evidenceRead` is `ControllerIdentity` (D2 §3.8 option E) — used to get one
-// read, on the pass that made it terminal. When that read failed, the
-// `NotAttempted` it wrote was final: the PoC upgrade round's three pre-upgrade
-// inline-archive points read `NotAttempted` because the controller had no
-// credential (the SDK fell back to IMDS), stayed so after `logweir-evidence-ro`
-// was created and the controller restarted twice, and were therefore never
-// recovery points. A destination-backed run whose evidence a JOB reads was
-// already retried at +1 m, +5 m and +15 m (D2 §3.9 step 5, above).
+// A `Backup` or `Restore` whose evidence the controller reads itself (an
+// inline-archive run through the global handle, D2 §3.10, or a destination
+// whose `evidenceRead` is `ControllerIdentity`, D2 §3.8 option E) takes the
+// same +1 m, +5 m, +15 m schedule as an evidence-fetch Job, recorded in the
+// same `status.evidence.observation` fields (`mode`, `attempt`, `retryAfter`),
+// so every reader of a scheduled fetch understands it. Two differences:
 //
-// The controller's own read now takes the SAME schedule, recorded in the SAME
-// `status.evidence.observation` fields — `mode`, `attempt`, `retryAfter` — so
-// every reader that already understands a scheduled fetch (the rehearsal
-// schedule's `verdict_owed`, `retry_due_in`) understands this one. Two things
-// differ, and both are about what an input change looks like for a read the
-// controller makes itself:
-//
-// * only a TRANSIENT failure is scheduled (`verification::NotAttemptedClass`):
-//   a definite `NotFound` is a fact about the archive and is never read again,
-//   and a configuration refusal waits for the configuration to change;
-// * the controller's credential reaches it through its own environment
+// * only a transient failure is scheduled (`verification::NotAttemptedClass`):
+//   a definite `NotFound` is never read again, and a configuration refusal
+//   waits for the configuration to change;
+// * the controller's credential arrives through its environment
 //   (`logweir-evidence-ro`, projected `optional: true`), so a created or
-//   rotated credential arrives with a new controller PROCESS. Each process
-//   therefore reads every eligible unverified run ONCE more after its
-//   schedule is spent ([`ReadMemory`]) — which is also how a `NotAttempted`
-//   written before this rule existed (no observation at all) is read again
-//   after the upgrade.
+//   rotated credential arrives with a new process, and each process reads
+//   every eligible unverified run once more after its schedule is spent
+//   ([`ReadMemory`]).
 //
-// FAIL-CLOSED THROUGHOUT: a retry runs the terminal pass's own reader and
-// verifier and writes whatever they answer. Nothing here can write `Valid`;
-// only `verify_oracle`/`verify_evidence` over fetched bytes can.
+// Fail-closed throughout: a retry runs the terminal pass's own reader and
+// verifier and writes what they answer; nothing here can write `Valid`.
 
 /// `status.evidence.observation.mode` for a read through the controller's own
 /// inline-archive handle (`LOGWEIR_ARCHIVE_URL`, D2 §3.10).
@@ -1149,30 +1108,19 @@ pub fn is_controller_read(mode: Option<&str>) -> bool {
 /// [`ReadMemory`]'s bound.
 pub const READ_MEMORY_CAPACITY: usize = 100_000;
 
-/// Which terminal objects THIS controller process has already read (by UID).
+/// Which terminal objects this controller process has already read (by UID).
 ///
-/// # Why process memory, when the retry backoff is on the object
+/// The retry schedule is on the object, so a restart neither shortens nor
+/// forgets it. What a restart changes is the controller's own credential
+/// (`logweir-evidence-ro`, read from the environment at start), so a run whose
+/// schedule was spent under the old one is worth exactly one more read, and
+/// "has this process read it" is that question with no field on the object and
+/// no clock comparison (`verifiedAt` cannot answer it: an unchanged verdict
+/// keeps its old `verifiedAt`).
 ///
-/// The schedule (`attempt`, `retryAfter`) is on the object, so a restart can
-/// neither shorten nor forget it. What a restart DOES change is the
-/// controller's own credential: `logweir-evidence-ro` is projected into the
-/// controller's environment, which a running process never re-reads. A run
-/// whose schedule was spent under the old credential is therefore worth
-/// exactly one more read under the new one, and "has this process read it
-/// yet" is the exact question — a new process has read nothing, and the
-/// question costs no field on the object and no clock comparison. (A stored
-/// `verifiedAt` cannot answer it: an unchanged verdict keeps its old
-/// `verifiedAt` by design — erratum E11(d) — so a comparison with the process
-/// start would re-read such a run on every pass.)
-///
-/// # Bounded
-///
-/// Remembering is what bounds the re-read to ONE per object per process, so
-/// the memory is never emptied: at [`READ_MEMORY_CAPACITY`] distinct objects
-/// it stops admitting new ones, and an object it cannot remember is treated
-/// as already read (no re-read), never as new. A crash-looping controller
-/// re-reads each eligible run once per start, which is the cost of one
-/// terminal pass and no more.
+/// Bounded: at [`READ_MEMORY_CAPACITY`] objects it stops admitting new ones,
+/// and an object it cannot remember is treated as already read, never as new.
+/// A crash-looping controller re-reads each eligible run once per start.
 #[derive(Debug, Default)]
 pub struct ReadMemory {
     read: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -1216,16 +1164,11 @@ impl ReadMemory {
     }
 }
 
-/// How many controller evidence reads one process runs at once — review L2.
-///
-/// A restart re-reads every eligible unverified run at once (the PoC profile's
-/// worst case is 258 inline runs written while the credential was missing),
-/// and each read is a trust resolution, two or three object `GET`s and a
-/// status patch; the schedules those reads start then fire in lockstep at +1,
-/// +6 and +21 minutes. The reads themselves are what is bounded: a reconcile
-/// that owes one waits for a permit, so at most this many are in flight and the
-/// rest follow as permits free. The terminal pass's own first read (one per
-/// finishing run) does not take a permit.
+/// How many controller evidence reads one process runs at once. A restart
+/// re-reads every eligible unverified run at once (hundreds, after a missing
+/// credential), each a trust resolution, two or three `GET`s and a status
+/// patch, and their schedules then fire in lockstep. A reconcile that owes a
+/// read waits for a permit; the terminal pass's own first read takes none.
 pub const CONTROLLER_READ_CONCURRENCY: usize = 4;
 
 /// The process's one semaphore of [`CONTROLLER_READ_CONCURRENCY`] permits,
@@ -1270,13 +1213,11 @@ pub fn scheduled(
     )
 }
 
-/// A RELAYED attempt's verdict, with the schedule when it failed transiently —
-/// PoC P12's class sweep of the Job path. A relay the store answered with a
-/// denial or a timeout, or one whose own framing did not hold (D2 §3.9 step
-/// 5's "relay unreadable"), used to be final after one Job; it now takes the
-/// same +1 m, +5 m, +15 m schedule a Job that did not finish takes. A relay
-/// that says the document is not there, or that it is over the relay's cap,
-/// is final as before.
+/// A relayed attempt's verdict, with the schedule when it failed transiently: a
+/// relay the store answered with a denial or a timeout, or whose framing did
+/// not hold (D2 §3.9 step 5's "relay unreadable"), takes the same +1 m, +5 m,
+/// +15 m schedule as a Job that did not finish. A relay saying the document is
+/// absent, or over the relay's cap, is final.
 #[must_use]
 pub fn relayed_schedule(
     result: crate::verification::VerificationResult,
@@ -1326,12 +1267,10 @@ pub fn controller_read_detail(detail: &str, attempt: u32, retry: Option<DateTime
     }
 }
 
-/// What a TERMINAL object's controller read calls for on this pass — the
-/// review round's M1 made this an enum rather than an `Option<u32>`, because
-/// "nothing is owed" and "an attempt is scheduled but can no longer happen"
-/// must end differently: the second has to be RECORDED, or the object keeps
-/// advertising a `retryAfter` in the past and a `Restore` requeues for it
-/// every second, for ever.
+/// What a terminal object's controller read calls for on this pass. "Nothing is
+/// owed" and "an attempt is scheduled but can no longer happen" end
+/// differently: the second must be recorded, or the object keeps advertising a
+/// past `retryAfter` and a `Restore` requeues for it every second.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControllerRead {
     /// Read now: this is the attempt's number.
@@ -1363,19 +1302,17 @@ pub enum ControllerRead {
 ///
 /// * a `NotAttempted` whose observation is a controller read's, with a
 ///   `retryAfter` and attempts left: [`ControllerRead::Due`] once `retryAfter`
-///   has passed and [`ControllerRead::Scheduled`] before it — or
+///   has passed and [`ControllerRead::Scheduled`] before it, or
 ///   [`ControllerRead::Settle`] when the run can no longer be read;
-/// * a controller read's `NotAttempted` with no `retryAfter` (the schedule is
-///   spent, or the failure was not transient), or an inline-archive run's
-///   `NotAttempted` with no observation at all (written before this rule, or a
-///   configuration refusal): attempt 1 of a new schedule, ONCE per controller
-///   process ([`ReadMemory`]) — never for a definite absence, and, for a
-///   destination-backed run, only when its sentence is a transient READ
-///   failure (review L4: a destination that refuses is not a read, and is not
-///   re-read on every start);
-/// * an observation that is an evidence-fetch Job's: nothing here
-///   ([`owed_attempt`] owns it);
-/// * anything that is not `NotAttempted`: nothing — a reached verdict is final.
+/// * a controller read's `NotAttempted` with no `retryAfter` (schedule spent,
+///   or a non-transient failure), or an inline-archive run's `NotAttempted`
+///   with no observation: attempt 1 of a new schedule, once per controller
+///   process ([`ReadMemory`]), never for a definite absence, and for a
+///   destination-backed run only when its sentence is a transient read failure
+///   (a refusing destination is not re-read on every start);
+/// * an evidence-fetch Job's observation: nothing here ([`owed_attempt`] owns
+///   it);
+/// * anything that is not `NotAttempted`: nothing; a reached verdict is final.
 #[must_use]
 pub fn plan_controller_read(
     result: Option<&str>,
@@ -1453,8 +1390,8 @@ pub fn owed_controller_read(
 }
 
 /// The sentence a scheduled inline-archive read settles on when this
-/// controller has no archive handle at all (review M1). Final: a new process
-/// with a handle reads the run again.
+/// controller has no archive handle at all. Final: a new process with a handle
+/// reads the run again.
 #[must_use]
 pub fn archive_handle_gone_detail(document: &str) -> String {
     format!(

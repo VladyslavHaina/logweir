@@ -1,4 +1,4 @@
-// time-basis.spec.js -- FX-8: the restore wizard's time-basis opt-in.
+// time-basis.spec.js -- the restore wizard's time-basis opt-in.
 //
 // WHY THE PAGE HAS IT. The archive holds each record's PRODUCER timestamp, so a
 // point in time over a `LogAppendTime` topic selects by the producers' clocks.
@@ -10,15 +10,15 @@
 // restore of a `LogAppendTime` topic could never run at all.
 //
 // THE ROWS. The plan carries the line exactly when the box is ticked, and is
-// byte-identical to before FX-8 when it is not (the golden pair below is read by
-// `crates/logweir/tests/ui_lint.rs` too, which deserialises it into the
-// runner's `RestoreSpec`); the box is unticked by default and never ticked by
-// the page; step 3 says what the box means and what the page cannot see; the
-// review step names the time basis; the draft keeps the choice as text; the
-// mounted wizard writes the box into the plan bytes and the review row.
+// byte-identical to a plan without the option when it is not (the golden pair
+// below is read by `crates/logweir/tests/ui_lint.rs` too, which deserialises
+// it into the runner's `RestoreSpec`); the box is unticked by default and
+// never ticked by the page; step 3 says what the box means and what the page
+// cannot see; the review step names the time basis; the draft keeps the
+// choice as text; the mounted wizard writes the box into the plan bytes and
+// the review row.
 //
-// NEGATIVE CONTROL: each row names the mutant it kills. The FX-8 report records
-// the mutants and the command that ran them.
+// NEGATIVE CONTROL: each row names the mutant it kills.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -74,16 +74,14 @@ function mountApi() {
   };
 }
 
-// ------------------------------------------------------------- the emitter
-
 test("fx8_the_plan_carries_the_opt_in_exactly_when_it_is_stated", () => {
   // ARM 2 of the golden pair (arm 1 is ui_lint.rs, which parses it into
   // `RestoreSpec` and asserts `restore.time_basis == ProducerTime`).
   const fields = fixture("plan-time-basis-fields.json");
   assert.equal(renderPlanBytes(fields), text("plan-time-basis.golden.yaml"),
     "NEGATIVE CONTROL: an emitter that drops the line, or spells it `timeBasis:`, fails this");
-  // NOT STATED, the bytes are the pre-FX-8 golden's, byte for byte: every plan
-  // the console wrote before keeps its hash.
+  // NOT STATED, the bytes are the golden without the option, byte for byte:
+  // every plan the console wrote before keeps its hash.
   for (const absent of [undefined, null, ""]) {
     const without = Object.assign({}, fields, { timeBasis: absent });
     assert.equal(renderPlanBytes(without), text("plan.golden.yaml"),
@@ -98,8 +96,6 @@ test("fx8_the_plan_carries_the_opt_in_exactly_when_it_is_stated", () => {
   }
   assert.equal(TIME_BASIS_PRODUCER_TIME, "producerTime");
 });
-
-// --------------------------------------------------------------- step 3
 
 test("fx8_step_3_offers_the_box_unticked_and_says_what_it_cannot_see", () => {
   const state = wizardState();
@@ -124,8 +120,6 @@ test("fx8_step_3_offers_the_box_unticked_and_says_what_it_cannot_see", () => {
     "NEGATIVE CONTROL: a box that does not show the plan's own value fails this");
 });
 
-// ------------------------------------------------------------ the review
-
 test("fx8_the_review_step_names_the_time_basis_and_the_plan_carries_it", async () => {
   const state = wizardState();
   let prepared = await preparePlan(state);
@@ -148,8 +142,6 @@ test("fx8_the_review_step_names_the_time_basis_and_the_plan_carries_it", async (
   assert.equal(timeBasisText(state), visible(/<span id="review-time-basis">([^<]*)<\/span>/
     .exec(html)[1]));
 });
-
-// --------------------------------------------------------------- the draft
 
 test("fx8_the_draft_keeps_the_choice_as_text_and_nothing_else_as_the_opt_in", () => {
   assert.ok(WIZARD_DRAFT_FIELDS.includes("timeBasis"),
@@ -176,8 +168,6 @@ test("fx8_the_draft_keeps_the_choice_as_text_and_nothing_else_as_the_opt_in", ()
   }
 });
 
-// ----------------------------------------------------------- the mount half
-
 test("fx8_the_mounted_wizard_writes_the_box_into_the_plan_and_the_review", async () => {
   const view = fakeView();
   await mountRestoreWizard(view.root, "team-fx8-mount", pointParams(), viewParse, mountApi());
@@ -200,8 +190,6 @@ test("fx8_the_mounted_wizard_writes_the_box_into_the_plan_and_the_review", async
   assert.ok(!visible(view.html()).includes("time_basis: \"producerTime\""),
     "and unticking takes it out");
 });
-
-// ------------------------------------------------------- the restore detail
 
 test("fx8_a_restores_detail_names_the_time_basis_its_approved_plan_states", async () => {
   const { planTimeBasis } = await import("../render.js");
@@ -253,7 +241,7 @@ test("fx8_a_restores_detail_names_the_time_basis_its_approved_plan_states", asyn
     "the refusal's own reason is printed verbatim beside it");
 });
 
-// --------------------------------------------- review L-3's class sweep
+// "Not found" is never "the plan states none".
 
 test("fx8_review_l3_the_evidence_bucket_reader_is_as_tolerant_as_the_time_basis_one", async () => {
   // `planEvidenceBucket` read only the console's two-space block too; a
@@ -274,7 +262,7 @@ test("fx8_review_l3_the_evidence_bucket_reader_is_as_tolerant_as_the_time_basis_
   assert.equal(planBlockValue(undefined, "restore", "time_basis"), null);
 });
 
-// ------------------------------------------- review M-2: the signed result
+// The signed result.
 
 test("fx8_review_m2_the_detail_shows_the_signed_lists_and_warns_on_an_unrecorded_type", async () => {
   const { renderRestoreDetail, signedTimeBasisText } = await import("../pages/history.js");

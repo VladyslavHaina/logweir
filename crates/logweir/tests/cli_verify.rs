@@ -6,20 +6,18 @@ fn schema_scorecard_prints_the_schema() {
     let out = bin().args(["schema", "scorecard"]).output().unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    // The `$id`, not a bare file name: the 1.1.0 schema's descriptions still
-    // NAME the frozen 1.0.0 file, so `contains("…-1.0.0.json")` stayed true
-    // after FX-4 moved the printed schema to 1.1.0.
+    // The `$id`, not a bare file name: a newer schema's descriptions still
+    // NAME the frozen 1.0.0 file.
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest version (PROD-16.2's 2.1.0); the writer writes
-            // 2.1.0 only for a partition-subset restore a second person
-            // approved in the console and 2.0.0 for any other partition
-            // subset, 1.9.0 for any other restore approved in the console
-            // (format 1's newest, `schemas/logweir-drill-scorecard-1.9.0.json`),
-            // 1.8.0 for one under the original topic names (PROD-15.1), 1.7.0
-            // for one that states a window start only, 1.6.0 for every other
-            // sampled drill (FX-23), and 1.4.0/1.5.0 for a complete one.
+            // The newest version (2.1.0); the writer writes 2.1.0 only for a
+            // partition-subset restore a second person approved in the
+            // console and 2.0.0 for any other partition subset, 1.9.0 for any
+            // other restore approved in the console, 1.8.0 for one under the
+            // original topic names, 1.7.0 for one that states a window start
+            // only, 1.6.0 for every other sampled drill, and 1.4.0/1.5.0 for a
+            // complete one.
             logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL
         )),
         "{s}"
@@ -145,19 +143,12 @@ fn the_verify_summary_prints_the_outcome_as_the_signed_document_spells_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// T0-1 — `approval.self_attested` is DERIVED, never echoed.
-//
-// `verify.rs` used to copy `sc.approval.self_attested` — the document's own
-// claim about the single most damaging property of its provenance — into the
-// verified report and print it under a `signature: VALID` banner, while the
-// key that actually verified the signature sat in `matched_key_id` and was
-// used only to print itself. The five tests below pin the derivation, both
-// directions of the refusal, the exit code, and the fact that the derivation
-// reads the signature that MATCHED rather than `signatures[0]`.
-//
-// Every one of them drives the compiled binary and reads `out.status.code()`
-// directly — never an exit code through a pipe.
+// `approval.self_attested` is DERIVED, never echoed: the document's own
+// claim about the most damaging property of its provenance must not be
+// printed under a `signature: VALID` banner. The five tests below pin the
+// derivation, both directions of the refusal, the exit code, and that the
+// derivation reads the signature that MATCHED rather than `signatures[0]`,
+// each through the compiled binary's own exit code.
 
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
@@ -410,23 +401,9 @@ fn verify_reports_self_contradiction_before_the_approval_claim() {
 }
 
 /// The two-reader parity claim is only as real as the gate that runs it.
-///
-/// `scripts/check-verifier-parity.sh` is the artefact that makes "both
-/// verifiers reach the same verdict" mechanical rather than documented. On the
-/// commit that introduced it, it was invoked by the `justfile`'s `lint` recipe
-/// and by **no CI job at all** — its three sibling guards
-/// (`check-no-oso.sh`, `check-pure-core.sh`, `check-dod.sh`) each have a named
-/// step in `.github/workflows/ci.yml`, and CI has never run `just lint`. So
-/// deleting the script would have changed no CI result, and deleting the
-/// `justfile` line was caught by nothing.
-///
-/// This test is the cover. It reads both gate files from the repository — the
-/// same shape as
-/// `crates/logweir-evidence/tests/key_provenance.rs::keygen_recipe_is_documented_and_linked`
-/// and `crates/logweir-core/tests/fixture_regen.rs::fixtures_recipe_is_non_destructive`,
-/// both of which already assert on checked-in non-Rust files — and requires the
-/// script to be invoked by an EXECUTED line in each, never merely mentioned in
-/// a comment. Removing either wiring fails it at assertion time.
+/// `scripts/check-verifier-parity.sh` must be invoked by an EXECUTED line in
+/// both the `justfile`'s `lint` recipe and `.github/workflows/ci.yml`, never
+/// merely mentioned in a comment; removing either wiring fails this.
 #[test]
 fn the_verifier_parity_script_is_wired_into_lint_and_ci() {
     const SCRIPT: &str = "check-verifier-parity.sh";
@@ -471,7 +448,7 @@ fn the_verifier_parity_script_is_wired_into_lint_and_ci() {
     assert!(executed(&check).iter().any(|l| l.trim() == "just lint"));
 }
 
-// ---------------------------------------------------------------- Task 5
+// ---------------------------------------------------------------- the backup receipt
 /// The signed backup-receipt fixture verifies under `--payload-type
 /// backup-receipt`, and the SAME bytes are refused under `--payload-type
 /// scorecard`.
@@ -521,16 +498,11 @@ fn the_signed_receipt_fixture_verifies() {
         stdout.contains("application/vnd.logweir.backup-receipt+json;version=1.0.0"),
         "the verdict must name the media type it checked, got: {stdout}"
     );
-    // SINCE TASK 5b THIS IS THE FULL-STRENGTH VERDICT for this document type.
-    // Task 5's build checked the signature alone and its printer said so in
-    // as many words (`checked: the SIGNATURE only …`); Task 5b wired the
-    // invariant dispatch, so `--payload-type backup-receipt` now runs all
-    // four of `BackupReceipt::validate_invariants`'s arms and the printer has
-    // to say THAT instead. The line still distinguishes the two strengths —
-    // which is the property the old assertion was protecting — it just names
-    // the stronger one now, and `the_signature_only_verdict_is_still_reachable`
-    // below keeps the weaker sentence honest for the two document types that
-    // still get it.
+    // The FULL-STRENGTH VERDICT for this document type: `--payload-type
+    // backup-receipt` runs all four of `BackupReceipt::validate_invariants`'s
+    // arms, and the line names that strength;
+    // `the_signature_only_verdict_is_still_reachable` below keeps the weaker
+    // sentence honest for the two document types that still get it.
     assert!(
         stdout.contains("the signature AND all forty-five backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout (twenty-nine since \
@@ -538,7 +510,7 @@ fn the_signed_receipt_fixture_verifies() {
          consumer_positions arms and PROD-01.4a's five generations arms, forty-five since \
          PROD-02.1's five source_watermarks arms), got: {stdout}"
     );
-    // PROD-02.1 (R3): the checked-in receipt predates source_watermarks, so
+    // The checked-in receipt predates source_watermarks, so
     // its coverage reads NOT RECORDED — never complete.
     assert!(
         stdout.contains(
@@ -547,7 +519,7 @@ fn the_signed_receipt_fixture_verifies() {
         ),
         "{stdout}"
     );
-    // PROD-01.4a: the checked-in receipt is a 1.0.0 document, so no topic ID
+    // The checked-in receipt is a 1.0.0 document, so no topic ID
     // is known from it — said, never left to read as "the same generation".
     assert!(
         stdout.contains(
@@ -556,7 +528,7 @@ fn the_signed_receipt_fixture_verifies() {
         ),
         "{stdout}"
     );
-    // PROD-03.0: the checked-in receipt is a 1.0.0 document, so whether its
+    // The checked-in receipt is a 1.0.0 document, so whether its
     // topics need a schema registry is NOT ASSESSED — said, never left to read
     // as "not schema-dependent".
     assert!(
@@ -566,7 +538,7 @@ fn the_signed_receipt_fixture_verifies() {
         ),
         "{stdout}"
     );
-    // PROD-05.1: the checked-in receipt is a 1.0.0 document, so its topics'
+    // The checked-in receipt is a 1.0.0 document, so its topics'
     // configuration model is NOT RECORDED — said, never left to read as "none".
     assert!(
         stdout.contains(
@@ -575,7 +547,7 @@ fn the_signed_receipt_fixture_verifies() {
         ),
         "{stdout}"
     );
-    // FX-4: the checked-in signed receipt is a 1.0.0 document, so its
+    // The checked-in signed receipt is a 1.0.0 document, so its
     // configuration capture coverage is UNKNOWN — and the verdict says so
     // rather than letting the exit 0 read as "captured".
     assert!(
@@ -612,7 +584,7 @@ fn the_signed_receipt_fixture_verifies() {
 
 /// The `SignatureOnly` verdict is still REACHABLE, and still honest.
 ///
-/// Task 5b gave the backup receipt an invariant reader; the drill put receipt
+/// The backup receipt has an invariant reader; the drill put receipt
 /// and the teardown attestation have none in tag 1, so their exit 0 means
 /// strictly less and the printer must keep saying so. Without this row, the
 /// sentence could be deleted along with its last caller and nothing would
@@ -749,7 +721,7 @@ fn the_payload_type_default_leaves_the_scorecard_invocation_unchanged() {
     );
 }
 
-/// **FX-3, through the binary.** `drill verify` exits 0 on all four documents
+/// **Through the binary.** `drill verify` exits 0 on all four documents
 /// and its `reconstruction:` line says exactly what each one claims:
 ///
 /// | document | line |
@@ -835,7 +807,7 @@ fn drill_verify_names_what_a_new_topic_restore_did_not_reconstruct() {
     }
 }
 
-/// **FX-8.** `drill verify` prints what a scorecard's `source.time_basis`
+/// `drill verify` prints what a scorecard's `source.time_basis`
 /// says — the topics selected by producer time and the ones selected with an
 /// unrecorded timestamp type — and, for a document without the block, that it
 /// was not recorded. Never silence for an absent block, never a line for an
@@ -898,7 +870,7 @@ fn drill_verify_prints_the_time_basis_a_scorecard_records() {
     }
 }
 
-/// **PROD-08.1.** `drill verify` prints what a scorecard's
+/// `drill verify` prints what a scorecard's
 /// `integrity.verification` says the verdict covered: one line saying it is
 /// not recorded (read as a sample) when the block is absent; the coverage, its
 /// basis and header order; a complete block's exact counts, or INCOMPLETE and
@@ -958,8 +930,8 @@ fn drill_verify_prints_what_the_verdict_covered() {
             String::from_utf8_lossy(&out.stderr)
         );
         let stdout = String::from_utf8(out.stdout).unwrap();
-        // The `integrity coverage:` lines only: FX-23 adds `sample coverage:`
-        // lines under the same printed prefix, pinned by their own test.
+        // The `integrity coverage:` lines only: `sample coverage:` lines share
+        // the printed prefix and are pinned by their own test.
         let got: Vec<&str> = stdout
             .lines()
             .filter_map(|l| l.strip_prefix("coverage:  "))
@@ -969,8 +941,8 @@ fn drill_verify_prints_what_the_verdict_covered() {
     }
 }
 
-/// **FX-23 review M2.** What a SAMPLED `pass` proves depends on the document's
-/// version: only a build with FX-23's checks writes 1.6.0, and a 1.4.0 or 1.5.0
+/// What a SAMPLED `pass` proves depends on the document's version: only a
+/// build with the per-partition checks writes 1.6.0, and a 1.4.0 or 1.5.0
 /// document is the same bytes whichever build signed it. So 1.6.0 and later
 /// say the per-partition bound, every-topic sampling and the engine-report
 /// check held; an earlier sampled pass says it proves only the canary and one
@@ -1020,7 +992,7 @@ fn a_sampled_pass_says_what_it_proves_at_its_version() {
     assert!(sampled_pass_lines(Outcome::Pass, Some(&complete), "1.6.0").is_empty());
 }
 
-/// **PROD-11.1 review H1.** A sampled `pass` over a document carrying
+/// A sampled `pass` over a document carrying
 /// `source.selection` says what it proves over THAT window, never the
 /// unqualified 1.6.0 line; a complete pass or a non-pass over a selection
 /// prints nothing, and a document without the block keeps the 1.6.0 line.
@@ -1077,7 +1049,7 @@ fn a_sampled_pass_over_a_selection_says_so() {
         sampled_pass_lines_over(Outcome::Pass, Some(&complete), "1.7.0", Some(&window)).is_empty()
     );
 
-    // PROD-11.1b: a 2.0.0 subset, from the floor and from a start.
+    // A 2.0.0 subset, from the floor and from a start.
     let subset = |start: Option<i64>| SelectionLabel {
         window_start_ms: start,
         window_end_ms: 1_760_000_015_000,
@@ -1117,7 +1089,7 @@ fn a_sampled_pass_over_a_selection_says_so() {
     );
 }
 
-/// **PROD-11.1 review N1, a row per lane.** The `replay selection:` line says
+/// **A row per lane.** The `replay selection:` line says
 /// "no record before the start was restored" ONLY over a complete
 /// verification whose integrity passed (IV-6: a restored record below the
 /// start is `unexpected`, and a complete pass has none). A sampled document
@@ -1190,7 +1162,7 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
     )
     .is_empty());
 
-    // PROD-11.1b: a 2.0.0 subset says no record of another partition was
+    // A 2.0.0 subset says no record of another partition was
     // RESTORED only over a verification that passed, on either lane (the
     // sampled lane holds every other partition empty; the complete lane
     // counts a record there as unexpected); anything else, only expected.
@@ -1230,7 +1202,7 @@ fn the_selection_line_claims_only_what_its_lane_proves() {
     }
 }
 
-/// **PROD-02.1, R3's control.** A receipt with `source_watermarks` reads
+/// **The control.** A receipt with `source_watermarks` reads
 /// "coverage recorded" and names its empty partitions; without the block it
 /// reads "coverage not recorded" (the row above, over the signed fixture).
 #[test]

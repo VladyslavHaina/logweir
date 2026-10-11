@@ -1,39 +1,33 @@
-// pages/operation.js -- THE DURABLE OPERATION VIEW (PLAT-12.1, PLAT-14.1).
+// pages/operation.js -- the durable operation view.
 //
-// ONE SUBMISSION, ONE PLACE TO WATCH IT, AND A ROUTE THAT SURVIVES A RELOAD.
-// Everything a person needs after clicking "Back up now" or submitting a
-// Restore is here: where the run is, why it is there, what the controller
-// could see, what it produced and whether the evidence verified. The route
-// carries the whole identity -- `#/operations?ns=&kind=&name=&uid=` -- so a
-// refresh, a new tab and a link pasted into an incident channel all open the
-// same run. Nothing is kept in this page; the custom resource is the truth.
+// One submission, one place to watch it, and a route that survives a reload:
+// where the run is, why, what the controller could see, what it produced and
+// whether the evidence verified. The route carries the whole identity --
+// `#/operations?ns=&kind=&name=&uid=` -- so a refresh, a new tab and a pasted
+// link all open the same run. Nothing is kept in this page; the custom
+// resource is the truth.
 //
 // FOUR THINGS THIS VIEW REFUSES TO DO.
 //
-//   1. IT COMPUTES NO STATE. In console mode the normalized `state` is one of
-//      ten words `logweir-api` derives from D3 section 2.5's table, and this page
-//      prints the API's word. In legacy mode there IS no normalized state, and
-//      this page says so and shows `status.progress.stage` -- the controller's
-//      own -- rather than implementing that table a second time in a browser.
-//   2. IT NEVER READS A CLOCK FOR A VERDICT. `lastUpdate`, `lastObservedTime`
-//      and `lastTransitionTime` are printed as the instants they are. Whether
-//      an active stage has gone stale is a decision the API makes against a
-//      clock the cluster shares; a page that made it from `Date.now()` would
-//      disagree with the cluster by exactly the skew between them.
-//   3. IT RENDERS THE RESULT AND THE EVIDENCE SEPARATELY, AND NEVER MERGES
-//      THEM. "The run exited 0" and "the document it signed verifies" are two
-//      facts about two things, and a `succeeded` result whose evidence is
-//      `NotAttempted` is never shown as a verified success (D3 section 2.5).
-//   4. IT CANCELS NOTHING. Leaving this route closes the watch's connection.
-//      The Job keeps running; there is no cancel route in v1 and this page
-//      offers no control that pretends there is.
+//   1. IT COMPUTES NO STATE. In console mode it prints the API's normalized
+//      `state` (D3 section 2.5's table). Legacy mode has none, and the page
+//      says so and shows the controller's `status.progress.stage` rather than
+//      implementing that table a second time in a browser.
+//   2. IT NEVER READS A CLOCK FOR A VERDICT. Instants are printed as they are;
+//      whether an active stage has gone stale is the API's decision against a
+//      clock the cluster shares, and `Date.now()` would disagree with it by
+//      the skew between them.
+//   3. IT NEVER MERGES THE RESULT AND THE EVIDENCE. "The run exited 0" and
+//      "the document it signed verifies" are two facts, and a `succeeded`
+//      result whose evidence is `NotAttempted` is never shown as a verified
+//      success (D3 section 2.5).
+//   4. IT CANCELS NOTHING. Leaving the route closes the watch's connection;
+//      the Job keeps running, and there is no cancel route in v1.
 //
-// THE UID IN THE ROUTE IS A GUARD AND NOT DECORATION. A name is reused: a
-// Backup deleted and recreated under the same name is a different run with
-// different evidence. When the route carries a `uid` and the object answers to
-// a different one, this page says "this name now refers to a different run"
-// and renders nothing about it, rather than silently switching to the new one
-// under a reader who came from a link about the old one.
+// THE UID IN THE ROUTE IS A GUARD. A Backup deleted and recreated under the
+// same name is a different run with different evidence, so when the object
+// answers to a different uid this page says "this name now refers to a
+// different run" and renders nothing about it.
 
 import {
   ABSENT,
@@ -76,9 +70,8 @@ import { granted } from "../client.js";
 import { active, cancelled } from "../lifecycle.js";
 import { inConsole, readOperation, watchOperation } from "../operation-watch.js";
 
-/** The route one operation lives at. BOTH HALVES OF THE IDENTITY TRAVEL: the
- *  name says which object to read and the uid says which RUN the link was
- *  about. */
+/** The route one operation lives at. Both halves of the identity travel: the
+ *  name says which object to read and the uid which RUN the link was about. */
 export function operationRoute(ns, kind, name, uid) {
   return (
     "#/operations?ns=" + encodeURIComponent(String(ns || "")) +
@@ -88,12 +81,10 @@ export function operationRoute(ns, kind, name, uid) {
   );
 }
 
-/** The three values the route carries, out of the hash string.
- *
- *  A PURE FUNCTION OF THE HASH, exported for the same reason
- *  `restoreRouteParams` is: `ui/app.js` touches `window` at module scope and
- *  cannot be imported under `node --test`, so an extraction written inline
- *  there would be a hop no test could reach. */
+/** The three values the route carries, out of the hash string. A pure
+ *  function of the hash, for the reason `restoreRouteParams` is: `ui/app.js`
+ *  touches `window` at module scope and cannot be imported under `node
+ *  --test`. */
 export function operationRouteParams(hash) {
   const text = typeof hash === "string" ? hash : "";
   const question = text.indexOf("?");
@@ -130,12 +121,11 @@ export const READING_SENTENCE = "Reading this operation...";
 
 /** THE FACTS, SELECTED AND NEVER DERIVED.
  *
- *  Both documents go through here and come out as the same bag of ALREADY
- *  RECORDED values. What differs between the modes is which fields EXIST, and
- *  that difference is carried honestly: `state` is `null` in legacy mode
- *  because the custom resource has none, and `null` renders as a sentence
- *  saying which API computes it -- never as `unknown`, which is one of the ten
- *  words and would be a verdict this page invented. */
+ *  Both documents come out as the same bag of already recorded values; what
+ *  differs is which fields EXIST. `state` is `null` in legacy mode because
+ *  the custom resource has none, and `null` renders as a sentence saying
+ *  which API computes it -- never as `unknown`, which is one of the ten words
+ *  and would be a verdict this page invented. */
 export function operationFacts(document, console_) {
   const o = document || {};
   if (console_ === true) {
@@ -152,15 +142,11 @@ export function operationFacts(document, console_) {
       lastUpdate: o.lastUpdatedAt || null,
       createdAt: o.createdAt || null,
       awaitingApproval: o.awaitingApproval === true,
-      // SELECTED AND DELIBERATELY NOT PRINTED, which is a decision and not an
-      // oversight. `ReadinessView` is published as required on every
-      // OperationView and `ReadinessView::not_implemented()` is the only value
-      // `logweir-api` can produce for it today: `{state: "unknown", basis:
-      // "notImplemented"}`, until PLAT-03.1 lands. A row saying "readiness
-      // unknown, because it is not implemented" on every run is noise a reader
-      // learns to skip, and skipping is what makes the row useless on the day
-      // it starts carrying an answer. It is kept in the facts so the page that
-      // renders it then has it, and the field is asserted by `contract.js`.
+      // Selected and deliberately NOT PRINTED. `logweir-api` can only produce
+      // `ReadinessView::not_implemented()` today (`{state: "unknown", basis:
+      // "notImplemented"}`), and a row saying so on every run is noise a reader
+      // learns to skip -- which makes the row useless the day it carries an
+      // answer. It is kept in the facts for the page that renders it then.
       readiness: o.readiness || null,
       stage: o.stage || null,
       progress: o.progress || null,
@@ -168,10 +154,9 @@ export function operationFacts(document, console_) {
       result: o.result || null,
       evidence: o.evidence || null,
       verification: o.verification || null,
-      // THE CONSOLE'S VERDICT IS ONE WORD AND IT ARRIVES COMBINED (D3
-      // section 2.5). `trust.state` is the API's own answer over the
-      // controller's `result` and `trust.basis`; the basis, the key state and
-      // the policy travel beside it as the facts behind that answer.
+      // The console's verdict is one word, arriving combined (D3 section 2.5):
+      // `trust.state` is the API's answer over the controller's `result` and
+      // `trust.basis`, which travel beside it with the key state and policy.
       trust: o.trust || null,
       trustState: (o.trust || {}).state || null,
       evidenceVerification: null,
@@ -223,7 +208,7 @@ export function operationFacts(document, console_) {
     evidenceVerification: (status.evidence || {}).verification || null,
     verifiedSuccess: false,
     verificationScope: status.verificationScope || null,
-    // PROD-08.1a: the custom resource's copy of the signed coverage, read by
+    // The custom resource's copy of the signed coverage, read by
     // [`renderCoverage`] where the console reads `verificationScope`.
     integrity: status.integrity || null,
     completion: status.completion || null,
@@ -247,14 +232,11 @@ function diagnosesOf(document) {
 
 /** The runner facts, and there are none in console mode.
  *
- *  `progress.runner` IS NOT PUBLISHED, DELIBERATELY. A Job name and a pod name
- *  are infrastructure detail; D0's visible list is reason, message, exit code,
- *  last phase, timestamps and evidence references, and a structural test on the
- *  API side keeps them off the contract. The custom resource DOES carry them
- *  and legacy mode renders them, because there the page is reading the object
- *  itself. What replaces them in console mode is the same thing an incident
- *  needs: `progress.reason`, `progress.message`, and a DIAGNOSTIC's own
- *  `object {kind, name}`, which IS published. */
+ *  `progress.runner` is not published, deliberately: a Job or pod name is
+ *  infrastructure detail, and a structural test on the API side keeps it off
+ *  the contract. Legacy mode renders it because there the page reads the
+ *  object itself. In console mode an incident has `progress.reason`,
+ *  `progress.message` and a diagnostic's own `object {kind, name}`. */
 export const NO_RUNNER_DETAIL_SENTENCE =
   "The product API publishes no Job or pod name for a run: they are infrastructure detail and " +
   "the console contract does not carry them. What the controller could see is in the diagnoses " +
@@ -327,42 +309,30 @@ export function renderDiagnostics(v) {
   );
 }
 
-/** THE ONE ACTION A FAILED RESTORE OFFERS: retry to a FRESH TARGET
- *  (PLAT-11.2, PLAT-12.2).
+/** THE ONE ACTION A FAILED RESTORE OFFERS: retry to a FRESH TARGET.
  *
- *  A LINK AND NOT A BUTTON, because nothing is retried from here: it opens the
- *  wizard, carrying which run failed, and the operator chooses the point and
- *  reviews a whole new plan. The retry is a NEW Restore with a new topic
- *  prefix, new plan bytes, a new plan hash and -- because both names are
- *  minted from those bytes -- a new Restore name and a new Approval name. The
- *  failed run's Approval is not reused and cannot be reached from here; where
- *  the namespace's policy is governed the new restore waits for an approval of
- *  its own, exactly as a first restore does.
+ *  A link, not a button: nothing is retried from here. It opens the wizard,
+ *  carrying which run failed, and the operator reviews a whole new plan. The
+ *  retry is a NEW Restore with a new topic prefix and plan bytes, so a new
+ *  plan hash and -- both names being minted from those bytes -- a new
+ *  Restore name and Approval name; a governed namespace makes it wait for an
+ *  approval of its own.
  *
- *  AND NOTHING IS OFFERED FOR A BACKUP OR FOR A RUN THAT HAS NOT FAILED. A
- *  retry of a running restore would be a second execution against the same
- *  target names; a retry of a successful one is a restore, and the ordinary
- *  wizard is where that starts. */
+ *  Nothing is offered for a backup or a run that has not failed: retrying a
+ *  running restore would be a second execution against the same target
+ *  names, and retrying a successful one is just a restore. */
 export function renderRetryAction(v, ns) {
   if (v.kind !== "restore") {
     return "";
   }
-  // BOTH MODES, AND EACH READ IN ITS OWN VOCABULARY. The console DTO says
-  // `terminal` and a lower-case `state`; the custom resource says
-  // `status.phase` with a capital, and its projection leaves `terminal` false
-  // because nothing there computes one. A predicate that read only the first
-  // would silently offer nothing behind `kubectl proxy`, which is where an
-  // incident without the product API happens.
-  // `failed` AND `refused`, because the product API has two terminal words for
-  // one operator situation and both are work that will never proceed. A
-  // terminal refusal -- `ApprovalSubjectMismatch`, `PlanHashMismatch` -- is in
-  // fact the SHARPER case for this affordance: that Restore's name and its
-  // Approval name are already taken, so a retry of the same point with the
-  // same prefix would mint exactly them again and collide, which is the defect
-  // PLAT-12.2 names. The custom resource spells both `Failed` in
-  // `status.phase`, so the legacy arm needs no second word. (A live journey
-  // found this: the lab refused a Restore terminally and the affordance,
-  // written for `failed` alone, was not offered.)
+  // BOTH MODES, EACH IN ITS OWN VOCABULARY: the console DTO says `terminal`
+  // and a lower-case `state`; the custom resource says `status.phase`, and its
+  // projection leaves `terminal` false, so reading only the first would offer
+  // nothing behind `kubectl proxy`, where an incident without the product API
+  // happens. `failed` AND `refused`: both are work that will never proceed,
+  // and a terminal refusal (`ApprovalSubjectMismatch`, `PlanHashMismatch`) is
+  // the sharper case -- that Restore's and Approval's names are taken, so a
+  // same-prefix retry would collide. The custom resource spells both `Failed`.
   const failed = v.console === true
     ? v.terminal === true &&
       ["failed", "refused"].includes(String(v.state || "").toLowerCase())
@@ -373,8 +343,8 @@ export function renderRetryAction(v, ns) {
   return (
     "<section class=\"retry\" id=\"restore-retry\"><h3>Retry</h3>" +
     "<p class=\"note\">" + esc(RETRY_FRESH_TARGET_SENTENCE) + "</p>" +
-    // A RETRY IS A NEW RESTORE, and a role that cannot create one reads who
-    // can (MCP round 3, R3-2's sweep): the wizard's route refuses it by name.
+    // A retry is a new Restore, and a role that cannot create one reads who can;
+    // the wizard's route refuses it by name.
     (granted(String(ns || ""), "restoreCreate")
       ? "<p class=\"actions\"><a id=\"retry-fresh-target\" href=\"" +
         esc(retryRoute(String(ns || ""), String(v.name || ""))) +
@@ -386,19 +356,15 @@ export function renderRetryAction(v, ns) {
 
 /** The wizard's selector, carrying which failed run is being retried.
  *
- *  SPELLED HERE AND NOT IMPORTED, ON PURPOSE. The wizard owns this route and
- *  exports the same helper (`restore-wizard.js::restoreRetryFromOperationRoute`),
- *  but importing that module here would pull `ui/plan.js` into the operation
- *  page's module graph -- and `plan.js` THROWS AT LOAD outside a secure
- *  context. A page that only reads a run would then stop rendering on an
- *  origin where it renders today, to support a link. So the four-token route
- *  is written out, and `pages.spec.js` asserts this function and the wizard's
- *  helper produce the identical string, which is the property that could
- *  otherwise drift.
+ *  Spelled here, not imported from the wizard
+ *  (`restore-wizard.js::restoreRetryFromOperationRoute`): that would pull
+ *  `ui/plan.js` into this page's module graph, and `plan.js` THROWS AT LOAD
+ *  outside a secure context, so a page that only reads a run would stop
+ *  rendering there. `pages.spec.js` asserts both produce the identical
+ *  string.
  *
  *  It names NO recovery point: `Restore.spec` carries a backup SET id and no
- *  reference to the `Backup` it came from, so the point is chosen on the
- *  selector rather than guessed here. */
+ *  reference to its `Backup`, so the point is chosen on the selector. */
 export function retryRoute(ns, restoreName) {
   const n = typeof ns === "string" ? ns.trim() : "";
   return (
@@ -437,24 +403,16 @@ export function renderResult(v) {
   );
 }
 
-/** THE EVIDENCE: what the CONTROLLER checked, with the case named.
- *
- *  Three results, three different claims (D3 section 7.4): `Invalid` is about the
- *  DOCUMENT, `NotAttempted` is about the CONTROLLER, and `Untrusted` is about
- *  the SIGNER. They are never flattened into one word here. */
 /** Whether this run's evidence is green, by the evidence section's own rule:
  *  the API's combined trust word in console mode, `result` + the raw `trust`
- *  block in legacy mode (render.js `trustBlockAllowsGreen`, the controller's
- *  rule: no block keeps D3 section 12's rule, a present one is green only on
- *  `Current`/`Historical`).
+ *  block in legacy mode (render.js `trustBlockAllowsGreen`).
  *
- *  THE BASIS STILL VETOES IN CONSOLE MODE (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
- *  A `logweir-api` built before TRUST-STATE-RBR-VERIFIED projects a `Valid`
- *  verdict on `RecordedBeforeRevocation` as `trust.state: verified`; a current
- *  one says `untrusted`, and D3 section 7.4 says that case is "never green".
- *  So a green word is green only on a basis a green badge may carry -- the
- *  SAME [`basisAllowsGreen`] legacy mode applies -- and the two modes cannot
- *  disagree about one run, whichever server answered. */
+ *  THE BASIS STILL VETOES IN CONSOLE MODE. An older `logweir-api` projects a
+ *  `Valid` verdict on `RecordedBeforeRevocation` as `trust.state: verified`
+ *  (a current one says `untrusted`), and D3 section 7.4 says that case is
+ *  "never green". So a green word is green only on a basis a green badge may
+ *  carry -- the same [`basisAllowsGreen`] legacy mode applies -- and the two
+ *  modes cannot disagree about one run, whichever server answered. */
 export function evidenceGreen(v) {
   const console_ = v.console === true;
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
@@ -480,19 +438,17 @@ function consoleUnverifiedCaption(v, trust) {
   return unverifiedTrustCaption(v.trustState, v.verifiedSuccess);
 }
 
+/** THE EVIDENCE: what the CONTROLLER checked, with the case named. Three
+ *  results, three claims (D3 section 7.4): `Invalid` is about the DOCUMENT,
+ *  `NotAttempted` about the CONTROLLER, `Untrusted` about the SIGNER; never
+ *  flattened into one word. */
 export function renderEvidence(v) {
   const e = v.evidence || {};
-  // TWO DOCUMENTS, TWO RULES, EACH READING WHAT ITS OWN DOCUMENT CARRIES.
-  //
-  // In CONSOLE mode the verdict arrives already combined: `trust.state` is D3
-  // section 2.5's own word, which `logweir-api` computed from the controller's
-  // `result` and its `trust.basis`. Reading it is the whole point of asking a
-  // normalizing API for a normalized status, and re-deriving it here would be
-  // that table implemented a second time in a browser.
-  //
-  // In LEGACY mode there is no such word -- the custom resource carries
-  // `result` and a PascalCase `basis` -- so the page keeps its own rule, which
-  // is the same rule the badge on `#/backups` and `#/history` uses.
+  // TWO DOCUMENTS, TWO RULES. In console mode the verdict arrives combined
+  // (`trust.state`, D3 section 2.5), and re-deriving it here would implement
+  // that table a second time in a browser. In legacy mode there is no such
+  // word -- the custom resource carries `result` and a PascalCase `basis` --
+  // so the page keeps its own rule, the one `#/backups` and `#/history` use.
   const console_ = v.console === true;
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
   const ver = (console_ ? v.verification : v.evidenceVerification) || {};
@@ -541,20 +497,12 @@ export function renderEvidence(v) {
 
 /** WHICH MODE THIS RESTORE IS IN, FROM THE MOMENT IT EXISTS.
  *
- *  THE RECONCILIATION MOVED `targetMode` TO THE TOP LEVEL AND THIS IS WHAT
- *  READS IT THERE. The published DTO says why in its own field documentation:
- *  D3 section 3.5 keys its guidance on `spec.target.mode`, "and that is a fact
- *  about the run from the moment it is created -- a rehearsal is a rehearsal
- *  before its scorecard exists. The first round hid it inside `completion`, so
- *  a Restore that had not finished could not be labelled." The console had the
- *  field at the top level after the renames and still read it ONLY inside the
- *  completion panel, which returns nothing at all without a scorecard -- so a
- *  running, pending or refused rehearsal was unlabelled on screen, which is
- *  the one case where "these topics are deleted by teardown" is worth saying
- *  BEFORE the fact.
- *
- *  It is deliberately NOT the completion guidance. That guidance is about what
- *  a run produced and stays beside the scorecard; this says what the run IS. */
+ *  `targetMode` is top level because D3 section 3.5 keys its guidance on
+ *  `spec.target.mode`, a fact about the run from creation: a running,
+ *  pending or refused rehearsal must be labelled, and "these topics are
+ *  deleted by teardown" is worth saying BEFORE the fact. This is not the
+ *  completion guidance, which is about what a run produced and stays beside
+ *  the scorecard; this says what the run IS. */
 export function renderTargetMode(v) {
   if (v.kind !== "restore") {
     return "";
@@ -576,12 +524,12 @@ export function renderTargetMode(v) {
   );
 }
 
-/** PROD-08.1a: HOW MUCH OF THIS RESTORE WAS VERIFIED, for every Restore and
- *  whatever its outcome -- the completion panel below is shown only for a run
- *  that succeeded, and a complete verification that did NOT cover the restore
- *  is exactly the run that did not. The signed coverage in words, and a
- *  recorded complete verification in full: covered or not, its reason, and
- *  every partition's exact counts. A claim until the evidence is green. */
+/** HOW MUCH OF THIS RESTORE WAS VERIFIED, for every Restore and whatever its
+ *  outcome -- the completion panel is shown only for a run that succeeded,
+ *  and a complete verification that did NOT cover the restore is exactly
+ *  the run that did not. The signed coverage in words, and a recorded
+ *  complete verification in full: covered or not, its reason, and every
+ *  partition's exact counts. A claim until the evidence is green. */
 export function renderCoverage(v) {
   if (v.kind !== "restore") {
     return "";
@@ -593,7 +541,7 @@ export function renderCoverage(v) {
   const green = evidenceGreen(v);
   const claim = (value) => scorecardClaim(cell(value), green);
   const known = recorded === "sampled" || recorded === "complete" ? recorded : null;
-  // PROD-11.1b: a narrowed restore says so beside its coverage.
+  // A narrowed restore says so beside its coverage.
   const selection = selectionIn(scope) || selectionIn(integrity);
   const narrowed = selectionWords(selection);
   return (
@@ -607,24 +555,17 @@ export function renderCoverage(v) {
   );
 }
 
-/** THE COMPLETION PANEL (D3 section 3.5): what a terminal Restore actually produced,
- *  the sampled counts labelled exactly, and the fixed guidance for the target
- *  mode this restore used.
- *
- *  The guidance sentences are `ui/render.js`'s and never the server's: a
- *  console that rendered server-authored prose here would be putting an
- *  instruction in front of an operator that no review in this repository ever
- *  read. */
+/** THE COMPLETION PANEL (D3 section 3.5): what a terminal Restore produced,
+ *  the sampled counts labelled exactly, and the fixed guidance for its
+ *  target mode. The guidance sentences are `ui/render.js`'s, never the
+ *  server's: server-authored prose here would be an instruction no review
+ *  in this repository ever read. */
 export function renderCompletion(v) {
   const c = v.completion || null;
   // A RUN THAT DID NOT SUCCEED PRODUCED NOTHING THIS PANEL COUNTS, AND THE
-  // PANEL IS NOT SHOWN (CONSOLE-COMPLETION-HEADING-ON-FAILED). A failed,
-  // refused or cancelled restore never writes the counts below -- the
-  // controller copies `status.completion` only for exit 0 and outcome `pass`
-  // -- so a heading "What this restore produced" over "No completion was
-  // recorded" was a section about an outcome the run did not have. Its result
-  // and its evidence are the sections above, and they say why it ended. This
-  // holds with a completion too: one an older controller copied onto a failed
+  // PANEL IS NOT SHOWN. The controller copies `status.completion` only for
+  // exit 0 and outcome `pass`; the result and evidence sections above say why
+  // a failed run ended. A completion an older controller copied onto a failed
   // run is still not what the run produced.
   const finished = v.terminal === true ||
     ["Succeeded", "Failed", "Cancelled"].indexOf(String(v.phase)) !== -1;
@@ -633,11 +574,10 @@ export function renderCompletion(v) {
     return "";
   }
   if (c === null) {
-    // A FINISHED RESTORE WITHOUT A COMPLETION IS SAID TO BE WITHOUT ONE, NEVER
-    // SHOWN AS ZERO. The controller copies `status.completion` only once the
-    // run's signed scorecard has verified; before that there are no counts to
-    // show, and an empty or zero row would read as "nothing was restored". A
-    // run still going has no panel at all, which is the same honesty.
+    // A finished restore without a completion is said to be without one, never
+    // shown as zero: the controller copies `status.completion` only once the
+    // signed scorecard verifies, and a zero row would read as "nothing was
+    // restored". A run still going has no panel at all.
     if (v.kind !== "restore" || !finished) {
       return "";
     }
@@ -657,10 +597,8 @@ export function renderCompletion(v) {
     ) +
     facts([
       ["records expected", cell(c.recordsExpected)],
-      // `recordsRestored` IS `sample.records_restored`: the records READ BACK
-      // in the sampled window, not everything this restore wrote (the CRD's
-      // field description, D3 section 3.5). Labelled as what it is, with the
-      // window beside it.
+      // `recordsRestored` is `sample.records_restored`: the records READ BACK in
+      // the sampled window, not everything this restore wrote (D3 section 3.5).
       [RECORDS_IN_WINDOW_LABEL, cell(c.recordsRestored)],
       ["sampled window", sampleWindow === null || (!sampleWindow.start && !sampleWindow.end)
         ? ABSENT
@@ -702,10 +640,9 @@ export function renderTeardown(v) {
     "<section class=\"teardown\"><h3>Teardown</h3>" +
     facts([
       ["attestation key", cell(t.attestationKey)],
-      // A LIST AND NOT A COUNT, and the flag beside it says when the list is
-      // the bounded head of a longer one: "which topics went" is the incident
-      // question, and a truncated list that did not say so would answer it
-      // wrongly and confidently.
+      // A list and not a count, with a flag for when it is the bounded head of a
+      // longer one: "which topics went" is the incident question, and a silently
+      // truncated list would answer it wrongly and confidently.
       ["deleted", deleted.length === 0 ? ABSENT : esc(deleted.join(", "))],
       ["deleted list truncated", cell(t.deletedTruncated)],
     ]) +
@@ -785,10 +722,9 @@ export function operationAnnouncement(f, name) {
   );
 }
 
-/** WHAT `#/operations` SAYS WHEN THE ADDRESS NAMES NO RUN (MCP-19). This route
- *  is one run's page and is reached FROM a run, so a visit without one is
- *  pointed at the two lists every run is listed in, rather than told that
- *  "the address bar named none". A kind this route does not serve is named.
+/** What `#/operations` says when the address names no run: it is one run's
+ *  page, reached from a run, so a visit without one is pointed at the two
+ *  lists every run is listed in. A kind this route does not serve is named.
  *  Pure. */
 export function renderNoOperation(ns, kind) {
   const n = encodeURIComponent(String(ns || ""));
@@ -808,8 +744,6 @@ export function renderNoOperation(ns, kind) {
     "\">History</a></p></div>"
   );
 }
-
-// --------------------------------------------------------------- mount half
 
 /** Reads one operation, renders it, and follows it until it settles. */
 export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
@@ -837,9 +771,9 @@ export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
       const uid = console_
         ? document.uid
         : ((document.metadata || {}).uid);
-      // THE UID GUARD, APPLIED TO EVERY DOCUMENT AND NOT ONLY THE FIRST. An
-      // object deleted and recreated while this view is open would otherwise
-      // start rendering the new run's facts under the old run's heading.
+      // The uid guard, on every document and not only the first: an object
+      // deleted and recreated while this view is open would otherwise put the new
+      // run's facts under the old run's heading.
       if (view.uid.length > 0 && typeof uid === "string" && uid.length > 0 && uid !== view.uid) {
         view.mismatch = true;
         view.document = null;

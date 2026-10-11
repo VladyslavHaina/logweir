@@ -58,9 +58,6 @@ pub trait Wiring {
     ) -> Result<Box<dyn InventoryProbe>, CheckFailure>;
 
     /// Build a READ-ONLY object handle for one role of this destination.
-    ///
-    /// # Errors
-    /// [`StoreFailure`].
     fn objects(
         &self,
         plan: &DestinationPlan,
@@ -75,10 +72,7 @@ pub trait Wiring {
     /// that grant is the destination grant `plan.credentials` describes. It is
     /// a parameter rather than something an implementation may look up so
     /// that no wiring can build the marker handle without being told whose it
-    /// is (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
-    ///
-    /// # Errors
-    /// [`StoreFailure`].
+    /// is.
     fn evidence_writer(
         &self,
         plan: &DestinationPlan,
@@ -92,9 +86,6 @@ pub trait Wiring {
     /// `grant` is the plan's separate `evidenceRead` grant, or `None` when that
     /// grant is the destination grant; a parameter for the reason
     /// [`Wiring::evidence_writer`]'s is.
-    ///
-    /// # Errors
-    /// [`StoreFailure`].
     fn evidence_reader(
         &self,
         plan: &DestinationPlan,
@@ -118,7 +109,7 @@ pub trait Wiring {
     /// The observation clock.
     fn now(&self) -> DateTime<Utc>;
 
-    /// One variable of this pod's environment — the FX-20c grant binding
+    /// One variable of this pod's environment — the grant binding
     /// pairs `destination.credentialBound` compares
     /// ([`access::credential_bound_row`]). A PROVIDED method reading the
     /// process environment, so the shipped wiring and every existing fake keep
@@ -245,8 +236,7 @@ pub fn state_for(code: CheckCode) -> CheckState {
     }
 }
 
-/// The operator-facing remedy for one code — PLAT-03.1's acceptance
-/// ("the UI names each failed prerequisite and **its remedy**").
+/// The operator-facing remedy for one code.
 ///
 /// A TABLE, not prose at each site, so a code cannot reach a UI with no remedy
 /// text; `every_code_the_runner_emits_has_a_remedy` walks the runner's own
@@ -320,9 +310,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The destination asks for workload identity and none was injected. Annotate the \
              runner ServiceAccount, or switch the destination to static credentials."
         }
-        // FX-20c (review LOW-2): never "write this destination's binding into
-        // the Secret" — the Secret may be ANOTHER destination's, and binding
-        // it here hands this destination that credential.
+        // Never "write this destination's binding into the Secret": the
+        // Secret may be ANOTHER destination's, and binding it here hands this
+        // destination that credential.
         CheckCode::CredentialBindingMismatch => {
             "A Secret this destination names carries no `logweir-binding`, or one written for \
              another object or endpoint, so the check presented it nowhere. Give this \
@@ -381,7 +371,7 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The object at the manifest key is not a backup manifest. Check that the prefix \
              points at the archive root this backup set was written to."
         }
-        // FX-14: the point-bound restore preflight, in the binding's words.
+        // The point-bound restore preflight, in the binding's words.
         CheckCode::ManifestSuperseded => crate::catalog::pin::SUPERSEDED_REMEDY,
         CheckCode::PointBindingMismatch => {
             "The plan's recovery point binding is not this archive's: it is malformed, names a \
@@ -398,8 +388,7 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The requested point in time is newer than anything this backup set covers. Pick an \
              earlier point, or take a newer backup."
         }
-        // PROD-15.1 review L6: the original-name block in a shape phase 0
-        // refuses.
+        // The original-name block in a shape phase 0 refuses.
         CheckCode::TopicMappingIdentity => {
             "The plan maps a topic onto its own name in a shape the runner refuses. A restore \
              under the original topic names is mode newTopic with topic_naming.prefix \"\", the \
@@ -481,7 +470,7 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              window yourself. The run is not refused for this: a record the target rejects fails \
              the restore, which signs nothing."
         }
-        // -- capability rows (PROD-01.2) ---------------------------------
+        // -- capability rows ---------------------------------------------
         CheckCode::EngineProtocolUnsupported => {
             "This operation cannot run against this endpoint with this engine: the endpoint \
              closes the connection on a request version it does not serve. Use an endpoint that \

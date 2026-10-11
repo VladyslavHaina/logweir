@@ -1,21 +1,21 @@
-//! **FX-23 review M1: reading the engine's offset report must not hold its
-//! per-record section in memory.**
+//! **Reading the engine's offset report must not hold its per-record section
+//! in memory.**
 //!
 //! The pinned engine writes one `detailed_mappings` pair per restored record
 //! (`restore/engine.rs:1903` in 0.23.3), so the report of a large restore is
 //! hundreds of megabytes. Phase 7 needs only `entries[].{topic, partition}`.
-//! The first FX-23 reader parsed the whole file — `std::fs::read`, then a
-//! `#[serde(flatten)]` catch-all that rebuilt every unmatched key as
-//! `serde_json::Value` — at about 750 bytes of memory per record (measured by
-//! the review: 1.5 GB peak RSS for a 2,000,000-pair report), enough to
-//! OOM-kill a memory-capped runner after a restore that exited 0.
+//! Parsing the whole file — `std::fs::read`, then a `#[serde(flatten)]`
+//! catch-all that rebuilds every unmatched key as `serde_json::Value` — costs
+//! about 750 bytes of memory per record (measured: 1.5 GB peak RSS for a
+//! 2,000,000-pair report), enough to OOM-kill a memory-capped runner after a
+//! restore that exited 0.
 //!
 //! This file holds ONE test, and it measures the read in a CHILD process: the
 //! test binary runs itself again with `FX23_MEM_CHILD` set, the child does the
 //! one read and exits, and the parent takes the child's peak resident set from
 //! `getrusage(RUSAGE_CHILDREN)` (a safe API; a counting global allocator would
-//! need `unsafe`, which the workspace lint forbids outside the FFI crate,
-//! PROD-04.0b). A baseline child that reads a report with no per-record pairs
+//! need `unsafe`, which the workspace lint forbids outside the FFI crate). A
+//! baseline child that reads a report with no per-record pairs
 //! is measured first; the read may add at most `BOUND` to it, however many
 //! pairs the report holds. The control child parses the same file into a
 //! `Value` and must add many times `BOUND`, which is what shows the meter would

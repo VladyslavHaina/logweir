@@ -64,8 +64,8 @@ pub fn text(bytes: &[u8]) -> String {
 
 /// A document's `format_version` is **at least** `min` — the minor that defines
 /// the field under test — rather than an exact pin. Receipt and catalog-point
-/// versions are renumbered when several format-bumping rows integrate together
-/// (PROD-01.3/01.4a/03.0/04.1), and a future renumber only raises the stamped
+/// versions are renumbered when several format-bumping rows integrate
+/// together, and a future renumber only raises the stamped
 /// version, so `>= min` survives it where `== min` would break a sibling's CI.
 pub fn assert_format_at_least(actual: &str, min: &str, what: &str) {
     let triple = |v: &str| -> (u64, u64, u64) {

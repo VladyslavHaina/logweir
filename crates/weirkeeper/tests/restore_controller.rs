@@ -2,19 +2,14 @@
 //! the plan hash recomputed from the spec bytes, and `mode: scratch` as a
 //! field.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST, A `mock_client` TEST OR A
-//! FIXTURE-PARSING TEST. Nothing dials a socket, nothing waits on a Job,
-//! nothing runs `kubectl`, and nothing approaches Global Constraint 22's 15 s
-//! per-test bound — the transport is a `tower` closure and the clock is an
-//! argument.
+//! Every test here is a pure-function, `mock_client` or fixture-parsing test:
+//! the transport is a `tower` closure and the clock is an argument.
 //!
 //! READ `no_job_exists_until_the_approval_is_verified` FIRST. It is the
 //! property the whole module exists for, and it is a ZERO COUNT over a route
-//! table that HAS the `POST` routes present: the double panics on a request it
-//! was not given a route for, so a table with the `POST`s missing would make
-//! "no Job was created" indistinguishable from "the test forgot a route".
-//! Global Constraint 6's operator half — an unapproved plan creates NOTHING —
-//! is only assertable that way round.
+//! table that HAS the `POST` routes present: the double panics on an unrouted
+//! request, so without them "no Job was created" would be indistinguishable
+//! from "the test forgot a route".
 
 mod support;
 use support::{
@@ -69,31 +64,25 @@ use weirkeeper::job::{self, APPROVAL_MOUNT_PATH, APPROVAL_VOLUME};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::{unverified_evidence, VerificationResult, VerificationVerdict};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
-/// The task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-t20";
 
 /// The `Restore`'s name. The Job is named after this object VERBATIM, so it is
-/// deliberately inside the 63-character `batch.kubernetes.io/job-name` cap —
-/// see `a_restore_whose_name_is_too_long_is_refused_before_any_post` for the
-/// other side.
+/// inside the 63-character `batch.kubernetes.io/job-name` cap (see
+/// `a_restore_whose_name_is_too_long_is_refused_before_any_post`).
 const NAME: &str = "logweir-restore-incident-4471";
 /// The pod the job controller made.
 const POD: &str = "logweir-restore-incident-4471-abcde";
 
 /// The runner Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
-/// this run's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// this run's pod.
 const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
 
-/// The `metadata.resourceVersion` every fixture object carries — the thing a
-/// watch always delivers and a hand-built fixture used not to.
-///
-/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
-/// this value, so a fixture without one is not an object this controller could
-/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+/// The `metadata.resourceVersion` every fixture object carries, as a watch
+/// always delivers: every `/status` write is a merge PATCH preconditioned on
+/// this value.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
 /// A pod's `ownerReferences` naming `job_uid` as its **controller**.
@@ -104,12 +93,9 @@ fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
     pod_owner_json_in("batch/v1", kind, job_uid, controller)
 }
 
-/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
-///
-/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
-/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
-/// reference naming another group's `Job` must be refused like any other
-/// stranger.
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter. The group
+/// is part of the check: `volcano.sh/v1alpha1` also ships a `Job`, and a
+/// reference naming another group's `Job` must be refused.
 fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
         r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
@@ -137,27 +123,17 @@ const KEY_ID_LIVE: &str = "sha256:1111111111111111111111111111111111111111111111
 const KEY_ID_EXPIRED: &str =
     "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
-/// `spec.planBytes` — **the runner's own `restore.yaml` grammar** (interface
-/// **I20**), and the fixture every ConfigMap assertion is made over.
+/// `spec.planBytes`, in the runner's own `restore.yaml` grammar, and the
+/// fixture every ConfigMap assertion is made over.
 ///
-/// # IT ENDS WITH TWO SPACES AND A NEWLINE, DELIBERATELY
+/// IT ENDS WITH TWO SPACES AND A NEWLINE, DELIBERATELY: `plan_hash` binds
+/// these exact bytes, and trailing whitespace is the cheapest thing a
+/// `serde_yaml` round trip destroys
+/// (`the_plan_configmap_carries_the_spec_bytes_verbatim`).
 ///
-/// `the_plan_configmap_carries_the_spec_bytes_verbatim` is about trailing
-/// whitespace and nothing else: `plan_hash` binds these exact bytes, so a
-/// renderer that round-tripped them through `serde_yaml::from_str` +
-/// `to_string` — which is the mutant — produces a document whose hash no
-/// approval matches, while every gate reports green. Trailing whitespace is
-/// the cheapest thing a round trip destroys and the hardest to notice by eye,
-/// which is exactly why it is the fixture.
-///
-/// # IT IS A DOCUMENT THE RUNNER PARSES
-///
-/// `the_plan_bytes_fixture_is_a_document_the_runner_parses` feeds it to
-/// `serde_yaml::from_str::<logweir_core::spec::RestoreSpec>` — the same type
-/// `logweir restore run --spec` deserialises with. An invented shape would
-/// pass the 201, pass `drill approve` (which hashes whatever bytes it reads),
-/// pass all of `admit` because the hash matches, and fail only inside the
-/// runner pod after every gate had reported green.
+/// It is a document the runner parses
+/// (`the_plan_bytes_fixture_is_a_document_the_runner_parses`): an invented
+/// shape would pass every gate and fail only inside the runner pod.
 const PLAN_BYTES: &str = "\
 source:
   storage:
@@ -207,11 +183,10 @@ fn new_topic_plan_bytes() -> String {
     )
 }
 
-/// The same plan with the target's `auth` block — the shape the UI emits for a
-/// `scramSha512` connection, and the one PLAT-07.1 requires to MATCH the
-/// `KafkaCluster` `spec.target.clusterRef` names: the runner dials the plan's
-/// address with that connection's credential, so the two must describe one
-/// connection.
+/// The same plan with the target's `auth` block, the shape the UI emits for a
+/// `scramSha512` connection. It must match the `KafkaCluster`
+/// `spec.target.clusterRef` names: the runner dials the plan's address with
+/// that connection's credential.
 fn scram_plan_bytes() -> String {
     PLAN_BYTES.replace(
         "  mode: scratch\n",
@@ -232,13 +207,9 @@ fn scram_restore() -> (Restore, weirkeeper::crds::approval::Approval) {
     (restore, approval)
 }
 
-/// `sha256_prefixed(PLAN_BYTES)` — computed, never written out as a literal.
-///
-/// A HARD-CODED HASH WOULD MAKE THE MUTANT SURVIVE. If the expected value were
-/// a literal and the reconciler's recomputation were replaced by a read of
-/// `Approval.status.planHash`, a fixture whose status happened to carry the
-/// same literal would still pass. Deriving it here from the same bytes the
-/// ConfigMap carries is what makes the comparison about the FUNCTION.
+/// `sha256_prefixed(PLAN_BYTES)`, computed and never written as a literal: a
+/// literal would let a reconciler that read a cached hash pass on a fixture
+/// carrying the same literal.
 fn plan_hash() -> String {
     sha256_prefixed(PLAN_BYTES.as_bytes())
 }
@@ -309,18 +280,9 @@ fn now() -> DateTime<Utc> {
 /// An `Approval` as the API server would hand it over.
 ///
 /// `doc_hash` is the hash INSIDE the signed bytes; `cached_hash` is what
-/// `spec.planHash` claims. They are separate parameters because the whole
-/// property of
-/// `the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation`'s second
-/// arm is that only the first one is read.
-///
-/// **`spec.planHash` IS THE ONE AN AUTHOR TYPES, AND IT IS NOT SIGNED.** It is
-/// a plain CRD field beside `approvalBytes`, so it can say anything at all
-/// while the DOCUMENT says something else — which is exactly what the mutant
-/// exploits. `Approval.status` carries no plan hash of any kind (measured
-/// against the shipped schema in the second arm below), so the nearest
-/// reachable form of "read it from a status" is "read it from this unsigned
-/// spec field".
+/// `spec.planHash` claims. **`spec.planHash` is typed by an author and not
+/// signed**, so it can say anything while the document says something else;
+/// only `doc_hash` may be read. `Approval.status` carries no plan hash at all.
 fn approval_json(verified: bool, doc_hash: &str, cached_hash: &str) -> String {
     let doc = serde_json::to_string(&approval_doc(doc_hash)).expect("the doc is a JSON string");
     let subject_binding = if verified {
@@ -413,14 +375,10 @@ fn roster() -> weirkeeper::crds::trust_roster::TrustRoster {
     serde_json::from_str(&roster_json()).expect("the fixture is a TrustRoster")
 }
 
-/// The trust a ROSTER-ONLY cluster resolves to.
-///
-/// PLAT-19.1 moved the approval bundle from `TrustRoster/default` to the
-/// namespace's resolved trust (D3 §7.1), and `synthesize_legacy` is exactly
-/// what `reconcile_restore` reaches for a cluster with no `TrustPolicy`. Every
-/// bundle assertion below predates that and describes such a cluster, so
-/// routing them through the synthesis is what makes them evidence that the
-/// legacy path still renders the same bytes.
+/// The trust a ROSTER-ONLY cluster resolves to: `synthesize_legacy`, which is
+/// what `reconcile_restore` reaches for a namespace with no `TrustPolicy`. The
+/// bundle assertions below describe such a cluster, so they prove the legacy
+/// path still renders the same bytes.
 fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
     weirkeeper::trust::synthesize_legacy(&roster().spec)
 }
@@ -449,19 +407,16 @@ fn job_body(condition: &str) -> String {
 }
 
 /// A pod list holding one pod whose `runner` container terminated with
-/// `exit_code`, preceded by an unrelated sidecar at index 0.
-///
-/// THE SIDECAR IS AT INDEX 0 ON PURPOSE. A suite whose happy path has `runner`
-/// at index 0 cannot tell a by-name reader from a by-index one.
+/// `exit_code`, preceded by an unrelated sidecar at index 0 so a by-index
+/// reader cannot pass for a by-name one.
 fn pod_list_terminated(exit_code: i32) -> String {
     pod_list_terminated_owned_by(exit_code, &owned_by_job())
 }
 
-/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
-///
-/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY (D-SEAMS
-/// **S6**): `"null"` gives an ownerless pod, `pod_owner_json(…)` gives a wrong
-/// one, and both must end where an empty list ends — no log read, no exit code.
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter,
+/// because the owner is the security boundary: `"null"` (ownerless) and a
+/// wrong owner must both end where an empty list ends, with no log read and
+/// no exit code.
 fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
@@ -520,9 +475,7 @@ fn scorecard_json(outcome: &str, integrity_result: &str, partial_reason: &str) -
     )
 }
 
-// ---------------------------------------------------------------------------
 // Route tables
-// ---------------------------------------------------------------------------
 
 /// The routes an ADMISSION pass needs, with **every write route present** so
 /// that a zero `POST` count is an assertion about the reconciler and not about
@@ -555,10 +508,9 @@ fn admission_routes(
             status: cluster_status,
             body: cluster_body,
         },
-        // PLAT-19.1: materialization resolves the NAMESPACE's trust (D3 §7.1),
-        // so the policy list is read before the roster it falls back to. An
-        // empty list is a cluster that has not migrated, which is what every
-        // fixture below describes.
+        // Materialization resolves the NAMESPACE's trust, so the policy list is
+        // read before the roster it falls back to. An empty list is a cluster with
+        // no `TrustPolicy`, which is what every fixture below describes.
         Route {
             method: "GET",
             path_suffix: "/trustpolicies",
@@ -573,10 +525,8 @@ fn admission_routes(
             status: 200,
             body: roster_json(),
         },
-        // PRESENT ON PURPOSE — see this function's own note and the module
-        // header. A table without these three cannot tell "created nothing"
-        // from "the test forgot a route", because the double panics on an
-        // unrouted request.
+        // PRESENT ON PURPOSE (see the module header): without these three a zero
+        // count cannot tell "created nothing" from "the test forgot a route".
         Route {
             method: "POST",
             path_suffix: "/configmaps",
@@ -659,11 +609,8 @@ fn finished_routes(pods: String, log: String, job_condition: &str) -> Vec<Route>
             status: 200,
             body: job_body(job_condition),
         },
-        // DELETE IS ROUTED SO THAT "IT DID NOT DELETE" IS AN ASSERTION AND NOT
-        // AN INABILITY. The double panics on an unrouted request, so with no
-        // DELETE route a reconciler that deleted something would fail inside
-        // `testing.rs` naming a missing route — a real failure, but not the
-        // one Global Constraint 6 is about.
+        // DELETE is routed so that "it did not delete" is an assertion over the
+        // recorder, not a panic from the double on an unrouted request.
         Route {
             method: "DELETE",
             path_suffix: "/jobs/logweir-restore-incident-4471",
@@ -679,9 +626,7 @@ fn finished_routes(pods: String, log: String, job_condition: &str) -> Vec<Route>
     ]
 }
 
-// ---------------------------------------------------------------------------
 // Recording helpers
-// ---------------------------------------------------------------------------
 
 /// How many `POST`s reached `suffix`.
 fn post_count(bodies: &[SeenBody], suffix: &str) -> usize {
@@ -716,20 +661,15 @@ fn workspace_yaml(relative: &str) -> serde_yaml::Value {
     serde_yaml::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-// ===========================================================================
-// ADMISSION — no Job exists until the approval is verified
-// ===========================================================================
+// ADMISSION: no Job exists until the approval is verified
 
 /// **The property this module exists for.** With
 /// `Approval.status.verified = Some(false)`: **zero** `POST …/jobs`, the
 /// patched `status.phase` is `Pending`, and the condition reason is
-/// `ApprovalNotVerified`.
+/// `ApprovalNotVerified`. The `POST` routes are present (see
+/// [`admission_routes`]).
 ///
 /// KILLS: create the Job when `status.verified` is `Some(false)`.
-///
-/// THE `POST` ROUTES ARE PRESENT. See [`admission_routes`]: the double panics
-/// on an unrouted request, so a table without them would make the zero count
-/// unfalsifiable.
 #[tokio::test]
 async fn no_job_exists_until_the_approval_is_verified() {
     let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
@@ -792,12 +732,11 @@ async fn no_job_exists_until_the_approval_is_verified() {
     );
 }
 
-/// **Interface I19.** With `spec.approvalRef.name` naming an `Approval` the
-/// mock answers **404**, the returned `Action` is a requeue of 30 s and the
-/// condition reason is `ApprovalNotVerified`; a second reconcile with the
-/// `Approval` present and `verified: true` posts the Job.
-///
-/// THIS IS WHAT MAKES THE WIZARD'S MINTED-BOTH-NAMES-FIRST ORDERING WORKABLE.
+/// With `spec.approvalRef.name` naming an `Approval` the mock answers
+/// **404**, the returned `Action` is a requeue of 30 s and the condition
+/// reason is `ApprovalNotVerified`; a second reconcile with the `Approval`
+/// present and `verified: true` posts the Job. This is what lets the wizard
+/// mint both names first.
 ///
 /// KILLS: treat a 404 on the `Approval` as terminal.
 #[tokio::test]
@@ -1044,11 +983,9 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
     // ---- arm 2: the UNSIGNED CACHED FIELD carries the CORRECT hash, and it
     //             changes nothing.
     //
-    // `Approval.status` carries no plan hash at all — asserted below — so the
-    // nearest reachable mutant is "read `spec.planHash`", the plain CRD field
-    // an author types beside the signed bytes. It can say anything while the
-    // document says something else, which is the whole reason check 7 on the
-    // Approval side and `admit` on this side both RECOMPUTE.
+    // `Approval.status` carries no plan hash at all (asserted below), so the
+    // nearest reachable mutant is "read `spec.planHash`", the field an author
+    // types beside the signed bytes. Both sides RECOMPUTE for that reason.
     let shipped = workspace_yaml("charts/logweir/crds/approvals.yaml");
     let status_props = &shipped["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]
         ["status"]["properties"];
@@ -1111,14 +1048,11 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
     );
 }
 
-/// `approvalBytes` is document text, never base64 — interface **I18**, from
-/// the other side.
+/// `approvalBytes` is document text, never base64.
 ///
-/// KILLS: base64-decode `approvalBytes` before parsing. A decoder finds no
-/// JSON in the raw text, so `approval_plan_hash` returns `None`, the recomputed
-/// hash matches nothing, and every approval in the cluster becomes a
-/// `PlanHashMismatch`. This test pins the DISTINGUISHABILITY: the raw-text
-/// fixture yields the hash and a base64 of the same document does not.
+/// KILLS: base64-decode `approvalBytes` before parsing, which would make
+/// every approval a `PlanHashMismatch`. The raw-text fixture yields the hash
+/// and a base64 of the same document does not.
 #[test]
 fn approval_bytes_are_document_text_and_not_base64() {
     let raw: weirkeeper::crds::approval::Approval =
@@ -1208,9 +1142,8 @@ fn a_legacy_verified_status_waits_for_subject_provenance_refresh() {
     );
 }
 
-/// Base64, standard alphabet with padding. Hand-written: Global Constraint 38
-/// closes the workspace graph, and one test's negative fixture is not worth a
-/// dependency edge.
+/// Base64, standard alphabet with padding. Hand-written: one test's negative
+/// fixture is not worth a dependency.
 fn base64_encode(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -1286,9 +1219,7 @@ async fn an_unreachable_target_cluster_is_terminal_and_creates_nothing() {
     }
 
     // AND THE ORDER: the cluster is checked LAST, so an unverified approval
-    // over an unreachable cluster reports the APPROVAL. An admission that
-    // reported the cluster first would send an operator to look at a broker
-    // when the answer is that nobody approved the run.
+    // over an unreachable cluster reports the APPROVAL, not a broker.
     assert_eq!(
         admit(&restore(), None, None),
         RestoreAdmission::ApprovalNotVerified {
@@ -1312,13 +1243,9 @@ async fn an_unreachable_target_cluster_is_terminal_and_creates_nothing() {
     );
 }
 
-/// A `Restore` whose name exceeds 63 characters is refused BEFORE any `POST` —
-/// errata **E5d**.
-///
-/// The API server refuses the Job (`spec.template.labels … must be no more
-/// than 63 characters`), which used to become a 15-second requeue with
-/// `status: null` FOREVER. Measured on the `Backup` path; the same refusal for
-/// the same reason here, and a 63-character name still creates the Job.
+/// A `Restore` whose name exceeds 63 characters is refused BEFORE any `POST`:
+/// the API server would refuse the Job's label, leaving a requeueing object
+/// with `status: null`. A 63-character name still creates the Job.
 #[tokio::test]
 async fn a_restore_whose_name_is_too_long_is_refused_before_any_post() {
     let long = "r".repeat(64);
@@ -1396,12 +1323,12 @@ async fn a_restore_whose_name_is_too_long_is_refused_before_any_post() {
 }
 
 /// The `Approval`'s own `ReferentNotFound` is routed explicitly, and is still a
-/// HOLD — Task 16's MEDIUM-2, routed here.
+/// HOLD.
 ///
 /// An `Approval` reconciled before this `Restore` existed reports that it
 /// cannot find its own subject. That is a RACE, not a signature problem, so
-/// the verdict is unchanged — a thirty-second hold — while the reconciler
-/// routes on the reason so the log line says which of the two it is.
+/// the verdict is a thirty-second hold, while the log line says which of the
+/// two it is.
 #[tokio::test]
 async fn an_approval_that_cannot_find_its_subject_is_still_a_hold() {
     let mut value: Value = serde_json::from_str(&approval_json(false, &plan_hash(), &plan_hash()))
@@ -1450,9 +1377,7 @@ async fn an_approval_that_cannot_find_its_subject_is_still_a_hold() {
     );
 }
 
-// ===========================================================================
 // The plan ConfigMap
-// ===========================================================================
 
 /// The `POST …/configmaps` body's `data["restore.yaml"]` is **byte-equal** to
 /// `spec.planBytes`, trailing whitespace included.
@@ -1563,10 +1488,10 @@ async fn the_plan_configmap_carries_the_spec_bytes_verbatim() {
     assert_eq!(created_maps[1]["immutable"].as_bool(), Some(true));
 }
 
-/// **Interface I20.** The fixture's `planBytes` is accepted by
-/// `serde_yaml::from_str::<logweir_core::spec::RestoreSpec>` — so the ConfigMap
-/// assertion above is made over the grammar spec §6.1 defines and not over an
-/// invented string.
+/// The fixture's `planBytes` is accepted by
+/// `serde_yaml::from_str::<logweir_core::spec::RestoreSpec>`, so the ConfigMap
+/// assertion above is made over the runner's grammar and not an invented
+/// string.
 #[test]
 fn the_plan_bytes_fixture_is_a_document_the_runner_parses() {
     let parsed: logweir_core::spec::RestoreSpec = serde_yaml::from_str(PLAN_BYTES)
@@ -1664,12 +1589,12 @@ fn the_approval_bundle_is_immutable_exact_and_bound_to_the_restore() {
     );
 }
 
-/// **M-1, THE PER-RUN ARM** (D3 §5.5 step 6). A plan that binds a recovery
-/// point renders a fifth bundle member, the evidence keyring, and pins its
-/// digest: the bundle carries exactly [`evidence_keyring_bytes`], the
-/// contract carries `sha256` over those bytes, the argv names the file and
-/// the Job projects it. The Backup-bound fixture above keeps its four
-/// members, so an existing Restore's bundle is byte-unchanged.
+/// A plan that binds a recovery point renders a fifth bundle member, the
+/// evidence keyring, and pins its digest: the bundle carries exactly
+/// [`evidence_keyring_bytes`], the contract carries `sha256` over those bytes,
+/// the argv names the file and the Job projects it. The Backup-bound fixture
+/// above keeps its four members, so an existing Restore's bundle is
+/// byte-unchanged.
 #[test]
 fn a_point_bound_plan_renders_and_pins_the_evidence_keyring() {
     use logweir_core::execution_contract::EVIDENCE_KEYS_SHA256_ENV;
@@ -1991,12 +1916,9 @@ async fn a_bundle_materialization_failure_is_visible_and_starts_no_job() {
         Some("ApprovalBundleMaterializationFailed")
     );
     assert_eq!(statuses[0]["phase"].as_str(), Some("Pending"));
-    // PLAT-19.1: the message names the object an operator would actually EDIT.
-    // This fixture is a roster-only cluster, so that is still the roster — but
-    // the sentence is now rendered from the RESOLVED source, which is the whole
-    // point of review finding F1: a namespace governed by a `TrustPolicy` is
-    // told to edit the policy, not an object D3 §7.2 says no longer decides
-    // anything for it.
+    // The message names the object an operator would actually EDIT, rendered
+    // from the RESOLVED trust source: here a roster-only cluster, so the roster;
+    // a namespace governed by a `TrustPolicy` is told to edit the policy.
     let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
     assert!(
         message.contains("the TrustRoster 'default' does not carry"),
@@ -2200,9 +2122,7 @@ async fn a_concurrent_job_create_is_accepted_only_after_owner_uid_revalidation()
     assert_eq!(*job_gets.lock().unwrap(), 2);
 }
 
-// ===========================================================================
 // The Job shape and the argv
-// ===========================================================================
 
 /// The two Jobs differ **only** in the plan ConfigMap's contents; the argv,
 /// the mounts and the failure policy are identical, asserted field by field.
@@ -2283,10 +2203,9 @@ async fn scratch_mode_and_new_topic_mode_produce_the_same_job_shape() {
                 )
             });
     }
-    // FX-34: AND EXCEPT FOR EACH JOB'S OWN LINE TOKEN, the last two arguments
-    // of the runner. It is made when the Job is built, from the operating
-    // system's random source, so two Jobs never share one: the pair is taken
-    // off each Job here, checked, and the rest compared.
+    // AND EXCEPT FOR EACH JOB'S OWN LINE TOKEN, the last two arguments of the
+    // runner, drawn from the operating system's random source when the Job is
+    // built: the pair is taken off each Job here, checked, and the rest compared.
     let tokens: Vec<String> = jobs
         .iter_mut()
         .map(|job| {
@@ -2412,11 +2331,10 @@ fn the_runner_argv_is_the_contract() {
     );
 }
 
-/// One flag per UNEXPIRED roster key id — interface **I16**.
-///
-/// Task 22 owns `the_restore_job_projects_every_unexpired_roster_key_id`,
-/// because it owns both sides of the flag. What is asserted here is the
-/// FILTER: the expired id the roster's own status names is not passed.
+/// One flag per UNEXPIRED roster key id. The flag itself is
+/// `the_restore_job_projects_every_unexpired_roster_key_id`'s; this row
+/// asserts the FILTER: the expired id the roster's own status names is not
+/// passed.
 #[test]
 fn only_unexpired_roster_key_ids_reach_the_argv() {
     let ids = approver_key_ids(Some(&roster()));
@@ -2633,9 +2551,8 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
         "a plaintext target has no password to project"
     );
 
-    // A scramSha512 target with NO secretRef projects nothing either — and the
-    // runner then refuses at exit 3 with CredentialNotRenderable, which is
-    // interface I11's division of labour and not a gap on this side.
+    // A scramSha512 target with NO secretRef projects nothing either: the runner
+    // refuses that at exit 3 with CredentialNotRenderable.
     let mut value: Value =
         serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is JSON");
     value["spec"]["auth"]
@@ -2667,7 +2584,7 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
 }
 
 /// An approved plan that names a different target than the saved connection is
-/// refused before any ConfigMap or Job exists — PLAT-07.1.
+/// refused before any ConfigMap or Job exists.
 ///
 /// The runner dials the PLAN's address and authenticates with the CONNECTION's
 /// credential and CA, so a mismatch sends a saved credential somewhere the
@@ -2728,9 +2645,7 @@ fn a_plan_naming_another_target_than_the_saved_connection_is_refused() {
     .expect("a plan built from the saved connection builds a Job");
 }
 
-// ===========================================================================
-// Interface I8 — the three evidence keys
-// ===========================================================================
+// The three evidence keys
 
 /// The mock's log body ends with the three lines; the patched
 /// `status.evidence.{scorecardKey,sidecarKey,offsetReportKey}` are those three
@@ -2812,8 +2727,8 @@ async fn the_three_evidence_keys_are_read_from_the_final_three_stdout_lines() {
     );
 
     // ---- arm 3: the pure scanner, over the shapes a pod log really has --
-    // E4: a pod log is stdout and stderr MERGED IN NONDETERMINISTIC ORDER, so
-    // the discriminator lines are not last in either direction.
+    // A pod log is stdout and stderr MERGED IN NONDETERMINISTIC ORDER, so the
+    // discriminator lines are not last in either direction.
     let interleaved = format!(
         "{SCORECARD_KEY_PREFIX}{SCORECARD_KEY}\n\
          a human sentence the runner wrote to stderr\n\
@@ -2838,10 +2753,8 @@ async fn the_three_evidence_keys_are_read_from_the_final_three_stdout_lines() {
 }
 
 /// The two MANDATORY keys missing at exit 0 is `EvidenceRecorded=False` /
-/// `EvidenceKeysUnreadable`; the third key's absence is not.
-///
-/// Errata **E5c**: the condition exists only at exit 0, under its own type,
-/// because Global Constraint 11 says exits 1, 3 and 4 write no artifact.
+/// `EvidenceKeysUnreadable`; the third key's absence is not. The condition
+/// exists only at exit 0: exits 1, 3 and 4 write no artifact.
 #[tokio::test]
 async fn the_two_mandatory_keys_missing_at_exit_zero_is_its_own_condition() {
     // ---- arm 1: exit 0, no key lines at all ----------------------------
@@ -3005,12 +2918,12 @@ fn stop_tail(lists: &str, state: &str) -> String {
     format!("target-topics-appeared={lists}\nfailure-reason={state}\n")
 }
 
-/// **FX-44: what a run's teardown left is named on the Restore.** The
-/// runner's `teardown-failed=` line reaches `status.teardown.failed` on a run
-/// that failed (exit 1, which signs nothing) and on one that passed (exit 0),
-/// held to this Restore's mapped target names. Controls: a log without the
-/// line writes no `teardown` block, and a name the plan does not map is
-/// dropped. KILLS: the line not read; an unmapped name copied.
+/// **What a run's teardown left is named on the Restore.** The runner's
+/// `teardown-failed=` line reaches `status.teardown.failed` on a run that
+/// failed (exit 1, which signs nothing) and on one that passed (exit 0), held
+/// to this Restore's mapped target names. Controls: a log without the line
+/// writes no `teardown` block, and a name the plan does not map is dropped.
+/// KILLS: the line not read; an unmapped name copied.
 #[tokio::test]
 async fn what_a_runs_teardown_left_is_named_on_the_restore() {
     let why = "the restore principal lacks `Delete` on topic `drill-orders`: \
@@ -3047,17 +2960,16 @@ async fn what_a_runs_teardown_left_is_named_on_the_restore() {
     assert!(status.get("teardown").is_none(), "{status}");
 }
 
-/// **PROD-15.1 review M4: a lost creation race is NAMED on the Restore.** An
-/// exit-1 run whose LAST line is `failure-reason=TargetTopicAppeared` says so
-/// on `status.exitReason` and the reconcile outcome, carries the runner's
-/// `target-topics-appeared=` lists on `status.targetTopicsAppeared` (held to
-/// legal names this Restore's plan maps), and the `Failed` condition's
-/// message names the topics — every topic the run created and LEFT, with
-/// what to do about it — so the operator reads them on the object, not in a
-/// pod log garbage-collected with the Job. Nothing was deleted, so the status
-/// has no "removed" list: a line that carries one is not copied. The same for
-/// a creation step that stopped for another reason (`CreatedTopicsLeft`).
-/// Controls: an exit 1 without the line keeps the wire reason and no lists.
+/// **A lost creation race is NAMED on the Restore.** An exit-1 run whose LAST
+/// line is `failure-reason=TargetTopicAppeared` says so on `status.exitReason`
+/// and the reconcile outcome, carries the runner's `target-topics-appeared=`
+/// lists on `status.targetTopicsAppeared` (held to legal names this Restore's
+/// plan maps), and the `Failed` condition's message names every topic the run
+/// created and LEFT, with what to do about it, so the operator reads them on
+/// the object and not in a garbage-collected pod log. Nothing was deleted, so
+/// the status has no "removed" list. The same for a creation step that
+/// stopped for another reason (`CreatedTopicsLeft`). Control: an exit 1
+/// without the line keeps the wire reason and no lists.
 /// KILLS: not reading `failure-reason=` on a Restore; dropping the lists;
 /// trusting an arbitrary name from the log; a status that claims a deletion.
 #[tokio::test]
@@ -3102,8 +3014,8 @@ async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
     }
     assert!(!message.contains("bad name"), "{message}");
     assert!(!message.contains(" more"), "nothing was cut: {message}");
-    // Review 2, L6: what this run CREATED is what it left, never the name
-    // someone else created.
+    // What this run CREATED is what it left, never the name someone else
+    // created.
     assert_eq!(
         status["newTopics"],
         serde_json::json!(["drill-orders"]),
@@ -3157,13 +3069,13 @@ async fn a_lost_creation_race_is_named_on_the_restore_with_its_topics() {
     );
 }
 
-/// **PROD-15.1 review 2, M2: the THIRD list reaches the Restore with its own
-/// sentence, and a list the 100-name bound cut says how many more.** A stop
-/// whose `CreateTopics` call failed as a whole names the topics the cluster
-/// then listed as `unconfirmed`: on `status.targetTopicsAppeared` with the
-/// counts and `unconfirmedSeen`, and in the condition's words — "exists now …
-/// check … before you remove it", never "created by this restore". When the
-/// runner could not list the cluster the words say "may exist". KILLS: an
+/// **The THIRD list reaches the Restore with its own sentence, and a list the
+/// 100-name bound cut says how many more.** A stop whose `CreateTopics` call
+/// failed as a whole names the topics the cluster then listed as
+/// `unconfirmed`: on `status.targetTopicsAppeared` with the counts and
+/// `unconfirmedSeen`, and in the condition's words ("exists now … check …
+/// before you remove it", never "created by this restore"). When the runner
+/// could not list the cluster the words say "may exist". KILLS: an
 /// unconfirmed topic called this restore's; a dropped third list; a count
 /// larger than the plan maps; a cut list that says nothing.
 #[tokio::test]
@@ -3199,7 +3111,7 @@ async fn names_a_stopped_creation_step_cannot_account_for_are_shown_as_unconfirm
         !message.contains("created by this restore and left empty"),
         "an unconfirmed topic is never called this restore's: {message}"
     );
-    // L6: this run is not known to have created anything.
+    // This run is not known to have created anything.
     assert_eq!(status["newTopics"], serde_json::json!([]), "{status}");
 
     // The runner could not list the cluster: "may exist", never "exists now".
@@ -3264,22 +3176,20 @@ async fn names_a_stopped_creation_step_cannot_account_for_are_shown_as_unconfirm
     assert!(!message.contains("`t100`"), "{message}");
 }
 
-/// **PROD-15.1 review 2, M1: the names beside "remove it yourself" are THIS
-/// run's, and a line elsewhere in the log cannot put them there.**
+/// **The names beside "remove it yourself" are THIS run's, and a line
+/// elsewhere in the log cannot put them there.**
 ///
-/// (1) THE FORGERY (the reviewer's probes C2 and B5): a plan string carrying
-/// the two key lines reaches an exit-1 error's text, and a runner that prints
-/// it raw puts them in the log, followed by the rest of the message and the
-/// runner's own finishing line. The pair is not the log's last two lines, so
-/// nothing is lifted: no state, no lists, the plain wire reason.
+/// (1) THE FORGERY: a plan string carrying the two key lines reaches an
+/// exit-1 error's text, and a runner that prints it raw puts them in the log,
+/// followed by the rest of the message and the runner's own finishing line.
+/// The pair is not the log's last two lines, so nothing is lifted.
 ///
 /// (2) A NAME OUTSIDE THE PLAN, in the runner's genuine place: dropped. When
 /// no name of the plan remains, the block is dropped whole and the condition
 /// says the list could not be read.
 ///
 /// (3) A NAME IN THE PLAN that the run did not create, in a pair that is not
-/// the last two lines: never called "left". Only the runner's genuine last
-/// lines can say so.
+/// the last two lines: never called "left".
 ///
 /// KILLS: lifting the last `failure-reason=` of the tail wherever it sits;
 /// lifting names without holding them to the plan; keeping an empty block.
@@ -3387,23 +3297,17 @@ async fn a_forged_pair_or_a_name_outside_the_plan_never_reaches_the_restore() {
     );
 }
 
-/// **The coordinator's row (2026-10-10): the OLDER-RUNNER shape, and what
-/// this controller does with it.** A runner image built before
-/// `logweir::exit::one_line` prints an error's text raw. If an exit-1 message
-/// ENDS with a plan-chosen string (the review-round probe found one: a store
-/// error ending with the plan's evidence path), and the stderr text lands
-/// after the runner's own stdout lines, the log's LAST TWO lines are a forged
-/// pair. When the names it carries are mapped targets of the plan, all three
-/// rules of this controller are satisfied.
+/// **The OLDER-RUNNER shape, and what this controller does with it.** A runner
+/// image that prints an error's text raw, with an exit-1 message that ENDS
+/// with a plan-chosen string and lands after the runner's own stdout lines,
+/// leaves a forged pair as the log's LAST TWO lines. When its names are mapped
+/// targets of the plan, every rule of this controller is satisfied.
 ///
-/// **THE CONTROLLER LIFTS IT. That is the stated residual**, not a guard:
-/// the rule about where a line sits cannot tell the runner's own last line
-/// from text the runner was made to print last, and this row records the
-/// behaviour so nobody takes the place rule for more than it is. What closes
-/// it for this build is the runner's escape (no error text can contain a
-/// line break); what closes it for every runner is a value the plan cannot
-/// know (the per-Job token of row FX-43). `docs/kubernetes.md` says what an
-/// operator does meanwhile. This row changes when that row lands.
+/// **THE CONTROLLER LIFTS IT. That is the stated residual**, not a guard: the
+/// place rule cannot tell the runner's own last line from text the runner was
+/// made to print last. This build's runner escapes error text (no line break
+/// can appear in it); only a value the plan cannot know would close it for
+/// every runner.
 #[tokio::test]
 async fn an_older_runners_raw_error_text_ending_in_the_pair_is_lifted_and_that_is_the_stated_residual(
 ) {
@@ -3449,11 +3353,10 @@ async fn an_older_runners_raw_error_text_ending_in_the_pair_is_lifted_and_that_i
     assert!(status.get("targetTopicsAppeared").is_none(), "{status}");
 }
 
-/// **PROD-15.1 review 2, M1's class note: the closed `failure-reason=` set is
-/// PER KIND.** A Restore's log whose last line names a BACKUP's state is
-/// nothing to the Restore reconciler, and a Backup's log naming a Restore's
-/// state is nothing to the Backup's reader. KILLS: one list for both
-/// reconcilers.
+/// **The closed `failure-reason=` set is PER KIND.** A Restore's log whose
+/// last line names a BACKUP's state is nothing to the Restore reconciler, and
+/// a Backup's log naming a Restore's state is nothing to the Backup's reader.
+/// KILLS: one list for both reconcilers.
 #[tokio::test]
 async fn a_backup_only_failure_state_is_never_lifted_onto_a_restore() {
     use weirkeeper::controllers::backup::failure_state;
@@ -3488,15 +3391,15 @@ async fn a_backup_only_failure_state_is_never_lifted_onto_a_restore() {
     );
 }
 
-/// **PROD-15.1 review 2, L3 and L7: the count bound and the line bound, at
-/// the reconcile.** A genuine-position line with 150 mapped names is cut to
-/// 100 with its count, and the status the controller patches fits the CRD's
-/// `maxItems`; a line longer than any genuine one is not parsed at all, and
-/// the Restore still reaches its terminal state with words that say the list
-/// could not be read. The terminal read asks the API for a bounded tail.
-/// KILLS: an unbounded list (the status patch would be refused by the CRD
-/// and the Restore would never reach a terminal state, mutant R2-03);
-/// parsing a megabyte line to keep 100 names of it.
+/// **The count bound and the line bound, at the reconcile.** A
+/// genuine-position line with 150 mapped names is cut to 100 with its count,
+/// and the patched status fits the CRD's `maxItems`; a line longer than any
+/// genuine one is not parsed at all, and the Restore still reaches its
+/// terminal state with words that say the list could not be read. The
+/// terminal read asks the API for a bounded tail.
+/// KILLS: an unbounded list (the CRD would refuse the status patch and the
+/// Restore would never reach a terminal state); parsing a megabyte line to
+/// keep 100 names of it.
 #[tokio::test]
 async fn the_lists_are_bounded_in_count_and_the_line_in_length() {
     use weirkeeper::controllers::restore::{
@@ -3529,8 +3432,8 @@ async fn the_lists_are_bounded_in_count_and_the_line_in_length() {
     }
     assert_eq!(schema["unconfirmedSeen"]["type"], "boolean");
 
-    // L7: one very long line in the runner's place is refused before it is
-    // parsed. The state is still named, with no list.
+    // One very long line in the runner's place is refused before it is parsed.
+    // The state is still named, with no list.
     let many: Vec<String> = (0..400_000).map(|i| format!("t{i}")).collect();
     let huge = stop_tail(
         &serde_json::json!({"left": many}).to_string(),
@@ -3556,12 +3459,9 @@ async fn the_lists_are_bounded_in_count_and_the_line_in_length() {
     assert_eq!(TERMINAL_LOG_TAIL_LINES, 256);
 }
 
-/// No two conditions in one status share a `type`.
-///
-/// A condition array is a MAP KEYED BY `type`, so two entries sharing one is a
-/// malformed status whatever their statuses say — and the day any task gives
-/// the array the standard `x-kubernetes-list-type: map` the API server rejects
-/// the patch (review finding HIGH-2, errata **E5c**).
+/// No two conditions in one status share a `type`: a condition array is a
+/// MAP KEYED BY `type`, and the API server rejects a duplicate the day the
+/// array is declared `x-kubernetes-list-type: map`.
 fn assert_no_duplicate_condition_types(status: &Value) {
     let mut types: Vec<String> = conditions_of(status).into_iter().map(|c| c.0).collect();
     let before = types.len();
@@ -3574,30 +3474,20 @@ fn assert_no_duplicate_condition_types(status: &Value) {
     );
 }
 
-// ===========================================================================
 // The exit-code contract
-// ===========================================================================
 
 /// A table over `TargetTopicConfigRefused` and `CredentialNotRenderable`: the
 /// mock's log body ends in `refusal-reason=<X>` and the patched condition
-/// reason is `<X>`. A third row whose log body has no such line yields
+/// reason is `<X>`. A row whose log body has no such line yields
 /// `GuardRefusedUnknownReason`, never a guess.
+///
+/// Row 3 is a tie: its prose mentions `TargetTopicConfigRefused` and its
+/// refusal line names `CredentialNotRenderable`, so a reader that scans for
+/// state NAMES rather than for the KEY answers the wrong one. Row 4 does the
+/// same to a first-line-wins reader with two refusal lines.
 ///
 /// KILLS: pick the first terminal state on a tie instead of reading the
 /// refusal line; guess a terminal state when the line is absent.
-///
-/// # ROW 3 IS THE TIE, AND IT WAS ADDED BECAUSE THE MUTANT SURVIVED WITHOUT IT
-///
-/// Measured: a mutant that answered *"the first member of
-/// `conditions::TERMINAL_STATES` the log body mentions anywhere"* instead of
-/// reading the `refusal-reason=` line passed this table at 32 / 0. Every row
-/// mentioned exactly ONE terminal state, so "the state on the refusal line"
-/// and "the first state the body mentions" could not disagree — the table was
-/// a table of one case written three ways. Row 3 makes them disagree: the
-/// prose mentions `TargetTopicConfigRefused` and the refusal line names
-/// `CredentialNotRenderable`, so a reader that scans for state NAMES rather
-/// than for the KEY answers the wrong one. Row 4 does the same to a
-/// first-line-wins reader with two refusal lines.
 #[tokio::test]
 async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
     for (label, tail, expect) in [
@@ -3608,9 +3498,8 @@ async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
         ),
         (
             "credential",
-            // E4: the discriminator is NOT last here. A reader that took the
-            // last line would report `GuardRefusedUnknownReason` for a
-            // perfectly explicit refusal.
+            // The discriminator is NOT last here. A reader that took the last line
+            // would report `GuardRefusedUnknownReason` for an explicit refusal.
             format!(
                 "refusal-reason={TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE}\n\
                  guard: $LOGWEIR_TARGET_PASSWORD is unset\n"
@@ -3629,9 +3518,8 @@ async fn an_exit_three_maps_to_the_terminal_state_its_refusal_line_names() {
             TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
         ),
         (
-            // TWO refusal lines: the LAST one in the tail wins, because a
-            // runner that logged an earlier draft would have the final one be
-            // the one it refused on.
+            // TWO refusal lines: the LAST one in the tail wins, because the final
+            // line is the one the runner refused on.
             "two refusal lines",
             format!(
                 "refusal-reason={TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED}\n\
@@ -3708,10 +3596,9 @@ fn window_not_covered_is_exit_two_with_a_coverage_outcome() {
     );
     assert_eq!(window_not_covered(3, Some(OUTCOME_FAIL_COVERAGE)), None);
 
-    // AND THE VALUE IS NOT IN THE FROZEN 1.0.0 ENUM — recorded, not papered
-    // over. The controller reads `outcome` as a string and copies it verbatim,
-    // so a document carrying this value is one it will classify; no runner
-    // this build ships can produce one.
+    // AND THE VALUE IS NOT IN THE FROZEN 1.0.0 ENUM. The controller reads
+    // `outcome` as a string and copies it verbatim, so a document carrying this
+    // value is one it will classify; no runner this build ships can produce one.
     let schema: Value = serde_json::from_str(
         &std::fs::read_to_string(
             workspace_root().join("schemas/logweir-drill-scorecard-1.0.0.json"),
@@ -3732,20 +3619,13 @@ fn window_not_covered_is_exit_two_with_a_coverage_outcome() {
     );
 }
 
-/// A pod wearing this Job's name label but not owned by it is NEVER read —
-/// D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// A pod wearing this Job's name label but not owned by it is NEVER read.
 ///
-/// This reconciler used to take `list.items.into_iter().next()`: the first pod
-/// the label selector returned, with no owner check at all.
-/// `batch.kubernetes.io/job-name` is a plain label that anything able to
-/// create a pod in the namespace can set, so a planted pod's `exitCode` and
-/// the three interface **I8** keys in its stdout became this `Restore`'s
-/// recorded outcome — on the object an approver reads after data went back
-/// into a cluster.
-///
-/// Every impostor carries `exitCode: 0`, so a reconciler that read one would
-/// report `phase: Succeeded`. The expected answer is a terminal `NoExitCode`
-/// with no `exitCode` on the object and NO `GET …/pods/<p>/log` at all.
+/// `batch.kubernetes.io/job-name` is a plain label anything able to create a
+/// pod in the namespace can set, so a planted pod's `exitCode` and evidence
+/// keys would become this `Restore`'s recorded outcome. Every impostor carries
+/// `exitCode: 0`; the expected answer is a terminal `NoExitCode` with no
+/// `exitCode` on the object and NO `GET …/pods/<p>/log` at all.
 ///
 /// KILLS: `list.items.into_iter().next()`; an ownerless-pod fallback; matching
 /// an owner reference without `controller: true`; matching an owner reference
@@ -3827,15 +3707,13 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
 }
 
 /// The positive control, and the contest: an OWNED pod IS read, and two pods
-/// claiming one Job are BOTH refused under their own terminal state — review
-/// finding **R1**.
+/// claiming one Job are BOTH refused under their own terminal state.
 ///
-/// An `ownerReference` is ordinary metadata its author writes and the API
-/// server does not validate, so a tenant who can read the Job's `metadata.uid`
-/// can mint a second claimant — and it is newer than the genuine runner pod by
-/// construction. Ranking would hand this `Restore`'s recorded outcome, the
-/// object an approver reads after data went back into a cluster, to whoever
-/// planted it. Nothing is read instead.
+/// An `ownerReference` is ordinary metadata the API server does not validate,
+/// so whoever can read the Job's `metadata.uid` can mint a second claimant,
+/// newer than the genuine pod by construction. Ranking would hand this
+/// `Restore`'s recorded outcome to whoever planted it; nothing is read
+/// instead.
 ///
 /// KILLS: refusing every pod; newest-wins over a contested Job; oldest-wins;
 /// reporting a contest as an ordinary `NoExitCode`.
@@ -3978,18 +3856,18 @@ fn stored_diagnostic(code: &str, severity: &str, last_seen: &str) -> Value {
     })
 }
 
-/// Defect WARNING-DIAGNOSTICS-NOEXITCODE through the `Restore` reconciler: the
-/// Job failed at 11:59 with its pod gone, and the WARNING recorded while it
-/// waited — a projected ConfigMap that never mounted, a pod no node took — is
-/// the terminal reason, not `NoExitCode`. The Secret-mount (`Error`) row is
-/// unchanged, and a warning last seen long before the end is not a cause.
+/// Through the `Restore` reconciler: the Job failed at 11:59 with its pod
+/// gone, and the WARNING recorded while it waited (a projected ConfigMap that
+/// never mounted, a pod no node took) is the terminal reason, not
+/// `NoExitCode`. The Secret-mount (`Error`) row is unchanged, and a warning
+/// last seen long before the end is not a cause.
 ///
 /// The write is still the one resourceVersion-preconditioned status patch,
 /// and it carries the stored condition array rather than replacing it.
 ///
 /// MUTANT: restore the `Severity::Error`-only filter in
-/// `diagnostics::recorded_terminal_state`. The first two arms fail. MUTANT:
-/// pass the pass's `now` instead of `job_ended_at`. The same two arms fail.
+/// `diagnostics::recorded_terminal_state`, or pass the pass's `now` instead of
+/// `job_ended_at`; the first two arms fail.
 #[tokio::test]
 async fn a_warning_that_ended_the_restore_is_its_terminal_reason() {
     let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
@@ -4073,13 +3951,12 @@ async fn a_warning_that_ended_the_restore_is_its_terminal_reason() {
     }
 }
 
-/// Review L7/M3, the `Restore` half: a warning recorded before the runner
-/// STARTED is not what ended it. The progress block says the runner started
-/// (`startedAt`, kept sticky across pod-less passes), the Job then failed with
-/// its pod gone, and the answer is `NoExitCode` — not the warning's class.
+/// A warning recorded before the runner STARTED is not what ended it. The
+/// progress block says the runner started (`startedAt`, kept sticky across
+/// pod-less passes), the Job then failed with its pod gone, and the answer is
+/// `NoExitCode`, not the warning's class.
 ///
-/// MUTANT: drop the `!started` clause in `recorded_terminal_state`. This row
-/// fails (the reviewer's R5 survived the `Restore` suite before it existed).
+/// MUTANT: drop the `!started` clause in `recorded_terminal_state`.
 #[tokio::test]
 async fn a_warning_before_the_restore_runner_started_is_not_its_cause() {
     let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
@@ -4147,10 +4024,8 @@ async fn a_job_that_finished_without_a_terminated_state_gets_a_terminal_status()
     );
 }
 
-// ---------------------------------------------------------------------------
-// The steady object, and the terminal object whose pod is gone — Task 24
-// fix round 1. The `Backup` twins live in `tests/verification.rs`.
-// ---------------------------------------------------------------------------
+// The steady object, and the terminal object whose pod is gone. The
+// `Backup` twins live in `tests/verification.rs`.
 
 /// A scorecard oracle that answers with a PASSING, digestible observation.
 ///
@@ -4171,14 +4046,9 @@ fn passing_scorecard(_key: String) -> BoxFuture<'static, Option<ScorecardObserva
     })
 }
 
-/// A verify oracle answering `Valid`, reached at `at`.
-///
-/// THE INSTANT IS A PARAMETER FOR THE REASON THE `Backup` TWIN'S IS
-/// (`tests/verification.rs::valid_oracle_at`): `verify_evidence` reads its own
-/// clock, so a re-verification on a later pass really does reach a later
-/// instant, and the rule that keeps a steady object quiet is that an UNCHANGED
-/// verdict keeps the instant it was first reached at. An oracle returning a
-/// constant cannot see that rule at all.
+/// A verify oracle answering `Valid`, reached at `at`. `verify_evidence`
+/// reads its own clock, and an UNCHANGED verdict must keep the instant it was
+/// first reached at; an oracle returning a constant could not see that rule.
 fn valid_evidence_at(
     at: DateTime<Utc>,
 ) -> impl Fn(weirkeeper::verification::EvidenceRef) -> BoxFuture<'static, VerificationResult> {
@@ -4192,10 +4062,8 @@ fn valid_evidence_at(
                 payload_type: r.payload_type.to_string(),
                 verified_at: at,
                 detail: None,
-                // PLAT-19.1: this oracle stands in for a signature that
-                // verified under a key this fixture does not model, so there
-                // is no trust projection to carry and the verdict is the
-                // signature's alone.
+                // This oracle stands in for a signature verified under a key the fixture
+                // does not model, so there is no trust projection to carry.
                 trust: None,
             }
         })
@@ -4203,13 +4071,10 @@ fn valid_evidence_at(
 }
 
 /// One finished, verified pass over a fresh `Restore`, and the object the API
-/// server would hold afterwards.
-///
-/// Built by RUNNING the pass and applying its patches the way the server does
-/// (`conditions::apply_merge_patch`), never by writing a status literal: a
-/// hand-written fixture pins what this file's author believes a verified
-/// `Restore` looks like, and both rows below are about what the controller
-/// does to the one it actually produced.
+/// server would hold afterwards: built by RUNNING the pass and applying its
+/// patches as the server does (`conditions::apply_merge_patch`), never from a
+/// status literal, so the rows below are about the object the controller
+/// actually produced.
 async fn settled_verified_restore() -> (Restore, Vec<Value>) {
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(0),
@@ -4247,10 +4112,9 @@ fn scorecard_with_outcome(
 ) -> impl Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> {
     move |_key| {
         Box::pin(async move {
-            // REALISTIC COUNTS, as every real scorecard carries — so the
-            // "no completion for a run that did not pass" assertions below
-            // can fail. Without them `completion_block` is empty whatever the
-            // gate says (the rehearsal-fix review's experiment X1).
+            // REALISTIC COUNTS, as every real scorecard carries, so the "no completion
+            // for a run that did not pass" assertions below can fail: without them
+            // `completion_block` is empty whatever the gate says.
             Some(ScorecardObservation {
                 outcome: Some(outcome.to_string()),
                 last_phase_completed: Some(7),
@@ -4297,21 +4161,20 @@ async fn finished_pass(exit_code: i32, log: &str, outcome: &'static str) -> (Vec
     (patches, merged)
 }
 
-/// **FAILED-DRILL-EVIDENCE-UNPUBLISHED, the controller half.** A runner
-/// carrying interface I8's amendment prints its signed scorecard's keys at
-/// exit 2. The controller records them, raises `EvidenceRecorded=True`, copies
-/// the signed `outcome: fail-integrity`, verifies the document with the same
-/// verifier as a pass — and the run is still NOT passed: `Verified=False`, the
-/// badge not green, `phase: Failed`.
+/// **A failed drill's evidence is published.** A runner prints its signed
+/// scorecard's keys at exit 2. The controller records them, raises
+/// `EvidenceRecorded=True`, copies the signed `outcome: fail-integrity`,
+/// verifies the document with the same verifier as a pass, and the run is
+/// still NOT passed: `Verified=False`, the badge not green, `phase: Failed`.
 ///
 /// Four arms:
-/// 1. exit 2 WITH keys — evidence recorded, verified `Valid`, `fail-integrity`,
+/// 1. exit 2 WITH keys: evidence recorded, verified `Valid`, `fail-integrity`,
 ///    not green (`OutcomeNotPass`);
-/// 2. exit 2 with keys and a PLANTED `outcome: pass` — still not green
-///    (`ExitCodeNotZero`): the exit code stays authoritative;
-/// 3. exit 2 WITHOUT keys — an older runner: exactly the pre-amendment status,
-///    one `Failed` condition, no evidence block, no verification patch;
-/// 4. exit 0 with keys — unchanged: `EvidenceRecorded=True`, `Verified=True`.
+/// 2. exit 2 with keys and a PLANTED `outcome: pass`: still not green
+///    (`ExitCodeNotZero`), the exit code stays authoritative;
+/// 3. exit 2 WITHOUT keys (an older runner): one `Failed` condition, no
+///    evidence block, no verification patch;
+/// 4. exit 0 with keys: `EvidenceRecorded=True`, `Verified=True`.
 ///
 /// MUTANTS: drop the exit-2 `EvidenceRecorded` arm (arm 1 fails on the
 /// condition list); raise it without `mandatory_complete()` (arm 3 fails on
@@ -4510,20 +4373,17 @@ fn a_completion_is_published_only_for_a_run_that_passed() {
     }
 }
 
-/// **A VERIFIED `Restore` RECONCILES AGAIN AND SENDS NOTHING** — the twin of
-/// `tests/verification.rs::a_verified_object_reconciles_without_a_patch`,
-/// which had only the `Backup` half.
+/// **A VERIFIED `Restore` RECONCILES AGAIN AND SENDS NOTHING**, the twin of
+/// `tests/verification.rs::a_verified_object_reconciles_without_a_patch`.
 ///
-/// Plan erratum **E11(d)**, MEASURED on a live cluster during the Phase B run:
-/// **20 `Restore` reconciles per second**, each a real write, because a JSON
-/// merge patch REPLACES arrays and the terminal patch's `conditions` deleted
-/// the `Verified` condition the second patch had just added.
+/// A JSON merge patch REPLACES arrays, so a terminal patch whose `conditions`
+/// dropped `Verified` would delete the condition the second patch had just
+/// added, and every reconcile would be a write.
 ///
-/// KILLS: removing `verification::carry_verified` from `finished_status_patch`
-/// — asserted twice over, because the two guards are independent. The
-/// already-terminal return (step 2b) stops the SECOND PASS from reaching the
-/// builder at all, so the last arm reaches the builder DIRECTLY: a patch built
-/// for a verified object carries `Verified` whatever the caller does.
+/// KILLS: removing `verification::carry_verified` from
+/// `finished_status_patch`, asserted twice: the already-terminal return stops
+/// the second pass before the builder, so the last arm reaches the builder
+/// DIRECTLY.
 #[tokio::test]
 async fn a_verified_restore_reconciles_without_a_patch() {
     let (settled, first) = settled_verified_restore().await;
@@ -4547,7 +4407,7 @@ async fn a_verified_restore_reconciles_without_a_patch() {
     );
     assert_eq!(status["outcome"], Value::String("pass".to_string()));
 
-    // PASS TWO, over that object, with BOTH clocks moved — the reconcile's
+    // PASS TWO, over that object, with BOTH clocks moved: the reconcile's
     // (12:00 -> 12:30) and the verification's own (12:00 -> 18:45). NOTHING IS
     // SENT.
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
@@ -4574,10 +4434,9 @@ async fn a_verified_restore_reconciles_without_a_patch() {
     );
 
     // AND THE BUILDER ITSELF, REACHED DIRECTLY. `finished_status_patch` owns
-    // the whole `conditions` array it writes, so it owes the parts of it that
-    // are not its own: `Verified` is the controller's fact about the run,
-    // computed after the terminal write, and a builder that dropped it would
-    // start the loop again the moment any caller reached it.
+    // the whole `conditions` array, so it owes `Verified`, which is computed
+    // after the terminal write; a builder that dropped it would start the loop
+    // again the moment any caller reached it.
     let rebuilt = finished_status_patch(
         &settled,
         0,
@@ -4601,19 +4460,14 @@ async fn a_verified_restore_reconciles_without_a_patch() {
 
 /// **A TERMINAL, VERIFIED `Restore` WHOSE RUNNER POD IS GONE IS LEFT ALONE.**
 ///
-/// Task 24 review, Milestone 5 — **proven on a live cluster**. A `Restore` at
-/// `phase: Succeeded`, `exitCode: 0`, `outcome: pass` and
-/// `verification.result: Valid` became `phase: Failed`, `exitReason:
-/// operational`, its `[Complete, EvidenceRecorded, Verified]` conditions
-/// replaced by one `Failed/NoExitCode` — after a plain `kubectl rollout
-/// restart deploy/weirkeeper`. Not a crash: an upgrade, a node reboot, an
-/// eviction or an OOM does the same thing, because the restarted controller
-/// re-lists a finished Job whose pod has been garbage-collected and re-derives
-/// an exit code from it. The Job outlives its pod by seven days.
+/// A restarted controller (a rollout, an upgrade, a node reboot, an
+/// eviction) re-lists a finished Job whose pod has been garbage-collected; the
+/// Job outlives its pod by seven days. Re-deriving an exit code there would
+/// turn a `Succeeded`, verified `Restore` into `Failed/NoExitCode`.
 ///
-/// KILLS: removing `reconcile_restore`'s already-terminal guard (step 2b,
-/// before `find_pod`). Without it this pass finds no pod, takes the crashed
-/// branch and PATCHES.
+/// KILLS: removing `reconcile_restore`'s already-terminal guard (before
+/// `find_pod`). Without it this pass finds no pod, takes the crashed branch
+/// and PATCHES.
 #[tokio::test]
 async fn a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched() {
     let (settled, _) = settled_verified_restore().await;
@@ -4665,10 +4519,8 @@ async fn a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched() {
             .collect::<Vec<_>>()
     );
 
-    // BELT AND BRACES, AND A SEPARATE CLAIM. Even reached directly — by a
-    // future edit that moves the guard, or by a caller this file does not know
-    // about — the crashed-path builder no longer owns the whole condition
-    // array.
+    // A SEPARATE CLAIM: even reached directly, the crashed-path builder does
+    // not own the whole condition array.
     let crashed = crashed_status_patch(&settled, "NoExitCode", NAME, utc(2026, 9, 10, 12, 30));
     let types: Vec<String> = conditions_of(&crashed["status"])
         .into_iter()
@@ -4751,9 +4603,7 @@ async fn ttl_is_patched_only_after_status() {
     );
 }
 
-// ===========================================================================
-// The scorecard's own values — I21, I34
-// ===========================================================================
+// The scorecard's own values
 
 /// For the fixture scorecard whose `integrity.result` is `partial`,
 /// `status.integrity.partialReason` is the scorecard's string and
@@ -4877,25 +4727,11 @@ async fn the_restore_status_carries_objectives_and_partial_reason() {
 }
 
 /// `status.topicPreflight` is scanned by key name, and ABSENT when the runner
-/// printed no line.
-///
-/// # What this test asserted before Task 24, and why it changed
-///
-/// Guard **G-TS**'s observation is returned by phase 0 in
-/// `logweir::drill::RestoreOutcome::topic_preflight` and, by Global Constraint
-/// 12 as amended, is deliberately not a scorecard field — so for two slots
-/// **nothing carried it out of the pod**, this test asserted the field was
-/// never written, and the CRD's own description recorded the gap in place
-/// (plan erratum **E10(c)**). It also said what closing the gap would take: a
-/// fourth machine-read stdout line, which is the interface owner's change.
-///
-/// Task 24 made that change on both sides, so the property is now the pair:
-/// **present when the line is, absent when it is not.** An assertion that the
-/// field is never written would now be asserting the bug.
+/// printed no line: present when the line is, absent when it is not.
 ///
 /// KILLS: deriving the block from anything but the line (arm 2 would fabricate
 /// one), and reading the line by POSITION rather than by name (arm 1 puts it
-/// before interface I8's three keys, which is where the runner prints it).
+/// before the three evidence keys, which is where the runner prints it).
 #[tokio::test]
 async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
     let doc = scorecard_json("pass", "pass", "");
@@ -4939,10 +4775,9 @@ async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
          structural schema prunes, so it is dropped here rather than misfiled. Got {pre}"
     );
 
-    // ARM 2 — no line, so no field. The same rule the evidence keys follow: a
-    // run that did not complete phase 0 read nothing about the target's
-    // config, and a fabricated block would be a claim about a check nobody
-    // made.
+    // ARM 2: no line, so no field. A run that did not complete phase 0 read
+    // nothing about the target's config, and a fabricated block would be a
+    // claim about a check nobody made.
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(0),
         log_body(&i8_tail()),
@@ -4971,8 +4806,8 @@ async fn the_topic_preflight_is_scanned_by_key_name_and_absent_without_it() {
     );
 }
 
-/// **Interface I21.** `crds/restore.rs`'s `outcome` field description states
-/// that green requires verification `Valid` and outcome `pass`, and
+/// `crds/restore.rs`'s `outcome` field description states that green requires
+/// verification `Valid` and outcome `pass`, and
 /// `charts/logweir/crds/restores.yaml` declares `status.outcome`.
 #[test]
 fn the_restore_green_rule_reads_the_outcome() {
@@ -4999,38 +4834,26 @@ fn the_restore_green_rule_reads_the_outcome() {
     );
 }
 
-// ===========================================================================
-// `status.reason` — the REASON printer column. FIX ROUND 1, review finding M2
-// ===========================================================================
+// `status.reason`, the REASON printer column
 
 /// **The `REASON` column reads `.status.reason`, and every status this
 /// reconciler writes sets it.**
 ///
-/// THE DEFECT THIS PINS, MEASURED LIVE AT THE TASK 20 REVIEW. The column read
-/// `.status.exitReason`, which [`refused_status_patch`] can only write as
-/// `operational` — Global Constraint 11 has no code for "the controller
-/// refused before anything ran", and no run means no code to lift. So
-/// `kubectl get restore` printed the identical `operational` for
-/// `ApprovalNotReceived`, `ApprovalNotVerified`, `PlanHashMismatch`,
-/// `ClusterNotReachable` and `NameTooLong` — five different facts under one
-/// word, with the specific state visible only to `kubectl describe`. For a
-/// `Restore` those are exactly the states an operator scans a list for.
+/// `.status.exitReason` cannot tell the admission refusals apart:
+/// [`refused_status_patch`] can only write it as `operational`, since no run
+/// means no code. `ApprovalNotReceived`, `ApprovalNotVerified`,
+/// `PlanHashMismatch`, `ClusterNotReachable` and `NameTooLong` are exactly the
+/// states an operator scans a list for.
 ///
-/// THREE ARMS, AND THE THIRD IS THE ONE THAT CANNOT ROT.
 /// 1. The SHIPPED CRD's `REASON` column names `.status.reason`, and the status
-///    schema declares the field. (`Backup` is asserted UNAFFECTED in the same
-///    arm: it has no `REASON` column at all, so nothing on that kind read
-///    `.status.exitReason` and nothing there was changed.)
+///    schema declares the field (`Backup` has no `REASON` column).
 /// 2. All five status-patch builders set `reason`, VERBATIM the reason of the
-///    condition each writes about the run's terminal or current state — so
-///    this is not a third vocabulary beside errata **E5b**'s two, and it is
-///    never one of GC11's lowercase-hyphenated wire strings. One arm drives a
-///    real `reconcile_restore` so the field is proven to reach the wire
-///    through `patch_status` and not merely to exist in a builder's return.
+///    condition each writes about the run's state, never one of the
+///    lowercase-hyphenated wire strings; one arm drives a real
+///    `reconcile_restore` so the field reaches the wire.
 /// 3. A SOURCE SCAN over `controllers/restore.rs`: every `"conditions"` key
-///    written into a status object has a `"reason"` key in the same builder.
-///    A sixth patch shape added later without one fails here, which is the
-///    only way "every status write" stays true of a file that grows.
+///    written into a status object has a `"reason"` key in the same builder,
+///    so a patch shape added later without one fails here.
 #[tokio::test]
 async fn every_status_write_sets_the_scalar_reason() {
     // ---- ARM 1: the column, and the field it names ------------------------
@@ -5102,10 +4925,9 @@ async fn every_status_write_sets_the_scalar_reason() {
         ),
         (
             "running_status_patch (the creating pass, two conditions)",
-            // THE CURRENT CONDITION IS `JobCreated`, THE ARRAY'S SECOND
-            // ELEMENT. `Admitted` is first and is about a check that already
-            // finished, so a scalar taken from the array's head would print
-            // `Admitted` once and `JobCreated` on every later pass over an
+            // THE CURRENT CONDITION IS `JobCreated`, THE ARRAY'S SECOND ELEMENT.
+            // `Admitted` is first and is about a check that already finished, so a
+            // scalar taken from the array's head would flip between the two on an
             // object whose state never changed.
             running_status_patch(&r, "r1", true, now())["status"].clone(),
             1,
@@ -5163,10 +4985,9 @@ async fn every_status_write_sets_the_scalar_reason() {
              run's terminal or current state (index {primary} of {conditions:?}) — not a third \
              vocabulary beside errata E5b's two"
         );
-        // NEVER GC11'S WIRE VOCABULARY. This is the assertion that fails if
-        // anyone repoints this field at `exitReason` again: `operational`,
-        // `ok`, `drill-not-pass`, `guard-refused` and `signing-or-lock` are
-        // all excluded, the first by name and the rest by the shape.
+        // NEVER THE WIRE VOCABULARY: `operational`, `ok`, `drill-not-pass`,
+        // `guard-refused` and `signing-or-lock` are all excluded, the first by name
+        // and the rest by the shape.
         assert_ne!(
             reason, REASON_OPERATIONAL,
             "[{label}] `operational` in this column is the whole of review finding M2"
@@ -5297,7 +5118,7 @@ fn the_restore_printer_columns_are_the_contract() {
             "RTO",
             "SIGNED",
             "AGE",
-            // PROD-11.1b: appended, so every column before it keeps its place.
+            // Appended, so every column before it keeps its place.
             "SELECTION"
         ],
         "`kubectl get restores` is an interface: a renamed or reordered column breaks a runbook \
@@ -5334,9 +5155,7 @@ fn restore_crd_field_description(path: &[&str]) -> String {
         .to_string()
 }
 
-// ===========================================================================
 // The topics, derived from the approved bytes
-// ===========================================================================
 
 /// `oldTopics` are the source names and `newTopics` are the mapped ones,
 /// derived from `spec.planBytes` through the ONE prefix rule.
@@ -5420,13 +5239,10 @@ async fn the_status_carries_the_old_and_new_topic_names() {
     );
 }
 
-// ===========================================================================
 // Source-reading properties
-// ===========================================================================
 
-/// **Interface I11.** `restore.rs` names neither the runner's credential
-/// predicate nor a namespaced Secret API, and its doc comment states the
-/// runner enforces it.
+/// `restore.rs` names neither the runner's credential predicate nor a
+/// namespaced Secret API, and its doc comment states the runner enforces it.
 ///
 /// KILLS: re-use `credential_is_renderable` in the controller.
 #[test]
@@ -5466,12 +5282,9 @@ fn the_controller_performs_no_credential_check() {
 #[test]
 fn the_controller_never_types_a_scorecard() {
     let src = this_module_source();
-    // THE TOKENS ARE ASSEMBLED, NOT SPELLED. This test reads
-    // `controllers/restore.rs`, and that file's own module header explains at
-    // length why it never parses a scorecard into a typed struct — so a
-    // literal here would be matched by the prose that argues for it, exactly
-    // as `tests/linkage.rs::the_controller_never_reads_a_secret` is defeated
-    // by a comment that names its token.
+    // THE TOKENS ARE ASSEMBLED, NOT SPELLED: `controllers/restore.rs`'s module
+    // header explains why it never parses a scorecard into a typed struct, so a
+    // literal here would be matched by that prose.
     let typed = format!("scorecard::{}", "Scorecard");
     let from_slice = format!("from_slice::<{}>", "Scorecard");
     let from_str = format!("from_str::<{}>", "Scorecard");
@@ -5515,11 +5328,10 @@ fn the_controller_never_types_a_scorecard() {
     );
 }
 
-/// **FX-33 — a scorecard is parsed only inside its own cap, at the line that
-/// parses it.** `scorecard_observation` builds a `serde_json::Value`, up to 37
-/// times the document, so it refuses bytes over 1 MiB itself, whoever handed
-/// them over: a document one byte over is NOT OBSERVED, and the same document
-/// one byte shorter is.
+/// **A scorecard is parsed only inside its own cap, at the line that parses
+/// it.** `scorecard_observation` builds a `serde_json::Value`, up to 37 times
+/// the document, so it refuses bytes over 1 MiB itself, whoever handed them
+/// over: a document one byte over is NOT OBSERVED, and one byte shorter is.
 ///
 /// KILLS: the parse relying on its callers' caps (a 5 MiB scorecard handed
 /// over by a relay parsed into 185 MB).
@@ -5673,17 +5485,10 @@ fn the_requeue_maps_onto_the_action_the_runtime_gets() {
 
 /// The archive read is ONE `get`, and an unreadable object is NOT OBSERVED.
 ///
-/// The real oracle's only `Store` touch, exercised over `Store::in_memory` —
-/// the double this tree already has — so interface **I13**'s `spawn_blocking`
-/// shape has something to be about while STANDING RULE 18's dial-token audit
-/// stays green with no `ALLOWED` entry owed. Whether the handle can WRITE is
-/// guard **G-RET** and is tested in Task 19's own file; what is tested here is
-/// the read.
-///
-/// A PLAIN `#[test]`, DELIBERATELY. `Store::get` drives the store's own
-/// current-thread runtime, so this must not run inside one — which is exactly
-/// the property interface I13's `spawn_blocking` exists for on the reconcile
-/// path.
+/// The real oracle's only `Store` touch, over `Store::in_memory`. A plain
+/// `#[test]`: `Store::get` drives the store's own current-thread runtime, so
+/// it must not run inside one, which is why the reconcile path wraps it in
+/// `spawn_blocking`.
 #[test]
 fn the_real_oracle_reads_one_object_and_an_unreadable_one_is_not_observed() {
     let doc = scorecard_json("pass", "pass", "");
@@ -5712,9 +5517,7 @@ fn the_real_oracle_reads_one_object_and_an_unreadable_one_is_not_observed() {
     );
 }
 
-// ===========================================================================
-// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
-// ===========================================================================
+// The steady-object row
 
 /// The routes a RUNNING pass needs: the Job exists and has not finished, and
 /// the status is patchable. No admission routes: the Job already exists, so
@@ -5723,9 +5526,9 @@ fn running_routes() -> Vec<Route> {
     running_routes_with(pod_list_running(), progress_log("6:restore"))
 }
 
-/// A pod list holding one owned pod whose `runner` container is RUNNING — what
-/// D3 §2.3's derivation sees on the ordinary in-flight pass. The sidecar stays
-/// at index 0 for [`pod_list_terminated`]'s reason.
+/// A pod list holding one owned pod whose `runner` container is RUNNING (the
+/// ordinary in-flight pass), with the sidecar at index 0 as in
+/// [`pod_list_terminated`].
 fn pod_list_running() -> String {
     let owners = owned_by_job();
     format!(
@@ -5770,16 +5573,14 @@ fn pod_list_waiting(reason: &str, message: &str) -> String {
     )
 }
 
-/// The progress channel a v2 runner prints at the top of its log — D3 §2.4.
+/// The progress channel a v2 runner prints at the top of its log.
 fn progress_log(phase: &str) -> String {
     format!("progress-contract=2\nprogress-phase=0:admit\nprogress-phase={phase}\n")
 }
 
-/// [`running_routes`] with the pod list and the pod log as parameters.
-///
-/// **THE POD LIST, THE LOG AND THE EVENTS ROUTES ARE NEW IN D3 W2
-/// (PLAT-14.1).** Before §2.3 the running pass read the Job and nothing else;
-/// it now derives the one diagnosis for every Job-backed run.
+/// [`running_routes`] with the pod list and the pod log as parameters: the
+/// running pass reads the pod, its log and its events to derive the one
+/// diagnosis for every Job-backed run.
 fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     vec![
         Route {
@@ -5993,16 +5794,13 @@ fn an_owned_legacy_job_remains_compatible_only_for_the_same_restore_uid() {
     assert!(!compatible_restore_job(&job, &recreated));
 }
 
-/// **Task 16b.** A steady `Restore` — one whose Job is still running — is
-/// patched once and then never again.
+/// A steady `Restore` (its Job still running) is patched once and then never
+/// again.
 ///
-/// The terminal state was never at risk (`status_is_terminal` returns before
-/// any patch). The RUNNING state is where this reconciler spends its time, and
-/// on a 15 s requeue it used to send an identical `running_status_patch` on
-/// every pass: quiet at the API server, which is why Task 15c measured this
-/// reconciler QUIET, but a request all the same. Erratum E11(d)'s third rule
-/// is that a pass computing the status the object already carries sends
-/// nothing, and a route-table count is what can see it.
+/// The running state is where this reconciler spends its time (the terminal
+/// state returns before any patch). A pass computing the status the object
+/// already carries sends nothing, and only a route-table count can tell that
+/// from an identical patch the API server ignores.
 #[tokio::test]
 async fn a_steady_restore_issues_no_second_status_patch() {
     let (client, _rec, bodies) = mock_client_recording_bodies(running_routes());
@@ -6039,10 +5837,9 @@ async fn a_steady_restore_issues_no_second_status_patch() {
         &client,
         &unobserved_scorecard,
         &unverified_evidence,
-        // ONE REQUEUE LATER (`REQUEUE_SECS` = 15), and INSIDE D3 §2.2's 60 s
-        // heartbeat window: `progress.lastObservedTime` is rewritten at most
-        // once per minute, so a pass at exactly +60 s would legitimately write
-        // one patch. That rule has its own row on the `Backup` twin.
+        // ONE REQUEUE LATER (`REQUEUE_SECS` = 15), inside the 60 s heartbeat
+        // window: at exactly +60 s the pass would legitimately rewrite
+        // `progress.lastObservedTime` (the `Backup` twin's row).
         now() + chrono::Duration::seconds(15),
     )
     .await
@@ -6058,22 +5855,17 @@ async fn a_steady_restore_issues_no_second_status_patch() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 22 — the roster reaches the runner, END TO END
-// ---------------------------------------------------------------------------
+// The roster reaches the runner, end to end
 
-/// The runner's DEBUG binary — the one the e2e harness runs too (erratum
-/// **E9**), located from this crate's manifest directory.
+/// The runner's DEBUG binary, the one the e2e harness runs too, located from
+/// this crate's manifest directory.
 ///
-/// A weirkeeper test cannot use `env!("CARGO_BIN_EXE_logweir")`: that variable
-/// exists only for targets of the package that declares the binary, and
-/// `weirkeeper` must NOT declare `logweir` as a dependency of any kind —
-/// `scripts/check-one-signer.sh`'s check 1 counts normal, build **and** dev
-/// edges, and the set of crates from which `logweir-evidence` is reachable is
-/// pinned at exactly `{logweir, e2e}`. Taking even a dev-dependency here would
-/// put `weirkeeper` in that set and turn the link-time single-signer gate red.
-/// So the two sides meet through the filesystem and a process, which is also
-/// what they do in a cluster.
+/// `env!("CARGO_BIN_EXE_logweir")` exists only for the package that declares
+/// the binary, and `weirkeeper` must not depend on `logweir` in any way:
+/// `scripts/check-one-signer.sh` pins the crates that reach
+/// `logweir-evidence` (normal, build and dev edges) to `{logweir, e2e}`. So
+/// the two sides meet through the filesystem and a process, as they do in a
+/// cluster.
 fn runner_binary() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || {
@@ -6124,31 +5916,23 @@ fn roster_of_three(first_key_id: &str) -> weirkeeper::crds::trust_roster::TrustR
     serde_json::from_str(&json).expect("the fixture is a TrustRoster")
 }
 
-/// Every UNEXPIRED roster key id reaches the Job's argv, in roster order — and
+/// Every UNEXPIRED roster key id reaches the Job's argv, in roster order, and
 /// the runner ACCEPTS every id this crate emits.
 ///
-/// # This row is end-to-end, and erratum **E10** is why
-///
-/// Task 20 landed the argv half while the shipped `logweir restore run` still
-/// refused the flag: measured in-pod, `error: unexpected argument
-/// '--approver-key-ids' found`, exit 1, so a `Restore` with a non-empty
-/// `TrustRoster` could not run at all. An argv-shape assertion cannot see that
-/// — both sides looked correct in isolation. **The mechanism here is
-/// process-level**: the `--approver-key-ids <id>` pairs are taken out of
+/// End-to-end because an argv-shape assertion cannot see a runner that
+/// refuses the flag. The `--approver-key-ids <id>` pairs are taken out of
 /// `runner_argv`'s own output and handed to the runner's DEBUG binary, with
 /// the fixture's public key as `--approver-key` and a plan phase 0 refuses on
 /// a purely local check.
 ///
-/// Three things then have to be true at once, and each has its own failure
-/// mode: the flag parses (a usage error would be exit 1 with `unexpected
-/// argument`), the id the reconciler emitted is INSIDE the pinned set (a miss
-/// is exit 3 naming the pinned set), and the run reached phase 0 (whose local
-/// refusal is the message asserted). The negative twin at the end removes the
-/// matching id and requires the refusal, so a guard that admitted everything
-/// would fail too.
+/// Three things must hold at once: the flag parses (a usage error would be
+/// exit 1 with `unexpected argument`), the emitted id is INSIDE the pinned set
+/// (a miss is exit 3 naming the set), and the run reached phase 0 (whose
+/// local refusal is the message asserted). The negative twin at the end
+/// removes the matching id and requires the refusal.
 ///
-/// No broker is dialled and none is needed: the pinned check is hoisted ahead
-/// of phase 0, and phase 0's mapping check is local.
+/// No broker is dialled: the pinned check is hoisted ahead of phase 0, and
+/// phase 0's mapping check is local.
 #[test]
 fn the_restore_job_projects_every_unexpired_roster_key_id() {
     let fixture_pub =
@@ -6280,12 +6064,9 @@ fn the_restore_job_projects_every_unexpired_roster_key_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A scratch directory under the system temp dir, made by hand.
-///
-/// `tempfile` is not a dependency of this crate and is not being added for one
-/// test: `tests/linkage.rs` measures this crate's declared entries, and a new
-/// one would have to justify itself there. The directory is created fresh and
-/// removed at the end of the test that made it.
+/// A scratch directory under the system temp dir, made by hand: `tempfile` is
+/// not a dependency of this crate (`tests/linkage.rs` measures its declared
+/// entries). Created fresh and removed at the end of the test that made it.
 fn scratch_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("logweir-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -6293,10 +6074,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// ===========================================================================
-// PLAT-19.1 fix round 1 — the approval bundle is resolved trust, not the roster
-// (review finding F1)
-// ===========================================================================
+// The approval bundle is resolved trust, not the roster
 
 /// The public half the policy fixtures carry — the same opaque string the
 /// roster fixture uses, so the ONLY difference between the two paths is where
@@ -6353,24 +6131,18 @@ fn policy_approver_key() -> weirkeeper::crds::trust_policy::TrustedKey {
     }
 }
 
-/// **F1.** A `GovernedApproval` key that exists only in a `TrustPolicy`
-/// materialises the bundle.
+/// A `GovernedApproval` key that exists only in a `TrustPolicy` materialises
+/// the bundle. Materialization reads the namespace's resolved trust, as
+/// admission does: a successor approver key is staged on the policy, and a
+/// namespace may have no roster at all. Reading the roster would leave a
+/// verified `Restore` in a permanent `ApprovalBundleMaterializationFailed`
+/// hold.
 ///
-/// # The split this closes
-///
-/// PLAT-19.1 wired ADMISSION to the resolved policy and left materialization
-/// reading `TrustRoster/default`. D3 §7.6 step 1 stages a successor approver
-/// key on the policy, and §15's L7 namespace B has no roster at all — so
-/// `approval::decide` wrote `Verified=True` and the `Restore` then sat for ever
-/// in a NON-TERMINAL `ApprovalBundleMaterializationFailed` hold, pointing the
-/// operator at an object §7.2 says no longer decides anything for their
-/// namespace. Fail-closed, and a permanent restore hold on the one rotation
-/// procedure the decision documents.
-///
-/// KILLS: "read the key material from `TrustRoster.spec.approverKeys`" — the
+/// KILLS: "read the key material from `TrustRoster.spec.approverKeys`" (the
 /// roster this namespace resolves away from does not carry the key, so the
-/// bundle refuses; and "render the allowlist from `TrustRoster.allowedClusterIds`"
-/// — the second assertion names the policy's own list.
+/// bundle refuses); "render the allowlist from
+/// `TrustRoster.allowedClusterIds`" (the second assertion names the policy's
+/// own list).
 #[test]
 fn a_policy_only_approver_key_materializes_the_bundle() {
     let trust = governing_policy(policy_approver_key());
@@ -6395,15 +6167,13 @@ fn a_policy_only_approver_key_materializes_the_bundle() {
     );
 }
 
-/// **F1, the expiry half.** The bundle's re-check is `may_sign_new`, not the
-/// roster's `status.expiredKeyIds`.
+/// The bundle's expiry re-check is `may_sign_new`, not the roster's
+/// `status.expiredKeyIds`. A bundle is the last thing written before a runner
+/// executes under that key, so the question is "may this key authorise
+/// something new", which is false for a `Retired` or `Revoked` key whose
+/// `notAfter` has not arrived, a case `expiredKeyIds` cannot express.
 ///
-/// A bundle is the last thing written before a runner executes under that key,
-/// so the question is D3 §7.4's first one — *may this key authorise something
-/// new* — which is false for a `Retired` or `Revoked` key whose `notAfter` has
-/// not arrived and which `expiredKeyIds` cannot express at all.
-///
-/// KILLS: "check `roster.status.expiredKeyIds`" — every key below is unexpired
+/// KILLS: "check `roster.status.expiredKeyIds`": every key below is unexpired
 /// by that measure, so all four would materialise.
 #[test]
 fn a_withdrawn_approver_key_writes_no_bundle() {
@@ -6471,11 +6241,11 @@ fn a_withdrawn_approver_key_writes_no_bundle() {
     .is_ok());
 }
 
-/// **F1.** A key the resolved trust does not carry refuses, and the message
-/// names the RESOLVED source rather than always the roster.
+/// A key the resolved trust does not carry refuses, and the message names the
+/// RESOLVED source rather than always the roster.
 ///
-/// KILLS: the pre-fix message `"absent from the TrustRoster"` — for a
-/// policy-governed namespace it sends the operator to the wrong object.
+/// KILLS: a message saying `"absent from the TrustRoster"`, which sends a
+/// policy-governed namespace's operator to the wrong object.
 #[test]
 fn a_bundle_refusal_names_the_object_an_operator_would_edit() {
     let mut stranger = policy_approver_key();
@@ -6517,17 +6287,13 @@ fn a_bundle_refusal_names_the_object_an_operator_would_edit() {
     );
 }
 
-// ===========================================================================
-// D3 §13 — PLAT-14.1's `Restore` half
-// ===========================================================================
+// The diagnosis rows, `Restore` half
 
-/// **D3 §2.2's scalar-reason rule, through the reconciler.** While
-/// `RunnerReady` is `False`, `status.reason` — the REASON printer column —
-/// carries the `RunnerReady` reason, not `JobCreated`.
-///
-/// This EXTENDS `every_status_write_sets_the_scalar_reason`, it does not
-/// weaken it: the field is still always set, still CamelCase, and still
-/// VERBATIM the reason of a condition in the same patch.
+/// **The scalar-reason rule, through the reconciler.** While `RunnerReady` is
+/// `False`, `status.reason` (the REASON printer column) carries the
+/// `RunnerReady` reason, not `JobCreated`. The field is still always set,
+/// still CamelCase, and still VERBATIM the reason of a condition in the same
+/// patch (`every_status_write_sets_the_scalar_reason`).
 #[tokio::test]
 async fn the_reason_column_names_what_the_runner_is_stuck_on_and_not_job_created() {
     let (client, _rec, bodies) = mock_client_recording_bodies(running_routes_with(
@@ -6577,8 +6343,7 @@ async fn the_reason_column_names_what_the_runner_is_stuck_on_and_not_job_created
     );
 }
 
-/// The `Restore` half of D3 §2.4: the runner's own phase reaches the status,
-/// and phase 7 is `Verifying`.
+/// The runner's own phase reaches the status, and phase 7 is `Verifying`.
 #[tokio::test]
 async fn the_restore_runners_phase_reaches_the_status_and_phase_seven_is_verifying() {
     for (phase, stage) in [("6:restore", "Running"), ("7:verify", "Verifying")] {
@@ -6620,10 +6385,9 @@ async fn the_restore_runners_phase_reaches_the_status_and_phase_seven_is_verifyi
     }
 }
 
-/// **D3 §13's "Completed Job cleanup" repair row, the `Restore` half.**
-///
-/// A terminal `Restore` requeues `AwaitChange`, so this is the ONE pass that
-/// will ever look at the Job again: repaired here, or never.
+/// **Completed Job cleanup, the repair row.** A terminal `Restore` requeues
+/// `AwaitChange`, so this is the ONE pass that will ever look at the Job
+/// again: repaired here, or never.
 #[tokio::test]
 async fn a_terminal_restore_whose_job_lost_its_ttl_has_it_repaired() {
     let mut terminal = restore();
@@ -6675,21 +6439,13 @@ async fn a_terminal_restore_whose_job_lost_its_ttl_has_it_repaired() {
     );
 }
 
-/// **Review round 1, N1: the `Restore` half of F1.**
+/// **No terminal `Restore` builder deletes `RunnerReady`**, the twin of
+/// `backup_controller::no_terminal_patch_deletes_the_condition_that_says_why_the_run_failed`.
 ///
-/// The `Backup` twin
-/// (`backup_controller::no_terminal_patch_deletes_the_condition_that_says_why_the_run_failed`)
-/// guards its own three builders, and the `Restore` builders were left
-/// CORRECT BUT UNGUARDED — the reviewer dropped `RunnerReady` from
-/// `crashed_status_patch` and all sixty-two rows in this file still passed.
-/// A guard without a mutant is not a guard (WORKER-RULES), and this kind has
-/// the twin defect available: a merge patch REPLACES arrays, so the terminal
-/// patch that records a failure would delete the only condition saying what
-/// the failure WAS, and a terminal `Restore` requeues `AwaitChange` — nothing
-/// ever reconciles it again to put the condition back.
-///
-/// All three builders, because the carry is a property of each of them and not
-/// of the reconcile that happens to call one.
+/// A merge patch REPLACES arrays, so a terminal patch without it would delete
+/// the only condition saying what the failure WAS, and a terminal `Restore`
+/// requeues `AwaitChange`, so nothing puts it back. All three builders,
+/// because the carry is a property of each of them.
 ///
 /// MUTANT: dropping `CONDITION_RUNNER_READY` from any of the three
 /// `carry_conditions` calls in `controllers/restore.rs`.
@@ -6766,10 +6522,9 @@ fn no_terminal_restore_builder_deletes_the_condition_that_says_why_the_run_faile
         );
     }
 
-    // …AND THE SCALAR REASON IS STILL THE TERMINAL ONE. `RunnerReady` riding
+    // …AND THE SCALAR REASON IS STILL THE TERMINAL ONE: `RunnerReady` riding
     // along must not capture the REASON column, which speaks for the condition
-    // this patch is about — review finding M2, and the rule
-    // `every_status_write_sets_the_scalar_reason` holds over every builder.
+    // this patch is about.
     for (label, patch) in &cases {
         let reason = patch["status"]["reason"]
             .as_str()
@@ -6782,9 +6537,7 @@ fn no_terminal_restore_builder_deletes_the_condition_that_says_why_the_run_faile
         );
     }
 }
-// ===========================================================================
-// D2 W10 — destination-backed restore (PLAT-08.1, D2 §3.6 checks 5-9)
-// ===========================================================================
+// Destination-backed restore
 
 use weirkeeper::check::policy::Policy as InstallationPolicy;
 use weirkeeper::controllers::restore::{
@@ -6801,8 +6554,8 @@ const SOURCE_UID: &str = "d0000000-0000-4000-8000-0000000000a1";
 const EVIDENCE_UID: &str = "d0000000-0000-4000-8000-0000000000b1";
 
 /// A `BackupDestination` whose location is EXACTLY what `PLAN_BYTES`' `source`
-/// block names — bucket, prefix, region, endpoint, path-style and allow_http,
-/// all six. Check 7 compares on every one of them.
+/// block names: bucket, prefix, region, endpoint, path-style and allow_http,
+/// all six, which the location check compares.
 fn source_destination_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
@@ -6838,9 +6591,8 @@ fn source_destination_value() -> Value {
     })
 }
 
-/// A SECOND destination — a different bucket and a different credential —
-/// whose evidence root is what `PLAN_BYTES`' `evidence` block names. The
-/// two-destination shape D2 §3.13 is about.
+/// A SECOND destination (a different bucket and credential) whose evidence
+/// root is what `PLAN_BYTES`' `evidence` block names.
 fn evidence_destination_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
@@ -6922,20 +6674,16 @@ fn destination_routes(source: Value, evidence: Value) -> Vec<Route> {
 /// **THE APPROVED PLAN AND THE NAMED DESTINATION MUST BE THE SAME LOCATION, ON
 /// EVERY FIELD.**
 ///
-/// # Why this check exists at all
+/// The RUNNER reads its location out of the PLAN, which is what an approver
+/// signed, so a destination whose location differs contributes only its
+/// CREDENTIALS, presented at a location nobody approved.
 ///
-/// D2 §3.6 checks 7 and 8. The RUNNER reads its location out of the PLAN, not
-/// out of the destination — the plan bytes are what an approver signed. So a
-/// destination whose location differs contributes only its CREDENTIALS, and the
-/// run then presents that credential at a location nobody approved. Without
-/// these two checks a saved destination on this path is a credential holder
-/// with no location semantics at all.
-///
-/// KILLS: dropping check 7 (a re-pointed `src` is admitted and its reader key
-/// is presented at the plan's bucket), dropping check 8 (the scorecard is
-/// written under a credential for a bucket the plan does not name), and
-/// comparing only the bucket instead of all six fields (`allow_http` flipped
-/// between the plan and the destination is then invisible).
+/// KILLS: dropping the source check (a re-pointed `src` is admitted and its
+/// reader key is presented at the plan's bucket), dropping the evidence check
+/// (the scorecard is written under a credential for a bucket the plan does
+/// not name), and comparing only the bucket instead of all six fields
+/// (`allow_http` flipped between the plan and the destination is then
+/// invisible).
 #[tokio::test]
 async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
     let now = utc(2026, 9, 7, 14, 30);
@@ -7055,11 +6803,10 @@ async fn a_plan_that_names_a_notification_sink_is_refused_at_admission() {
 /// **HALF A DESTINATION-BACKED RESTORE IS REFUSED, AND AN ABSENT DESTINATION
 /// HOLDS.**
 ///
-/// D2 §3.6 check 5, and the CEL pair rule re-evaluated. The pair rule is
-/// re-checked here for the reason every re-validated rule in this crate exists:
-/// an object admitted by an OLDER CRD revision reaches this controller
-/// unchecked, and half a destination-backed restore reads from a saved
-/// destination while writing its scorecard wherever the inline block says.
+/// The CEL pair rule is re-checked here because an object admitted by an OLDER
+/// CRD revision reaches this controller unchecked, and half a
+/// destination-backed restore reads from a saved destination while writing
+/// its scorecard wherever the inline block says.
 ///
 /// KILLS: trusting the CEL pair rule (the `(Some, None)` arm removed), and
 /// making an absent destination terminal instead of a hold.
@@ -7111,15 +6858,13 @@ async fn half_a_destination_backed_restore_is_refused_and_an_absent_one_holds() 
 /// **A DESTINATION-BACKED RESTORE PROJECTS TWO CREDENTIALS THAT CANNOT SHADOW
 /// EACH OTHER, AND FORWARDS NOTHING FROM THE CONTROLLER.**
 ///
-/// D2 §3.5's Restore paragraph. The engine reads the archive through `AWS_*`;
-/// the scorecard is written through `LOGWEIR_EVIDENCE_AWS_*`, separately named
-/// because one `AWS_ACCESS_KEY_ID` in a pod is one credential and a restore
-/// with two destinations legitimately needs two.
+/// The engine reads the archive through `AWS_*`; the scorecard is written
+/// through `LOGWEIR_EVIDENCE_AWS_*`, because one `AWS_ACCESS_KEY_ID` in a pod
+/// is one credential and a restore with two destinations needs two.
 ///
-/// KILLS: projecting the evidence grant under `AWS_*` (the archive's read key
-/// then loses to the evidence key, or the reverse, depending on ordering);
-/// forwarding `archive_addressing_env` on this path; and dropping the
-/// store-contract handshake from the argv.
+/// KILLS: projecting the evidence grant under `AWS_*` (one key then loses to
+/// the other, depending on ordering); forwarding `archive_addressing_env` on
+/// this path; and dropping the store-contract handshake from the argv.
 #[test]
 fn a_destination_backed_restore_projects_two_unshadowed_credentials() {
     let restore = destination_backed_restore();
@@ -7211,11 +6956,9 @@ fn restore_with_destination_free_spec() -> Restore {
 }
 
 /// **THE TWO CA BUNDLES ARE FROZEN INTO THE RUN'S OWN PLAN, NOT MOUNTED FROM
-/// THE DESTINATION'S.**
-///
-/// D2 §3.5's "CA files". Mounting the destination's own `ConfigMap` would mean
-/// a root rotated while a restore runs changes what that run trusts, mid-run,
-/// with an approved plan that says nothing about it.
+/// THE DESTINATION'S.** Mounting the destination's own `ConfigMap` would let
+/// a root rotated mid-run change what that run trusts, with an approved plan
+/// that says nothing about it.
 ///
 /// KILLS: pointing `LOGWEIR_EVIDENCE_CA_FILE` at the destination's `ConfigMap`
 /// rather than at the run's plan, and re-serialising `planBytes` while adding
@@ -7260,12 +7003,10 @@ fn the_ca_bundles_are_copied_into_the_runs_own_immutable_plan() {
     );
 }
 
-// ===========================================================================
-// Fix round 1, R1 — the `Restore` twin of D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN
-// ===========================================================================
+// A destination-backed `Restore` publishes its `NotAttempted` verdict
 
 /// [`evidence_destination_value`] with an `evidenceRead` grant only a pod may
-/// hold — read by D2 §3.9's evidence-fetch Job.
+/// hold, read by the evidence-fetch Job.
 fn evidence_destination_with_pod_only_read() -> Value {
     let mut value = evidence_destination_value();
     value["spec"]["access"]["evidenceRead"] = serde_json::json!({"mode": "SecretKeys", "secret": {
@@ -7283,34 +7024,21 @@ fn finished_routes_for_destinations(pods: String, log: String, evidence: Value) 
     routes
 }
 
-/// **A DESTINATION-BACKED `Restore` PUBLISHES ITS `NotAttempted` VERDICT** —
-/// review finding **R1**, the twin of `D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN`.
+/// **A DESTINATION-BACKED `Restore` PUBLISHES ITS `NotAttempted` VERDICT.**
 ///
-/// # Why this row is not optional once the `Backup` half is fixed
-///
-/// `restore.rs`'s second patch carried the byte-for-byte same fence as
-/// `backup.rs`'s — `if let (Some(payload_key), Some(sidecar_key),
-/// Some(digest))` — and its `NotAttempted` arm was dead for the identical
-/// reason: `observed` is `None` for that source, so `scorecard_sha256` is
-/// `None` by construction. `docs/kubernetes.md` §7b.3 promises the
-/// `NotAttempted` verdict for destination-backed execution generally, §7b.1
-/// (`Restore`) included; fixing only the `Backup` half would have made that
-/// documented sentence true for one kind and still false for the other.
-///
-/// The `evidenceRead` grant that matters here is the **evidence** destination's
-/// — the scorecard was written under its `evidenceWrite`, and reading it back
-/// through the source destination is the two-destination form of grounding G2.
+/// Nothing was fetched for that source, so `scorecard_sha256` is `None` by
+/// construction; a second patch fenced on the digest would never write the
+/// verdict. The `evidenceRead` grant that matters is the **evidence**
+/// destination's: the scorecard was written under its `evidenceWrite`.
 ///
 /// KILLS: re-fencing the block on `scorecard_sha256`; answering `Valid`,
 /// `Invalid` or `Untrusted` without bytes; dropping the detail sentence;
 /// copying `outcome`, `objectives` or `measured` out of a document nobody read.
 #[tokio::test]
 async fn a_destination_backed_restore_with_no_evidence_reader_publishes_not_attempted() {
-    // NO `evidenceRead` on the evidence destination. A pod-only grant is now
-    // read by an evidence-fetch Job (see
-    // `a_restore_with_a_pod_only_grant_is_verified_through_an_evidence_fetch_job`);
-    // the verdict that must be PUBLISHED rather than skipped is the one for a
-    // destination that names no reader.
+    // NO `evidenceRead` on the evidence destination. A pod-only grant is read
+    // by an evidence-fetch Job
+    // (`a_restore_with_a_pod_only_grant_is_verified_through_an_evidence_fetch_job`).
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_for_destinations(
         pod_list_terminated(0),
         log_body(&i8_tail()),
@@ -7319,8 +7047,8 @@ async fn a_destination_backed_restore_with_no_evidence_reader_publishes_not_atte
     reconcile_restore(
         &destination_backed_restore(),
         &client,
-        // THE GLOBAL HANDLE IS NEVER CONSULTED for a destination-backed run
-        // (D2 §3.10); this oracle exists so that reading it would be visible.
+        // The global handle is never consulted for a destination-backed run; this
+        // oracle exists so that reading it would be visible.
         &unobserved_scorecard,
         &unverified_evidence,
         now(),
@@ -7371,13 +7099,10 @@ async fn a_destination_backed_restore_with_no_evidence_reader_publishes_not_atte
     );
 }
 
-/// The GC11 half, and the decision it records: **"no artifact was written"
-/// still writes nothing**, on the `Restore` path exactly as on the `Backup`
-/// one.
-///
-/// The guard is `keys.mandatory_complete()` — the scorecard and sidecar key
-/// lines say a document exists; the digest only says one was read, which is
-/// the question the verdict answers.
+/// **"No artifact was written" still writes nothing**, on the `Restore` path
+/// as on the `Backup` one. The guard is `keys.mandatory_complete()`: the
+/// scorecard and sidecar key lines say a document exists; the digest only
+/// says one was read, which is the question the verdict answers.
 ///
 /// KILLS: hoisting the `NotAttempted` verdict out of the key guard as well as
 /// out of the digest guard.
@@ -7416,18 +7141,11 @@ async fn a_restore_that_wrote_no_artifact_still_writes_no_verification_block() {
     );
 }
 
-// ===========================================================================
-// SEAM S7 — every `/status` write is a resourceVersion-preconditioned merge
-// PATCH (defect STATUS-PATCH-NO-RV)
-// ===========================================================================
+// Every `/status` write is a resourceVersion-preconditioned merge PATCH
 
 /// The `resourceVersion` the API server reports AFTER the first status write of
-/// a pass.
-///
-/// Deliberately not [`FIXTURE_RESOURCE_VERSION`]: a second write that
-/// preconditioned on the object this pass was HANDED rather than on what the
-/// first write returned would then be visibly wrong instead of accidentally
-/// right.
+/// a pass. Not [`FIXTURE_RESOURCE_VERSION`], so a second write preconditioned
+/// on the object the pass was HANDED is visibly wrong.
 const BUMPED_RESOURCE_VERSION: &str = "4099";
 
 /// [`finished_routes`] whose `/status` PATCH answers with the object standing
@@ -7459,19 +7177,12 @@ fn patch_bodies(bodies: &[SeenBody], suffix: &str) -> Vec<Value> {
         .collect()
 }
 
-/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**, and the
-/// row the D3 W2 record implies.
+/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION**, so a pass computing from
+/// a stale watch-cache copy cannot overwrite a concurrent writer.
 ///
-/// `charts/logweir/README.md:59-60` says every status write in this crate is a
-/// `resourceVersion`-preconditioned merge PATCH. Defect STATUS-PATCH-NO-RV is
-/// that this reconciler's nine writes were not: the merge patch went out with
-/// no `metadata` at all, so a pass computing from a stale watch-cache copy
-/// overwrote whatever a concurrent writer had stored.
-///
-/// Asserted over TWO passes that take different branches — the admission hold
-/// and the finished run, whose second write is the verification — because the
-/// defect was one helper serving every branch and a row over one branch would
-/// not have seen it.
+/// Asserted over TWO passes that take different branches (the admission hold
+/// and the finished run, whose second write is the verification), because
+/// one helper serves every branch.
 ///
 /// KILLS: dropping the `metadata` insert in
 /// `conditions::patch_status_preconditioned`; writing an empty
@@ -7548,17 +7259,14 @@ async fn every_restore_status_write_is_a_resource_version_preconditioned_merge_p
 
 /// **THE SECOND WRITE OF A PASS PRECONDITIONS ON WHAT THE FIRST ONE ANSWERED.**
 ///
-/// The terminal patch and the verification patch are two writes of ONE pass,
-/// and after the first returns the object this pass was handed is stale by
-/// exactly one version. Preconditioned on that stale version the verification
-/// write is refused with a `409` forever — and a terminal `Restore` requeues
-/// `AwaitChange` and never reads its Job again, so the evidence verdict would
-/// be lost rather than deferred.
+/// After the terminal patch returns, the object this pass was handed is stale
+/// by one version. Preconditioned on it, the verification write is refused
+/// with a `409` forever, and a terminal `Restore` never reads its Job again,
+/// so the evidence verdict would be lost.
 ///
 /// KILLS: `patch_status_at(&restores, restore, &name, &at, …)` rewritten as
-/// `patch_status_if_changed(&restores, restore, &name, …)` — the whole suite
-/// passes with that mutation unless the double's answer moves the version,
-/// which is why this row bumps it.
+/// `patch_status_if_changed(&restores, restore, &name, …)`; only a double whose
+/// answer moves the version sees it, which is why this row bumps it.
 #[tokio::test]
 async fn the_verification_write_preconditions_on_the_terminal_writes_answer() {
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_bumping_version(
@@ -7599,21 +7307,14 @@ async fn the_verification_write_preconditions_on_the_terminal_writes_answer() {
     );
 }
 
-/// **A `409` IS SURFACED, NOT SWALLOWED AND NOT RETRIED** — the row the D3 W2
-/// record implies.
-///
-/// The precondition working looks like this: the API server answers `409`, the
-/// helper returns it as the API error it is, the reconcile stops there, and
-/// `error_policy` requeues so the next pass reads what the OTHER writer
-/// stored. Nothing this pass computed is on the object, and — the half that
-/// makes it a safety property rather than a detail — the Job's TTL is not
-/// patched either, so the pod whose log the next pass has to read is still
-/// alive.
+/// **A `409` IS SURFACED, NOT SWALLOWED AND NOT RETRIED.** The helper returns
+/// it as the API error it is, the reconcile stops, and `error_policy` requeues
+/// so the next pass reads what the OTHER writer stored. Nothing this pass
+/// computed is on the object, and the Job's TTL is not patched, so the pod
+/// whose log the next pass has to read is still alive.
 ///
 /// KILLS: swallowing the 409 inside the helper and returning `Ok`; re-reading
-/// the object and retrying the same computed status inside the helper (either
-/// one puts a status derived from inputs nobody re-observed on top of the
-/// concurrent writer's).
+/// the object and retrying the same computed status inside the helper.
 #[tokio::test]
 async fn a_conflicting_status_write_stops_the_pass_and_arms_no_ttl() {
     let mut routes = finished_routes(pod_list_terminated(0), log_body(&i8_tail()), "Complete");
@@ -7660,32 +7361,20 @@ async fn a_conflicting_status_write_stops_the_pass_and_arms_no_ttl() {
     );
 }
 
-// ===========================================================================
-// RESTORE-ADMITTED-DROPPED — the base-plus-apply path carries every stored
-// condition it does not own
-// ===========================================================================
+// The base-plus-apply path carries every stored condition it does not own
 
 /// **`Admitted=True` SURVIVES THE SECOND RECONCILE OF AN UNCHANGED RUNNING
-/// `Restore`** — defect RESTORE-ADMITTED-DROPPED.
+/// `Restore`.**
 ///
-/// `running_status_patch` asserts `Admitted` on the CREATING pass only
-/// (`created`), and every later pass over the running Job calls it with
-/// `admitted: false`. A merge patch REPLACES `status.conditions`, so the array
-/// the later pass sent — `JobCreated` plus the folded `RunnerReady` — did not
-/// leave `Admitted` alone, it deleted it. One pass after the controller wrote
-/// "this run was approved", nothing on the object said so, and no later pass
-/// re-asserts it: the approval is not re-read while a Job is in flight. The
-/// comment on the builder said the opposite of what the code did.
-///
-/// Both passes are run for real and the server's merge is applied between
-/// them, so this is what the object would actually hold — not a status literal
-/// asserting what this file's author believes.
+/// `running_status_patch` asserts `Admitted` on the CREATING pass only, and
+/// a merge patch REPLACES `status.conditions`; the approval is not re-read
+/// while a Job is in flight, so nothing else would re-assert it. Both passes
+/// are run for real with the server's merge applied between them.
 ///
 /// KILLS: replacing `conditions::upsert_conditions(write.conditions, owned)`
-/// in `diagnostics::apply` with `owned` — which is the code this row is about.
-/// Also kills carrying `Admitted` with a FRESH `lastTransitionTime`: "admitted
-/// four seconds ago" on a run admitted half an hour ago is a false statement to
-/// an operator, and the same rule `merge_condition` exists for.
+/// in `diagnostics::apply` with `owned`; carrying `Admitted` with a FRESH
+/// `lastTransitionTime` ("admitted four seconds ago" on a run admitted half an
+/// hour ago).
 #[tokio::test]
 async fn the_admission_condition_survives_the_second_pass_over_a_running_job() {
     // ---- PASS 1: admitted, the Job is created --------------------------
@@ -7793,16 +7482,13 @@ async fn the_admission_condition_survives_the_second_pass_over_a_running_job() {
     );
 }
 
-/// **A SECOND IDENTICAL RUNNING PASS SENDS NOTHING** — plan erratum **E11(d)**,
-/// and the reason `upsert_conditions` keeps stored ORDER rather than appending.
+/// **A SECOND IDENTICAL RUNNING PASS SENDS NOTHING**, which is why
+/// `upsert_conditions` keeps stored ORDER rather than appending.
 ///
-/// A reconciler's own status patch is what wakes it. `status_unchanged`
-/// compares the condition array element by element, so a carry that appended
-/// what it carried — `[JobCreated, RunnerReady, Admitted]` onto a stored
-/// `[Admitted, JobCreated, RunnerReady]` — would compute a DIFFERENT array on
-/// every pass over an object nobody touched, write it, and wake itself with
-/// the write. That is the 20-reconciles-per-second shape this file already
-/// carries a row for on the terminal path; this is the running one.
+/// `status_unchanged` compares the condition array element by element, so a
+/// carry that appended (`[JobCreated, RunnerReady, Admitted]` onto a stored
+/// `[Admitted, JobCreated, RunnerReady]`) would write a different array on
+/// every pass over an untouched object and wake itself with the write.
 ///
 /// KILLS: building the carry as "this patch's conditions, then the stored ones
 /// it did not name" instead of upserting into the stored list.
@@ -7870,15 +7556,10 @@ async fn a_second_pass_over_an_unchanged_running_job_sends_no_patch() {
     );
 }
 
-/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION TOO** — review finding
-/// MED-2, the other half of defect RESTORE-ADMITTED-DROPPED.
-///
-/// The running pass was fixed first; the terminal builders still replaced
-/// `status.conditions` from an allow-list, so `Admitted` and `JobCreated` went
-/// off the object at the exact moment the run finished — on the object an
-/// AUDITOR inspects, which is never reconciled again, so nothing ever put them
-/// back. The window had moved from "one reconcile after admission" to "the
-/// moment the run ends", which is worse, not better.
+/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION TOO.** A terminal
+/// builder that replaced `status.conditions` from an allow-list would drop
+/// `Admitted` and `JobCreated` the moment the run finished, on the object an
+/// auditor inspects, which is never reconciled again.
 ///
 /// Three passes, run for real, with the server's merge applied between them:
 /// create, then running, then the finished Job.
@@ -7989,17 +7670,12 @@ async fn the_admission_condition_survives_the_terminal_transition() {
     );
 }
 
-// ===========================================================================
-// EVIDENCE-FETCH-JOB-UNBUILT — the `Restore` half of D2 §3.9: the scorecard
-// read by an evidence-fetch Job with the EVIDENCE destination's grant
-// ===========================================================================
+// The scorecard read by an evidence-fetch Job with the EVIDENCE destination's
+// grant
 
-// ===========================================================================
-// RESTORE-COMPLETION-UNWRITTEN — PLAT-14.1's durable completion report
-// (D3 §2.2, §3.5): `status.completion`, copied by JSON pointer from the signed
-// scorecard and written on the preconditioned status write that carries the
-// other scorecard facts.
-// ===========================================================================
+// `status.completion`: copied by JSON pointer from the signed scorecard and
+// written on the preconditioned status write that carries the other
+// scorecard facts
 
 /// The signed scorecard fixture `logweir-core`'s `emit_fixture` produces
 /// (`crates/logweir-core/tests/fixture_regen.rs` pins it), so the pointers read
@@ -8047,7 +7723,7 @@ fn fixture_scorecard_oracle(_key: String) -> BoxFuture<'static, Option<Scorecard
     Box::pin(async { scorecard_observation(&signed_fixture_scorecard()) })
 }
 
-/// Every completion field comes from its D3 §2.2 pointer, verbatim.
+/// Every completion field comes from its pointer, verbatim.
 #[test]
 fn the_completion_is_copied_from_the_signed_scorecard_by_pointer() {
     let o = scorecard_observation(&signed_fixture_scorecard()).expect("a scorecard object");
@@ -8249,8 +7925,8 @@ async fn finished_pass_patches(
         .collect()
 }
 
-/// **THE COMPLETION APPEARS WITH A `Valid` VERDICT AND WITH NO OTHER** — the
-/// own-handle path (MEDIUM-1 of the ctl-batch-1 review, orchestrator decision).
+/// **THE COMPLETION APPEARS WITH A `Valid` VERDICT AND WITH NO OTHER**, on the
+/// own-handle path.
 ///
 /// The terminal write lands before any verification and never carries it; the
 /// verification write carries it only when that verdict is `Valid`, in the same
@@ -8280,10 +7956,8 @@ async fn the_completion_is_written_only_beside_a_valid_verdict() {
     );
     assert_eq!(patches[1]["status"]["completion"], fixture_completion());
     // THE SECOND WRITE OF THE PASS: preconditioned on where the terminal write
-    // left the object. The double enforces seam S7 now (defect
-    // REHEARSAL-FIRE-PASS-STATUS-LOST), so the terminal write moved the object
-    // from the fixture's version to the next one, and the fixture's own version
-    // here would have been answered 409.
+    // left the object. The double enforces the precondition, so the fixture's
+    // own version here would have been answered 409.
     assert_eq!(
         patches[1]["metadata"]["resourceVersion"],
         serde_json::json!("4072"),
@@ -8313,7 +7987,7 @@ async fn the_completion_is_written_only_beside_a_valid_verdict() {
 }
 
 /// The gate reads the BASIS as the badge does: `Historical` and `Current` (and
-/// a pre-PLAT-19.1 verdict with no trust block) admit the completion; a stored
+/// an older verdict with no trust block) admit the completion; a stored
 /// `Unverified` basis, any basis the badge does not know, and every non-`Valid`
 /// result do not.
 #[test]
@@ -8635,9 +8309,8 @@ mod evidence_fetch_job {
             "{last}"
         );
         assert_eq!(last["outcome"], serde_json::json!("pass"));
-        // RESTORE-COMPLETION-UNWRITTEN: `status.completion`, copied by JSON
-        // pointer out of the relayed, signed fixture (the one
-        // `logweir-core`'s `emit_fixture` produces), exactly and entirely.
+        // `status.completion`, copied by JSON pointer out of the relayed, signed
+        // fixture, exactly and entirely.
         assert_eq!(
             last["completion"],
             fixture_completion(),
@@ -8664,14 +8337,13 @@ mod evidence_fetch_job {
         assert_eq!(verified.1, "True", "{last}");
     }
 
-    /// **A RUN-BOUND SCORECARD WHOSE SIGNATURE FAILS PUBLISHES NO COMPLETION**
-    /// (MEDIUM-1, orchestrator decision 2026-09-22). The review's scenario:
-    /// someone with write access to the evidence bucket rewrites this run's
+    /// **A RUN-BOUND SCORECARD WHOSE SIGNATURE FAILS PUBLISHES NO COMPLETION.**
+    /// Someone with write access to the evidence bucket rewrites this run's
     /// scorecard, keeping its `run_id`, with inflated counts and another topic
-    /// name. The verdict is `Invalid`, and the console's completion panel —
-    /// which carries no trust caption — must not render the forged facts.
+    /// name. The verdict is `Invalid`, and the console's completion panel, which
+    /// carries no trust caption, must not render the forged facts.
     /// MUTANT: copy `completion_block` into the relayed facts without the
-    /// `Valid` gate, and this fails.
+    /// `Valid` gate.
     #[tokio::test]
     async fn a_relayed_scorecard_whose_signature_fails_publishes_no_completion() {
         let mut forged: Value =
@@ -8722,8 +8394,8 @@ mod evidence_fetch_job {
     /// `run_id` is not the run its key names: `Invalid`, nothing copied.
     #[tokio::test]
     async fn a_relayed_scorecard_for_another_run_is_invalid_and_copies_nothing() {
-        // Another run's key, and — review LOW-2 — a key that merely ENDS with
-        // this document's `<run_id>.json`: the binding is key equality.
+        // Another run's key, and a key that merely ENDS with this document's
+        // `<run_id>.json`: the binding is key equality.
         for key in [
             SCORECARD_KEY.to_string(),
             format!(
@@ -8764,10 +8436,8 @@ mod evidence_fetch_job {
     }
 }
 
-// ===========================================================================
-// legacy-point-restore P5 — an inline-archive restore's evidence is read ONLY
-// through the controller's archive handle, and only in that handle's bucket
-// ===========================================================================
+// An inline-archive restore's evidence is read ONLY through the
+// controller's archive handle, and only in that handle's bucket
 
 /// The handle the PoC controller ran with (`LOGWEIR_ARCHIVE_URL`).
 const LEGACY_HANDLE: &str = "s3://kafka-backups/logweir";
@@ -8827,18 +8497,11 @@ async fn legacy_pass(
     (patched_statuses(&bodies), asked)
 }
 
-/// **P5, the PoC's own shape, and the fix's first half.** The wizard used to
-/// hard-code evidence bucket `logweir-evidence` for a point with no
-/// destination; the controller read the printed keys through its handle over
-/// `kafka-backups`, found nothing, and `rst-4y5hcog6vsj5jwrfxj4exrm6f6`
-/// ended `Succeeded` with NO verification block and NO completion.
-///
-/// Now the handle is not read at all for a plan whose evidence it cannot see,
-/// and the run publishes `NotAttempted` naming both buckets.
-///
-/// FAILS ON THE OLD CODE: the oracle is asked for the key (so `asked` is not
-/// empty), and — with the PoC's real handle, which found nothing — no
-/// verification block is written at all.
+/// **An inline-archive restore whose evidence the handle cannot see is not
+/// read, and says so.** The plan writes its evidence to `logweir-evidence`
+/// while the handle is over `kafka-backups`: the handle is not read at all,
+/// and the run publishes `NotAttempted` naming both buckets, rather than
+/// ending `Succeeded` with no verification block.
 #[tokio::test]
 async fn a_legacy_restore_whose_evidence_the_handle_cannot_see_is_not_read_and_says_so() {
     let (statuses, asked) = legacy_pass(
@@ -8864,8 +8527,8 @@ async fn a_legacy_restore_whose_evidence_the_handle_cannot_see_is_not_read_and_s
         "the sentence names where the evidence went, the handle by role and what to run: \
          {detail}"
     );
-    // REVIEW L4: the handle's location is installation configuration, and this
-    // detail is in a status every operator of the namespace reads.
+    // The handle's location is installation configuration, and this detail is
+    // in a status every operator of the namespace reads.
     assert!(
         !detail.contains(LEGACY_HANDLE) && !detail.contains("kafka-backups"),
         "the archive handle's URL and bucket never reach a tenant-visible status: {detail}"
@@ -8876,11 +8539,10 @@ async fn a_legacy_restore_whose_evidence_the_handle_cannot_see_is_not_read_and_s
     );
 }
 
-/// **P5's other half — a legacy-point restore that ends with a verdict AND a
-/// completion.** The plan the fixed wizard renders for a point with no
-/// destination writes its evidence to the archive's own bucket, which is the
-/// handle's; the controller reads it there, verifies it and writes the
-/// completion.
+/// **A legacy-point restore that ends with a verdict AND a completion.** A
+/// plan for a point with no destination writes its evidence to the archive's
+/// own bucket, which is the handle's; the controller reads it there, verifies
+/// it and writes the completion.
 #[tokio::test]
 async fn a_legacy_restore_whose_evidence_is_in_the_handles_bucket_gets_a_verdict_and_a_completion()
 {
@@ -8909,12 +8571,8 @@ async fn a_legacy_restore_whose_evidence_is_in_the_handles_bucket_gets_a_verdict
 
 /// **The unread rule.** The runner printed both keys, the handle is the right
 /// one, and the read produced nothing (a deleted object, a credential that
-/// cannot read it). That used to publish NO block — the same silence P5
-/// showed. It is `NotAttempted`, naming the key and the handle; never
-/// `Invalid`, never a completion.
-///
-/// FAILS ON THE OLD CODE: there, a read with no digest wrote no verification
-/// block at all.
+/// cannot read it). It is `NotAttempted`, naming the key and the handle; never
+/// `Invalid`, never a completion, and never no block.
 #[tokio::test]
 async fn a_scorecard_the_handle_read_nothing_for_is_not_attempted_and_named() {
     let (statuses, asked) = legacy_pass(
@@ -9022,21 +8680,18 @@ fn the_legacy_evidence_scope_compares_backend_and_bucket() {
     ));
 }
 
-// ===========================================================================
-// legacy-point-restore review round: L2 (the shipped wiring), L3 (the unread
-// verdict is for inline-archive runs only)
-// ===========================================================================
+// The shipped wiring, and the unread verdict's scope
 
-/// **L2.** The SHIPPED reconcile states the handle's location: it reads
+/// The SHIPPED reconcile states the handle's location: it reads
 /// `LOGWEIR_ARCHIVE_URL` from its environment and hands it to the evidence
-/// guard. The reviewer's mutant R3 (passing `None` there) left every row green,
-/// because every row drove `reconcile_restore_at` directly.
+/// guard. The other rows drive `reconcile_restore_at` directly, so passing
+/// `None` here would leave them green.
 ///
-/// Here the environment names the PoC handle and the controller holds no
-/// handle at all (`Context::archive: None`), over the PoC-shaped plan that
-/// writes its evidence to `logweir-evidence`. With the location stated the
-/// verdict is the guard's ("not the bucket of the controller's archive
-/// handle"); with it dropped it would be the unread sentence instead.
+/// Here the environment names the handle and the controller holds no handle
+/// at all (`Context::archive: None`), over a plan that writes its evidence to
+/// `logweir-evidence`. With the location stated the verdict is the guard's
+/// ("not the bucket of the controller's archive handle"); with it dropped it
+/// would be the unread sentence instead.
 #[tokio::test]
 async fn the_shipped_reconcile_states_the_handle_location_it_read() {
     let object: Restore = serde_json::from_str(&restore_json(
@@ -9082,15 +8737,13 @@ async fn the_shipped_reconcile_states_the_handle_location_it_read() {
     );
 }
 
-/// **L3, AMENDED BY PoC P12.** The unread-scorecard verdict is written for a
-/// run the CONTROLLER reads — through the global handle (P5) and, since P12,
-/// through an evidence destination's own `ControllerIdentity` handle, whose
-/// failed read used to write no block and so could never be read again. It is
-/// a TRANSIENT `NotAttempted` in both cases (the retry schedule's input), and
-/// the destination's sentence names the destination rather than the
-/// installation's archive handle. A run with no keys still has no document to
-/// have an opinion about, and a run whose evidence a Job reads gets its
-/// verdict from the Job.
+/// **The unread-scorecard verdict is written for a run the CONTROLLER reads**:
+/// through the global handle, or through an evidence destination's own
+/// `ControllerIdentity` handle. It is a TRANSIENT `NotAttempted` in both cases
+/// (the retry schedule's input), and the destination's sentence names the
+/// destination rather than the installation's archive handle. A run with no
+/// keys has no document to have an opinion about, and a run whose evidence a
+/// Job reads gets its verdict from the Job.
 #[test]
 fn the_unread_verdict_is_for_a_run_the_controller_reads() {
     use weirkeeper::controllers::backup::EvidenceSource;
@@ -9129,9 +8782,7 @@ fn the_unread_verdict_is_for_a_run_the_controller_reads() {
     assert_eq!(not_attempted_class(detail), NotAttemptedClass::Transient);
 }
 
-// ---------------------------------------------------------------------------
-// P10 — the manual-restore pool
-// ---------------------------------------------------------------------------
+// The manual-restore pool
 
 fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
@@ -9407,17 +9058,14 @@ async fn n_plus_one_manual_restores_make_n_jobs_and_one_queued_run() {
     );
 }
 
-/// **H1 (Tier-A review), THE PoC's ROW 6: three console restores released
-/// together from their approval hold make exactly TWO Jobs.**
+/// **Three console restores released together from their approval hold make
+/// exactly TWO Jobs.**
 ///
-/// Every console restore goes through `Pending` while its approval is
-/// verified, with its 30-second requeues aligned. When the approvals verify,
-/// the three passes run within milliseconds of each other, and each one's
-/// snapshot still shows the other two `Pending` — the store has not delivered
-/// anybody's admission yet. The first round of the pool counted a `Pending`
-/// peer as nothing and admitted all three (probe P2). Now each admission is
-/// RESERVED under the pool's one lock before the pass creates anything, so the
-/// third pass counts the first two, whatever the store says, and is queued.
+/// Their 30-second `Pending` requeues are aligned, so when the approvals
+/// verify, the three passes run within milliseconds and each one's snapshot
+/// still shows the other two `Pending`. Each admission is RESERVED under the
+/// pool's one lock before the pass creates anything, so the third pass counts
+/// the first two, whatever the store says, and is queued.
 ///
 /// KILLS: deciding from the snapshot alone (three Jobs); a reservation that is
 /// not counted for a peer whose snapshot phase is `Pending`.
@@ -9505,10 +9153,8 @@ async fn an_unapproved_restore_holds_and_never_queues() {
     assert!(reservations.is_empty(), "a held run reserves nothing");
 }
 
-// ===========================================================================
-// PoC P12 — a Restore whose scorecard the controller could not read is read
-// again, on the schedule, and completes when the read succeeds
-// ===========================================================================
+// A Restore whose scorecard the controller could not read is read again, on
+// the schedule, and completes when the read succeeds
 mod p12_controller_read_retry {
     use super::*;
     use serde_json::json;
@@ -9610,17 +9256,14 @@ mod p12_controller_read_retry {
         serde_json::to_value(r.status.as_ref().expect("a status")).expect("json")
     }
 
-    /// **THE RESTORE TWIN OF THE PoC ROW.** An inline-archive restore's
+    /// **An unread scorecard is read again.** An inline-archive restore's
     /// scorecard read through the controller's handle produces nothing (the
-    /// credential is missing): the verdict is `NotAttempted` naming the key —
-    /// P5's rule — AND attempt 1 of a schedule, and the terminal `Restore`,
-    /// which otherwise waits for a change, requeues for the retry. Before `retryAfter`
-    /// nothing is read or written and the requeue is the time left; once it has
-    /// passed and the scorecard is readable, attempt 2 writes `Valid`, the
-    /// scorecard's outcome and the completion, and the verdict is reached.
-    ///
-    /// FAILS ON THE OLD CODE: pass 1 writes no observation and requeues
-    /// `AwaitChange`, and the run never completes.
+    /// credential is missing): the verdict is `NotAttempted` naming the key AND
+    /// attempt 1 of a schedule, and the terminal `Restore`, which otherwise waits
+    /// for a change, requeues for the retry. Before `retryAfter` nothing is read
+    /// or written and the requeue is the time left; once it has passed and the
+    /// scorecard is readable, attempt 2 writes `Valid`, the scorecard's outcome
+    /// and the completion, and the verdict is reached.
     #[tokio::test]
     async fn an_unread_scorecard_is_read_again_and_the_restore_completes() {
         let credential = Arc::new(AtomicBool::new(false));
@@ -9691,13 +9334,12 @@ mod p12_controller_read_retry {
         assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
 
-    /// **REVIEW M1 — THE REVIEWER'S PROBE A, INVERTED.** An inline restore's
-    /// retry is scheduled (+1 m); the archive handle is then removed, or
-    /// re-pointed at another bucket. The run can no longer be read, so the
-    /// first pass SETTLES it — `NotAttempted` with the handle's own sentence,
-    /// `retryAfter` cleared — and waits for a change. Before this, a past
-    /// `retryAfter` on such a run requeued it every second, for ever, with a
-    /// `GET` of its runner Job each time.
+    /// **A scheduled read whose handle leaves settles.** An inline restore's retry
+    /// is scheduled (+1 m); the archive handle is then removed, or re-pointed at
+    /// another bucket. The run can no longer be read, so the first pass SETTLES
+    /// it (`NotAttempted` with the handle's own sentence, `retryAfter` cleared)
+    /// and waits for a change, instead of requeueing every second on a past
+    /// `retryAfter`.
     ///
     /// KILLS: the requeue computed from the controller read's observation where
     /// the read can no longer happen (the `After(1)` loop); a settle that keeps
@@ -9780,12 +9422,10 @@ mod p12_controller_read_retry {
         );
     }
 
-    /// **REVIEW T1/R1 — THE TERMINAL PASS'S CHOICE, TABLED.** PoC P12's
-    /// class-sweep item: a `ControllerIdentity` evidence destination whose
-    /// scorecard read produced nothing now RECORDS `NotAttempted` naming the
-    /// destination, as a transient failure that the schedule reads again —
-    /// where it used to write no block and could never be retried. Every other
-    /// source keeps its rule.
+    /// **The terminal pass's choice, tabled.** A `ControllerIdentity` evidence
+    /// destination whose scorecard read produced nothing RECORDS `NotAttempted`
+    /// naming the destination, as a transient failure the schedule reads again.
+    /// Every other source keeps its rule.
     ///
     /// KILLS: narrowing the unread arm back to the global handle (the
     /// destination row writes nothing again); verifying without a digest.
@@ -9861,9 +9501,7 @@ mod p12_controller_read_retry {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // FX-31 review F3 — the over-cap scorecard, through the reconcile
-    // -----------------------------------------------------------------------
+    // The over-cap scorecard, through the reconcile
 
     /// A scorecard oracle that reads through the REAL `observe_scorecard`
     /// over a store reporting every object at five gibibytes (the
@@ -9957,12 +9595,11 @@ mod p12_controller_read_retry {
 
     /// **THE TERMINAL PASS** (`restore.rs`, the `(Some(detail), Record(_))`
     /// arm). The scorecard is over the controller's cap: the verdict is
-    /// `NotAttempted` naming the cap, FINAL — no `retryAfter`, no requeue for a
-    /// retry — and no completion, rather than the transient "read no such
-    /// document" that would name the wrong reason and be read again on the
-    /// schedule.
+    /// `NotAttempted` naming the cap, FINAL (no `retryAfter`, no requeue for a
+    /// retry) and no completion, rather than the transient "read no such
+    /// document" that would name the wrong reason and be read again.
     ///
-    /// KILLS: the reviewer's C1 (the terminal arm disabled).
+    /// KILLS: the terminal arm disabled.
     #[tokio::test]
     async fn an_oversized_scorecard_at_the_terminal_pass_is_not_attempted_naming_the_cap() {
         let readable = Arc::new(AtomicBool::new(true));
@@ -9998,8 +9635,8 @@ mod p12_controller_read_retry {
     /// by attempt 2 the scorecard is there and over the cap. Attempt 2 records
     /// `NotAttempted` naming the cap, FINAL: no `retryAfter`, and no attempt 3.
     ///
-    /// KILLS: the reviewer's C2 (the read-pass arm disabled: attempt 2 would
-    /// write the transient sentence and schedule attempt 3).
+    /// KILLS: the read-pass arm disabled (attempt 2 would write the transient
+    /// sentence and schedule attempt 3).
     #[tokio::test]
     async fn an_oversized_scorecard_at_a_scheduled_read_is_not_attempted_naming_the_cap() {
         let readable = Arc::new(AtomicBool::new(false));
@@ -10043,10 +9680,8 @@ mod p12_controller_read_retry {
     }
 }
 
-// ===========================================================================
-// FX-2 — `spec.runnerResources` reaches the runner container, or the Restore
-// is refused. Never dropped, never clamped.
-// ===========================================================================
+// `spec.runnerResources` reaches the runner container, or the Restore is
+// refused. Never dropped, never clamped.
 
 /// The fixture `Restore` with `spec.runnerResources` set to `resources`.
 fn restore_with_resources(resources: Value) -> Restore {
@@ -10056,8 +9691,8 @@ fn restore_with_resources(resources: Value) -> Restore {
     serde_json::from_value(value).expect("the fixture is a Restore")
 }
 
-/// The block the FX-2 rows apply. EVERY REQUEST DIFFERS FROM ITS LIMIT, so a
-/// swap anywhere between the object and the container is visible.
+/// The block the resources rows apply. EVERY REQUEST DIFFERS FROM ITS LIMIT,
+/// so a swap anywhere between the object and the container is visible.
 fn fx2_resources() -> Value {
     serde_json::json!({
         "requests": {"cpu": "250m", "memory": "512Mi"},
@@ -10075,12 +9710,10 @@ fn only_container(job: &Value) -> Value {
     containers[0].clone()
 }
 
-/// **FX-2, THE DEFECT'S OWN ROW, THROUGH THE RECONCILER.** An admitted
-/// `Restore` carrying `spec.runnerResources` gets a Job whose one container
-/// carries exactly those requests and limits — the request the reconciler
-/// `POST`s, not a builder called on the side.
-///
-/// Before FX-2 this container had no `resources` key at all.
+/// **Through the reconciler**, an admitted `Restore` carrying
+/// `spec.runnerResources` gets a Job whose one container carries exactly those
+/// requests and limits: the request the reconciler `POST`s, not a builder
+/// called on the side.
 ///
 /// MUTANTS: `resources: None` in `job::build` (dropped); requests and limits
 /// exchanged (swapped); `resources: None` in `runner_job_spec_with_policy`.
@@ -10104,11 +9737,9 @@ async fn the_runner_container_carries_spec_runner_resources_exactly() {
     .expect("a valid block is admitted");
     assert!(outcome.created, "the Job was created");
     let job = posted_job(&bodies.lock().expect("readable"));
-    // AN AFFORDANCE, NOT AN ASSERTION — the `Backup` twin's
-    // `LOGWEIR_DUMP_RUNNER_JOB`, for this Job. `LOGWEIR_DUMP_RESTORE_JOB=<path>`
-    // writes the exact Job this reconcile POSTed as YAML, which is what the
-    // FX-2 live row hands to `kubectl create --dry-run=server` so the API
-    // server itself judges these bytes. Unset in every ordinary run.
+    // Not an assertion: `LOGWEIR_DUMP_RESTORE_JOB=<path>` writes the exact Job
+    // this reconcile POSTed as YAML, for `kubectl create --dry-run=server` to
+    // judge. Unset in every ordinary run.
     if let Ok(path) = std::env::var("LOGWEIR_DUMP_RESTORE_JOB") {
         let yaml = serde_yaml::to_string(&job).expect("the Job serialises as YAML");
         std::fs::write(&path, yaml).unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -10123,8 +9754,7 @@ async fn the_runner_container_carries_spec_runner_resources_exactly() {
 }
 
 /// A `Restore` that asks for nothing gets a container with NO `resources`
-/// key — the pre-FX-2 shape, so the namespace's `LimitRange` defaults apply
-/// exactly as they did.
+/// key, so the namespace's `LimitRange` defaults apply.
 ///
 /// MUTANT: rendering an empty `resources: {}` (or a default) for `None`.
 #[tokio::test]
@@ -10151,22 +9781,17 @@ async fn a_restore_that_asks_for_nothing_gets_no_resources_key() {
     );
 }
 
-/// **A ONE-SIDED BLOCK REACHES THE CONTAINER AS WRITTEN** — review L7, the
-/// reviewer's probe P5 made a shipped row. Every other admitted row here uses
-/// a two-sided block, so a copy that "applies the block only when it caps
-/// something" (`resources.filter(|r| !r.limits.is_empty())` where the block
-/// enters `RunnerJobSpec`) dropped every requests-only block — FX-2's own
-/// defect, back for that shape — and the whole suite stayed green (mutant
-/// C1, 1,736 rows, 0 failed).
+/// **A ONE-SIDED BLOCK REACHES THE CONTAINER AS WRITTEN.** The other admitted
+/// rows use two-sided blocks, so a copy that "applies the block only when it
+/// caps something" would drop every requests-only block unseen.
 ///
 /// Three shapes, each admitted and each `POST`ed exactly as written:
-/// requests only (the `BestEffort` pod C1 brings back); limits only; and a
-/// request on one resource beside a limit on the other — at exactly the
-/// ceilings, 4 CPUs and 8Gi, so the at-ceiling value is also judged through
-/// the reconciler and not only by the pure row (review R1).
+/// requests only; limits only; and a request on one resource beside a limit
+/// on the other, at exactly the ceilings (4 CPUs and 8Gi), so the at-ceiling
+/// value is also judged through the reconciler.
 ///
-/// MUTANTS: C1 (a block without limits dropped at the copy); a block without
-/// requests dropped there; rule 3 refusing AT the ceiling (R1).
+/// MUTANTS: a block without limits dropped at the copy; a block without
+/// requests dropped there; refusing AT the ceiling.
 #[tokio::test]
 async fn a_one_sided_block_reaches_the_container_as_written() {
     for (label, block) in [
@@ -10207,24 +9832,23 @@ async fn a_one_sided_block_reaches_the_container_as_written() {
     }
 }
 
-/// **FX-2, THE REFUSAL.** A block the controller will not apply ends the
-/// object `Failed` / `ExecutionSpecInvalid`, naming the field — with ZERO
-/// `POST`s over a route table that HAS them, and BEFORE the approval is read.
+/// **THE REFUSAL.** A block the controller will not apply ends the object
+/// `Failed` / `ExecutionSpecInvalid`, naming the field, with ZERO `POST`s over
+/// a route table that HAS them, and BEFORE the approval is read.
 ///
-/// THE APPROVAL IS UNVERIFIED ON PURPOSE. A controller that checked the block
+/// THE APPROVAL IS UNVERIFIED ON PURPOSE: a controller that checked the block
 /// only where the Job is built would HOLD this object as
 /// `ApprovalNotVerified`, and an approver would sign a run that could never
-/// start; this row fails on exactly that.
+/// start.
 ///
-/// EACH ROW BREAKS EXACTLY ONE RULE, and its message must name that rule.
-/// The first form of the milli-bytes row put `100m` on a LIMIT, where the
-/// memory floor refuses it too, so removing the unit rule left the row green
-/// (mutant round 1, M7); it is a REQUEST now, which has no floor.
+/// EACH ROW BREAKS EXACTLY ONE RULE, and its message must name that rule. The
+/// milli-bytes row puts `100m` on a REQUEST, which has no memory floor, so
+/// only the unit rule refuses it.
 ///
 /// MUTANTS: removing the early `runner_resources_of(restore)?` in STEP 1
 /// (every row becomes a hold); `validate` accepting everything (every row
-/// creates a Job — and the table has the route for it); removing any one rule
-/// (its row is admitted, or refused for a reason it does not name).
+/// creates a Job); removing any one rule (its row is admitted, or refused for
+/// a reason it does not name).
 #[tokio::test]
 async fn a_block_the_controller_will_not_apply_is_refused_before_anything_is_read() {
     for (label, resources, field, rule) in [
@@ -10371,13 +9995,12 @@ fn the_job_builder_refuses_what_the_reconcile_refuses() {
     assert_eq!(pairs(&rendered.limits), vec!["cpu=1", "memory=2Gi"]);
 }
 
-/// **FX-2, THE QUOTA HALF: never a silent stuck Job.** The Job is created;
-/// the namespace's `ResourceQuota` (or `LimitRange`) then refuses its pod, and
-/// the only trace is the job controller's `FailedCreate` event. The `Restore`
-/// says so — `RunnerReady=False`, reason `PodCreationForbidden`, the scalar
-/// `REASON` column, and a diagnostic carrying the admission's own words — and
-/// once the finding has held for `failFastSeconds` the Job's deadline is
-/// collapsed rather than left to run out.
+/// **Never a silent stuck Job.** The Job is created; the namespace's
+/// `ResourceQuota` (or `LimitRange`) then refuses its pod, and the only trace
+/// is the job controller's `FailedCreate` event. The `Restore` says so
+/// (`RunnerReady=False`, reason `PodCreationForbidden`, the scalar `REASON`
+/// column, and a diagnostic carrying the admission's own words), and once the
+/// finding has held for `failFastSeconds` the Job's deadline is collapsed.
 #[tokio::test]
 async fn a_runner_pod_the_namespace_quota_rejects_is_reported_and_failed_fast() {
     let object = restore_with_resources(fx2_resources());
@@ -10505,11 +10128,9 @@ async fn a_runner_pod_the_namespace_quota_rejects_is_reported_and_failed_fast() 
     assert_eq!(patch["spec"]["activeDeadlineSeconds"].as_i64(), Some(1));
 }
 
-/// **FX-2's class sweep: `spec.sourceArchive.secretRef`**, documented
-/// (`docs/kubernetes.md` §12) as reaching the pod as `secretKeyRef` env. It
-/// did, and no row said so at the Job: a projection that dropped it passed
-/// every test here, and the runner would have read the archive with whatever
-/// credential the pod happened to have.
+/// **`spec.sourceArchive.secretRef` reaches the pod as `secretKeyRef` env**,
+/// asserted at the Job; without it the runner would read the archive with
+/// whatever credential the pod happened to have.
 ///
 /// MUTANT: skipping the two `EnvFromSecret` pushes for the inline Secret.
 #[tokio::test]
@@ -10554,11 +10175,10 @@ async fn the_inline_archive_credential_reaches_the_runner_by_reference_only() {
     }
 }
 
-/// **FX-2's class sweep: a `BackupDestination`'s
-/// `workloadIdentity.serviceAccountName`**, documented as "the pod's own
-/// ServiceAccount identity". A destination-backed `Restore` whose archive
-/// grant is a workload identity runs AS that ServiceAccount — the Job-level
-/// row the resolver's own test stops short of.
+/// **A `BackupDestination`'s `workloadIdentity.serviceAccountName` is the
+/// runner pod's ServiceAccount**: a destination-backed `Restore` whose
+/// archive grant is a workload identity runs AS that ServiceAccount, the
+/// Job-level row the resolver's own test stops short of.
 ///
 /// MUTANT: `service_account_name` taken from the connection alone, ignoring
 /// the destination's identity.
@@ -10596,9 +10216,7 @@ fn a_workload_identity_archive_grant_is_the_runner_pods_service_account() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-8 review M-2: the signed time basis reaches the Restore's status
-// ---------------------------------------------------------------------------
+// The signed time basis reaches the Restore's status
 
 /// The fixture scorecard at format 1.3.0 with `source.time_basis` set to `block`.
 fn scorecard_with_time_basis(block: &str) -> String {
@@ -10732,17 +10350,15 @@ fn the_relay_facts_carry_the_signed_time_basis() {
     assert!(facts.get("timeBasis").is_none(), "{facts:?}");
 }
 
-// ===========================================================================
-// FX-20: an inline source archive's Secret is bound to where the plan reads
-// and writes with it
-// ===========================================================================
+// An inline source archive's Secret is bound to where the plan reads and
+// writes with it
 
 /// **An inline `sourceArchive.secretRef` is bound to the LOCATIONS the approved
-/// plan dials with it — `source.storage` and, when it is elsewhere,
-/// `evidence:` (both reached with this one credential, D2 G6) — with an
-/// endpoint the plan leaves out filled from the forwarded `AWS_ENDPOINT_URL`.**
-/// A plan author who points either block at a host they control therefore
-/// cannot have a Secret bound to the real location presented there.
+/// plan dials with it (`source.storage` and, when it is elsewhere,
+/// `evidence:`, both reached with this one credential), with an endpoint the
+/// plan leaves out filled from the forwarded `AWS_ENDPOINT_URL`.** A plan
+/// author who points either block at a host they control therefore cannot
+/// have a Secret bound to the real location presented there.
 ///
 /// KILLS: the pair dropped; the evidence location left unbound (the scorecard
 /// upload is a signed PUT with the same key); the binding over the CR's URL
@@ -10869,9 +10485,7 @@ async fn fx20_the_inline_restore_job_carries_the_location_binding() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PROD-08.1a: a Restore asks for complete coverage, and shows what it signed
-// ---------------------------------------------------------------------------
+// A Restore asks for complete coverage, and shows what it signed
 
 /// [`PLAN_BYTES`] asking for complete coverage, with `bound` as its
 /// `sample.complete_max_records` when given.
@@ -10883,14 +10497,11 @@ fn complete_plan_bytes(bound: Option<u64>) -> String {
     )
 }
 
-/// **PROD-17.1 B5: a plan that does not parse is refused before anything is
-/// read** — `PlanUnparseable`, terminal, ZERO `POST`s and the `Approval` never
-/// read, although the approval is VERIFIED over those exact bytes and nothing
-/// is declared on `spec`. Before B5 the first row was admitted: its Job was
-/// created carrying the fail-closed archive binding (`UNBOUND_NO_UID`) and
-/// the runner refused the plan at phase 0; the second was refused only after
-/// the approval was read, as `ConnectionPlanMismatch`. CONTROL: the fixture's
-/// plan, approved the same way, is admitted and its Job created.
+/// **A plan that does not parse is refused before anything is read**:
+/// `PlanUnparseable`, terminal, ZERO `POST`s and the `Approval` never read,
+/// although the approval is VERIFIED over those exact bytes and nothing is
+/// declared on `spec`. CONTROL: the fixture's plan, approved the same way, is
+/// admitted and its Job created.
 #[tokio::test]
 async fn an_unparseable_plan_is_refused_before_anything_is_read() {
     let no_objectives = PLAN_BYTES.replace(
@@ -10968,28 +10579,26 @@ fn restore_declaring(plan: &str, coverage: Option<&str>, bound: Option<i64>) -> 
     serde_json::from_value(value).expect("the fixture is a Restore")
 }
 
-/// **PROD-08.1a: the declaration must be what the plan says.** Each row
-/// declares one thing on `spec` and signs another in the plan, and ends
-/// `Failed` / `ExecutionSpecInvalid` naming both — with ZERO `POST`s over a
-/// table that has them, and before the approval is read (it is UNVERIFIED on
-/// purpose, so a controller checking only at Job-build time would hold the
-/// object instead).
+/// **The declaration must be what the plan says.** Each row declares one
+/// thing on `spec` and signs another in the plan, and ends `Failed` /
+/// `ExecutionSpecInvalid` naming both, with ZERO `POST`s over a table that
+/// has them, and before the approval is read (it is UNVERIFIED on purpose, so
+/// a controller checking only at Job-build time would hold the object
+/// instead).
 ///
 /// The first two rows are the two directions of "absent means sampled": a
 /// complete declaration over a sampled plan, and a complete plan with no
-/// declaration — the second is how a list would show `sampled` over a run
-/// that verifies everything, or the reverse.
+/// declaration.
 ///
 /// The fifth row is a hand-written STANDING `Restore` (it carries
-/// `spec.authorization`, so the admission that follows is the standing one):
-/// its declaration is held to the plan exactly as a per-run one's, so a list
-/// can never read "sampled" over a standing run that verifies every record.
+/// `spec.authorization`): its declaration is held to the plan exactly as a
+/// per-run one's.
 ///
 /// KILLS: removing the early `coverage_agrees(restore)?` (every row holds as
 /// `ApprovalNotVerified`); comparing coverage only (rows 3 and 4 admitted);
 /// reading absent as "whatever the plan says" (row 2 admitted); skipping the
-/// check for a `Restore` carrying `spec.authorization` (review RM3: row 5
-/// reads the approval).
+/// check for a `Restore` carrying `spec.authorization` (row 5 reads the
+/// approval).
 #[tokio::test]
 async fn a_declared_coverage_the_plan_does_not_say_is_refused_before_anything_is_read() {
     let standing = |restore: weirkeeper::crds::restore::Restore| {
@@ -11086,13 +10695,12 @@ async fn a_declared_coverage_the_plan_does_not_say_is_refused_before_anything_is
     }
 }
 
-/// **The control, and the brief's row "a complete request reaches the
-/// runner's plan".** A `Restore` declaring complete coverage over a plan that
-/// asks for it, approved over those bytes, is admitted: the Job is created and
-/// the plan ConfigMap the runner reads carries `coverage: complete` and the
-/// bound, byte for byte. And a `Restore` that declares nothing over the
-/// sampled plan — every object written before the field — is admitted exactly
-/// as before, its plan carrying no `coverage` key.
+/// **The control: a complete request reaches the runner's plan.** A `Restore`
+/// declaring complete coverage over a plan that asks for it, approved over
+/// those bytes, is admitted: the Job is created and the plan ConfigMap
+/// carries `coverage: complete` and the bound, byte for byte. A `Restore`
+/// that declares nothing over the sampled plan is admitted as before, its
+/// plan carrying no `coverage` key.
 ///
 /// KILLS: `coverage_agrees` refusing a matching pair; the plan ConfigMap
 /// rewritten (it is copied verbatim).
@@ -11183,8 +10791,8 @@ fn the_job_builder_refuses_a_coverage_the_plan_does_not_say() {
     }
 }
 
-/// PROD-15.1 review L5 (R07): a Restore whose `topicNaming.originalName`
-/// declaration is `declared`, over `plan`.
+/// A Restore whose `topicNaming.originalName` declaration is `declared`, over
+/// `plan`.
 fn restore_declaring_original_name(plan: &str, declared: Option<bool>) -> Restore {
     let mut value: Value =
         serde_json::from_str(&restore_json(plan, APPROVAL, NAME)).expect("fixture JSON");
@@ -11202,12 +10810,11 @@ fn original_name_plan_bytes() -> String {
     )
 }
 
-/// **PROD-15.1 review L5 (R07), the reconcile's call site.** A declaration
-/// the plan does not say — `originalName: true` over an ordinary plan, or an
-/// original-name plan declared nothing — ends `Failed` / `ExecutionSpecInvalid`
-/// before the approval is read and with no Job, so a list never shows the
-/// wrong approval subject. KILLS: removing the reconcile's
-/// `original_name_agrees(restore)?`.
+/// **The reconcile's call site.** A declaration the plan does not say
+/// (`originalName: true` over an ordinary plan, or an original-name plan
+/// declared nothing) ends `Failed` / `ExecutionSpecInvalid` before the
+/// approval is read and with no Job, so a list never shows the wrong approval
+/// subject. KILLS: removing the reconcile's `original_name_agrees(restore)?`.
 #[tokio::test]
 async fn an_original_name_declaration_the_plan_does_not_say_is_refused_before_anything_is_read() {
     for (label, object) in [
@@ -11328,13 +10935,13 @@ async fn a_sampled_original_name_restore_is_refused_before_anything_is_read() {
     );
     assert!(read_approval, "the complete plan goes on to its approval");
 
-    // **PROD-15.1 after PROD-11.1b: the same, for a PARTITION SUBSET.** The
-    // complete plan narrowed to two partitions of `orders` ends `Failed`
-    // before anything is read: `ExecutionSpecInvalid`, the condition opening
-    // `OriginalNameNeedsWholeTopics`, no Job, the approval never read. There
-    // is no CEL rule for this (the CRD declares no partitions), so this
-    // reconcile is the Kubernetes boundary. KILLS: the controller leaving a
-    // subset plan under the original names to the runner.
+    // **The same, for a PARTITION SUBSET.** The complete plan narrowed to two
+    // partitions of `orders` ends `Failed` before anything is read:
+    // `ExecutionSpecInvalid`, the condition opening
+    // `OriginalNameNeedsWholeTopics`, no Job, the approval never read. No CEL
+    // rule can see partitions, so this reconcile is the Kubernetes boundary.
+    // KILLS: the controller leaving a subset plan under the original names to
+    // the runner.
     let subset_plan = complete_plan.replace(
         "  point_in_time: \"2026-09-07T14:05:00Z\"\n",
         "  point_in_time: \"../2026-09-07T14:05:00Z\"\n  partitions:\n    orders: [0, 2]\n",
@@ -11358,9 +10965,9 @@ async fn a_sampled_original_name_restore_is_refused_before_anything_is_read() {
     );
 }
 
-/// **PROD-15.1 review L5 (R07), the Job builder's call site**: it refuses
-/// exactly what the reconcile refuses. KILLS: dropping `original_name_agrees`
-/// from `runner_job_spec_with_policy`.
+/// **The Job builder's call site** refuses exactly what the reconcile
+/// refuses. KILLS: dropping `original_name_agrees` from
+/// `runner_job_spec_with_policy`.
 #[test]
 fn the_job_builder_refuses_an_original_name_declaration_the_plan_does_not_say() {
     let refused = runner_job_spec(
@@ -11448,12 +11055,12 @@ fn uncovered_block() -> Value {
     })
 }
 
-/// **PROD-08.1a: what the run SIGNED about its coverage reaches the status.**
-/// A complete scorecard's coverage, `covered`, its reason, the archive counts,
-/// the totals and every partition's exact counts are copied onto
-/// `status.integrity`, from the same read as `outcome`; a sampled 1.4.0
-/// scorecard's `coverage: sampled` is copied with no block; a scorecard
-/// before 1.4.0 copies NO coverage at all (not recorded — never complete).
+/// **What the run SIGNED about its coverage reaches the status.** A complete
+/// scorecard's coverage, `covered`, its reason, the archive counts, the totals
+/// and every partition's exact counts are copied onto `status.integrity`, from
+/// the same read as `outcome`; a sampled 1.4.0 scorecard's `coverage: sampled`
+/// is copied with no block; a scorecard before 1.4.0 copies NO coverage at all
+/// (not recorded, never complete).
 ///
 /// KILLS: `integrity_block` dropping `coverage` or `complete`; the
 /// observation reading the block beside a sampled coverage; inventing
@@ -11526,10 +11133,9 @@ async fn the_signed_coverage_and_exact_counts_reach_the_restore_status() {
 /// **All of it or nothing, and never past the CRD's bounds.** A complete
 /// block missing a required field, or carrying a count of the wrong type, is
 /// not copied (the coverage still is). A block beside `coverage: sampled` is
-/// not copied (IV-4 keeps them together). A block listing more partitions
-/// than `status` holds is copied WITHOUT its rows, `partitionCount` saying how
-/// many. FX-23's `sample.unsampled_topics` is copied whole, or not at all
-/// past its bound.
+/// not copied. A block listing more partitions than `status` holds is copied
+/// WITHOUT its rows, `partitionCount` saying how many.
+/// `sample.unsampled_topics` is copied whole, or not at all past its bound.
 #[test]
 fn a_malformed_or_oversized_complete_block_is_not_copied_half_way() {
     fn no_covered(b: &mut Value) {
@@ -11622,10 +11228,9 @@ fn a_malformed_or_oversized_complete_block_is_not_copied_half_way() {
 
 /// **`covered: false` is never green, whatever `outcome` says.** A status
 /// whose evidence is `Valid`, whose `outcome` reads `pass` and whose exit code
-/// is 0 — a combination arm IV-6 keeps out of every document either reader
-/// accepts — is still NOT green when its complete block says `covered: false`:
-/// `CompleteNotCovered`. The same status with `covered: true` is green (the
-/// control).
+/// is 0 (a combination no accepted document carries) is still NOT green when
+/// its complete block says `covered: false`: `CompleteNotCovered`. The same
+/// status with `covered: true` is green (the control).
 ///
 /// KILLS: the badge rule's `covered` arm removed.
 #[test]
@@ -11654,20 +11259,17 @@ fn a_complete_verification_that_did_not_cover_is_never_a_green_badge() {
 }
 
 /// **A real run whose complete verification did not cover is named
-/// `CompleteNotCovered`, not `OutcomeNotPass`** (PROD-08.1a review M2). Such a
-/// run signs `fail-integrity`, `integrity.result: partial`, and exits 2; the
-/// badge rule judges `covered` before the outcome, so the `Verified`
-/// condition says WHY it failed and an operator can alert on that reason.
+/// `CompleteNotCovered`, not `OutcomeNotPass`.** Such a run signs
+/// `fail-integrity`, `integrity.result: partial`, and exits 2; the badge rule
+/// judges `covered` before the outcome, so the `Verified` condition says WHY
+/// it failed and an operator can alert on that reason.
 ///
 /// CONTROLS: a complete run that DID cover and still failed integrity is
-/// `OutcomeNotPass` (so the reason comes from `covered`, not from the
-/// outcome); the same `covered: false` status over a verdict that is
-/// `Invalid` is `VerificationInvalid` (the signature is judged first, so no
-/// reason is ever read off a status whose document did not verify).
+/// `OutcomeNotPass`; the same `covered: false` status over an `Invalid`
+/// verdict is `VerificationInvalid` (the signature is judged first).
 ///
-/// KILLS: the `covered` arm moved back after the outcome (the case reads
-/// `OutcomeNotPass`); the `covered` arm moved ahead of the verification (the
-/// second control reads `CompleteNotCovered`).
+/// KILLS: the `covered` arm moved back after the outcome; the `covered` arm
+/// moved ahead of the verification.
 #[test]
 fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
     let status = |covered: bool, verdict: &str| {
@@ -11706,7 +11308,7 @@ fn a_real_run_that_did_not_cover_is_named_complete_not_covered() {
     );
 }
 
-// ------------------------------------------------------------- PROD-11.1b
+// The narrowed selection
 
 /// A 1.4.0-shaped sampled pass with `source.selection` set to `selection`
 /// (and the format the writer gives it), or with no block for `None`.
@@ -11723,13 +11325,12 @@ fn scorecard_with_selection(selection: Option<Value>) -> Value {
     doc
 }
 
-/// **PROD-11.1b (review M1): a narrowed restore names its selection in the
-/// status, beside the verdict it qualifies.** A 2.0.0 subset's block is
-/// copied to `status.integrity.selection` (the narrowed topics, their
-/// partitions, the count, the runs and the window's ends); a 1.7.0 start-only
-/// block is copied with its start and no subset. The CONTROL: a document
-/// with no block (and one whose block is `null`) gets no `selection`, so an
-/// unnarrowed restore's status is exactly what it was. FAIL SAFE: a block the
+/// **A narrowed restore names its selection in the status, beside the
+/// verdict it qualifies.** A 2.0.0 subset's block is copied to
+/// `status.integrity.selection` (the narrowed topics, their partitions, the
+/// count, the runs and the window's ends); a 1.7.0 start-only block is copied
+/// with its start and no subset. The CONTROL: a document with no block (and
+/// one whose block is `null`) gets no `selection`. FAIL SAFE: a block the
 /// controller cannot read is still a selection (copied empty), and a subset
 /// list past the bounds keeps its count. KILLS: the selection not read; the
 /// block not written into `integrity`; a malformed block read as none; the
@@ -11829,15 +11430,12 @@ fn a_narrowed_restore_names_its_selection_in_the_status() {
     );
 }
 
-// ===========================================================================
-// FX-34 — a guard-refused Restore says WHY, and a pod log is untrusted text
-// ===========================================================================
+// A guard-refused Restore says WHY, and a pod log is untrusted text.
 //
-// PoC batch 5, finding F-1: a `Restore` whose runner exited 3 said only "the
-// runner exited 3 (guard-refused)". The runner's sentence was in the pod log,
-// which goes with the pod. The runner now prints it as ONE `refusal-detail=`
-// line (`crates/logweir/tests/refusal_detail.rs` runs the binary) and the
-// reconciler carries it into the terminal condition's message.
+// The runner prints its refusal sentence as ONE `refusal-detail=` line
+// (`crates/logweir/tests/refusal_detail.rs` runs the binary) and the
+// reconciler carries it into the terminal condition's message; the pod log
+// itself goes with the pod.
 //
 // Every row drives `reconcile_restore` through the recording double, so what
 // is asserted is the bytes of the `/status` PATCH and the requests the pass
@@ -11854,9 +11452,8 @@ use weirkeeper::refusal::{
     runner_reason, RunnerReason, REFUSAL_LOG_LIMIT_BYTES, REFUSAL_LOG_TAIL_LINES,
 };
 
-/// What a refused `Restore`'s terminal condition said before FX-34, and still
-/// says for a runner that prints no detail line. It is the message PoC batch 5
-/// recorded (`claude/artifacts/poc-batch-5/prod111/k3-rst-….json`).
+/// What a refused `Restore`'s terminal condition says for a runner that
+/// prints no detail line.
 const FX34_OLD_MESSAGE: &str = "the runner exited 3 (guard-refused); the code was read from \
      status.containerStatuses[name=runner].state.terminated.exitCode";
 
@@ -11870,9 +11467,9 @@ fn fx34_fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// The guard's sentence, off the human line of the log PoC batch 5 captured
-/// (`prod111/k3-runner.log`; the fixture is that file without `kubectl logs
-/// --timestamps`' prefix, which is what `pods/log` returns).
+/// The guard's sentence, off the human line of a captured runner log (the
+/// fixture is that file without `kubectl logs --timestamps`' prefix, which is
+/// what `pods/log` returns).
 fn fx34_k3_sentence() -> String {
     fx34_fixture("k3-runner.log")
         .lines()
@@ -11881,9 +11478,8 @@ fn fx34_k3_sentence() -> String {
         .to_string()
 }
 
-/// That log as a runner carrying FX-34 prints it: the detail line the runner's
-/// own formatter writes for that sentence, immediately before
-/// `refusal-reason=`.
+/// That log as a current runner prints it: the detail line the runner's own
+/// formatter writes for that sentence, immediately before `refusal-reason=`.
 fn fx34_k3_log_with_detail() -> String {
     let detail = refusal_detail_line(
         RefusingRun::Restore,
@@ -12104,11 +11700,11 @@ fn fx34_assert_nothing_raw(seen: &[SeenBody], label: &str) {
 /// **The row.** The same refused run, read off the log an older runner wrote
 /// and off the log a current runner writes.
 ///
-/// The CONTROL is the first half and it can fail: the real log PoC batch 5
-/// captured carries no detail line, and its status must be exactly what that
-/// batch recorded. The second half adds the one line and the message gains the
-/// runner's reason code and sentence, the remedy at its end included; nothing
-/// else in the status moves.
+/// The CONTROL is the first half and it can fail: the captured log carries no
+/// detail line, and its status must be exactly the recorded one. The second
+/// half adds the one line and the message gains the runner's reason code and
+/// sentence, the remedy at its end included; nothing else in the status
+/// moves.
 ///
 /// KILLS: dropping the reason from the builder; reading the reason from the
 /// human line; reading the log unbounded (the query is asserted).
@@ -12122,10 +11718,8 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
 
     let (status, seen) = fx34_refused(fx34_k3_log_with_detail()).await;
     let sentence = fx34_k3_sentence();
-    // K3's opening word was a reason code when PoC batch 5 ran and is in no
-    // closed set today (PROD-11.1b retired that refusal), so it is shown as
-    // what any word outside the set is: part of the sentence, behind the
-    // default code.
+    // K3's opening word is in no closed set today, so it is shown as what any
+    // word outside the set is: part of the sentence, behind the default code.
     let expected = format!("{FX34_OLD_MESSAGE}{FX34_STATED}GuardRefused: {sentence}");
     assert_eq!(fx34_message(&status), expected);
     assert!(
@@ -12191,8 +11785,8 @@ async fn a_refused_restore_says_why_in_its_terminal_condition() {
     }
 }
 
-/// The log tails of the passes FX-34 must not change, each carrying a VALID
-/// detail line: only an exit 3 may lift one.
+/// The log tails of the passes the refusal line must not change, each
+/// carrying a VALID detail line: only an exit 3 may lift one.
 fn fx34_unchanged_cases() -> Vec<(&'static str, i32, String)> {
     // A line with THIS Job's token: at exit 3 it would be shown.
     let detail = refusal_detail_line(
@@ -12264,22 +11858,21 @@ const FX34_CAPTURED_FROM: &str = "claude/integrate-5 7e415dbb (pre-FX-34)";
 /// byte for byte**, and so is an exit 3 from a runner that prints no detail
 /// line.
 ///
-/// The golden holds every request and every write body the SAME cases produced
-/// at the base commit, before any of FX-34 existed. Each case's log carries a
-/// valid `refusal-detail=` line, so this is also the row that fails when any
-/// exit code but 3 starts to carry a reason.
+/// The golden holds every request and every write body the SAME cases
+/// produced before the refusal line existed. Each case's log carries a valid
+/// `refusal-detail=` line, so this row fails when any exit code but 3 starts
+/// to carry a reason.
 ///
 /// The writes are compared whole. The requests are compared with the log
 /// read's QUERY set aside, because the golden predates both bounds on that
-/// read: FX-34's at exit 3 (the `runner` container, 32 lines, 512 KiB) and
-/// PROD-15.1's at every other exit (`tailLines=256`, no byte bound). The
-/// query each exit asks is then asserted by itself, so the two reads cannot
-/// trade places unseen.
+/// read: exit 3's (the `runner` container, 32 lines, 512 KiB) and every other
+/// exit's (`tailLines=256`, no byte bound). The query each exit asks is then
+/// asserted by itself, so the two reads cannot trade places unseen.
 ///
 /// KILLS: the gate widened to exit 1 (the `exit-1` case's condition message
 /// gains a suffix); the bounded read used for every exit code, or the other
-/// exits' read used at exit 3 (the query asserted per exit differs); a suffix
-/// added for `NotStated` (the three old-runner cases).
+/// exits' read used at exit 3; a suffix added for `NotStated` (the three
+/// old-runner cases).
 #[tokio::test]
 async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unchanged() {
     let golden: Value =
@@ -12569,21 +12162,18 @@ async fn hostile_refusal_lines_are_refused_or_cleaned_and_never_stored_raw() {
 }
 
 /// **A plan can start a line in the pod log, and a line it started is never
-/// shown as the runner's** (PROD-15.1's review, and the review of this
-/// branch's first answer to it).
+/// shown as the runner's.**
 ///
 /// The runner prints an error's text raw on stderr; an error may repeat a
-/// plan value; a YAML scalar may hold a line break. So a `refusal-detail=`
-/// line, a `refusal-reason=` line or both can stand at the start of a log line
-/// because the plan's author put them there, and both streams reach this
-/// controller as one log. WHERE a line stands therefore proves nothing. What
-/// the plan's author cannot have is the Job's line token, which did not exist
-/// when the plan was written.
+/// plan value; a YAML scalar may hold a line break. So a `refusal-detail=` or
+/// `refusal-reason=` line can stand at the start of a log line because the
+/// plan's author put it there, and both streams reach this controller as one
+/// log. WHERE a line stands proves nothing; what the plan's author cannot
+/// have is the Job's line token, which did not exist when the plan was
+/// written.
 ///
-/// LOG 1 and LOG 2 are the second review's own: each defeats a rule that
-/// trusts a line for its place. Every forged line below is VALID in every
-/// respect but the token (a code of the closed set, a clean sentence, a
-/// state line that agrees).
+/// LOG 1 and LOG 2 each defeat a rule that trusts a line for its place. Every
+/// forged line below is VALID in every respect but the token.
 ///
 /// KILLS: the token comparison removed; the token taken from the line
 /// instead of the Job; "the pair that ends the log is the runner's".
@@ -13010,10 +12600,9 @@ async fn invalid_utf8_in_the_log_is_decoded_lossily_and_cleaned() {
 /// **The pod gone; the log unreadable.** An honest message, the exit code
 /// recorded, the TTL armed, and the pass does not fail, so nothing is retried.
 ///
-/// The CONTROL is exit 0 over the same 404: that pass still fails, as it
-/// always did, because a successful run's log carries the evidence keys and
-/// "the keys are unknown" is not something to publish from one failed read.
-/// FX-34 changed the exit-3 read and no other.
+/// The CONTROL is exit 0 over the same 404: that pass still fails, because a
+/// successful run's log carries the evidence keys and "the keys are unknown"
+/// is not something to publish from one failed read.
 ///
 /// KILLS: propagating the read's error for exit 3 (the pass fails); treating
 /// a 404 as any other failure (the message says HTTP 404, not "the pod is
@@ -13100,15 +12689,12 @@ async fn fx34_settled_refusal(log: String) -> Restore {
 }
 
 /// **A second reconcile of the same finished Job: no log read, no status
-/// write.**
+/// write.** Every route is PRESENT, so both are assertions over the request
+/// log.
 ///
-/// Every route is PRESENT, so "it did not read the log" and "it did not write
-/// the status" are assertions over the request log and not an inability.
-///
-/// The one write a later pass may make is the Job's own TTL repair (D3 §2.7):
-/// this fixture's Job carries no `ttlSecondsAfterFinished`, and the
-/// already-terminal branch repairs that from the Job's spec alone, reading no
-/// pod and writing no status.
+/// The one write a later pass may make is the Job's own TTL repair: this
+/// fixture's Job carries no `ttlSecondsAfterFinished`, and the
+/// already-terminal branch repairs that from the Job's spec alone.
 ///
 /// KILLS: reading the log before the already-terminal guard, or removing the
 /// guard (a `pods/log` request appears on the second pass).
@@ -13152,16 +12738,14 @@ async fn a_second_pass_over_a_refused_restore_reads_and_writes_nothing() {
     }
 }
 
-/// **The status is written only when its content changes** (FX-29), and the
-/// reason is content that does not change: no clock and no counter is in it.
+/// **The status is written only when its content changes**, and the reason
+/// is content that does not change: no clock and no counter is in it.
 ///
 /// The terminal patch is recomputed an hour later over the object the first
 /// pass stored. It is the same bytes, `status_unchanged` says so, and the one
-/// function every `/status` write goes through then sends nothing. The PATCH
-/// route is present, so "no write" is an assertion.
-///
-/// The CONTROL is a changed reason: the same call with a different sentence
-/// does write.
+/// function every `/status` write goes through sends nothing. The PATCH route
+/// is present, so "no write" is an assertion. The CONTROL is a changed
+/// reason, which does write.
 ///
 /// KILLS: a write made although nothing changed (`patch_status_preconditioned`
 /// without its `status_unchanged` return); a suffix that carries a time.
@@ -13402,9 +12986,7 @@ async fn the_consoles_refusal_fixture_is_what_a_pass_over_its_line_stores() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PROD-17.1 C1 (OD-12) — a standing authorization is refused by name
-// ---------------------------------------------------------------------------
+// A standing authorization is refused by name
 
 /// [`restore`] as a STANDING (rehearsal) `Restore`: `spec.authorization` names
 /// the `Approval`, and there is no `spec.approvalRef` at all.
@@ -13426,17 +13008,16 @@ fn fx34_standing_restore(approval_ref: &str) -> Restore {
 }
 
 /// **A `Restore` carrying `spec.authorization` is refused BY NAME, before its
-/// `Approval` is read and before anything is created** — standing
-/// authorizations are withdrawn in v1 (OD-12). The route table HAS the
-/// `Approval` (verified), the reachable cluster and every `POST` route, so the
-/// zero counts below are the refusal's and not the table's.
+/// `Approval` is read and before anything is created**: standing
+/// authorizations are withdrawn in v1. The route table HAS the `Approval`
+/// (verified), the reachable cluster and every `POST` route, so the zero
+/// counts below are the refusal's and not the table's.
 ///
 /// The CONTROL is the ordinary `Restore` that names no approval: still
 /// `ApprovalNotReceived`, the sentence it always had.
 ///
-/// KILLS (negative control): removing step 0 of `admit_with_policy` — the
-/// standing `Restore` then falls to `ApprovalNotReceived`, which is terminal
-/// but not the named refusal, and the first assertion fails.
+/// KILLS: removing step 0 of `admit_with_policy` (the standing `Restore` then
+/// falls to `ApprovalNotReceived`, and the first assertion fails).
 #[tokio::test]
 async fn a_standing_restore_is_refused_by_name_and_creates_nothing() {
     let refused = |restore: Restore| async move {
@@ -13598,23 +13179,17 @@ fn every_admission_sentence_names_the_approval_field_it_is_about() {
     );
 }
 
-// ===========================================================================
-// FX-19 CLASS SWEEP — the reaping of a finished runner Job flaps nothing here
-// ===========================================================================
+// The reaping of a finished runner Job flaps nothing here
 
-/// **FX-19 CLASS SWEEP, `Restore`: THE REAPING OF A FINISHED RUNNER JOB
-/// CANNOT FLAP THE STATUS OR LOG A WARN.** The TTL is patched only after the
-/// terminal status write (`controllers/restore.rs`, "ONLY NOW" after the
-/// terminal `patch_status_if_changed`), so the Job the TTL controller's
-/// foreground delete leaves — TTL set, `deletionTimestamp`, pod gone — belongs
-/// to a TERMINAL `Restore`, and step 2b (`status_is_terminal` before
-/// `find_pod`) reads nothing from it: no pod list, no status write, no TTL
-/// patch, nothing above debug.
+/// **THE REAPING OF A FINISHED RUNNER JOB CANNOT FLAP THE STATUS OR LOG A
+/// WARN.** The TTL is patched only after the terminal status write, so the
+/// Job the TTL controller's foreground delete leaves (TTL set,
+/// `deletionTimestamp`, pod gone) belongs to a TERMINAL `Restore`, and the
+/// `status_is_terminal` guard before `find_pod` reads nothing from it: no pod
+/// list, no status write, no TTL patch, nothing above debug.
 ///
-/// NEGATIVE CONTROL: `a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched`
-/// is the same guard with its KILLS line (the guard removed, the pass takes
-/// the crashed branch and patches); this row adds the Job's deletion and the
-/// log level, and its own control below: the non-terminal copy writes.
+/// NEGATIVE CONTROL: the non-terminal copy writes; the guard's own mutant is
+/// `a_terminal_verified_restore_whose_pod_is_gone_is_not_re_patched`'s.
 #[tokio::test]
 async fn fx19_a_terminal_restore_whose_job_is_being_collected_is_not_rejudged() {
     let (settled, _) = settled_verified_restore().await;
@@ -13689,17 +13264,17 @@ async fn fx19_a_terminal_restore_whose_job_is_being_collected_is_not_rejudged() 
     );
 }
 
-/// **FX-19 FIX ROUND (review M2): A `Restore` DOES NOT ADMIT ON A PROBE READING
-/// TOO OLD TO VOUCH FOR.** The target's probe Job is stuck mid-deletion (its
-/// name is fixed, so no newer probe can run). The `KafkaCluster` reconciler is
-/// driven over it at two instants and its status write folded onto the object;
-/// admission is then asked about the result. Inside the bound
-/// (`STALE_AFTER_SECS` after the 11:59 reading) the last reading stands and the
-/// Restore is admitted; past it the probe has cleared `reachable`
-/// (`ProbeStale`) and the Restore is refused `ClusterNotReachable`.
+/// **A `Restore` DOES NOT ADMIT ON A PROBE READING TOO OLD TO VOUCH FOR.** The
+/// target's probe Job is stuck mid-deletion (its name is fixed, so no newer
+/// probe can run). The `KafkaCluster` reconciler is driven over it at two
+/// instants and its status write folded onto the object; admission is then
+/// asked about the result. Inside the bound (`STALE_AFTER_SECS` after the
+/// 11:59 reading) the last reading stands and the Restore is admitted; past
+/// it the probe has cleared `reachable` (`ProbeStale`) and the Restore is
+/// refused `ClusterNotReachable`.
 ///
-/// NEGATIVE CONTROL: the first instant — the same object, the same stuck Job —
-/// admits, so the refusal is the bound's and not the fixture's.
+/// NEGATIVE CONTROL: the first instant admits, so the refusal is the bound's
+/// and not the fixture's.
 ///
 /// KILLS: the probe's staleness bound removed (the old `reachable: true`
 /// stands and admission passes at the second instant).

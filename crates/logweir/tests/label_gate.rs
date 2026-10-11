@@ -50,7 +50,7 @@ fn line_of(text: &str, offset: usize) -> usize {
 
 // ------------------------------------------------ the two pre-existing marks
 
-/// **The two marks that were defective before this task are closed, in place.**
+/// **Two marks that were defective are closed, in place.**
 ///
 /// ADR 0004, now consolidated in `docs/architecture.md`, carried a bare
 /// `[UNVERIFIED]` with no description, quoted out of a task brief; `docs/stability.md` carried

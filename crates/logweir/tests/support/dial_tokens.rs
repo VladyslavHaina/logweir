@@ -1,18 +1,9 @@
-//! **The array-literal tokeniser.** Task 32, stage-2 carried item (a).
+//! **The array-literal tokeniser.**
 //!
-//! `crates/logweir/tests/notify.rs::the_two_ureq_token_lists_agree` used to
-//! read `crates/logweir/tests/no_network_in_unit_tests.rs`'s `DIAL_TOKENS`
-//! literal as raw text and ask `list.contains(&format!("\"{t}\""))`. A
-//! substring search over source text cannot tell an ARRAY ELEMENT from a
-//! mention: a `//` comment inside the literal that quotes a token satisfied it
-//! with no real entry behind it. Today the comment at
-//! `no_network_in_unit_tests.rs` names the bare-constructor token in
-//! **backticks** rather than in double quotes, so the check was right by luck
-//! rather than by construction — and the mutant that moves a real token into
-//! that comment is exactly the one it had to catch. (This module deliberately
-//! spells no dial token out: `no_network_in_unit_tests.rs`'s own audit walks
-//! this file, and a helper that has to be allow-listed to describe itself is a
-//! helper that has widened the audit to write its doc comment.)
+//! A substring search over source text cannot tell an ARRAY ELEMENT from a
+//! mention: a `//` comment inside a literal that quotes a token would satisfy
+//! it with no real entry behind it. (This module deliberately spells no dial
+//! token out: `no_network_in_unit_tests.rs`'s own audit walks this file.)
 //!
 //! So the elements are parsed: comments are removed first, and what is left is
 //! read as double-quoted string literals and compared as a **set**.
@@ -27,11 +18,9 @@
 //! string. None of the three arrays this is used on contains any of them, and
 //! a future one that does must extend this module rather than work around it.
 //!
-//! It is a **different tokeniser from `support::exit_code_lint`** and does not
-//! duplicate it: that one answers questions about shell *lines* (I29, Task 12),
-//! this one answers "what are the elements of this Rust array literal". The
-//! controller ruling that Task 32 writes no second exit-code tokeniser is about
-//! that helper, and it is reused unchanged.
+//! It is a **different tokeniser from `support::exit_code_lint`**, which
+//! answers questions about shell *lines* (I29); this one answers "what are
+//! the elements of this Rust array literal".
 
 use std::collections::BTreeSet;
 

@@ -1,4 +1,4 @@
-//! **The compatibility matrix cannot claim what no row shows** (PROD-01.2).
+//! **The compatibility matrix cannot claim what no row shows.**
 //!
 //! `docs/support-matrix.md` carries the compatibility contract between its two
 //! `compatibility:` markers: one table row per broker, authentication mode,
@@ -16,9 +16,7 @@
 //!    `fn test_name(` under a `#[test]` attribute. "Supported" on reasoning
 //!    alone, on an artifact nobody can re-run, on a test that was renamed
 //!    away, or on a helper function that asserts nothing, fails. So does a
-//!    status row written after the end marker (PROD-01.2 review, L5: the
-//!    first version read only between the markers and accepted any
-//!    `fn name(`).
+//!    status row written after the end marker.
 //! 3. **Every check id the page names is in the vocabulary.** A backticked
 //!    `category.name` whose category is one of the check categories must be a
 //!    `CheckId`, anywhere on the page, so a renamed or invented id cannot sit
@@ -144,8 +142,7 @@ fn test_references(text: &str) -> Vec<(String, String)> {
 /// "Declares" is a line that IS the declaration, so a name in a comment or a
 /// string is not one. "A test" is `#[test]` (or an async runtime's
 /// `#[…::test]`) among the attribute lines directly above: a helper such as
-/// `fn capability_plan(` asserts nothing and is not evidence (review L5,
-/// mutants D4 and D7).
+/// `fn capability_plan(` asserts nothing and is not evidence.
 fn not_a_test(path: &str, name: &str) -> Option<String> {
     let Ok(src) = std::fs::read_to_string(repo_root().join(path)) else {
         return Some(format!(
@@ -331,7 +328,7 @@ fn every_rule_of_the_matrix_lint_has_a_mutant_that_fails_it() {
         "a reference into a missing file was not caught:\n{d}"
     );
 
-    // Rule 2c (review L5, mutants D4 and D7): a HELPER cited as the row. It
+    // Rule 2c: a HELPER cited as the row. It
     // is declared in the file the real row is in, and asserts nothing.
     for helper in ["capability_plan", "dial"] {
         assert!(
@@ -364,7 +361,7 @@ fn every_rule_of_the_matrix_lint_has_a_mutant_that_fails_it() {
     assert_eq!(not_a_test_in(src, "x.rs", "async_row"), None);
     assert!(not_a_test_in(src, "x.rs", "helper").is_some());
 
-    // Rule 2d (review L5, mutant D6): a status row written AFTER the end
+    // Rule 2d: a status row written AFTER the end
     // marker is held to the same rule, and so is a reference in prose.
     let after = format!(
         "{text}\n| Endpoint | Status | What | Evidence |\n|---|---|---|---|\n\

@@ -51,7 +51,7 @@ fn code(exit: i32) -> ExitCode {
     ExitCode::from(u8::try_from(exit).unwrap_or(1))
 }
 
-/// Every exit-3 path: the reason on stderr, and the closed code (FX-20, FX-15)
+/// Every exit-3 path: the reason on stderr, and the closed code
 /// on stdout for the controller to put on the policy's status.
 fn refuse(refusal: &Refusal) -> i32 {
     eprintln!("logweir-retention: {refusal}");
@@ -68,7 +68,7 @@ fn run(flags: &[&str]) -> i32 {
 
     // THE DELETER. Built from the destination's own frozen addressing and the
     // explicitly named credential — never `from_env()`, so no ambient
-    // `AWS_ENDPOINT_URL` can relocate a deletion (D-SEAMS S5).
+    // `AWS_ENDPOINT_URL` can relocate a deletion.
     let reaper = match ArchiveReaper::new(
         &admitted.archive_url(),
         admitted.archive_keys.as_ref().map(as_credentials).as_ref(),
@@ -80,7 +80,7 @@ fn run(flags: &[&str]) -> i32 {
 
     // A DRY RUN OPENS NO SINK AND DELETES NOTHING. It does hold the archive
     // handle, because the preview enumerates the set bound to report the real
-    // object count (review `d3w9` M1) — listing is a separate IAM verb from
+    // object count — listing is a separate IAM verb from
     // deleting, and `execute`'s `dry_run` arm never reaches `delete_exact`,
     // which `a_dry_run_issues_no_delete` asserts over a deleter that panics.
     if admitted.dry_run {
@@ -101,7 +101,7 @@ fn run(flags: &[&str]) -> i32 {
     // THE RECORD SINK, BEFORE THE FIRST DELETE. `admit` already refused a run
     // with no `evidenceWrite` credential; this is the handle itself.
     //
-    // **What this does and does not guarantee** (review `d3w9` L4).
+    // **What this does and does not guarantee.**
     // `Store::from_url_with` configures a client and performs no round trip, so
     // opening it proves the credential is PRESENT and not that `logweir/` is
     // writable. The guarantee that holds is the narrower, true one: the first
@@ -194,7 +194,7 @@ impl EvidenceSink {
 impl TombstoneSink for EvidenceSink {
     /// The provider's version id comes back: the reaper refuses a line whose
     /// intent tombstone was versioned, because versioning is then Enabled on
-    /// the bucket it deletes from (review H1).
+    /// the bucket it deletes from.
     fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<Option<String>, SinkError> {
         self.store
             .put_create_only(key, bytes)

@@ -1,9 +1,10 @@
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
 
-/// The fixture is the spec §6.1 example with its `//` annotations stripped.
-/// Round-tripping it byte-for-byte is what makes the format the public API:
-/// any field rename, reorder or default change turns this test red.
+/// The fixture is the specification's example scorecard with its `//`
+/// annotations stripped. Round-tripping it byte-for-byte is what makes the
+/// format the public API: any field rename, reorder or default change turns
+/// this test red.
 #[test]
 fn spec_example_round_trips_byte_for_byte() {
     let raw = include_str!("../../../e2e/fixtures/scorecard-pass.json");
@@ -47,6 +48,6 @@ fn source_relative_rpo_and_its_reason_are_mutually_exclusive() {
     let raw = include_str!("../../../e2e/fixtures/scorecard-pass.json");
     let mut sc: Scorecard = serde_json::from_str(raw).unwrap();
     sc.source.captured_by_logweir = true;
-    // reason is still Some(...) while captured_by_logweir is true -> invalid (spec §9.3 phase 8)
+    // reason is still Some(...) while captured_by_logweir is true -> invalid
     assert!(sc.validate_invariants().is_err());
 }

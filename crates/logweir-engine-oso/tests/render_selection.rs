@@ -1,4 +1,4 @@
-//! **PROD-11.1 — the engine runs a partition selection needs.**
+//! **The engine runs a partition selection needs.**
 //!
 //! The pinned engine's `restore.source_partitions` is a run-wide filter: it
 //! applies to every topic of one run (`restore/engine.rs:1253-1264` in the

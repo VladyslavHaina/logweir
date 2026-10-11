@@ -1,15 +1,13 @@
-//! **PROD-01.4a: the topic IDs a backup receipt records** (format 1.6.0,
+//! **The topic IDs a backup receipt records** (format 1.6.0,
 //! `generations`), and projected into the catalog point.
 //!
-//! # The defect this closes
+//! # Why
 //!
 //! A topic deleted and recreated under the same name is a NEW topic: its
-//! offsets restart at zero and mean other records. Before this row Logweir
-//! could not tell: the pinned engine asks for Metadata v9, which carries no
-//! topic ID, and rust-rdkafka 0.36.2 has no DescribeTopics. Two backups of a
-//! recreated topic read as two points of one history, and PROD-01.4 measured
-//! two recreations its offset heuristic misses (c13, c14:
-//! `docs/to-do/decisions/PROD-01.4-topic-identity.md` §4.7, FN1 and FN2).
+//! offsets restart at zero and mean other records. The pinned engine asks for
+//! Metadata v9, which carries no topic ID, and rust-rdkafka 0.36.2 has no
+//! DescribeTopics, so without these reads two backups of a recreated topic
+//! read as two points of one history.
 //!
 //! # Where the IDs come from
 //!
@@ -18,7 +16,7 @@
 //! once IMMEDIATELY before the engine starts, the last read of phase −1
 //! ([`observe`]), and once immediately after it exits. The read is
 //! `logweir_kafka::reader::ClusterReader::topic_ids` (DescribeTopics through
-//! `logweir-rdkafka-ffi`, OD-6 (a2)). [`block`] writes the two reads into the
+//! `logweir-rdkafka-ffi`). [`block`] writes the two reads into the
 //! receipt's entry per topic (`logweir_core::topic_identity::observed`): each ID
 //! in Kafka's text, or `null` with the reason.
 //!
@@ -27,9 +25,9 @@
 //! An ID is a RECORDED FACT, not a refusal. A broker below inter-broker
 //! protocol 2.8 has no IDs (`noTopicId`); a principal that may not Describe the
 //! topic is refused by name (`notAuthorized`), never read as "absent"; a failed
-//! read is `readFailed`. In each case the generation stays UNKNOWN — today's
-//! fallback, stated in the receipt and never guessed — and the backup proceeds
-//! exactly as before. A topic whose two reads DIFFER was deleted and recreated
+//! read is `readFailed`. In each case the generation stays UNKNOWN, stated in
+//! the receipt and never guessed, and the backup proceeds. A topic whose two
+//! reads DIFFER was deleted and recreated
 //! while the engine ran: the receipt records both IDs, and this module warns
 //! ([`log_changes`]).
 

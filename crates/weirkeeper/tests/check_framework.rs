@@ -1,15 +1,14 @@
-//! The shared check framework — D2 §4.3 and §4.4.
+//! The shared check framework.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST. Nothing
-//! dials a socket and nothing waits on a Job. The double PANICS on a request it
-//! was not given a route for, which is what makes "the framework did not read
-//! that pod's log" an assertion rather than an absence of evidence.
+//! Every test here is a pure-function or `mock_client` test. The double PANICS
+//! on an unrouted request, which makes "the framework did not read that pod's
+//! log" an assertion rather than an absence of evidence.
 //!
-//! READ `a_pod_that_wears_the_label_but_is_not_owned_is_never_read` FIRST. It
-//! is D-SEAMS **S6** and defect `SEC-PODLOG`: `batch.kubernetes.io/job-name` is
-//! writable by anything that can create a pod, and a check's stdout becomes a
-//! custom resource's status and then an API response. The label narrows the
-//! list; the controller `ownerReference` UID decides.
+//! READ `a_pod_that_wears_the_label_but_is_not_owned_is_never_read` FIRST:
+//! `batch.kubernetes.io/job-name` is writable by anything that can create a
+//! pod, and a check's stdout becomes a custom resource's status and then an
+//! API response. The label narrows the list; the controller `ownerReference`
+//! UID decides.
 
 mod support;
 use support::pod_list;
@@ -31,9 +30,7 @@ use weirkeeper::check::{
 use weirkeeper::job::{RunnerOwner, SecretMount};
 use weirkeeper::testing::{mock_client_recording_bodies, Route};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 const NS: &str = "logweir-d2-w5";
 /// The subject (a `TopicDiscovery`, once W6a lands the kind).
@@ -50,9 +47,9 @@ const CONNECTION_UID: &str = "c0ffee00-0000-4000-8000-0000000000d4";
 /// [`Route::path_suffix`] is one.
 const POD_LOG_PATH: &str = "/pods/lwc-td-9ab-xyz12/log";
 /// The check Job's path suffix, spelled out rather than composed, so a change
-/// to [`cjob::check_job_name`] has to be argued for here as well as asserted
-/// there. `a_check_job_name_is_a_pure_function_of_the_kind_and_the_owner_uid`
-/// holds the two together.
+/// to [`cjob::check_job_name`] has to be argued for here as well.
+/// `a_check_job_name_is_a_pure_function_of_the_kind_and_the_owner_uid` holds
+/// the two together.
 const JOB_PATH: &str = "/jobs/lwc-td-288fecc03251c1c31851";
 /// The plan `ConfigMap`'s path suffix, spelled out for the same reason.
 const PLAN_PATH: &str = "/configmaps/lwc-td-288fecc03251c1c31851-plan";
@@ -188,8 +185,8 @@ fn good_log() -> String {
     let end = frames::end_frame(PLAN_SHA, SUBJECT_UID, &streams, Some(&entries));
 
     let mut out = String::new();
-    // A non-frame line FIRST, because the decoder must ignore it (D2 §4.5:
-    // the KafkaCluster probe prints its I14 lines on the same stdout).
+    // A non-frame line FIRST, because the decoder must ignore it: the
+    // KafkaCluster probe prints its lines on the same stdout.
     out.push_str("cluster-id=M29I2S7FQPyHBEX12Vx7XA\n");
     for e in &entries {
         out.push_str(&frames::write_topic_line(e).expect("a framable entry"));
@@ -204,9 +201,7 @@ fn good_log() -> String {
     out
 }
 
-// ---------------------------------------------------------------------------
-// The Job shape — D2 §4.3's `job.rs` row
-// ---------------------------------------------------------------------------
+// The Job shape
 
 #[test]
 fn a_check_job_name_is_a_pure_function_of_the_kind_and_the_owner_uid() {
@@ -256,9 +251,9 @@ fn the_check_job_is_the_runner_job_shape_plus_labels() {
     let built = cjob::build(&spec());
     let plain = weirkeeper::job::build(&cjob::runner_job_spec(&spec()));
 
-    // THE DEFERRED `job.rs` SEAM. Everything except the two label maps is
-    // byte-identical to what `job::build` produces, which is what makes the
-    // later move of `labels`/`template_labels` into `RunnerJobSpec` a no-op.
+    // Everything except the two label maps is byte-identical to what
+    // `job::build` produces, so moving `labels`/`template_labels` into
+    // `RunnerJobSpec` would be a no-op.
     let mut stripped = built.clone();
     stripped.metadata.labels = None;
     if let Some(s) = stripped.spec.as_mut() {
@@ -372,9 +367,7 @@ fn a_check_job_carries_the_contract_env_the_deadline_margin_and_no_ttl() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// D-SEAMS S6 — pod identity
-// ---------------------------------------------------------------------------
+// Pod identity
 
 #[test]
 fn only_a_controller_owner_reference_with_the_jobs_uid_counts() {
@@ -409,9 +402,8 @@ fn only_a_controller_owner_reference_with_the_jobs_uid_counts() {
     );
 }
 
-/// D2 §12's PLAT-09.1 row
-/// `pod::ignores_label_matching_pod_without_job_controller_owner`, over the
-/// double, so the ABSENCE of a `pods/log` read is the assertion.
+/// A label-matching pod without the Job as controller owner is ignored, over
+/// the double, so the ABSENCE of a `pods/log` read is the assertion.
 #[tokio::test]
 async fn a_pod_that_wears_the_label_but_is_not_owned_is_never_read() {
     for impostor in [
@@ -419,8 +411,7 @@ async fn a_pod_that_wears_the_label_but_is_not_owned_is_never_read() {
         pod_object(None, terminated(0)),
         pod_object(Some(("Job", JOB_UID, false)), terminated(0)),
     ] {
-        // THE TABLE HAS NO `pods/log` ROUTE. The double panics on a request it
-        // was not given a route for, so a framework that read the impostor's
+        // THE TABLE HAS NO `pods/log` ROUTE: a framework that read the impostor's
         // stdout fails here by panicking rather than by returning bad data.
         let routes = vec![Route {
             method: "GET",
@@ -570,9 +561,7 @@ async fn a_running_job_reads_no_log_at_all() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The relay — D2 §4.3's `relay.rs` row
-// ---------------------------------------------------------------------------
+// The relay
 
 #[test]
 fn the_log_read_names_the_runner_container_and_a_byte_limit() {
@@ -587,9 +576,8 @@ fn the_log_read_names_the_runner_container_and_a_byte_limit() {
     );
 }
 
-/// D2 §12's framework rows `relay::missing_end_line_is_result_unreadable`,
-/// `relay::wrong_plan_sha_is_refused` and `relay::part_digest_mismatch`, plus
-/// the truncation case the brief names.
+/// Every way a relay can fail to verify (a missing end line, a wrong plan
+/// digest, a part digest mismatch, a truncated log) is `ResultUnreadable`.
 #[test]
 fn every_way_a_relay_can_fail_to_verify_is_result_unreadable() {
     let good = good_log();
@@ -720,7 +708,7 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
         "a correct exit-3 refusal must not be reported as an unreadable result"
     );
     assert_eq!(observation.exit_code, Some(3));
-    // Review L3: the message says what to do.
+    // The message says what to do.
     assert!(
         observation
             .message
@@ -750,9 +738,7 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The waiting table — D2 §4.3
-// ---------------------------------------------------------------------------
+// The waiting table
 
 fn classify_pod(container: Value, events: &[EventFact], now: DateTime<Utc>) -> Option<Waiting> {
     let pod = pod_object(Some(("Job", JOB_UID, true)), container);
@@ -977,9 +963,7 @@ fn a_terminal_waiting_state_asks_for_an_immediate_cancel() {
     assert!(!observation.cancel_now);
 }
 
-// ---------------------------------------------------------------------------
 // Cancellation
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn cancel_patches_the_deadline_only_on_an_owned_unfinished_job() {
@@ -1033,9 +1017,7 @@ async fn cancel_patches_the_deadline_only_on_an_owned_unfinished_job() {
     assert_eq!(body, json!({"spec":{"activeDeadlineSeconds":1}}));
 }
 
-// ---------------------------------------------------------------------------
-// Attribution — D2 §4.3's "Mapping to check IDs"
-// ---------------------------------------------------------------------------
+// Attribution: mapping a waiting code to a check id
 
 #[test]
 fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
@@ -1064,8 +1046,8 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
         Some(CheckId::DestinationCredentialProjected)
     );
     // A SEPARATE evidence-write grant's Secret is still the destination's
-    // credential (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL): a check pod that
-    // cannot start because of it names the destination row, not the pod.
+    // credential: a check pod that cannot start because of it names the
+    // destination row, not the pod.
     assert_eq!(
         check::attribute(&secret_not_found("evidence-writer"), &projections),
         Some(CheckId::DestinationCredentialProjected)
@@ -1078,7 +1060,7 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
         check::attribute(&secret_not_found("logweir-signing-key"), &projections),
         Some(CheckId::SignerPrivateKeyUsable)
     );
-    // THE UNMATCHED CASE IS `None`, AND IT IS A REAL ANSWER. Attributing a
+    // THE UNMATCHED CASE IS `None`, AND IT IS A REAL ANSWER: attributing a
     // Secret this plan did not project to the connection would send an
     // operator to rotate the wrong credential.
     assert_eq!(
@@ -1115,9 +1097,7 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The policy ConfigMap — D2 §4.4
-// ---------------------------------------------------------------------------
+// The policy ConfigMap
 
 const GOOD_POLICY: &str = r#"{"version":1,
  "checks":{"maxActivePerNamespace":4,"maxActiveTotal":20,
@@ -1180,8 +1160,8 @@ async fn an_absent_policy_is_the_documented_defaults_and_is_ready() {
     assert_eq!(p.checks.max_active_total, 20);
     assert_eq!(p.discovery.hard_max_topics, 50_000);
     assert_eq!(p.discovery.keep_per_connection, 5);
-    // FX-10: the two withdrawn fields keep their wire values so the digest of
-    // an unchanged document does not move; nothing reads them.
+    // The two withdrawn fields keep their wire values so the digest of an
+    // unchanged document does not move; nothing reads them.
     assert_eq!(
         p.discovery.withdrawn_default_max_topics,
         policy::WITHDRAWN_DEFAULT_MAX_TOPICS
@@ -1247,8 +1227,8 @@ async fn a_well_formed_policy_is_loaded_and_carries_its_attestation() {
 }
 
 /// MALFORMED FAILS CLOSED. Every case below leaves the attestation list and the
-/// identity allowlist EMPTY, because a policy nobody can read must never be the
-/// reason a topic listing is reported as complete (D-SEAMS S3).
+/// identity allowlist EMPTY: a policy nobody can read must never be the reason
+/// a topic listing is reported as complete.
 #[test]
 fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
     let cases: &[(&str, &str)] = &[
@@ -1310,16 +1290,16 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
     );
 }
 
-/// **FX-10: the two withdrawn fields are accepted, read by nothing, and can
-/// never fail a document closed.**
+/// **The two withdrawn fields are accepted, read by nothing, and can never
+/// fail a document closed.**
 ///
 /// `discovery.defaultMaxTopics` and `preflight.defaultTimeoutSeconds` never
-/// reached a request (the CRDs default the request fields at admission), so the
-/// knobs were withdrawn. Three documents must keep parsing, each a real one:
+/// reached a request (the CRDs default the request fields at admission), so
+/// the knobs were withdrawn. Three documents must keep parsing:
 ///
 /// * a document an OLDER chart rendered, carrying both keys at any value its
-///   schema admitted — including one the old rules would now be pointless
-///   about (`defaultMaxTopics` above `hardMaxTopics`, a 900-second budget);
+///   schema admitted, including values the old rules would refuse
+///   (`defaultMaxTopics` above `hardMaxTopics`, a 900-second budget);
 /// * a hand-written document that omits both;
 /// * the chart's own document, with the compatibility values.
 ///
@@ -1327,14 +1307,12 @@ fn a_malformed_policy_is_refused_by_name_and_fails_closed() {
 /// `Preflight` would read `policyChanged` after an upgrade that changed no
 /// behaviour.
 ///
-/// **"ANY VALUE" IS ANY `u32`, AND NO MORE** (FX-10 review L3). The fields keep
-/// their type, so a whole number from 0 to 4 294 967 295 is accepted, and
-/// `null`, a negative, a fraction, a quoted number or 4 294 967 296 is refused
-/// like any malformed field: the WHOLE document fails closed, as it did for a
-/// controller before FX-10. The chart never renders a configured value there
-/// (it renders the fixed compatibility values), so only a hand-written
-/// document can meet the refusal; the docs say so, and the table below pins
-/// both edges.
+/// **"ANY VALUE" IS ANY `u32`, AND NO MORE.** The fields keep their type, so a
+/// whole number from 0 to 4 294 967 295 is accepted, and `null`, a negative, a
+/// fraction, a quoted number or 4 294 967 296 is refused like any malformed
+/// field: the WHOLE document fails closed. The chart renders fixed
+/// compatibility values there, so only a hand-written document can meet the
+/// refusal; the table below pins both edges.
 ///
 /// MUTANTS: restoring either range rule refuses the first document (it fails
 /// CLOSED: attestations and the allowlist gone); dropping
@@ -1441,15 +1419,15 @@ fn the_withdrawn_fields_are_accepted_at_any_u32_or_absent_and_read_by_nothing() 
     }
 }
 
-/// **FX-10: the digest of the default policy is the one every controller
-/// before FX-10 computed.**
+/// **The digest of the default policy is the one older controllers compute.**
 ///
 /// `Policy::digest` is SHA-256 over the parsed object's JSON, and a retained
 /// `Preflight` whose recorded `policyDigest` differs from the current one is
 /// downgraded to `unknown` with `policyChanged` (`controllers/preflight.rs`).
-/// Renaming the two withdrawn fields in Rust must therefore leave the JSON —
-/// names AND order — exactly as it was. The literal below is the pre-FX-10
-/// serialisation of `Policy::defaults()`, field by field in declaration order.
+/// Renaming the two withdrawn fields in Rust must therefore leave the JSON
+/// (names AND order) as it was. The literal below is the serialisation of
+/// `Policy::defaults()` before the withdrawal, field by field in declaration
+/// order.
 ///
 /// MUTANT: move `withdrawn_default_max_topics` after `hard_max_topics`, or
 /// drop its `rename`, and the bytes (and the digest) change.
@@ -1501,9 +1479,7 @@ fn the_policy_reference_comes_from_the_environment_or_the_release_namespace() {
     assert_eq!(policy::configured_ref(Some("ns/"), None), None);
 }
 
-// ---------------------------------------------------------------------------
 // Aggregation
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_unattributable_waiting_code_makes_the_whole_set_unknown() {
@@ -1537,9 +1513,7 @@ fn an_unattributable_waiting_code_makes_the_whole_set_unknown() {
     assert_eq!(check::overall(&[], None), OverallState::Unknown);
 }
 
-// ---------------------------------------------------------------------------
 // The EventFact converter
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_event_reduces_to_the_four_fields_the_table_reads() {
@@ -1568,9 +1542,7 @@ fn an_event_reduces_to_the_four_fields_the_table_reads() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Source guards — the two rules a fixture cannot express
-// ---------------------------------------------------------------------------
+// Source guards: the two rules a fixture cannot express
 
 fn check_sources() -> Vec<(String, String)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check");
@@ -1607,11 +1579,11 @@ fn code_only(src: &str) -> String {
 /// [`weirkeeper::controllers::backup::pod_selectors`] tries
 /// `batch.kubernetes.io/job-name` and then the unprefixed `job-name`, because
 /// the execution paths must work on a 1.29 cluster that has not backfilled the
-/// prefixed one. New code does not need that — the prefixed label has been set
-/// since 1.27 — and a second selector is a second chance for a foreign pod to
-/// be considered at all (D2 §4.3: "No legacy-label fallback for check Jobs").
-/// A fixture cannot express this: the fallback only fires when the first
-/// selector returns nothing, which a route table always controls.
+/// prefixed one. New code does not need that (the prefixed label has been set
+/// since 1.27), and a second selector is a second chance for a foreign pod to
+/// be considered at all. A fixture cannot express this: the fallback only
+/// fires when the first selector returns nothing, which a route table always
+/// controls.
 #[test]
 fn no_check_module_names_the_legacy_pod_label_or_the_two_selector_helper() {
     for (name, src) in check_sources() {
@@ -1643,14 +1615,12 @@ fn no_check_module_names_the_legacy_pod_label_or_the_two_selector_helper() {
 
 /// **The check framework builds no `Api<Event>` handle.**
 ///
-/// The weirkeeper `ClusterRole` now grants `list` on `events` (D2 §7.1), and
-/// every Job-owning controller reads them (FX-11) — but not from here.
+/// Every Job-owning controller reads events, but not from here.
 /// [`weirkeeper::check::EventFact`] is the seam: the classifier takes the facts
 /// as values and stays pure, and `check::job_events` delegates the one read to
 /// `diagnostics::events_for`, the bounded, UID-selected, best-effort list the
 /// `Backup` and `Restore` diagnostics already make. A second `Api<Event>` in
-/// this directory would be a second events read with its own bound to review;
-/// this test is what keeps there being one.
+/// this directory would be a second events read with its own bound to review.
 #[test]
 fn the_check_framework_builds_no_event_handle_before_its_grant_exists() {
     for (name, src) in check_sources() {
@@ -1673,13 +1643,10 @@ fn the_check_framework_builds_no_event_handle_before_its_grant_exists() {
     );
 }
 
-/// **Nothing in the check framework reads a clock.**
-///
-/// Every `now` is an argument, exactly as on the five existing reconcilers, so
-/// a boundary like [`waiting::UNSCHEDULABLE_GRACE`] is assertable rather than
-/// observable only by waiting — and so a re-read of the same objects produces a
-/// byte-identical patch, which is what stopped the `KafkaCluster` probe's
-/// measured 3,388-reconciles-in-ninety-seconds hot loop.
+/// **Nothing in the check framework reads a clock.** Every `now` is an
+/// argument, so a boundary like [`waiting::UNSCHEDULABLE_GRACE`] is assertable
+/// rather than observable only by waiting, and a re-read of the same objects
+/// produces a byte-identical patch rather than feeding a watch loop.
 #[test]
 fn no_check_module_reads_a_clock() {
     for (name, src) in check_sources() {
@@ -1694,9 +1661,7 @@ fn no_check_module_reads_a_clock() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The plan ConfigMap — D2 §4.3, §12 "Framework / security additions"
-// ---------------------------------------------------------------------------
+// The plan ConfigMap
 
 fn documents() -> plan::PlanDocuments {
     plan::PlanDocuments {
@@ -1759,13 +1724,11 @@ fn a_plan_config_map_is_immutable_owned_and_digest_pinned() {
     assert_eq!(e.code(), CheckCode::CheckPlanConflict);
 }
 
-/// D2 §12's framework row `plan::foreign_owner_409_is_conflict`.
-///
-/// A 409 is the HEALTHY duplicate-reconcile case and is adopted — but only when
+/// A 409 is the HEALTHY duplicate-reconcile case and is adopted, but only when
 /// the object there is the same document, owned by the same subject, and still
-/// immutable. Each of the three failures is terminal, because retrying cannot
-/// fix "two different plans want one name" and running the other one would
-/// check inputs this pass never rendered.
+/// immutable. Each of the three failures is terminal: retrying cannot fix "two
+/// different plans want one name", and running the other one would check
+/// inputs this pass never rendered.
 #[tokio::test]
 async fn plan_foreign_owner_409_is_conflict() {
     let digest = documents().check_plan_sha256();
@@ -1877,11 +1840,9 @@ async fn a_plan_that_did_not_exist_is_created_and_nothing_is_read() {
     assert_eq!(seen[0].method, "POST");
 }
 
-// ---------------------------------------------------------------------------
-// Result chunks — D2 §4.3, §5.5, §12
-// ---------------------------------------------------------------------------
+// Result chunks
 
-/// D2 §12's PLAT-09.1 unit row `chunks::size_bounds_worst_case_names`.
+/// Chunk size bounds at worst-case names.
 #[test]
 fn chunks_size_bounds_worst_case_names() {
     // Worst-case shape: a 249-character name, six digits of partitions and the
@@ -1944,7 +1905,7 @@ fn chunks_size_bounds_worst_case_names() {
         "lexical order"
     );
 
-    // The typical shape D2 §5.5 tabulates: 5,003 entries ⇒ 3 chunks.
+    // The typical shape: 5,003 entries ⇒ 3 chunks.
     let typical: Vec<TopicEntry> = (0..5_003)
         .map(|i| TopicEntry::new(&format!("orders-{i:05}"), 6))
         .collect();
@@ -1958,17 +1919,15 @@ fn chunks_size_bounds_worst_case_names() {
     );
 
     // THE BYTE BOUND, EXERCISED ON ITS OWN. With Kafka's 249-character name
-    // limit the LINE bound always bites first — 2,500 × 308 B is 770,000 B,
-    // just under the 786,432 B ceiling — so nothing in the legal-name fixture
-    // above can reach the byte bound, and dropping it changed no assertion in
-    // this file. It is defence against a raised `MAX_CHUNK_LINES` or a longer
-    // flag set, and `TopicEntry` does not enforce Kafka's limit, so this
+    // limit the LINE bound always bites first (2,500 × 308 B is 770,000 B, just
+    // under the 786,432 B ceiling), so the legal-name fixture above cannot reach
+    // the byte bound. It is defence against a raised `MAX_CHUNK_LINES` or a
+    // longer flag set, and `TopicEntry` does not enforce Kafka's limit, so this
     // reaches it directly.
-    // Which bound bites at legal Kafka names, computed rather than asserted on
-    // constants — `clippy::assertions_on_constants` refuses the latter, and it
-    // is right to: a constant comparison is optimised out and guards nothing.
-    // Feeding the real `split` a full chunk's worth of worst-case entries is
-    // the same claim, made against the code.
+    // Which bound bites at legal Kafka names is computed rather than asserted
+    // on constants (`clippy::assertions_on_constants` refuses those): feeding
+    // the real `split` a full chunk of worst-case entries is the same claim,
+    // made against the code.
     let full: Vec<TopicEntry> = (0..chunks::MAX_CHUNK_LINES).map(worst).collect();
     let split = chunks::split(&full);
     assert_eq!(
@@ -2002,7 +1961,7 @@ fn chunks_size_bounds_worst_case_names() {
     assert_eq!(split[0].lines, 1);
 }
 
-/// D2 §12's framework row `chunks::immutable_false_is_conflict`.
+/// A chunk that is not immutable is a conflict.
 #[test]
 fn chunks_immutable_false_is_conflict() {
     let entries = [TopicEntry::new("orders", 6)];
@@ -2088,9 +2047,7 @@ async fn every_chunk_is_written_before_the_caller_can_commit() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Concurrency limits — D2 §4.3, §4.4, §12
-// ---------------------------------------------------------------------------
+// Concurrency limits
 
 fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished: bool) -> Job {
     let mut labels = serde_json::Map::new();
@@ -2115,17 +2072,15 @@ fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished:
     .expect("the fixture is a Job")
 }
 
-/// **A `Backup`'S OWN DISCOVERY SPENDS THE CONNECTION AND NOTHING ELSE** —
-/// PLAT-09.2 against D2 §4.4's `maxActiveDiscoveriesPerConnection`.
+/// **A `Backup`'S OWN DISCOVERY SPENDS THE CONNECTION AND NOTHING ELSE.**
 ///
-/// A per-run discovery Job (`logweir.dev/purpose=topic-discovery`) deliberately
-/// does NOT wear `app.kubernetes.io/component=check`: nothing admits it —
-/// `admit` is never called for work an operator already scheduled — so wearing
-/// that label would spend the interactive pool without ever being bounded by
-/// it, and a browser click would queue behind a nightly schedule. What it
-/// should spend is the per-connection ceiling, which exists to bound
-/// simultaneous dials at one broker: eight dynamic schedules firing at 02:00
-/// against one `KafkaCluster` is exactly the case.
+/// A per-run discovery Job (`logweir.dev/purpose=topic-discovery`) does NOT
+/// wear `app.kubernetes.io/component=check`: nothing admits it (`admit` is
+/// never called for work an operator already scheduled), so wearing that label
+/// would spend the interactive pool without being bounded by it, and a browser
+/// click would queue behind a nightly schedule. It spends the per-connection
+/// ceiling, which bounds simultaneous dials at one broker: eight dynamic
+/// schedules firing at 02:00 against one `KafkaCluster` is the case.
 ///
 /// KILLS: counting a run discovery into `namespace`/`total` (which would let a
 /// schedule queue a console click); ignoring it entirely (which would leave the
@@ -2186,7 +2141,7 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
     );
 
     // AND THE INTERACTIVE ADMISSION STILL IGNORES THEM. Four run discoveries in
-    // this namespace — more than `maxActivePerNamespace` — admit an interactive
+    // this namespace (more than `maxActivePerNamespace`) admit an interactive
     // check against another connection, because they spend neither pool.
     let crowd: Vec<Job> = (0..4)
         .map(|i| {
@@ -2220,7 +2175,7 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
     );
 }
 
-/// D2 §12's framework row `limits::queues_over_namespace_cap`.
+/// Over the namespace cap, a check is queued.
 #[test]
 fn limits_queues_over_namespace_cap() {
     let policy = policy::ChecksPolicy::default(); // 4 / 20 / 1 / 4
@@ -2282,15 +2237,13 @@ fn limits_queues_over_namespace_cap() {
     );
 }
 
-/// **FX-10: every check ceiling is the policy's own, at a value its default
-/// cannot imitate.**
+/// **Every check ceiling is the policy's own, at a value its default cannot
+/// imitate.**
 ///
 /// The rows above drive `limits::admit` with `ChecksPolicy::default()` (4 / 20
-/// / 1 / 4) — so an `admit` that compared against a constant equal to the
-/// default passed them for three of the four ceilings (`maxActiveTotal` alone
-/// had a non-default row, at 7). Here each ceiling moves on its own, and the
-/// counts that sit exactly at the moved ceiling are queued while the default
-/// would admit them (or the reverse), so a constant cannot pass:
+/// / 1 / 4). Here each ceiling moves on its own, and the counts that sit
+/// exactly at the moved ceiling are queued while the default would admit them
+/// (or the reverse), so a constant cannot pass:
 ///
 /// | ceiling | default | here | counts | default says | here |
 /// |---|---|---|---|---|---|
@@ -2373,8 +2326,8 @@ fn every_check_ceiling_is_the_policys_own_at_a_non_default_value() {
     .is_admitted());
 }
 
-/// **FX-10: `freshUntil` is the observation plus the window it is GIVEN.** The
-/// row above uses the default 900 s only.
+/// **`freshUntil` is the observation plus the window it is GIVEN.** The row
+/// above uses the default 900 s only.
 #[test]
 fn fresh_until_is_the_observation_plus_a_non_default_window() {
     use weirkeeper::controllers::topic_discovery as td;
@@ -2394,7 +2347,7 @@ fn fresh_until_is_the_observation_plus_a_non_default_window() {
 fn one_discovery_per_connection_and_a_separate_evidence_pool() {
     let policy = policy::ChecksPolicy::default();
 
-    // D2 §4.4's `maxActiveDiscoveriesPerConnection: 1`.
+    // The default `maxActiveDiscoveriesPerConnection: 1`.
     let jobs = vec![labelled_job(
         NS,
         "topicInventory",
@@ -2418,7 +2371,7 @@ fn one_discovery_per_connection_and_a_separate_evidence_pool() {
 
     // THE SEPARATE EVIDENCE POOL. Four interactive checks fill the namespace
     // pool; an evidence fetch is still admitted, because verification must not
-    // be starved by interactive checks (D2 §4.3).
+    // be starved by interactive checks.
     let busy: Vec<Job> = (0..4)
         .map(|i| {
             let mut j = labelled_job(NS, "topicInventory", None, false);
@@ -2511,10 +2464,10 @@ async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
         "ONE request, whatever the selector says: a count that costs two \
          installation-wide LISTs per pass is a count nobody can afford"
     );
-    // The SET form, since PLAT-09.2: one key, two values, so the same request
-    // finds an interactive check and a `Backup`'s own per-run discovery. A
-    // selector ANDs its terms and cannot express "either key", which is why the
-    // two populations share `app.kubernetes.io/component`.
+    // The SET form: one key, two values, so the same request finds an
+    // interactive check and a `Backup`'s own per-run discovery. A selector ANDs
+    // its terms and cannot express "either key", which is why the two
+    // populations share `app.kubernetes.io/component`.
     let decoded = seen[0].uri.replace("%2F", "/").replace("%2C", ",");
     assert!(
         decoded.contains("app.kubernetes.io/component") && decoded.contains("check"),
@@ -2543,20 +2496,16 @@ async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// H4 — a finished Job whose pod never wrote a log
-// ---------------------------------------------------------------------------
+// A finished Job whose pod never wrote a log
 
 /// **`observe` must reach `classify`'s `DeadlineExceeded` branch.**
 ///
-/// A check pod that sat in `ImagePullBackOff` — which is NOT in
-/// `Waiting::is_terminal`, so it is not cancelled early — reaches its
-/// `activeDeadlineSeconds` without ever starting its `runner` container. The
-/// API server then answers `pods/log` with **400** ("container \"runner\" … is
-/// waiting to start"). While `observe` propagated that with `?`, every
-/// reconcile returned `Err` and requeued: no status was ever committed, so no
-/// TTL was ever patched, and the operator saw a spinner instead of
-/// `DeadlineExceeded`.
+/// A check pod that sat in `ImagePullBackOff` (NOT in `Waiting::is_terminal`,
+/// so not cancelled early) reaches its `activeDeadlineSeconds` without ever
+/// starting its `runner` container, and the API server answers `pods/log` with
+/// **400** ("container \"runner\" … is waiting to start"). Propagated with
+/// `?`, every reconcile would return `Err` and requeue: no status committed,
+/// no TTL patched, and a spinner instead of `DeadlineExceeded`.
 #[tokio::test]
 async fn a_finished_job_whose_pod_never_started_is_classified_not_requeued() {
     let never_started = json!({"phase":"Failed","containerStatuses":[{
@@ -2708,9 +2657,7 @@ async fn a_finished_job_whose_pod_never_started_is_classified_not_requeued() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// L5 — a FailedCreate event must name THIS Job
-// ---------------------------------------------------------------------------
+// A FailedCreate event must name THIS Job
 
 #[test]
 fn another_workloads_failed_create_never_cancels_this_check() {
@@ -2754,18 +2701,16 @@ fn another_workloads_failed_create_never_cancels_this_check() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// L6 — the redaction chokepoint holds for a relay refusal
-// ---------------------------------------------------------------------------
+// The redaction chokepoint holds for a relay refusal
 
 #[test]
 fn a_relay_refusal_reason_goes_through_the_redaction_chokepoint() {
     // `RelayRefusal::reason` reaches `Observation.message` and from there a
     // status condition. No `FrameError` variant reachable from `decode`
-    // carries runner bytes today, but `CheckRelay::result()` — which W8 and W9
-    // must call — produces one whose `CheckResultError::Contract(String)`
-    // quotes the runner's own field verbatim. A chokepoint is only a
-    // chokepoint if every path through it calls it.
+    // carries runner bytes, but `CheckRelay::result()` produces one whose
+    // `CheckResultError::Contract(String)` quotes the runner's own field
+    // verbatim. A chokepoint is only a chokepoint if every path through it
+    // calls it.
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/check/relay.rs"),
     )
@@ -2784,15 +2729,12 @@ fn a_relay_refusal_reason_goes_through_the_redaction_chokepoint() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Q9 — fail_closed is defence in depth, and it has a guard of its own
-// ---------------------------------------------------------------------------
+// fail_closed is defence in depth, and it has a guard of its own
 
 /// `Policy::fail_closed()` is observationally equal to `Policy::defaults()`
-/// TODAY, because both default collections are already empty — which is why a
-/// reviewer's `fail_closed() -> defaults()` mutant was a no-op rather than a
-/// weak guard. This is the guard it lacked: whatever the defaults come to hold,
-/// a policy nobody can read clears the two collections that could turn a
+/// while both default collections are empty, so a `fail_closed() ->
+/// defaults()` mutant is a no-op there. Whatever the defaults come to hold, a
+/// policy nobody can read clears the two collections that could turn a
 /// listing into a completeness claim.
 #[test]
 fn fail_closed_clears_the_two_collections_whatever_the_defaults_hold() {
@@ -2823,9 +2765,7 @@ fn fail_closed_clears_the_two_collections_whatever_the_defaults_hold() {
 
     // `closed()` takes a VALUE, so the rule can be observed on a policy that
     // actually carries both collections. `fail_closed()` is
-    // `defaults().closed()`, and the two are equal only because the defaults
-    // are empty today — which is why a reviewer's `fail_closed() -> defaults()`
-    // mutant was a no-op rather than a weak guard.
+    // `defaults().closed()`.
     let closed = generous.clone().closed();
     assert!(
         closed.discovery.visibility_attestations.is_empty(),
@@ -2856,9 +2796,7 @@ fn fail_closed_clears_the_two_collections_whatever_the_defaults_hold() {
     assert_eq!(closed.discovery.hard_max_topics, 50_000);
 }
 
-// ---------------------------------------------------------------------------
-// FX-11 — the read every Job-owning controller shares, and its bound
-// ---------------------------------------------------------------------------
+// The events read every Job-owning controller shares, and its bound
 
 fn quota_refusal() -> EventFact {
     EventFact {
@@ -2871,9 +2809,9 @@ fn quota_refusal() -> EventFact {
     }
 }
 
-/// **The events list is made only when the classifier could read one** —
-/// FX-11's cost bound, at both grace boundaries. The Job was created at
-/// 11:58:00; the pod at 11:58:10.
+/// **The events list is made only when the classifier could read one**, at
+/// both grace boundaries. The Job was created at 11:58:00; the pod at
+/// 11:58:10.
 ///
 /// KILLS: `reads_events` returning `true` unconditionally (a list per pass of
 /// every healthy run); the grace period dropped from either row.
@@ -2945,8 +2883,8 @@ fn fx11_a_job_that_counts_a_pod_is_never_looked_at() {
 }
 
 /// **`pod_create_refusal` is the classifier's `FailedCreate` row and nothing
-/// else** — the one matcher the probe, the delivery and the retention run
-/// share with `Preflight`.
+/// else**: the one matcher the probe, the delivery and the retention run share
+/// with `Preflight`.
 ///
 /// KILLS: the grace period ignored; a pod present still judged; another Job's
 /// Event taken; the admission's message dropped.

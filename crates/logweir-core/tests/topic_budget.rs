@@ -1,4 +1,4 @@
-//! **FX-33 — the topic budget is held by rows that exist.**
+//! **The topic budget is held by rows that exist.**
 //!
 //! `logweir_core::topic_budget` states numbers; rows in the runner's and the
 //! controller's crates measure them. This row is here, in the pure crate's

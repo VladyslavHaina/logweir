@@ -13,15 +13,13 @@
 //!
 //! `CheckPlan::validate` caps the request at three objects, a 1 MiB payload
 //! and a 64 KiB sidecar. **This module never reads past an object's
-//! `maxBytes` (FX-31).** It reads through `ObjectAccess::get` with that cap,
+//! `maxBytes`.** It reads through `ObjectAccess::get` with that cap,
 //! so an object whose size the store reports over it is refused before a
 //! body byte is read, and one whose stream runs past it is cut off at the cap.
 //! Either is reported `present: true, truncated: true` with NO bytes relayed
 //! (no `sha256`, no `bytes`): the controller refuses a truncated object
 //! whatever was relayed (`weirkeeper::evidence_fetch`'s "the cap is a refusal,
-//! not a prefix"), so a prefix was never worth relaying. Before FX-31 the
-//! whole object was read and then truncated, so only the pod's memory limit
-//! bounded what one planted object could cost.
+//! not a prefix"), so a prefix is never worth relaying.
 //!
 //! # The `key` is echoed VERBATIM, and that is deliberate
 //!
@@ -71,9 +69,7 @@ pub fn run(req: &EvidenceFetchRequest, wiring: &dyn Wiring, deadline: Deadline) 
     // The request timeout is a property of the HANDLE and not of a call, so
     // there is no per-object slice to take; the loop is bounded by
     // `Deadline::has_room` instead, over at most three objects of at most
-    // 1 MiB each. An earlier draft carried an unused `objects` binding that
-    // implied a per-object slice this code never took (reviewer finding F6);
-    // it is gone rather than half-implemented.
+    // 1 MiB each.
     let access = match wiring.objects(
         &req.destination,
         DestinationRole::EvidenceRead,
@@ -122,7 +118,7 @@ pub fn run(req: &EvidenceFetchRequest, wiring: &dyn Wiring, deadline: Deadline) 
                 });
                 extra.push((o.stream, bytes));
             }
-            // FX-31: over the plan's `maxBytes`. The object is there and was
+            // Over the plan's `maxBytes`. The object is there and was
             // not read past the cap; nothing is relayed for it.
             Err(StoreError::TooLarge { .. }) => {
                 result.evidence.push(EvidenceObjectResult {

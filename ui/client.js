@@ -3,8 +3,7 @@
 //
 // ONE DEPLOYMENT. The page is served by `logweir-api` and talks to its bounded
 // product API at `/api/v1/...` on the same origin -- CONSOLE MODE. The legacy
-// `kubectl proxy` mode was withdrawn in v1 (PROD-17.1 C4, release-notes item
-// 75).
+// `kubectl proxy` mode was withdrawn in v1.
 //
 // THE STATE IS DECIDED ONCE, BY ONE REQUEST. At boot the page asks
 // `GET /api/v1/session`. An answer that decodes as a session document is
@@ -77,14 +76,11 @@ import { causesFrom, validateRequest } from "./validate.js";
 /** The mode a page with a session is in. */
 export const CONSOLE = "console";
 
-/** THE SHARED CONSOLE WITH NOBODY SIGNED IN (MCP-1, MCP-4). Not a third API:
- *  the page IS behind `logweir-api`, and `GET /api/v1/session` said so by
- *  answering `401` with its own problem document. Before this the page read
- *  that refusal as "not the product API" and fell back to legacy mode, so a
- *  signed-out visitor was asked for a namespace and then shown a raw problem
- *  document from a `/apis/...` path the console does not serve. In this mode
- *  the shell renders a sign-in page on every route and no page is mounted;
- *  every read and write is refused here, by name, before the network. */
+/** THE SHARED CONSOLE WITH NOBODY SIGNED IN. Not a third API: the page IS
+ *  behind `logweir-api`, and `GET /api/v1/session` said so by answering `401`
+ *  with its own problem document. In this mode the shell renders a sign-in
+ *  page on every route and no page is mounted; every read and write is
+ *  refused here, by name, before the network. */
 export const SIGNED_OUT = "signedOut";
 
 /** The two problem codes a `401` from `/api/v1/session` carries (`docs/api.md`,
@@ -94,7 +90,7 @@ export const SIGNED_OUT = "signedOut";
  *  sign-in. */
 export const SIGNED_OUT_CODES = SIGN_IN_CODES;
 
-/** THE CONSOLE THAT COULD NOT BE REACHED (console-ux-1 review L1). The session
+/** THE CONSOLE THAT COULD NOT BE REACHED. The session
  *  probe did not give the page a session or a sign-in refusal: it timed out,
  *  failed on the network, answered a 5xx or a 429, or answered a body this
  *  page could not decode. That is "the service is not answering right now",
@@ -139,8 +135,6 @@ const CREATE_CAPABILITY = Object.freeze({
   restores: "restoreCreate",
 });
 
-// --------------------------------------------------------------- the record
-
 let decided = null;
 let probing = null;
 
@@ -162,8 +156,8 @@ export function grantedNamespaces() {
   return decided === null ? [] : decided.namespaces.slice();
 }
 
-/** Whether a signed-in console session holds NO product role in any namespace
- *  (MCP round 2, R2-16). False outside console mode, before the probe, and for the
+/** Whether a signed-in console session holds NO product role in any
+ *  namespace. False outside console mode, before the probe, and for the
  *  localAdmin actor, who is the administrator by construction. */
 export function holdsNoRole() {
   if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
@@ -276,15 +270,14 @@ async function probe(deps) {
       return signedOutRecord(signedOutCode(answer));
     }
     if (answer === null || answer === undefined || answer.ok !== true) {
-      // A MISSING SESSION IS AN OUTAGE AND NOT A MODE (review L1).
+      // A MISSING SESSION IS AN OUTAGE AND NOT A MODE.
       return unavailableRecord(answer);
     }
     const decoded = decodeSession(answer.body);
     return consoleRecord(decoded.value, decoded.unknown);
   } catch (refused) {
     // A body that is not a session document, a decode that found a required
-    // field missing, a failed request: each is the service not answering
-    // (review L1).
+    // field missing, a failed request: each is the service not answering.
     return unavailableRecord(null, refused);
   } finally {
     if (timer !== null) {
@@ -369,7 +362,7 @@ export function signedOutReason() {
   return decided === null || decided.mode !== SIGNED_OUT ? null : decided.signedOut;
 }
 
-/** WHO THIS PAGE IS SIGNED IN AS, for the header (MCP-5), or `null` when there
+/** WHO THIS PAGE IS SIGNED IN AS, for the header, or `null` when there
  *  is no session to describe (signed out, unreachable, before the probe).
  *
  *  Every value is the session document's own: the display claim, the subject,
@@ -388,9 +381,8 @@ export function sessionIdentity(ns) {
     subject: String(actor.subject || ""),
     authenticationMode: String(decided.session.authenticationMode || ""),
     roles: Object.freeze(rolesFor(ns)),
-    // NO ROLE ANYWHERE (MCP round 3, R3-3): the header says what the no-role
-    // card says, instead of asking for a namespace no choice will give a
-    // role in.
+    // NO ROLE ANYWHERE: the header says what the no-role card says, instead
+    // of asking for a namespace no choice will give a role in.
     noRole: holdsNoRole(),
     namespace: typeof ns === "string" ? ns : "",
     // A localAdmin console has no sign-in and no sign-out: the one actor is the
@@ -401,9 +393,8 @@ export function sessionIdentity(ns) {
 
 /** Whether the session publishes `flag` in ANY granted namespace (the
  *  document's top-level `capabilities`, the union the API computes); `false`
- *  signed out or unreachable. For the NAVIGATION only (MCP-33): a hidden tab
- *  is a convenience, and every route still refuses by name when it is
- *  reached. */
+ *  signed out or unreachable. For the NAVIGATION only: a hidden tab is a
+ *  convenience, and every route still refuses by name when it is reached. */
 export function grantedAnywhere(flag) {
   if (decided === null) {
     return true;
@@ -415,7 +406,7 @@ export function grantedAnywhere(flag) {
   return top[flag] === true;
 }
 
-/** SIGN OUT (MCP-5): `POST /api/v1/session/logout`, an unsafe method, so it
+/** SIGN OUT: `POST /api/v1/session/logout`, an unsafe method, so it
  *  carries the session's synchroniser token exactly as every other write does
  *  (`docs/api.md`: "it needs the exact `Origin`, `application/json` and the
  *  token like any other mutation"). Resolves once the product API has cleared
@@ -449,7 +440,7 @@ function consoleRecord(document, unknown) {
   const names = [];
   for (const grant of document.namespaces) {
     grants[grant.name] = grant.capabilities;
-    // THE ROLES COME FROM THE SESSION AND ARE NEVER DERIVED HERE (PLAT-17.2).
+    // THE ROLES COME FROM THE SESSION AND ARE NEVER DERIVED HERE.
     // A page that inferred "this actor is an operator" from which capability
     // flags happen to be true would be inventing an authorisation decision the
     // server already made, and would invent a different one the moment a
@@ -494,8 +485,6 @@ export function applyGrants(context, names) {
   return true;
 }
 
-// ------------------------------------------------------------- the refusals
-
 /** An error for something this page will not attempt, named rather than sent.
  *  `status` is 0 because nothing was asked of any server. */
 function noRoute(said) {
@@ -534,13 +523,10 @@ function withCauses(error, plural) {
   return error;
 }
 
-// ---------------------------------------------------------- the idempotency
-
 // THE KEY IS A FUNCTION OF WHAT IS BEING CREATED, NOT OF WHEN. A retry after a
 // lost response, a double click and a reload all compose the same key, so the
-// product API answers the second request with the object the first one made --
-// which is the same property the legacy mode gets from naming the object. A
-// DELIBERATELY NEW operation is a new name, and a new name is a new key.
+// product API answers the second request with the object the first one made.
+// A DELIBERATELY NEW operation is a new name, and a new name is a new key.
 function idempotencyKey(plural, ns, name) {
   const composed = "logweir-ui." + plural + "." + String(ns) + "." + String(name);
   if (composed.length <= 128) {
@@ -564,8 +550,6 @@ function digest32(text) {
   }
   return hash.toString(16).padStart(8, "0");
 }
-
-// ---------------------------------------------------------- the projections
 
 function meta(item, kind) {
   const m = {
@@ -623,21 +607,16 @@ const VERIFICATION_OF = Object.freeze({
 
 /** The recorded result a console DETAIL folds in, with the API's combined
  *  trust word applied where the signature column alone would say too much or
- *  nothing (TRUST-STATE-RBR-VERIFIED).
+ *  nothing.
  *
  *  `OperationVerification.state` is the SIGNATURE result and has no word for
- *  the controller's `result: Untrusted`: it arrives as `unknown`, which
- *  [`VERIFICATION_OF`] has no spelling for, so the fold used to write no
- *  result at all and the page said "no verification was recorded" about a
- *  verdict the controller reached. `OperationTrust.state` does carry it, so
- *  an `untrusted` word restores the resource's own `Untrusted`.
- *
- *  And a `Valid` signature the API judged `untrusted` on a basis this page
- *  would read as green -- a `trust` block whose basis is `None`, which the DTO
- *  spells the same way as an absent block -- folds as `Untrusted` too, so the
- *  detail and the operation view give the API's one answer. A basis the page
- *  already refuses (`RecordedBeforeRevocation`, `Unverified`, an unknown word)
- *  keeps `Valid` beside it, and with it the case the badge names. */
+ *  the controller's `result: Untrusted` (it arrives as `unknown`);
+ *  `OperationTrust.state` does, so an `untrusted` word restores the
+ *  resource's own `Untrusted`. A `Valid` signature the API judged `untrusted`
+ *  on a basis this page would read as green (a `None` basis, which the DTO
+ *  spells like an absent block) folds as `Untrusted` too, so the detail and
+ *  the operation view agree. A basis the page already refuses keeps `Valid`
+ *  beside it, and with it the case the badge names. */
 function foldedResult(state, trust) {
   const recorded = VERIFICATION_OF[state];
   if (trust === null || trust === undefined || trust.state !== "untrusted") {
@@ -657,21 +636,18 @@ function operationStatus(summary) {
   if (summary.stateReason !== null) {
     status.reason = summary.stateReason;
   }
-  // THE LIST'S OWN VERDICT, CARRIED AND NOT DROPPED
-  // (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED). A list item's `OperationSummary`
-  // publishes `verificationState` and `verifiedSuccess` -- the latter is the
-  // controller's own green-badge rule, computed by the API -- and no key id, no
-  // instant and no exit code. Dropping the two meant every console-mode list
-  // row read "no verification was recorded", including Valid ones. They ride
-  // under `__summary` (a projection field, like `__contract`): the custom
-  // resource has no such field, and the badge rules read it only when the
-  // object carries no recorded verification of its own.
+  // THE LIST'S OWN VERDICT, CARRIED AND NOT DROPPED. A list item's
+  // `OperationSummary` publishes `verificationState` and `verifiedSuccess`
+  // (the controller's green-badge rule, computed by the API) and no key id,
+  // instant or exit code. They ride under `__summary` (a projection field,
+  // like `__contract`), and the badge rules read it only when the object
+  // carries no recorded verification of its own.
   status.__summary = {
     verificationState: summary.verificationState,
     verifiedSuccess: summary.verifiedSuccess === true,
     terminal: summary.terminal === true,
   };
-  // THE RESULT, WHERE THE API PUBLISHES IT ON THE LIST (MCP-17): the EXIT and
+  // THE RESULT, WHERE THE API PUBLISHES IT ON THE LIST: the EXIT and
   // RESULT columns read `status.exitCode` and `status.outcome` exactly as they
   // read the custom resource's, and a Restore's outcome keeps its "unverified
   // scorecard claim" label unless the summary is green.
@@ -691,36 +667,25 @@ function operationStatus(summary) {
 const ABSENT_IN_CONSOLE = Object.freeze({
   // CONNECTION CONTRACT v1's DATA-KEY REFERENCE IS NOT IN THE PRODUCT API.
   // `ConnectionAuthView` carries the mode, the username, the credential and
-  // client-certificate Secret NAMES, `tls` and (since PROD-01.3) the CA
-  // reference, so a console-mode projection cannot say which data key of a
-  // hand-made Secret the controller projects. It is NAMED here rather than left
-  // as an empty cell, and `requestBody` refuses a create that carries one.
+  // client-certificate Secret NAMES, `tls` and the CA reference, so a
+  // console-mode projection cannot say which data key of a hand-made Secret
+  // the controller projects. It is NAMED here rather than left as an empty
+  // cell, and `requestBody` refuses a create that carries one.
   kafkaclusters: Object.freeze([
     "status.conditions",
     "spec.auth.secretRef.passwordKey",
   ]),
-  // D1 W7. THE CONTROLLER RECORDS THESE AND THE PRODUCT API DOES NOT PUBLISH
-  // THEM. `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns`
-  // and stops there, so a console-mode schedule card can show the revision and
-  // the previews and cannot show what happened to the last slot or how many
-  // came due and were skipped. Naming them here is the difference between a
-  // gap and an omission: the page prints the sentence that says which task
-  // owes the projection, and legacy mode -- which reads the custom resource
-  // itself -- renders all four.
-  // `status.lastSlot` and `status.missedSlots` LEFT THIS LIST with
-  // console-ux-1 (MCP-13): `ScheduleStatusView` publishes both, so an absent
-  // one means the controller has recorded nothing yet -- the console and the
-  // API ship in one image, so there is no older API behind a newer page.
+  // THE CONTROLLER RECORDS THESE AND THE PRODUCT API DOES NOT PUBLISH THEM
+  // (`ScheduleStatusView` carries the policy, the next and active runs, the
+  // last slot and the missed slots).
   backupschedules: Object.freeze([
     "status.pendingRun",
     "status.history",
   ]),
-  // AND THE SAME FOR A RUN'S COVERAGE. `Backup` publishes `trigger` and
-  // `scheduleRef` (D1 W6) and no `status.selection` at all, so the coverage
-  // label `weirkeeper` writes on every dynamic run -- the one fact that says
-  // whether "all topics" was attested or only visible -- is not reachable in
-  // console mode. The page will not infer one from the mode, the topic list or
-  // a successful phase; it says so and names the route that owes it.
+  // A RUN'S COVERAGE IS NOT PUBLISHED: the `Backup` view carries no
+  // `status.selection`, so the coverage label `weirkeeper` writes on every
+  // dynamic run (whether "all topics" was attested or only visible) is not
+  // reachable in console mode, and the page will not infer one.
   backups: Object.freeze([
     "status.manifestSha256",
     "status.jobRef",
@@ -733,13 +698,8 @@ const ABSENT_IN_CONSOLE = Object.freeze({
     "status.exitCode",
     "status.evidence",
   ]),
-  // A RESTORE'S SCORECARD FACTS, NAMED ONE BY ONE (FX-48, PoC batch 6 F-4).
-  // This used to say `status.integrity` as a whole, which the projection half
-  // supplies (the coverage and the selection), so a row with either was not
-  // said to lack anything -- and the Restore detail printed "-" for an
-  // integrity level, a result and a partial reason, which is what "the
-  // controller recorded none" looks like. What the product API publishes of
-  // the block is `integrity.level`, on the operation route a DETAIL reads
+  // A RESTORE'S SCORECARD FACTS, NAMED ONE BY ONE. The API publishes
+  // `integrity.level` on the operation route a DETAIL reads
   // (`completion.integrityLevel`; `mergeOperation` takes it off this list when
   // it supplies it). `integrity.result`, `integrity.partialReason`, the
   // objectives, the measured values, the target topic preflight and the old
@@ -763,12 +723,9 @@ const ABSENT_IN_CONSOLE = Object.freeze({
 function note(object, plural, unknown) {
   object.__contract = {
     mode: CONSOLE,
-    // A FIELD THE PROJECTION DID SUPPLY IS NOT ABSENT. The table above names
-    // what this contract's projection may leave out; an object that carries
-    // one of them anyway (a list row whose summary published MCP-17's exit
-    // code or outcome) is not said to lack it. `lastSlot`/`missedSlots` are no
-    // longer in the table at all (MCP-13): the projection publishes them, and
-    // the console and the API ship in one image.
+    // A FIELD THE PROJECTION DID SUPPLY IS NOT ABSENT: an object that carries
+    // one of the table's paths anyway (a list row whose summary published the
+    // exit code or outcome) is not said to lack it.
     absent: (ABSENT_IN_CONSOLE[plural] || []).filter((path) => valueAt(object, path) === undefined),
     unknown: unknown,
   };
@@ -798,8 +755,8 @@ function projectConnection(item) {
   if (credential !== null) {
     auth.secretRef = credential;
   }
-  // PROD-01.3: the mTLS Secret's NAME and the CA reference, in the custom
-  // resource's own spelling, so both modes render one shape.
+  // The mTLS Secret's NAME and the CA reference, in the custom resource's own
+  // spelling, so both modes render one shape.
   const certificate = nameRef(item.auth.clientCertificateRef);
   if (certificate !== null) {
     auth.clientCertificate = certificate;
@@ -859,11 +816,10 @@ function projectSchedule(item) {
     }
     object.spec.retention = retention;
   }
-  // THE TWO FIELDS D1 W6 ADDED, PROJECTED UNDER THE NAMES THE CRD USES.
   // `spec.destinationRef` is the saved destination this schedule writes to,
-  // and `spec.allUserTopics` is its dynamic-selection policy. Both are absent
-  // on every schedule written before PLAT-06.2, and absent keeps meaning what
-  // it meant: an inline archive, and a named allowlist.
+  // and `spec.allUserTopics` is its dynamic-selection policy, under the names
+  // the CRD uses. Both are absent on older schedules, and absent keeps meaning
+  // what it meant: an inline archive, and a named allowlist.
   if (item.destinationRef !== null) {
     object.spec.destinationRef = nameRef(item.destinationRef);
   }
@@ -881,12 +837,12 @@ function projectSchedule(item) {
     }
     object.spec.allUserTopics = dynamic;
   }
-  // THE EDITABLE FUTURE POLICY (D1 W7, PLAT-04.2/05.1), UNDER THE CRD's OWN
-  // NAMES. Every one of these is optional on the wire and ABSENT on every
-  // schedule written before PLAT-04.2, and absent keeps meaning what it meant:
-  // UTC evaluation, a one-hour starting deadline, no catch-up, no retry and a
-  // 3600 s run deadline. The projection invents none of them -- the form
-  // renders "the default, N" for an absent field and sends nothing for it.
+  // THE EDITABLE FUTURE POLICY, UNDER THE CRD's OWN NAMES. Every one of these
+  // is optional on the wire and absent on older schedules, and absent keeps
+  // meaning what it meant: UTC evaluation, a one-hour starting deadline, no
+  // catch-up, no retry and a 3600 s run deadline. The projection invents none
+  // of them: the form renders "the default, N" for an absent field and sends
+  // nothing for it.
   for (const field of ["timeZone", "startingDeadlineSeconds", "catchUpPolicy",
     "activeDeadlineSeconds"]) {
     if (item[field] !== null) {
@@ -952,7 +908,7 @@ function projectSchedule(item) {
   if (view.activeRuns !== null) {
     status.activeRuns = view.activeRuns.map(activeRun);
   }
-  // MCP-13: WHAT THE LAST SLOT DID AND HOW MANY WERE SKIPPED, in the custom
+  // WHAT THE LAST SLOT DID AND HOW MANY WERE SKIPPED, in the custom
   // resource's own shape, so `renderLastSlot` reads them in both modes. The
   // decoder hands an absent optional as `null`; a nested absent one is
   // dropped rather than rendered as a value.
@@ -1022,9 +978,9 @@ function projectBackup(item) {
   }
   // `schedule` IS THE OLD, COARSER FACT AND `scheduleRef` IS THE NEW ONE, and
   // the projection keeps them in one field the way the CRD does: the name
-  // alone for a run created before PLAT-05.1, and the name with the uid,
-  // generation and run-policy digest for one created after it. A run that
-  // carries neither has no schedule, which is what a manual ad-hoc run is.
+  // alone for an older run, and the name with the uid, generation and
+  // run-policy digest for a newer one. A run that carries neither has no
+  // schedule, which is what a manual ad-hoc run is.
   if (item.scheduleRef !== null) {
     const ref = { name: item.scheduleRef.name };
     for (const field of ["uid", "generation", "runPolicySha256"]) {
@@ -1036,7 +992,7 @@ function projectBackup(item) {
   } else if (item.schedule !== null) {
     object.spec.scheduleRef = { name: item.schedule };
   }
-  // WHICH KIND OF RUN THIS IS (D1 W7, PLAT-05.1/06.2). ABSENT on every run
+  // WHICH KIND OF RUN THIS IS. ABSENT on every run
   // frozen before `trigger` existed, and the page renders that absence as
   // "trigger not recorded" rather than reading `triggeredBy` as a kind: the
   // older field says `manual` or `schedule`, which cannot tell a catch-up or a
@@ -1095,20 +1051,14 @@ function projectRestore(item) {
     },
     deadlineSeconds: item.deadlineSeconds,
   };
-  // PROD-15.1: WHETHER THE RESTORE WRITES UNDER THE ORIGINAL TOPIC NAMES, where
-  // the custom resource keeps it (`spec.target.topicNaming.originalName`), so
-  // the approval page and the wizard's "start from this Restore" read one
-  // field in both modes. Written only when it is so, as the CRD stores it.
+  // WHETHER THE RESTORE WRITES UNDER THE ORIGINAL TOPIC NAMES, where the
+  // custom resource keeps it (`spec.target.topicNaming.originalName`), so the
+  // approval page and the wizard's "start from this Restore" read one field in
+  // both modes. Written only when it is so, as the CRD stores it.
   //
   // AND THE APPROVAL SUBJECT THE RESTORE NEEDS, under the product API's own
   // name beside the object (as a connection's `lastTest` rides): the custom
   // resource has no such field, and `approvals.js` reads this one first.
-  //
-  // NEITHER WAS PROJECTED UNTIL FX-48's SWEEP. Both are required members of
-  // the published `Restore`, both were decoded, and both stopped here -- so
-  // the approval page of a shared console said an original-name Restore
-  // needed an `ordinary` approval. The rows that held the page handed it an
-  // object written in the test.
   if (item.target.originalName === true) {
     object.spec.target.topicNaming.originalName = true;
   }
@@ -1135,7 +1085,7 @@ function projectRestore(item) {
     status.newTopics = item.newTopics.slice();
   }
   queueOf(item, status);
-  // FX-8 (review M-2): THE SIGNED TIME BASIS, under the custom resource's own
+  // THE SIGNED TIME BASIS, under the custom resource's own
   // name (`status.timeBasis`), so the Restore detail reads it the same way in
   // both modes. Absent stays absent: not recorded, never "none".
   if (item.timeBasis !== null && item.timeBasis !== undefined) {
@@ -1147,7 +1097,7 @@ function projectRestore(item) {
       status.timeBasis.plan = item.timeBasis.plan;
     }
   }
-  // PROD-15.1: A STOPPED CREATION STEP'S THREE LISTS, under the custom
+  // A STOPPED CREATION STEP'S THREE LISTS, under the custom
   // resource's own names (`status.targetTopicsAppeared`): the names someone
   // else created, the topics this restore created and LEFT, and the names it
   // asked for and cannot account for, each with how many there are in all.
@@ -1166,7 +1116,7 @@ function projectRestore(item) {
       status.targetTopicsAppeared.unconfirmedSeen = stopped.unconfirmedSeen;
     }
   }
-  // PROD-08.1a: THE COVERAGE, under the custom resource's own names, so one
+  // THE COVERAGE, under the custom resource's own names, so one
   // badge rule and one list line read it in both modes: what the Restore asks
   // for on `spec` (absent when sampled, as the CRD stores it), what its signed
   // scorecard recorded on `status.integrity`. A list row carries `covered` and
@@ -1189,7 +1139,7 @@ function projectRestore(item) {
       }
     }
   }
-  // PROD-11.1b: THE SIGNED SELECTION, under the custom resource's own name
+  // THE SIGNED SELECTION, under the custom resource's own name
   // (`status.integrity.selection`), so one list line and one detail row read
   // it in both modes. Absent stays absent (every partition, from the floor);
   // an empty block is still a selection.
@@ -1201,11 +1151,11 @@ function projectRestore(item) {
   return object;
 }
 
-/** PROD-11.1b: a decoded `RestoreSelectionView`, with the decoder's `null`s
+/** A decoded `RestoreSelectionView`, with the decoder's `null`s
  *  (absent optional fields) left out, as the custom resource stores it. */
 function copySelection(selection) {
-  // `scope` is always "partial" on the API (PROD-11.1b): presence IS the
-  // marker, under the custom resource's name for it.
+  // `scope` is always "partial" on the API: presence IS the marker, under
+  // the custom resource's name for it.
   const out = { scope: "partial" };
   for (const field of ["windowStartMs", "windowEndMs", "narrowedTopics", "engineRuns"]) {
     if (typeof selection[field] === "number") {
@@ -1221,7 +1171,7 @@ function copySelection(selection) {
   return out;
 }
 
-// P10: THE CEILING A QUEUED MANUAL RUN WAITS BEHIND, under the custom
+// THE CEILING A QUEUED MANUAL RUN WAITS BEHIND, under the custom
 // resource's own name (`status.queue.limit`), so one `runPhaseBadge` reads it
 // in both modes. The API publishes the block only while the run is queued.
 function queueOf(item, status) {
@@ -1246,13 +1196,8 @@ function projectApproval(item) {
     }
   }
   status.conditions = item.conditions.map(condition);
-  // THE CRD'S OWN SPELLING, `status.verifiedSubjectRef` (PLAT-19.2, found
-  // live). This used to project `status.verifiedSubject`, which no page reads:
-  // `approvals.js`'s `approvalState` reads `verifiedSubjectRef`, as the
-  // Approval object carries it in legacy mode, so in console mode a Verified
-  // Approval was shown "awaiting verification" for ever, a verdict bound to an
-  // older UID was never shown "bound to another execution", and the wizard
-  // never routed a verified submission to its operation view.
+  // The CRD's own spelling, `status.verifiedSubjectRef`, which `approvals.js`'s
+  // `approvalState` reads in both modes.
   if (item.verifiedSubject !== null) {
     status.verifiedSubjectRef = {
       kind: item.verifiedSubject.kind,
@@ -1261,7 +1206,7 @@ function projectApproval(item) {
       uid: item.verifiedSubject.uid,
     };
   }
-  // PLAT-19.2: the Approval CRD's own `status.authorization` spelling, so a
+  // The Approval CRD's own `status.authorization` spelling, so a
   // page reads one shape in both modes.
   if (item.authorization !== null) {
     status.authorization = {
@@ -1277,12 +1222,10 @@ function projectApproval(item) {
     approvalBytes: item.approvalBytesLength,
     sidecarBytes: item.sidecarBytesLength,
   };
-  // PROD-15.1: THE APPROVAL SUBJECT THE SIGNED DOCUMENT CARRIES, as the product
-  // API read it -- `originalName`, `ordinary`, or `unknown` for a document it
-  // could not read. Beside the object under the API's own name, for the same
-  // reason and from the same sweep as a Restore's (FX-48): it was decoded and
-  // not projected, so a list row -- which has no bytes to read a subject from
-  // -- said `unknown` about an Approval the API had described.
+  // THE APPROVAL SUBJECT THE SIGNED DOCUMENT CARRIES, as the product API read
+  // it (`originalName`, `ordinary`, or `unknown` for a document it could not
+  // read), beside the object under the API's own name: a list row has no
+  // bytes to read a subject from.
   object.approvalSubject = item.approvalSubject;
   return object;
 }
@@ -1300,63 +1243,49 @@ const PROJECT = Object.freeze({
  *  product API keeps these on their own route, so a DETAIL view reads them and
  *  a list does not.
  *
- *  THE TRUST BASIS TRAVELS WITH THE VERDICT (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
- *  `trust` is the route's decoded `OperationTrust` block, or `null` when the
- *  body carried none. Its `basis` is written where the custom resource keeps
- *  it -- `status.evidence.verification.trust.basis`, in the CRD's own spelling,
- *  which the API passes through untranslated -- so the ONE badge rule
- *  (`validVerification`, `verificationCase`) judges a console detail exactly
- *  as it judges the custom resource: `RecordedBeforeRevocation` is not green,
- *  `Historical` is green with the retired-key qualifier, and an absent block
- *  keeps the pre-existing rule (D3 sections 7.4 and 12). Without it a `Valid`
- *  on a compromise-revoked key read green, and so did every scorecard fact
- *  captioned by the same rule. The basis only ever refines a recorded
- *  `result`, so it is not written where no result was recorded.
+ *  THE TRUST BASIS TRAVELS WITH THE VERDICT. `trust` (the decoded
+ *  `OperationTrust`, or `null`) has its `basis` written where the custom
+ *  resource keeps it, `status.evidence.verification.trust.basis`, so the ONE
+ *  badge rule (`validVerification`, `verificationCase`) judges a console
+ *  detail exactly as a custom resource: `RecordedBeforeRevocation` is not
+ *  green, `Historical` is green with the retired-key qualifier, and an absent
+ *  block keeps the pre-existing rule. The basis only refines a recorded
+ *  `result`, so it is not written where none was recorded.
  *
- *  `operation` IS THE WHOLE PUBLISHED VIEW (FX-48): `decodeOperation` reads
- *  `OperationViewResponse` with every member D3 added, so `trust`,
- *  `verificationScope` and `completion` arrive on the one decoded item, each
- *  `null` when the body carried none. Before, the item was the frozen sixteen
- *  and the first two were recovered by decoders of their own. */
+ *  `operation` IS THE WHOLE PUBLISHED VIEW: `trust`, `verificationScope` and
+ *  `completion` arrive on the one decoded item, each `null` when the body
+ *  carried none. */
 function mergeOperation(object, operation) {
   const status = object.status;
   const trust = operation.trust;
   const scope = operation.verificationScope;
-  // HOW MUCH OF A RESTORE WAS COMPARED TRAVELS WITH THE DETAIL (console class
-  // sweep). `scope` is the route's decoded `VerificationScopeView`, or `null`
-  // when the body carried none. It is written under the name the History
-  // detail already reads first (`history.js` `scopeOf`: "the product API's
-  // own block, used verbatim when it is there"); without it that page read
-  // the custom resource's `status.integrity`, which no projection carries, and
-  // said "No verification scope was recorded" about a run the API had scoped.
-  // A Backup has no scope, and a Restore whose route published none keeps the
-  // absent-scope sentence, which is what an absent scope means.
+  // HOW MUCH OF A RESTORE WAS COMPARED TRAVELS WITH THE DETAIL, under the
+  // name the History detail reads first (`history.js` `scopeOf`). A Backup
+  // has no scope, and a Restore whose route published none keeps the
+  // absent-scope sentence.
   if (operation.kind === "restore" && scope !== null && scope !== undefined) {
     const copied = { level: scope.level };
-    // PROD-08.1a / FX-23: the signed coverage, a complete verification's
-    // exact counts and the topics a sampled check left unsampled travel with
-    // the scope they qualify.
+    // The signed coverage, a complete verification's exact counts and the
+    // topics a sampled check left unsampled travel with the scope they qualify.
     for (const field of ["recordsSampled", "recordsSampledMatching", "recordsExpected",
       "coverage", "complete", "unsampledTopics"]) {
       if (scope[field] !== null && scope[field] !== undefined) {
         copied[field] = scope[field];
       }
     }
-    // PROD-11.1b: the selection every count above is over.
+    // The selection every count above is over.
     if (scope.selection !== null && scope.selection !== undefined) {
       copied.selection = copySelection(scope.selection);
     }
     status.verificationScope = copied;
   }
-  // THE INTEGRITY LEVEL TRAVELS WITH THE DETAIL TOO (FX-48, PoC batch 6 F-4).
-  // `completion.integrityLevel` is the signed scorecard's own word --
-  // `byte-fingerprint`, `consume-only` or `not-attempted`, verbatim -- and it
-  // is written where the custom resource keeps it, `status.integrity.level`,
-  // so the Restore detail's Integrity table reads one field in both modes. It
-  // is copied and never derived: a view that publishes no completion block
-  // leaves the level absent, and the page then says the API published none
-  // rather than printing an empty cell. The block's result and partial reason
-  // are published by no route; see `ABSENT_IN_CONSOLE`.
+  // THE INTEGRITY LEVEL TRAVELS WITH THE DETAIL TOO.
+  // `completion.integrityLevel` is the signed scorecard's own word
+  // (`byte-fingerprint`, `consume-only` or `not-attempted`, verbatim), written
+  // where the custom resource keeps it, `status.integrity.level`. It is
+  // copied and never derived: with no completion block the level stays
+  // absent, and the page says the API published none. The block's result and
+  // partial reason are published by no route; see `ABSENT_IN_CONSOLE`.
   const completion = operation.completion;
   if (operation.kind === "restore" && completion !== null && completion !== undefined &&
     typeof completion.integrityLevel === "string" && completion.integrityLevel.length > 0) {
@@ -1397,7 +1326,7 @@ function mergeOperation(object, operation) {
       verification[field] = operation.verification[field];
     }
   }
-  // AN ABSENT BLOCK STAYS ABSENT (TRUST-VALID-BASIS-CLASS). The DTO spells a
+  // AN ABSENT BLOCK STAYS ABSENT. The DTO spells a
   // missing `trust` block as `basis: None`; written here as a block, the
   // custom-resource rule (`trustBlockAllowsGreen`) would read it as a PRESENT
   // `None` and turn every object an older controller wrote red. A present
@@ -1431,44 +1360,29 @@ function mergeOperation(object, operation) {
   return object;
 }
 
-// ------------------------------------------------------------- the two APIs
-
-// =========================================================================
-// D1 SECTION 8.2's MANUAL-RUN NAME: ONE RULE, OBEYED BY BOTH MODES
-// =========================================================================
+// THE MANUAL-RUN NAME. "Back up now" is the only create whose object has NO
+// NAME UNTIL THE SCOPE IS HASHED, so the name IS the idempotency record:
+// `logweir-manual-` plus the first 26 characters of the lowercase, unpadded
+// RFC 4648 base32 of `sha256` over the length-prefixed tuple `(issuer,
+// subject, namespace, route, key)`. A double click, a lost response and a
+// retry target the SAME name, and `AlreadyExists` makes a second object
+// impossible.
 //
-// WHY THIS IS HERE AT ALL. "Back up now" is the only create in this tree whose
-// object has NO NAME UNTIL THE SCOPE IS HASHED. Every other create names its
-// object after something the person typed, so `AlreadyExists` is the
-// idempotence. A manual run's name IS the idempotency record: D1 section 8.2
-// makes it `logweir-manual-` plus the first 26 characters of the lowercase,
-// unpadded RFC 4648 base32 of `sha256` over the length-prefixed tuple
-// `(issuer, subject, namespace, route, key)`. A double click, a lost response
-// and a retry all target the SAME name, and the API server's own
-// `AlreadyExists` is what makes a second object impossible.
+// IT MATCHES `crates/logweir-api/src/idempotency.rs` (`identity`,
+// `base32_lower`, `NAME_HASH_CHARS`) BYTE FOR BYTE:
 //
-// THE RULE IS SHARED, NOT RE-INVENTED. `crates/logweir-api/src/idempotency.rs`
-// (`identity`, `base32_lower`, `NAME_HASH_CHARS`) is the other implementation,
-// and this one is written to match it byte for byte:
-//
-//   * the scope opens with the literal format line below -- INSIDE the hashed
-//     bytes, so a format change is a name change rather than a silent change
-//     of question;
+//   * the scope opens with the format line below, INSIDE the hashed bytes,
+//     so a format change is a name change;
 //   * each field is prefixed with its BYTE length as a 64-bit big-endian
 //     integer, so no pair of fields can be re-cut into a different pair;
-//   * the digest is taken over the whole document and rendered in the base32
-//     alphabet below -- `a`-`z` then `2`-`7`, which is DNS-label safe;
-//   * exactly 26 characters of it are kept, which is 130 bits and a 41-
-//     character DNS-1123 name.
+//   * the digest is rendered in the base32 alphabet below (`a`-`z`, `2`-`7`,
+//     DNS-label safe), and exactly 26 characters are kept: 130 bits and a
+//     41-character DNS-1123 name.
 //
-// AND IT IS PINNED BY A FIXTURE BOTH SIDES PASS, because the two
-// implementations are in two languages and a comment is not a test.
-// `ui/tests/fixtures/manual-backup-names.json` carries scope tuples and the
-// name each one produces; `ui/tests/d1.spec.js` drives THIS function over
-// every row, and `scripts/live/d1/run.py`'s `L-06-2-cli` drives the REAL
-// `logweir-api` over the same rows and fails if any name differs. A fixture
-// checked by one side only would pin this function to itself.
-
+// `ui/tests/fixtures/manual-backup-names.json` pins both sides:
+// `ui/tests/d1.spec.js` drives this function over every row, and
+// `scripts/live/d1/run.py`'s `L-06-2-cli` drives `logweir-api` over the
+// same rows.
 
 /** The route identifier inside a manual run's idempotency scope: the PRODUCT
  *  API's route. */
@@ -1526,7 +1440,7 @@ function pushField(out, value) {
 }
 
 /** The deterministic name of the manual run at `scope`
- *  `{issuer, subject, namespace, route, key}`, D1 section 8.2.
+ *  `{issuer, subject, namespace, route, key}`.
  *
  *  `route` defaults to [`MANUAL_BACKUP_ROUTE`] because there is exactly one
  *  route this rule is used for; it is a parameter so the fixture can pin the
@@ -1570,10 +1484,10 @@ async function sha256Of(bytes) {
 
 /** The run deadline a manual run inherits when the schedule names none --
  *  `weirkeeper::controllers::backup_schedule::SCHEDULED_DEADLINE_SECONDS` and
- *  `weirkeeper::cadence::DEFAULT_ACTIVE_DEADLINE_SECONDS`, which are the same
- *  number for the same reason: D1 section 3.2 puts the deadline INSIDE the digested
- *  document, so a schedule that says nothing and a schedule that says 3600 ask
- *  for the same run and must digest the same. */
+ *  `weirkeeper::cadence::DEFAULT_ACTIVE_DEADLINE_SECONDS`, the same number for
+ *  the same reason: the deadline is INSIDE the digested document, so a
+ *  schedule that says nothing and one that says 3600 ask for the same run and
+ *  must digest the same. */
 export const DEFAULT_MANUAL_DEADLINE_SECONDS = 3600;
 
 /** The four labels a manual run carries -- selection hints, never authority.
@@ -1604,13 +1518,13 @@ function copyRef(reference) {
   return r === null || typeof r.name !== "string" ? null : { name: r.name };
 }
 
-/** The `Backup` a "Back up now" on `schedule` becomes: D1 section 8.1's canonical
- *  object, with no name and no annotations yet.
+/** The `Backup` a "Back up now" on `schedule` becomes: the canonical object,
+ *  with no name and no annotations yet.
  *
  *  THE POLICY HALF IS A STRUCTURAL COPY AND NOTHING CLEVERER, because that is
  *  exactly what `weirkeeper::controllers::backup_schedule::run_policy_spec`
  *  does -- the one builder the scheduler validates, digests and POSTs, and the
- *  one `crates/logweir-api/src/routes/backups.rs::build` calls for body A.
+ *  one `crates/logweir-api/src/routes/backups.rs::build` calls for it.
  *  Source, topic selection, archive or destination, and the deadline with its
  *  absent default resolved. Nothing is canonicalised here: sorting the topics
  *  or dropping a duplicate would change the object without changing the policy
@@ -1635,13 +1549,10 @@ export function manualBackupObject(ns, schedule, digest) {
     sourceRef: copyRef(policy.sourceRef) || { name: "" },
     topics: Array.isArray(policy.topics) ? policy.topics.slice() : [],
     // A STRUCTURAL CLONE OF THE WHOLE `archive`, NOT A REBUILT `{url,
-    // secretRef}` (review F3). `run_policy_spec` -- the builder the product API
-    // calls for body A -- clones the whole `ArchiveRef`, and today that type is
-    // exactly `{url, secretRef}` so the two agree. A field added to it later
-    // would be dropped silently HERE and nowhere else, and the only symptom
-    // would be a terminal `RunPolicyDigestMismatch` after somebody clicked:
-    // the controller recomputes the digest over the fields the object carries,
-    // and a field this page left out changes it.
+    // secretRef}`: `run_policy_spec` clones the whole `ArchiveRef`, and a field
+    // added to it later and dropped here would surface only as a terminal
+    // `RunPolicyDigestMismatch` (the controller digests the fields the object
+    // carries).
     archive: clone(policy.archive, { url: "" }),
     triggeredBy: "manual",
     trigger: { kind: "Manual", attempt: 0 },
@@ -1704,22 +1615,13 @@ const consoleApi = Object.freeze({
     const route = consolePlural(plural);
     requireGrant(ns, READ_CAPABILITY[route]);
     const project = PROJECT[plural];
-    // THE CURSOR IS FOLLOWED, AND A LIST IS NEVER SILENTLY SHORTENED.
+    // THE CURSOR IS FOLLOWED, AND A LIST IS NEVER SILENTLY SHORTENED: a page
+    // that stopped at the first rows would show fewer Backups with nothing
+    // saying so, and `#/history` is the inventory read during an incident.
     //
-    // The product API pages; `kubectl proxy` does not, and every page in this
-    // tree was written against a list that holds the namespace. A console mode
-    // that stopped at the first fifty rows would show fewer Backups than the
-    // legacy mode shows, in the same table, with nothing on screen saying so --
-    // and `#/history` is the inventory somebody reads during an incident. So
-    // the pages are followed to the end.
-    //
-    // AND THE END IS BOUNDED. A namespace larger than the budget below is not
-    // quietly cut off either: it raises an error the page RENDERS, naming how
-    // many rows were read and what to run instead. A prefix presented as the
-    // whole is the failure this arm exists to prevent; a refusal that says so
-    // is not that failure. Rendering "showing the first N, more exist" beside
-    // the table would be better still, and it is PLAT-18.2's to add -- the
-    // table, its footer and its copy belong to that task.
+    // AND THE END IS BOUNDED: a namespace larger than the budget raises an error
+    // the page RENDERS, naming how many rows were read and what to run instead.
+    // A prefix presented as the whole is the failure this arm prevents.
     const items = [];
     const unknown = [];
     let page = null;
@@ -1751,7 +1653,7 @@ const consoleApi = Object.freeze({
           __unknown: unknown,
         };
       }
-      // A PAGE CAN BE SHOWN BEFORE THE LAST ONE ARRIVES (MCP-26). A caller that
+      // A PAGE CAN BE SHOWN BEFORE THE LAST ONE ARRIVES. A caller that
       // passes `onPage` is handed the rows read so far, marked `partial`, after
       // every page but the last, so a list of hundreds renders its first 200
       // rows while the rest are read. The list it RESOLVES with is still the
@@ -1782,7 +1684,7 @@ const consoleApi = Object.freeze({
   },
   async create(ns, plural, object) {
     const route = consolePlural(plural);
-    // RECORDING AN APPROVAL IS THE RESTORE'S OWN ROUTE (PLAT-19.2). The
+    // RECORDING AN APPROVAL IS THE RESTORE'S OWN ROUTE. The
     // product API has no top-level Approval create; an approver records the
     // files `logweir drill approve` wrote through `POST .../restores/{name}/
     // approval`, named by the Restore the Approval is about, which stores them
@@ -1816,10 +1718,9 @@ const consoleApi = Object.freeze({
       const made = note(PROJECT[plural](decoded.value.item), plural, decoded.unknown);
       // THE API ANSWERED "THIS ALREADY HAPPENED", AND THAT TRAVELS WITH THE
       // OBJECT. `lifecycle.js`'s `createdOutcome` reads it, so a form says
-      // "already existed" for a replay and "created" for a create, in this
-      // mode exactly as the 409 read-back says it in the other one.
+      // "already existed" for a replay and "created" for a create.
       made.__contract.replayed = decoded.value.replayed === true;
-      // PLAT-19.2 / PLAT-12.1: THE FROZEN POLICY'S ANSWER TRAVELS WITH THE
+      // THE FROZEN POLICY'S ANSWER TRAVELS WITH THE
       // OBJECT, exactly as `replayed` does. Only a Restore create carries one;
       // `ui/pages/restore-wizard.js`'s `frozenDecision` is its one reader.
       made.__contract.authorization = decoded.value.authorization || null;
@@ -1845,7 +1746,6 @@ const consoleApi = Object.freeze({
       throw withCauses(refused, "schedules");
     }
   },
-  // ------------------------------------------- D1 W7 (PLAT-04.2/05.1/06.2)
   async previewCadence(query, options) {
     // A SAFE GET THAT READS NO OBJECT, so there is no namespace to scope it
     // to and no capability flag that covers it. The product API's own rule is
@@ -1857,10 +1757,9 @@ const consoleApi = Object.freeze({
     return decoded.value;
   },
   async editSchedulePolicy(ns, name, body) {
-    // THE SAME AUTHORITY AS CREATING ONE. D1 W6 made editing a schedule's
-    // future policy a new action with the SAME role row as creating one, and
-    // left the capability flag `scheduleCreate` covering both; a route test
-    // there pins the equality, so splitting the flag and splitting the
+    // THE SAME AUTHORITY AS CREATING ONE: editing a schedule's future policy
+    // has the same role row as creating one and `scheduleCreate` covers both;
+    // a route test pins the equality, so splitting the flag and splitting the
     // authority have to happen together.
     requireGrant(ns, "scheduleCreate");
     const checked = decodeRequest("schedules:policy", body);
@@ -1881,7 +1780,7 @@ const consoleApi = Object.freeze({
       throw withCauses(refused, "schedules");
     }
   },
-  // PLAT-19.2: the namespace's effective approval policy, or `null` when this
+  // The namespace's effective approval policy, or `null` when this
   // session may not read approvals there (the policy route is gated on the
   // same read).
   async approvalPolicy(ns, options) {
@@ -1890,15 +1789,15 @@ const consoleApi = Object.freeze({
     }
     return decodeApprovalPolicy(await consoleApprovalPolicy(ns, options)).value.item;
   },
-  // PLAT-19.2: a governed approver's countersigned sidecar for one Restore.
+  // A governed approver's countersigned sidecar for one Restore.
   // The product API refuses the requester (403), a non-Governed namespace
   // (409 policy_mismatch) and a stale or expired confirmation; this page
   // renders each refusal as it arrives.
   async submitGovernedApproval(ns, restoreName, sidecarBytes, approvalBytes) {
     requireGrant(ns, "approvalSubmit");
-    // `approvalBytes` only for an UNBOUND namespace's v1 files (PLAT-19.2,
-    // CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE); a governed countersignature
-    // sends the sidecar alone and the server refuses a document beside it.
+    // `approvalBytes` only for an UNBOUND namespace's v1 files; a governed
+    // countersignature sends the sidecar alone and the server refuses a
+    // document beside it.
     const body = typeof approvalBytes === "string"
       ? { sidecarBytes: String(sidecarBytes), approvalBytes: approvalBytes }
       : { sidecarBytes: String(sidecarBytes) };
@@ -1923,7 +1822,7 @@ const consoleApi = Object.freeze({
     made.__contract.replayed = decoded.value.replayed === true;
     return made;
   },
-  // PROD-16.2: one Restore's two-person request, as the approver is shown
+  // One Restore's two-person request, as the approver is shown
   // it -- or `null` when this session may not read approvals there (the route
   // is gated on the same read). Every field the page renders is the server's,
   // taken from bytes the console verified its own signature on.
@@ -1939,7 +1838,7 @@ const consoleApi = Object.freeze({
       throw withCauses(refused, "approvals");
     }
   },
-  // PROD-16.2: THE SECOND PERSON'S CLICK. The body is ONE field: the hash of
+  // THE SECOND PERSON'S CLICK. The body is ONE field: the hash of
   // the request's signed bytes, exactly as the view showed it. It names what
   // was reviewed; it supplies nothing an authorization carries. The product
   // API refuses the requester and anyone who is not an Approver (403), a
@@ -2008,8 +1907,8 @@ const consoleApi = Object.freeze({
     made.__contract.replayed = decoded.value.replayed === true;
     // THE SCHEDULE'S OWN STATE TRAVELS WITH THE RUN, as notices. A suspended
     // schedule and an already-active run are both things a person should SEE
-    // after clicking, and neither is a reason the click was refused -- D1 section 8.3
-    // is explicit that nothing about a schedule blocks a manual run.
+    // after clicking, and neither is a reason the click was refused: nothing
+    // about a schedule blocks a manual run.
     return { run: made, schedule: decoded.value.schedule, replayed: made.__contract.replayed };
   },
   async listCluster(plural) {
@@ -2021,22 +1920,15 @@ const consoleApi = Object.freeze({
   },
 });
 
-// ===========================================================================
-// D2: destinations, topic discoveries and operation readiness
-// ===========================================================================
+// DESTINATIONS, TOPIC DISCOVERIES AND OPERATION READINESS exist on the
+// product API and are not projected into custom resources.
 //
-// These three domains exist on the product API and are not projected into
-// custom resources.
-//
-// WHO MAY START ONE. The three capability flags `destinations`,
-// `topicDiscovery` and `preflight` are the domains' READ FLOORS: "this build
-// serves the domain and you may read it". Whether the actor may also START,
-// CANCEL or MANAGE is the role table, which `/session` publishes per grant in
-// `namespaces[].roles` -- and D2 W12 deliberately did not split the three
-// flags into read/start pairs, because `CAPABILITY_FLAGS` is frozen at
-// nineteen entries and pinned against the schema's own `required` set. So the
-// read is gated by the FLAG and the write by [`mayOperate`], which reads the
-// roles.
+// WHO MAY START ONE. The flags `destinations`, `topicDiscovery` and
+// `preflight` are the domains' READ FLOORS ("this build serves the domain and
+// you may read it"). Whether the actor may also START, CANCEL or MANAGE is
+// the role table, which `/session` publishes per grant: `CAPABILITY_FLAGS`
+// is frozen and pinned against the schema, so the read is gated by the FLAG
+// and the write by [`mayOperate`], which reads the roles.
 
 /** The capability flag that is each domain's READ FLOOR. */
 const DOMAIN_CAPABILITY = Object.freeze({
@@ -2118,8 +2010,7 @@ function requireOperator(ns, domain, what) {
 // THE BODY IS CHECKED AGAINST THE PUBLISHED REQUEST SHAPE BEFORE IT IS SENT.
 // `ui/contract.js` declares every D2 request; a field that became required on
 // the server, or one this page invented, is a named contract failure here
-// rather than a 422 in front of an operator. It is the same rule the read side
-// has had since PLAT-18.1, applied to the half that was never checked.
+// rather than a 422 in front of an operator.
 function sending(name, body) {
   const decodedBody = decodeRequest(name, body);
   if (decodedBody.unknown.length > 0) {
@@ -2177,11 +2068,9 @@ const consoleChecks = Object.freeze({
   async testDestination(ns, name, request, options) {
     requireOperator(ns, "destinations", "test destination access");
     const body = sending("destinations:test", request || {});
-    // THE ATTEMPT, WHEN THE PAGE MINTS ONE (P8's class, review F1's rule): a
-    // DELIBERATE second test -- the operator fixed a Secret and presses Test
-    // access again -- is a new check. Without it the key was the destination
-    // and the roles alone, so the second press REPLAYED the first Preflight for
-    // as long as it lived and showed its old verdict as the new one.
+    // THE ATTEMPT, WHEN THE PAGE MINTS ONE: a deliberate second test (an
+    // operator fixed a Secret and presses Test access again) is a new check,
+    // not a replay of the first Preflight's verdict.
     const attempt = (options || {}).attempt;
     const subject = name + "." + rolesTag(body.roles) +
       (typeof attempt === "string" && attempt.length > 0 ? "." + digest32(attempt) : "");
@@ -2216,7 +2105,7 @@ const consoleChecks = Object.freeze({
   async startDiscovery(ns, connection, request, options) {
     requireOperator(ns, "topic-discoveries", "start a topic discovery");
     const body = sending("connections:topic-discoveries", request || {});
-    // `attempt` IS THE PAGE'S INTENT TOKEN (P14's class): the parameters alone
+    // `attempt` IS THE PAGE'S INTENT TOKEN: the parameters alone
     // are the same key every time, and a discovery past its freshness would
     // be replayed for as long as the controller keeps the object.
     const attempt = (options || {}).attempt;
@@ -2310,17 +2199,14 @@ function tokenNow() {
 }
 
 /** THE SESSION'S SYNCHRONISER TOKEN, for the one product-API write that is not
- *  a method of the client object: `ui/operation-watch.js`'s `connectArchive`
- *  (POC-P4). `null` without a session and before the probe has answered.
+ *  a method of the client object: `ui/operation-watch.js`'s `connectArchive`.
+ *  `null` without a session and before the probe has answered.
  *
  *  EVERY UNSAFE REQUEST CARRIES THIS VALUE AND NO OTHER. The product API
  *  refuses a write whose `X-CSRF-Token` does not match the session that sent
- *  it (`403 x-csrf-token: the synchronizer token does not match this
- *  session`), so a write that takes its token from anywhere else -- a caller's
- *  options bag, a route's `deps` -- is a write that is refused in the shared
- *  console. The connect-archive form did exactly that: it read `deps.token`,
- *  which the shell never supplies, and sent no header at all. Like the token
- *  itself this lives in this module's memory and nowhere else. */
+ *  it, so a write that takes its token from anywhere else (a caller's options
+ *  bag, a route's `deps`) is refused. Like the token itself this lives in
+ *  this module's memory and nowhere else. */
 export function sessionToken() {
   return tokenNow();
 }
@@ -2349,15 +2235,11 @@ function discoveryTag(body) {
 // the SAME plan is the same check; an edited plan is a different one, because
 // the plan hash is inside the digest.
 //
-// `attempt` IS THE CALLER'S "THIS IS A NEW ONE", and it is what the header of
-// this section already anticipates: "A DELIBERATELY NEW operation is a new
-// name, and a new name is a new key." A readiness check over an unchanged plan
-// is the same question and passes none, so its key is unchanged and a retry
-// replays. A connectivity test is the opposite: its whole subject is a broker
-// that may answer differently a minute later, so the page that owns the
-// control mints one token per accepted CLICK and passes it here. Without it
-// "Test connection" would replay its first answer for ever -- which is the
-// re-read this control exists to stop being.
+// `attempt` IS THE CALLER'S "THIS IS A NEW ONE". A readiness check over an
+// unchanged plan passes none, so a retry replays. A connectivity test's
+// subject is a broker that may answer differently a minute later, so its
+// page mints one token per accepted CLICK; without it "Test connection"
+// would replay its first answer for ever.
 function preflightTag(body, attempt) {
   const block = body[body.operation];
   const subject = body.operation + "." +
@@ -2381,10 +2263,9 @@ function requireGrant(ns, flag) {
   }
 }
 
-// A 409 from the product API is the same event the legacy mode reports as
-// `AlreadyExists` with a different spec: the name this operation would take is
-// taken by something else. It is reported as a conflict so a form says so and
-// keeps what was typed, instead of reading as a generic refusal.
+// A 409 from the product API means the name this operation would take is
+// taken by something else. It is reported as a conflict so a form says so
+// and keeps what was typed, instead of reading as a generic refusal.
 function conflictKind(error) {
   const code = (error || {}).code;
   if (code === "idempotency_conflict" || code === "state_conflict") {
@@ -2402,7 +2283,7 @@ function conflictKind(error) {
 function requestBody(plural, object) {
   const spec = (object || {}).spec || {};
   if (plural === "kafkaclusters") {
-    // REFUSED, NOT DROPPED (PLAT-07.2). `CreateConnectionRequest` declares
+    // REFUSED, NOT DROPPED. `CreateConnectionRequest` declares
     // `additionalProperties: false` and has no field for either of connection
     // contract v1's references, so there is no shape this module could put
     // them in. Sending the request without them would create a connection that
@@ -2418,9 +2299,9 @@ function requestBody(plural, object) {
           "cluster to create this connection.",
       );
     }
-    // PROD-01.3: a CA from a ConfigMap travels; one held in a Secret does not
-    // -- the product API takes the CA from a ConfigMap only, so every Secret a
-    // console-made connection uses is one the API created itself.
+    // A CA from a ConfigMap travels; one held in a Secret does not: the product
+    // API takes the CA from a ConfigMap only, so every Secret a console-made
+    // connection uses is one the API created itself.
     const ca = spec.auth.tlsCa;
     if (ca !== undefined && ca !== null && ca.secretKeyRef) {
       throw noRoute(
@@ -2430,10 +2311,10 @@ function requestBody(plural, object) {
           "access to the cluster to create this connection.",
       );
     }
-    // PROD-01.3 security follow-up: THE CONSOLE NEVER NAMES AN EXISTING SECRET.
-    // A connection that could name any Secret could make Logweir present
-    // another team's credential to brokers of its author's choosing; the
-    // product API refuses `credentialRef`, and this module never sends one.
+    // THE CONSOLE NEVER NAMES AN EXISTING SECRET. A connection that could name
+    // any Secret could make Logweir present another team's credential to
+    // brokers of its author's choosing; the product API refuses
+    // `credentialRef`, and this module never sends one.
     if (((spec.auth.secretRef) || {}).name || ((spec.auth.clientCertificate) || {}).name) {
       throw noRoute(
         "the product API never names an existing Secret for a connection's credential: enter " +
@@ -2463,11 +2344,8 @@ function requestBody(plural, object) {
     return body;
   }
   if (plural === "backupschedules") {
-    // THE WHOLE POLICY, BECAUSE THE ROUTE TAKES THE WHOLE POLICY (PLAT-10.1).
-    // `CreateScheduleRequest` used to carry seven fields, so a guided form could
-    // only create a schedule and then repair it; it now carries the same set
-    // the edit route does. A field ABSENT from the custom resource stays absent
-    // from the body -- the route writes absent for absent, and an absent policy
+    // THE WHOLE POLICY, BECAUSE THE ROUTE TAKES THE WHOLE POLICY. A field ABSENT
+    // from the custom resource stays absent from the body: an absent policy
     // field is the documented default rather than a value this module invented.
     //
     // ONE LOCATION AND ONE SELECTION, decided by the object the page composed:
@@ -2527,12 +2405,9 @@ function requestBody(plural, object) {
       },
       deadlineSeconds: spec.deadlineSeconds,
     };
-    // PROD-15.1: THE ORIGINAL-NAME DECLARATION TRAVELS WITH THE EMPTY PREFIX
-    // (found by FX-48's sweep). `TopicNamingRequest.originalName` is what tells
-    // the product API that an empty prefix is a choice and not a missing
-    // field; this copied the prefix alone, so the request the route requires
-    // for such a restore could not have been built here. Sent only when
-    // stated, so every other restore sends what it always did.
+    // THE ORIGINAL-NAME DECLARATION TRAVELS WITH THE EMPTY PREFIX:
+    // `TopicNamingRequest.originalName` tells the product API that an empty
+    // prefix is a choice and not a missing field. Sent only when stated.
     if (spec.target.topicNaming.originalName === true) {
       body.target.topicNaming.originalName = true;
     }
@@ -2542,24 +2417,22 @@ function requestBody(plural, object) {
     if (spec.evidenceDestinationRef !== undefined) {
       body.evidenceDestinationRef = { name: spec.evidenceDestinationRef.name };
     }
-    // PROD-08.1a: the coverage the plan asks for, declared beside it and
-    // stored on `Restore.spec`, where the controller holds it to the plan.
-    // Sent only when stated, so a sampled restore sends what it always did.
+    // The coverage the plan asks for, declared beside it and stored on
+    // `Restore.spec`, where the controller holds it to the plan. Sent only when
+    // stated, so a sampled restore sends what it always did.
     if (spec.coverage === "complete") {
       body.coverage = "complete";
       if (typeof spec.completeMaxRecords === "number") {
         body.completeMaxRecords = spec.completeMaxRecords;
       }
     }
-    // THE DECLARED MAPPING RIDES ON THE REQUEST AND NOT ON THE OBJECT
-    // (PLAT-11.2). `Restore.spec` has no topic list, so this travels beside
-    // the create body the wizard built: the product API recomputes every row
-    // from `target.topicNaming.prefix` and answers 422 when the preview and
-    // the submission disagree. It is carried only when it is there, so a
-    // caller that predates it sends exactly what it always did.
-    // PLAT-19.2: the change ticket rides beside the create body the same way
-    // -- a field of the REQUEST, signed into the authorization document, never
-    // of `Restore.spec`.
+    // THE DECLARED MAPPING RIDES ON THE REQUEST AND NOT ON THE OBJECT:
+    // `Restore.spec` has no topic list, so this travels beside the create body
+    // the wizard built, and the product API recomputes every row from
+    // `target.topicNaming.prefix` and answers 422 when the preview and the
+    // submission disagree. Carried only when it is there. The change ticket
+    // rides the same way: a field of the REQUEST, signed into the authorization
+    // document, never of `Restore.spec`.
     const ticket = (object || {}).ticket;
     if (typeof ticket === "string" && ticket.length > 0) {
       body.ticket = ticket;
@@ -2571,20 +2444,15 @@ function requestBody(plural, object) {
         target: (row || {}).target,
       }));
     }
-    // OD-10 (PROD-15.1): THE ORIGINAL TOPIC NAMES THE REQUESTER RE-TYPED ride
-    // beside the body the same way -- a field of the REQUEST, which the
-    // console signs into the authorization document, never of `Restore.spec`.
-    // The wizard has built it since PROD-15.1 and nothing here copied it
-    // (FX-48's sweep), so a one-person confirmation would have been refused
-    // `typed_topics_required` with the names typed on screen.
+    // THE ORIGINAL TOPIC NAMES THE REQUESTER RE-TYPED ride beside the body the
+    // same way: a field of the REQUEST, which the console signs into the
+    // authorization document, never of `Restore.spec`.
     const typed = ((object || {}).originalNameConfirmation || {}).typedTopics;
     if (Array.isArray(typed)) {
       body.originalNameConfirmation = { typedTopics: typed.map((name) => String(name)) };
     }
     // AND THE BODY IS HELD TO THE PUBLISHED REQUEST SHAPE BEFORE IT IS SENT,
-    // like every other create's (`sending`). A Restore create was the one body
-    // this module built and never checked, which is how two of its members
-    // went missing without a red row.
+    // like every other create's (`sending`).
     return sending("restores", body);
   }
   throw noRoute("the product API has no create route for " + String(plural) + ".");
@@ -2636,8 +2504,8 @@ async function enrich(ns, plural, name, object, options) {
       const body = await consoleOperation(
         ns, plural === "backups" ? "backup" : "restore", name, options,
       );
-      // ONE DECODE OF THE DOCUMENT THE ROUTE PUBLISHES (FX-48): the frozen
-      // sixteen and every member D3 added, by the view's own shape.
+      // ONE DECODE OF THE DOCUMENT THE ROUTE PUBLISHES: the frozen sixteen and
+      // every member D3 added, by the view's own shape.
       return mergeOperation(object, decodeOperation(body).value.item);
     } catch (unread) {
       if (isMissingExtra(unread)) {
@@ -2680,8 +2548,6 @@ function tooMany(ns, plural, read) {
   return error;
 }
 
-// --------------------------------------------------------------- the facade
-
 /** THE ONE OBJECT EVERY PAGE READS THROUGH. Frozen, with an identity that
  *  never changes, so a page holds it at module scope exactly as it held
  *  `{list, get, create}` before.
@@ -2712,11 +2578,10 @@ export function apiClient() {
       return dispatch((api) => api.listCluster(plural, options));
     },
 
-    // D1 W7 (PLAT-04.2, PLAT-05.1, PLAT-06.2): the draft cadence preview, the
-    // future-policy replace and "Back up now". They go through `dispatch` and
-    // not `dispatchChecks` because they are the SAME five kinds this facade
-    // has always served -- a schedule and a Backup -- rather than a domain of
-    // their own.
+    // The draft cadence preview, the future-policy replace and "Back up now".
+    // They go through `dispatch` and not `dispatchChecks` because they are the
+    // SAME kinds this facade has always served (a schedule and a Backup), not a
+    // domain of their own.
     previewCadence(query, options) {
       return dispatch((api) => api.previewCadence(query, options));
     },
@@ -2726,7 +2591,6 @@ export function apiClient() {
     runBackupNow(ns, body, key) {
       return dispatch((api) => api.runBackupNow(ns, body, key));
     },
-    // PLAT-19.2.
     approvalPolicy(ns, options) {
       return dispatch((api) => api.approvalPolicy(ns, options));
     },
@@ -2734,7 +2598,6 @@ export function apiClient() {
       return dispatch((api) => api.submitGovernedApproval(ns, restoreName, sidecarBytes,
         approvalBytes));
     },
-    // PROD-16.2.
     approvalRequest(ns, restoreName, options) {
       return dispatch((api) => api.approvalRequest(ns, restoreName, options));
     },
@@ -2742,8 +2605,7 @@ export function apiClient() {
       return dispatch((api) => api.approveInConsole(ns, restoreName, confirmationSha256));
     },
 
-    // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
-    // discovery and operation readiness.
+    // Saved destinations, bounded topic discovery and operation readiness.
     destinations(ns, options) {
       return dispatchChecks((api) => api.destinations(ns, options));
     },
@@ -2808,7 +2670,7 @@ function dispatch(call) {
 }
 
 // WHICH IMPLEMENTATION A DECIDED RECORD USES: the console's, or the refusals
-// a signed-out or unreachable page answers (MCP-4, review L1).
+// a signed-out or unreachable page answers.
 function implementation(record, consoleImpl, signedOutImpl) {
   return record.mode === CONSOLE ? consoleImpl : signedOutImpl;
 }

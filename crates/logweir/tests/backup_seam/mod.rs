@@ -100,7 +100,7 @@ impl Fixture {
         self.key.verifying_key()
     }
 
-    /// **PROD-04.1.** Rewrite the plan so `source.consumer_groups` names
+    /// Rewrite the plan so `source.consumer_groups` names
     /// `groups` (after `topics`).
     pub fn select_in_plan(&self, groups: &[&str]) {
         let text = std::fs::read_to_string(&self.args.spec).unwrap();
@@ -113,7 +113,7 @@ impl Fixture {
         std::fs::write(&self.args.spec, text).unwrap();
     }
 
-    /// **PROD-04.1.** One `backup run` through `reader`, with `cli_groups` as
+    /// One `backup run` through `reader`, with `cli_groups` as
     /// `--consumer-group`.
     pub fn execute_reading(
         &self,
@@ -168,7 +168,7 @@ impl Fixture {
     ) -> Result<BackupOutcome, BackupError> {
         // EMPTY: the engine double writes the manifest DURING the run, as the
         // real engine does. A run refuses an execution whose set directory
-        // already holds its manifest or a segment (FX-7, `phase_run::refuse_an_existing_set`),
+        // already holds its manifest or a segment (`phase_run::refuse_an_existing_set`),
         // so seeding it first would be refused before the engine.
         let archive = Store::in_memory(ARCHIVE_PREFIX);
         // Rebuilt rather than cloned: `BackupRunArgs` derives no `Clone`, and

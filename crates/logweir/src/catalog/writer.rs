@@ -32,7 +32,7 @@ pub struct RecordInputs {
     /// object at all.
     ///
     /// It is not the whole block: [`from_receipt`] merges the receipt's own
-    /// `triggered_by` on top (review finding F4), so a record carries the
+    /// `triggered_by` on top, so a record carries the
     /// provenance that was actually in hand and nothing else.
     pub execution: Option<RecordExecution>,
 }
@@ -67,7 +67,7 @@ pub fn from_receipt(
 /// [`from_receipt`]'s projection, WITHOUT the receipt's invariants: every
 /// field copied exactly as `from_receipt` copies it.
 ///
-/// **FX-33.** `backup run` measures, before the engine, the largest record
+/// `backup run` measures, before the engine, the largest record
 /// this run could sign (`crate::backup::document_budget`), from a receipt
 /// whose after-the-engine fields are each at their longest. That receipt is a
 /// SIZE, not a claim — it would not pass arm 26 — so it cannot go through
@@ -87,7 +87,7 @@ pub fn project(
         .records
         .iter()
         .map(|(name, records)| {
-            // PROD-05.1: the receipt's own model entry, copied — absent (NOT
+            // The receipt's own model entry, copied — absent (NOT
             // RECORDED) for a receipt that predates format 1.3.0. Arm 14 has
             // established the block names exactly the topics `records` does.
             let configuration = receipt
@@ -95,7 +95,7 @@ pub fn project(
                 .as_ref()
                 .and_then(|block| block.get(name))
                 .cloned();
-            // PROD-03.0: the receipt's own schema dependency entry, copied —
+            // The receipt's own schema dependency entry, copied —
             // absent (NOT ASSESSED) for a receipt that predates format 1.5.0.
             // Arm 23 has established the block names exactly the topics
             // `records` does.
@@ -111,7 +111,7 @@ pub fn project(
                 // `RecordTopic::partitions`.
                 partitions: configuration.as_ref().and_then(|c| c.partitions),
                 records: *records,
-                // FX-4: the receipt's own entry, copied — absent (UNKNOWN) for a
+                // The receipt's own entry, copied — absent (UNKNOWN) for a
                 // receipt that predates format 1.1.0. Arm 7 has established the
                 // block names exactly the topics `records` does.
                 config_coverage: receipt
@@ -121,7 +121,7 @@ pub fn project(
                     .cloned(),
                 configuration,
                 schema_dependency,
-                // PROD-01.4a: the receipt's own topic IDs, copied — absent
+                // The receipt's own topic IDs, copied — absent
                 // (UNKNOWN) for a receipt that predates format 1.6.0. Arm 37
                 // has established the block names exactly the topics
                 // `records` does.
@@ -133,23 +133,14 @@ pub fn project(
             }
         })
         .collect();
-    // The record's minor says what it carries: PROD-04.1's
-    // `FORMAT_VERSION_WITH_CONSUMER_POSITIONS` (1.7.0) when the receipt's
-    // consumer position summary travels (below), else PROD-01.4a's
-    // `FORMAT_VERSION_WITH_GENERATIONS` (1.6.0) when the receipt's topic IDs
-    // travel into the topics — every receipt this build signs — else
-    // PROD-03.0's `FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY` (1.5.0) when the
-    // receipt's schema dependency travels into the topics, else PROD-01.3's
-    // `FORMAT_VERSION_WITH_AUTH_MODES` (1.4.0) when it copies a receipt whose
-    // `source.auth.mode` is one of the modes PROD-01.3 added — its
-    // `source.auth_mode` carries a value the older schemas do not list, and
-    // 1.4.0 defines every earlier minor's fields — else PROD-05.1's
-    // `FORMAT_VERSION_WITH_TOPIC_CONFIGURATION` (1.3.0) when the receipt's
-    // configuration model travels into the topics — every receipt this build
-    // signs — else FX-7's `FORMAT_VERSION_WITH_MANIFEST_VERSION` (1.2.0) when
-    // the pin does, else FX-4's `FORMAT_VERSION` (1.1.0).
+    // The record's minor says what it carries: 1.7.0 when the receipt's
+    // consumer position summary travels (below), else 1.6.0 when its topic IDs
+    // travel (every receipt this build signs), else 1.5.0 when its schema
+    // dependency does, else 1.4.0 when it copies a `source.auth.mode` 1.4.0
+    // added (a value the older schemas do not list), else 1.3.0 when its
+    // configuration model travels, else 1.2.0 when the pin does, else 1.1.0.
     let manifest_version_id = receipt.archive.manifest_version_id.clone();
-    // PROD-04.1: the receipt's consumer position evidence, summarised and
+    // The receipt's consumer position evidence, summarised and
     // bound by its digest; the version that defines it when it travels.
     let consumer_positions = receipt
         .consumer_positions
@@ -161,7 +152,7 @@ pub fn project(
     } else if receipt.generations.is_some() {
         crate::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
     } else if receipt.schema_dependency.is_some() {
-        // PROD-03.0: the record's topics carry the receipt's schema
+        // The record's topics carry the receipt's schema
         // dependency, which 1.5.0 defines (with every earlier minor's fields
         // and values).
         crate::catalog::record::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY
@@ -202,7 +193,7 @@ pub fn project(
             finished_at: receipt.finished_at,
         },
         topics,
-        // PROD-05.1: where the run looked for owners, copied — absent (NOT
+        // Where the run looked for owners, copied — absent (NOT
         // RECORDED) for a receipt that predates format 1.3.0.
         owner_detection: receipt.owner_detection.clone(),
         source: RecordSource {
@@ -218,7 +209,7 @@ pub fn project(
 }
 
 /// The `execution` block, from what the caller knows PLUS what the receipt
-/// already carries — and nothing else (review finding F4).
+/// already carries — and nothing else.
 ///
 /// `BackupReceipt::triggered_by` is always present in the document (it is the
 /// empty string when the operator passed no `--triggered-by`), so a record that
@@ -375,16 +366,9 @@ fn create_only(store: &Store, key: &str, bytes: &[u8]) -> Result<PutState, PutEr
     }
 }
 
-/// **Why [`put_point`] returns a typed error and not a `String` (review
-/// finding F1).**
-///
-/// Global Constraint 11's exit 4 means "signing or lock-proof failed — **and
-/// nothing was uploaded**". A `String` error made every caller map a denied
-/// PUT, a 503 or a timeout onto that code, which is false twice over: it sends
-/// an operator to rotate signing material over a bucket policy, and it asserts
-/// "nothing was uploaded" in the one case — `record.json` stored, `record.sig`
-/// refused — where something was. The distinction is knowable exactly here, so
-/// it is made exactly here.
+/// Why [`put_point`] returns a typed error: exit 4 means "signing or
+/// lock-proof failed, and nothing was uploaded", and only here is it knowable
+/// whether that holds (`record.json` may be stored and `record.sig` refused).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PutError {
     /// The document contradicts itself and was NOT signed. Nothing was

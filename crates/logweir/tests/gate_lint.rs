@@ -141,8 +141,7 @@ fn ci_uses_the_complete_compose_setup() {
     }
 }
 
-/// **I32 is verified here, never rewritten** (Task 1's to close; Task 32 only
-/// certifies that it is closed).
+/// **I32 is verified here, never rewritten.**
 #[test]
 fn gate_lint_the_engine_allowlists_are_two_constants() {
     let src = read("scripts/check-no-oso.sh");
@@ -374,11 +373,10 @@ fn one_signer_refuses_a_classification_without_a_reason() {
 /// **The parity gate names the pinned toolchain before it builds.**
 ///
 /// A source-reading test: the `RUSTUP_TOOLCHAIN` export precedes the build line,
-/// and the build line is `cargo build --release -p logweir`. The execution half
-/// is recorded once in the task report rather than run here — a release build
-/// exceeds Global Constraint 22's 15 s per-test bound, and
-/// `crates/logweir-core/tests/fixture_regen.rs` stays the only test in the
-/// workspace that spawns a nested cargo.
+/// and the build line is `cargo build --release -p logweir`. The execution
+/// half is not run here: a release build exceeds Global Constraint 22's 15 s
+/// per-test bound, and `crates/logweir-core/tests/fixture_regen.rs` stays the
+/// only test in the workspace that spawns a nested cargo.
 #[test]
 fn parity_gate_names_the_pinned_toolchain_before_building() {
     let src = read("scripts/check-verifier-parity.sh");
@@ -425,7 +423,7 @@ fn parity_gate_names_the_pinned_toolchain_before_building() {
 /// not see it, so the agreement fails), and one where a harmless extra token
 /// appears in a comment while all six real entries remain (it passes).
 ///
-/// The first fixture is the mutant the old substring search survived.
+/// The first fixture is the mutant a substring search survives.
 #[test]
 fn the_ureq_token_lists_agree_under_a_comment() {
     let audit = read("crates/logweir/tests/no_network_in_unit_tests.rs");
@@ -538,13 +536,11 @@ impl SuiteFixture {
     /// A stub `nc` that answers "closed" for every port.
     ///
     /// The harness refuses to time the suite while the broker port or the MinIO
-    /// port answers on the loopback address (M10), and it asks `nc` — the real one, first on the host's
-    /// `PATH`. These fixtures exercise the harness's RED PATHS, not the host:
-    /// run under `just e2e` or `ci.yml`'s `e2e` job, where the compose stack is
-    /// up by design, the real `nc` made all three red-path fixtures fail on the
-    /// refusal instead (the fourth CI run, 2026-09-12). With the stub the
-    /// fixtures are stack-agnostic; the refusal stays real for every real run,
-    /// because a real run has no fixture `bin/` on its `PATH`.
+    /// port answers on the loopback address, and it asks the real `nc` first on
+    /// the host's `PATH`, so under `just e2e` or CI's `e2e` job (stack up by
+    /// design) the red-path fixtures would fail on the refusal instead. With the
+    /// stub they are stack-agnostic; a real run has no fixture `bin/` on its
+    /// `PATH`, so its refusal stays real.
     fn stub_nc(&self) {
         self.stub("nc", "#!/bin/sh\nexit 1\n");
     }
@@ -571,13 +567,12 @@ impl SuiteFixture {
 
     /// A stub `mktemp` that honours `$TMPDIR` even with no template.
     ///
-    /// **Without this the log-leak check below is vacuous**, and that was
-    /// measured rather than assumed: BSD `mktemp` (this is macOS) ignores
+    /// **Without this the log-leak check below is vacuous**: BSD `mktemp`
+    /// (this is macOS) ignores
     /// `$TMPDIR` unless it is given a template or `-t`, and puts a bare
     /// `mktemp`'s file in `confstr(_CS_DARWIN_USER_TEMP_DIR)` instead — so a
     /// before/after listing of the fixture's own `$TMPDIR` stayed empty whether
-    /// the harness removed its log or leaked it. A check that cannot fail is
-    /// this build's signature defect; the stub is how this one can.
+    /// the harness removed its log or leaked it.
     fn stub_mktemp(&self) {
         let witness = self.path.join("mktemp-witness");
         self.stub(

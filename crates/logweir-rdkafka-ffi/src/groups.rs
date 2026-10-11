@@ -1,8 +1,7 @@
 //! Consumer-group calls: the typed listing (`rd_kafka_ListConsumerGroups`),
 //! the name listing of every group type (`rd_kafka_list_groups`), and the
 //! description (`rd_kafka_DescribeConsumerGroups`). Values only: what a state,
-//! a type or a code MEANS is `logweir_kafka::groups`' decision (PROD-04.0 §5,
-//! §6 T2–T4, T6, T14).
+//! a type or a code MEANS is `logweir_kafka::groups`' decision.
 use crate::raw::{self, array, raw_error, run, text, Event};
 use crate::{code, sys, CText, CallError, RawError};
 use rdkafka::bindings as rd;
@@ -139,7 +138,7 @@ pub struct NamedGroup {
     /// The group id.
     pub group_id: CText,
     /// The per-group DescribeGroups error code (`0` for none), read as an
-    /// integer (T12). rust-rdkafka's `GroupInfo` does not expose it (C2).
+    /// integer (T12). rust-rdkafka's `GroupInfo` does not expose it.
     pub error: i32,
     /// The classic describe's state text. A non-classic group, and an absent
     /// one, read `Dead` here (K2, T2): never read it for an unclassified group.
@@ -176,15 +175,15 @@ impl Drop for GroupList {
 
 /// **The name listing of every group type** (`rd_kafka_list_groups`, the call
 /// rust-rdkafka's `fetch_group_list` wraps, made here so no `GroupInfo` is
-/// ever built: T1, C2, and its `expect` on non-UTF-8 text).
+/// ever built, with its `expect` on non-UTF-8 text).
 ///
 /// librdkafka's own merging of broker answers keeps the LAST broker's error
 /// (`state->err = err` at the end of both callbacks, `rdkafka.c:5028` and
 /// `:5119`): on a cluster of several brokers, a broker that failed can be
 /// followed by one that answered, and the listing then reads as complete
-/// without that broker's groups (trap T19, PROD-04.0b). The caller must not
-/// treat this listing alone as complete; `logweir_kafka::groups` cross-checks
-/// it against the typed listing.
+/// without that broker's groups. The caller must not treat this listing
+/// alone as complete; `logweir_kafka::groups` cross-checks it against the
+/// typed listing.
 ///
 /// # Errors
 ///

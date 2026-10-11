@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 /// Kafka's topic-name length limit, in characters. `kafka.common.Topic`'s own
 /// `MAX_NAME_LENGTH`; the broker refuses a longer name at `CreateTopics`, and
-/// `phase0_admit::run` refuses it before anything runs (review F2).
+/// `phase0_admit::run` refuses it before anything runs.
 const MAX_TOPIC_NAME_CHARS: usize = 249;
 
 #[derive(Debug)]
@@ -27,20 +27,17 @@ pub struct Admitted {
     /// `target.topic_mapping_prefix` in `scratch` mode and the `newTopic`
     /// naming rule in `newTopic` mode.
     ///
-    /// Carried out rather than re-derived by whoever needs to name it, for the
-    /// same reason `phase8_score::Signed::key` is: the signed scorecard's
-    /// `target.topic_mapping_prefix` is supposed to say what this run mapped
-    /// through, and re-reading `spec.target.topic_mapping_prefix` at the
-    /// scorecard end would report the SCRATCH prefix over a `newTopic` run —
-    /// a false claim in the one field an auditor uses to re-derive the
-    /// mapping.
+    /// Carried out rather than re-derived, like `phase8_score::Signed::key`:
+    /// re-reading `spec.target.topic_mapping_prefix` would report the scratch
+    /// prefix over a `newTopic` run, in the field an auditor uses to
+    /// re-derive the mapping.
     pub topic_mapping_prefix: String,
     /// **Guard G-TS.** What phase 0 read off the broker, and the config set it
     /// will apply to every target topic. `topics_created` is filled in by
     /// `create_target_topics` — see that function for why the creation itself
     /// cannot happen inside this phase.
     pub topic_preflight: TopicPreflight,
-    /// **PROD-15.1.** What phase 0 PROVED for a restore under the original
+    /// What phase 0 PROVED for a restore under the original
     /// topic names before admitting it — the cluster condition and the owner
     /// verdict — and `None` for every other restore. The signed scorecard's
     /// `target.original_name` is built from it after phase 1 has verified the
@@ -48,7 +45,7 @@ pub struct Admitted {
     pub original_name: Option<OriginalNameAdmission>,
 }
 
-/// **PROD-15.1.** What only the runner holds about an original-name restore's
+/// What only the runner holds about an original-name restore's
 /// source and owners, beyond the plan and the allowlist file. Every field is
 /// optional and absent means "not known" — never "no source", never "no
 /// owner".
@@ -57,7 +54,7 @@ pub struct OriginalNameInputs {
     /// The bound recovery point's VERIFIED receipt's `source.cluster_id`,
     /// read from the broker at backup time (`binding::VerifiedPoint`).
     pub receipt_source_cluster_id: Option<String>,
-    /// The same receipt's recorded owners (PROD-05.1): its `owner_detection`
+    /// The same receipt's recorded owners: its `owner_detection`
     /// and each source topic's owner.
     pub receipt_owners: Option<ReceiptOwners>,
     /// The Strimzi owners of the restored names in the `KafkaTopic` resources
@@ -66,12 +63,12 @@ pub struct OriginalNameInputs {
     pub kafka_topic_owners: Option<BTreeMap<String, logweir_core::backup_receipt::TopicOwner>>,
     /// `sha256:<hex>` of that resources file's bytes, signed into
     /// `target.original_name` so the document names the file it looked in
-    /// (review L2: the file is unsigned runner input). `Some` exactly when
+    /// (the file is unsigned runner input). `Some` exactly when
     /// `kafka_topic_owners` is.
     pub kafka_topic_resources_sha256: Option<String>,
 }
 
-/// **PROD-15.1.** The conditions phase 0 proved for an original-name restore.
+/// The conditions phase 0 proved for an original-name restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginalNameAdmission {
     /// How the target relates to the source cluster.
@@ -85,21 +82,16 @@ pub struct OriginalNameAdmission {
 /// What phase 0 found out about the target topics before anything was written,
 /// and what Logweir set on them.
 ///
-/// **This is NOT a scorecard field** (Global Constraint 12 as amended): the
-/// scorecard is frozen at 21 top-level properties and 17 required ones, and a
-/// new top-level block would break `the_scorecard_top_level_shape_is_unchanged`
-/// and re-open GC12 in a direction the plan's preamble forbids. It is returned
-/// by phase 0 in `crate::drill::RestoreOutcome` and written to
-/// `Restore.status.topicPreflight` (spec §10 G-TS) by the operator.
+/// Not a scorecard field (Global Constraint 12 permits no new top-level
+/// property): it is returned in `crate::drill::RestoreOutcome` and written to
+/// `Restore.status.topicPreflight` by the operator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicPreflight {
     /// The broker's `log.message.timestamp.type`, AS IT REPORTED IT.
     ///
-    /// `None` when the broker's configuration answer does not carry the key
-    /// (PROD-01.2; measured on Redpanda v26.2.4, whose broker resource
-    /// answers nine keys and not this one): NOT RECORDED, and never the
-    /// Apache default written down as though it had been read. Until
-    /// PROD-01.2 an absent key was published as `CreateTime`.
+    /// `None` when the broker's answer does not carry the key (Redpanda
+    /// v26.2.4's broker resource answers nine keys, not this one): not
+    /// recorded, never the Apache default written down as though read.
     pub timestamp_type: Option<String>,
     /// The broker's `log.retention.ms`, as reported — a STRING, not an `i64`,
     /// because that is what DescribeConfigs returns and because a value this
@@ -124,30 +116,13 @@ pub struct TopicPreflight {
     pub topics_created: Vec<String>,
 }
 
-/// The stdout key the runner prints guard **G-TS**'s observation on —
-/// **interface I8's fourth key line**, and the producer half of plan erratum
-/// **E10(c)**.
+/// The stdout key the runner prints guard G-TS's observation on, interface
+/// I8's fourth key line: the controller reads only the pod log and the
+/// signed scorecard, and this observation is not a scorecard field.
 ///
-/// # Why a line at all, and why one
-///
-/// `Restore.status.topicPreflight` was declared at slot 5 and had **no
-/// producer**: the observation is returned by phase 0 inside the runner and is
-/// deliberately not a scorecard field (Global Constraint 12 as amended), so
-/// nothing carried it out of the pod and the operator rendered a declared
-/// absence. Closing the gap needs exactly one thing on this side — a machine-
-/// readable stdout line — because the controller reads the pod's log and the
-/// signed scorecard and nothing else.
-///
-/// ONE LINE, NOT THREE. A pod log is stdout and stderr merged in
-/// nondeterministic order, so every controller-side reader in this plan scans
-/// a BOUNDED TAIL (`weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`, 16
-/// lines since D3 W2 raised it from 8) and matches by key name (plan erratum
-/// **E4**). Three separate `topic-preflight-*=` lines would spend three of
-/// those on one fact and crowd out interface I8's own three keys on a run that
-/// also wrote an offset report — which is what the argument was when the
-/// window was eight and seven of them were already spoken for. One line
-/// carrying a JSON object costs one, and the reasoning does not depend on the
-/// window's size.
+/// One line, not three: controller-side readers scan a bounded tail of the
+/// merged pod log (`weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`)
+/// by key name, so one JSON object costs one line of it.
 pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 
 impl TopicPreflight {
@@ -174,8 +149,8 @@ impl TopicPreflight {
     /// `topicPreflight` field on the CRD: the configs are a compile-time
     /// constant (`TARGET_TOPIC_CONFIGS`) an operator can read in the source,
     /// and the created topics reach the status through
-    /// `Restore.status.newTopics`, which Task 20 derives from the APPROVED
-    /// plan bytes rather than from anything the runner says about itself.
+    /// `Restore.status.newTopics`, which the controller derives from the
+    /// approved plan bytes rather than from anything the runner says.
     #[must_use]
     pub fn status_line_value(&self) -> String {
         let mut o = serde_json::Map::new();
@@ -258,7 +233,7 @@ pub fn run(
 }
 
 /// [`run`], with what the runner holds about an original-name restore's
-/// source and owners (PROD-15.1). [`run`] is this with nothing known, which
+/// source and owners. [`run`] is this with nothing known, which
 /// is what every caller that is not the drill's own context passes — and for
 /// an original-name plan "nothing known" refuses (`OriginalNameOwnerNotChecked`
 /// unless the plan states its owners; the cluster condition then needs
@@ -294,30 +269,29 @@ pub fn run_with_original_name(
     // backstop for every path that reaches phase 0 another way.
     logweir_core::guard::reject_withdrawn_notifications(&spec.notifications)?;
 
-    // **C15** (PROD-00.3f), purely local: an `http://` archive endpoint with
-    // `allow_http: false` is refused here, exit 3, before anything runs. The
-    // pinned engine would otherwise derive plaintext from the scheme; the
-    // renderer's own refusal is the phase-5 backstop (exit 1).
+    // Purely local: an `http://` archive endpoint with `allow_http: false` is
+    // refused here, exit 3, before anything runs. The pinned engine would
+    // otherwise derive plaintext from the scheme; the renderer's own refusal
+    // is the phase-5 backstop (exit 1).
     logweir_core::guard::reject_plaintext_endpoint_without_allow_http(
         "source.storage",
         &spec.source.storage,
     )?;
-    // **FX-20 fix round (review F1)**, purely local: a region that is not a
-    // region name, on the source archive or the evidence store.
+    // Purely local: a region that is not a region name, on the source archive
+    // or the evidence store.
     logweir_core::guard::reject_invalid_storage_region("source.storage", &spec.source.storage)?;
     logweir_core::guard::reject_invalid_storage_region("evidence", &spec.evidence)?;
 
-    // **PROD-01.3**, purely local: SASL/PLAIN (and mTLS) without TLS on the
+    // Purely local: SASL/PLAIN (and mTLS) without TLS on the
     // target is refused, exit 3, `refusal-reason=PlainWithoutTls` for PLAIN.
     // `execute` already refused it before the client was built; this is the
     // same rule for every caller that reaches phase 0 another way.
     logweir_core::guard::reject_auth_without_required_tls("target.auth", &spec.target.auth)?;
 
-    // **PROD-15.1, condition 1**, purely local: an `original_name` block is
-    // legal only in `newTopic` mode and only beside `prefix: ""` — the identity
-    // ban stays in scratch mode, and a plan that names two names is refused.
-    // An empty prefix WITHOUT the block is the mapping guard's below, which
-    // refuses it exactly as before.
+    // Original-name condition 1, purely local: an `original_name` block is
+    // legal only in `newTopic` mode and only beside `prefix: ""` (the identity
+    // ban stays in scratch mode), and a plan that names two names is refused.
+    // An empty prefix without the block is the mapping guard's, below.
     if let Some(refusal) = original_name::refuse_shape(spec) {
         return Err(GuardRefusal(refusal).into());
     }
@@ -342,12 +316,12 @@ pub fn run_with_original_name(
         .collect();
     // `check_topic_mapping` returns `Result<(), GuardRefusal>`; `?` converts
     // it into `DrillError::Guard` via the `#[from]` impl. The identity mapping
-    // is allowed ONLY for a plan whose shape opted in above (PROD-15.1), and
-    // there it is required for every topic; the conditions it needs are proved
-    // below, before anything is written.
+    // is allowed only for a plan whose shape opted in above, and there it is
+    // required for every topic; the conditions it needs are proved below,
+    // before anything is written.
     check_topic_mapping(&spec.source.topics, &topic_mapping, is_original_name)?;
 
-    // **PROD-11.1, the SHAPE of the replay selection**, purely local: a
+    // The shape of the replay selection, purely local: a
     // partition subset for a topic the plan does not select, an empty subset,
     // a repeated or negative partition, and a window start at or after the
     // window's end are refused here, exit 3, before any broker or bucket is
@@ -359,37 +333,16 @@ pub fn run_with_original_name(
     logweir_core::replay_selection::ReplaySelection::from_spec(spec)
         .map_err(|refusal| GuardRefusal(refusal.to_string()))?;
 
-    // **G-GLOB and G-EXP, at phase 0.** Both are also enforced by
-    // `render_restore::render`, and that is NOT where a plan gets refused.
-    //
-    // This arm is Task 2's review finding F2. Before it, a wildcard such as
-    // `orders*` in `source.topics` was ADMITTED here and refused only in
-    // `preflight` — at phase 5, as `EngineError::Operational`, which is exit
-    // **1** with no `refusal-reason=` line. Ruling R-E is right that a
-    // renderer refusal reached at phase 5 is exit 1 ("by phase 6 phases 0-5
-    // have run", `logweir-engine-oso/src/engine.rs:243-250`), and that ruling
-    // is not reopened here. The defect was the missing arm, not the mapping:
-    // Global Constraint 11 reserves exit 3 for a plan refused BEFORE anything
-    // runs, and a glob in a spec is exactly that — an adopter-written string
-    // this drill will never accept, knowable with no broker, no bucket and no
-    // engine. So it is refused here, where the exit code is 3 and the
-    // `refusal-reason=GuardRefused` line is emitted, and phase 5 keeps its
-    // fail-closed backstop for a value that reached a renderer by some other
-    // route.
-    //
-    // BOTH SIDES, exactly as the renderer checks both: the keys become
-    // `target.topics.include` entries and the values become
-    // `restore.topic_mapping` targets, which the engine also treats as topic
-    // selectors. Checking only the keys would leave the half an operator is
-    // more likely to template — and the values are the half that carries
-    // `target.topic_mapping_prefix`, so a prefix of `drill-*` is refused here
-    // and nowhere else in phase 0.
-    //
-    // **G-EXP is checked BEFORE G-GLOB**, in the same order and for the same
-    // reason as the renderers (`logweir_engine_oso::yaml::reject_dollar_brace`):
-    // `${` contains `{` and `}`, two of `GLOB_METACHARACTERS`, so a
-    // glob-first order reports `orders${X}` as a pattern and sends the
-    // operator to escape a brace instead of to stop an expansion.
+    // G-GLOB and G-EXP at phase 0, where a refusal is exit 3 with a
+    // `refusal-reason=` line; the renderer's own refusal is a phase-5, exit-1
+    // backstop. A glob or `${` in a spec is knowable with no broker, bucket or
+    // engine. Both sides are checked, as the renderer does: the keys become
+    // `target.topics.include` entries and the values `restore.topic_mapping`
+    // targets (and carry `target.topic_mapping_prefix`, so a `drill-*` prefix
+    // is refused here). G-EXP goes first, as in
+    // `logweir_engine_oso::yaml::reject_dollar_brace`: `${` contains two
+    // `GLOB_METACHARACTERS`, and a glob-first order would send the operator to
+    // escape a brace instead of to stop an expansion.
     let sources: Vec<String> = topic_mapping.keys().cloned().collect();
     let targets: Vec<String> = topic_mapping.values().cloned().collect();
     for (side, entries) in [("source topic", &sources), ("mapped target", &targets)] {
@@ -431,39 +384,14 @@ pub fn run_with_original_name(
         }
     }
 
-    // **The mapped target names are LEGAL KAFKA TOPIC NAMES**, checked here
-    // and not at the broker (fix round 1, review F2).
-    //
-    // Kafka's rule is three clauses: at most 249 characters, drawn from
-    // `[a-zA-Z0-9._-]`, and never `.` or `..` (those two collide with the
-    // directory entries a log segment lives in). A name that broke any of
-    // them used to reach `create_target_topics` and come back as a broker
-    // error — `EngineError::Operational`, exit **1**, no artifact — from
-    // `drill/mod.rs`, i.e. AFTER phase 5's `engine.preflight` had already
-    // written into the workdir. Global Constraint 11 reserves exit 3 for a
-    // plan refused BEFORE anything runs, and a target name's SHAPE is
-    // knowable with no broker, no bucket and no engine, exactly like the
-    // glob rail above.
-    //
-    // **The TARGET side only**, and the asymmetry is deliberate: a source
-    // topic name was read out of an archive a Kafka broker had already
-    // accepted, so it is legal by construction; the mapped name is the one
-    // THIS build synthesises, out of `target_topic_prefix` — either
-    // `topic_mapping_prefix` or an adopter-written `topic_naming.prefix`,
-    // and `examples/restore.yaml` itself suggests writing one by hand
-    // (`incident-4471-`). The exposure is therefore WIDENED by `newTopic`
-    // mode and not created by it: `target.topic_mapping_prefix` has always
-    // been able to do this.
-    //
-    // AFTER the glob and `${` arms, so a `drill-*` prefix is still reported
-    // as a pattern rather than as an illegal character — every glob
-    // metacharacter is also outside the legal charset, and the specific
-    // message is the useful one.
-    //
-    // Length is counted in CHARACTERS, not bytes: a non-ASCII name is
-    // refused by the charset clause anyway, so the two agree on everything
-    // this arm accepts, and `chars().count()` is the number the message
-    // quotes.
+    // The mapped target names are legal Kafka topic names: at most 249
+    // characters, from `[a-zA-Z0-9._-]`, never `.` or `..`. Checked here,
+    // exit 3, not at the broker, where it would be exit 1 after phase 5 wrote
+    // into the workdir. Only the target side: a source name was accepted by a
+    // broker already, while the target name is synthesised from an
+    // adopter-written prefix. After the glob and `${` arms, so a `drill-*`
+    // prefix is reported as a pattern. Length is counted in characters, the
+    // number the message quotes.
     for name in &targets {
         let why = if name.is_empty() {
             Some("is empty".to_string())
@@ -493,19 +421,12 @@ pub fn run_with_original_name(
         }
     }
 
-    // v0.1 implements `head` and refuses the other two, HERE, before anything
-    // runs. `logweir_core::spec::Anchor`'s doc comment carries the full
-    // reasoning and the measurement; the short version is that phase 4 honours
-    // the anchor when choosing which ARCHIVE records to fingerprint while
-    // `phase7_verify::verdict_for_selection` reads the TARGET's first
-    // `records_per_partition` records, so `tail` and `random` reconcile two
-    // different sets of records and report a healthy backup as broken.
-    //
-    // A REFUSAL, not a downgrade to `head`: silently running a different
-    // sample than the approved plan named is the same class of dishonesty as
-    // silently restoring a different backup set (`pick_backup_set` refuses
-    // that too), and the scorecard would then record an anchor the drill did
-    // not apply.
+    // v0.1 implements `head` and refuses the other two here: phase 4 honours
+    // the anchor when choosing archive records while phase 7 reads the
+    // target's first `records_per_partition`, so `tail` and `random` would
+    // reconcile different records (`logweir_core::spec::Anchor`'s doc). A
+    // refusal, not a downgrade: running a different sample than the approved
+    // plan named would sign an anchor the drill did not apply.
     if spec.sample.anchor != Anchor::Head {
         return Err(GuardRefusal(format!(
             "sample.anchor `{}` is not supported in v0.1; only `head` is. Phase 7 reconciles \
@@ -519,12 +440,12 @@ pub fn run_with_original_name(
         .into());
     }
 
-    // PROD-08.1: `sample.coverage`. Three plans ask for two things at once,
+    // `sample.coverage`. Three plans ask for two things at once,
     // and each is refused HERE, before anything runs, rather than run as one
     // of them: a verification the approved plan did not describe would be
     // signed as if it had.
     // - `complete` with `max_partitions`: the latter keeps N partitions (one
-    //   of every topic first, FX-23), the sampling complete coverage exists to
+    //   of every topic first), the sampling complete coverage exists to
     //   remove.
     // - `complete_max_records` with `sampled`: a bound on a verification the
     //   plan did not ask for.
@@ -635,14 +556,9 @@ pub fn run_with_original_name(
                     .into());
                 }
                 None => {
-                    // PROD-01.2: ABSENT FROM THE LISTING IS TWO THINGS. Kafka
-                    // lists only the topics a principal may Describe, so a
-                    // marker that exists and is not describable is missing
-                    // from it exactly as one that was never created is.
-                    // Measured on the `acl` profile: with Describe on the
-                    // marker removed this said only "does not exist … Create
-                    // it", which sends an operator to create a topic that is
-                    // already there. The refusal stands either way.
+                    // Absent from the listing is two things: Kafka lists only
+                    // the topics a principal may Describe, so the message names
+                    // both causes. The refusal stands either way.
                     return Err(GuardRefusal(format!(
                         "marker topic `{}` does not exist on cluster {target_cluster_id}, or \
                          this principal may not Describe it (a topic a principal cannot \
@@ -666,45 +582,15 @@ pub fn run_with_original_name(
         TargetMode::NewTopic => {}
     }
 
-    // **Spec §6.1: "A `Restore` refuses if any mapped target topic already
-    // exists."** Twice stated there — once as the reason `broker_configs` and
-    // not `topic_configs` is the preflight's instrument ("the mapped target
-    // topics do not exist at phase 0 (a `Restore` refuses if any of them
-    // does)"), once as the rule itself under **New-topic naming**, with the
-    // measurement: appending into a half-populated topic is the false-pass
-    // class measured at `e2e-seed.sh:81-91`, where a second run left the
-    // manifest describing 2048 records while the broker held 6000.
-    //
-    // **A refusal, not a reuse.** Reusing the topic was the behaviour this
-    // task shipped first, and it made `TopicPreflight.configs_set` a false
-    // claim: the pinned pair is reported "as applied" while a reused topic
-    // keeps whatever `retention.ms` and `message.timestamp.type` it had —
-    // `Restore.status.topicPreflight` would then say `retention.ms=-1` over a
-    // target on `604800000`, exactly the silent-failure class G-TS exists to
-    // prevent. There is no way to make the claim true after the fact either:
-    // `TopicCreator` creates, it does not alter, and `alter_configs` is
-    // surface `logweir-kafka` deliberately does not have.
-    //
-    // **HERE, and not at the creation step**, because this is where exit 3
-    // still means what Global Constraint 11 says it means: refused before
-    // anything ran, before phase 1 consumes the approval, before the archive
-    // is opened, with nothing created and no client write of any kind. The
-    // topic list is the one `list_topics()` read above — no extra round trip,
-    // and the same metadata the marker check just used.
-    //
-    // The refusal message does NOT open with a terminal state, so
-    // `logweir_core::guard::terminal_state` classifies it as the general
-    // `GuardRefused` and the runner's last stdout line reads
-    // `refusal-reason=GuardRefused`. `TargetTopicConfigRefused` is this task's
-    // state for a target CONFIGURATION this build refuses (the two arms in
-    // `target_topic_preflight`); a target that merely exists is not a
-    // configuration finding, spec §3.2 names no state of its own for it, and
-    // widening the declared state to cover it would make the terminal state a
-    // worse signal for the operator, not a better one.
-    // **ONE refusal path, in BOTH modes.** Task 9b converges the message on
-    // spec §6.1's own sentence and adds nothing beside it: a second
-    // `newTopic`-only existence check would be a second place for the two to
-    // drift, and the rule is identical in both modes because the reason is.
+    // Spec §6.1: a `Restore` refuses if any mapped target topic already
+    // exists. Appending into a half-populated topic is a measured false-pass
+    // class (`e2e-seed.sh:81-91`), and a reused topic would make
+    // `TopicPreflight.configs_set` a false claim, since `TopicCreator` cannot
+    // alter its configs. Here, where exit 3 still means refused before
+    // anything ran (no approval consumed, no archive opened, nothing written),
+    // from the `list_topics()` read above. The message opens with no terminal
+    // state, so the run reads `refusal-reason=GuardRefused`: a target that
+    // exists is not a configuration finding. One refusal path in both modes.
     let already_present: Vec<&String> = topic_mapping
         .values()
         .filter(|t| topics.iter().any(|m| &m.name == *t))
@@ -732,7 +618,7 @@ pub fn run_with_original_name(
         .into());
     }
 
-    // **PROD-15.1, conditions 3 and 4**, after the absence refusal above
+    // Original-name conditions 3 and 4, after the absence refusal above
     // (condition 2, the same refusal every restore gets) and BEFORE G-TS,
     // whose `LogAppendTime` arm is the one write phase 0 makes. Every refusal
     // here is exit 3 with nothing written.
@@ -793,13 +679,13 @@ pub fn run_with_original_name(
     })
 }
 
-/// **PROD-15.1, conditions 3 and 4**, for a plan that passed condition 1 and
+/// Original-name conditions 3 and 4, for a plan that passed condition 1 and
 /// whose every restored name phase 0 has just proved absent.
 ///
 /// 3. The target is not the source cluster — every known source cluster id
 ///    (the verified receipt's, then the allowlist file's) differs from it — or
 ///    every broker reports `auto.create.topics.enable=false`. A broker that
-///    cannot be read is exit 1 (a `KafkaError`, FX-4's rule for a refused
+///    cannot be read is exit 1 (a `KafkaError`, as for any refused
 ///    read); one that answers without the key, or with anything but `false`,
 ///    is a refusal (exit 3).
 /// 4. Somewhere was looked for a declarative owner of the restored names, and
@@ -810,7 +696,7 @@ fn original_name_conditions(
     target_cluster_id: &str,
     original: &OriginalNameInputs,
 ) -> Result<OriginalNameAdmission, DrillError> {
-    // ONLY THE VERIFIED RECEIPT'S MEASURED ID (review L3). The allowlist
+    // Only the verified receipt's measured id. The allowlist
     // file's `source_cluster_id` is unsigned runner input outside the plan
     // hash: counting it would let a wrong value make the target "not the
     // source" and skip the auto-creation read. Without a bound point the
@@ -856,11 +742,8 @@ fn original_name_conditions(
 /// 3. `message.timestamp.type = LogAppendTime` — overwrites every restored
 ///    timestamp with the restore's wall clock, voiding any timestamp lookup.
 ///
-/// The obvious instrument is the WRONG one. `ClusterReader::topic_configs`
-/// describes a topic that does not exist until Logweir creates it — the mapped
-/// target topics are absent at phase 0 by construction — so a fixture-driven
-/// test over it would guard nothing. That is why spec §10 marks G-TS
-/// `[EDIT-DERIVED]`, and why this reads `broker_configs` instead.
+/// `ClusterReader::topic_configs` cannot answer this: the mapped target
+/// topics do not exist at phase 0, so this reads `broker_configs`.
 ///
 /// # A `KafkaError` here is exit 1, not exit 3
 ///
@@ -895,13 +778,10 @@ fn target_topic_preflight(
 ) -> Result<TopicPreflight, DrillError> {
     // 1 — read the BROKER's defaults.
     let broker = reader.broker_configs()?;
-    // AS REPORTED, OR NOT RECORDED (PROD-01.2). An absent key is not a
-    // positive observation of a hostile setting, so it refuses nothing: the
-    // per-topic `message.timestamp.type = CreateTime` this task pins on every
-    // created topic is what decides the topic's behaviour. But it is not an
-    // observation of `CreateTime` either, and until PROD-01.2 it was written
-    // down as one (`Restore.status.topicPreflight.timestampType: CreateTime`
-    // for a broker that never said so).
+    // As reported, or not recorded. An absent key refuses nothing (the
+    // per-topic `CreateTime` pinned on every created topic decides its
+    // behaviour), and is not recorded as an observation of `CreateTime`
+    // either.
     let timestamp_type = broker.get(BROKER_TIMESTAMP_TYPE).cloned();
     if timestamp_type.is_none() {
         tracing::warn!(
@@ -913,7 +793,7 @@ fn target_topic_preflight(
              its broker reports {LOG_APPEND_TIME}"
         );
     }
-    // Unreported is "", which no check reads and `status_line_value` omits (FX-47).
+    // Unreported is "", which no check reads and `status_line_value` omits.
     let retention_ms = broker.get(BROKER_RETENTION_MS).cloned().unwrap_or_default();
     // `before.max.ms` first: on Kafka >= 3.6 BOTH keys are reported and
     // `difference.max.ms` is the deprecated one.
@@ -939,19 +819,12 @@ fn target_topic_preflight(
     // panics in debug and wraps to a floor in the FUTURE in release — which
     // would refuse every window on every default broker.
     if let Some(bound) = timestamp_bound_ms {
-        // The window END this plan will actually ask the engine for, which is
-        // `spec.restore.point_in_time` when the spec states one and
-        // `spec.sample.window_end` otherwise — the same choice
-        // `crate::drill::build_plan_with_floor` makes for `time_window.1`.
-        // Reading `sample.window_end` unconditionally would check a bound
-        // against a timestamp this restore never requests.
-        //
-        // The window START is deliberately NOT checked here: since Task 9 it
-        // is the ARCHIVE's floor and not a spec field (guard **G-WIN**), and a
-        // broker's `message.timestamp.before.max.ms` refusal is about how far
-        // in the past a record may be — a window whose end is inside the bound
-        // but whose start is not is a partial refusal the engine reports per
-        // record, not a plan this guard can adjudicate before anything runs.
+        // The window end this plan asks the engine for: `point_in_time` when
+        // stated, else `sample.window_end`, as `build_plan_with_floor`
+        // chooses. The start is not checked: it is the archive's floor (guard
+        // G-WIN), and a window whose end is inside the bound but whose start
+        // is not is a partial refusal the engine reports per record, not one
+        // this guard can adjudicate before anything runs.
         let (window_end_field, window_end) = match spec.restore.point_in_time {
             Some(t) => ("restore.point_in_time", t),
             None => ("sample.window_end", spec.sample.window_end),
@@ -976,9 +849,9 @@ fn target_topic_preflight(
     if timestamp_type.as_deref() != Some(LOG_APPEND_TIME) {
         return Ok(preflight);
     }
-    // PROD-15.1: an original-name restore's probe is its own scratch name
+    // An original-name restore's probe is its own scratch name
     // (`original_name::probe_topic_name`), never a restored name; every other
-    // restore borrows the first mapped target, as before.
+    // restore borrows the first mapped target.
     let Some(probe) = probe_name
         .map(str::to_string)
         .or_else(|| topic_mapping.values().next().cloned())
@@ -1006,12 +879,10 @@ fn target_topic_preflight(
              per-topic override could not be tested because creating `{name}` failed: {e}"
         )));
     }
-    // FX-18: the probe was created a moment ago, so it is read only once the
-    // cluster serves it. A plain `topic_configs` here raced the creation: a
-    // broker whose metadata did not hold the topic yet answered empty, which
-    // T13 names "not authorized" (PROD-00.3f's matrix row), and the drill
-    // exited 1 on a broker that would have answered a second later.
-    // `created_topic_configs` waits that out, bounded by
+    // The probe was created a moment ago, so it is read only once the cluster
+    // serves it: a plain `topic_configs` races the creation, and a broker
+    // whose metadata lacks the topic answers empty (read as "not
+    // authorized"). `created_topic_configs` waits that out, bounded by
     // `CREATED_TOPIC_SETTLE`, and still returns a real refusal (exit 1 below).
     let readback = reader.created_topic_configs(&probe, 1, CREATED_TOPIC_SETTLE);
     let delete = deleter.delete_topics(std::slice::from_ref(&probe));
@@ -1059,78 +930,35 @@ fn target_topic_preflight(
     Ok(preflight)
 }
 
-/// **Guard G-TS**, the creating half: every mapped target topic, created by
-/// LOGWEIR, with exactly `TARGET_TOPIC_CONFIGS`, the source topic's partition
-/// count and `spec.target.default_replication_factor`.
-///
-/// The rendered `restore.yaml` says `create_topics: false`, so this is the only
-/// thing that creates them. The engine's own creation path carries no
-/// configuration at all —
-/// `TopicToCreate { name, num_partitions, replication_factor }`
-/// [U:crates/kafka-backup-core/src/restore/engine.rs:1447-1455] — which is
-/// exactly why it cannot be trusted with the two settings that decide whether
-/// the restored records survive being written.
+/// Guard G-TS, the creating half: every mapped target topic, created by
+/// Logweir with exactly `TARGET_TOPIC_CONFIGS`, the source topic's partition
+/// count and `spec.target.default_replication_factor`. The rendered
+/// `restore.yaml` says `create_topics: false`, so this is the only thing that
+/// creates them; the engine's own creation path carries no configuration.
 ///
 /// # Why this is not inside `run`
 ///
-/// The brief for this task places the creation step inside phase 0. It cannot
-/// be there, for three independent reasons, each of which has a test in this
-/// tree today:
+/// 1. Phase 1 verifies the approval: creating at phase 0 would let an
+///    unapproved plan write to the target.
+/// 2. Phases 2 and 3 read the target's pre-existing state; creating first
+///    would make every target topic a self-inflicted `Collision`.
+/// 3. The partition count comes from the archive manifest, opened in
+///    `execute_with` after phases 0 and 1 so a refused plan never opens the
+///    bucket (`crates/logweir/tests/guard_cli.rs`).
 ///
-/// 1. **Phase 1 verifies the approval.** Creating every mapped target topic at
-///    phase 0 would let an UNAPPROVED plan write to the target cluster, and
-///    exit 3 promises the opposite ("refused before anything ran").
-/// 2. **Phases 2 and 3 read the target's PRE-EXISTING state.**
-///    `phase3_diff::run` reports an already-present target topic as a
-///    `Collision` in the signed scorecard; creating first would turn every
-///    target topic into a self-inflicted collision.
-/// 3. **The partition count is a fact of the archive MANIFEST**
-///    (`BackupSetFacts::topics[].partitions`, via
-///    `phase3_diff::restore_partition_count`), and the archive is opened in
-///    `execute_with` AFTER phases 0 and 1 by design — `Ctx`'s own doc comment
-///    says so and `crates/logweir/tests/guard_cli.rs` pins the consequence,
-///    because a refused plan must never open the bucket. Creating at phase 0
-///    would mean creating at a count nobody had read yet, and a one-partition
-///    target for a three-partition source loses two thirds of the restore
-///    silently.
+/// It runs after the phase-5 verdict, because phase 5's `Verdict::Block`
+/// branch relies on nothing having been created (`e2e/tests/full_drill.rs`'s
+/// `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`),
+/// and immediately before phase 6. The engine's preflight writes nothing.
 ///
-/// So `run` keeps the OBSERVATION and both REFUSALS — the guard, at phase 0,
-/// exit 3, before anything runs — and this runs from `execute_with` after the
-/// phase-5 verdict and immediately before phase 6.
+/// # Every per-topic failure here is `Operational`
 ///
-/// **After phase 5, not before it**, for a fourth reason found by execution:
-/// phase 5's `Verdict::Block` branch returns without a teardown on the stated
-/// ground that a blocked preflight means the restore never ran and the drill
-/// created nothing on the target, and
-/// `e2e/tests/full_drill.rs`'s
-/// `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`
-/// asserts exactly that (`!topic_exists("drill-orders")`). It failed against a
-/// version of this call placed before phase 5. The engine's preflight is
-/// `validate-restore`, which force-sets `dry_run = true` and writes nothing, so
-/// it needs no target topic; `restore` does.
-///
-/// # Every per-topic failure here is `Operational`, including "already exists"
-///
-/// `run` has already REFUSED, at phase 0 and with exit 3, any plan whose
-/// mapped target topics existed (spec §6.1). So a broker answering
-/// `TopicAlreadyExists` at this point means the target changed under the run
-/// after admission — someone else created it, or a previous drill's teardown
-/// completed late — and the topic's `message.timestamp.type` and
-/// `retention.ms` are then NOT the pinned pair, whatever `configs_set` says.
-/// Continuing would append into it and make that claim false, which is the
-/// silent-failure class this guard exists to prevent.
-///
-/// It is `DrillError::Operational` (exit 1, no artifact) rather than exit 3
-/// because by here phases 0-5 have run: Global Constraint 11 reserves exit 3
-/// for a plan refused BEFORE anything runs, and the recorded ruling in
-/// `docs/stability.md` ("a phase-5 / phase-6 divergence is exit 1, not exit
-/// 3") is the same boundary. Nothing about the archive was established and the
-/// fix is on the cluster.
-///
-/// Consequently `TopicPreflight.topics_created` names ONLY topics this run
-/// created, and `configs_set` describes what was applied to every one of them
-/// —  the property `topics_created_names_only_the_topics_this_run_created`
-/// asserts.
+/// `run` already refused any plan whose mapped targets existed, so
+/// `TopicAlreadyExists` here means the target changed after admission, and
+/// appending would make `configs_set` false. Exit 1, not 3, because phases
+/// 0-5 have run (the phase-5/6 boundary in `docs/stability.md`). So
+/// `TopicPreflight.topics_created` names only topics this run created
+/// (`topics_created_names_only_the_topics_this_run_created`).
 pub fn create_target_topics(
     creator: &dyn TopicCreator,
     reader: &dyn ClusterReader,
@@ -1158,15 +986,12 @@ pub fn create_target_topics(
     if specs.is_empty() {
         return Ok(());
     }
-    // **PROD-15.1, condition 6: CREATION IS EXCLUSIVE, AND A RACE LOSES BY
-    // NAME.** Phase 0 proved every mapped name absent; phases 1–5 have run
-    // since. A name that exists NOW was created by someone else in between —
-    // a producer on a cluster that auto-creates, an operator, a declarative
-    // owner — and this run must never write into it. Looked for once more
-    // here, so the common race refuses before ANY topic of this run is
-    // created; `CreateTopics` itself then fails on a name that appears in the
-    // last instant, and that answer is the same refusal. Both modes: the
-    // creation step is one step, and the rule is the same.
+    // Condition 6: creation is exclusive, and a race loses by name. Phase 0
+    // proved every mapped name absent and phases 1–5 have run since, so a
+    // name that exists now was created by someone else and is never written
+    // into. Looked for once more here, so the common race refuses before any
+    // topic of this run is created; `CreateTopics` fails on a name that
+    // appears in the last instant with the same refusal. Both modes.
     let existing = reader.list_topics()?;
     let appeared: Vec<&str> = specs
         .iter()
@@ -1187,7 +1012,7 @@ pub fn create_target_topics(
     // `RdKafkaReader::create_topics`, which cannot compile otherwise.
     let results = match creator.create_topics(&specs) {
         Ok(results) => results,
-        // **THE WHOLE CALL FAILED** (PROD-15.1 review 2, M2 (a)): no answer
+        // The whole call failed: no answer
         // for ANY name, and that is not "nothing was created". A request the
         // broker applied after this client gave up leaves every topic in
         // place, empty, under its target name. So the cluster is listed once
@@ -1210,13 +1035,13 @@ pub fn create_target_topics(
             ));
         }
     };
-    // **ONE ANSWER PER NAME ASKED, AND NOTHING ELSE** (PROD-15.1 review L1).
+    // One answer per name asked, and nothing else.
     // librdkafka refuses an answer naming MORE topics than requested, not
     // fewer: a short answer would leave a name neither created nor refused,
     // and the engine would be handed it.
     //
-    // EVERY ASKED NAME IS CLASSIFIED BY ITS OWN ANSWER, and only a DEFINITE
-    // one puts it in a list that makes a claim (review 2, M2 and L2):
+    // Every asked name is classified by its own answer, and only a definite
+    // one puts it in a list that makes a claim:
     //
     // - exactly one answer, `Ok`: this run created it (`topics_created`, and
     //   `left` if the step then stops);
@@ -1288,7 +1113,7 @@ pub fn create_target_topics(
             why,
         ));
     }
-    // FX-18: the engine is handed topics the cluster SERVES, not topics the
+    // The engine is handed topics the cluster SERVES, not topics the
     // controller has merely committed. The engine retries
     // NOT_LEADER_FOR_PARTITION on produce, but a partition its first metadata
     // read does not list with a leader is `PartitionNotAvailable`, which it
@@ -1315,8 +1140,7 @@ pub fn create_target_topics(
     Ok(())
 }
 
-/// **PROD-15.1, condition 6: the creation step stopped, and NOTHING IS
-/// DELETED.**
+/// The creation step stopped, and nothing is deleted.
 ///
 /// Exit 1 (phases 0–5 have run, `docs/stability.md`'s phase-5/6 ruling), with
 /// no write into any name someone else created. Every topic THIS execution
@@ -1324,8 +1148,7 @@ pub fn create_target_topics(
 /// (`target-topics-appeared=`), on the Restore's status and in the console —
 /// so the operator removes it once they have checked nothing writes to it.
 ///
-/// **No code path deletes a topic under an original name, ever** (the
-/// orchestrator's ruling of 2026-10-09, withdrawing the fix round's cleanup).
+/// **No code path deletes a topic under an original name, ever.**
 /// Kafka has no conditional delete: between any "it is empty" read and the
 /// delete, a producer pointed at the name can write a record, and deleting the
 /// topic would lose it under a production name. Leaving an empty topic is the
@@ -1340,7 +1163,7 @@ pub fn create_target_topics(
 /// - `left`: topics this execution created, by its own `CreateTopics`
 ///   answer.
 /// - `unconfirmed`: names it asked for, got no definite answer about, and
-///   cannot account for (review 2, M2). Never called `left`, which claims
+///   cannot account for. Never called `left`, which claims
 ///   ownership, nor `appeared`, which says someone else made the topic.
 pub fn creation_stopped(
     appeared: Vec<String>,
@@ -1393,7 +1216,7 @@ impl Unconfirmed {
         }
     }
 
-    /// **The one more look** (review 2, M2): lists the cluster — a READ — and
+    /// **The one more look**: lists the cluster — a READ — and
     /// keeps each of `candidates` that EXISTS NOW. Phase 0 and the creation
     /// step's own listing found every one of them absent moments ago, so a
     /// candidate that exists was created since: by this run's request, whose
@@ -1621,12 +1444,8 @@ mod tests {
         }
     }
 
-    /// A `ClusterReader` double whose every response is configured directly
-    /// by the test, scoped to this file only. The SHARED `FakeReader` double
-    /// in `crates/logweir/tests/fixtures/mod.rs` is deferred to Task 16
-    /// (behind `TargetState`, per addendum A4); this stub carries no such
-    /// dependency, so it can prove phase 0's cluster-identity checks now
-    /// rather than waiting six tasks for a shared double to exist.
+    /// A `ClusterReader` double whose every response is configured by the
+    /// test, scoped to this file.
     struct StubReader {
         cluster_id: Result<String, KafkaError>,
         topics: Result<Vec<TopicMeta>, KafkaError>,
@@ -1667,13 +1486,10 @@ mod tests {
         }
     }
 
-    /// Task 8, guard **G-TS**. Phase 0 now takes a `TopicCreator` and a
-    /// `TopicDeleter` because its target-topic preflight needs them for the one
-    /// case that cannot be answered by reading — a broker on `LogAppendTime`.
-    /// Every test in THIS module runs against a broker that reports nothing, so
-    /// neither of these may be reached; both panic rather than returning
-    /// something plausible, so a preflight that started writing on the ordinary
-    /// path would fail here instead of passing quietly.
+    /// Phase 0 takes a `TopicCreator` and a `TopicDeleter` for the one case
+    /// reading cannot answer, a broker on `LogAppendTime`. Every test here
+    /// runs against a broker that reports nothing, so both panic: a preflight
+    /// that started writing on the ordinary path fails here.
     struct NoopCreator;
     impl logweir_kafka::reader::TopicCreator for NoopCreator {
         fn create_topics(
@@ -1855,7 +1671,7 @@ mod tests {
         }
     }
 
-    /// PROD-08.1: the three plans that ask for two verifications at once are
+    /// The three plans that ask for two verifications at once are
     /// refused at phase 0 (exit 3), each naming the fields, and the two
     /// coherent ones are not. KILLS: deleting any arm (that row then admits),
     /// or refusing `complete` without `max_partitions` (the control rows).
@@ -1943,9 +1759,7 @@ mod tests {
     /// and it is the shape of thing that breaks silently: a multi-line Rust
     /// string literal without a trailing `\` bakes the source indentation into
     /// the message, so it reaches the terminal as
-    /// "Phase 7 reconciles              the restored topic". That exact defect
-    /// shipped here, and shipped in `phase4_sample.rs` earlier in the build, so
-    /// it gets an assertion rather than a promise.
+    /// "Phase 7 reconciles              the restored topic".
     #[test]
     fn the_anchor_refusal_message_is_single_spaced_prose_not_source_indentation() {
         let mut spec = spec_with(&["orders"], "drill-");

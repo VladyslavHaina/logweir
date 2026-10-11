@@ -245,7 +245,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Done |
 | 3 | PROD-01.2a | Fixtures behind the matrix's hand-run and untested cells: a SCRAM-SHA-512 TLS listener in the `auth` profile with its `auth_modes` row (the mode Amazon MSK's SCRAM endpoint needs); RustFS and versitygw as opt-in profiles or weekly rows; a directory-archive row for the standalone CLI (`backend: filesystem`); and a weekly job for the rows PROD-01.2 ran by hand (Confluent Platform, Redpanda, SeaweedFS, Karapace), so a supported cell is re-proven without a person | P2 | M3 | infra | 01.2 | — | compose | B | Done |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
-| 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11, OD-12 | none | A | In progress |
+| 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11, OD-12 | none | A | Done |
 | 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | In progress |
 | 1 | PROD-16.2 | Two-person approval in the console: the second person clicks Approve | P1 | M1 | impl | 16.1 | — | k8s | A | Done |
 | 1 | PROD-16.4 | Auth follow-ups: IdP groups mapped to roles proven live; an audit-log retention recipe | P2 | M1 | impl | — | — | k8s | B | In progress |
@@ -662,7 +662,7 @@ What it fixed:
   - `publish` needs every shard.
 - **Published and signed:** main run 38134054797 passed all four shards on main and signed `sha-5da3a395`.
 
-**PROD-17.1 — decided (OD-12, 2026-10-11); waves 1 to 3 merged (PRs #27 to #29); OD-13's chores integrating; wave 4 (comments) next.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
+**PROD-17.1 — decided (OD-12, 2026-10-11); all four waves merged (PRs #27 to #29 and #31); PROD-17.1 Done.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
 - **Wave 1, cuts:**
   - `s1-c1`: C1, with A4's `GET /rehearsal-schedules`. Tier A review, because admission and approval change.
   - `s1-notify`: C2's alert sinks, B2, A2 and A3's phase-7 call.
@@ -754,6 +754,24 @@ What it fixed:
 - **Blocked on the owner:**
   - **PROD-04.0c:** Amendment D was merged and reverted (`ab8a6ec9`) until the owner's yes (rule 8).
   - **PROD-01.4b:** the rust-rdkafka `DescribeTopics` patch and draft PR are in `claude/artifacts/c-engine/rdkafka/`. Opening it upstream needs the owner's go-ahead, and the tag does not wait on upstream.
+
+**PR #31 — merged (2026-10-11) as `984127fa`: PROD-17.1 wave 4 (the comment rule). PROD-17.1 — Done.**
+- **Wave 4:** five crate groups. Each branch was proven comment-only with `claude/tools/comment_only.py`, which strips comments and compares token streams: 556 files, 0 not comment-only. Each was reviewed by sampling its deleted blocks. One MEDIUM, a reworded safety rationale that said the opposite, was restored.
+  - Comment lines in the touched files went from 139,616 to 116,558 (−16.5%).
+  - The OpenAPI document is byte-identical, all 25 `--help` pages are identical, and rustdoc shows no new warnings.
+- **The whole pass, measured with the proposal's own `measure.py`** (integrate-9 `79ba95b5` against main `984127fa`; the later tree also carries the rows merged since):
+
+  | Column | Before | After | Change |
+  |---|---|---|---|
+  | code | 208,193 | 195,821 | −5.9% |
+  | comments | 95,479 | 74,592 | −21.9% |
+  | tests | 517,930 | 490,090 | −5.4% |
+  | docs | 52,331 | 31,799 | −39.2% |
+
+  Generated YAML lost about 128.5k lines in wave 1.
+- **By the proposal's plan:** tiers A and B are done. B14 goes inside PROD-14.1. The three PLAT harnesses A1 held are cut after PROD-14.1.
+- **Tier C, as decided (OD-12):** C1, C2's alert sinks, C4, C5, C6 and C7 are cut. C3 is kept.
+- **Never touched:** the signed-format readers, the frozen schemas, the invariant corpus, the verifiers and consumer positions.
 
 ## Carried over from the PLAT tracker
 

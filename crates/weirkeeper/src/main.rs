@@ -1,40 +1,21 @@
 #![forbid(unsafe_code)]
 //! The `weirkeeper` binary.
 //!
-//! FOUR ARGV FORMS AND NO ARGUMENT PARSER. `--version`, `--help`,
-//! `--probe live|ready`, or nothing at all; anything else exits 1 naming what
-//! it got. `--probe` is the kubelet's exec probe (chart gap G5): it asks the
-//! running controller's loopback health listener one question and exits 0 or
-//! 1, building no client and touching no cluster — `weirkeeper::health` has
-//! the whole argument. `clap` is deliberately
-//! not added: Global Constraint 38 closes the workspace graph, and a match on
-//! `std::env::args()` is the whole requirement. `--version` exists because
-//! Task 23's `scripts/check-image-weirkeeper.sh` check 2 runs
-//! `/usr/local/bin/weirkeeper --version` against the built image, and an image
-//! check needs something to run that touches no cluster.
+//! Four argv forms and no argument parser: `--version`, `--help`,
+//! `--probe live|ready`, or nothing; anything else exits 1 naming what it got.
+//! `--probe` is the kubelet's exec probe: it asks the running controller's
+//! loopback health listener one question and exits 0 or 1, building no client
+//! ([`weirkeeper::health`]). No `clap`: Global Constraint 38 closes the
+//! workspace graph, and a match on `std::env::args()` is the whole requirement.
+//! `--version` is what `scripts/check-image-weirkeeper.sh` runs against the
+//! built image.
 //!
-//! THE ARGV MATCH COMES FIRST, BEFORE THE CLIENT. `--version` inside a
-//! container has no kubeconfig, no service-account token and no API server to
-//! reach; if it built a client first it would exit non-zero in exactly the
-//! place it is used.
-//!
-//! ONE TYPE ALIAS, NOT TWO (Task 18). Task 15 declared a local
-//! `type ControllerTask` here and Task 16 added
-//! `weirkeeper::controllers::ControllerTask` beside it; two spellings of one
-//! type is how the registration point below comes to be typed against the
-//! wrong one. The local alias is GONE and this file names the library's, which
-//! is the one `controllers/mod.rs` documents as "the type `main`'s registration
-//! point holds".
-//!
-//! ONE THING PRECEDES THE ARGV MATCH: THE rustls PROVIDER INSTALL. It is not a
-//! client and it is not I/O — it builds a struct and sets a `OnceLock` — and
-//! it has to be unconditional, because it is the difference between this
-//! binary's no-argv path logging a named error and ABORTING at exit 101 inside
-//! rustls (review finding H1). See
-//! [`weirkeeper::install_default_crypto_provider`] for the mechanism and
-//! `Cargo.toml`'s `rustls` entry for why the provider is `ring`. `--version`'s
-//! guarantee is unchanged: it still builds no client and touches no cluster,
-//! which is what Task 23's `scripts/check-image-weirkeeper.sh` check 2 runs.
+//! The argv match comes before any client: `--version` in a container has no
+//! kubeconfig, token or API server, and would fail exactly where it is used.
+//! Only the rustls provider install precedes it, unconditionally: it is no
+//! client and no I/O, and without it the no-argv path aborts at exit 101 inside
+//! rustls instead of logging a named error (see
+//! [`weirkeeper::install_default_crypto_provider`]).
 
 use std::process::ExitCode;
 
@@ -51,10 +32,9 @@ Takes no arguments: `--version` prints the version, `--help` prints this, \
 argument at all runs the controller until SIGTERM.";
 
 fn main() -> ExitCode {
-    // BEFORE ANY kube CLIENT IS BUILT — and before the argv match, because a
-    // provider install is neither a client nor a syscall and an unconditional
-    // one cannot be skipped by a future argv form that does build a client.
-    // Losing the race to another installer is a `false`, not an error.
+    // Before any kube client and before the argv match, so no future argv form
+    // can skip it. Losing the race to another installer is `false`, not an
+    // error.
     let _installed = weirkeeper::install_default_crypto_provider();
 
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -69,7 +49,7 @@ fn main() -> ExitCode {
             println!("{HELP}");
             ExitCode::SUCCESS
         }
-        // THE KUBELET'S EXEC PROBE. No client, no subscriber, no runtime: one
+        // The kubelet's exec probe: no client, no subscriber, no runtime, one
         // loopback connection with a two-second deadline on each step.
         ["--probe", which] => {
             let outcome = weirkeeper::health::Probe::from_arg(which).and_then(|probe| {
@@ -105,15 +85,10 @@ fn main() -> ExitCode {
 
 /// Run the controller until SIGTERM.
 ///
-/// `clippy::vec_init_then_push` IS ALLOWED FOR THE REGISTRATION POINT BELOW,
-/// AND THE REASON IS A CONTRACT AND NOT A PREFERENCE. The `controllers` vector
-/// is the one place every chain-O task from Task 16 onward appends ONE line —
-/// `controllers.push(Box::pin(…));` — with nothing else in this file changing.
-/// Collapsing the two current entries into the `vec![…]` literal clippy
-/// suggests would turn each of those one-line additions into an edit of the
-/// same expression, which is precisely the rewrite the plain `Vec` was written
-/// to avoid. The allow sits on the function because the lint's span is the
-/// whole statement group, not the `let`.
+/// `clippy::vec_init_then_push` is allowed for the registration point below:
+/// each reconciler is one `controllers.push(Box::pin(…));` line, which a
+/// `vec![…]` literal would turn into edits of one expression. The allow sits on
+/// the function because the lint's span is the whole statement group.
 #[allow(clippy::vec_init_then_push)]
 fn run() -> ExitCode {
     // JSON to stdout, filter from `RUST_LOG`: the pod log API has no stream
@@ -124,47 +99,25 @@ fn run() -> ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // THE ONE READ-ONLY ARCHIVE HANDLE, BUILT BEFORE THE TOKIO RUNTIME EXISTS
-    // — interface I13, and the ORDER is load-bearing rather than tidy.
-    // `Store`'s constructors build and drive their OWN current-thread runtime
-    // (`crates/logweir-store/src/lib.rs`'s `new_rt`, and the `rt.block_on` in
-    // `build_backend`), and `Runtime::block_on` from a thread already driving
-    // a runtime panics with *Cannot start a runtime from within a runtime*.
-    // Constructing this inside `rt.block_on` below — or worse, inside a
-    // reconcile — is that panic. Here, on a thread driving nothing, it is a
-    // plain synchronous call.
+    // The one read-only archive handle, built before the tokio runtime exists
+    // (interface I13). `Store`'s constructors drive their own current-thread
+    // runtime, and `Runtime::block_on` from a thread already driving one panics
+    // ("Cannot start a runtime from within a runtime"), so this must not move
+    // inside `rt.block_on` or a reconcile. Built exactly once: `Arc<Store>` is
+    // cloned into each controller's context and every call on it goes through
+    // `tokio::task::spawn_blocking`
+    // (`tests/retention.rs::no_store_call_is_made_outside_spawn_blocking`
+    // asserts this file is the only construction site).
     //
-    // AND IT IS BUILT EXACTLY ONCE. `Arc<Store>` is cloned into each
-    // controller's context; every later call on it goes through
-    // `tokio::task::spawn_blocking`. A handle rebuilt per reconcile discards
-    // the connection pool each time and reintroduces the nested-runtime panic,
-    // and `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking`
-    // asserts this file is the only place in the crate that constructs one.
+    // `read_only_from_url`, never `from_url`: the handle physically cannot put
+    // (Global Constraint 6, guard G-RET), and `scripts/check-no-archive-write.sh`
+    // fails if the other constructor is named under `crates/weirkeeper/src/`.
     //
-    // `read_only_from_url` AND NEVER `from_url`. The archive is never under
-    // `logweir/`, so the write-path constructor's `LOGWEIR_ROOT` guard would
-    // refuse to build a handle over it at all; the handle this returns
-    // physically cannot put (Global Constraint 6, guard G-RET).
-    // `scripts/check-no-archive-write.sh` fails if the other constructor is
-    // named anywhere under `crates/weirkeeper/src/`.
-    //
-    // AN EMPTY VALUE IS UNSET, AND THAT IS PLAN ERRATUM **E19(e)**. The
-    // shipped `config/manager/deployment.yaml` carries
-    // `LOGWEIR_ARCHIVE_URL: ""` — the default install, with retention and
-    // verification display switched off — and this match used to send that
-    // empty string to `storage_url_for`, which correctly refused a URL with no
-    // `://` and made the controller log an **ERROR** on every clean start. An
-    // empty archive URL is a DOCUMENTED SWITCH, not a misconfiguration, and it
-    // reads as the absent variable it means. (Invisible until Task 24 pinned
-    // `RUST_LOG: info` on the same Deployment, which is how a wrong ERROR line
-    // survives: nothing was printing it.)
-    //
-    // THE PREDICATE ITSELF LIVES IN `retention::configured_archive_url` and
-    // this function only supplies the read — a two-line extraction made in
-    // Task 24's fix round, because a decision behind `fn main` is reachable
-    // from no test at all, and `crates/weirkeeper/tests/retention.rs::
-    // an_empty_archive_url_is_unset_and_not_an_error` is the row that now
-    // holds it.
+    // An empty value is unset: the chart may render `LOGWEIR_ARCHIVE_URL: ""`
+    // (no inline archive), which is a documented switch, not a
+    // misconfiguration. The decision is `retention::configured_archive_url`
+    // (`tests/retention.rs::an_empty_archive_url_is_unset_and_not_an_error`);
+    // this only supplies the read.
     let archive = match weirkeeper::retention::configured_archive_url(std::env::var(
         weirkeeper::retention::ARCHIVE_URL_ENV,
     )) {
@@ -177,9 +130,8 @@ fn run() -> ExitCode {
         }
         Some(url) => match weirkeeper::retention::storage_url_for(&url) {
             Err(e) => {
-                // NOT FATAL, AND NAMED. A malformed archive URL must not stop
-                // the approval and schedule reconcilers, which need no
-                // archive at all; it degrades loudly.
+                // Not fatal, and named: a malformed archive URL must not stop
+                // the reconcilers that need no archive.
                 error!(
                     env = weirkeeper::retention::ARCHIVE_URL_ENV,
                     error = %e,
@@ -211,32 +163,15 @@ fn run() -> ExitCode {
         },
     };
 
-    // THE RUNNER IMAGE THIS PROCESS WILL PUT IN EVERY JOB IT CREATES — Task
-    // 33, and the SECOND thing this file reads out of the environment.
-    //
-    // WHY IT EXISTS. `weirkeeper::job::RUNNER_IMAGE` is a compile-time digest,
-    // measured on the machine that built the image, and plan erratum E19(a)
-    // says a local digest changes on every build. On the laptop that is
-    // survivable — the operator's own build IS the pinned bytes, and one
-    // `docker tag` puts them under the pinned repository name (E19b). On a
-    // cluster that did not build the pins it is not: a GitHub runner builds
-    // both images minutes before the demo, at digests nothing in the tree
-    // names, and the shipped repository is not pullable (Global Constraint 37).
-    // A controller that could only ever name the compile-time pin would create
-    // Jobs no such node can start.
-    //
-    // THE SAME ARRANGEMENT AS THE ARCHIVE URL ABOVE, AND FOR THE SAME REASON:
-    // the read is here and the DECISION is a pure predicate in the library, so
-    // a test can hand it the empty string a Kubernetes `env:` entry with an
-    // empty `value:` actually produces (plan erratum E19(e)) without touching
-    // process-global state. This is the ONLY `std::env::var` of
-    // `weirkeeper::job::RUNNER_IMAGE_ENV` in the crate, and
-    // `crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_image_override_once`
-    // asserts exactly that.
-    //
-    // ONE LINE, NAMING THE IMAGE AND WHERE IT CAME FROM. A controller that
-    // silently used a different image from the one the install file names is
-    // the failure this variable is meant to fix, not to create.
+    // The runner image every Job this process creates will name. The compiled
+    // `weirkeeper::job::RUNNER_IMAGE` is a digest of a local build that a
+    // cluster which did not build it cannot start, so the chart (or an
+    // operator) hands the controller its image. The decision is
+    // `job::configured_runner_image`, so a test can pass the empty string an
+    // empty `env:` value produces; this is the only read of
+    // `weirkeeper::job::RUNNER_IMAGE_ENV` in the crate
+    // (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_image_override_once`).
+    // One log line names the image and where it came from.
     let runner_image =
         weirkeeper::job::configured_runner_image(std::env::var(weirkeeper::job::RUNNER_IMAGE_ENV));
     info!(
@@ -251,29 +186,12 @@ fn run() -> ExitCode {
         "the runner image every Job this controller creates will name"
     );
 
-    // AND THE PULL POLICY THOSE JOBS WILL CARRY — Task 37, and the THIRD thing
-    // this file reads out of the environment.
-    //
-    // WHY IT EXISTS. The owner decided, on 2026-09-12, that `charts/logweir`'s
-    // defaults name the two Logweir images by the `latest` TAG rather than by a
-    // digest. A mutable tag under `weirkeeper::job::IMAGE_PULL_POLICY` — which
-    // is `Never`, and stays the compiled-in default for every path that LOADS
-    // an image onto the node — is a reference the kubelet cannot resolve, so
-    // the policy had to become configurable alongside the image. The chart
-    // renders this variable from its own `runnerImagePullPolicy` value beside
-    // the image one, so the two halves of one decision travel together.
-    //
-    // SAME ARRANGEMENT AS THE TWO READS ABOVE: the read is here and the
-    // DECISION is a pure predicate in the library, so a test can hand it the
-    // empty string an `env:` entry with an empty `value:` actually produces
-    // (plan erratum E19(e)) without touching process-global state.
-    //
-    // AND ON A BAD VALUE THIS PROCESS REFUSES TO START. `imagePullPolicy` is a
-    // closed set the API server validates at Job CREATE, so a controller that
-    // started under `always` or `Sometimes` would turn every `Backup` and every
-    // `Restore` into a rejected Job, forever, with nothing but an API error per
-    // object to say why. One legible refusal at startup is the whole of the
-    // difference.
+    // The pull policy those Jobs carry. The chart names images by the `latest`
+    // tag, which `job::IMAGE_PULL_POLICY` (`Never`, right for loaded images)
+    // cannot resolve, so the chart renders this beside the image. A bad value
+    // refuses to start: `imagePullPolicy` is a closed set the API server
+    // validates at every Job create, and one legible refusal beats a rejected
+    // Job per object.
     let runner_pull_policy = match weirkeeper::job::configured_runner_pull_policy(std::env::var(
         weirkeeper::job::RUNNER_PULL_POLICY_ENV,
     )) {
@@ -295,13 +213,11 @@ fn run() -> ExitCode {
         "the runner pull policy every Job this controller creates will carry"
     );
 
-    // THE INSTALLATION'S APPROVAL POLICIES — PLAT-19.2, and the FOURTH thing
-    // this file reads out of the environment. Same arrangement as the three
-    // reads above: the read is here, the decision is
+    // The installation's approval policies. The decision is
     // `weirkeeper::approval_policy::configured_policy`. Absent is every
-    // namespace on `legacy-governed-v1`; a file that cannot be read or does
-    // not validate is a refusal to start, because an operator who bound a
-    // namespace Governed and got legacy would be told nothing.
+    // namespace on `legacy-governed-v1`; a file that cannot be read or does not
+    // validate refuses to start, because an operator who bound a namespace
+    // Governed and got legacy would be told nothing.
     let approval_policies = match weirkeeper::approval_policy::configured_policy(
         std::env::var(weirkeeper::approval_policy::APPROVAL_POLICY_FILE_ENV),
         |path| std::fs::read_to_string(path),
@@ -320,11 +236,9 @@ fn run() -> ExitCode {
         "the approval policies this controller enforces; an unbound namespace is \
          legacy-governed-v1 unless defaultMode or the fresh-install marker says confirm"
     );
-    // PROD-16.1: WHERE THE FRESH-INSTALL MARKER IS READ — the fifth thing this
-    // file reads out of the environment. Both variables, or neither: the
+    // Where the fresh-install marker is read: both variables or neither (the
     // release namespace and the public identity ConfigMap the identity hook
-    // writes the marker on. Neither is an install with no managed identity,
-    // whose readers never see a marker.
+    // writes it on). Neither is an install with no managed identity.
     let marker_source = std::env::var(weirkeeper::approval_policy::IDENTITY_PUBLIC_CONFIGMAP_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -343,14 +257,11 @@ fn run() -> ExitCode {
         image_pull_policy: runner_pull_policy,
     };
 
-    // THE NAMESPACES THIS PROCESS WATCHES AND ACTS IN — D0 stage 5, and the
-    // FOURTH thing this file reads out of the environment. Unset or empty is
-    // the whole cluster, exactly as before; a list scopes every namespaced
-    // reconciler and every cross-object read to it, which is what the chart's
-    // per-namespace RoleBindings require (`weirkeeper::scope` has the whole
-    // argument). Same arrangement as the reads above: the read is here, the
-    // decision is a pure predicate, and a malformed list refuses to start
-    // rather than leave a namespace silently unreconciled.
+    // The namespaces this process watches and acts in. Unset or empty is the
+    // whole cluster; a list scopes every namespaced reconciler and every
+    // cross-object read to it, as the chart's per-namespace RoleBindings require
+    // (`weirkeeper::scope`). A malformed list refuses to start rather than leave
+    // a namespace silently unreconciled.
     let scope = match weirkeeper::scope::configured(std::env::var(
         weirkeeper::scope::WATCH_NAMESPACES_ENV,
     )) {
@@ -374,11 +285,9 @@ fn run() -> ExitCode {
     }
     weirkeeper::scope::init(scope);
 
-    // THE HEALTH LISTENER'S ADDRESS — chart gap G5, and the last thing this
-    // file reads out of the environment. Same arrangement as the reads above:
-    // the decision is `weirkeeper::health::configured_addr`, and a value that
-    // is not a loopback address refuses to start rather than publish the
-    // listener.
+    // The health listener's address. The decision is
+    // `weirkeeper::health::configured_addr`; a non-loopback address refuses to
+    // start rather than publish the listener.
     let health_addr = match weirkeeper::health::configured_addr(std::env::var(
         weirkeeper::health::HEALTH_ADDR_ENV,
     )) {
@@ -402,12 +311,11 @@ fn run() -> ExitCode {
     };
 
     rt.block_on(async {
-        // THE LISTENER COMES UP FIRST, so `--probe live` answers while the
-        // client is still being built; `--probe ready` says `starting` until
-        // every controller is registered. A port that cannot be bound is a
-        // refusal, not a controller with no liveness: inside a pod the port is
-        // the pod's own, so a clash is a configuration error worth a restart
-        // loop that names it.
+        // The listener comes up first, so `--probe live` answers while the
+        // client is built and `--probe ready` says `starting` until every
+        // controller is registered. A port that cannot be bound refuses to
+        // start: inside a pod it is a configuration error worth a restart loop
+        // that names it.
         let listener = match weirkeeper::health::bind(health_addr).await {
             Ok(listener) => listener,
             Err(e) => {
@@ -436,9 +344,9 @@ fn run() -> ExitCode {
             }
         };
 
-        // PROD-16.1: the fresh-install marker, read again every
-        // `MARKER_POLL_SECONDS` into the one handle every Approval and Restore
-        // reconcile resolves against. Not a reconciler: it writes nothing.
+        // The fresh-install marker, re-read every `MARKER_POLL_SECONDS` into
+        // the one handle every Approval and Restore reconcile resolves against.
+        // Not a reconciler: it writes nothing.
         if let Some((configmap, namespace)) = marker_source.clone() {
             info!(
                 configmap = %format!("{namespace}/{configmap}"),
@@ -452,32 +360,15 @@ fn run() -> ExitCode {
             ));
         }
 
-        // THE RECONCILER-REGISTRATION POINT. Every chain-O task from Task 16
-        // onward appends ONE line here — `controllers.push(Box::pin(…));` —
-        // and nothing else in this file changes. Keeping it a plain `Vec` is
-        // what makes those serial edits one-line additions instead of a
-        // rewrite of `main`.
-        //
-        // Task 16 pushed the first two, so the `#[allow(unused_mut)]` Task 15
-        // left here for exactly this moment is gone. Task 18 pushed the third
-        // — the `BackupSchedule` cron reconciler — as one line, which is what
-        // this shape is for, and Task 17 pushed the FOURTH, the `Backup`
-        // reconciler that runs each archive capture as one Job and lifts its
-        // exit code onto the status. `tests/linkage.rs`'s `"controllers":4`
-        // moved in this same commit.
-        //
-        // `Vec::new()` + `push`, AND NOT `vec![…]` — see the
-        // `clippy::vec_init_then_push` allow on `run` for why.
+        // The reconciler-registration point: one `controllers.push` line per
+        // reconciler (see the `clippy::vec_init_then_push` allow on `run`).
+        // `tests/linkage.rs` counts them.
         let mut controllers: Vec<ControllerTask> = Vec::new();
         controllers.push(Box::pin(weirkeeper::controllers::trust_roster::controller(
             client.clone(),
         )));
-        // PLAT-19.1 / decision D3 §7.1 — ONE LINE, at the registration point
-        // this file's header reserves for exactly that. The `TrustPolicy`
-        // reconciler parses each key, resolves it against the clock, reports
-        // which namespaces this policy governs and which two policies contest,
-        // and writes `Superseded` onto the roster it replaces. It holds no
-        // archive handle and creates no Job, so it takes only the client.
+        // The `TrustPolicy` reconciler takes only the client: it holds no
+        // archive handle and creates no Job.
         controllers.push(Box::pin(weirkeeper::controllers::trust_policy::controller(
             client.clone(),
         )));
@@ -486,65 +377,42 @@ fn run() -> ExitCode {
             approval_policies.clone(),
         )));
         // The schedule reconciler takes the handle on its context and does
-        // not read it: the per-schedule retention report it fed is withdrawn
-        // (PROD-17.1 B1).
+        // not read it.
         controllers.push(Box::pin(
             weirkeeper::controllers::backup_schedule::controller(client.clone(), archive.clone()),
         ));
-        // Task 17's fix round threads the SAME one read-only handle here: the
-        // `Backup` reconciler's archive oracle reads a finished run's receipt
-        // and its sidecar to fill `status.windowCovered` and to detect an
-        // orphaned scorecard (interface I13 and I22). `archive.clone()` is an
-        // `Option<Arc<Store>>` clone, not a second constructor — the handle is
-        // built exactly once, above, before this runtime existed.
+        // The same read-only handle (an `Option<Arc<Store>>` clone, not a
+        // second constructor): the `Backup` reconciler reads a finished run's
+        // receipt and sidecar for `status.windowCovered` and to detect an
+        // orphaned scorecard.
         controllers.push(Box::pin(weirkeeper::controllers::backup::controller(
             client.clone(),
             archive.clone(),
             runner.clone(),
         )));
-        // Task 20 pushes the FIFTH — the `Restore` reconciler that admits a
-        // run only against a `Verified=True` approval whose own bytes carry
-        // the hash of `spec.planBytes`, recomputed here at Job-creation time,
-        // and then runs it as one Job. `archive.clone()` is the same
-        // `Option<Arc<Store>>` clone the two above take, not a second
-        // constructor: its oracle reads the signed scorecard the run put, for
-        // `status.{outcome,objectives,integrity,measured}`. `tests/linkage.rs`'s
-        // `"controllers":5` moved in this same commit.
+        // The `Restore` reconciler admits a run only against a `Verified=True`
+        // approval whose bytes carry the hash of `spec.planBytes`, and reads the
+        // signed scorecard through the same handle.
         controllers.push(Box::pin(weirkeeper::controllers::restore::controller(
             client.clone(),
             archive.clone(),
             runner.clone(),
             approval_policies.clone(),
         )));
-        // Task 15c pushes the SIXTH — the `KafkaCluster` probe reconciler that
-        // makes `status.reachable` mean something, by running `logweir
-        // cluster-probe` as a short-lived Job and reading interface I14's two
-        // stdout lines off the pod log. It takes NO archive handle: a probe
-        // reads no archive, so it is the one controller here whose context
-        // needs nothing but a client. `tests/linkage.rs`'s `"controllers":6`
-        // moved in this same commit.
+        // The `KafkaCluster` probe reconciler creates probe Jobs and reads no
+        // archive, so it takes no handle.
         controllers.push(Box::pin(
             weirkeeper::controllers::kafka_cluster::controller(client.clone(), runner.clone()),
         ));
-        // D2 W7 pushes the SEVENTH — the `BackupDestination` reconciler that
-        // publishes each saved destination's `Valid` condition, canonical URL
-        // and two digests. It takes NEITHER the archive handle NOR the runner
-        // image: it creates no Job and reads no archive, so a client is all its
-        // context needs. `tests/linkage.rs`'s `"controllers":7` moved in this
-        // same commit (D2 §13.4: W8 and W9 take it to 8 and 9).
+        // The `BackupDestination` reconciler creates no Job and reads no
+        // archive, so a client is all it needs.
         controllers.push(Box::pin(
             weirkeeper::controllers::backup_destination::controller(client.clone()),
         ));
-        // D2 W8 pushes the NINTH — the `TopicDiscovery` reconciler that turns
-        // one bounded discovery request into one isolated check Job, stores the
-        // inventory as owned immutable ConfigMap chunks and publishes the
-        // completeness verdict. It takes the runner image, because it CREATES
-        // Jobs, and the installation policy reference, because the attestation
-        // that can upgrade a result to `attestedComplete` lives in a ConfigMap
-        // only a release-namespace administrator can write. It takes no archive
-        // handle: a discovery reads no archive. `tests/linkage.rs`'s
-        // `"controllers":8` moved to 9 in this same commit (D2 §13.4: W9 takes
-        // it further).
+        // The `TopicDiscovery` reconciler creates check Jobs, so it takes the
+        // runner image, and the installation policy reference, whose
+        // attestations can upgrade a result to `attestedComplete`. No archive
+        // handle.
         controllers.push(Box::pin(
             weirkeeper::controllers::topic_discovery::controller(
                 client.clone(),
@@ -552,49 +420,30 @@ fn run() -> ExitCode {
                 weirkeeper::controllers::topic_discovery::configured_policy_ref(),
             ),
         ));
-        // D3 W8 pushes the TENTH — the `RecoveryCatalog` reconciler that runs a
-        // bounded `catalogSync` check Job and materialises its result as an
-        // immutable, Job-owned, TTL-collected view. It takes the runner image
-        // (it creates a Job) and NO archive handle: the sync reads object
-        // storage with the destination's own credential inside that Job, never
-        // from this process. `tests/linkage.rs`'s `"controllers":10` moved in
-        // this same commit (PLAT-19.1's `trust_policy` took it to eight and
-        // D2 W8's `topic_discovery` to nine).
+        // The `RecoveryCatalog` reconciler creates sync Jobs and no archive
+        // handle: the sync reads object storage with the destination's own
+        // credential inside the Job.
         controllers.push(Box::pin(
             weirkeeper::controllers::recovery_catalog::controller(client.clone(), runner.clone()),
         ));
-        // D2 W9 pushes the ELEVENTH — the `Preflight` reconciler that turns a
-        // readiness question into one isolated check Job and publishes what it
-        // found as codes with remedies. It takes the runner image, because it
-        // creates a Job in the execution pod's own shape; it takes NO archive
-        // handle, because every archive read a preflight makes happens inside
-        // that pod with the destination's own credential. Its verdict
-        // AUTHORISES NOTHING (D2 §6.8). `tests/linkage.rs`'s `"controllers":11`
-        // moved in this same commit (D3 W8's `recovery_catalog` took it to ten).
+        // The `Preflight` reconciler creates check Jobs in the execution pod's
+        // shape; every archive read happens inside that pod. Its verdict
+        // authorises nothing (D2 §6.8).
         controllers.push(Box::pin(weirkeeper::controllers::preflight::controller(
             client.clone(),
             runner.clone(),
         )));
-        // D3 W6 (PLAT-14.2) pushes the TWELFTH — the `ProtectionPolicy`
-        // reconciler that turns runs that already happened into a freshness
-        // verdict. It creates no Job and holds NO archive handle: protection
-        // reads `Backup` status and the catalog's own materialised view, never
-        // an object store. `tests/linkage.rs`'s controller count moved in the
-        // commit that added it.
+        // The `ProtectionPolicy` reconciler creates no Job and holds no archive
+        // handle: it reads `Backup` status and the catalog's view.
         controllers.push(Box::pin(
             weirkeeper::controllers::protection_policy::controller(client.clone()),
         ));
-        // D3 W9 pushes the THIRTEENTH — the `RetentionPolicy` reconciler that
-        // reports what WOULD be removed from one destination and, only when an
-        // administrator has both selected `Enforce` and approved the current
-        // plan digest, creates one Job that removes it. It takes the runner
-        // image (it creates a Job, running `logweir-retention` rather than
-        // `logweir`) and NO archive handle: this process neither reads nor
-        // deletes an object, and `scripts/check-no-archive-write.sh` proves the
-        // deleting crate is unreachable from here. `tests/linkage.rs`'s
-        // `"controllers":14` moved in this same commit (D3 W7's
-        // `rehearsal_schedule` had taken it to thirteen; that reconciler is
-        // withdrawn in v1, OD-12, so the count is thirteen again).
+        // The `RetentionPolicy` reconciler creates one deletion Job (running
+        // `logweir-retention`) only once an administrator selected `Enforce` and
+        // approved the current plan digest. No archive handle: this process
+        // neither reads nor deletes an object, and
+        // `scripts/check-no-archive-write.sh` proves the deleting crate is
+        // unreachable from here.
         controllers.push(Box::pin(
             weirkeeper::controllers::retention_policy::controller(client.clone(), runner.clone()),
         ));

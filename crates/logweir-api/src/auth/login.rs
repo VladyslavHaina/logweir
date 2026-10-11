@@ -17,9 +17,9 @@
 //! and a restart between the redirect and the callback must not strand the
 //! browser. The cookie is `__Host-` prefixed, `HttpOnly` and ten-minute-lived,
 //! and the callback clears it on success and on every `401` refusal (the
-//! refusal's clear reaches the browser since FX-32: the problem rendering
-//! keeps the handler's `Set-Cookie`). A `429` from the sign-in limit and a
-//! `405` clear nothing, and should not: neither ends the attempt.
+//! problem rendering keeps the handler's `Set-Cookie`). A `429` from the
+//! sign-in limit and a `405` clear nothing, and should not: neither ends the
+//! attempt.
 //!
 //! THAT CLEARING IS ADVICE TO THE BROWSER, so on its own it ends the attempt
 //! for an honest client and nothing more. What the cookie carries is the
@@ -29,28 +29,27 @@
 //! (wrong `state`, no cookie, another login's cookie), each also asserting the
 //! code was never exchanged.
 //!
-//! A `state` IS SINGLE-USE ON EACH REPLICA (FX-13a), and the provider's
-//! single-use code is the backstop across replicas. A sealed cookie cannot
-//! remember being used, so before FX-13a someone who kept a copy could drive
-//! the callback with it for its whole 600 seconds, each callback a token
-//! request to the provider authenticated as this client. Now, once the cookie
-//! has opened and its `state` matched, and BEFORE the code is exchanged, the
-//! callback redeems the state in this process's [`UsedStates`] — one lock, so
-//! of two callbacks with one state on this replica exactly one gets past it —
-//! and a state this replica already redeemed is refused `login_state_replayed`,
-//! audited, with its cookie cleared and no token request. Nothing is written
-//! anywhere else: no Kubernetes object, no shared store. So a replay that
-//! reaches ANOTHER replica still reaches the token endpoint: one token request
-//! per replica (that callback redeems the state there too), and again after
-//! that replica restarts or evicts the entry. The provider refuses an
-//! authorization code it has already exchanged (RFC 6749 §4.1.2: a code is
-//! single-use), so a replay cannot obtain a second sign-in from a code the
-//! provider has exchanged. A CODE THE PROVIDER HAS NOT CONSUMED IS NOT
-//! COVERED: when the first callback's exchange fails without the provider
-//! consuming the code, the same cookie and URL still sign in on another
-//! replica, exactly as before FX-13a. The record never refuses a sign-in for
-//! lack of room: when it is full the oldest entry is forgotten, announced
-//! once a minute.
+//! A `state` IS SINGLE-USE ON EACH REPLICA, and the provider's single-use code
+//! is the backstop across replicas. A sealed cookie cannot remember being
+//! used, so without a record someone who kept a copy could drive the callback
+//! with it for its whole 600 seconds, each callback a token request to the
+//! provider authenticated as this client. So once the cookie has opened and
+//! its `state` matched, and BEFORE the code is exchanged, the callback redeems
+//! the state in this process's [`UsedStates`] -- one lock, so of two callbacks
+//! with one state on this replica exactly one gets past it -- and a state this
+//! replica already redeemed is refused `login_state_replayed`, audited, with
+//! its cookie cleared and no token request. Nothing is written anywhere else:
+//! no Kubernetes object, no shared store. So a replay that reaches ANOTHER
+//! replica still reaches the token endpoint: one token request per replica
+//! (that callback redeems the state there too), and again after that replica
+//! restarts or evicts the entry. The provider refuses an authorization code it
+//! has already exchanged (RFC 6749 §4.1.2: a code is single-use), so a replay
+//! cannot obtain a second sign-in from a code the provider has exchanged. A
+//! CODE THE PROVIDER HAS NOT CONSUMED IS NOT COVERED: when the first
+//! callback's exchange fails without the provider consuming the code, the
+//! same cookie and URL still sign in on another replica. The record never
+//! refuses a sign-in for lack of room: when it is full the oldest entry is
+//! forgotten, announced once a minute.
 //!
 //! THE BROWSER NEVER SEES A PROVIDER TOKEN, and the redirect that ends a
 //! successful login carries no fragment, no query and no credential: it is
@@ -97,15 +96,15 @@ fn redirect(location: &str, cookies: &[String]) -> Response {
     response
 }
 
-/// The most redeemed sign-in states one console process remembers (FX-13a):
+/// The most redeemed sign-in states one console process remembers:
 /// 65,536 entries of a 128-bit digest and an expiry, about 4 MiB at most
 /// (a hash set of 131,072 buckets and a deque of 65,536 32-byte slots).
 ///
 /// A BOUND THAT NEVER REFUSES. When the record is full, the OLDEST entry is
 /// forgotten to make room ([`Redemption::First`] says so), never the new
 /// sign-in: a full record that refused would let anyone who can mint login
-/// cookies — one unauthenticated `/auth/login` each — lock every operator out,
-/// which FX-13 rules out. A forgotten state can be replayed on this replica
+/// cookies -- one unauthenticated `/auth/login` each -- lock every operator
+/// out. A forgotten state can be replayed on this replica
 /// once more: that replay costs one token request, and it cannot obtain a
 /// second sign-in from a code the provider has exchanged (a code is
 /// single-use there).
@@ -137,7 +136,7 @@ struct Record {
     announced: Option<i64>,
 }
 
-/// FX-13a: the sign-in states this console process has redeemed, in memory.
+/// The sign-in states this console process has redeemed, in memory.
 ///
 /// KEYED BY A DIGEST, NOT THE STATE: 128 bits of SHA-256 over a domain label
 /// and the `state`, so the process never keeps the value itself. An entry is
@@ -301,7 +300,7 @@ pub async fn login(State(state): State<AppState>, request: axum::extract::Reques
         Ok(discovery) => discovery,
         Err(error) => {
             audit.set_failure(error.code());
-            // The detail says which of a stall (FX-28: `provider_timeout`, the
+            // The detail says which of a stall (`provider_timeout`, the
             // deadline in seconds), a transport cause or an oversized document
             // it was — the same text readiness logs, and like it, no
             // credential: discovery carries none.
@@ -417,7 +416,7 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
         return refuse("state_mismatch", "The sign-in state does not match.");
     }
 
-    // FX-13a: REDEEM THE STATE ON THIS REPLICA BEFORE THE CODE IS EXCHANGED.
+    // REDEEM THE STATE ON THIS REPLICA BEFORE THE CODE IS EXCHANGED.
     // Nothing below this block runs for a state this replica already redeemed
     // — that includes the token request. See the module documentation for
     // what holds across replicas (the provider's single-use code).
@@ -463,10 +462,9 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
             // body. The detail is the variant's own text, which carries none of
             // them either: for a refused exchange it is the provider's HTTP
             // status ("the provider answered HTTP 429"), which is what an
-            // operator alerting on the provider throttling this client needs
-            // to see (FX-13 review M1) — `code_exchange_failed` alone reads
-            // the same for a junk code and for a provider that has stopped
-            // serving this client.
+            // operator alerting on the provider throttling this client needs to see --
+            // `code_exchange_failed` alone reads the same for a junk code and for a
+            // provider that has stopped serving this client.
             audit.set_failure(error.code());
             tracing::warn!(reason = %error.code(), detail = %error, "a sign-in was refused");
             let mut response = ApiError::new(
@@ -484,7 +482,7 @@ pub async fn callback(State(state): State<AppState>, request: axum::extract::Req
 
     // THE SESSION CARRIES ONLY BINDABLE GROUPS, AND ONLY IF IT FITS. See
     // `crate::auth::session::MAX_SET_COOKIE_BYTES` and
-    // `crate::authz::Authorizer::bindable_groups` (review finding F-2).
+    // `crate::authz::Authorizer::bindable_groups`.
     let bindable = state.authorizer().bindable_groups();
     let identity = super::oidc::Identity {
         groups: session::session_groups(&identity.groups, bindable.as_ref()),
@@ -639,12 +637,12 @@ mod tests {
 
     /// **Of eight threads redeeming one state at once, exactly one is first.**
     ///
-    /// REGRESSION REASON (FX-13a review, M1). The router rows run two
-    /// callbacks on a current-thread runtime, where they interleave only at
-    /// an `await`. `redeem` has none, so a check and a mark split across two
-    /// lock acquisitions passed every one of them, while production runs a
-    /// multi-thread runtime. Real threads released together by a barrier see
-    /// the split: two of them pass the check before either records the state.
+    /// The router rows run two callbacks on a current-thread runtime, where
+    /// they interleave only at an `await`. `redeem` has none, so a check and a
+    /// mark split across two lock acquisitions would pass every one of them,
+    /// while production runs a multi-thread runtime. Real threads released
+    /// together by a barrier see the split: two of them pass the check before
+    /// either records the state.
     #[test]
     fn of_eight_threads_redeeming_one_state_exactly_one_is_first() {
         for round in 0..300 {

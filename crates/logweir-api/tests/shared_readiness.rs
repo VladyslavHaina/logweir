@@ -1,4 +1,4 @@
-//! Shared-mode readiness is gated on the OIDC provider (PLAT-17.2, D0
+//! Shared-mode readiness is gated on the OIDC provider (D0
 //! §"Helm, RBAC, ingress, and network changes": "The API starts NotReady if
 //! OIDC discovery/JWKS cannot initialize").
 //!
@@ -72,7 +72,7 @@ async fn a_jwks_outage_with_nothing_cached_is_not_ready() {
 /// **Once initialised, a provider outage does not take the console out of
 /// rotation, and a signed session keeps working** (D0: the API *starts*
 /// NotReady if the provider cannot initialise; a valid session continues to
-/// its signed expiry — review M2). The caches are expired and discovery and
+/// its signed expiry). The caches are expired and discovery and
 /// JWKS both fail; readiness stays true and `/api/v1/session` still answers.
 /// NEGATIVE CONTROL: the rows above, where the provider never initialised.
 #[tokio::test]

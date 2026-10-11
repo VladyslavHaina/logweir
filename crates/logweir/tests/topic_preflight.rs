@@ -62,9 +62,9 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
         target: TargetSpec {
             bootstrap_servers: vec!["localhost:9092".into()],
             auth: logweir_core::spec::AuthSpec::Plaintext,
-            // Task 9b: `scratch` is the default and is what every row in this
-            // file is about — the marker and allowlist checks below ARE the
-            // scratch segregation proof. `newTopic`'s skips are asserted in
+            // `scratch` is the default and is what every row in this file is
+            // about: the marker and allowlist checks below ARE the scratch
+            // segregation proof. `newTopic`'s skips are asserted in
             // `crates/logweir/tests/restore_mode.rs`.
             mode: logweir_core::spec::TargetMode::Scratch,
             topic_naming: None,
@@ -124,19 +124,18 @@ struct BrokerDouble {
     /// reports them. Empty for every test but the one that proves spec §6.1's
     /// "a `Restore` refuses if any mapped target topic already exists".
     already_there: Vec<TopicMeta>,
-    /// FX-4 / T13: the principal lacks DescribeConfigs on the cluster, so the
-    /// broker configuration read is REFUSED — what `RdKafkaReader::
-    /// broker_configs` returns now instead of the empty map rdkafka 0.36.2
-    /// used to hand back.
+    /// The principal lacks DescribeConfigs on the cluster, so the broker
+    /// configuration read is REFUSED, as `RdKafkaReader::broker_configs`
+    /// reports it.
     broker_refused: bool,
-    /// FX-4 / T13: the probe topic's configuration read is REFUSED.
+    /// The probe topic's configuration read is REFUSED.
     readback_refused: bool,
-    /// FX-18: how many configuration reads of a just-created topic answer
+    /// How many configuration reads of a just-created topic answer
     /// `TopicNotFound` before it is readable — a creation still propagating.
     readback_lag: std::sync::atomic::AtomicUsize,
-    /// FX-18: every `await_served(topic, partitions)` call, in order.
+    /// Every `await_served(topic, partitions)` call, in order.
     served: Mutex<Vec<(String, i32)>>,
-    /// FX-18: `await_served` answers this instead of `Ok`.
+    /// `await_served` answers this instead of `Ok`.
     never_served: Option<KafkaError>,
 }
 
@@ -157,7 +156,7 @@ impl BrokerDouble {
         }
     }
 
-    /// FX-18: the first `n` reads of a just-created topic's configuration
+    /// The first `n` reads of a just-created topic's configuration
     /// answer `TopicNotFound`, as a broker whose metadata does not hold the
     /// topic yet does.
     fn lagging_readback(self, n: usize) -> Self {
@@ -166,7 +165,7 @@ impl BrokerDouble {
         self
     }
 
-    /// FX-18: a created topic the cluster never serves.
+    /// A created topic the cluster never serves.
     fn never_serving(mut self, e: KafkaError) -> Self {
         self.never_served = Some(e);
         self
@@ -320,9 +319,7 @@ fn guard_message(e: DrillError) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// G-TS, four arms
-// ---------------------------------------------------------------------------
+// G-TS, four arms.
 
 /// **G-TS.** The whole property, in the four arms spec §10's row names. Each is
 /// a `#[test]` of its own below, and this one is the roll-up an auditor reads:
@@ -557,12 +554,10 @@ fn a_logappendtime_broker_that_honours_the_override_is_admitted() {
     );
 }
 
-/// **FX-18.** The `LogAppendTime` probe reads its topic back only once the
-/// cluster serves it.
-///
-/// A broker whose metadata does not hold a just-created topic yet answers its
-/// configuration read `TopicNotFound` (or, through T13, an empty answer named
-/// "not authorized"). PROD-00.3f's matrix row hit it once in two runs.
+/// **The `LogAppendTime` probe reads its topic back only once the cluster
+/// serves it.** A broker whose metadata does not hold a just-created topic
+/// yet answers its configuration read `TopicNotFound` (or an empty answer
+/// named "not authorized").
 ///
 /// NEGATIVE CONTROL: put `reader.topic_configs(&probe)` back in
 /// `target_topic_preflight` and this plan, which the broker honours, exits 1
@@ -599,8 +594,8 @@ fn the_probe_readback_waits_for_the_topic_phase_0_just_created() {
     );
 }
 
-/// **FX-18.** Every target topic Logweir creates is SERVED before the engine
-/// is handed it, each with the partition count it was created with.
+/// **Every target topic Logweir creates is SERVED before the engine is handed
+/// it**, each with the partition count it was created with.
 ///
 /// The engine retries `NOT_LEADER_FOR_PARTITION` on produce but not a
 /// partition its first metadata read lists without a leader.
@@ -658,7 +653,7 @@ fn every_created_target_topic_is_served_before_the_restore_runs() {
     );
 }
 
-/// **FX-18.** A created target topic the cluster never serves is an
+/// A created target topic the cluster never serves is an
 /// operational failure (exit 1) naming the topic, and `topics_created` still
 /// names every topic this run created. Nothing tears them down on this error:
 /// the run returns before phase 9, as it does for a failed create in the same
@@ -734,17 +729,11 @@ fn a_timestamp_bound_that_excludes_the_window_end_is_a_guard_refusal() {
 
 /// **The bound is checked against the window end THIS restore asks for.**
 ///
-/// Since Task 9 `RestorePlan.time_window.1` is `restore.point_in_time` when
-/// the spec states one and `sample.window_end` otherwise, so phase 0 makes the
-/// same choice: reading `sample.window_end` unconditionally would compare the
-/// broker's bound against a timestamp this restore never requests — passing a
-/// plan the broker will reject record by record, or refusing one it would have
-/// accepted.
-///
-/// Both directions are asserted, because the repoint was correct and entirely
-/// unasserted: "read `sample.window_end` even when `point_in_time` is present"
-/// survived `cargo test --workspace` at 814 passed / 0 failed (task-9 review,
-/// MED-3). Arm 1 dies on the missing refusal, arm 2 on a refusal that should
+/// `RestorePlan.time_window.1` is `restore.point_in_time` when the spec states
+/// one and `sample.window_end` otherwise, so phase 0 makes the same choice:
+/// reading `sample.window_end` unconditionally would compare the broker's
+/// bound against a timestamp this restore never requests. Both directions are
+/// asserted: arm 1 dies on a missing refusal, arm 2 on a refusal that should
 /// not have happened, and arm 1 also pins the `restore.point_in_time` label
 /// the message carries.
 #[test]
@@ -838,8 +827,7 @@ fn the_pre_3_6_timestamp_bound_spelling_is_read_too() {
 /// The Apache default for both bound keys is `9223372036854775807`, i.e.
 /// unbounded. A plain `now - bound` overflows: it panics in a debug build and
 /// wraps to a floor in the FUTURE in a release build, which would refuse every
-/// window on every default broker. `saturating_sub` is the fix and this is the
-/// test that would have caught its absence.
+/// window on every default broker; `saturating_sub` is what this pins.
 #[test]
 fn the_apache_default_timestamp_bound_refuses_nothing() {
     let spec = spec_with_window_end(chrono::Utc::now() - chrono::Duration::days(365));
@@ -897,13 +885,12 @@ fn a_broker_configs_read_failure_is_operational_not_a_guard_refusal() {
     assert_eq!(err.exit_code(), ExitCode::Operational, "{err:?}");
 }
 
-/// **FX-4 / T13, consumer 2.** A principal without DescribeConfigs on the
-/// cluster used to get an EMPTY broker configuration back, and G-TS read the
-/// missing `log.message.timestamp.type` as the Apache default `CreateTime` —
-/// so on a `LogAppendTime` target the override probe never ran and the
-/// timestamp bound was never checked. The read now REFUSES, and phase 0 stops
-/// on it (exit 1, a `KafkaError`: the plan may be fine; the principal is not),
-/// before writing anything.
+/// **A refused broker configuration stops phase 0.** Without DescribeConfigs
+/// on the cluster, a missing `log.message.timestamp.type` must not read as
+/// the Apache default `CreateTime`: on a `LogAppendTime` target the override
+/// probe would never run and the timestamp bound would never be checked. The
+/// read REFUSES, and phase 0 stops on it (exit 1, a `KafkaError`: the plan may
+/// be fine; the principal is not), before writing anything.
 ///
 /// Negative control: make phase 0 swallow the refusal as an empty map
 /// (`reader.broker_configs().unwrap_or_default()`) and this test fails: the
@@ -932,12 +919,11 @@ fn a_refused_broker_configuration_read_is_never_read_as_the_apache_default() {
     );
 }
 
-/// **FX-4 / T13, consumer 3.** On a `LogAppendTime` broker the override probe
-/// creates a topic and reads its configuration back. A REFUSED readback used
-/// to be an empty map, which G-TS then read as the BROKER's type and refused
-/// with exit 3 claiming the broker "REFUSED a per-topic override" — a finding
-/// about the broker that nothing observed. It is now operational (exit 1),
-/// naming the refusal, and the probe topic is still deleted.
+/// **A refused probe readback is operational, not a broker finding.** On a
+/// `LogAppendTime` broker the override probe creates a topic and reads its
+/// configuration back. A REFUSED readback is exit 1, naming the refusal, never
+/// the exit-3 claim that the broker "REFUSED a per-topic override", and the
+/// probe topic is still deleted.
 ///
 /// Negative control: `readback.unwrap_or_default()` in phase 0 turns this back
 /// into the exit-3 override verdict, and this test fails.
@@ -969,9 +955,7 @@ fn a_refused_probe_readback_is_operational_never_an_override_verdict() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// I9 — the refusal-reason line, in process
-// ---------------------------------------------------------------------------
+// I9 — the refusal-reason line, in process.
 
 /// **Interface I9**, second producer half. The refusal built by the
 /// `a_logappendtime_broker_that_refuses_the_override_is_a_guard_refusal`
@@ -979,8 +963,7 @@ fn a_refused_probe_readback_is_operational_never_an_override_verdict() {
 /// result is byte-equal to `refusal-reason=TargetTopicConfigRefused`; then
 /// `logweir::exit::print_refusal_to`, the writer `print_refusal` prints stdout
 /// through, is asserted to END its output with exactly that line and its
-/// newline, after the one `refusal-detail=` line FX-34 put before it. (The
-/// printer of the state line alone is gone: FX-34's review, L5.)
+/// newline, after the one `refusal-detail=` line before it.
 ///
 /// **In process, never the binary** — a binary-level arm would need both a
 /// broker and a `LogAppendTime` broker, so the only binary assertion of this
@@ -1042,8 +1025,8 @@ fn a_target_topic_refusal_prints_its_terminal_state() {
 }
 
 /// `TargetTopicConfigRefused` is one of the three declared terminal states, so
-/// a controller's exit-3 map is closed over it. Task 3 declared the constant for
-/// this task; this is the assertion that it is now actually produced.
+/// a controller's exit-3 map is closed over it; this asserts it is actually
+/// produced.
 #[test]
 fn the_terminal_state_this_task_emits_is_one_of_the_declared_three() {
     assert!(
@@ -1057,9 +1040,7 @@ fn the_terminal_state_this_task_emits_is_one_of_the_declared_three() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The preflight leaves the run in `RestoreOutcome`
-// ---------------------------------------------------------------------------
+// The preflight leaves the run in `RestoreOutcome`.
 
 /// The preflight leaves a WHOLE RUN, not just the phase: a full drill over the
 /// orchestrator fixture's doubles, through `execute_with_outcome`.
@@ -1067,8 +1048,8 @@ fn the_terminal_state_this_task_emits_is_one_of_the_declared_three() {
 /// Deliberately **not** `topic_preflight_lands_in_the_scorecard`: it is not a
 /// scorecard field. Global Constraint 12 as amended freezes the document at 21
 /// top-level properties and 17 required ones and permits nested optional fields
-/// only, so a `topic_preflight` block would make the count 22 and break Task
-/// 5's `the_scorecard_top_level_shape_is_unchanged`. Spec §10's G-TS row puts it
+/// only, so a `topic_preflight` block would make the count 22 and break
+/// `the_scorecard_top_level_shape_is_unchanged`. Spec §10's G-TS row puts it
 /// in `Restore.status.topicPreflight`, which the operator writes from this
 /// outcome.
 #[test]
@@ -1099,14 +1080,12 @@ fn execute_with_still_returns_the_scorecard_alone() {
     assert_eq!(sc.outcome, logweir_core::outcome::Outcome::Pass);
 }
 
-/// **PROD-01.2: a broker that does not REPORT its timestamp type is not
-/// recorded as `CreateTime`.** Redpanda v26.2.4's broker resource answers nine
+/// **A broker that does not REPORT its timestamp type is not recorded as
+/// `CreateTime`.** Redpanda v26.2.4's broker resource answers nine
 /// configuration keys and `log.message.timestamp.type` is not one of them
-/// (measured). Phase 0 used to fill in the Apache default and publish it
-/// (`Restore.status.topicPreflight.timestampType: CreateTime`): unsupported
-/// metadata recorded as a fact. Now the type is `None`, the status line omits
-/// the key, the plan is still admitted (an absent key refuses nothing), and no
-/// probe topic is created.
+/// (measured). The type is `None`, the status line omits the key, the plan is
+/// still admitted (an absent key refuses nothing), and no probe topic is
+/// created.
 ///
 /// CONTROL, in the same test: the same broker answer plus the key records it.
 ///
@@ -1207,21 +1186,17 @@ fn the_outcome_preflight_is_the_one_phase_0_built() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Spec §6.1 — a `Restore` refuses if any mapped target topic already exists.
-// Fix round 1, review finding 1.
-// ---------------------------------------------------------------------------
 
-/// **Spec §6.1, review finding 1.** A mapped target topic that already exists
+/// **Spec §6.1.** A mapped target topic that already exists
 /// is REFUSED at phase 0 — exit 3, `refusal-reason=GuardRefused`, the topic
 /// named, nothing created and nothing deleted.
 ///
-/// This is the arm that kills the mutant "reuse the existing topic (warn and
-/// continue) instead of refusing": that version returns `Ok`, and every
+/// Reusing the existing topic (warn and continue) would return `Ok`, and every
 /// assertion below expects a `GuardRefusal`. It also pins the two facts that
-/// made the reuse a false claim — `TopicPreflight.configs_set` reports the
-/// pinned pair "as applied" and `topics_created` named a topic Logweir did not
-/// create, both of which reach `Restore.status.topicPreflight`.
+/// would make reuse a false claim: `TopicPreflight.configs_set` reports the
+/// pinned pair "as applied" and `topics_created` would name a topic Logweir
+/// did not create, both of which reach `Restore.status.topicPreflight`.
 #[test]
 fn a_mapped_target_topic_that_already_exists_is_a_guard_refusal_naming_it() {
     let spec = a_recent_spec();
@@ -1314,15 +1289,12 @@ fn the_existence_check_runs_before_the_logappendtime_probe_writes() {
     );
 }
 
-/// **Review finding 1(b).** `topics_created` names only topics THIS RUN
-/// created, so `configs_set`'s "as applied" is true of every one of them.
-///
-/// Two halves, and the second is the one that used to be false: a broker that
-/// answers `TopicAlreadyExists` for a target is `DrillError::Operational`
-/// (exit 1) and that name does NOT enter `topics_created`. The old code
-/// warned, continued, and pushed the name — so
-/// `Restore.status.topicPreflight` claimed `retention.ms=-1` over a topic that
-/// kept whatever retention it had.
+/// **`topics_created` names only topics THIS RUN created**, so `configs_set`'s
+/// "as applied" is true of every one of them. A broker that answers
+/// `TopicAlreadyExists` for a target is `DrillError::Operational` (exit 1),
+/// and that name does NOT enter `topics_created`, or
+/// `Restore.status.topicPreflight` would claim `retention.ms=-1` over a topic
+/// that kept whatever retention it had.
 #[test]
 fn topics_created_names_only_the_topics_this_run_created() {
     let spec = a_recent_spec();
@@ -1421,20 +1393,12 @@ fn topics_created_names_only_the_topics_this_run_created() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Review finding 2 — the phase order, in process.
-// ---------------------------------------------------------------------------
+// The phase order, in process.
 
-/// **Review finding 2.** The creation step runs AFTER phase 5's verdict, and
-/// that ordering was pinned only behind Docker
-/// (`e2e/tests/full_drill.rs::a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`,
-/// which asserts `!topic_exists("drill-orders")`). The whole default suite
-/// stayed green with the call moved before the `Verdict::Block` branch.
-///
-/// This is that assertion in process: a drill whose phase-5 preflight BLOCKS
-/// created nothing on the target, and a drill that passes created the mapped
-/// target — so the test fails both for a creation step moved earlier and for
-/// one deleted altogether.
+/// **The creation step runs AFTER phase 5's verdict.** A drill whose phase-5
+/// preflight BLOCKS creates nothing on the target, and a drill that passes
+/// creates the mapped target, so the test fails both for a creation step
+/// moved earlier and for one deleted altogether.
 #[test]
 fn a_blocked_preflight_creates_no_target_topic() {
     let blocked = fixtures::orchestrator_fixture(fixtures::Drill::BlocksAtPreflight);
@@ -1464,9 +1428,7 @@ fn a_blocked_preflight_creates_no_target_topic() {
     assert_eq!(created, vec!["drill-orders".to_string()]);
 }
 
-// ---------------------------------------------------------------------------
-// The PRODUCER half of erratum E10(c) — Task 24 fix round 1
-// ---------------------------------------------------------------------------
+// The PRODUCER half of erratum E10(c).
 
 /// A source file from the workspace, read from this crate's manifest
 /// directory.
@@ -1507,45 +1469,28 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
     panic!("`{signature}`'s body is unbalanced");
 }
 
-/// **THE RUNNER PRINTS `topic-preflight=` BY NAME ON A PASSING RUN** — the
-/// PRODUCER half of plan erratum **E10(c)**, which the Task 24 review found
-/// pinned by nothing at all: deleting the line survived the entire workspace
-/// suite.
+/// **THE RUNNER PRINTS `topic-preflight=` BY NAME ON A PASSING RUN**, the
+/// PRODUCER half of plan erratum **E10(c)**.
 ///
-/// # Why this row is in process and what it can and cannot reach
+/// `drill::exiting` writes with `println!` to the process's real stdout, on
+/// the `ExitCode::Ok` branch only, and there is no writer seam, so the print
+/// is not observable in process without a broker. This row pins what the
+/// print is made of:
 ///
-/// `drill::exiting` is a private function that writes with `println!` to the
-/// process's real stdout, and the branch that prints this line is reached only
-/// at `ExitCode::Ok` — a full drill that dialled a broker, restored into it and
-/// signed a scorecard. **There is no writer seam** (`exit::print_refusal_to`
-/// is the precedent for one, and it covers interface I9's line, not this one),
-/// and libtest gives a test no way to read back its own captured stdout. So
-/// the print itself is not observable in process without a broker, and this row
-/// says so rather than pretending otherwise. What it does instead is pin the
-/// two halves the print is made of, and pin that the print is still there:
+/// 1. **The VALUE, off a real passing run**: the `TopicPreflight` from
+///    `execute_with_outcome` over the orchestrator fixture, the object
+///    `exiting` is handed.
+/// 2. **The SHAPE the controller scans (erratum E4)**: ONE line, the key by
+///    NAME at its head, a single-line JSON object after it, the three keys
+///    spelled as `Restore.status.topicPreflight`'s camelCase fields. The
+///    controller reads a BOUNDED TAIL of a merged pod log and matches by key
+///    name, so a value carrying a newline could be split.
+/// 3. **The PRINT, in `exiting`'s body**, read as text.
+/// 4. **The two crates agree on the key**: `weirkeeper`'s scanner constant is
+///    read out of its own source, because `weirkeeper` must not depend on
+///    `logweir` (`scripts/check-one-signer.sh`'s check 1).
 ///
-/// 1. **The VALUE, off a real passing run.** The `TopicPreflight` comes from
-///    `execute_with_outcome` over the orchestrator fixture — the same object
-///    `exiting` is handed — never from a literal, so the line's shape is the
-///    one a passing drill actually produces.
-/// 2. **The SHAPE the controller scans (erratum E4).** ONE line, the key by
-///    NAME at its head, a single-line JSON object after it, and the three keys
-///    spelled as `Restore.status.topicPreflight`'s own camelCase fields. A pod
-///    log is stdout and stderr merged in nondeterministic order, so the
-///    controller reads a BOUNDED TAIL and matches by key name; a value carrying
-///    a newline would cost two of those eight lines and could be split across
-///    them.
-/// 3. **The PRINT, in `exiting`'s body.** Text, over the source — the mutant
-///    this row exists for is "delete the `println!`", and the body is where
-///    that is decidable without a cluster.
-/// 4. **The two crates agree on the key.** `weirkeeper`'s scanner constant is
-///    read out of its own source and compared, because the producer and the
-///    consumer cannot share a type: `weirkeeper` must not depend on `logweir`
-///    at all (`scripts/check-one-signer.sh`'s check 1), so the two halves meet
-///    only in a pod log and only on this string.
-///
-/// KILLS: **M18** — dropping the `topic-preflight=` producer line, which
-/// survived the whole workspace suite before this row; renaming the key on
+/// KILLS: dropping the `topic-preflight=` producer line; renaming the key on
 /// either side; and emitting a multi-line or non-JSON value.
 #[test]
 fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
@@ -1579,10 +1524,9 @@ fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
     let object = parsed
         .as_object()
         .unwrap_or_else(|| panic!("…and it is an OBJECT: {line}"));
-    // PROD-01.2: THE FIXTURE'S BROKER REPORTS NO CONFIGURATION KEY AT ALL, so
-    // the line carries no `timestampType`. Until PROD-01.2 it carried
-    // `CreateTime`: the Apache default, written down for a broker that never
-    // said so.
+    // THE FIXTURE'S BROKER REPORTS NO CONFIGURATION KEY AT ALL, so the line
+    // carries no `timestampType`, never the Apache default for a broker that
+    // never said so.
     assert_eq!(
         object.get("timestampType"),
         None,
@@ -1666,7 +1610,7 @@ fn the_topic_preflight_line_is_printed_by_name_on_a_passing_run() {
     );
 }
 
-/// **FX-20 fix round (review F1), phase 0's own arm.** The restore runner
+/// **Phase 0's own arm.** The restore runner
 /// refuses an injected S3 region before the archive is read
 /// (`guard_cli.rs::fx20_an_injected_region_exits_3_before_the_archive_is_read`);
 /// phase 0 holds the same rule for every caller that reaches it another way,

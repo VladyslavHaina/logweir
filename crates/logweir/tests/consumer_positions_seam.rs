@@ -1,4 +1,4 @@
-//! **PROD-04.1, end to end through `backup run`'s in-process seam**: the
+//! **Consumer positions, end to end through `backup run`'s in-process seam**: the
 //! selection (plan and `--consumer-group`), phase −1's refusal, the capture
 //! before the engine, the marks after it, the receipt's 1.7.0 block, the
 //! catalog point's summary — with a `ClusterReader` double and no socket.
@@ -6,12 +6,12 @@
 //! | row | proves | negative control |
 //! |---|---|---|
 //! | `a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point` | one outcome per selected id (plan then CLI), a captured group's position — in the positions document put beside the receipt, which the receipt binds by digest — judged against the archive (`withinArchive`), a share group `GroupTypeNotCaptured`, the receipt 1.7.0 and VALID, the document VALID against it, the catalog point's summary bound by the block's digest | the same run selecting nothing writes a receipt that never names the block, and no document |
-//! | `a_reader_that_cannot_read_groups_fails_every_selected_group` | the default `ClusterReader` (every double written before PROD-04.1) records each selected group `failed: CaptureUnavailable` | absence read as offset 0, or the group dropped, would fail arm 26, CP-11 or the count |
+//! | `a_reader_that_cannot_read_groups_fails_every_selected_group` | the default `ClusterReader` (a double that reads no groups) records each selected group `failed: CaptureUnavailable` | absence read as offset 0, or the group dropped, would fail arm 26, CP-11 or the count |
 //! | `a_selection_that_is_not_one_is_refused_before_anything_runs` | a group selected twice (plan and CLI), a blank id and a control character are refused at phase −1, exit 3, before the engine | a valid selection runs |
 //! | `a_topic_recreated_during_the_capture_fails_the_groups_holding_positions_on_it` | marks after the engine below the group-capture marks (TI-04.1-3): the group is `GenerationChangedDuringCapture` | stable marks capture it |
-//! | `a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name` | 85 ids of 255 `"` are refused at phase −1 by name, exit 3, nothing written (review N1) | 84 fit (core and builder rows) |
-//! | `a_capture_that_asked_no_position_reads_no_marks_after_the_engine` | every selected group excluded: no mark is read after the engine (review L8) | one captured group: the marks are read once |
-//! | `a_positions_document_over_the_read_cap_is_refused_naming_the_cap_and_nothing_is_read` | FX-31 over this row's document: read under `caps::SIGNED_DOCUMENT`, and one the store reports a byte over it is `TooLarge` naming the key and the cap, with no body byte taken and nothing held against the receipt | the same bytes in an honest store are read whole and hold against the signed receipt |
+//! | `a_selection_whose_summary_could_exceed_the_cap_as_encoded_is_refused_by_name` | 85 ids of 255 `"` are refused at phase −1 by name, exit 3, nothing written | 84 fit (core and builder rows) |
+//! | `a_capture_that_asked_no_position_reads_no_marks_after_the_engine` | every selected group excluded: no mark is read after the engine | one captured group: the marks are read once |
+//! | `a_positions_document_over_the_read_cap_is_refused_naming_the_cap_and_nothing_is_read` | the document is read under `caps::SIGNED_DOCUMENT`, and one the store reports a byte over it is `TooLarge` naming the key and the cap, with no body byte taken and nothing held against the receipt | the same bytes in an honest store are read whole and hold against the signed receipt |
 #[path = "backup_seam/mod.rs"]
 mod backup_seam;
 
@@ -173,7 +173,7 @@ fn evidence() -> Store {
 /// The positions document `receipt` binds, read back from `store` and held
 /// against the signed receipt.
 ///
-/// **FX-31.** It is read under `caps::SIGNED_DOCUMENT`, the cap a runner or
+/// It is read under `caps::SIGNED_DOCUMENT`, the cap a runner or
 /// CLI reads a signed evidence document with: the document is not signed
 /// itself, the receipt's signature covers its digest and length. Over the cap
 /// the read is `TooLarge` and this returns before anything is parsed or held
@@ -304,8 +304,8 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
         point.format_version
     );
 
-    // CONTROL: the same backup selecting nothing writes the receipt it would
-    // without PROD-04.1.
+    // CONTROL: the same backup selecting nothing writes a receipt with no
+    // positions block.
     let f = Fixture::new();
     let store = evidence();
     let outcome = f
@@ -331,7 +331,7 @@ fn a_selected_group_is_recorded_in_the_signed_receipt_and_its_catalog_point() {
     );
 }
 
-/// **FX-31 over PROD-04.1's document (integrate-6).** The positions document
+/// **The read cap over the positions document.** The positions document
 /// is read under `caps::SIGNED_DOCUMENT`, and one the store reports over that
 /// cap is refused `TooLarge`, naming the key and the cap, before a body byte
 /// is taken: nothing is parsed and nothing is held against the receipt.
@@ -474,7 +474,7 @@ fn a_selection_that_is_not_one_is_refused_before_anything_runs() {
     assert!(f.execute_reading(&evidence(), &reader, Vec::new()).is_ok());
 }
 
-/// **Review N1 at phase −1.** 85 ids of 255 `"` — legal Kafka group ids, 85
+/// **At phase −1.** 85 ids of 255 `"` — legal Kafka group ids, 85
 /// of 100, each 255 bytes — would make a summary over the cap as JSON writes
 /// it: the run is refused by name, exit 3, before anything runs, and nothing
 /// is written. Never a truncated summary.
@@ -586,12 +586,12 @@ impl ClusterReader for CountingReader {
     }
 }
 
-/// **Review L8.** A capture that described no group — every selected group
+/// A capture that described no group — every selected group
 /// excluded, as on a broker that types none — asked no position, so the run
 /// reads no marks after the engine: an unavailable leader costs it nothing.
 /// The control: one captured group, and the marks are read once more.
 ///
-/// PROD-02.1: every run reads the marks ONCE before the engine (the
+/// Every run reads the marks ONCE before the engine (the
 /// receipt's `source_watermarks`), so the counts below are that one read plus
 /// the read after the engine this row is about.
 #[test]

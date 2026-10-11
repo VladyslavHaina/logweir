@@ -1,56 +1,37 @@
 // pages/keys.js -- THE KEYS VIEW, READ-ONLY, AND `unknown` IS NOT `valid`.
 //
-// THIS PAGE WRITES NOTHING, AND THE PLURALS IT READS ARE NOT WRITABLE. Both
-// `TrustPolicy` and `TrustRoster` are cluster-scoped and admin-only: a
-// namespace-scoped adopter cannot edit either at all, neither plural is in the
-// frozen writable set in `api.js`, and the product API serves no trust write
-// in v1 at all (`capabilities.trustAdministration: false`, D3 section 10). This page
-// never calls either writer; `the_keys_page_submits_nothing` asserts that
-// twice -- once with a stub whose writers throw, and once by reading this file.
+// THIS PAGE WRITES NOTHING. `TrustPolicy` and `TrustRoster` are
+// cluster-scoped and admin-only, neither plural is in `api.js`'s writable
+// set, and the product API serves no trust write in v1
+// (`capabilities.trustAdministration: false`, D3 section 10);
+// `the_keys_page_submits_nothing` asserts it with a stub whose writers throw
+// and by reading this file. So it shows the exact `kubectl apply` document a
+// cluster admin applies, and does not submit it.
 //
-// SO IT SURFACES THE `kubectl apply` SNIPPET AND DOES NOT SUBMIT IT. That is
-// the honest shape for an admin-only step: show the exact document a cluster
-// admin applies, and let them apply it.
+// IT PRINTS THE FINGERPRINT COMMAND, because comparing the fingerprint out of
+// band with the key's holder is the only step that catches an undisclosed
+// key rotation: a row says which key id the controller accepts, not that the
+// material behind it is still the holder's.
 //
-// AND IT PRINTS THE FINGERPRINT COMMAND, because that is the only step that
-// catches an undisclosed key rotation. A row says which key id the controller
-// will accept; it cannot say that the key material behind that id is still the
-// one its holder has. Comparing the fingerprint out of band, against the
-// person who holds the key, is what does.
+// THE THIRD WORD (D3 section 7.7). A verdict is rendered only for a FRESH
+// evaluation: the object carries a `status`, `status.observedGeneration`
+// equals `metadata.generation` (the verdicts are about the spec on screen),
+// and `status.evaluatedAt` is inside the freshness window measured against
+// the SERVER's clock. Anything else is `unknown`, saying which cause it was
+// -- because "nothing evaluated this" (no status: unreconciled, no
+// controller, unparseable keys) must never read as "valid".
 //
-// ===========================================================================
-// WHAT D3 section 7.7 CHANGED, AND WHY IT IS THE POINT OF THIS FILE
-// ===========================================================================
+// THE CLOCK IS THE SERVER'S AND NEVER THE BROWSER'S: `ui/api.js`'s
+// `serverClock()`, the `Date` header of the most recent answer. With no
+// server instant, freshness is not established and every row reads
+// `unknown` -- the fail-closed side.
 //
-// THE OLD RULE WAS WRONG IN A WAY THAT ALWAYS READ GREEN. The roster view
-// printed `valid` for any key whose id was not in `status.expiredKeyIds[]` --
-// INCLUDING when the object carried no status at all, which is what an
-// unreconciled roster, a controller that is not running and a roster whose
-// every key failed to parse all look like. "Nothing evaluated this" and "this
-// is valid" rendered identically, and the one that is a fault rendered as the
-// one that is fine.
-//
-// THE NEW RULE HAS A THIRD WORD. An evaluation is FRESH only when all of:
-// the object carries a `status`; `status.observedGeneration` equals
-// `metadata.generation`, so the verdicts are about the spec on screen; and
-// `status.evaluatedAt` is inside the freshness window measured against the
-// SERVER's clock. Anything else is `unknown`. `valid` and `expired` are
-// rendered only for a fresh evaluation, and `unknown` says which of the four
-// causes it was.
-//
-// THE CLOCK IS THE SERVER'S AND NEVER THE BROWSER'S. `ui/api.js`'s
-// `serverClock()` is the `Date` header of the most recent answer -- the
-// `logweir-api` process in console mode, kube-apiserver through `kubectl
-// proxy` in legacy mode. With no server instant at all, freshness has not been
-// established and every row reads `unknown`: that is the fail-closed side, and
-// it is the side this page takes.
-//
-// RETIREMENT AND REVOCATION ARE DIFFERENT AND ARE EXPLAINED AS SUCH. A retired
-// key still verifies everything it signed before it was retired (`Historical`)
-// and authorises nothing new. A key revoked for compromise does NOT get that
-// courtesy: its own claimed signing time is attacker-controlled, so only a
-// controller's earlier independent observation counts, and without one the
-// evidence fails closed.
+// RETIREMENT AND REVOCATION ARE DIFFERENT. A retired key still verifies
+// everything it signed before retirement (`Historical`) and authorises
+// nothing new. A key revoked for compromise gets no such courtesy: its own
+// claimed signing time is attacker-controlled, so only a controller's
+// earlier independent observation counts, and without one the evidence
+// fails closed.
 
 import { apiClient, mode, CONSOLE } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
@@ -108,13 +89,9 @@ export function rosterOf(collection) {
 
 /** WHETHER AN EVALUATION IS FRESH ENOUGH TO BE RENDERED AS A VERDICT.
  *
- *  PURE, AND THE SERVER INSTANT IS AN ARGUMENT. `now` is
- *  the server clock `ui/api.js` recorded -- the instant the cluster dated its own answer
- *  by. Handing it in rather than reading it here is what lets the suite drive
- *  every branch, and what stops a future edit reaching for `Date.now()`
- *  because it was convenient.
- *
- *  Returns `{fresh, reason}`. `reason` is one of
+ *  Pure, with the server instant as an argument: `now` is the server clock
+ *  `ui/api.js` recorded, so the suite can drive every branch and nothing here
+ *  can reach for `Date.now()`. Returns `{fresh, reason}`; `reason` is one of
  *  [`EVALUATION_UNKNOWN_REASONS`]' keys when `fresh` is false. */
 export function evaluationFreshness(object, now, windowMs) {
   const meta = (object && object.metadata) || {};
@@ -130,11 +107,9 @@ export function evaluationFreshness(object, now, windowMs) {
     return { fresh: false, reason: "NoStatus" };
   }
   if (typeof now !== "number" || !isFinite(now)) {
-    // NO SERVER INSTANT IS NOT A FRESH ONE. Freshness has not been
-    // established, and `unknown` is what "not established" reads as -- under
-    // its OWN reason, because "this evaluation is old" and "this page has no
-    // clock the cluster saw" are two different things and explaining one with
-    // the other's sentence is a page saying something that did not happen.
+    // NO SERVER INSTANT IS NOT A FRESH ONE, and it has its OWN reason: "this
+    // evaluation is old" and "this page has no clock the cluster saw" are
+    // different things.
     return { fresh: false, reason: "NoServerClock" };
   }
   const budget = typeof windowMs === "number" && windowMs > 0 ? windowMs : EVALUATION_FRESHNESS_MS;
@@ -145,22 +120,20 @@ export function evaluationFreshness(object, now, windowMs) {
 
 /** THE FRESHNESS ANSWER FOR ONE POLICY, FROM WHICHEVER DOCUMENT IT CAME.
  *
- *  **Console mode: the API decided it.** `TrustPolicyView.evaluation` carries
+ *  Console mode: the API decided it. `TrustPolicyView.evaluation` carries
  *  `state` (`fresh` or `unknown`), `reason` (one of D3 section 7.7's five
- *  causes), the server instant it decided against, `freshWithinSeconds` and the
- *  evaluation's own age -- so the arithmetic is checkable and the page renders
- *  the answer rather than a second opinion. That is the whole point of asking a
- *  normalizing API: the console and the controller cannot disagree about
- *  freshness if only one of them decides it.
+ *  causes), the server instant, `freshWithinSeconds` and the evaluation's
+ *  age, so the page renders the answer rather than a second opinion, and the
+ *  console and the controller cannot disagree.
  *
- *  **Legacy mode: the page decides it**, by [`evaluationFreshness`], against
- *  the `Date` header of the answer that carried the object -- still a SERVER
- *  clock, still never the browser's. Two documents, two rules.
+ *  Legacy mode: the page decides it, by [`evaluationFreshness`], against the
+ *  `Date` header of the answer that carried the object -- still a SERVER
+ *  clock.
  *
  *  Returns `{fresh, reason, decidedBy}`. `reason` is a key of
- *  [`EVALUATION_UNKNOWN_REASONS`]; the API's five map onto four of them one for
- *  one, and `evaluated` never reaches a reason because it only accompanies
- *  `fresh`. */
+ *  [`EVALUATION_UNKNOWN_REASONS`]; the API's five map onto four of them one
+ *  for one, and `evaluated` never reaches a reason because it only
+ *  accompanies `fresh`. */
 export const API_EVALUATION_REASONS = Object.freeze({
   notEvaluated: "NoStatus",
   generationBehind: "GenerationBehind",
@@ -226,11 +199,9 @@ export function usabilityCell(freshness, verdict) {
   return esc(signing + "; verification: " + verification);
 }
 
-/** THE TRUST POLICY'S KEY TABLE.
- *
- *  Seven columns, and the two that matter most are the last two: what the
- *  controller decided about this key, and whether that decision is one this
- *  page is allowed to render at all. */
+/** THE TRUST POLICY'S KEY TABLE. The two columns that matter most are the
+ *  last two: what the controller decided about this key, and whether that
+ *  decision is one this page may render at all. */
 export function renderPolicyKeys(object, now) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
@@ -241,9 +212,8 @@ export function renderPolicyKeys(object, now) {
     const usages = Array.isArray(entry.usages) ? entry.usages : [];
     return [
       "<code>" + cell(entry.keyId) + "</code>",
-      // THE USAGES AND THE DECLARED STATE UNDER THE PRINCIPAL (MCP round 2,
-      // R2-3): eight columns were wider than the card at 1024 px, and both
-      // are facts about the entry the principal names.
+      // The usages and the declared state under the principal: both are facts
+      // about the entry it names, and eight columns overflow the card at 1024 px.
       cell((entry.principal || {}).display) + " " +
         "<code>" + cell((entry.principal || {}).id) + "</code>" +
         "<span class=\"cell-sub\">" + (usages.length === 0 ? ABSENT : esc(usages.join(", "))) +
@@ -275,15 +245,13 @@ const ARROW_TO = "->";
 
 /** Retirement and revocation, per key, in the words that distinguish them.
  *
- *  A KEY THIS POLICY DECLARES ALIVE CAN BE EVALUATED `Revoked`
- *  (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a `KeyCompromise` revocation
- *  recorded on ANY TrustPolicy applies to the key everywhere, so the
- *  controller reports it `Revoked` here too. Printing "active -- it may sign
- *  new documents" beside that verdict would be the one sentence on the page
- *  still vouching for a compromised key, so a FRESH `Revoked` verdict over a
- *  declared `Active`/`Retired` key says where the revocation lives instead.
- *  An unfresh verdict is not read at all: `unknown` is not `valid`, and it is
- *  not `revoked` either. */
+ *  A KEY THIS POLICY DECLARES ALIVE CAN BE EVALUATED `Revoked`: a
+ *  `KeyCompromise` revocation recorded on ANY TrustPolicy applies everywhere.
+ *  "Active -- it may sign new documents" beside that verdict would vouch for
+ *  a compromised key, so a FRESH `Revoked` verdict over a declared
+ *  `Active`/`Retired` key says where the revocation lives instead. An
+ *  unfresh verdict is not read at all: `unknown` is neither `valid` nor
+ *  `revoked`. */
 export function lifecycleCell(entry, freshness, verdict) {
   const e = entry || {};
   const evaluated = freshness !== undefined && freshness !== null && freshness.fresh === true &&
@@ -341,11 +309,9 @@ export function renderPolicyFacts(object, now) {
         ? esc(spec.namespaces.join(", "))
         : ABSENT],
       ["namespaces it governs", bound.length === 0 ? ABSENT : esc(bound.join(", "))],
-      // THE LIST MAY BE PARTIAL AND SAYS SO. The product API serves a policy to
-      // an administrator of any namespace it governs and filters the namespace
-      // lists to that administered set, so "these are the namespaces" would be
-      // a claim this reader cannot make. `namespacesTruncated` is the separate,
-      // ordinary row bound.
+      // THE LIST MAY BE PARTIAL AND SAYS SO: the product API filters a policy's
+      // namespace lists to those this reader administers. `namespacesTruncated`
+      // is the separate, ordinary row bound.
       ["namespace lists narrowed to what you administer",
         object.__namespacesFiltered === true ? "yes" : "no"],
       ["namespace list truncated", object.__namespacesTruncated === true ? "yes" : "no"],
@@ -366,7 +332,7 @@ export function renderPolicyFacts(object, now) {
   );
 }
 
-/** The `CompromiseGuard` condition's type (TRUSTPOLICY-DELETE-DROPS-REVOCATION). */
+/** The `CompromiseGuard` condition's type. */
 export const COMPROMISE_GUARD = "CompromiseGuard";
 
 /** What a `KeyCompromise` record on this policy holds, verbatim from the
@@ -394,13 +360,10 @@ export const CONFLICT_SENTENCE =
   "policy at all: every approval and every evidence verification in them is refused with " +
   "TrustPolicyConflict rather than silently taking one policy's answer.";
 
-/** The whole page.
- *
- *  `view` is `{policies, roster, reason, now}`. A bare COLLECTION is accepted
- *  too and read as "no policy, this roster, and no server instant" -- which is
- *  the `kubectl proxy` shape this page was called with before D3, and which
- *  now renders every roster verdict the roster's own status supports and
- *  `unknown` for the rest. */
+/** The whole page. `view` is `{policies, roster, reason, now}`; a bare
+ *  COLLECTION (the older `kubectl proxy` call shape) is read as "no policy,
+ *  this roster, and no server instant", so roster verdicts the roster's own
+ *  status supports render and the rest read `unknown`. */
 export function renderKeysPage(view) {
   const v = looksLikeCollection(view)
     ? { policies: [], roster: rosterOf(view), now: null, reason: "" }
@@ -452,11 +415,10 @@ export function renderLegacyRosterNote() {
 
 /** The roster half: what this page shows when no TrustPolicy is readable.
  *
- *  THE ROSTER'S OWN COLUMN IS `unknown` TOO. The old page printed `valid` for
- *  any key not in `status.expiredKeyIds[]`, including for a roster with no
- *  status at all. The roster has no `observedGeneration` and no `evaluatedAt`,
- *  so there is nothing to establish freshness FROM -- and D3 section 7.7's answer to
- *  that is the same word it is everywhere else. */
+ *  The roster's own column is `unknown` too: a roster has no
+ *  `observedGeneration` and no `evaluatedAt`, so there is nothing to
+ *  establish freshness FROM, and D3 section 7.7's answer is the same word as
+ *  everywhere else. */
 export function renderRosterHalf(view) {
   const v = view || {};
   const roster = v.roster || null;
@@ -510,7 +472,7 @@ export function renderRosterKeys(caption, entries, status) {
   );
 }
 
-/** What a reader who may not read trust material is told (MCP-32). */
+/** What a reader who may not read trust material is told. */
 export const KEYS_FORBIDDEN_SENTENCE =
   "Only administrators can view trust material. Your role does not include reading the " +
   "installation's TrustPolicy objects; that says nothing about whether approvals and evidence " +
@@ -543,12 +505,10 @@ export function renderFingerprint() {
 
 /** THE SNIPPET A CLUSTER ADMIN APPLIES. RENDERED AND NEVER SUBMITTED.
  *
- *  It is a TrustPolicy and no longer a roster, because the policy is what the
- *  lifecycle lives on: a roster cannot express a retirement, an overlap window
- *  or a usage, and D3 section 7.2 replaces every one of its fields. The migration
- *  command is beside it, because an existing roster is not edited by hand into
- *  a policy -- `logweir trust migrate-roster` produces one and the roster is
- *  left in place for rollback. */
+ *  A TrustPolicy, not a roster: a roster cannot express a retirement, an
+ *  overlap window or a usage (D3 section 7.2). The migration command is
+ *  beside it, because `logweir trust migrate-roster` produces a policy from
+ *  an existing roster and leaves the roster in place for rollback. */
 export function renderPolicySnippet() {
   return (
     "<section class=\"check\"><h3>Editing trust is a cluster-admin step</h3>" +
@@ -590,20 +550,17 @@ export function renderPolicySnippet() {
   );
 }
 
-// --------------------------------------------------------------- mount half
-
 /** Reads the cluster's trust material and renders it.
  *
- *  TWO READS, AND THE SECOND IS A FALLBACK AND NOT A FAILURE. The policy read
- *  is the one D3 section 7 makes authoritative. Where it is refused -- an identity
- *  with no grant on `trustpolicies`, which is exactly what the chart's own UI
- *  ServiceAccount holds today, or a build whose product API has no trust route
- *  yet -- the roster is read instead and the page says which it is looking at.
- *  A refusal is never absorbed into an empty table. */
+ *  TWO READS, AND THE SECOND IS A FALLBACK, NOT A FAILURE. The policy read is
+ *  authoritative (D3 section 7); where it is refused (no grant on
+ *  `trustpolicies`, or a product API without the trust route) the roster is
+ *  read instead and the page says which it is looking at. A refusal is never
+ *  absorbed into an empty table. */
 export async function mountKeys(node, parse, deps, lifecycle) {
-  // THE SEAM TAKES EITHER SHAPE. Callers before D3 handed this the API object
-  // itself; the D3 reads need a bag (the mode probe, the server clock). An
-  // object that can `listCluster` IS the API object, and is read as one.
+  // The seam takes either shape: an object that can `listCluster` IS the API
+  // object; otherwise it is a bag of D3 reads (the mode probe, the server
+  // clock).
   const d = deps !== null && deps !== undefined && typeof deps.listCluster === "function"
     ? { api: deps }
     : (deps || {});
@@ -617,13 +574,11 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     if (cancelled(error, lifecycle)) {
       return;
     }
-    // A 403 IS "YOU MAY NOT READ THIS", NOT "THERE IS NO TRUST" (MCP-32). The
-    // page used to render it as "No TrustPolicy and no TrustRoster ... could be
-    // read ... no approval can verify", which told an operator that trust was
-    // missing from an installation where it was merely not theirs to read.
-    // In the shared console only: behind `kubectl proxy` a 403 is the page's
-    // own kubeconfig, and the refusal and the document an administrator applies
-    // are what that reader needs.
+    // A 403 IS "YOU MAY NOT READ THIS", NOT "THERE IS NO TRUST": rendering it as
+    // missing trust would mislead an operator who merely may not read it. Shared
+    // console only: behind `kubectl proxy` a 403 is the page's own kubeconfig,
+    // and the refusal and the document an administrator applies are what that
+    // reader needs.
     view.forbidden = (error || {}).status === 403 && (d.modeOf || mode)() === CONSOLE;
     view.reason = describeRefusal(error);
   }
@@ -639,10 +594,9 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     if (cancelled(error, lifecycle)) {
       return;
     }
-    // A ROSTER REFUSAL IS ONLY WORTH REPORTING WHEN IT IS THE LAST THING LEFT.
-    // With a policy on screen the roster is a footnote about rollback, and a
-    // 403 on it says nothing this reader needs. With no policy it is the whole
-    // page, and its refusal is what goes on screen.
+    // A roster refusal is worth reporting only when it is the last thing left:
+    // with a policy on screen the roster is a footnote about rollback; with no
+    // policy it is the whole page.
     if (view.policies.length === 0 && view.reason.length === 0) {
       view.reason = describeRefusal(error);
     }

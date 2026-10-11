@@ -1,4 +1,4 @@
-//! THE UI's RUST-SIDE LINT. Tasks 26, 27 and 28 extend this file.
+//! THE UI's RUST-SIDE LINT.
 //!
 //! WHAT THESE TESTS PROVE. That the shipped UI is what the documents say it
 //! is: a directory of static files that names no external resource, holds no
@@ -63,11 +63,10 @@ const API_EXPORTS: [&str; 22] = [
     "path",
     "apiError",
     // The product API's reads, its writes, its session probe and its problem
-    // reader (PLAT-18.1, decision D0 stage 6). Every one of them goes through
+    // reader (decision D0 stage 6). Every one of them goes through
     // the SAME `request(path(...))` seam, which is what
     // `every_api_path_is_relative` holds. Nothing here is a generic request
-    // helper: each names one route. (The legacy `kubectl proxy` half was
-    // withdrawn in v1, PROD-17.1 C4.)
+    // helper: each names one route.
     "CONSOLE_WRITABLE_PLURALS",
     "session",
     // MCP-5: sign out. `POST /api/v1/session/logout`, a WRITE like every
@@ -79,7 +78,7 @@ const API_EXPORTS: [&str; 22] = [
     "consoleGet",
     "consoleSub",
     "consoleOperation",
-    // D3 W12 (PLAT-14.1, PLAT-15.1, PLAT-19.1): the ONE cluster-scoped product
+    // The ONE cluster-scoped product
     // read (`GET /api/v1/trust-policies`, bounded by its own frozen plural
     // list in api.js) and the module's SECOND request site -- the operation
     // event stream. `EventSource` is a request, so it lives in api.js like
@@ -89,18 +88,18 @@ const API_EXPORTS: [&str; 22] = [
     "consoleClusterList",
     "consoleClusterGet",
     "openOperationStream",
-    // D2 W13: the SIX named action routes the product API spells as a verb
+    // The SIX named action routes the product API spells as a verb
     // suffix (`destinations/primary:test`) or a sub-collection create
     // (`connections/source/topic-discoveries`) -- neither of which is a plural
     // `consoleCreate` could POST to. It is not a generic POST helper: the
     // action is looked up in a frozen table in `api.js`, so the reachable set
     // is still a list a reviewer reads in one place.
     "consoleAction",
-    // PLAT-19.2: ONE read, `GET .../approval-policy` -- the namespace's
+    // ONE read, `GET .../approval-policy` --
     // effective approval policy the submit step and the approvals page render.
     // No body, no query, no write.
     "consoleApprovalPolicy",
-    // PROD-16.2: ONE more read, `GET .../restores/{name}/approval-request` --
+    // ONE more read, `GET .../restores/{name}/approval-request` --
     // a two-person request as the approver is shown it, every field of it
     // from bytes the console verified its own signature on. No body, no
     // query, no write. The click itself is not an export: it is the action
@@ -108,14 +107,14 @@ const API_EXPORTS: [&str; 22] = [
     "consoleApprovalRequest",
     "consoleCreate",
     "consoleSetSuspension",
-    // D1 W7: the draft-cadence preview (a safe, namespace-less GET that reads
+    // The draft-cadence preview (a safe, namespace-less GET that reads
     // no object) and the product API's ONE replace, the schedule's future
     // policy. See [`the_api_module_offers_no_delete_and_no_put`] for the terms
     // on which the second one is allowed to exist at all.
     "cadencePreview",
     "consoleSchedulePolicy",
-    // D3 W12 (PLAT-19.1, D3 section 7.7): the instant the SERVER dated its most
-    // recent answer, for the one column that needs an elapsed time -- the keys
+    // The instant the SERVER dated its most recent answer (D3 section 7.7),
+    // for the one column that needs an elapsed time -- the keys
     // view's `unknown`. It is a reader over a value this module recorded; it
     // issues no request, and it is deliberately not reachable from a page
     // module (`the_suspend_toggle_is_the_only_update`), which reads it through
@@ -123,7 +122,7 @@ const API_EXPORTS: [&str; 22] = [
     "serverTime",
     // The bound that keeps that instant from becoming a STOPPED clock: an
     // instant carried forward past it is reported as none, and none reads
-    // `unknown` (review F6). It is a constant, not a reader.
+    // `unknown`. It is a constant, not a reader.
     "SERVER_TIME_MAX_AGE_MS",
     "problemError",
 ];
@@ -204,14 +203,10 @@ fn read(path: &Path) -> String {
 
 /// `api.js`'s export list AS THE FILE DECLARES IT, in source order.
 ///
-/// READ FROM THE MODULE, NEVER FROM [`API_EXPORTS`]. The constant is what the
-/// surface is SUPPOSED to be, and `the_api_module_offers_no_delete_and_no_put`
-/// compares the two. Every other test that needs "the identifiers a page could
-/// reach for" has to ask the file, because the interesting mutant is precisely
-/// the one that ADDS an export -- a generic `patch`, a raw request helper --
-/// and an alphabet taken from the constant cannot contain a name the constant
-/// does not have. That is a guard whose mutant passes, which STANDING RULE 21
-/// calls worse than no guard.
+/// READ FROM THE MODULE, NEVER FROM [`API_EXPORTS`]: the constant is what the
+/// surface is SUPPOSED to be, and an alphabet taken from it cannot contain the
+/// export a mutant ADDS (a generic `patch`, a raw request helper).
+/// `the_api_module_offers_no_delete_and_no_put` compares the two.
 fn api_exports() -> Vec<String> {
     let contents = read(&ui_root().join("api.js"));
     let mut exports: Vec<String> = Vec::new();
@@ -670,20 +665,13 @@ fn the_api_module_offers_no_delete_and_no_put() {
         );
     }
 
-    // AND THERE IS EXACTLY ONE REPLACE (D1 W7, PLAT-05.1). `PUT
-    // .../schedules/{name}` is the product API's editable future policy: it
-    // replaces the whole policy under `expectedGeneration`, and D1 §5.6 makes
-    // it the route a guided edit form must use. Until D1 W6 landed it, this
-    // test forbade the token outright, and the page said so in prose
-    // (`EDIT_IS_A_REPLACE`).
-    //
-    // WHAT REPLACED THE BAN IS NOT A WEAKER RULE. The token must appear
-    // EXACTLY ONCE, and that once must be the value of a module-level
-    // `const REPLACE_METHOD`, which is what makes "this module can replace one
-    // thing" a sentence a reviewer reads in one place rather than a property
-    // they would have to reconstruct from the call sites. A second replace --
-    // a `PUT` over a connection, a destination, a Backup -- lands as a second
-    // occurrence and fails here, exactly as a delete does above.
+    // AND THERE IS EXACTLY ONE REPLACE. `PUT .../schedules/{name}` is the
+    // product API's editable future policy: it replaces the whole policy
+    // under `expectedGeneration`, and D1 §5.6 makes it the route a guided edit
+    // form must use. The token must appear EXACTLY ONCE, as the value of a
+    // module-level `const REPLACE_METHOD`, so "this module can replace one
+    // thing" is read in one place; a second replace (a `PUT` over a
+    // connection, a destination, a Backup) fails here, as a delete does above.
     let declaration = "const REPLACE_METHOD = \"PUT\";";
     assert!(
         contents.contains(declaration),
@@ -810,12 +798,11 @@ fn every_api_path_is_relative() {
 
 /// **ONE STREAM CONSTRUCTION, IN `api.js`, OVER A `path(...)` IDENTIFIER.**
 ///
-/// `every_api_path_is_relative` counts `fetch(` and nothing else, so when D3
-/// W12 added `EventSource` the module grew a second way to reach the network
-/// that no gate covered: `ui/README.md` and `api.js`'s own paragraph both
-/// assert the identifier is built by `path(...)`, and a page constructing its
-/// own stream -- or the argument here becoming a binding -- would have left
-/// every gate green (review F8).
+/// `every_api_path_is_relative` counts `fetch(` and nothing else, and
+/// `EventSource` is a second way to reach the network: `ui/README.md` and
+/// `api.js`'s own paragraph assert its identifier is built by `path(...)`, so
+/// a page constructing its own stream, or the argument becoming a binding,
+/// must fail here.
 ///
 /// Three arms, the same three the `fetch` site has:
 ///
@@ -879,13 +866,10 @@ fn is_call_position(source: &str, start: usize) -> bool {
     !is_word_byte(source.as_bytes()[start - 1])
 }
 
-// ===========================================================================
-// TASK 26 -- the four read-and-create pages, and the behaviour gate.
-// ===========================================================================
+// The four read-and-create pages, and the behaviour gate.
 
 /// The six identifiers a page module may reach for: the `ui/client.js` facade's
-/// read and write methods (the Kubernetes-shaped `api.js` functions of the same
-/// names went with the legacy mode, PROD-17.1 C4) and `api.js`'s `apiError`.
+/// read and write methods and `api.js`'s `apiError`.
 ///
 /// The first element carries the `engine-token-ok` escape `check-no-oso.sh`'s
 /// check B requires: the token names a JavaScript method that lists a
@@ -920,9 +904,8 @@ const REQUIRED_PAGE_IDENTIFIERS: [&str; 4] = [
 /// Constraint 22), and a behaviour suite that opened a socket would be a unit
 /// gate that needs the network. Node's five dialling built-ins are listed in
 /// BOTH spellings an ES import can use -- the `node:` scheme and the bare
-/// name, in either quote style -- because a guard that named one spelling was
-/// a guard a file passed by choosing the other (the review of Task 36
-/// measured exactly that: a bare `from "http"` left this test green).
+/// name, in either quote style -- because a guard that named one spelling is
+/// a guard a file passes by choosing the other.
 const DIAL_TOKENS: [&str; 16] = [
     "fetch(",
     "node:net",
@@ -942,10 +925,8 @@ const DIAL_TOKENS: [&str; 16] = [
     "from 'dgram'",
 ];
 
-/// The files under `ui/tests/` that may dial, BY NAME. EMPTY since the
-/// fixture-driven preview server went with the legacy `kubectl proxy` mode it
-/// emulated (PROD-17.1 C4). The converse arm of
-/// `the_ui_behaviour_suite_never_dials` keeps this list from going stale: a
+/// The files under `ui/tests/` that may dial, BY NAME: none. The converse arm
+/// of `the_ui_behaviour_suite_never_dials` keeps this list from going stale: a
 /// file listed here that carries no dial token fails the test.
 const DIALLING_TOOLS: [&str; 0] = [];
 
@@ -979,16 +960,10 @@ fn behaviour_suite_files() -> Vec<PathBuf> {
 fn the_suspend_toggle_is_the_only_update() {
     // The whole `api.js` export list is the alphabet; the six above are what a
     // page may use. Anything else from that list appearing under `ui/pages/`
-    // means a page reached for a capability -- a raw identifier builder, a
-    // generic patch, a widened writable set -- that the page contract does not
-    // have. A grep for `patch` cannot express this: it matches
-    // `api.patchSuspend(` itself.
-    // THE ALPHABET IS `api.js`'s LIVE EXPORT LIST, not the checked-in constant.
-    // The mutant this test exists for adds a generic `patch(ns, plural, name,
-    // body)` to `api.js` and calls it from `schedules.js`; an alphabet taken
-    // from `API_EXPORTS` cannot contain a name `API_EXPORTS` does not have, so
-    // that mutant would survive here and be caught only by the neighbouring
-    // test -- which is not the same thing as this rule holding.
+    // means a page reached for a capability the page contract does not have.
+    // A grep for `patch` cannot express this: it matches `api.patchSuspend(`
+    // itself. THE ALPHABET IS `api.js`'s LIVE EXPORT LIST, not the checked-in
+    // constant, which cannot contain a name a mutant adds.
     let exports = api_exports();
     let mut findings: Vec<String> = Vec::new();
     for file in page_modules() {
@@ -1175,10 +1150,8 @@ fn the_behaviour_gate_refuses_an_old_node() {
 
 #[test]
 fn the_offline_gate_refuses_a_bare_module_specifier() {
-    // Nothing else exercises the RED side of `check-ui-offline.sh`'s SPECIFIER
-    // rule: weakening that rule alone left every other test in this file green,
-    // which makes it a guard whose mutant passes (STANDING RULE 21). This is
-    // the arm that fails when it is weakened.
+    // The RED side of `check-ui-offline.sh`'s SPECIFIER rule: nothing else
+    // exercises it, so this is the arm that fails when it is weakened.
     let overlay = Overlay::new("specifier");
     overlay.write("a.js", "import x from \"preact\";\nexport const y = x;\n");
     let out = run_gate(Some(&overlay.path));
@@ -1221,10 +1194,8 @@ fn the_offline_gate_refuses_a_bare_module_specifier() {
     );
 }
 
-// ===========================================================================
-// TASK 27 -- the plan document, the submit region, the download and the
-// read-only roster page.
-// ===========================================================================
+// The plan document, the submit region, the download and the read-only
+// roster page.
 
 /// The unambiguous reserialisation entry points the wizard's SUBMIT REGION may
 /// not carry, plus the plan document's file extension.
@@ -1279,7 +1250,7 @@ fn render_plan_bytes_emits_a_document_the_runner_parses() {
     // ARM 1: Rust, no node. It deserialises the checked-in golden into the
     // RUNNER'S OWN TYPE, which is the only assertion that catches an invented
     // shape. `Restore.spec.planBytes` is opaque to the API server and to the
-    // controller and it is still not arbitrary: Task 20 writes those bytes
+    // controller and it is still not arbitrary: the controller writes those bytes
     // VERBATIM into the runner's plan ConfigMap as `data["restore.yaml"]` and
     // the runner parses them with `serde_yaml::from_str::<RestoreSpec>`. An
     // invented shape passes the 201, passes `drill approve` (which hashes
@@ -1362,7 +1333,7 @@ fn render_plan_bytes_emits_a_document_the_runner_parses() {
     );
 }
 
-// ---- 18c. the console's time-basis opt-in reaches the runner (FX-8)
+// ---- 18c. the console's time-basis opt-in reaches the runner
 
 #[test]
 fn the_time_basis_opt_in_the_console_writes_is_the_one_the_runner_reads() {
@@ -1425,7 +1396,7 @@ fn the_time_basis_opt_in_the_console_writes_is_the_one_the_runner_reads() {
     );
 }
 
-// ---- 18a2. the complete-coverage plan the console writes is the one the runner reads (PROD-08.1a)
+// ---- 18a2. the complete-coverage plan the console writes is the one the runner reads
 
 #[test]
 fn the_complete_coverage_the_console_writes_is_the_one_the_runner_reads() {
@@ -1484,7 +1455,7 @@ fn the_complete_coverage_the_console_writes_is_the_one_the_runner_reads() {
     );
 }
 
-// ---- 18a3. the original-name plan the console writes is the one the runner reads (PROD-15.1)
+// ---- 18a3. the original-name plan the console writes is the one the runner reads
 
 #[test]
 fn the_original_name_plan_the_console_writes_is_the_one_the_runner_reads() {
@@ -1555,7 +1526,7 @@ fn the_original_name_plan_the_console_writes_is_the_one_the_runner_reads() {
     );
 }
 
-// ---- 18b. the catalog-bound plan carries the recovery point binding (PLAT-15.2)
+// ---- 18b. the catalog-bound plan carries the recovery point binding
 
 #[test]
 fn the_catalog_bound_plan_carries_the_point_binding_the_runner_reads() {
@@ -1844,21 +1815,16 @@ fn the_secure_context_spec_imports_nothing_at_module_scope() {
 /// The runner line `scripts/check-ui-behaviour.sh` passes to node, verbatim.
 const RUNNER_GLOB: &str = "'ui/tests/*.spec.js'";
 
-/// The glob it used to pass, and must never pass again.
+/// The glob that would run tools as suites, and must never be passed.
 const RUNNER_GLOB_TOO_WIDE: &str = "'ui/tests/*.js'";
 
 #[test]
 fn the_behaviour_gate_runs_only_the_spec_files() {
-    // WHY THE SUFFIX IS THE GUARD AND NOT A CONVENTION. `ui/tests/` holds two
-    // kinds of file: `*.spec.js` suites, and TOOLS the gate invokes by name --
-    // `emit-plan.js`, which prints the plan golden on stdout for the `diff -u`
-    // arm. Under `ui/tests/*.js` node executed that tool as a test FILE and
-    // counted it as one passing test, so the gate's zero-count refusal could
-    // never fire: with every `*.spec.js` deleted the suite still reported
-    // `# tests 1` and the gate exited 0. A refusal that cannot reach zero is
-    // the state STANDING RULE 21 calls worse than no guard, because the ledger
-    // records it as closed -- so the narrow glob is what holds Task 26's
-    // refusal, and this arm is what holds the narrow glob.
+    // WHY THE SUFFIX IS THE GUARD AND NOT A CONVENTION. `ui/tests/` holds
+    // `*.spec.js` suites and TOOLS the gate invokes by name (`emit-plan.js`,
+    // which prints the plan golden for the `diff -u` arm). Under
+    // `ui/tests/*.js` node runs a tool as a test FILE and counts it as one
+    // passing test, so the gate's zero-count refusal could never fire.
     let gate_path = repo_root().join("scripts").join("check-ui-behaviour.sh");
     let gate = read(&gate_path);
 
@@ -1924,13 +1890,11 @@ fn the_behaviour_gate_runs_only_the_spec_files() {
     );
 }
 
-// ===========================================================================
-// TASK 36 -- the design system.
-// ===========================================================================
+// The design system.
 
-// ------------------------------------------------ PLAT-18.2: the token layer
+// ------------------------------------------------ the token layer
 //
-// THE RULE IS POSITIVE WHERE IT CAN BE (review MEDIUM-1). Tokens are defined
+// THE RULE IS POSITIVE WHERE IT CAN BE. Tokens are defined
 // once, in `ui/style.css`'s `:root` blocks, and every page consumes them. So:
 //
 //   * a `:root` block may hold `--*` custom properties and `color-scheme`, and
@@ -2667,7 +2631,7 @@ fn inline_style_findings(file: &str, source: &str) -> Vec<String> {
 
 #[test]
 fn no_literal_colour_or_size_outside_the_token_layer() {
-    // PLAT-18.2, the Clarity design standard: tokens are defined once, in
+    // The Clarity design standard: tokens are defined once, in
     // `ui/style.css`'s `:root` blocks, and every page consumes them.
     let css_path = ui_root().join("style.css");
     let css = read(&css_path);
@@ -2731,8 +2695,8 @@ fn no_literal_colour_or_size_outside_the_token_layer() {
 
 #[test]
 fn the_token_lint_refuses_each_kind_of_literal() {
-    // The RED side, one mutant per rule, so the guard above is a guard -- and
-    // the twelve escapes the PLAT-18.2 review planted, each by name.
+    // The RED side, one mutant per rule, so the guard above is a guard,
+    // and the twelve known escapes, each by name.
     let flagged = |css: &str| token_layer_findings("mutant.css", css).len();
     let other = |css: &str| stylesheet_findings("other.css", css, false).len();
     assert_eq!(flagged(".a { color: #0072a3; }"), 1, "a hex colour");
@@ -2779,7 +2743,7 @@ fn the_token_lint_refuses_each_kind_of_literal() {
         1,
         "a length inside a media block is still a rule, not a token"
     );
-    // Review MEDIUM-1, escapes 1-3 (stylesheet).
+    // Escapes 1-3 (stylesheet).
     assert_eq!(
         flagged(":root { .crumb { color: #ff0000; margin-top: 3px; } }"),
         3,
@@ -2878,7 +2842,7 @@ fn the_token_lint_refuses_each_kind_of_literal() {
         1,
         "a style attribute in a string"
     );
-    // Review MEDIUM-1, escapes 4-12 (scripts and pages).
+    // Escapes 4-12 (scripts and pages).
     assert_eq!(
         inline("node.setAttribute(\"style\", \"color: red\");"),
         1,
@@ -2932,8 +2896,7 @@ fn the_token_lint_refuses_each_kind_of_literal() {
         "cssText, and the word"
     );
     assert_eq!(inline("sheet.insertRule(\".x{}\");"), 1, "insertRule");
-    // PLAT-18.2 re-check LOW-R1: variants 14 and 15 of the review, which the
-    // lint did not see.
+    // Variants 14 and 15.
     assert_eq!(
         inline("node.attributeStyleMap.set(\"color\", \"red\");"),
         1,

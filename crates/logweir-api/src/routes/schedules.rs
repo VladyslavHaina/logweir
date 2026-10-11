@@ -52,7 +52,7 @@ pub const SET_SUSPENSION: &str = ":set-suspension";
 ///
 /// D1 §0.2 fixes this spelling, and `create`, `update` and
 /// `routes::cadence_previews` all use THIS constant so that one condition
-/// cannot acquire two codes again.
+/// cannot acquire two codes.
 pub const SCHEDULE_INVALID: &str = "schedule_invalid";
 
 /// The field-error code for a zone the compiled-in database does not have.
@@ -136,7 +136,7 @@ pub(crate) fn validate_archive(
 /// `validation_failed` naming every invalid field.
 pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     let mut errors = Vec::new();
-    // THE ZONE IS PART OF THE SAME PARSE (PLAT-10.1): the create DTO carries
+    // THE ZONE IS PART OF THE SAME PARSE: the create DTO carries
     // `timeZone`, so this route resolves the expression in the zone it will be
     // stored with -- an unknown zone is `timeZone: timezone_unknown` here
     // rather than `Ready=False`/`UnknownTimeZone` on an object the console
@@ -220,16 +220,14 @@ pub fn build(
             topics,
             archive,
             destination_ref,
-            // D1 W2 added the cadence and selection policy fields to
-            // `BackupScheduleSpec` and D1 W6 gave the edit route all of them.
-            // PLAT-10.1 gave them to this route as well, because a form that
-            // can only create a policy it cannot express has to follow every
-            // create with an edit against an object that is already
-            // scheduling. An ABSENT field is still written absent, which is
-            // still the documented default: UTC, a one-hour starting deadline,
-            // no catch-up, no retries and a 3600 s run deadline.
+            // The create route takes every cadence and selection policy field the edit
+            // route takes, because a form that can only create a policy it cannot
+            // express has to follow every create with an edit against an object that is
+            // already scheduling. An ABSENT field is still written absent, which is the
+            // documented default: UTC, a one-hour starting deadline, no catch-up, no
+            // retries and a 3600 s run deadline.
             all_user_topics,
-            // PROD-04.1: the console's create form selects no consumer group;
+            // The console's create form selects no consumer group;
             // `kubectl` sets `spec.consumerGroups`, and an edit through this
             // API is a merge patch that leaves it as it is.
             consumer_groups: None,
@@ -366,9 +364,7 @@ pub async fn command(
     ))
 }
 
-// ======================================================================
-// PLAT-05.1: the editable future policy
-// ======================================================================
+// THE EDITABLE FUTURE POLICY.
 
 /// The edit route identifier.
 pub const ROUTE_UPDATE: &str = "PUT /api/v1/namespaces/{ns}/schedules/{name}";
@@ -389,10 +385,10 @@ pub const MAX_TOPICS: usize = 256;
 /// WHERE THE FIELD PATHS COME FROM. `field` is the name the selection has in
 /// the request that carries it — `topicSelection` on the edit route, and the
 /// EMPTY STRING on the create route, whose `topics` and `allUserTopics` are
-/// top-level fields (PLAT-10.1). With an empty `field` the paths lose their
+/// top-level fields. With an empty `field` the paths lose their
 /// prefix (`topics[0]`, not `.topics[0]`) and the empty-selection refusal is
 /// reported on `topics`, which is the input a console has to highlight; the
-/// edit route's own paths are byte-identical to what they were.
+/// edit route's own paths are unchanged.
 pub(crate) fn validate_selection(
     field: &str,
     selection: &TopicSelectionRequest,
@@ -643,9 +639,8 @@ fn validate_cadence_fields(schedule: &str, time_zone: Option<&str>, errors: &mut
 }
 
 /// The future-policy members the create and the replace routes share, read
-/// from either DTO. ONE VALIDATOR FOR BOTH (review LOW-3): the create route
-/// used to carry a copy of the edit route's rules, and the next edit to one
-/// copy would have drifted from the other.
+/// from either DTO. ONE VALIDATOR FOR BOTH, so the two routes' rules cannot
+/// drift apart.
 struct PolicyFields<'a> {
     /// Where the selection's field errors are reported: `""` on create (flat
     /// `topics`/`allUserTopics`), `"topicSelection"` on the replace.

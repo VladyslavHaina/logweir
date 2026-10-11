@@ -1,16 +1,8 @@
-// code-spans.spec.js -- O2, R2-10's class: no page prints a literal backtick.
+// code-spans.spec.js -- no page prints a literal backtick.
 //
-// WHAT THE LIVE ROUND SAW (poc-upgrade-4). The Catalog page printed "listed by
-// `logweir catalog list`" and "Use `logweir catalog list`" with the Markdown
-// backticks on screen: two sentences (`render.js`'s CATALOG_WINDOW_SENTENCE,
-// `catalog.js`'s MORE_POINTS_SENTENCE) went through `esc`. R2-10 had fixed the
-// same thing in the wizard's step texts. The sweep found the class across the
-// tree: nine more sentence constants printed through `esc`; seven markup
-// literals that spelled code with backticks (the approval form, the countersign
-// panel, both trust snippets, the destination prefix help, the protection
-// page's no-point complaint); and this page's own refusals ("Open the console
-// (`logweir-api`)"), which reach the error box, the field-error line and the
-// panels' "unavailable" notes.
+// A sentence constant printed through `esc` puts Markdown backticks on screen
+// ("Use `logweir catalog list`"), and so does markup that spells code with
+// backticks or a refusal that names `logweir-api` that way.
 //
 // THE RULE. What is code on screen is `<code>`: a sentence with backticked
 // spans renders through `messageText` (a message through `codeSpans`, the DOM
@@ -71,9 +63,7 @@ function shipped() {
       .map((f) => UI + "pages/" + f));
 }
 
-// ===========================================================================
-// Every surface the sweep fixed, rendered
-// ===========================================================================
+// EVERY SURFACE THE SWEEP FIXED, RENDERED.
 
 /** This page's own legacy-mode refusal, as the panels and error boxes get it. */
 const REFUSAL = noD3Route("A recovery catalog's point list");
@@ -156,9 +146,7 @@ test("o2_the_dom_error_box_shows_code_as_code", () => {
   }
 });
 
-// ===========================================================================
-// The tree: no new instance of either shape
-// ===========================================================================
+// THE TREE: no new instance of either shape.
 
 test("o2_no_shipped_markup_literal_spells_code_with_a_backtick", () => {
   // A string literal that carries a tag is markup, and markup says `<code>`.
@@ -216,9 +204,7 @@ test("o2_a_sentence_with_a_code_span_is_rendered_through_messageText", () => {
       "ones among them:\n" + wrong.join("\n"));
 });
 
-// ===========================================================================
-// Review LOW-2: a code span is text, whatever it spells
-// ===========================================================================
+// A CODE SPAN IS TEXT, whatever it spells.
 
 test("o2_review_a_code_span_carrying_markup_is_escaped_text_in_every_sink", () => {
   // A problem detail an API server -- or anyone who can write one -- sends,

@@ -1,4 +1,4 @@
-//! PROD-01.3 security follow-up: the RUNNER's half of the credential binding,
+//! The RUNNER's half of the credential binding,
 //! and the PLAIN-over-TLS rule, on the shipped binary.
 //!
 //! A controller-built Job carries the EXPECTED binding (a literal the
@@ -263,9 +263,7 @@ fn cluster_probe_refuses_an_unbound_credential_without_dialling() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-20: the object-store credentials, on the same entry points
-// ---------------------------------------------------------------------------
+// The object-store credentials, on the same entry points.
 
 /// A secret access key the refusal paths must never print.
 const SEEDED_S3: &str = "seeded-store-row-secret-access-key-9c1e";
@@ -346,7 +344,7 @@ fn fx20_backup_run_refuses_an_unbound_or_foreign_destination_secret_before_any_s
     );
 }
 
-/// **FX-20 fix round (review F1): `backup run` refuses an S3 region that is
+/// **`backup run` refuses an S3 region that is
 /// not a region name before any store exists, even with a credential whose
 /// binding matches**, and never dials what the region would have made the
 /// host. The probe's shape: no endpoint, the victim's bucket, `region:
@@ -416,7 +414,7 @@ fn fx20_backup_run_refuses_an_injected_region_before_any_store() {
     }
 }
 
-/// **Review F3: `logweir catalog list` checks the store pairs too**, before it
+/// **`logweir catalog list` checks the store pairs too**, before it
 /// builds a store, and never dials the endpoint. CONTROL: bound, it lists an
 /// empty filesystem catalog and exits 0.
 #[test]
@@ -609,7 +607,7 @@ fn fx20_catalog_sync_and_doctor_refuse_a_foreign_store_credential() {
                 "LOGWEIR_ENGINE_BIN",
                 manifest.join("../../e2e/fixtures/fake-engine-ok.sh"),
             )
-            // No declared identity (PROD-00.2): the fake engine prints the
+            // No declared identity: the fake engine prints the
             // pin, and doctor stops at the first failing check, so a declared
             // sentinel version would end the run before the storage check.
             .env_remove("LOGWEIR_ENGINE_VERSION")

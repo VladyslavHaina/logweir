@@ -1,4 +1,4 @@
-//! THE CONTROL-EVIDENCE MAPPING — PROD-08.4.
+//! THE CONTROL-EVIDENCE MAPPING.
 //!
 //! `docs/control-evidence.md` tells auditors which fields of Logweir's evidence
 //! support which backup and restore-testing clause (DORA, its RTS, ISO/IEC
@@ -16,8 +16,7 @@
 //!    every standing test reads). An object keyed by topic name is entered
 //!    through the `<topic>` segment (`config_coverage.<topic>.coverage`), and
 //!    only through it. A field that is renamed or removed fails here until the
-//!    page is updated, which turns the row's handoff, "refreshed as fields
-//!    change", into a check. Every field-shaped token in the prose must
+//!    page is updated. Every field-shaped token in the prose must
 //!    resolve too, except the Kafka configuration keys the page names.
 //! 2. **THE DEFINITION NAMES THE FIELD.** Each citation links the page that
 //!    defines its document's fields, and that page (or the linked section of
@@ -37,7 +36,7 @@
 //!    the `not_assessed` list that bounds it; and no row calls a restore an
 //!    exact or complete copy, or the approver a human.
 //!
-//! Around them, the structure the row's acceptance names: every supported
+//! Around them, the structure: every supported
 //! statement cites a field, and links the page that defines that document's
 //! fields; every "does not show" item links to a section under
 //! the page's gap heading; every anchor the page links resolves (`just links`
@@ -49,8 +48,8 @@
 //! real page (green) and against mutated copies (red): a made-up field, a real
 //! field cited under the wrong document, a map entered without `<topic>`, a
 //! supported row that cites nothing, a gap item with no link, a dangling
-//! anchor, a definition that does not name its field, the review's planted
-//! claim sentences, and the review's overreaching rows. A check that cannot
+//! anchor, a definition that does not name its field, planted claim
+//! sentences, and overreaching rows. A check that cannot
 //! fail is not a check. POSITIVE CONTROLS: the page's own permitted phrasings
 //! pass the claim scan, so its stems cannot over-ban silently.
 //!
@@ -76,7 +75,7 @@ const DOES_NOT_SHOW: &str = "**What it does not show**";
 /// The heading whose `### ` sections are the gaps the lists link to.
 const GAPS_HEADING: &str = "## What the evidence does not show";
 
-/// The six texts PROD-08.4 maps, by the start of their `## ` heading. A text
+/// The six texts the page maps, by the start of their `## ` heading. A text
 /// that loses its section, or its section's table, fails the structure test.
 const TEXTS: [&str; 6] = [
     "## DORA",
@@ -1410,8 +1409,7 @@ fn a_made_up_or_misattributed_field_is_refused() {
     }
 
     // And a made-up dotted field in the prose, outside any table — one whose
-    // first segment is a real block, and one whose first segment is not
-    // (the review's mutant ME, which the first version of this check missed).
+    // first segment is a real block, and one whose first segment is not.
     for (sentence, token) in [
         (
             "The scorecard's `measured.rto_guaranteed_seconds` field.",
@@ -1456,7 +1454,7 @@ fn a_made_up_or_misattributed_field_is_refused() {
 }
 
 /// **An object keyed by topic name is cited through `<topic>`, and only
-/// through it** (FX-4's `config_coverage`). The derived sets enter such a map
+/// through it** (`config_coverage`). The derived sets enter such a map
 /// once, as one value path, so a literal key, a missing map segment, array
 /// syntax on a map, a made-up field under the value, a `<topic>` on a field
 /// that is not a map, and an unknown placeholder are all refused.
@@ -1543,8 +1541,7 @@ fn the_newest_schema_is_chosen_by_numeric_semver() {
 }
 
 /// **Every cited field is named on the definition its citation links**, so a
-/// reader who follows the link finds the field (review finding L3: two
-/// documents linked pages that never named the fields cited under them).
+/// reader who follows the link finds the field.
 #[test]
 fn every_cited_field_is_named_on_its_definition() {
     let fields = Fields::load();
@@ -1667,11 +1664,10 @@ fn the_control_evidence_page_makes_no_compliance_claim() {
     );
 }
 
-/// The claim sentences every scan must catch: the review's planted mutants
-/// MA-MD, the fix brief's forms and their inflections, and every phrase the
-/// first version of the guard banned.
+/// The claim sentences every scan must catch: planted claims, their
+/// inflections, and every phrase the guard bans.
 const CLAIM_SENTENCES: [&str; 40] = [
-    // The review's planted sentences, verbatim.
+    // Planted claim sentences.
     "Logweir complies with DORA Article 12(7).",
     "A passing rehearsal meets the RTS.",
     "Article 25(5) is satisfied by the signed scorecard.",
@@ -1777,8 +1773,8 @@ fn the_permitted_phrasings_pass_the_claim_scan() {
     );
 }
 
-/// **No supported row says more than its condition** — the review's M1, M2,
-/// M3 and overreach findings, as a guard over every row.
+/// **No supported row says more than its condition**, as a guard over every
+/// row.
 #[test]
 fn no_supported_statement_says_more_than_its_condition() {
     let page = read(PAGE);
@@ -1789,8 +1785,7 @@ fn no_supported_statement_says_more_than_its_condition() {
         "the guard read the supported rows"
     );
 
-    // Negative controls: the rows the review found, verbatim from the
-    // reviewed tip, each refused.
+    // Negative controls: overreaching rows, each refused.
     for (row, expected) in [
         (
             "| Restored records were reconciled byte for byte with the archive, on a sample whose size and result are recorded. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.result` |",

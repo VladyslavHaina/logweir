@@ -1,6 +1,6 @@
-//! `impl DataEngine for OsoCliEngine` — the point where the renderers (Task
-//! 11), the subprocess runner (this task) and the vendored wire structs (Task
-//! 8/8b) meet the trait boundary logweir-core defines.
+//! `impl DataEngine for OsoCliEngine`: where the renderers, the subprocess
+//! runner and the vendored wire structs meet the trait boundary logweir-core
+//! defines.
 use crate::{render_backup, render_restore, subprocess, vendored};
 use logweir_core::engine::*;
 use logweir_core::spec::Anchor;
@@ -8,19 +8,13 @@ use std::path::PathBuf;
 
 /// How much of a failed subprocess's stream may travel into an `EngineError`.
 ///
-/// This is not cosmetic. `crates/logweir/src/drill/mod.rs` writes an
-/// `EngineError`'s `Display` into `PhaseRecord.outcome`, which phase 8 signs
-/// and puts **create-only** into the evidence bucket: whatever lands there is
-/// immutable and cannot be redacted afterwards. The capture was unbounded, and
-/// the child inherits the parent environment — which is where
-/// `AWS_SECRET_ACCESS_KEY` lives on the Kubernetes path
-/// (`examples/cronjob-drill.yaml`). An engine that echoes its configuration on
-/// failure could therefore write a credential into a write-once document.
-///
-/// A byte cap does not make that impossible and is not claimed to: it bounds
-/// the blast radius and the document size. `RUST_LOG=warn` (set in
-/// `run_engine`) remains the measure that keeps the engine quiet in the first
-/// place, and it is a mitigation, not a boundary.
+/// An `EngineError`'s `Display` is written into `PhaseRecord.outcome`, which
+/// phase 8 signs and puts **create-only** into the evidence bucket, and the
+/// child inherits the parent environment (`AWS_SECRET_ACCESS_KEY` on the
+/// Kubernetes path): an engine that echoes its configuration on failure could
+/// write a credential into a write-once document. The cap bounds the blast
+/// radius and the document size; `RUST_LOG=warn` (set in `run_engine`) keeps
+/// the engine quiet in the first place. Both are mitigations, not a boundary.
 const MAX_CAPTURED_STREAM_BYTES: usize = 4096;
 
 /// The TAIL of a captured stream, capped at `MAX_CAPTURED_STREAM_BYTES`, with
@@ -47,7 +41,7 @@ fn captured(s: &str) -> String {
     )
 }
 
-/// **FX-23.** The engine's offset-mapping report at `path`, as phase 7 reads
+/// The engine's offset-mapping report at `path`, as phase 7 reads
 /// it: the `(target topic, partition)` of every entry.
 ///
 /// `Absent` when there is no file (the engine writes one only from a completed
@@ -56,7 +50,7 @@ fn captured(s: &str) -> String {
 /// is evidence of what the engine LACKS, never of what it wrote, and phase 7
 /// logs a report it could not check.
 ///
-/// **Streamed, never buffered (FX-23 review M1).** The report carries one
+/// **Streamed, never buffered.** The report carries one
 /// `detailed_mappings` pair per restored record — about 116 bytes of file per
 /// record — so it is read through a `BufReader` into a shape that names only
 /// `entries[].{topic, partition}`, and serde skips everything else as it
@@ -84,7 +78,7 @@ pub fn read_engine_report(path: &std::path::Path) -> EngineReport {
     }
 }
 
-/// FX-23: whatever is at a report path before a restore is NOT that
+/// Whatever is at a report path before a restore is NOT that
 /// restore's. The default path is per run, but `--offset-report-out` may name
 /// a fixed one, and a report an earlier run left there would be read as this
 /// run's (and uploaded by phase 8 as its evidence) whenever the engine writes
@@ -101,7 +95,7 @@ fn remove_stale_report(path: &std::path::Path) -> Result<(), EngineError> {
     }
 }
 
-/// **PROD-11.1.** One `PreflightReport` for a plan restored by several engine
+/// One `PreflightReport` for a plan restored by several engine
 /// runs (one per distinct partition subset). The verdict-bearing fields can
 /// only get worse by merging: `valid` and `header_preflight_honoured` hold
 /// only when they hold for EVERY run, every run's errors, warnings, coverage
@@ -147,8 +141,8 @@ pub fn merge_preflight_reports(mut reports: Vec<PreflightReport>) -> PreflightRe
     out
 }
 
-/// **PROD-11.1.** The offset report of a restore made of several engine runs:
-/// every run's report is checked (FX-23) only when every run's was READ — the
+/// The offset report of a restore made of several engine runs:
+/// every run's report is checked only when every run's was READ — the
 /// union of their entries, the runs restoring disjoint topics. Otherwise the
 /// first run's report that could not be read (Unreadable before Absent) is the
 /// answer, and phase 7 checks nothing from it, as for one run.
@@ -169,16 +163,16 @@ pub fn merge_engine_reports(reports: Vec<EngineReport>) -> EngineReport {
     }
 }
 
-/// **PROD-11.1.** The evidence file a multi-run restore leaves at the plan's
+/// The evidence file a multi-run restore leaves at the plan's
 /// `offset_report` path, which phase 8 uploads: a JSON ARRAY with one element
 /// per engine run, in run order — that run's report, byte for byte, or `null`
 /// when the run wrote none. The bytes are concatenated, never parsed, so the
-/// per-record section of a large report is never held in memory (FX-23 review
-/// M1). A one-run restore keeps the engine's own report as before.
+/// per-record section of a large report is never held in memory. A one-run
+/// restore keeps the engine's own report as before.
 pub fn compose_offset_reports(runs: &[PathBuf], out: &std::path::Path) -> Result<(), EngineError> {
     use std::io::Write as _;
     let op = |e: std::io::Error| EngineError::Operational(format!("{}: {e}", out.display()));
-    // A run's report IS the output (review L5): copying a file into itself
+    // A run's report IS the output: copying a file into itself
     // never ends. `RestoreRun::path` gives every run of a multi-run plan its
     // own `.run-<i>` path, so this is a guard against a future caller.
     if let Some(same) = runs.iter().find(|p| p.as_path() == out) {
@@ -213,21 +207,17 @@ pub struct OsoCliEngine {
     version: String,
     digest: String,
     workdir: PathBuf,
-    /// Reads the archive: `list_backup_sets`, `describe` and `fingerprints`
-    /// all go through this handle and only ever call `Store::get_capped` /
-    /// `list_manifests` / `segment_keys_for_set` — never `put_create_only`.
-    /// Nothing in this file writes evidence, so the caller should construct
-    /// this engine with `Store::read_only_from_url` over the OSO archive
-    /// location: `Store::from_url`'s `LOGWEIR_ROOT` guard (Global Constraint
-    /// 6) would otherwise refuse to build a handle over the archive prefix at
-    /// all, since the archive is never under `logweir/`.
+    /// Reads the archive (`list_backup_sets`, `describe`, `fingerprints`) and
+    /// never writes: build it with `Store::read_only_from_url` over the OSO
+    /// archive location, which `Store::from_url`'s `LOGWEIR_ROOT` guard (Global
+    /// Constraint 6) would refuse.
     store: crate::storage::Store,
     /// The digest of the `restore.yaml` phase 5 wrote, memoised so phase 6 can
     /// refuse a divergence. `Mutex`, not `RefCell`: `DataEngine`'s methods take
     /// `&self` and the orchestrator holds this behind a trait object whose auto
     /// traits must not narrow.
     ///
-    /// PROD-11.1: ONE DIGEST PER ENGINE RUN, in run order. A plan whose
+    /// ONE DIGEST PER ENGINE RUN, in run order. A plan whose
     /// partition subsets differ between topics is several engine runs
     /// (`render_restore::runs`), each with its own document; phase 6 refuses
     /// unless it would restore exactly the documents phase 5 validated, in the
@@ -261,7 +251,7 @@ impl OsoCliEngine {
     }
 
     /// One engine run's `validate-restore` over the document already written
-    /// at `cfg` (PROD-11.1: `preflight` calls it once per run).
+    /// at `cfg` (`preflight` calls it once per run).
     fn validate_one_run(
         &self,
         cfg: &std::path::Path,
@@ -282,19 +272,13 @@ impl OsoCliEngine {
             &mut |_, _| {},
         )?;
         self.assert_no_dropped_logweir_key(doc, &run.unknown_key_warnings)?;
-        // validate-restore exits 1 on !valid || !errors.is_empty()
-        // [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/commands/
-        // validate_restore.rs:39-42], so exit 1 with parsable JSON is a
-        // RESULT, not an operational failure. Only unparsable output is.
-        // stdout is LOG LINES followed by the JSON object: the command logs
-        // `info!("Validating restore configuration from: {}", ...)` (line 21)
-        // and `RestoreEngine::new`/`dry_run()` log further, all through the
-        // same stdout-defaulting fmt layer, before
-        // `println!("{}", serde_json::to_string_pretty(&report)?)` (line 30)
-        // [VERIFIED validate_restore.rs:5,21,30,39-42 and main.rs:553-556].
-        // `RUST_LOG=warn` (set in `run_engine`) removes the info! lines at the
-        // source; slicing from the first `{` is the belt to that brace,
-        // because a WARN line would otherwise still break the parse.
+        // validate-restore exits 1 on !valid || !errors.is_empty() [VERIFIED
+        // U/kafka-backup/crates/kafka-backup-cli/src/commands/validate_restore.rs:39-42],
+        // so exit 1 with parsable JSON is a RESULT; only unparsable output is
+        // an operational failure. stdout is log lines followed by the pretty
+        // JSON object (validate_restore.rs:21,30): `RUST_LOG=warn` removes the
+        // info! lines at the source, and slicing from the first `{` covers a
+        // WARN line.
         let json = run
             .stdout
             .find('{')
@@ -315,7 +299,7 @@ impl OsoCliEngine {
             ))
         })?;
 
-        // Readback (1) of spec §9.3 phase 5: an engine that IGNORES
+        // Readback (1) of phase 5: an engine that IGNORES
         // `header_preflight` defaults to Auto (config.rs:972-980),
         // offset_recovery_requested is false (preflight.rs:196-198), so
         // scan_required is false and report.header_preflight stays None.
@@ -377,7 +361,7 @@ impl OsoCliEngine {
         })
     }
 
-    /// One engine run's `restore` over `doc` (PROD-11.1: `restore` calls it
+    /// One engine run's `restore` over `doc` (`restore` calls it
     /// once per run, in order). `which` is `(index, count, the run's topic
     /// mapping)`, for the failure message.
     fn restore_one_run(
@@ -389,12 +373,8 @@ impl OsoCliEngine {
         which: (usize, usize, &std::collections::BTreeMap<String, String>),
     ) -> Result<RestoreFacts, EngineError> {
         let cfg = self.write(config_name, doc)?;
-        // FX-23: whatever is at the report path now is NOT this restore's. The
-        // default path is per run, but `--offset-report-out` may name a fixed
-        // one, and a report an earlier run left there would be read below as
-        // this run's (and uploaded by phase 8 as its evidence) whenever this
-        // engine writes none. Removed first, so after the run the file is this
-        // engine's or it is absent.
+        // Whatever is at the report path now is NOT this restore's: see
+        // `remove_stale_report`.
         remove_stale_report(report_path)?;
         let started_at = chrono::Utc::now();
         let run = subprocess::run_engine(
@@ -409,19 +389,12 @@ impl OsoCliEngine {
             &mut |stream, line| obs.engine_line(stream, line),
         )?;
         let finished_at = chrono::Utc::now();
-        // Fix (post-review): exit code checked BEFORE the dropped-key check,
-        // not after. With the order reversed, a run that both dropped a key
-        // we rendered AND failed would return only the dropped-key error —
-        // losing the exit code and stderr, which are the more actionable,
-        // primary evidence for an outright failure. A run that dropped a key
-        // but otherwise EXITED 0 still gets the dropped-key error, from the
-        // `assert_no_dropped_logweir_key` call below.
-        //
-        // Fix (post-review): stdout is now included too, not just stderr —
-        // by this crate's own finding (see subprocess.rs), the engine's log
-        // lines (including a dropped-key warning, on the real binary) go to
-        // stdout, so a failure message carrying only stderr can omit the very
-        // line that explains the failure.
+        // The exit code is checked BEFORE the dropped-key check: a run that
+        // both dropped a key and failed must report the exit code and the
+        // streams, the primary evidence of the failure; one that dropped a key
+        // but exited 0 still gets the dropped-key error below. stdout is
+        // included because the engine's log lines (a dropped-key warning
+        // included) go to stdout.
         if run.exit_code != 0 {
             let (index, count, mapping) = which;
             let of_runs = if count > 1 {
@@ -443,7 +416,7 @@ impl OsoCliEngine {
         self.assert_no_dropped_logweir_key(doc, &run.unknown_key_warnings)?;
         // `restore` has no --format; the exit code is its only machine-readable
         // VERDICT, so every timing here is OURS. Its offset-mapping report is
-        // read for one thing only (FX-23): an engine a SIGTERM stopped between
+        // read for one thing only: an engine a SIGTERM stopped between
         // topics exits 0 and writes a report without the topics it never
         // started, and phase 7 refuses a report that lacks a mapped partition
         // the manifest proves holds records in the window.
@@ -457,9 +430,9 @@ impl OsoCliEngine {
     }
 
     /// Rendered documents are the coupling surface; a key WE rendered that the
-    /// engine dropped aborts the run (spec §7.2(a)). `doc` is the exact
-    /// string handed to the engine as `--config`, so this check runs against
-    /// what was actually asked for, not a reconstruction of it.
+    /// engine dropped aborts the run. `doc` is the exact string handed to the
+    /// engine as `--config`, so this check runs against what was actually asked
+    /// for.
     fn assert_no_dropped_logweir_key(
         &self,
         doc: &str,
@@ -484,7 +457,7 @@ impl OsoCliEngine {
     /// it, so the two can never look at different keys.
     ///
     /// Only `StoreError::NotFound` is absence. Any other read failure is an
-    /// error (Task 12): neither presence nor a digest can be stated then.
+    /// error: neither presence nor a digest can be stated then.
     fn consumer_group_snapshot_object(
         &self,
         set: &BackupSetRef,
@@ -495,7 +468,7 @@ impl OsoCliEngine {
             .rsplit_once('/')
             .map(|(dir, _)| format!("{dir}/{name}"))
             .unwrap_or_else(|| name.to_string());
-        // FX-31: under the engine-document cap. An object over it is an
+        // Under the engine-document cap. An object over it is an
         // error like any other read failure that leaves presence unknown.
         match self
             .store
@@ -507,27 +480,21 @@ impl OsoCliEngine {
         }
     }
 
-    /// FX-1. `set`'s consumer-groups snapshot, read the way the engine writes
-    /// it (`vendored::consumer_groups`).
+    /// `set`'s consumer-groups snapshot, read the way the engine writes it
+    /// (`vendored::consumer_groups`).
     ///
     /// **A snapshot that is not in the engine's shape is a VALUE here,
-    /// [`ConsumerGroupSnapshotRead::Unreadable`], not an error.** It is a fact
-    /// about the archive — the object exists, it hashes to this digest, and
-    /// this build cannot read its content — so it is reported as one, with the
-    /// reason. It is never `EngineError::Operational`, which the drill and the
-    /// backup define as a failure that says nothing about the archive (exit
-    /// 1, "fix the environment and re-run"), and it is not an `Err` a caller
-    /// can propagate with `?` by reflex: a caller that needs the positions
-    /// matches on the outcome and must say what an unreadable snapshot means
-    /// for it (PROD-04.1: "not captured", never zero groups). The only `Err`
-    /// is a read failure that leaves presence unknown.
+    /// [`ConsumerGroupSnapshotRead::Unreadable`], not an error**: the object
+    /// exists, it hashes to this digest, and this build cannot read its
+    /// content. It is never `EngineError::Operational` (a failure that says
+    /// nothing about the archive), and a caller that needs positions must say
+    /// what an unreadable snapshot means for it ("not captured", never zero
+    /// groups). The only `Err` is a read failure that leaves presence unknown.
     ///
-    /// `describe_with_notices` calls it, so `drill run` and `backup run` read
-    /// it on every run: they publish its digest, and they PRINT an
-    /// `Unreadable` outcome as a warning (FX-1 fix round, M1) — never act on
-    /// it, because Logweir restores no consumer offsets (spec §2 non-goals)
-    /// and signs nothing about the snapshot. It is also the reader PROD-04.1's
-    /// import of foreign archives builds on.
+    /// `describe_with_notices` reads it on every `drill run` and `backup run`,
+    /// which publish its digest and PRINT an `Unreadable` outcome as a warning,
+    /// never act on it: Logweir restores no consumer offsets and signs nothing
+    /// about the snapshot.
     pub fn consumer_group_snapshot(
         &self,
         set: &BackupSetRef,
@@ -564,7 +531,7 @@ pub enum ConsumerGroupSnapshotRead {
     /// named no topic yet at the end of the pass
     /// (`U/…/backup/engine.rs:853-856`) — or when writing it FAILED, which
     /// the engine only logs (`:584-589`, "non-fatal"). So absence means "not
-    /// captured", never "no group had committed" (PROD-04.1).
+    /// captured", never "no group had committed".
     Absent,
     /// The object, in the shape the engine writes. `sha256` is over its bytes,
     /// the same value `describe` publishes.
@@ -593,7 +560,7 @@ impl ConsumerGroupSnapshotRead {
     }
 
     /// The notice `drill run` and `backup run` print for an UNREADABLE
-    /// snapshot, and `None` for every other outcome (FX-1 fix round, M1).
+    /// snapshot, and `None` for every other outcome.
     pub fn notice(&self) -> Option<ArchiveNotice> {
         match self {
             Self::Unreadable {
@@ -615,14 +582,14 @@ impl ConsumerGroupSnapshotRead {
     }
 }
 
-/// **PROD-04.1.** The group type every group imported from an engine
-/// consumer-group snapshot carries: the engine records none (PROD-04.0 §3.7:
-/// it keeps a streams group's positions with no type at all), so an imported
-/// group is never shown as a consumer group's, and its positions are never
-/// applied on the snapshot's word (AP-04.1-7).
+/// The group type every group imported from an engine
+/// consumer-group snapshot carries: the engine records none (it keeps a streams
+/// group's positions with no type at all), so an imported group is never shown
+/// as a consumer group's, and its positions are never applied on the snapshot's
+/// word.
 pub const IMPORTED_GROUP_TYPE: &str = "unknown";
 
-/// **PROD-04.1.** One group of an engine snapshot, imported.
+/// One group of an engine snapshot, imported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedGroup {
     /// The group id the engine recorded.
@@ -636,7 +603,7 @@ pub struct ImportedGroup {
     pub positions: Vec<vendored::consumer_groups::Position>,
 }
 
-/// **PROD-04.1.** An engine consumer-group snapshot, imported: the ONE way a
+/// An engine consumer-group snapshot, imported: the ONE way a
 /// foreign archive's snapshot is read as positions. Logweir's own backups
 /// never write one (the rendered document leaves the engine's
 /// `consumer_group_snapshot` at its default, `false`); they record the
@@ -654,7 +621,7 @@ pub struct ImportedSnapshot {
 }
 
 impl ConsumerGroupSnapshotRead {
-    /// **PROD-04.1.** The snapshot as an import source: `None` when there is no
+    /// The snapshot as an import source: `None` when there is no
     /// object, `Some(Err)` when it is unreadable or a group's positions are not
     /// the engine's shape — never a partial import, which would read as "no
     /// committed position" for what it dropped.
@@ -726,34 +693,15 @@ impl DataEngine for OsoCliEngine {
             .map_err(|e| EngineError::Operational(format!("{}: {e}", set.manifest_key)))?;
         let created_at = chrono::DateTime::from_timestamp_millis(m.created_at)
             .ok_or_else(|| EngineError::Operational("manifest created_at out of range".into()))?;
-        // Spec §14 SP1b names consumer-groups-snapshot.json in scope and
-        // §10/GT-10 treat it as part of the artifact set a reader must handle.
-        // `describe` publishes two facts about it: that it EXISTS and what it
-        // HASHES to. Absent is normal, not an error.
-        //
-        // Task 12 fix: `Err(_) => None` used to map EVERY read failure — a
-        // 403, a timeout, a truncated read, genuine absence — onto the same
-        // `None`, a positive claim ("this artefact was never uploaded") the
-        // store never established. Only `StoreError::NotFound` means that; any
-        // other read error still propagates, because then neither fact can be
-        // stated.
-        //
-        // FX-1: its CONTENT is not a fact `describe` publishes, and it is no
-        // longer a reason to refuse the archive. The content used to be parsed
-        // against an invented shape and a mismatch returned `Operational` —
-        // "says nothing about the archive; fix the environment and re-run"
-        // (exit 1, no artifact) — so every drill and every backup receipt of an
-        // archive holding a real, non-empty snapshot failed, and no re-run
-        // could ever succeed. Neither caller reads the content: a drill
-        // restores data with `auto_consumer_groups: false`
-        // (`render_restore.rs`) and signs no snapshot fact, and a receipt
-        // carries none.
-        //
-        // FX-1 fix round (M1): an UNREADABLE snapshot is still told, not
-        // swallowed. It comes back as an `ArchiveNotice` beside the facts,
-        // which `drill run` and `backup run` print as a warning line and a
-        // structured log event. The read below is the ONE read of the object:
-        // the digest published and the notice printed are of the same bytes.
+        // `describe` publishes two facts about the snapshot: that it EXISTS and
+        // what it HASHES to; absent is normal. Only `StoreError::NotFound` is
+        // absence, and any other read error propagates, because then neither
+        // fact can be stated. Its CONTENT is neither a published fact nor a
+        // reason to refuse the archive: no drill (it restores with
+        // `auto_consumer_groups: false`) and no receipt reads it. An UNREADABLE
+        // snapshot comes back as an `ArchiveNotice` beside the facts, printed
+        // by `drill run` and `backup run`; this is the ONE read of the object,
+        // so the digest and the notice are of the same bytes.
         let snapshot = self.consumer_group_snapshot(set)?;
         let notices: Vec<ArchiveNotice> = snapshot.notice().into_iter().collect();
         let facts = BackupSetFacts {
@@ -781,24 +729,11 @@ impl DataEngine for OsoCliEngine {
                                 .iter()
                                 .map(|s| SegmentFacts {
                                     // QUALIFIED, not the manifest's own
-                                    // relative key. A manifest body stores
-                                    // `{backup_id}/topics/...` relative to the
-                                    // configured storage prefix (see
-                                    // `Store::qualify`), and `SegmentFacts.key`
-                                    // is consumed by `phase7_verify::
-                                    // segment_evidence` as an argument to
-                                    // `Store::get_capped`. Passing the relative key
-                                    // through made every segment of a real
-                                    // archive with a non-empty prefix 404 in
-                                    // `get` — so the byte-fingerprint segment
-                                    // lane could never verify anything against
-                                    // a real bucket, only against a
-                                    // `Filesystem` store (whose prefix is `""`)
-                                    // and the in-memory doubles. Found by Task
-                                    // 21c the first time phase 7 read segments
-                                    // out of MinIO; `segments_in_manifest` in
-                                    // storage.rs already carried the identical
-                                    // fix and this call site was missed.
+                                    // relative key: `SegmentFacts.key` is
+                                    // passed to `Store::get_capped` by
+                                    // `phase7_verify::segment_evidence`, and a
+                                    // relative key 404s on any archive with a
+                                    // non-empty prefix (see `Store::qualify`).
                                     key: self.store.qualify(&s.key),
                                     start_offset: s.start_offset,
                                     end_offset: s.end_offset,
@@ -828,32 +763,24 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn preflight(&self, plan: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        // G-GLOB: a topic (or a mapped target) carrying a glob
-        // metacharacter is refused HERE, at phase 5, before the engine is
-        // spawned. `EngineError::Operational` is exit 1 — the same mapping
-        // ruling R-E gives the phase-5/phase-6 digest divergence, and for the
-        // same reason: `preflight` is reached only after phase 0's guards have
-        // run, so Global Constraint 11's exit 3 ("refused by a guard, before
-        // anything runs") does not describe it.
+        // G-GLOB: a topic (or a mapped target) carrying a glob metacharacter is
+        // refused HERE, at phase 5, before the engine is spawned, as
+        // `EngineError::Operational` (exit 1): `preflight` runs after phase 0's
+        // guards, so exit 3 ("refused by a guard, before anything runs") does
+        // not describe it.
         //
-        // PROD-11.1: every engine run's document, rendered and written before
-        // any engine is spawned (a plan with no subset is one run and writes
-        // `restore.yaml`, exactly as before).
+        // Every engine run's document is rendered and written before any engine
+        // is spawned (a plan with no subset is one run, `restore.yaml`).
         let runs = render_restore::render_all_and_digest(plan)
             .map_err(|e| EngineError::Operational(e.to_string()))?;
         let mut written = Vec::with_capacity(runs.len());
         for (run, doc, digest) in &runs {
             written.push((self.write(&run.config_file_name(), doc)?, doc, digest));
         }
-        // T0-14. Memoised HERE, immediately after the write and before the
-        // engine is spawned, because the field's meaning is "the digest of the
-        // bytes that are now on disk as restore.yaml" — that is the document
-        // phase 6 would silently truncate, and the moment those bytes exist is
-        // the moment the claim becomes checkable. Memoising only on a
-        // successful return would be no stronger in production (`record(..)?`
-        // in `crates/logweir/src/drill/mod.rs` short-circuits, so phase 6 is
-        // unreachable after a phase-5 error) and would make the memo depend on
-        // the engine's behaviour rather than on our own write.
+        // Memoised HERE, immediately after the write and before the engine is
+        // spawned: the field means "the digest of the bytes now on disk as
+        // restore.yaml", so the memo depends on our own write, not on the
+        // engine's behaviour.
         *self.phase5_render.lock().expect("phase5_render mutex") =
             Some(runs.iter().map(|(_, _, d)| d.clone()).collect());
         let mut reports = Vec::with_capacity(written.len());
@@ -868,24 +795,13 @@ impl DataEngine for OsoCliEngine {
         plan: &RestorePlan,
         obs: &mut dyn PhaseObserver,
     ) -> Result<RestoreFacts, EngineError> {
-        // T0-14. Phases 5 and 6 each render `restore.yaml` and `self.write`
-        // calls `std::fs::write`, which truncates — so phase 6 overwrites the
-        // document phase 5 validated. Until this comparison existed, "the SAME
-        // document" was true only because
-        // `crates/logweir/src/drill/mod.rs:576` happened to build `plan` once
-        // and hand the same value to both. That is a property of one call
-        // site, not a guarantee; it dissolves the moment phase 5 and phase 6
-        // are split.
-        //
-        // Ruling R-E: a divergence is `EngineError::Operational` and therefore
-        // EXIT 1 (no artifact) via `DrillError::Engine` at drill/mod.rs:105 —
-        // NOT exit 3. Global Constraint 11 reserves 3 for "plan refused by a
-        // guard, before anything runs", and by phase 6 phases 0-5 have run,
-        // including the engine's own `validate-restore`. The ADR that would
-        // carry this ruling is gated on open question O2 and is deferred; see
-        // docs/stability.md.
-        //
-        // PROD-11.1: the comparison is over EVERY run's document, in order.
+        // Phases 5 and 6 each render `restore.yaml`, and the write truncates,
+        // so phase 6 overwrites the document phase 5 validated; this comparison
+        // makes "the SAME document" a guarantee rather than a property of one
+        // call site. A divergence is `EngineError::Operational`, EXIT 1 with no
+        // artifact, not exit 3: by phase 6 phases 0-5 have run, including the
+        // engine's own `validate-restore` (`docs/stability.md`). The comparison
+        // is over EVERY run's document, in order.
         let runs = render_restore::render_all_and_digest(plan)
             .map_err(|e| EngineError::Operational(e.to_string()))?;
         let six: Vec<String> = runs.iter().map(|(_, _, d)| d.clone()).collect();
@@ -912,9 +828,9 @@ impl DataEngine for OsoCliEngine {
             }
         }
         let count = runs.len();
-        // PROD-11.1: with several runs, `plan.offset_report` is the composed
+        // With several runs, `plan.offset_report` is the composed
         // report Logweir writes after the last run; whatever an earlier run
-        // left there is not this restore's (FX-23's rule, below, per path).
+        // left there is not this restore's (`remove_stale_report`, per path).
         if count > 1 {
             remove_stale_report(&plan.offset_report)?;
         }
@@ -957,17 +873,11 @@ impl DataEngine for OsoCliEngine {
     }
 
     fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        // Fix (Task 16 fix round 1): `phase4_sample::run` (crates/logweir)
-        // cannot populate `SampleSelection.set.manifest_key` — it only ever
-        // sees `BackupSetFacts`, which does not carry one — so every
-        // `Selection` it produces arrives with `manifest_key` empty until a
-        // caller patches it (`Selection::bind_backup_set`) from the original
-        // `BackupSetRef`. Refusing here, with a message naming exactly what
-        // is wrong, turns a forgotten patch step into a loud, specific
-        // `EngineError::Operational` rather than relying on
-        // `Store::get_capped("", …)`'s incidental "object not found" (harmless today,
-        // but a guard that depends on a downstream error happening to be
-        // legible is not a guard).
+        // `phase4_sample::run` cannot populate
+        // `SampleSelection.set.manifest_key` (it sees only `BackupSetFacts`),
+        // so a caller must patch it (`Selection::bind_backup_set`). Refusing
+        // here names a forgotten patch step instead of relying on
+        // `Store::get_capped("", …)` happening to fail legibly.
         if sel.set.manifest_key.is_empty() {
             return Err(EngineError::Operational(
                 "SampleSelection.set.manifest_key is empty — phase 4 (phase4_sample::run) \
@@ -977,20 +887,13 @@ impl DataEngine for OsoCliEngine {
                     .into(),
             ));
         }
-        // Fix (post-review): scoped to `sel.set.manifest_key` via
-        // `segment_keys_for_set`, NOT the broad `segment_keys_for` — the
-        // latter resolves topic/partition against EVERY manifest under the
-        // store's prefix, so two backup sets sharing a topic/partition with
-        // an overlapping window would merge here, making the archive side a
-        // strict superset of what a real restore populated. That reads as a
-        // mismatch and fails a drill that actually succeeded — the worst
-        // direction for a product whose deliverable is a signed attestation.
-        // See `SampleSelection::set`'s doc comment (logweir-core).
+        // Scoped to `sel.set.manifest_key` via `segment_keys_for_set`, NOT
+        // `segment_keys_for`: across every manifest under the prefix, two
+        // backup sets sharing a topic/partition with an overlapping window
+        // would merge, and the archive side would be a strict superset of what
+        // a real restore populated, failing a drill that succeeded.
         //
-        // Fix (post-review, second round): `count == 0` returns before
-        // touching storage at all — no listing, no reads, no decoding —
-        // rather than building and discarding a full buffer, for every
-        // anchor.
+        // `count == 0` returns before touching storage at all.
         if sel.count == 0 {
             return Ok(Vec::new());
         }
@@ -1001,8 +904,8 @@ impl DataEngine for OsoCliEngine {
             sel.partition,
             sel.window,
         )? {
-            // FX-31: one segment, under the segment ceiling (FX-30 owns the
-            // decode's own caps).
+            // One segment, under the segment ceiling (the decoder has its own
+            // caps).
             let (bytes, _) = self.store.get_capped(&key, crate::storage::caps::SEGMENT)?;
             for r in crate::kbak::decode_segment(&bytes)? {
                 // Err(Unsupported) propagates
@@ -1021,28 +924,14 @@ impl DataEngine for OsoCliEngine {
                     ),
                 });
             }
-            // Fix (post-review, second round): `head` bounds the READ, not
-            // only the output — `count`'s doc comment (logweir-core) used to
-            // claim this for every anchor, when only `head` can actually do
-            // it. `tail` and `random` both need the window's full extent
-            // before they can choose (the latest `count` records, or a span
-            // across all of them), so they must keep traversing regardless
-            // of how much `all` already holds.
-            //
-            // Safe to stop here for `head` specifically because
-            // `segment_keys_for_set` returns keys SORTED (lexicographically,
-            // via `Vec::sort` in storage.rs) and the real key format
-            // zero-pads the segment's start offset to a fixed width
-            // (`segment-{offset:020}.bin{ext}`, storage.rs's `qualify` doc) —
-            // for a FIXED topic/partition (already the case here; every key
-            // in this loop shares that prefix), lexicographic order over
-            // these keys IS ascending start-offset order. So once `all`
-            // holds `count` in-window records after fully decoding a
-            // segment, every segment left in the iterator has a start offset
-            // at or above the one just processed and cannot contain a
-            // record earlier than what has already been collected — reading
-            // it could only add records `select_sample`'s `"head"` branch
-            // would discard anyway.
+            // `head` bounds the READ, not only the output; `tail` and `random`
+            // need the window's full extent before they can choose. Safe for
+            // `head` because `segment_keys_for_set` returns keys SORTED and the
+            // key format zero-pads the start offset
+            // (`segment-{offset:020}.bin{ext}`), so for one topic/partition
+            // lexicographic order is ascending start offset: once `all` holds
+            // `count` in-window records after a whole segment, no later segment
+            // can hold an earlier record.
             if sel.anchor == Anchor::Head && all.len() >= sel.count {
                 break;
             }
@@ -1051,31 +940,21 @@ impl DataEngine for OsoCliEngine {
         select_sample(all, sel.anchor, sel.count)
     }
 
-    /// GC18's `--from-cluster` half, and the SECOND shipped `run_engine` call
-    /// site (Task 1's `ENGINE_ARGV_ALLOWLIST` / interface **I32**).
+    /// GC18's `--from-cluster` half, and the second `run_engine` call site
+    /// (interface **I32**).
     ///
-    /// The engine's `backup` takes `--config` and nothing else
-    /// [VERIFIED U:crates/kafka-backup-cli/src/main.rs:35-39,559-561] — no
-    /// `--format`, no report file — so the WHOLE surface is the rendered
-    /// document, and every fact about the run other than its exit code is
-    /// ours to time and to read back off its streams. That is why
-    /// `BackupFacts` looks like `RestoreFacts` and not like
-    /// `PreflightReport`.
+    /// The engine's `backup` takes `--config` and nothing else [VERIFIED
+    /// U:crates/kafka-backup-cli/src/main.rs:35-39,559-561]: no `--format`, no
+    /// report file, so every fact about the run other than its exit code is
+    /// ours to time and to read back off its streams.
     ///
-    /// `render_and_digest` rather than `render`: it is the entry point that
-    /// carries GC18(c) rail 3 (`scan_rendered_document`, fail-closed) and
-    /// **G-EXP**'s post-render sweep, both of which must run over the exact
-    /// bytes about to be written. The digest is bound and dropped here
-    /// because `BackupFacts` has no field for it (Task 2 froze that type);
-    /// Task 5b's receipt can re-derive it from the same plan, since
-    /// `render_backup::render` is a pure function of `BackupPlan`.
-    ///
-    /// SASL/SCRAM-SHA-512 renders since Task 6, so nothing on this path
-    /// refuses an auth mode any more. `RenderError::UnsupportedAuthMode` is
-    /// kept as the rail for a mode `AuthRender` does not yet have (see the
-    /// variant's own doc comment) and would still leave this method as
-    /// `EngineError::Operational`, exit 1 by ruling R-E — never a panic and
-    /// never a silent downgrade to an unauthenticated document.
+    /// `render_and_digest` rather than `render`: it carries GC18(c) rail 3
+    /// (`scan_rendered_document`, fail-closed) and **G-EXP**'s post-render
+    /// sweep over the exact bytes about to be written. The digest is dropped
+    /// here (`BackupFacts` has no field for it); the receipt can re-derive it
+    /// from the same plan. `RenderError::UnsupportedAuthMode` stays the rail
+    /// for a mode `AuthRender` does not have: `EngineError::Operational`, exit
+    /// 1, never a silent downgrade to an unauthenticated document.
     fn backup(
         &self,
         plan: &BackupPlan,
@@ -1097,17 +976,8 @@ impl DataEngine for OsoCliEngine {
             &mut |stream, line| obs.engine_line(stream, line),
         )?;
         let finished_at = chrono::Utc::now();
-        // The exit code is checked BEFORE the dropped-key check, matching the
-        // ordering fix recorded at `engine.rs:422-428` for `restore`: with the
-        // order reversed, a run that both dropped a key we rendered AND failed
-        // returns only the dropped-key error, losing the exit code and the
-        // streams, which are the primary evidence for an outright failure. A
-        // run that dropped a key but EXITED 0 still gets the dropped-key error,
-        // from the `assert_no_dropped_logweir_key` call below.
-        //
-        // Both streams in the message, for the reason `restore` records: this
-        // engine's log lines go to STDOUT, so a failure carrying only stderr
-        // can omit the line that explains it.
+        // The exit code is checked BEFORE the dropped-key check, and both
+        // streams go in the message, for the reasons `restore` records.
         if run.exit_code != 0 {
             return Err(EngineError::Operational(format!(
                 "kafka-backup backup exited {}\nstdout: {}\nstderr: {}",
@@ -1116,9 +986,8 @@ impl DataEngine for OsoCliEngine {
                 captured(&run.stderr)
             )));
         }
-        // Rendered documents are the coupling surface: a key WE rendered that
-        // this engine tag dropped aborts the run (spec §7.2(a)), exactly as
-        // `preflight` (engine.rs:270) and `restore` (engine.rs:443) already do.
+        // A key WE rendered that this engine tag dropped aborts the run, as in
+        // `preflight` and `restore`.
         self.assert_no_dropped_logweir_key(&doc, &run.unknown_key_warnings)?;
         Ok(BackupFacts {
             started_at,
@@ -1129,46 +998,26 @@ impl DataEngine for OsoCliEngine {
     }
 }
 
-/// Fix (post-review): `anchor` and `count` used to be read by nothing, so
-/// `fingerprints()` returned every matching record in the window regardless
-/// of what the caller (and the scorecard, which also records both fields —
-/// see `SampleSpec` in the Task 14 drill spec) asked for. A scorecard stating
-/// "head, 25 samples" while the comparison actually ran over every record in
-/// the window is a signed document describing a sample nobody took; on a
-/// real archive's volumes it is also an unbounded-memory read. `count` is a
-/// CAP (fewer matching records than `count` is not an error), never a promise
-/// of exactly that many.
+/// The sample the caller asked for: `count` is a CAP (fewer matching records is
+/// not an error), and a scorecard must not state a sample nobody took.
 ///
-/// `anchor` semantics chosen here (undocumented beyond "head | tail | random"
-/// at the type's own definition, and the Task 14 brief's "rotating across
-/// runs is the adopter's job" — which sets policy across MULTIPLE drill runs,
-/// not what a single call does):
-/// - `"head"`: the first `count` records by offset (lowest/earliest) in the
-///   window — Kafka's own convention for "head of the log".
-/// - `"tail"`: the last `count` records by offset (highest/latest).
-/// - `"random"`: a DETERMINISTIC, evenly-spaced ("systematic") sample across
-///   the full sorted set, not a seeded or unseeded RNG draw. Chosen over true
-///   randomness because the scorecard's audit trail is the concrete list of
-///   `RecordFingerprint`s it embeds, not a formula to regenerate them — an
-///   auditor verifies the offsets actually recorded, never re-derives which
-///   ones "should" have been picked — so genuine non-determinism buys nothing
-///   an evenly-spaced deterministic sample does not, while costing a new `rand`
-///   dependency and, more importantly, testability: this function's tests
-///   assert exact selections, which a true RNG draw cannot do.
+/// - `"head"`: the first `count` records by offset in the window, Kafka's own
+///   "head of the log".
+/// - `"tail"`: the last `count` records by offset.
+/// - `"random"`: a DETERMINISTIC, evenly-spaced sample across the sorted set.
+///   The audit trail is the list of `RecordFingerprint`s the scorecard embeds,
+///   not a formula to regenerate them, so an RNG would buy nothing and cost a
+///   dependency and exact-selection tests.
 ///
-/// Any other value is a bug in the caller (this field is entirely
-/// Logweir-internal, never engine-reported) and is reported as such rather
-/// than silently defaulting — a scorecard cannot honestly claim an anchor
-/// that was never actually applied.
+/// Any other value is a caller bug (the field is Logweir-internal) and is
+/// reported, never defaulted.
 fn select_sample(
     sorted: Vec<RecordFingerprint>,
     anchor: Anchor,
     count: usize,
 ) -> Result<Vec<RecordFingerprint>, EngineError> {
-    // Backstop, not the primary path: `fingerprints()` already returns before
-    // reading anything when `sel.count == 0`, so `sorted` is always empty
-    // here in practice too. Kept in case a future caller reaches this
-    // function some other way.
+    // Backstop: `fingerprints()` returns before reading anything when
+    // `sel.count == 0`.
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1188,11 +1037,8 @@ fn select_sample(
                 let idx = i * (n - 1) / (count - 1).max(1);
                 out.push(sorted[idx].clone());
             }
-            // Defensive, not load-bearing under the current n > count
-            // guarantee (see the early return above): guards against a
-            // repeated index if the stride between two adjacent `i` values
-            // ever floors to the same integer, so `count` is honoured as a
-            // cap even if that arithmetic assumption is ever violated.
+            // Defensive: a stride that floors two `i` values to one index must
+            // not repeat a record.
             out.dedup_by_key(|f| f.offset);
             Ok(out)
         }

@@ -1,36 +1,26 @@
-// d3.spec.js -- D3 (PLAT-12.1, PLAT-14.1, PLAT-14.2, PLAT-15.1, PLAT-15.2,
-// PLAT-16.1, PLAT-16.2, PLAT-19.1) under `node --test`: the durable operation
-// view, protection health, the recovery catalog, the keys view, the badge
-// cases and the retention panel.
+// d3.spec.js -- the durable operation view, protection health, the recovery
+// catalog, the keys view, the badge cases and the retention panel, under
+// `node --test`. These surfaces span both modes (the custom resource in
+// legacy mode, the product API's document in console mode, one renderer over
+// both).
 //
-// WHY THIS IS A FILE OF ITS OWN, like `d2.spec.js` before it. These surfaces
-// span both modes: the custom resource in legacy mode, the product API's
-// document in console mode, and one renderer over both. Keeping them together
-// means a reader looking for "what does the console say when nothing has
-// evaluated this policy" finds one file.
-//
-// THE FIVE CLAIMS EVERY ROW BELOW IS ABOUT. Each one is a sentence this
-// product must never render, and each has its own arm:
+// THE FIVE CLAIMS EVERY ROW BELOW IS ABOUT, each a sentence this product must
+// never render:
 //
 //   * `valid`, for a key nothing has evaluated -- D3 section 7.7's `unknown`;
 //   * `verified`, for evidence signed by a key this installation does not
-//     accept -- `Untrusted` is a claim about the SIGNER and `NotAttempted` one
-//     about the CONTROLLER, and one word for both loses the repair;
-//   * a complete comparison, for a sampled one -- `complete` is not a level
-//     this version has and no sentence here can spell it;
-//   * `protected`, for a policy Logweir could not evaluate -- `Unknown` stays
-//     `Unknown` and is never rounded to `False`;
+//     accept -- `Untrusted` is about the SIGNER and `NotAttempted` about the
+//     CONTROLLER, and one word for both loses the repair;
+//   * a complete comparison, for a sampled one;
+//   * `protected`, for a policy Logweir could not evaluate -- `Unknown` is
+//     never rounded to `False`;
 //   * "Logweir never deletes from your archive", beside a policy that does --
-//     the retention panel reads `status.enforcement`, which is what is
-//     HAPPENING, not `spec.mode`, which is what was asked for.
+//     the retention panel reads `status.enforcement` (what is HAPPENING), not
+//     `spec.mode` (what was asked for).
 //
-// THE FIXTURES ARE REAL OBJECTS where a real one exists: the ProtectionPolicy,
-// the RecoveryCatalog status and its view entries, the two RetentionPolicies
-// and the TrustPolicy are the bytes the D3 live runs recorded (see
-// `fixtures/README.md` for which is which and what was constructed).
-//
-// NOTHING HERE DIALS, and `ui_lint.rs::the_ui_behaviour_suite_never_dials`
-// holds that for the whole directory.
+// THE FIXTURES ARE REAL OBJECTS where one exists (see `fixtures/README.md`
+// for which were recorded and which constructed). Nothing here dials
+// (`ui_lint.rs::the_ui_behaviour_suite_never_dials`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -180,10 +170,8 @@ const d3 = (name) =>
 const fixture = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url), "utf8"));
 
-/** The PRODUCT API's own documents. They live under `fixtures/console/` with
- *  every other one, and `contract.spec.js` holds each of them to the published
- *  schema -- which is what the reconciliation bought: these were this client's
- *  assumption and are now instances. */
+/** The PRODUCT API's own documents, under `fixtures/console/`;
+ *  `contract.spec.js` holds each of them to the published schema. */
 const con = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/console/" + name, import.meta.url), "utf8"));
 
@@ -197,10 +185,6 @@ function decode(html) {
     .replace(/&gt;/g, ">")
     .replace(/&amp;/g, "&");
 }
-
-// ===========================================================================
-// PLAT-14.1 -- the operation contract, and what the two modes each carry
-// ===========================================================================
 
 test("the_operation_decoder_reads_the_published_view_and_refuses_an_unknown_stage", () => {
   const item = operationOf("operation-backup-preparing.json");
@@ -232,14 +216,12 @@ test("the_operation_decoder_reads_the_published_view_and_refuses_an_unknown_stag
 });
 
 test("a_word_the_document_publishes_as_a_string_is_rendered_and_never_refused", () => {
-  // THE RECONCILIATION'S OWN RULE, AND IT CUTS BOTH WAYS. Eight D3
-  // vocabularies are typed enums and a word outside one is refused (above).
-  // The other twenty are published as `string`, because each is a word a
-  // CONTROLLER writes into a status field the API passes through: a closed
-  // enum there would turn a forward-compatible status into a 500, so this
-  // client declares them `str` and keeps the lists as RENDERING vocabularies.
-  //
-  // A code from a newer controller therefore DECODES, and renders as itself.
+  // THE RULE CUTS BOTH WAYS. Eight D3 vocabularies are typed enums and a word
+  // outside one is refused (above). The other twenty are published as
+  // `string`, because a CONTROLLER writes them into a status field the API
+  // passes through, and a closed enum there would turn a forward-compatible
+  // status into a 500. So a code from a newer controller DECODES, and renders
+  // as itself.
   const invented = con("operation-backup-preparing.json");
   invented.item.diagnostics[0].code = "SomethingThisBuildHasNeverSeen";
   const item = decodeD3Operation(invented).value.item;
@@ -272,7 +254,7 @@ test("the_operation_view_computes_no_state_in_legacy_mode_and_says_so", () => {
     document: object, console: false, meta: { transport: "poll", attempt: 0 },
   });
   assert.match(html, /data-no-normalized-state="true"/);
-  // ITS NAMES ARE CODE, not literal backticks (O2, R2-10's class).
+  // Its names are code, not literal backticks.
   assert.match(decode(html), /normalized operation state is computed by <code>logweir-api<\/code>/);
   assert.doesNotMatch(html, /badge-state-unknown/,
     "and it does NOT render the API's `unknown` word for a fact it simply does not have");
@@ -347,15 +329,9 @@ test("the_completion_panel_carries_the_mode_s_own_guidance_and_the_sampled_sente
 });
 
 test("a_rehearsal_is_labelled_a_rehearsal_before_its_scorecard_exists", () => {
-  // REVIEW SECTION 5 ITEM 5, FINISHED. The reconciliation moved `targetMode`
-  // to the TOP LEVEL of the published view, and the DTO's own field
-  // documentation says why: "that is a fact about the run from the moment it
-  // is created -- a rehearsal is a rehearsal before its scorecard exists. The
-  // first round hid it inside `completion`, so a Restore that had not
-  // finished could not be labelled." The console then read the field from the
-  // top level and STILL only inside `renderCompletion`, which returns the
-  // empty string without a scorecard -- so a pending, running or refused
-  // rehearsal carried no mode on screen at all. That is the one case where
+  // `targetMode` is top level because a rehearsal is a rehearsal before its
+  // scorecard exists, and `renderCompletion` returns nothing without one: a
+  // pending, running or refused rehearsal must still carry its mode, and
   // "these topics are deleted by teardown" is worth saying in advance.
   const running = operationFacts(operationOf("operation-restore-untrusted.json"), true);
   const unfinished = Object.assign({}, running, {
@@ -429,10 +405,6 @@ test("the_operation_route_carries_both_halves_of_the_identity", () => {
   assert.equal(operationRoute("team-a", "restore", "r1", ""),
     "#/operations?ns=team-a&kind=restore&name=r1");
 });
-
-// ===========================================================================
-// PLAT-14.1 -- the watch
-// ===========================================================================
 
 test("the_watch_stops_only_when_the_run_is_terminal_AND_the_verification_settled", () => {
   assert.equal(isSettled({ terminal: true, verification: { state: "valid" } }), true);
@@ -600,10 +572,6 @@ test("the_legacy_poller_slows_down_after_the_declared_run_of_errors", async () =
   watch.stop();
 });
 
-// ===========================================================================
-// PLAT-14.2 -- protection health
-// ===========================================================================
-
 test("schedule_health_and_protection_health_are_two_columns_and_never_one", () => {
   const object = d3("protection-unprotected.json");
   assert.equal(object.status.health, "Unprotected");
@@ -655,9 +623,9 @@ test("an_unevaluated_protection_is_unknown_and_Protected_Unknown_is_never_rounde
 });
 
 test("the_alert_ledger_shows_kind_state_and_instants_and_no_delivery_columns", () => {
-  // PROD-17.1 (C2's leftover): alert sinks are withdrawn, so the ledger shows
-  // no delivery state. The fixture is a policy recorded before the
-  // withdrawal and still carries delivery facts; none of them is printed.
+  // Alert sinks are withdrawn, so the ledger shows no delivery state. The
+  // fixture predates the withdrawal and still carries delivery facts; none of
+  // them is printed.
   const object = d3("protection-unknown.json");
   assert.equal(openAlerts(object.status).length, 1);
   assert.ok(object.status.alerts.some((a) => a.delivery),
@@ -683,10 +651,6 @@ test("the_protection_list_says_what_an_empty_namespace_means", () => {
     "a recovery point no older than 300 seconds");
   assert.equal(objectiveLine({}), "-", "an objective nothing states is not zero");
 });
-
-// ===========================================================================
-// PLAT-15.1 / PLAT-15.2 -- the recovery catalog
-// ===========================================================================
 
 test("availability_and_verification_are_two_columns_and_selectable_is_read_not_recomputed", () => {
   const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
@@ -736,21 +700,16 @@ test("one_point_in_two_buckets_is_one_row_and_the_degraded_location_is_named", (
 });
 
 test("the_restore_link_carries_what_the_point_route_PUBLISHED", () => {
-  // RECONCILED, then corrected by review L-2. The link used to carry an
-  // assumed `locationDigest`; the catalog's view entry has never held one --
-  // the frozen destination digest is a fact about a BACKUP's own destination
-  // snapshot, not about a point read out of a bucket -- so the API publishes
-  // none and this page invents none. What it carries instead is what the point
-  // route published, which is what D3 section 5.5 step 4's plan is built from:
-  // `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`,
-  // plus the catalog's own destination.
+  // The catalog's view entry holds no `locationDigest` (that is a fact about a
+  // BACKUP's own destination snapshot, not a point read out of a bucket), so
+  // the link carries what the point route published -- what D3 section 5.5
+  // step 4's plan is built from, `source.point {point_id, receipt_key,
+  // receipt_sha256, manifest_sha256}` -- plus the catalog's own destination.
   //
-  // AND THIS FIXTURE IS ITS OWN WITNESS. It was recorded from a live run, and
-  // every `receiptKey` in it is `[redacted].receipt.json` -- the product's own
-  // `redact_path` rewrote the key on the way into the catalog view, because a
-  // 26-character ULID is longer than the redactor's free-component cap. So the
-  // first thing this row proves is that the page does NOT carry a redacted key
-  // into a plan.
+  // THIS FIXTURE IS ITS OWN WITNESS: recorded from a live run, every
+  // `receiptKey` in it is `[redacted].receipt.json` (`redact_path` rewrote a
+  // 26-character ULID longer than its free-component cap). So the first thing
+  // this row proves is that the page does NOT carry a redacted key into a plan.
   const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
   const entry = page.items[0];
   assert.ok(entry.receiptKey.length > 0 && entry.receiptSha256.length > 0,
@@ -879,10 +838,6 @@ test("the_catalog_detail_renders_its_status_even_when_the_point_list_is_refused"
   assert.ok(NO_CATALOG_SENTENCE.length > 0);
 });
 
-// ===========================================================================
-// PLAT-19.1 -- unknown is not valid
-// ===========================================================================
-
 test("an_unevaluated_trust_policy_reads_unknown_and_never_valid", () => {
   const object = d3("trustpolicy-unevaluated.json");
   assert.equal(object.status, undefined, "the fixture carries no status at all");
@@ -892,8 +847,8 @@ test("an_unevaluated_trust_policy_reads_unknown_and_never_valid", () => {
   const html = decode(renderPolicyKeys(object, Date.parse("2026-09-19T02:00:00Z")));
   assert.match(html, /unknown/);
   assert.match(html, /nothing has evaluated these keys yet/);
-  // The sentence above the table names `valid` as code (O2); the word is in
-  // no badge and no cell.
+  // The sentence above the table names `valid` as code; the word is in no
+  // badge and no cell.
   assert.equal(html.replace(/<code>[^<]*<\/code>/g, "").indexOf(">valid<"), -1,
     "and the word `valid` is nowhere in this table");
   assert.ok(UNKNOWN_IS_NOT_VALID_SENTENCE.indexOf("never `valid`") !== -1);
@@ -985,11 +940,11 @@ test("a_fresh_evaluation_renders_the_controllers_own_verdict_and_the_lifecycle_b
   assert.match(out, /this key has no verdict in status.keys\[\]/);
 });
 
-// TRUSTPOLICY-DELETE-DROPS-REVOCATION. `trustpolicy-compromise-inherited.json`
-// is the status `crates/weirkeeper/tests/trust_revocation_durable.rs::
-// the_shared_keys_fixture_is_what_the_controller_writes` asserts this build
-// WRITES for a policy listing a key another policy revoked for compromise:
-// declared `Active`, evaluated `Revoked`, `CompromiseGuard=True/
+// `trustpolicy-compromise-inherited.json` is the status
+// `crates/weirkeeper/tests/trust_revocation_durable.rs::
+// the_shared_keys_fixture_is_what_the_controller_writes` asserts the
+// controller WRITES for a policy listing a key another policy revoked for
+// compromise: declared `Active`, evaluated `Revoked`, `CompromiseGuard=True/
 // CompromiseInherited`. Two readers of one file.
 test("COMPROMISE_INHERITED__a_key_another_policy_revoked_is_never_rendered_active", () => {
   const object = d3("trustpolicy-compromise-inherited.json");
@@ -1058,18 +1013,12 @@ test("the_keys_page_falls_back_to_the_roster_by_name_and_submits_nothing", () =>
 });
 
 test("KEYSVIEW_ABSENT_VALID__an_absent_expiredKeyIds_reads_unknown_and_never_valid", () => {
-  // THE DEFECT THIS ROW IS FOR, BY NAME. The roster half's expiry column used
-  // to be "`valid` unless this key id is in `status.expiredKeyIds[]`", and
-  // `[]` is what an ABSENT list decodes to in that spelling. So a TrustRoster
-  // the controller had never evaluated -- no status at all, or a status with
-  // no `expiredKeyIds` because nothing has parsed the keys yet -- printed a
-  // green `valid` for EVERY key in it. That is the exact sentence D3 section
-  // 7.7 forbids: `unknown` is not `valid`, and the one direction that must
-  // never be guessed is the flattering one.
-  //
-  // The roster has no `observedGeneration` and no `evaluatedAt`, so there is
-  // nothing to establish freshness FROM; the honest column is `unknown` with
-  // the reason beside it.
+  // An ABSENT `expiredKeyIds` decodes to `[]`, so a rule of "`valid` unless
+  // listed" would print a green `valid` for every key of a roster nothing has
+  // evaluated -- the sentence D3 section 7.7 forbids. A roster has no
+  // `observedGeneration` and no `evaluatedAt`, so there is nothing to
+  // establish freshness FROM; the honest column is `unknown` with the reason
+  // beside it.
   const roster = JSON.parse(readFileSync(
     new URL("./fixtures/trustroster-default.json", import.meta.url), "utf8",
   )).items[0];
@@ -1126,10 +1075,6 @@ test("KEYSVIEW_ABSENT_VALID__an_absent_expiredKeyIds_reads_unknown_and_never_val
     "every key in both lists carries the unknown badge, and none is skipped");
   assert.ok(UNKNOWN_IS_NOT_VALID_SENTENCE.indexOf("never `valid`") !== -1);
 });
-
-// ===========================================================================
-// PLAT-19.1 -- the badge cases
-// ===========================================================================
 
 test("a_historical_basis_is_green_and_carries_its_qualifier", () => {
   const object = d3("restore-historical.json");
@@ -1188,22 +1133,18 @@ test("a_recorded_before_revocation_basis_is_never_green", () => {
 });
 
 test("an_explicit_basis_None_is_an_absence_in_the_DTO_and_a_refused_block_in_a_resource", () => {
-  // REVIEW F1, NARROWED BY TRUST-VALID-BASIS-CLASS. D3 section 12 spells the
-  // DTO's case: "`trust` absent -> `basis: None` and the badge uses the
-  // pre-existing rule". So in the PRODUCT API's document the string `"None"`
-  // is an absence (`basisAllowsGreen`). A CUSTOM RESOURCE can say "absent" by
-  // carrying no block, so a PRESENT `{basis: "None"}` there is a block the
-  // controller refuses (`weirkeeper::verification::valid_verification`:
-  // `VerificationUntrusted`), and legacy mode now reads it with the
-  // controller's rule (`trustBlockAllowsGreen`) -- review LOW-1 of
-  // `claude/api-trust-state`. An object an older controller wrote carries no
-  // block at all and stays green (`an_object_with_no_trust_block_at_all_stays_green`).
+  // D3 section 12 spells the DTO's case: "`trust` absent -> `basis: None` and
+  // the badge uses the pre-existing rule", so in the PRODUCT API's document the
+  // string `"None"` is an absence (`basisAllowsGreen`). A CUSTOM RESOURCE says
+  // "absent" by carrying no block, so a PRESENT `{basis: "None"}` there is a
+  // block the controller refuses (`VerificationUntrusted`), and legacy mode
+  // reads it with the controller's rule (`trustBlockAllowsGreen`). An object
+  // with no block at all stays green
+  // (`an_object_with_no_trust_block_at_all_stays_green`).
   //
-  // THE FIXTURE IS A REAL PRE-D3 OBJECT. `backup-pre-d3-basis-none.json` is
-  // the lab's own 2026-09-14 Backup, captured whole; its `trust` block is
-  // `{basis: "None", keyState: "Active", policy: {name: "legacy-roster-v1"}}`,
-  // written by the intermediate controller build that introduced the block
-  // without the basis vocabulary (see claude/lab-refresh-3.result.md section 9).
+  // THE FIXTURE IS A REAL OBJECT from an intermediate controller build that
+  // wrote the block without the basis vocabulary: `{basis: "None", keyState:
+  // "Active", policy: {name: "legacy-roster-v1"}}`.
   const real = d3("backup-pre-d3-basis-none.json");
   const verification = real.status.evidence.verification;
   assert.equal(verification.trust.basis, "None");
@@ -1298,10 +1239,6 @@ test("rows_of_both_kinds_link_to_the_durable_operation_view", () => {
     .indexOf("uid=" + backup.metadata.uid) !== -1);
 });
 
-// ===========================================================================
-// PLAT-16.1 / PLAT-16.2 -- the retention panel
-// ===========================================================================
-
 test("the_never_deletes_sentence_stays_verbatim_for_a_report_and_is_replaced_otherwise", () => {
   const schedule = { status: { retentionReport: { evaluatedAt: "2026-09-19T01:11:38Z" } } };
   assert.ok(retentionSentenceFor(schedule.status.retentionReport, null)
@@ -1384,10 +1321,6 @@ test("an_external_lifecycle_policy_says_logweir_cannot_read_the_rule_back", () =
   assert.match(html, /every guarantee above that says so is a DECLARATION/);
 });
 
-// ===========================================================================
-// the contract's own self-pinning arm
-// ===========================================================================
-
 /** EVERY ROUTE THIS CLIENT ADDRESSES. Each must be a key of the published
  *  document's `paths`; the arm below asserts it, so a route renamed on either
  *  side is a red suite and not a 404 in front of an operator. */
@@ -1410,15 +1343,10 @@ const D3_ROUTES_ADDRESSED = Object.freeze([
 const POINT_FILTERS = Object.freeze(["limit", "cursor", "selectable"]);
 
 test("every_d3_shape_route_and_vocabulary_is_pinned_against_the_published_document", () => {
-  // RECONCILED, AND THERE IS NO ASSUMED BUCKET LEFT.
-  //
-  // The first version of this arm let an unpublished name fall into an
-  // `assumed` list; the review's F2 made that list an equality so a rename
-  // could not hide in it, and this round emptied it: the API branch is in the
-  // tree, every name below is the document's own, and the arm now HARD-FAILS on
-  // any shape, route or vocabulary this client names that the document does
-  // not. A client with something left to assume is a client whose decoders are
-  // pinned against nothing.
+  // THERE IS NO ASSUMED BUCKET: the arm HARD-FAILS on any shape, route or
+  // vocabulary this client names that the document does not. A client with
+  // something left to assume is a client whose decoders are pinned against
+  // nothing.
   const schema = JSON.parse(readFileSync(
     new URL("../../schemas/logweir-api-v1.openapi.json", import.meta.url), "utf8"));
   const definitions = schema.components.schemas;
@@ -1516,14 +1444,10 @@ test("every_d3_shape_route_and_vocabulary_is_pinned_against_the_published_docume
   }
 });
 
-// ===========================================================================
-// the mount halves, driven over a fake node and an in-memory API
-// ===========================================================================
-//
-// THE RENDERERS ABOVE ARE PURE AND THE MOUNTS ARE NOT, and the defects the
-// last two console waves' reviews caught all lived in the impure half: a form
-// that kept rendering the values it had already saved, two clicks sharing one
-// intent, and a control that only re-read. These rows drive the real mount
+// THE MOUNT HALVES, over a fake node and an in-memory API. The renderers
+// above are pure and the mounts are not, and a form that kept rendering
+// saved values, two clicks sharing one intent and a control that only
+// re-read all live in the impure half. These rows drive the real mount
 // functions over the smallest node `render.js`'s `replace` touches.
 
 function fakeNode(form) {
@@ -1590,13 +1514,10 @@ function fakeForm(values) {
 }
 
 test("a_422_from_the_connect_route_lands_beside_the_field_it_names", () => {
-  // THE LIVE RUN FOUND THIS, AND IT IS THE ONE THE FIXTURES COULD NOT.
-  // `POST .../catalogs` with a name that is not a DNS-1123 subdomain is a real
-  // 422 whose body carries `errors: [{field, code, message}]` -- this is the
-  // document `logweir-api` answered on 2026-09-21, copied verbatim. The
-  // console's `fieldErrors` reads `details.causes[]`, and nothing bridged the
-  // two for a D3 create: the form printed "fix the fields marked below" and
-  // marked nothing.
+  // A REAL 422 BODY, copied verbatim from `logweir-api`: a name that is not a
+  // DNS-1123 subdomain answers `errors: [{field, code, message}]`, while the
+  // console's `fieldErrors` reads `details.causes[]`. Unbridged, the form
+  // would say "fix the fields marked below" and mark nothing.
   const body = JSON.stringify({
     type: "https://logweir.dev/problems/validation-failed",
     title: "Request validation failed",
@@ -1697,12 +1618,9 @@ test("the_connect_form_sends_one_request_per_intent_and_a_second_click_while_pen
   });
 
 test("one_draft_holds_one_intent_across_every_resend_of_it", async () => {
-  // THE DEFECT THIS ARM IS FOR, WHICH THE MUTANT BATTERY FOUND. `keepDraft` is
-  // a REPLACE over the declared fields and not a merge, so a submit handler
-  // that kept only the form's values dropped the intent the draft held -- and
-  // the next submission minted a new one. A resend would then be a DIFFERENT
-  // request under a different key, which is the exact opposite of what an
-  // idempotency key is for: a lost response and a retry would create two
+  // `keepDraft` is a REPLACE over the declared fields, not a merge, so a submit
+  // handler that kept only the form's values would drop the draft's intent and
+  // mint a new one: a lost response and a retry would then create two
   // catalogs rather than resolving to the one the first request made.
   const sent = [];
   const deps = {
@@ -1788,8 +1706,8 @@ test("the_operation_mount_refuses_a_kind_this_route_does_not_serve", async () =>
 });
 
 test("mcp_19_an_operations_visit_with_no_run_points_at_the_two_lists_runs_are_in", async () => {
-  // BEFORE (MCP-19): "This route serves backup and restore operations. The
-  // address bar named none." -- a dead end reached from a top-level tab.
+  // The route is reached from a run; a visit without one is pointed at the
+  // two lists runs are in, not told "the address bar named none".
   const node = fakeNode();
   let reads = 0;
   const watch = await mountOperation(node, "team-a", { kind: "", name: "", uid: "" },
@@ -1863,17 +1781,11 @@ test("the_keys_mount_prefers_the_policy_and_names_the_refusal_when_it_cannot_rea
       "with the document a cluster admin applies, rendered and not submitted");
   });
 
-// ===========================================================================
-// review fix round 1: the close, the cleared form and the spent intent
-// ===========================================================================
-
 test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
-  // REVIEW F3. The behaviour was right and the GUARD was missing: the
-  // reviewer's mutant dropped `stream.close()` and kept `stream = null`, and
-  // the whole suite stayed green. A stream that survives a terminal document
-  // and a route change is one live connection per visit to `#/operations`,
-  // leaked across navigations, and the one-call-site gate counts the network
-  // call by name and knows nothing about a stream.
+  // `stream.close()` must happen, not merely `stream = null`: a stream that
+  // survives a terminal document and a route change is one live connection
+  // per visit to `#/operations`, leaked across navigations, and the one
+  // network-call-site gate knows nothing about a stream.
   function fakeStream() {
     const state = { closed: 0, handlers: {} };
     return {
@@ -1898,10 +1810,9 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
       this.addEventListener = made.addEventListener.bind(made);
       this.close = made.close.bind(this);
       queueMicrotask(() => {
-        // THE BARE VIEW, which is what `send_view` puts on the wire. Feeding
-        // the READ route's `{item, requestId}` envelope here is what let the
-        // envelope bug live: the suite asserted a close, and a close happens
-        // for a document that decodes to `undefined` too.
+        // THE BARE VIEW, which is what `send_view` puts on the wire. A frame shaped
+        // like the READ route's `{item, requestId}` envelope would decode to
+        // `undefined`, and a close happens for that too.
         made.state.handlers.operation({
           data: JSON.stringify(wireItem("operation-restore-completed.json")),
         });
@@ -1948,10 +1859,6 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
     "the route's own signal closes the connection -- and closing a READ never cancels the run");
 });
 
-// ===========================================================================
-// pass 2 reconciliation -- the stream's own two shapes
-// ===========================================================================
-
 /** A fake `EventSource` whose handlers this test drives by hand. */
 function streamHarness() {
   const state = { closed: 0, opened: 0, handlers: {} };
@@ -1973,14 +1880,11 @@ function streamHarness() {
 }
 
 test("a_stream_frame_is_the_BARE_view_and_the_envelope_is_the_read_routes_alone", async () => {
-  // THE RECONCILIATION ITEM THE RENAMES DID NOT REACH (review section 5 item 2,
-  // in the one place it survived). `GET .../operations/{kind}/{name}` answers
-  // `OperationViewResponse` -- `{item, requestId}`, both required. The stream
-  // does NOT: `send_view` in `crates/logweir-api/src/status.rs` is
-  // `serde_json::to_string(&OperationView)`, so `operation` and `reset` carry
-  // the flat view with no wrapper. Decoding a frame as the envelope yields
-  // `undefined` for every document the stream has ever sent, and a watch that
-  // renders `undefined` is a live view that shows only its first read.
+  // `GET .../operations/{kind}/{name}` answers `OperationViewResponse`
+  // (`{item, requestId}`), but the stream does NOT: `send_view` in
+  // `crates/logweir-api/src/status.rs` serialises the flat `OperationView`.
+  // Decoding a frame as the envelope yields `undefined` for every document,
+  // and a watch that renders `undefined` shows only its first read.
   const envelope = con("operation-restore-completed.json");
   assert.deepEqual(Object.keys(envelope).sort(), ["item", "requestId"],
     "the READ route's fixture is the envelope, and `contract.spec.js` holds it to " +
@@ -2026,11 +1930,10 @@ test("a_stream_frame_is_the_BARE_view_and_the_envelope_is_the_read_routes_alone"
 
 test("the_end_frame_is_a_reason_and_only_two_of_the_three_end_anything", async () => {
   // `end` CARRIES `{"reason": ...}` AND NO DOCUMENT (`StreamEnd` in
-  // `crates/logweir-api/src/status.rs`). The first round fed it to the
-  // document handler and stopped on every one, which is wrong twice over: a
-  // normal close raised a decode error on screen, and `maxDuration` -- the
-  // 300-second CONNECTION ceiling, which a long backup hits while it is still
-  // running -- stopped the watch on a run that had not finished.
+  // `crates/logweir-api/src/status.rs`). Feeding it to the document handler
+  // would raise a decode error on every normal close, and stopping on
+  // `maxDuration` -- the 300-second CONNECTION ceiling a long backup hits while
+  // still running -- would stop the watch on an unfinished run.
   assert.deepEqual(Object.keys(STREAM_END_REASONS).sort(),
     ["maxDuration", "settled", "vanished"]);
   assert.equal(endReason("{\"reason\":\"settled\"}"), "settled");
@@ -2133,14 +2036,11 @@ test("the_end_frame_is_a_reason_and_only_two_of_the_three_end_anything", async (
 });
 
 test("isSettled_is_the_servers_own_two_conditions_and_the_two_states_agree_by_construction", () => {
-  // REVIEW SECTION 5 ITEM 4, CHECKED AGAINST THE HANDLER AND NOT THE FIXTURE.
-  // `is_settled` in `crates/logweir-api/src/status.rs` is
-  // `terminal && trust.state != Pending`; this page reads
-  // `terminal && verification.state !== "pending"`. They are the same
-  // predicate because `trust_of` maps `VerificationState::Pending` to
-  // `TrustState::Pending` and NOTHING ELSE to it -- so the two words are
-  // pending together or not at all, and the console cannot stop one frame
-  // before the server does.
+  // `is_settled` in `crates/logweir-api/src/status.rs` is `terminal &&
+  // trust.state != Pending`; this page reads `terminal && verification.state
+  // !== "pending"`. They are the same predicate because `trust_of` maps
+  // `VerificationState::Pending` to `TrustState::Pending` and NOTHING ELSE to
+  // it, so the console cannot stop one frame before the server does.
   assert.equal(isSettled({ terminal: true, verification: { state: "pending" } }), false);
   assert.equal(isSettled({ terminal: true, verification: { state: "valid" } }), true);
   assert.equal(isSettled({ terminal: false, verification: { state: "valid" } }), false);
@@ -2169,15 +2069,10 @@ test("isSettled_is_the_servers_own_two_conditions_and_the_two_states_agree_by_co
 });
 
 test("a_FINISHED_run_in_legacy_mode_stops_polling_after_one_read", async () => {
-  // REVIEW M-1, AND IT IS THE MODE THIS WHOLE FILE IS ABOUT. `isSettled` read
-  // `terminal` and `verification.state`, which only the product API's DTO
-  // publishes. Legacy mode -- `kubectl proxy`, where the legacy operation view
-  // and the KEYSVIEW-ABSENT-VALID roster half both live -- is handed the
-  // CUSTOM RESOURCE, which has neither. So a console left open on a FINISHED
-  // Backup polled the kube-apiserver every POLL_MS for ever, and the stated
-  // reason for `isSettled` had no effect in the mode without a normalizing API
-  // in front of it. The reviewer's probe read "polls of a FINISHED run: 6";
-  // this row holds it at one.
+  // Legacy mode is handed the CUSTOM RESOURCE, which has neither `terminal`
+  // nor `verification.state`; reading only those, a console left open on a
+  // FINISHED Backup would poll the kube-apiserver every POLL_MS for ever. This
+  // row holds it at one read.
   const finished = fixture("backup-valid-exit0.json");
   assert.equal(finished.status.phase, "Succeeded");
   assert.equal(finished.status.evidence.verification.result, "Valid");
@@ -2237,12 +2132,10 @@ test("a_FINISHED_run_in_legacy_mode_stops_polling_after_one_read", async () => {
 });
 
 test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
-  // REVIEW L-2. `PointView.receiptKey` is a required plan-binding key, and on
-  // this product the catalog sync runs it through `redact_path` first -- a
-  // 26-character ULID is longer than the redactor's free-component cap, so a
-  // point this product wrote itself comes back as `[redacted].receipt.json`.
-  // Observed on every live run of this branch. The page used to promise "the
-  // whole plan binding" and carry the redactor's output into the link.
+  // `PointView.receiptKey` is a required plan-binding key, and the catalog
+  // sync runs it through `redact_path` first: a 26-character ULID is longer
+  // than the redactor's free-component cap, so a point this product wrote
+  // itself can come back as `[redacted].receipt.json`.
   assert.ok(isRedacted("[redacted].receipt.json"));
   assert.ok(!isRedacted("archive/0f1c/01M3.receipt.json"));
   assert.ok(!isRedacted(undefined));
@@ -2274,8 +2167,8 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
   assert.match(html, /Runners up to v0\.2\.0-rc\.1 did this to every scheduled run's point/);
   assert.match(html, /nothing in your archive is missing or unreadable because of this/);
 
-  // FX-17: a redacted SET ID raises the same complaint with the key whole --
-  // the scheduled run's `<schedule uid>-<slot>` that the PoC's runner withheld.
+  // A redacted SET ID (a scheduled run's `<schedule uid>-<slot>`) raises the
+  // same complaint with the key whole.
   const setGone = handedPoint(Object.assign({}, published, { backupId: "[redacted]" }));
   assert.match(decode(renderPoints(handedPage([setGone]), "team-a", "c1", "dest")),
     /data-redacted-binding="true"/);
@@ -2291,11 +2184,10 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
 });
 
 test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {
-  // REVIEW F4, which is d1w7's post-save staleness in a new form. The catalog
-  // EXISTS after a success; leaving its name and destination in the inputs
-  // invites a second click that creates a SECOND RecoveryCatalog for one
-  // destination -- refused by the controller with `DuplicateCatalog`, leaving a
-  // dead object this console holds no delete for.
+  // The catalog EXISTS after a success; leaving its name and destination in
+  // the inputs invites a second click that creates a SECOND RecoveryCatalog
+  // for one destination -- refused by the controller with `DuplicateCatalog`,
+  // leaving a dead object this console holds no delete for.
   let lists = 0;
   const created = [];
   const deps = {
@@ -2334,10 +2226,9 @@ test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {
 });
 
 test("a_corrected_body_mints_a_new_intent_rather_than_spending_the_old_one", async () => {
-  // REVIEW F5. An idempotency key binds a REQUEST. An operator who submits,
-  // is refused, corrects the destination and submits again would otherwise
-  // spend the same key on a different body -- `409 idempotency_conflict`, and
-  // every further retry the same, with only a page reload to recover.
+  // An idempotency key binds a REQUEST: spending the same key on a corrected
+  // body is `409 idempotency_conflict` on every retry, with only a page reload
+  // to recover.
   const sent = [];
   let failWith = null;
   const deps = {
@@ -2415,11 +2306,10 @@ test("the_point_table_says_when_it_is_one_page_of_a_larger_view", () => {
 });
 
 test("a_server_instant_too_old_to_be_now_is_reported_as_none", () => {
-  // REVIEW F6. A recorded instant that never expired is a stopped clock, and a
-  // clock in the past SHRINKS the measured age -- the direction that reads
-  // fresh. The instant is carried forward by an ELAPSED duration and dropped
-  // past the bound; the duration is a difference of two monotonic readings and
-  // never an absolute one.
+  // A recorded instant that never expired is a stopped clock, and a clock in
+  // the past SHRINKS the measured age -- the direction that reads fresh. The
+  // instant is carried forward by an ELAPSED (monotonic) duration and dropped
+  // past the bound.
   assert.equal(SERVER_TIME_MAX_AGE_MS, 300000);
   const dated = Date.parse("2026-09-18T04:42:25Z");
   const carried = (elapsed) => {
@@ -2440,16 +2330,10 @@ test("a_server_instant_too_old_to_be_now_is_reported_as_none", () => {
     { fresh: false, reason: "NoServerClock" });
 });
 
-// ===========================================================================
-// the reconciliation: two documents, two rules, one renderer
-// ===========================================================================
-
 test("the_console_evidence_rule_reads_the_apis_own_combined_word", () => {
   // D3 section 2.5 makes the evidence verdict ONE WORD, computed by
-  // `logweir-api` from the controller's `result` and its `trust.basis`. In
-  // console mode the page reads it; re-deriving it here would be that table
-  // implemented a second time in a browser, which is what a normalizing API
-  // exists to prevent.
+  // `logweir-api` from the controller's `result` and `trust.basis`; in console
+  // mode the page reads it rather than implementing that table a second time.
   assert.deepEqual(GREEN_TRUST_STATES.slice(), ["verified", "verifiedHistorical"]);
 
   const historical = operationFacts(operationOf("operation-restore-completed.json"), true);
@@ -2574,10 +2458,9 @@ test("the_flat_views_project_into_the_custom_resources_own_vocabulary", async ()
 });
 
 test("the_keys_view_renders_the_apis_own_freshness_verdict_in_console_mode", async () => {
-  // THE RECONCILIATION'S MOST CONSEQUENTIAL FIELD. `TrustPolicyView.evaluation`
-  // is D3 section 7.7's decision, made by `logweir-api` against its own clock
-  // and published with the instant it used -- so the console and the controller
-  // cannot disagree about freshness, because only one of them decides it.
+  // `TrustPolicyView.evaluation` is D3 section 7.7's decision, made by
+  // `logweir-api` against its own clock and published with the instant it
+  // used, so the console and the controller cannot disagree about freshness.
   const fresh = await readD3("trust", "", "org-default", undefined, {
     modeOf: () => "console",
     consoleClusterGet: async () => con("trust-policy.json"),
@@ -2633,9 +2516,9 @@ test("the_signer_panel_reads_the_published_envelope_and_the_apis_own_command", (
 });
 
 test("records_restored_is_labelled_as_the_sampled_window_count_with_the_window_beside_it", () => {
-  // Orchestrator addition to PLAT-18.2: `completion.recordsRestored` is
-  // `sample.records_restored` -- the records read back in the SAMPLED window
-  // (CRD field description; D3 section 3.5) -- not the total restored.
+  // `completion.recordsRestored` is `sample.records_restored` -- the records
+  // read back in the SAMPLED window (CRD field description; D3 section 3.5) --
+  // not the total restored.
   const facts = operationFacts(operationOf("operation-restore-completed.json"), true);
   const html = decode(renderCompletion(facts));
   assert.match(html, /<dt>records verified in the sampled window<\/dt><dd>200<\/dd>/,
@@ -2643,7 +2526,7 @@ test("records_restored_is_labelled_as_the_sampled_window_count_with_the_window_b
   assert.match(html,
     /<dt>sampled window<\/dt><dd>2026-09-19T01:09:08\.259Z to 2026-09-19T01:09:17\.277Z \(inclusive\)<\/dd>/,
     "and the window it counts is beside it");
-  // NEGATIVE CONTROL: the old caption, which read as the total restored.
+  // NEGATIVE CONTROL: a caption that would read as the total restored.
   assert.equal(html.indexOf("<dt>records restored</dt>"), -1,
     "no row calls the sampled count `records restored`");
 });
@@ -2657,38 +2540,33 @@ test("a_finished_restore_without_a_completion_says_not_yet_verified_and_never_ze
   // NEGATIVE CONTROL: no count row and no zero is rendered for the absence.
   assert.equal(html.indexOf("records verified in the sampled window"), -1, "no count row");
   assert.equal(/<dd>0<\/dd>/.test(html), false, "nothing is shown as zero");
-  // Review LOW-3, then CONSOLE-COMPLETION-HEADING-ON-FAILED: a restore that
-  // FAILED, was refused or was cancelled is not "not yet verified" -- it will
-  // never have counts -- and it carries no completion section at all: no
-  // "What this restore produced" heading over a run that produced nothing.
+  // A restore that FAILED, was refused or was cancelled will never have
+  // counts, so it carries no completion section at all: no "What this restore
+  // produced" heading over a run that produced nothing.
   for (const ended of [{ state: "failed" }, { state: "refused" }, { state: "cancelled" },
     { state: "unknown" },
     { state: null, phase: "Failed" }, { state: null, phase: "Cancelled" }]) {
     assert.equal(renderCompletion(Object.assign({}, finished, ended)), "",
       "no completion section for " + JSON.stringify(ended));
   }
-  // A run still going has no panel at all (the existing rule, unchanged).
+  // A run still going has no panel at all.
   assert.equal(renderCompletion(Object.assign({}, finished, { terminal: false, state: "running" })), "");
   // And a legacy custom resource, finished by its phase, says the same.
   assert.match(decode(renderCompletion({ kind: "restore", completion: null, terminal: false,
     phase: "Succeeded" })), /Completion not yet verified/);
 });
 
-// ===========================================================================
-// FX-22 -- the retention panel says what the per-run ceiling held back, and
-// never calls it kept
-// ===========================================================================
-//
-// THE EVIDENCE (PoC batch 3, F-3): 371 points, and the status read "321 kept,
-// 50 candidate(s)" for `keepLast: 300` and for `keepLast: 10` alike.
+// THE RETENTION PANEL SAYS WHAT THE PER-RUN CEILING HELD BACK, AND NEVER
+// CALLS IT KEPT. With 371 points, `keepLast: 300` and `keepLast: 10` must not
+// both read "321 kept, 50 candidate(s)".
 //
 // THE FIXTURES ARE A CHAIN THREE SIDES READ. `fixtures/retention-held-back.json`
 // is the two policies as the reconciler leaves them
 // (`weirkeeper/tests/retention_policy_controller.rs` fails when it is not);
 // `fixtures/console/retention-policies-held-back.json` is the product API's
 // answer for them (`logweir-api/tests/retention_accounting.rs` fails when it
-// is not); and these rows render both -- the API's answer in console mode and
-// the custom resources themselves in legacy mode.
+// is not); and these rows render both, the API's answer in console mode and
+// the custom resources in legacy mode.
 
 /** The two policies as the shared console reads them: through the product
  *  API's list, decoded by the published contract and projected back into the
@@ -2719,15 +2597,15 @@ function fact(html, caption) {
 test("the_retention_panel_tells_300_kept_from_the_ceiling_stopped_at_50", async () => {
   const policies = await heldBackPolicies();
 
-  // ---- keepLast: 300 ------------------------------------------------------
+  // keepLast: 300.
   const threeHundred = decode(renderEnforcement({}, policies["keep-300"]));
   assert.equal(fact(threeHundred, "points evaluated"), "371");
   assert.equal(fact(threeHundred, "kept"), "300");
   assert.equal(fact(threeHundred, "in this plan"), "50");
   assert.equal(fact(threeHundred, "held back by the per-run ceiling"), "21");
   assert.match(threeHundred, /data-accounting="recorded" data-kept="300" data-held-back="21"/);
-  // THE API SAID SO (review M1): the fixture is its answer, and both policies
-  // carry `accounting: "Recorded"`.
+  // The API said so: the fixture is its answer, and both policies carry
+  // `accounting: "Recorded"`.
   assert.equal(policies["keep-300"].status.lastEvaluation.accounting, "Recorded");
   assert.equal(policies["keep-10"].status.lastEvaluation.accounting, "Recorded");
   assert.ok(threeHundred.indexOf(heldBackSentence(21, 50)) !== -1,
@@ -2740,7 +2618,7 @@ test("the_retention_panel_tells_300_kept_from_the_ceiling_stopped_at_50", async 
   assert.equal(policies["keep-300"].status.lastEvaluation.kept.length, 200);
   assert.equal(policies["keep-300"].status.lastEvaluation.truncated, true);
 
-  // ---- keepLast: 10 -------------------------------------------------------
+  // keepLast: 10.
   const ten = decode(renderEnforcement({}, policies["keep-10"]));
   assert.equal(fact(ten, "points evaluated"), "371");
   assert.equal(fact(ten, "kept"), "10");
@@ -2748,8 +2626,7 @@ test("the_retention_panel_tells_300_kept_from_the_ceiling_stopped_at_50", async 
   assert.equal(fact(ten, "held back by the per-run ceiling"), "311");
   assert.ok(ten.indexOf(heldBackSentence(311, 50)) !== -1);
 
-  // THE DEFECT, AS A NEGATIVE CONTROL: neither reads 321 kept, and the two no
-  // longer read alike.
+  // NEGATIVE CONTROL: neither reads 321 kept, and the two do not read alike.
   for (const html of [threeHundred, ten]) {
     assert.notEqual(fact(html, "kept"), "321");
   }
@@ -2790,10 +2667,10 @@ test("legacy_mode_reads_the_same_counts_off_the_custom_resource", () => {
   assert.equal(fact(html, "kept"), "not recorded");
   assert.equal(fact(html, "held back by the per-run ceiling"), "not recorded");
 
-  // THE SAME ROLLBACK WHILE THE ARCHIVE STANDS STILL (review M2). The counts
-  // still add up to the unchanged 371, and the `kept` list beside them is the
-  // older controller's: the ten kept points and the 311 the ceiling held back.
-  // A list that is not `keptCount` long is two writers' block.
+  // THE SAME ROLLBACK WHILE THE ARCHIVE STANDS STILL. The counts still add up
+  // to the unchanged 371, and the `kept` list beside them is the older
+  // controller's: the ten kept points and the 311 the ceiling held back. A
+  // list that is not `keptCount` long is two writers' block.
   const rolledBack = JSON.parse(JSON.stringify(byName["keep-10"]));
   rolledBack.status.lastEvaluation.kept = Array.from({ length: 321 },
     (_, i) => "p" + String(i < 10 ? i + 1 : i + 51).padStart(3, "0"));
@@ -2813,9 +2690,9 @@ test("legacy_mode_reads_the_same_counts_off_the_custom_resource", () => {
   assert.notEqual(evaluationAccounting(byName["keep-10"].status.lastEvaluation), null);
 });
 
-// FX-39: the controller cuts each status list at 500 and writes the count
-// beside it. Legacy mode reads `skippedCount`, and holds `kept` to its first
-// 500 ids.
+// The controller cuts each status list at 500 and writes the count beside
+// it. Legacy mode reads `skippedCount`, and holds `kept` to its first 500
+// ids.
 test("legacy_mode_reads_the_counts_past_the_status_lists_bound", () => {
   const items = fixture("retention-held-back.json").items;
   const cut = JSON.parse(JSON.stringify(items.find((i) => i.metadata.name === "keep-10")));
@@ -2835,9 +2712,9 @@ test("legacy_mode_reads_the_counts_past_the_status_lists_bound", () => {
   assert.equal(evaluationAccounting({ ...ev, kept: ev.kept.slice(1) }), null);
 });
 
-// FX-39 review S1: a `skipped` list that is not as long as `skippedCount` is
-// two writers' block (an older controller rewrote the list beside a stale
-// count), however the stale counts add up.
+// A `skipped` list that is not as long as `skippedCount` is two writers'
+// block (an older controller rewrote the list beside a stale count), however
+// the stale counts add up.
 test("legacy_mode_refuses_a_skipped_list_beside_a_stale_skipped_count", () => {
   const items = fixture("retention-held-back.json").items;
   const policy = JSON.parse(JSON.stringify(items.find((i) => i.metadata.name === "keep-10")));
@@ -2855,7 +2732,7 @@ test("legacy_mode_refuses_a_skipped_list_beside_a_stale_skipped_count", () => {
     { pointsEvaluated: 61, kept: 10, candidates: 50, heldBack: 0, ceiling: 50 });
 });
 
-// FX-22 review M1: console mode READS the API's word. It does not infer "not
+// Console mode READS the API's accounting word. It does not infer "not
 // recorded" from an absent count, and it does not let a count stand against
 // the API's `NotRecorded`.
 test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async () => {
@@ -2898,11 +2775,9 @@ test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async ()
   assert.equal(evaluationAccounting(older), null);
 
   // AN API THAT PREDATES THE WORD. The member is optional in the published
-  // schema, with the default `NotRecorded`, so such an answer still DECODES:
-  // the policy list is not lost to a contract failure (which the schedules
-  // page would render as "no RetentionPolicy was read", and print the
-  // no-deletion sentence under). And the counts it carries are not taken for
-  // an accounting nobody declared.
+  // schema, with the default `NotRecorded`, so such an answer still DECODES
+  // (the policy list is not lost to a contract failure), and the counts it
+  // carries are not taken for an accounting nobody declared.
   const predates = con("retention-policies-held-back.json");
   for (const item of predates.items) {
     delete item.lastEvaluation.accounting;
@@ -2936,7 +2811,7 @@ test("console_mode_reads_the_apis_accounting_word_and_never_infers_it", async ()
   );
 });
 
-// FX-22 review L3 (mutant R12): a negative number is not a count.
+// A negative number is not a count.
 test("a_negative_count_is_never_printed_as_a_count", () => {
   const ids = (n) => Array.from({ length: n }, (_, i) => "p" + String(i + 1).padStart(3, "0"));
   // The sum CLOSES over a negative (10 + 50 - 5 = 55) and the list is the
@@ -2977,8 +2852,9 @@ test("a_negative_count_is_never_printed_as_a_count", () => {
 });
 
 test("an_evaluation_that_records_no_accounting_reads_not_recorded_and_never_counts_its_list", () => {
-  // A LIVE PRE-FIX OBJECT: one id under `kept`, and no `keptCount`. Its list
-  // may hold points the ceiling held back, so the panel does not count it.
+  // AN OBJECT FROM BEFORE THE ACCOUNTING: one id under `kept`, and no
+  // `keptCount`. Its list may hold points the ceiling held back, so the panel
+  // does not count it.
   const older = d3("retention-report.json");
   assert.equal(older.status.lastEvaluation.kept.length, 1);
   assert.equal(older.status.lastEvaluation.keptCount, undefined);
@@ -2993,7 +2869,7 @@ test("an_evaluation_that_records_no_accounting_reads_not_recorded_and_never_coun
   assert.ok(html.indexOf(ACCOUNTING_NOT_RECORDED_SENTENCE) !== -1);
   assert.equal(html.indexOf("data-held-back-sentence"), -1);
 
-  // THE PRE-FIX SHAPE AT THE EVIDENCE'S SIZE: 321 ids under `kept`.
+  // THAT OLDER SHAPE AT THE EVIDENCE'S SIZE: 321 ids under `kept`.
   const preFix = JSON.parse(JSON.stringify(fixture("retention-held-back.json").items[1]));
   const ev = preFix.status.lastEvaluation;
   for (const key of ["keptCount", "truncatedByCap", "maxDeletionsPerRun"]) {
@@ -3035,10 +2911,10 @@ test("a_plan_under_the_ceiling_shows_zero_held_back_and_no_ceiling_sentence", as
   assert.match(heldBackSentence(4, null), /per-run ceiling \(maxDeletionsPerRun\)\./);
 });
 
-// FX-22 review L1, on this page: a plan that names NOTHING while points are
-// due does not promise that a later plan names them. Each is in a backup set
-// that more due points name than the ceiling, and the next plan finds the
-// same sets over the same ceiling.
+// A plan that names NOTHING while points are due does not promise that a
+// later plan names them: each is in a backup set that more due points name
+// than the ceiling, and the next plan finds the same sets over the same
+// ceiling.
 test("an_empty_plan_beside_held_back_points_promises_no_later_plan", () => {
   const ids = (n) => Array.from({ length: n }, (_, i) => "p" + String(i + 1));
   // The controller's own numbers for two receipts over one set, ceiling 1.
@@ -3084,8 +2960,8 @@ test("a_catalog_view_that_is_not_the_whole_archive_is_said_on_the_panel", async 
   const html = decode(renderEnforcement({}, windowed));
   assert.match(html, /data-view-incomplete="true"/);
   assert.ok(html.indexOf(VIEW_INCOMPLETE_SENTENCE) !== -1);
-  // `status.truncated` HAS OTHER CAUSES THAN `viewLimit` (review L4): the
-  // sentence names the limit with the one case it helps, never as the remedy.
+  // `status.truncated` has other causes than `viewLimit`: the sentence names
+  // the limit with the one case it helps, never as the remedy.
   assert.match(VIEW_INCOMPLETE_SENTENCE,
     /also when entries do not fit its pages or duplicate rows are merged, so raising viewLimit brings the missing points in only in the first case\.$/);
 
@@ -3094,14 +2970,11 @@ test("a_catalog_view_that_is_not_the_whole_archive_is_said_on_the_panel", async 
   assert.equal(decode(renderEnforcement({}, said)).indexOf("data-view-incomplete"), -1);
 });
 
-// FX-22 review L3 and L5: ONE RULE for `viewIncomplete`, the product API's
-// too. Never hide a warning; never assert a completeness that is not
-// recorded; and "the catalog said the view is whole" is no longer the same
-// page as "nobody said".
-//
-// MUTANTS: R13 (the review's) -- print the warning only when the accounting
-// is recorded; F6c -- print "the whole archive" without the accounting; F6d
-// -- print "the whole archive" when the member is absent.
+// ONE RULE for `viewIncomplete`, the product API's too: never hide a
+// warning, never assert a completeness that is not recorded, and keep "the
+// catalog said the view is whole" apart from "nobody said". Mutants: print
+// the warning only when the accounting is recorded; print "the whole
+// archive" without the accounting, or when the member is absent.
 test("the_catalog_view_row_has_three_answers_and_never_hides_the_warning", async () => {
   const policies = await heldBackPolicies();
   const row = (html) => fact(html, "catalog view it read");
@@ -3123,7 +2996,7 @@ test("the_catalog_view_row_has_three_answers_and_never_hides_the_warning", async
     return decode(renderEnforcement({}, p));
   };
 
-  // ---- `true`: shown whether or not the accounting is recorded ------------
+  // `true`: shown whether or not the accounting is recorded.
   const warnedRecorded = mk(true, "Recorded");
   assert.equal(row(warnedRecorded), EVALUATION_VIEW_WORDS.incomplete);
   assert.match(warnedRecorded, /data-view="incomplete"/);
@@ -3135,7 +3008,7 @@ test("the_catalog_view_row_has_three_answers_and_never_hides_the_warning", async
   assert.match(warnedUnrecorded, /data-view-incomplete="true"/);
   assert.ok(warnedUnrecorded.indexOf(VIEW_INCOMPLETE_SENTENCE) !== -1);
 
-  // ---- `false`: "the whole archive" only with the accounting --------------
+  // `false`: "the whole archive" only with the accounting.
   const wholeRecorded = mk(false, "Recorded");
   assert.equal(row(wholeRecorded), "the whole archive, the catalog said");
   assert.match(wholeRecorded, /data-view="whole"/);
@@ -3145,15 +3018,14 @@ test("the_catalog_view_row_has_three_answers_and_never_hides_the_warning", async
     "completeness is not asserted beside an accounting that is not recorded");
   assert.match(wholeUnrecorded, /data-view="not-recorded"/);
 
-  // ---- absent: "not recorded", never "the whole archive" ------------------
+  // Absent: "not recorded", never "the whole archive".
   for (const accounting of ["Recorded", "NotRecorded"]) {
     const silent = mk(undefined, accounting);
     assert.equal(row(silent), "not recorded", accounting);
     assert.match(silent, /data-view="not-recorded"/);
     assert.equal(silent.indexOf("data-view-incomplete"), -1);
   }
-  // The three answers are three different pages (review L5: `false` and
-  // absent used to render identical HTML).
+  // The three answers are three different pages.
   assert.notEqual(mk(false, "Recorded"), mk(undefined, "Recorded"));
 
   // The pure rule, and a value that is not a boolean is not an answer.

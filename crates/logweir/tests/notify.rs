@@ -65,7 +65,7 @@ fn debugging_a_notifications_block_prints_no_secret() {
             "https://hooks.slack.com/services/T0/B0/XXXXXXXXXXXXXXXXXXXXXXXX".into(),
         ),
         pagerduty_routing_key: Some("R000000000000000000000000000000".into()),
-        // Task 14, fix round 1 (F1). Not a credential, but free-form adopter
+        // Not a credential, but free-form adopter
         // input: reduced to `scheme://host/…` like every other URL that
         // reaches a display surface.
         pagerduty_endpoint: Some("https://events.eu.pagerduty.com/v2/enqueue".into()),
@@ -85,12 +85,9 @@ fn debugging_a_notifications_block_prints_no_secret() {
     // failed" are different findings.
     assert!(shown.contains("1 configured"), "{shown}");
     assert!(shown.contains("***"), "{shown}");
-    // Task 14, the other direction, as corrected by fix round 1 (F1): the
-    // endpoint is still IDENTIFIABLE — the host is what says which PagerDuty
-    // region the events went to, and an operator who cannot read that cannot
-    // diagnose the misdirection the field exists to fix — but it is no longer
-    // VERBATIM. The two are not the same requirement, and the first version of
-    // this test asserted the stronger one.
+    // The endpoint stays IDENTIFIABLE, but not VERBATIM: the host says which
+    // PagerDuty region the events went to, which an operator needs to
+    // diagnose a misdirection.
     // The leak assertion first: a verbatim URL contains the host as well, so
     // asserting the redacted form first makes a raw-endpoint mutant report a
     // missing host rather than the path that got out.
@@ -123,27 +120,16 @@ const FORBIDDEN: [&str; 6] = [
     "ureq::agent(",
 ];
 
-/// FIX ROUND 2 (re-review R1). The last round's audit carried a comment saying
-/// "The two lists now match." They did not — bare `Agent::new(` was in this
-/// file's list and missing from the workspace one, and a probe using it walked
-/// through both gates into `crates/logweir/tests/`, which the crate-local test
-/// does not walk.
+/// The workspace-wide audit may be BROADER than this file's list, never
+/// narrower: every token here must be an ELEMENT of the audit's
+/// `DIAL_TOKENS` literal, read from its source.
 ///
-/// A comment cannot hold that property, so this test does. It reads the audit's
-/// source and requires every token here to be an ELEMENT of its `DIAL_TOKENS`
-/// literal: the workspace-wide audit may be BROADER than this one, never
-/// narrower.
-///
-/// **IT TOKENISES; IT DOES NOT SLICE** (Task 32, stage-2 carried item (a)).
-/// The first version took `text[start..end]` and asked
-/// `list.contains(&format!("\"{t}\""))` — a substring search, which cannot
-/// distinguish an array element from a mention inside a `//` comment in the
-/// same literal. A token moved from the array into that comment would have kept
-/// this test green while the gate stopped covering it. `support::dial_tokens`
-/// strips comments first and reads the remaining double-quoted literals as a
-/// SET, so the property is now held by a parser;
+/// **IT TOKENISES; IT DOES NOT SLICE.** A substring search cannot distinguish
+/// an array element from a mention inside a `//` comment in the same literal;
+/// `support::dial_tokens` strips comments first and reads the remaining
+/// double-quoted literals as a SET.
 /// `crates/logweir/tests/gate_lint.rs::the_ureq_token_lists_agree_under_a_comment`
-/// is the test that proves the parser, and not the slice, is doing the work.
+/// proves the parser, and not a slice, is doing the work.
 #[test]
 fn the_two_ureq_token_lists_agree() {
     let audit =
@@ -170,17 +156,14 @@ fn the_two_ureq_token_lists_agree() {
 
 /// THE MUTANT KILLER, structural rather than behavioural: no ureq entry point
 /// with ureq's default configuration anywhere under `crates/logweir/src/`.
-/// (Re-scoped when the drill's notification post was withdrawn: the crate's
-/// one remaining agent is the identity bootstrap's.)
+/// The crate's one agent is the identity bootstrap's.
 ///
 /// Two families are forbidden:
 ///
 /// * **Agentless request builders** — `ureq::post(`, `ureq::get(`,
 ///   `ureq::request(`. Each constructs a throwaway agent with ureq's defaults.
 /// * **Default-configured agents** — `ureq::Agent::new(`, `Agent::new(`,
-///   `ureq::agent(`. Same defect, spelled differently: the reviewer's mutant
-///   `agent.post(&url)` -> `ureq::Agent::new().post(&url)` restored the
-///   unbounded wait and survived the first version of this test.
+///   `ureq::agent(`. Same defect, spelled differently.
 ///
 /// And `AgentBuilder::new()` must occur EXACTLY ONCE under
 /// `crates/logweir/src/`: inside `identity.rs`'s `kubernetes_agent`, the
@@ -299,7 +282,7 @@ fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
     None
 }
 
-/// **Acceptance check 12.** Both new fields are provably ADDITIVE: the
+/// Both new fields are provably ADDITIVE: the
 /// checked-in example spec, which has neither, still parses.
 ///
 /// It asserts the example's own shape first, because a future edit that added

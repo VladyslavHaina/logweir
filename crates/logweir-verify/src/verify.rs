@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
 /// Verify-as-read: the caller passes the bytes it actually read from disk or
 /// from the bucket, never a re-serialisation of a parsed value. A
-/// re-serialisation would verify a document nobody stored (spec §6 C3).
+/// re-serialisation would verify a document nobody stored.
 ///
 /// On success, returns the `keyid` of the signature that was actually
 /// checked and matched — never `sidecar.signatures[0]`, which a caller must

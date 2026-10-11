@@ -1,30 +1,24 @@
 //! THE engine identity Logweir signs: `engine.version` and `engine.digest` in
-//! every drill scorecard and every backup receipt (PROD-00.2, OD-3).
+//! every drill scorecard and every backup receipt.
 //!
-//! TWO SOURCES, AND THE IMAGE WINS. The runner image is built with one engine
-//! — Logweir's build of the vendored OSO source by default, or OSO's released
-//! binary under the documented one-release rollback — and the `Dockerfile`
-//! writes WHICH one into the image at [`IMAGE_IDENTITY_PATH`], copied from the
-//! same build stage as the binary. `LOGWEIR_ENGINE_VERSION` and
-//! `LOGWEIR_ENGINE_DIGEST` are what a standalone binary on a host reads from
-//! whatever the operator exported; since PROD-00.2's review the controller
-//! never puts them in a Job. The environment describes what someone EXPECTED
-//! the engine to be; the file describes what the image DOES hold. So the file
-//! is read first, and the environment only where there is no file: a
-//! standalone `logweir` with an engine on `$PATH`, the e2e harness,
-//! `scripts/demo.sh`. And either way the run asks the binary itself:
-//! [`verify_engine_reports`] refuses a version it does not print.
+//! TWO SOURCES, AND THE IMAGE WINS. The `Dockerfile` writes which engine the
+//! runner image holds (Logweir's build of the vendored OSO source, or OSO's
+//! released binary under the one-release rollback) into
+//! [`IMAGE_IDENTITY_PATH`], from the same build stage as the binary.
+//! `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST`, which the controller
+//! never puts in a Job, say what someone EXPECTED; the file says what the image
+//! holds. So the file is read first, and the environment only where there is
+//! none (a standalone `logweir` with an engine on `$PATH`, the e2e harness,
+//! `scripts/demo.sh`). Either way [`verify_engine_reports`] refuses a version
+//! the binary does not print.
 //!
-//! The consequence is the property OD-3 asks for: a rollback image can never
-//! sign under the default build's name, and the default image can never sign
-//! under OSO's, whatever the controller that created the Job was compiled
-//! with. Where the two disagree, a notice names both, once, on stderr; the
-//! signed document names the image's.
+//! So a rollback image never signs under the default build's name, nor the
+//! reverse, whatever the controller was compiled with. Where the two disagree,
+//! a notice names both, once, on stderr; the signed document names the image's.
 //!
 //! A FILE THAT EXISTS AND DOES NOT PARSE IS A REFUSAL, never a fall-back to the
-//! environment: an image whose identity file is broken is a broken image, and
-//! signing the environment's claim instead would be exactly the mislabelling
-//! this file exists to prevent.
+//! environment: signing the environment's claim over a broken image is the
+//! mislabelling this module exists to prevent.
 
 /// Where the runner image declares its engine (`Dockerfile`, runtime stage).
 pub const IMAGE_IDENTITY_PATH: &str = "/etc/logweir/engine-identity";
@@ -167,7 +161,7 @@ fn read_identity_file(path: &std::path::Path) -> Result<Option<String>, String> 
 /// a container for it.
 const VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// **The identity is held to the binary that runs** (PROD-00.2 review L3/L4).
+/// **The identity is held to the binary that runs.**
 /// Runs `<binary> --version` once — a flag that prints a string and acts on no
 /// cluster or bucket (ruling GR8) — and refuses unless one whitespace token of
 /// the output is exactly `version`, the `engine.version` this run would sign.
@@ -260,9 +254,6 @@ fn check_reported(
 
 /// The identity this process would sign, from the real file and environment.
 /// Prints the disagreement notice, if any, to stderr.
-///
-/// # Errors
-/// See [`decide`].
 pub fn resolve() -> Result<EngineIdentity, String> {
     let (identity, notice) = decide(
         read_image_file(),
@@ -278,9 +269,6 @@ pub fn resolve() -> Result<EngineIdentity, String> {
 /// The identity this process DECLARES, for `doctor`: `None` when there is no
 /// image file and neither variable is set — a host that has not said which
 /// engine it runs.
-///
-/// # Errors
-/// See [`decide`].
 pub fn declared() -> Result<Option<EngineIdentity>, String> {
     let identity = resolve()?;
     Ok(
@@ -360,12 +348,12 @@ mod tests {
             }
         );
         assert!(notice.is_none());
-        // Empty stays empty: the signing paths refuse it, exactly as before.
+        // Empty stays empty: the signing paths refuse it.
         let (id, _) = decide(Ok(None), None, None).unwrap();
         assert!(id.version.is_empty() && id.digest.is_empty());
     }
 
-    /// REVIEW L6 (mutant R3): an identity file that EXISTS but cannot be read
+    /// An identity file that EXISTS but cannot be read
     /// is an error, never "no file" (which would fall back to the
     /// environment). A directory at the path is unreadable as a file on every
     /// platform and under any privilege.
@@ -382,7 +370,7 @@ mod tests {
         assert_eq!(read_identity_file(&present), Ok(Some("version=1\n".into())));
     }
 
-    /// REVIEW L3/L4: the version signed must be one the engine prints.
+    /// The version signed must be one the engine prints.
     #[test]
     fn the_signed_version_must_be_the_one_the_engine_prints() {
         let bin = std::path::Path::new("/opt/engine/kafka-backup");

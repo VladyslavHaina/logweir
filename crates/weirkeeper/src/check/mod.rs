@@ -1,16 +1,11 @@
-//! The shared check framework — D2 §4.3.
+//! The shared check framework (D2 §4.3).
 //!
-//! # What this module is for
-//!
-//! Four different controllers will want the same thing: run one short-lived,
-//! isolated Job that mirrors an execution pod, watch it without ever trusting a
-//! label, read its framed stdout, and turn what happened into the closed
-//! [`CheckCode`] vocabulary. `TopicDiscovery` (W8) and `Preflight` (W9) are the
-//! first two; the `KafkaCluster` probe joins them in D2 §4.5's phase 1.
-//!
-//! Writing that four times is how four slightly different answers to "did the
-//! Secret exist?" end up in four status fields. So the moving parts are here
-//! and the reconcilers are thin:
+//! Every check controller needs the same thing: run one short-lived, isolated
+//! Job that mirrors an execution pod, watch it without trusting a label, read
+//! its framed stdout, and turn what happened into the closed [`CheckCode`]
+//! vocabulary. Written per controller, that would give slightly different
+//! answers to "did the Secret exist?" in different status fields, so the moving
+//! parts are here and the reconcilers are thin:
 //!
 //! | module | what it decides |
 //! |---|---|
@@ -18,44 +13,21 @@
 //! | [`plan`] | the immutable, owned, digest-pinned plan `ConfigMap` and its 409 rule |
 //! | [`chunks`] | the immutable result `ConfigMap`s, their size bounds and the commit point |
 //! | [`limits`] | D2 §4.4's four concurrency ceilings, counted from Jobs |
-//! | [`pod`] | which pod belongs to that Job — by controller-owner UID, never by label (D-SEAMS **S6**) |
+//! | [`pod`] | which pod belongs to that Job: by controller-owner UID, never by label (seam **S6**) |
 //! | [`waiting`] | what a pod that has not run yet is waiting for, as a code |
 //! | [`relay`] | the verified frames, and the runner's contract refusal |
 //! | [`policy`] | the installation policy `ConfigMap`, its defaults and its fail-closed refusal |
 //!
-//! # The seam W8 and W9 call
+//! # The seam a check controller calls
 //!
-//! [`classify`] is a PURE function from what the API server said to an
-//! [`Observation`]. Everything that reads a clock or a socket is its caller's.
-//! That is what lets a controller test drive a whole state machine over
-//! fixtures, and it is why a reconciler in this crate can be asserted to have
-//! "called nothing its test did not record".
-//!
-//! [`attribute`] is the other half: a waiting code belongs to a specific check
-//! id when it names a Secret or volume the plan projected, and BLOCKS THE WHOLE
-//! POD when it does not (D2 §4.3, "Mapping to check IDs").
-//!
-//! # What is deliberately not here yet
-//!
-//! One module of D2 §4.3's ten: **`gc.rs`**. It deletes a terminal
-//! `TopicDiscovery` when `now > observedAt + retentionSeconds` or when it falls
-//! outside the newest `keepPerConnection` terminal discoveries for a connection,
-//! and a terminal `Preflight` when `now > expiresAt + retentionSeconds`, always
-//! with `DeleteParams { preconditions: { uid } }`. Every one of those reads a
-//! field on a kind **W6a has not landed** — `TopicDiscovery.status.observedAt`
-//! and `Preflight.status.expiresAt` — so there is nothing to type the function
-//! against. It also needs an RBAC decision rather than a grant:
-//! `crates/logweir/tests/manifest_lint.rs` asserts twice, with the reason
-//! recorded in `charts/logweir/templates/clusterrole.yaml`'s header, that `delete` appears in NO
-//! rule and that `Api::delete`/`delete_opt` is called NOWHERE under
-//! `crates/weirkeeper/src/`. `gc.rs` belongs to W8/W9 with W11.
-//!
-//! Everything else in §4.3 is here. `plan.rs`, `chunks.rs` and `limits.rs`
-//! needed only [`crate::job::RunnerOwner`] — four strings — and a label
-//! selector, never a W6a type, and leaving them out would have meant W8 and W9
-//! each writing their own plan-`ConfigMap` 409 rule, their own chunk bounds and
-//! their own commit point: exactly the "four slightly different answers" this
-//! module's header says it exists to prevent.
+//! [`classify`] is a pure function from what the API server said to an
+//! [`Observation`]; everything that reads a clock or a socket is its caller's,
+//! so a controller test drives a whole state machine over fixtures.
+//! [`attribute`] is the other half: a waiting code belongs to a check id when
+//! it names a Secret or volume the plan projected, and blocks the whole pod
+//! when it does not (D2 §4.3, "Mapping to check IDs"). The collection of
+//! terminal check objects (`collect_expired`) lives in the two check
+//! controllers, the only places a `delete` is granted.
 //!
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::batch::v1::Job;
@@ -80,10 +52,9 @@ pub use waiting::{EventFact, Waiting};
 
 /// D2 §6.4's aggregation, re-exported so a controller names one path.
 ///
-/// RE-EXPORTED AND NOT REIMPLEMENTED: the API, the UI and both controllers must
-/// agree on what a set of outcomes adds up to, and the rule (blocking notReady
-/// wins, then blocking unknown, and an EMPTY set is `Unknown` and never
-/// `Ready`) lives in the pure crate where the API can reach it too.
+/// Re-exported, not reimplemented: the API, the UI and both controllers must
+/// agree on what a set of outcomes adds up to (blocking `notReady` wins, then
+/// blocking `unknown`, and an empty set is `Unknown`, never `Ready`).
 pub use logweir_core::check_contract::aggregate;
 
 /// Where a check has got to.
@@ -141,7 +112,7 @@ pub struct Input<'a> {
 
 /// Turn one pass's observations into an [`Observation`] — **pure**.
 ///
-/// # The order, and why each step is where it is
+/// # The order
 ///
 /// 1. **A waiting state that is terminal wins over everything**, including a
 ///    finished Job: a pod whose Secret does not exist tells you why the Job is
@@ -175,10 +146,8 @@ pub fn classify(input: &Input<'_>) -> Observation {
             relay: None,
             waiting: Some(w.clone()),
             exit_code: None,
-            // EARLY CANCEL. The Job cannot succeed and its
-            // `activeDeadlineSeconds` is minutes away; a user watching a
-            // spinner for a Secret that does not exist is the experience this
-            // whole framework is meant to replace.
+            // Early cancel: the Job cannot succeed and its deadline is minutes
+            // away.
             cancel_now: true,
         };
     }
@@ -205,18 +174,12 @@ pub fn classify(input: &Input<'_>) -> Observation {
         .pod
         .and_then(crate::controllers::backup::terminated_exit_code);
 
-    // A FINISHED JOB WITH A WAITING STATE SAYS WHAT IT WAS WAITING FOR.
-    //
-    // Any waiting state, not only the deadline and the disruption this used to
-    // filter for. A check whose pod sat in `ImagePullBackOff` — which is NOT in
-    // `Waiting::is_terminal`, so it is not cancelled early — reaches its
-    // `activeDeadlineSeconds` having never started its `runner` container, and
-    // there is no relay because there was never a process to write one.
-    // `RunnerImagePullFailed` is what the operator has to act on;
-    // `ResultUnreadable` would name the symptom and bury the cause, and
-    // `DeadlineExceeded` would name only the clock. The waiting classification
-    // is already ordered most-specific-first, so whatever it returns is the
-    // best answer available.
+    // A finished Job with any waiting state says what it was waiting for: a pod
+    // in `ImagePullBackOff` (not terminal, so not cancelled early) reaches its
+    // deadline without ever starting its `runner`, and `RunnerImagePullFailed`
+    // is what the operator acts on, where `ResultUnreadable` or
+    // `DeadlineExceeded` would bury it. The classification is already ordered
+    // most-specific-first.
     if let Some(w) = waiting.as_ref() {
         return Observation {
             phase: CheckPhase::Failed,
@@ -250,9 +213,9 @@ pub fn classify(input: &Input<'_>) -> Observation {
 
     // 4. The contract refusal, BY KEY NAME from a bounded tail.
     if let Some(code) = relay::refusal_reason(log) {
-        // REVIEW L3: a runner that refuses a plan THIS controller rendered is,
-        // in practice, an older runner image — say so, and name the field it
-        // did not know when its own stderr line says which.
+        // A runner refusing a plan this controller rendered is in practice an
+        // older runner image: say so, naming the field it did not know when its
+        // own stderr line says which.
         let hint = if code == CheckCode::CheckContractMismatch {
             let field = refused_plan_field(log)
                 .map(|f| format!(" (it did not know the plan field `{f}`)"))
@@ -297,8 +260,8 @@ pub fn classify(input: &Input<'_>) -> Observation {
         Err(refusal) => Observation {
             phase: CheckPhase::Failed,
             reason: refusal.code,
-            // THE REASON, AND NOT THE LOG. D2 §4.3: a relay that does not
-            // verify is reported with the exit code and without log content.
+            // The reason and not the log: a relay that does not verify is
+            // reported with the exit code and without log content (D2 §4.3).
             message: format!(
                 "the check Job's output did not verify: {} (exit {})",
                 refusal.reason,
@@ -324,13 +287,13 @@ pub struct Projections {
     pub connection_secret: Option<String>,
     /// The Secret the destination's credential comes from.
     pub destination_secret: Option<String>,
-    /// The Secret a SEPARATE `evidenceWrite` grant's credential comes from,
-    /// when the check writes the create-only marker as that principal
-    /// (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Still the destination's
-    /// credential, so a missing one is `destination.credentialProjected`.
+    /// The Secret a separate `evidenceWrite` grant's credential comes from, when
+    /// the check writes the create-only marker as that principal. Still the
+    /// destination's credential, so a missing one is
+    /// `destination.credentialProjected`.
     pub evidence_write_secret: Option<String>,
-    /// The Secret a SEPARATE `evidenceRead` grant's credential comes from, for
-    /// the same reason (the class sweep).
+    /// The Secret a separate `evidenceRead` grant's credential comes from, for
+    /// the same reason.
     pub evidence_read_secret: Option<String>,
     /// The Secret the signing key comes from.
     pub signer_secret: Option<String>,
@@ -341,12 +304,10 @@ pub struct Projections {
 /// Which check a waiting code belongs to, or `None` when it belongs to the
 /// whole pod.
 ///
-/// `None` IS A REAL ANSWER AND NOT A FAILURE TO DECIDE. D2 §4.3: "An unmatched
-/// code blocks the whole pod: every Job-sourced check becomes `unknown` with
-/// `BlockedByPrerequisite`, and the named cause is reported." A code attributed
-/// to the wrong check would send an operator to rotate the wrong credential, so
-/// a code that names a Secret this plan did not project is deliberately
-/// attributed to nothing.
+/// `None` is an answer, not a failure to decide (D2 §4.3: "An unmatched code
+/// blocks the whole pod"). A code attributed to the wrong check would send an
+/// operator to rotate the wrong credential, so a code naming a Secret this plan
+/// did not project is attributed to nothing.
 #[must_use]
 pub fn attribute(waiting: &Waiting, projections: &Projections) -> Option<CheckId> {
     match waiting.code {
@@ -386,7 +347,7 @@ pub fn attribute(waiting: &Waiting, projections: &Projections) -> Option<CheckId
 }
 
 /// The plan field an older runner refused, read from its own stderr line
-/// (`… unknown field `evidenceRead`, expected one of …`) — review L3.
+/// (`… unknown field `evidenceRead`, expected one of …`).
 ///
 /// A HINT, not a contract: the text is serde's, and a runner that words it
 /// differently simply gets the hint without a field name. The value is kept
@@ -402,20 +363,14 @@ pub fn refused_plan_field(log: &str) -> Option<String> {
         .then(|| field.to_string())
 }
 
-/// The merge patch that cancels an unfinished check Job — D2 §4.3's
-/// `cancel.rs`.
+/// The merge patch that cancels an unfinished check Job (D2 §4.3's `cancel.rs`).
 ///
-/// `activeDeadlineSeconds: 1` and not `delete`: the weirkeeper `ClusterRole`
-/// grants `delete` on the two transient CHECK KINDS and on nothing else — no
-/// Job, ever (`charts/logweir/templates/clusterrole.yaml`'s own header) — and a deadline collapse
-/// is the better mechanism anyway. The Job FAILS with `DeadlineExceeded`, its
-/// pods terminate, and it becomes finished, so the TTL applies and the object
-/// stays around long enough to say what happened; a delete would take the
-/// reason with it.
-///
-/// **The caller verifies the owner UID before sending it.** A Job's name is
-/// derived from the subject's UID ([`job::check_job_name`]), but a name is not
-/// an identity; [`is_cancellable`] is the check.
+/// `activeDeadlineSeconds: 1`, not `delete`: the controller holds no `delete`
+/// on Jobs, and a collapsed deadline is the better mechanism anyway. The Job
+/// fails with `DeadlineExceeded`, becomes finished, gets its TTL and stays long
+/// enough to say what happened; a delete would take the reason with it. The
+/// caller verifies the owner UID first ([`is_cancellable`]): a name derived
+/// from the subject's UID is not an identity.
 #[must_use]
 pub fn cancel_patch() -> Value {
     json!({ "spec": { "activeDeadlineSeconds": 1 } })
@@ -455,10 +410,6 @@ pub fn overall(outcomes: &[CheckOutcome], blocked_by: Option<&Waiting>) -> Overa
     }
 }
 
-// ---------------------------------------------------------------------------
-// The three calls the framework makes against the API server
-// ---------------------------------------------------------------------------
-
 /// Create one check Job.
 ///
 /// **No TTL is set here** — [`crate::job::build`]'s note 4 and [`set_ttl`].
@@ -480,13 +431,10 @@ pub async fn create_job(
 
 /// Patch a finished check Job's `ttlSecondsAfterFinished`.
 ///
-/// # THE CALLER SENDS THIS ONLY AFTER ITS STATUS WRITE RETURNED 200
-///
-/// That is not a convention this function can enforce, and saying so here is
-/// the next best thing: the relay lives on the pod, the TTL controller deletes
-/// the Job and its pods together, and a TTL patched before the commit lets
-/// garbage collection race the read. Every runner Job's TTL goes through
-/// [`crate::runner_log::set_ttl`], which carries the same note.
+/// The caller sends this only after its status write returned 200: the relay
+/// lives on the pod, the TTL controller deletes the Job and its pods together,
+/// and a TTL patched before the commit lets garbage collection race the read.
+/// This function cannot enforce that.
 ///
 /// # Errors
 /// [`kube::Error`].
@@ -541,19 +489,11 @@ pub fn is_log_absent(error: &kube::Error) -> bool {
     matches!(error, kube::Error::Api(response) if response.code == 400 || response.code == 404)
 }
 
-/// One whole observation pass — **the seam W8 and W9 call**.
-///
-/// It finds the owned pod (never a label match), reads the relay **only** when
-/// the Job has finished and an owned pod was found, and hands everything to the
-/// pure [`classify`].
-///
-/// # Why the log is read only for a finished Job with an owned pod
-///
-/// A running check's stdout has no end frame yet, so decoding it would always
-/// be `ResultUnreadable`; and a `pods/log` read for a pod this Job does not own
-/// is a read of somebody else's output, which is the whole of defect
-/// `SEC-PODLOG`. Both conditions are enforced here rather than left to each
-/// caller.
+/// One whole observation pass: find the owned pod (never a label match), read
+/// the relay only when the Job has finished and an owned pod was found, and hand
+/// everything to the pure [`classify`]. A running check's stdout has no end
+/// frame yet, and a `pods/log` read of a pod this Job does not own is a read of
+/// somebody else's output; both rules are enforced here rather than per caller.
 ///
 /// # Errors
 /// [`kube::Error`] from the pod `list` or the `pods/log` read.
@@ -569,13 +509,10 @@ pub async fn observe(
     observe_found(client, namespace, job, owned.as_ref(), events, expect, now).await
 }
 
-/// [`observe`], reading the Job's Events itself — through [`job_events`], so
-/// only when the classifier could use one (FX-11).
-///
-/// For a check controller that holds no Events read of its own (the
-/// `RecoveryCatalog` sync). Without it, a pod a `ResourceQuota` or a
-/// `LimitRange` refused at creation was `PodNotStarted` until the Job's own
-/// deadline and then `DeadlineExceeded`, never naming the admission.
+/// [`observe`], reading the Job's Events itself through [`job_events`], only
+/// when the classifier could use one: for a check controller with no Events
+/// read of its own, so a pod refused at creation is named rather than ending
+/// `DeadlineExceeded`.
 ///
 /// # Errors
 /// [`kube::Error`] from the pod `list` or the `pods/log` read. The events list
@@ -592,31 +529,22 @@ pub async fn observe_reading_events(
     observe_found(client, namespace, job, owned.as_ref(), &events, expect, now).await
 }
 
-/// The Events that explain why one Job's pod has not started — **the one read
-/// every Job-owning controller without its own shares** (FX-11).
+/// The Events that explain why one Job's pod has not started, for every
+/// Job-owning controller without its own read.
 ///
-/// # Bounded, and why the bound is the classifier's own
+/// * Only when [`waiting::reads_events`] says the classifier could use one (no
+///   pod after [`waiting::POD_CREATE_GRACE`], or a container still creating
+///   after [`waiting::MOUNT_GRACE`]), so every healthy run costs nothing.
+/// * One list, by `involvedObject.uid` (the Job's while there is no pod, the
+///   pod's once there is), with `limit` [`crate::diagnostics::EVENT_LIMIT`],
+///   through [`crate::diagnostics::events_for`].
+/// * By UID, never by name: `FailedCreate` is common in a namespace with a
+///   `ResourceQuota`, and a classifier handed somebody else's would cancel a
+///   healthy Job.
 ///
-/// * **Only when [`waiting::reads_events`] says the classifier could read
-///   one**: no pod after [`waiting::POD_CREATE_GRACE`], or a container still
-///   creating after [`waiting::MOUNT_GRACE`]. A Job whose pod exists and runs
-///   — every healthy run — costs NOTHING here.
-/// * **One list, never a namespace-wide scan by the controller**: a field
-///   selector on `involvedObject.uid` (the Job's while there is no pod, the
-///   pod's once there is one, because those are the only objects the two rows
-///   match) and `limit` [`crate::diagnostics::EVENT_LIMIT`], through
-///   [`crate::diagnostics::events_for`] — the read the `Backup` and `Restore`
-///   diagnostics already make.
-/// * **By UID and never by name**: `FailedCreate` is a common event in a
-///   namespace with a `ResourceQuota`, and a classifier handed somebody else's
-///   would cancel a healthy Job (`waiting::from_failed_create`'s own note).
-///
-/// # Best effort
-///
-/// A list that fails yields an EMPTY slice, so the classification falls back
-/// to the state it reported before Events were read (`PodNotStarted`, then the
-/// Job's own deadline) — a diagnostic aid never becomes an outage, and an
-/// installation whose role lacks `events: list` behaves exactly as before.
+/// Best effort: a failed list yields an empty slice, so the classification
+/// falls back to `PodNotStarted` and then the Job's own deadline, and a role
+/// without `events: list` behaves exactly as before.
 pub async fn job_events(
     client: &kube::Client,
     namespace: &str,
@@ -635,10 +563,10 @@ pub async fn job_events(
     crate::diagnostics::events_for(client, namespace, &[subject]).await
 }
 
-/// Why an UNFINISHED runner Job has no pod, when the Job controller said why
-/// — FX-11's fail-fast read for the runner kinds that keep no pod read of
-/// their own while a Job runs (the `KafkaCluster` probe, a `ProtectionPolicy`
-/// delivery, a retention run).
+/// Why an unfinished runner Job has no pod, when the Job controller said why:
+/// the fail-fast read for the runner Jobs that keep no pod read of their own
+/// while they run (the `KafkaCluster` probe, a dynamic backup's discovery Job,
+/// a retention run).
 ///
 /// `None` costs no request at all while the Job's own status counts a pod or
 /// the Job is younger than [`waiting::POD_CREATE_GRACE`]
@@ -694,18 +622,11 @@ async fn observe_found(
                 .await
             {
                 Ok(log) => Some(log),
-                // THERE IS NO LOG, AND THAT IS AN ANSWER. A finished Job whose
-                // pod never started its `runner` container has no stdout to
-                // read, and the API server says so with 400 ("container
-                // \"runner\" … is waiting to start") or 404. Propagating that
-                // with `?` made `classify`'s DeadlineExceeded branch
-                // unreachable from here: a check whose pod sat in
-                // `ImagePullBackOff` — which is NOT in `Waiting::is_terminal`,
-                // so it is not cancelled early — reaches its deadline, and
-                // every reconcile from then on returned `Err` and requeued. No
-                // status was ever committed, so no TTL was ever patched, and
-                // the operator watched a spinner instead of reading
-                // `DeadlineExceeded`.
+                // No log is an answer: a finished Job whose `runner` never
+                // started has no stdout, and the API server says so with 400
+                // ("container \"runner\" … is waiting to start") or 404.
+                // Propagating it would make `classify`'s DeadlineExceeded branch
+                // unreachable and leave the check requeueing with no status.
                 Err(e) if is_log_absent(&e) => {
                     debug!(
                         namespace = %namespace,

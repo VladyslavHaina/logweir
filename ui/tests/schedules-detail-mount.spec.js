@@ -1,12 +1,10 @@
-// PLAT-10.2's schedule detail, MOUNTED: what a successful action does to the
-// page it was taken on.
+// schedules-detail-mount.spec.js -- the schedule detail, MOUNTED: what a
+// successful action does to the page it was taken on.
 //
-// WHY THESE ROWS DRIVE THE REAL WIRING. Every row in `schedules-detail.spec.js`
-// calls a pure renderer, and the live harness reloaded the page after each
-// click -- so a success arm that re-mounted the namespace LIST into the detail
-// (review HIGH-1, 2026-09-22) passed both. These rows mount
-// `mountScheduleDetail` over a stubbed adapter, press the control, and assert
-// the page is still the detail of the same schedule, re-read.
+// Every row in `schedules-detail.spec.js` calls a pure renderer, so a success
+// arm that re-mounted the namespace LIST into the detail would pass it. These
+// rows mount `mountScheduleDetail` over a stubbed adapter, press the control,
+// and assert the page is still the detail of the same schedule, re-read.
 //
 // Run with: node --test 'ui/tests/*.spec.js'
 
@@ -81,8 +79,8 @@ function detailPage(ns, state, overrides, catalog) {
     },
     // THE DESTINATION THE FIXTURE'S `destinationRef` NAMES (`dest`). An empty
     // list beside a schedule that names one is a destination that is gone, and
-    // since PLAT-08.2 review L5 a policy save then asks for the location-move
-    // box, as it always did beside a non-empty list without it.
+    // a policy save then asks for the location-move box, as it does beside a
+    // non-empty list without it.
     destinations() {
       return Promise.resolve({
         items: [Object.assign(decoded("destination.json").item, { name: "dest" })],
@@ -182,8 +180,8 @@ test("a_successful_policy_save_on_the_detail_re_reads_the_detail_at_the_new_revi
 });
 
 test("back_up_now_on_the_detail_re_reads_the_history_and_keeps_the_run_on_screen", async () => {
-  // Review LOW-5: the run-now panel repainted and the history did not, so the
-  // run it had just made was not in the table until the next page load.
+  // The history repaints with the run-now panel, so the run just made is in
+  // the table without a page load.
   const ns = "detail-run-now";
   const state = { schedule: scheduleIn(ns), backups: [] };
   // What `runBackupNow` hands on is the DECODED answer's `schedule` and a run
@@ -219,8 +217,8 @@ test("back_up_now_on_the_detail_re_reads_the_history_and_keeps_the_run_on_screen
 });
 
 test("an_expired_catalog_view_reaches_the_mounted_detail_as_expired_not_absent", async () => {
-  // Review HIGH-2, through the real mount: the page's own reader receives the
-  // view's `viewExpired` and the history says so.
+  // Through the real mount: the page's own reader receives the view's
+  // `viewExpired` and the history says so.
   const ns = "detail-expired";
   const state = { schedule: scheduleIn(ns), backups: [] };
   state.backups.push(runOf(state.schedule, "run-a", "set-a"));

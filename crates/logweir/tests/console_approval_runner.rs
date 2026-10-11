@@ -1,4 +1,4 @@
-//! **PROD-16.2: what a run a SECOND PERSON APPROVED IN THE CONSOLE signs,
+//! **What a run a SECOND PERSON APPROVED IN THE CONSOLE signs,
 //! through the runner's own phase sequence, over the orchestrator fixture.**
 //! CI-run (no broker, no bucket, no engine binary).
 //!
@@ -202,7 +202,7 @@ fn a_restore_approved_in_the_console_signs_who_approved_as_1_9_0() {
 
 /// **A PARTITION-SUBSET restore approved in the console is ALLOWED, and it
 /// is scorecard 2.1.0**: format 2's fields and the same block. The row's
-/// decision (the coordinator's addition 1): a subset is narrower than a whole
+/// decision: a subset is narrower than a whole
 /// restore, never more dangerous, so there is no reason to refuse the pair;
 /// the block is defined in both lines, and the version step picks the one of
 /// the major the selection chose. KILLS: a version step that runs before the
@@ -210,7 +210,7 @@ fn a_restore_approved_in_the_console_signs_who_approved_as_1_9_0() {
 /// CA-1 refuses to sign), or that writes 1.9.0 for a subset (PS-1).
 ///
 /// NEGATIVE CONTROL: the same subset under its own v1 approval is the 2.0.0
-/// document PROD-11.1b signs.
+/// document a subset signs.
 #[test]
 fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     let f = fixtures::orchestrator_fixture(Drill::StatesAPartitionSelection);
@@ -247,7 +247,7 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
     assert!(sc.approval.console.is_none());
 }
 
-/// **PROD-15.1 and PROD-16.2 together: an original-name restore approved in
+/// **Together: an original-name restore approved in
 /// the console says so in BOTH places.** `target.original_name.approval_mode`
 /// is `consoleApproval` (never `governed`: no personal key countersigned),
 /// `approval.console` names who approved, the document is 1.9.0, and no typed
@@ -257,7 +257,7 @@ fn a_partition_subset_approved_in_the_console_is_format_2_1_0() {
 /// version left at 1.8.0 with the block (CA-1).
 ///
 /// NEGATIVE CONTROL: the same restore under its own v1 approval is the 1.8.0
-/// document PROD-15.1 signs.
+/// document an original-name restore signs.
 #[test]
 fn an_original_name_restore_approved_in_the_console_says_so_in_both_places() {
     let f = fixtures::orchestrator_fixture(Drill::RestoresUnderTheOriginalNames);
@@ -297,7 +297,7 @@ fn an_original_name_restore_approved_in_the_console_says_so_in_both_places() {
 /// **A console approval under the ORDINARY subject never reaches the
 /// creation step of an original-name plan** — the subject is the signed
 /// document's, and the second person approving an ordinary restore did not
-/// approve writing under the original names (PROD-15.1's rule, unchanged by
+/// approve writing under the original names (the rule, unchanged by
 /// the way the approval was given). KILLS: a console route that skips
 /// `check_original_name_subject`.
 #[test]

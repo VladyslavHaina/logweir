@@ -227,7 +227,7 @@ async fn the_block_must_match_the_operation_and_the_exclusive_pairs_hold() {
     assert!(app.fake.requests().is_empty());
 }
 
-/// BACKUP-PROJECTION-NO-DESTINATION's independent API rail.
+/// The independent API rail for a point's legacy source.
 ///
 /// MUTANT: remove `validate_legacy_source_for_point` from the create route (or
 /// accept `Some(legacySourceArchive)` unconditionally). The first assertion
@@ -606,19 +606,15 @@ async fn a_duplicate_request_replays_and_a_changed_one_conflicts() {
     app.fake.assert_strict();
 }
 
-/// P14 (poc-upgrade-2): ONE KEY IS STILL ONE CHECK, AND A REPLAY OF A CHECK
-/// WHOSE VALIDITY HAS PASSED SAYS SO ITSELF.
+/// ONE KEY IS STILL ONE CHECK, AND A REPLAY OF A CHECK WHOSE VALIDITY HAS
+/// PASSED SAYS SO ITSELF.
 ///
-/// The schedule form's "Check readiness", clicked with unchanged inputs after
-/// its check expired, sent the same content-derived key and was answered
-/// `200 replayed: true` with the expired check, whose answer said only "not
-/// recomputed". D0 does not let this route answer that key with a SECOND
-/// object ("two CRs result from one idempotency key" is a release failure),
-/// so the replay is still the same object, same UID -- and now names `expired`
-/// from the recorded `expiresAt`, which needs no read. That is what lets a
-/// client (the console's `askCheck`) renew its key and ask again, and the last
-/// arm is the other half: a NEW key with the identical body is a new check.
-///
+/// D0 does not let this route answer a key with a SECOND object ("two CRs
+/// result from one idempotency key" is a release failure), so a replay of an
+/// expired check is the same object, same UID -- and names `expired` from the
+/// recorded `expiresAt`, which needs no read. That is what lets a client (the
+/// console's `askCheck`) renew its key and ask again, and the last arm is the
+/// other half: a NEW key with the identical body is a new check.
 /// MUTANTS: drop the `stale_reasons` call from `staleness`'s not-recomputed
 /// arm (the expired replay loses `expired`); hand it `None` for the recorded
 /// expiry (the replay inside the window says `expired`); leave its
@@ -671,7 +667,7 @@ async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
     assert_eq!(v["item"]["uid"], uid);
     assert_eq!(reasons(&v["item"]), vec!["unverifiable"]);
     assert_eq!(v["item"]["staleBasis"], json!(["expiry"]));
-    // AND IT IS NOT A CURRENT VERDICT (review L3, mutant AM1): nothing was
+    // AND IT IS NOT A CURRENT VERDICT: nothing was
     // recomputed, so a replay inside the window is stale and applies to
     // nothing until a read says otherwise.
     assert_eq!(v["item"]["stale"], true);
@@ -702,9 +698,7 @@ async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// The result, and what it is a result about
-// ======================================================================
+// THE RESULT, AND WHAT IT IS A RESULT ABOUT.
 
 #[tokio::test]
 async fn a_result_names_its_gating_and_never_rounds_the_aggregate_up() {
@@ -995,8 +989,6 @@ async fn a_completed_check_with_no_recorded_aggregate_is_unknown_and_not_ready()
     assert_eq!(response.json()["item"]["state"], "unknown");
 }
 
-// ------------------------------------------------------------------ helpers
-
 fn field_names(problem: &Value) -> Vec<String> {
     problem["errors"]
         .as_array()
@@ -1009,9 +1001,7 @@ fn field_names(problem: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// ======================================================================
-// The stale-reason vocabulary, and the recomputation that produces it
-// ======================================================================
+// THE STALE-REASON VOCABULARY, AND THE RECOMPUTATION THAT PRODUCES IT.
 
 /// Seed the `KafkaCluster/target` that `seed_preflight`'s binding records, at
 /// the revision it records.
@@ -1028,16 +1018,13 @@ fn seed_bound_referent(app: &TestApp, uid: &str, generation: i64) {
 
 /// **The DTO's reasons are core's vocabulary, plus exactly one of ours.**
 ///
-/// Renamed from `…is_the_controllers_reason_set`, which is what it never was:
-/// it pins the DTO against `logweir_core::check_contract::StaleReason`, the
-/// VOCABULARY type, and the controller emits a strict subset of that. Saying
-/// so in the name is the difference between a test a reader can trust and one
-/// whose title promises coverage it does not have.
+/// It pins the DTO against `logweir_core::check_contract::StaleReason`, the
+/// VOCABULARY type; the controller emits a strict subset of that.
 ///
 /// The `match` has NO WILDCARD, so a seventh reason in `logweir-core` stops
 /// this file compiling. Both the LIVE Rust enum and the checked-in document
-/// are compared: an earlier cut read only the document, and a reviewer's
-/// variant-drop mutant passed this test while `just schema-check` caught it.
+/// are compared: reading only the document would let a variant-drop mutant
+/// pass here and be caught only by `just schema-check`.
 #[test]
 fn the_dto_reason_set_is_the_core_vocabulary_plus_unverifiable() {
     use logweir_core::check_contract::StaleReason;
@@ -1282,7 +1269,7 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
     }
 
     // (b) a kind this build has no read for. Both cluster-scoped trust kinds
-    // ARE read now (PREFLIGHT-TRUSTROSTER-STALE, below); a kind a later
+    // ARE read now (below); a kind a later
     // controller adds is not, and is still reported rather than skipped.
     let app = TestApp::new();
     seed_preflight(
@@ -1311,16 +1298,12 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
     app.fake.assert_strict();
 }
 
-// ======================================================================
-// PREFLIGHT-TRUSTROSTER-STALE: the cluster-scoped trust referents
-// ======================================================================
-//
-// The controller records `TrustRoster/default` whenever it exists (since
-// `4c4d2ed`) and the namespace's governing `TrustPolicy`. Until this fix the
-// API could read neither, so EVERY readiness result on a cluster with a roster
-// was served `unverifiable` → stale, and the wizard refused all of them. Now
-// both are compared by uid and generation like every other referent — and a
-// read that is refused stays `unverifiable`, which is the fail-closed half.
+// THE CLUSTER-SCOPED TRUST REFERENTS. The controller records
+// `TrustRoster/default` whenever it exists and the namespace's governing
+// `TrustPolicy`. Both are compared by uid and generation like every other
+// referent -- an API that could read neither would serve EVERY readiness
+// result on a cluster with a roster `unverifiable` and stale -- and a read
+// that is refused stays `unverifiable`, which is the fail-closed half.
 
 /// One trust kind under test: its binding kind, its RBAC plural, the name the
 /// binding records, and a minimal object of that kind the typed read accepts.
@@ -1807,9 +1790,7 @@ async fn a_cancel_request_is_not_a_stale_reason() {
     assert_eq!(item["state"], "running");
 }
 
-// ======================================================================
-// ui-conn-followups: finding a connectivity check again
-// ======================================================================
+// FINDING A CONNECTIVITY CHECK AGAIN.
 
 fn seed_cluster(app: &TestApp, name: &str, uid: &str) {
     app.fake.seed(
@@ -1972,9 +1953,9 @@ async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
 /// with no generation — `Referent::generation` is `None` "for a kind whose
 /// generation is not meaningful". Comparing the live object's generation
 /// against that `None` reported `referentChanged` for every restore check
-/// naming a recovery point, on every `?planHash=` re-read, so the console's
-/// pre-submit re-read refused every such submit (found by PLAT-08.2's live
-/// journey). The same uid is unchanged; a recreated object is still a change.
+/// against that `None` would report `referentChanged` for every restore check
+/// naming a recovery point, on every `?planHash=` re-read, refusing every such
+/// submit. The same uid is unchanged; a recreated object is still a change.
 #[tokio::test]
 async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
     for (live_uid, changed, why) in [
@@ -2027,14 +2008,13 @@ async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
 }
 
 /// **A catalog point's `RecoveryCatalog` referent is READ and bound by uid
-/// alone** (PLAT-08.2 review M1).
+/// alone.**
 ///
 /// The controller records `RecoveryCatalog/<catalog>` in every catalog-point
 /// restore check's binding with no generation (weirkeeper
-/// `controllers/preflight.rs`, "a catalog point"). This service had no read
-/// for the kind, so EVERY catalog-point check re-read as `unverifiable` →
-/// stale, and the console's submit-time re-read refused Create (live on
-/// lab-refresh-9, `ui/plat15-2/…/dr/gate-after-check.txt`). Now: the same
+/// `controllers/preflight.rs`, "a catalog point"). Without a read for the
+/// kind, EVERY catalog-point check would re-read as `unverifiable` and stale,
+/// and the console's submit-time re-read would refuse Create. The same
 /// catalog, whatever its generation, is unchanged and the verdict applies; a
 /// catalog recreated under the same name (a new uid) is `referentChanged`.
 ///
@@ -2110,7 +2090,7 @@ async fn a_catalog_referent_recorded_without_a_generation_is_read_and_compared_b
 }
 
 /// **Uid-alone binding is for the three kinds the controller records that
-/// way, and no other** (PLAT-08.2 review L4).
+/// way, and no other.**
 ///
 /// A `KafkaCluster` or `BackupDestination` spec is mutable: a binding that
 /// recorded one without a generation cannot say whether it was edited since,
@@ -2166,9 +2146,7 @@ async fn a_mutable_referent_recorded_without_a_generation_is_unverifiable() {
     }
 }
 
-// ======================================================================
-// PLAT-15.2 — a restore readiness check about a CATALOG point
-// ======================================================================
+// A RESTORE READINESS CHECK ABOUT A CATALOG POINT.
 
 const CATALOG_POINT_ID: &str = "lwp1-0123456789abcdef0123456789abcdef";
 

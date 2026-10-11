@@ -1,47 +1,38 @@
-//! **One** derivation of "why is this run taking so long" for every Job-backed
-//! run — D3 §2.3.
+//! One derivation of "why is this run taking so long" for every Job-backed run
+//! (D3 §2.3).
 //!
-//! # There is no second classification table here
+//! # No second classification table
 //!
-//! D-SEAMS **S1** fixes one classification table for pod, Job and Event state,
-//! and that table is [`crate::check::waiting`] — D2 §4.3's, written for check
-//! Jobs and already exercised row by row. This module does not restate it. It
-//! *generalises* it over a `Backup`'s and a `Restore`'s runner Job by adding
-//! exactly the three columns D3 §2.3 adds: the **severity**, the
-//! **transience**, and the **`metav1` condition reason** a
-//! [`crate::conditions::CONDITION_RUNNER_READY`] carries while the runner
-//! cannot start. [`Code::from_check_code`] is the only door between the two,
-//! so a row added to D2's classifier reaches this one and a row invented here
-//! would have no producer.
+//! Seam **S1** fixes one classification table for pod, Job and Event state:
+//! [`crate::check::waiting`]. This module generalises it over a `Backup`'s and a
+//! `Restore`'s runner Job by adding D3 §2.3's three columns: the severity, the
+//! transience, and the `metav1` condition reason
+//! [`crate::conditions::CONDITION_RUNNER_READY`] carries while the runner cannot
+//! start. [`Code::from_check_code`] is the only door between the two, so a row
+//! added to the check classifier reaches this one and a row invented here would
+//! have no producer.
 //!
-//! # Two vocabularies, and the difference is deliberate
+//! # Two vocabularies, on purpose
 //!
-//! * [`Code`] is the DIAGNOSTIC code — thirteen values, D3 §2.3's list
-//!   verbatim. It is the most specific thing known, and it is what
-//!   `status.progress.diagnostics[].code` carries: `CredentialSecretKeyMissing`
-//!   tells an operator to add a key, and `CredentialSecretNotFound` tells them
-//!   to create a Secret.
-//! * [`Code::runner_ready_reason`] projects it into the SIX closed reasons D3
-//!   §2.2 gives the `RunnerReady` condition. A `metav1.Condition.reason` is a
-//!   rendered, stable label that other software matches on; the parameters
-//!   (`{secret}`, `{volume}`) travel in the diagnostic's `object` and
-//!   `message`, never in a condition reason.
+//! * [`Code`] is the diagnostic code, D3 §2.3's thirteen values: the most
+//!   specific thing known, carried by `status.progress.diagnostics[].code`
+//!   (`CredentialSecretKeyMissing` says add a key, `CredentialSecretNotFound`
+//!   says create a Secret).
+//! * [`Code::runner_ready_reason`] projects it into the six closed reasons of
+//!   the `RunnerReady` condition, a stable label other software matches on;
+//!   parameters travel in the diagnostic's `object` and `message`.
 //!
-//! The projection is many-to-one on purpose. Four of the six reasons are also
-//! [`crate::conditions::TERMINAL_STATES`] members, which is what makes
-//! "the terminal reason is the recorded diagnostic" (§2.3) expressible: the
-//! terminal state a fail-fast writes is the diagnostic's PROJECTION, which is
-//! the value D3 §15's L1 asserts live (`Failed/CredentialReferenceMissing` for
-//! a missing Secret).
+//! The projection is many-to-one. Four of the six reasons are also
+//! [`crate::conditions::TERMINAL_STATES`] members, so the terminal state a
+//! fail-fast writes is the diagnostic's projection (for example
+//! `Failed/CredentialReferenceMissing` for a missing Secret).
 //!
-//! # Nothing here reads a clock, opens a socket or trusts a pod it did not own
+//! # No clock, no socket, no pod it did not own
 //!
-//! `now` is an argument on every function that needs one, as everywhere else
-//! in this crate. The pod reaches [`derive`] only through
-//! [`crate::check::pod::find_owned_pod_by_selectors`], which has already
-//! verified the pod's controller owner UID against the Job's (seam **S6**,
-//! defect SEC-PODLOG); this module re-states that requirement in
-//! [`Facts::pod`]'s contract and never lists pods itself.
+//! `now` is an argument. The pod reaches [`derive`] only through
+//! [`crate::check::pod::find_owned_pod_by_selectors`], which has verified its
+//! controller owner UID against the Job's (seam **S6**); this module never lists
+//! pods itself.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -63,10 +54,6 @@ use crate::conditions::{
 };
 use crate::crds::{Condition, Diagnostic, DiagnosticObject, RunProgress, RunnerFacts, RunnerPhase};
 
-// ===========================================================================
-// Installation policy
-// ===========================================================================
-
 /// How long a non-transient diagnostic may hold before the Job is cancelled —
 /// D3 §2.3's `failFastSeconds`, chart value `controller.failFastSeconds`.
 pub const FAIL_FAST_SECONDS_ENV: &str = "LOGWEIR_FAIL_FAST_SECONDS";
@@ -83,11 +70,9 @@ pub const JOB_TTL_SECONDS_ENV: &str = "LOGWEIR_JOB_TTL_SECONDS";
 /// pod log of a run that failed overnight.
 pub const JOB_TTL_SECONDS_MIN: i32 = 3_600;
 
-/// Read a bounded `u64` out of the environment, clamped at `min`.
-///
-/// **An unreadable value is the default and never a panic.** This is read on a
-/// reconcile path, and a controller that refused to reconcile because somebody
-/// typed `5m` into a ConfigMap would convert a typo into an outage.
+/// Read a bounded `u64` out of the environment, clamped at `min`. An unreadable
+/// value is the default and never a panic: a controller that refused to
+/// reconcile over `5m` in a ConfigMap would turn a typo into an outage.
 fn bounded_env(var: &str, default: u64, min: u64) -> u64 {
     let raw = std::env::var(var).ok();
     let value = bounded(raw.as_deref(), default, min);
@@ -104,17 +89,12 @@ fn bounded_env(var: &str, default: u64, min: u64) -> u64 {
     value
 }
 
-/// [`bounded_env`]'s decision, as a PURE function of the configured text.
+/// [`bounded_env`]'s decision as a pure function of the configured text, so it
+/// can be tested without the process-global `set_var`:
 ///
-/// Separate from the environment read so the three rules can be asserted
-/// without `set_var`, which is process-global and therefore unusable in a
-/// suite that runs tests in parallel.
-///
-/// 1. absent, blank or unparseable → `default` — a controller that refused to
-///    reconcile because somebody typed `5m` into a ConfigMap would convert a
-///    typo into an outage;
-/// 2. below `min` → `min`, because the floors exist to stop a configuration
-///    from cancelling every Job whose image is still being pulled;
+/// 1. absent, blank or unparseable → `default`;
+/// 2. below `min` → `min`, because the floors stop a configuration from
+///    cancelling every Job whose image is still being pulled;
 /// 3. otherwise the configured value.
 #[must_use]
 pub fn bounded(raw: Option<&str>, default: u64, min: u64) -> u64 {
@@ -124,45 +104,30 @@ pub fn bounded(raw: Option<&str>, default: u64, min: u64) -> u64 {
     }
 }
 
-/// The one configured value that means **never fail fast** — review round 1,
-/// finding F8's third step.
+/// The one configured value that means never fail fast.
 ///
-/// Zero, and not a sentinel word, because the value is a number of seconds
-/// everywhere else and "0 seconds of patience" is the one reading of zero that
-/// would be actively dangerous: cancel on sight. Giving it the OPPOSITE
-/// meaning is a decision, which is why it is a named constant carrying this
-/// note rather than a bare `0` in a comparison.
-///
-/// **The chart value does not exist yet.** `controller.failFastSeconds` is
-/// W13's (report gap G3). This is the controller half, ready for it, so that
-/// when the value lands its semantics are already written down and tested
-/// rather than invented at the point of use.
+/// Zero, rather than a sentinel word, because the value is seconds everywhere
+/// else; "0 seconds of patience" read literally (cancel on sight) is the one
+/// dangerous reading, so the opposite meaning is a named decision. Chart value
+/// `controller.failFastSeconds: 0`.
 pub const FAIL_FAST_NEVER: u64 = 0;
 
-/// [`FAIL_FAST_SECONDS_ENV`]'s effective value, or `None` for **never**.
+/// [`FAIL_FAST_SECONDS_ENV`]'s effective value, or `None` for never.
 ///
-/// `None` is [`FAIL_FAST_NEVER`]: fail-fast is disabled and every Job runs to
-/// its own `activeDeadlineSeconds`. That is the lever for the case the review
-/// identified — a cluster where an external controller (external-secrets, a
-/// vault injector) materialises a Secret a few minutes behind the Job, where a
-/// healthy run would otherwise be cancelled at the 300 s default.
+/// `None` ([`FAIL_FAST_NEVER`]) disables fail-fast so every Job runs to its own
+/// `activeDeadlineSeconds`: the lever for a cluster where an external
+/// controller (external-secrets, a vault injector) materialises a Secret a few
+/// minutes behind the Job.
 #[must_use]
 pub fn fail_fast_seconds() -> Option<Duration> {
     fail_fast_window(std::env::var(FAIL_FAST_SECONDS_ENV).ok().as_deref())
 }
 
-/// [`fail_fast_seconds`]'s decision, as a PURE function of the configured
-/// text — the same split [`bounded`] has, and for the same reason: `set_var`
-/// is process-global and unusable in a suite that runs tests in parallel, so a
-/// rule that lives only behind an environment read is a rule with no mutant.
+/// [`fail_fast_seconds`]'s decision as a pure function of the configured text,
+/// split out for [`bounded`]'s reason. In order:
 ///
-/// Three answers, and the order matters:
-///
-/// 1. exactly [`FAIL_FAST_NEVER`] → `None`, **read before the floor is
-///    applied**. [`bounded`] clamps 1..59 UP to the minimum, which is right
-///    for a configured patience and wrong for a request to switch the
-///    behaviour off — `0` would otherwise come back as 60, which is the
-///    opposite of what was asked for;
+/// 1. exactly [`FAIL_FAST_NEVER`] → `None`, read before the floor, which would
+///    otherwise turn `0` into 60, the opposite of what was asked;
 /// 2. anything else parseable → [`bounded`]'s answer, floor included;
 /// 3. absent or unparseable → the default.
 #[must_use]
@@ -177,11 +142,8 @@ pub fn fail_fast_window(raw: Option<&str>) -> Option<Duration> {
     )))
 }
 
-/// [`JOB_TTL_SECONDS_ENV`]'s effective value, as the Job field's own type.
-///
-/// The default is [`crate::controllers::backup::TTL_SECONDS_AFTER_FINISHED`],
-/// so an installation that configures nothing gets exactly the behaviour it
-/// had before this was configurable.
+/// [`JOB_TTL_SECONDS_ENV`]'s effective value, as the Job field's own type,
+/// defaulting to [`crate::controllers::backup::TTL_SECONDS_AFTER_FINISHED`].
 #[must_use]
 pub fn job_ttl_seconds() -> i32 {
     let default = u64::try_from(crate::controllers::backup::TTL_SECONDS_AFTER_FINISHED)
@@ -190,10 +152,6 @@ pub fn job_ttl_seconds() -> i32 {
     let secs = bounded_env(JOB_TTL_SECONDS_ENV, default, min);
     i32::try_from(secs).unwrap_or(i32::MAX)
 }
-
-// ===========================================================================
-// The closed diagnosis vocabulary — D3 §2.3
-// ===========================================================================
 
 /// How bad a [`Code`] is — D3 §2.3's severity column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,23 +182,19 @@ pub const MOUNT_TRANSIENT_FOR: Duration = Duration::from_secs(180);
 /// itself reported — D3 §2.3's `WaitingForPod` "after 60 s".
 pub const WAITING_FOR_POD_GRACE: Duration = Duration::from_secs(60);
 
-/// How often an "it is still happening" timestamp may be rewritten — plan
-/// erratum **E11(d)**, D3 §2.2's `lastObservedTime`.
-///
-/// A reconciler's own status patch is what wakes it, so a field carrying a
-/// fresh clock read on every pass makes every pass a write. Sixty seconds is
-/// D3 §2.2's number and it governs `progress.lastObservedTime` and every
-/// `diagnostics[].lastSeen` alike.
+/// How often an "it is still happening" timestamp may be rewritten (D3 §2.2's
+/// `lastObservedTime`). A reconciler's own status patch wakes it, so a fresh
+/// clock read on every pass would make every pass a write. It governs
+/// `progress.lastObservedTime` and every `diagnostics[].lastSeen`.
 pub const OBSERVED_HEARTBEAT: Duration = Duration::from_secs(60);
 
-/// The CLOSED diagnosis vocabulary — D3 §2.3, exactly.
+/// The closed diagnosis vocabulary, D3 §2.3 exactly.
 ///
 /// Twelve of the thirteen are [`CheckCode`]s, reached only through
-/// [`Code::from_check_code`]; [`Code::DisruptedMidRun`] is D2's
-/// `DisruptedMidCheck` under the name a Backup or a Restore renders it with,
-/// and [`Code::WaitingForPod`] is D3 §2.3's one addition — "no pod and no
-/// event yet", which D2's classifier reports as `None` because a check that
-/// has not started is not yet a finding.
+/// [`Code::from_check_code`]; [`Code::DisruptedMidRun`] is `DisruptedMidCheck`
+/// renamed for a run, and [`Code::WaitingForPod`] is D3's one addition: "no pod
+/// and no event yet", which the check classifier reports as `None` because a
+/// check that has not started is not yet a finding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Code {
     /// The Secret a credential names does not exist.
@@ -304,27 +258,21 @@ impl Code {
             Self::VolumeMountFailed => "VolumeMountFailed",
             Self::RunnerServiceAccountMissing => "RunnerServiceAccountMissing",
             Self::PodCreateRejected => "PodCreateRejected",
-            // THE ONE RENAME, AND IT IS D3 §2.3's OWN. D2 spells this
-            // `DisruptedMidCheck` because its subject is a check; a Backup and
-            // a Restore are not checks and an operator reading
-            // `DisruptedMidCheck` on a restore would go looking for a check.
+            // The one rename: an operator reading `DisruptedMidCheck` on a
+            // restore would go looking for a check.
             Self::DisruptedMidRun => "DisruptedMidRun",
             Self::WaitingForPod => "WaitingForPod",
         }
     }
 
-    /// D2's classification, rendered for a Backup or a Restore runner Job.
+    /// The check classification, rendered for a Backup or a Restore runner Job:
+    /// the only door between the two vocabularies.
     ///
-    /// **THE ONLY DOOR BETWEEN THE TWO VOCABULARIES.** Every member of
-    /// [`Code`] except [`Code::WaitingForPod`] is reachable only from here, so
-    /// there is no second classifier and no invented code.
-    ///
-    /// `None` for every [`CheckCode`] that is not a waiting classification.
-    /// The one D2's classifier can actually return that way is
-    /// [`CheckCode::DeadlineExceeded`]: the Job's own clock running out is not
-    /// a CAUSE, it is the consequence, and `crash_terminal_state` already
-    /// records it. Reporting it as a diagnostic would bury whatever the pod
-    /// had been waiting for.
+    /// `None` for every [`CheckCode`] that is not a waiting classification. The
+    /// one the classifier can return that way is
+    /// [`CheckCode::DeadlineExceeded`], a consequence rather than a cause, which
+    /// `crash_terminal_state` already records and which would bury whatever the
+    /// pod was waiting for.
     #[must_use]
     pub fn from_check_code(code: CheckCode) -> Option<Self> {
         Some(match code {
@@ -357,16 +305,12 @@ impl Code {
     }
 
     /// D3 §2.3's transience column: whether waiting could still fix it.
+    /// `observed_for` is how long this code has held continuously: a volume
+    /// that has not mounted in [`MOUNT_TRANSIENT_FOR`] is not going to.
     ///
-    /// `observed_for` is how long this code has held CONTINUOUSLY, which is
-    /// what makes the one time-dependent row expressible: a volume that has
-    /// not mounted in [`MOUNT_TRANSIENT_FOR`] is not going to.
-    ///
-    /// [`Code::PodUnschedulable`] is transient FOREVER and that is a decision,
-    /// not an oversight (D2's `Waiting::is_terminal` takes the same one): a
-    /// node can join, a pod can be preempted and a cluster autoscaler exists.
-    /// It is reported and left to the Job's own deadline — D3 §15's L2 asserts
-    /// exactly that no fail-fast patch is issued for it.
+    /// [`Code::PodUnschedulable`] is transient forever, on purpose: a node can
+    /// join, a pod can be preempted, an autoscaler exists. It is reported and
+    /// left to the Job's own deadline.
     #[must_use]
     pub fn transient(self, observed_for: Duration) -> bool {
         match self {
@@ -376,13 +320,9 @@ impl Code {
         }
     }
 
-    /// The `RunnerReady=False` reason this code projects into — one of D3
-    /// §2.2's six, or `None` for a code that is not about a runner that has
-    /// not started.
-    ///
-    /// [`Code::DisruptedMidRun`] is the one `None`: the node went away, which
-    /// means the runner HAD started, so `RunnerReady` is not the condition
-    /// with an opinion about it.
+    /// The `RunnerReady=False` reason this code projects into, or `None` for
+    /// [`Code::DisruptedMidRun`]: the node went away, so the runner had started
+    /// and `RunnerReady` has no opinion.
     #[must_use]
     pub fn runner_ready_reason(self) -> Option<&'static str> {
         Some(match self {
@@ -393,11 +333,8 @@ impl Code {
             | Self::RunnerImageNotPresent
             | Self::RunnerImageInvalid => TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE,
             Self::PodUnschedulable => TERMINAL_STATE_POD_UNSCHEDULABLE,
-            // THE SIGNING KEY IS A VOLUME, AND THE CONDITION SAYS SO. The
-            // diagnostic keeps `SigningKeyMissing` — which is the fact an
-            // operator acts on — and the condition reason is the closed label
-            // for its class. D3 §2.2 gives the condition six values and
-            // `SigningKeyMissing` is not one of them.
+            // The diagnostic keeps `SigningKeyMissing`, the fact an operator
+            // acts on; the condition gets the closed label for its class.
             Self::SigningKeyMissing | Self::VolumeMountFailed => TERMINAL_STATE_VOLUME_MOUNT_FAILED,
             Self::RunnerServiceAccountMissing | Self::PodCreateRejected => {
                 TERMINAL_STATE_POD_CREATION_FORBIDDEN
@@ -423,7 +360,6 @@ pub struct Diagnosis {
     pub message: String,
     /// `Pod` or `Job`.
     pub object_kind: &'static str,
-    /// Its name.
     pub object_name: String,
 }
 
@@ -435,28 +371,19 @@ impl Diagnosis {
     }
 }
 
-// ===========================================================================
-// Sanitization — D3 §2.3
-// ===========================================================================
-
 /// The byte bound on a diagnostic message — D3 §2.2's `maxLength: 512`.
 pub const MESSAGE_MAX_BYTES: usize = 512;
 
 /// Make a kubelet's, a scheduler's or an admission webhook's prose safe to put
-/// on a status — D3 §2.3's `diagnostics::sanitize`.
+/// on a status (D3 §2.3).
 ///
-/// In order: collapse every run of whitespace (a newline on a status is how a
-/// reader is fooled into thinking two facts are one), drop everything from a
-/// `-----BEGIN` marker onwards (a webhook that echoed a mounted PEM back at us
-/// must not have it copied onto an object every viewer can read), remove URL
-/// userinfo, query strings and fragments (an endpoint with a presigned
-/// signature in its query is a credential), and truncate to
-/// [`MESSAGE_MAX_BYTES`] **on a char boundary**.
-///
-/// Object NAMES are kept. A Secret's or a ConfigMap's name is already a
-/// reference in the spec every viewer of this object can read, and a
-/// diagnostic that would not say which Secret is missing is a diagnostic
-/// nobody can act on.
+/// In order: drop everything from a `-----BEGIN` marker on (an echoed PEM must
+/// not reach an object every viewer reads), collapse whitespace (a newline is
+/// how a reader is fooled into two facts), remove URL userinfo, query strings
+/// and fragments (a presigned signature is a credential), and truncate to
+/// [`MESSAGE_MAX_BYTES`] on a char boundary. Object names are kept: they are
+/// already in the spec, and a diagnostic that will not say which Secret is
+/// missing is one nobody can act on.
 #[must_use]
 pub fn sanitize(message: &str) -> String {
     sanitize_within(message, MESSAGE_MAX_BYTES)
@@ -466,15 +393,9 @@ pub fn sanitize(message: &str) -> String {
 /// `maxLength` for that field.
 pub const PROGRESS_MESSAGE_MAX_BYTES: usize = 1024;
 
-/// [`sanitize`] with the byte bound as a parameter.
-///
-/// **FX-34.** [`apply_finished`] copies the terminal condition's message
-/// into `status.progress.message`, whose bound is
-/// [`PROGRESS_MESSAGE_MAX_BYTES`], and it used to do so through [`sanitize`],
-/// whose bound is a DIAGNOSTIC's 512. No terminal message was that long, so
-/// nothing showed. A refused run's message now carries the runner's reason
-/// and can reach about 770 bytes, and the copy would have ended mid-sentence
-/// with no marker while the condition beside it was whole.
+/// [`sanitize`] with the byte bound as a parameter: [`apply_finished`] copies
+/// the terminal condition's message into `status.progress.message`, whose bound
+/// is [`PROGRESS_MESSAGE_MAX_BYTES`], not a diagnostic's 512.
 #[must_use]
 pub fn sanitize_within(message: &str, max_bytes: usize) -> String {
     // 1. Anything after a PEM header is key material or a certificate, and in
@@ -525,16 +446,9 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-// ===========================================================================
-// The derivation — D3 §2.3
-// ===========================================================================
-
-/// What a run has got to, in user-facing terms — D3 §2.2's `progress.stage`.
-///
-/// **THE CONTROLLER'S HALF ONLY.** D3 §2.5's third column — the normalized API
-/// `state` — is `logweir-api`'s (W11) and is not computed anywhere in this
-/// crate: a controller that also published the normalized value would be the
-/// second source of truth §17 forbids.
+/// What a run has got to, in user-facing terms (D3 §2.2's `progress.stage`).
+/// The normalized API `state` is computed only by `logweir-api`, so there is
+/// one source of truth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     /// Nothing has been created yet, or admission has not passed.
@@ -579,25 +493,17 @@ pub struct Facts<'a> {
     /// The runner Job. Always present: this is only called for a Job that
     /// exists.
     pub job: &'a Job,
-    /// Its owned pod.
-    ///
-    /// **ALREADY OWNER-UID VERIFIED BY THE CALLER** —
-    /// [`crate::check::pod::find_owned_pod_by_selectors`] is the one producer
-    /// and it compares the pod's controller owner reference against the Job's
-    /// UID (seam **S6**, defect SEC-PODLOG). Handing this function a pod found
-    /// by label alone would be handing it a stranger's pod.
+    /// Its owned pod, already owner-UID verified by the caller
+    /// ([`crate::check::pod::find_owned_pod_by_selectors`], seam **S6**). A pod
+    /// found by label alone could be a stranger's.
     pub pod: Option<&'a Pod>,
     /// Events for the Job and the pod, in any order. An EMPTY slice is a legal
     /// input and means "none were read", never "none exist".
     pub events: &'a [EventFact],
-    /// How many pods claimed this Job when more than one did — review finding
-    /// **F11**.
-    ///
-    /// `find_owned_pod_by_selectors` answers a CONTESTED Job with `pod: None`,
-    /// which is the right ACCESS decision (nothing is read) and the wrong
-    /// thing to say out loud: "no pod has appeared" is the opposite of what
-    /// happened. This is what lets the message tell the truth on the one path
-    /// defect SEC-PODLOG exists for.
+    /// How many pods claimed this Job when more than one did.
+    /// `find_owned_pod_by_selectors` answers a contested Job with `pod: None`,
+    /// the right access decision and the wrong thing to say: this lets the
+    /// message say pods exist rather than "no pod has appeared".
     pub contested: usize,
     /// The runner's own phase, from the progress channel — [`parse_progress`].
     pub runner_phase: Option<&'a RunnerPhase>,
@@ -638,15 +544,12 @@ pub struct Derived {
 }
 
 /// One pure function from (Job, owned pod, container states, events, runner
-/// phase) to a closed diagnosis — D3 §2.3, and the only one.
+/// phase) to a closed diagnosis (D3 §2.3), and the only one.
 ///
-/// # The order is the classification, and it is D2's
-///
-/// [`crate::check::waiting::classify`] decides which row fires; this function
-/// renders its answer, adds the one row D2 has no reason to have
-/// ([`Code::WaitingForPod`]) and computes the stage, the runner block and the
-/// condition around it. A second `match` over pod conditions here would be the
-/// second table seam S1 forbids.
+/// [`crate::check::waiting::classify`] decides which row fires; this renders its
+/// answer, adds [`Code::WaitingForPod`], and computes the stage, the runner
+/// block and the condition around it. A second `match` over pod conditions here
+/// would be the second table seam S1 forbids.
 #[must_use]
 pub fn derive(facts: &Facts<'_>) -> Derived {
     let runner_status = facts.pod.and_then(runner_container);
@@ -662,10 +565,9 @@ pub fn derive(facts: &Facts<'_>) -> Derived {
     let diagnosis = classified
         .as_ref()
         .and_then(|w| render(w, facts))
-        // D3 §2.3's one addition. D2's classifier answers `None` for a Job
-        // with no pod and no `FailedCreate` event, because for a check that
-        // is simply "not started yet"; for a run an operator is watching,
-        // sixty seconds of nothing is itself the answer.
+        // A Job with no pod and no `FailedCreate` event is "not started yet"
+        // for a check; for a watched run, sixty seconds of nothing is itself
+        // the answer.
         .or_else(|| waiting_for_pod(facts));
 
     let runner_ready = runner_ready(&diagnosis, started, facts);
@@ -683,10 +585,9 @@ pub fn derive(facts: &Facts<'_>) -> Derived {
 /// cause ([`Code::from_check_code`]'s contract).
 fn render(waiting: &Waiting, facts: &Facts<'_>) -> Option<Diagnosis> {
     let code = Code::from_check_code(waiting.code)?;
-    // THE OBJECT IS THE ONE THE ROW IS ABOUT, and it is decided by the code
-    // rather than by "whatever pod we have": `PodCreateRejected` and
-    // `RunnerServiceAccountMissing` are the Job controller failing to make a
-    // pod, so naming a pod would name one that does not exist.
+    // The object is decided by the code, not by "whatever pod we have":
+    // `PodCreateRejected` and `RunnerServiceAccountMissing` mean no pod was
+    // made, so naming a pod would name one that does not exist.
     let (object_kind, object_name) = match code {
         Code::PodCreateRejected | Code::RunnerServiceAccountMissing | Code::WaitingForPod => {
             ("Job", facts.job.name_any())
@@ -717,11 +618,9 @@ fn waiting_for_pod(facts: &Facts<'_>) -> Option<Diagnosis> {
     }
     let secs = WAITING_FOR_POD_GRACE.as_secs();
     let message = if facts.contested > 0 {
-        // PODS EXIST. What does not exist is one this Job can be PROVED to
-        // own, and the terminal answer for that is `PodOwnershipContested`,
-        // which `crash_terminal_state` writes when the Job ends. Saying "no
-        // pod has appeared" here would contradict the namespace the operator
-        // is looking at.
+        // Pods exist, but none this Job can be proved to own; the terminal
+        // answer is `PodOwnershipContested`, which `crash_terminal_state`
+        // writes when the Job ends.
         format!(
             "{} pods claim this runner Job as their controller owner and none of them could be \
              proved to be its own, so none was read and nothing they printed is trusted",
@@ -783,28 +682,23 @@ fn runner_facts(facts: &Facts<'_>, runner: Option<&ContainerStatus>) -> RunnerFa
             .pod
             .and_then(|p| p.status.as_ref()?.phase.clone())
             .filter(|p| POD_PHASES.contains(&p.as_str())),
-        // `false` WITH NO DIAGNOSTIC IS THE "it is just queued" CASE, which is
-        // why this is written even when it is false and why it is `None` when
-        // there is no pod to have an opinion about.
+        // `false` with no diagnostic is the "just queued" case, so it is
+        // written even when false, and `None` when there is no pod.
         scheduled: facts
             .pod
             .map(|p| waiting::pod_condition(p, "PodScheduled") == Some("True")),
         container_state: container_state.map(str::to_string),
-        // VERBATIM AND BOUNDED. A translated kubelet reason is a reason nobody
-        // can search for; a 64-byte bound is D3 §2.2's.
+        // Verbatim (a translated kubelet reason cannot be searched for) and
+        // bounded at D3 §2.2's 64 bytes.
         waiting_reason: runner
             .and_then(|c| c.state.as_ref()?.waiting.as_ref()?.reason.clone())
             .map(|r| truncate_on_char_boundary(&r, 64)),
-        // RUNNING OR TERMINATED: a runner that crashed between two passes is
-        // first seen terminated, and it started all the same.
-        //
-        // AND A RUNNER FIRST SEEN CRASH-LOOPING (re-check RL3): state
-        // `waiting` (`CrashLoopBackOff`) with the previous run in
-        // `lastState.terminated` (or, briefly, `lastState.running`). The
-        // kubelet fills `lastState` whenever `restartCount > 0`, so a restarted
-        // runner always carries a start instant here; a `restartCount` with no
-        // `lastState` at all has no instant to record, and `derive`'s
-        // `started` still says it ran for this pass.
+        // Running or terminated: a runner that crashed between two passes is
+        // first seen terminated, and it started all the same. A runner first
+        // seen crash-looping is `waiting` with the previous run in `lastState`,
+        // which the kubelet fills whenever `restartCount > 0`; with no
+        // `lastState` there is no instant to record, and `derive`'s `started`
+        // still says it ran.
         started_at: runner.and_then(|c| {
             let current = c.state.as_ref();
             let last = c.last_state.as_ref();
@@ -896,31 +790,21 @@ fn is_verification_phase(phase: &RunnerPhase) -> bool {
     }
 }
 
-// ===========================================================================
-// The runner progress channel — D3 §2.4, as ratified by W5's review
-// ===========================================================================
-
-/// The once-per-run version announcement — D3 §2.4 as amended 2026-09-17.
+/// The once-per-run version announcement (D3 §2.4).
 ///
-/// **IT MEANS TWO DIFFERENT NUMBERS AND A READER MUST KNOW WHICH.** On the
-/// restore path it is the EXECUTION CONTRACT version the controller stamped;
-/// on the backup path no controller stamps one, so it is the version the
-/// runner binary implements. The amendment is explicit that a consumer reads
-/// it against the path it is on and never treats the two as one number space —
-/// which is why this controller RECORDS it verbatim on
-/// `progress.runnerPhase`'s sibling field and compares it to nothing.
+/// It means two different numbers: on the restore path the execution contract
+/// version the controller stamped, on the backup path the version the runner
+/// binary implements. A consumer reads it against the path it is on, so this
+/// controller compares it to nothing and uses it only as the progress gate.
 pub const PROGRESS_CONTRACT_PREFIX: &str = "progress-contract=";
 
 /// `progress-phase=<n>:<name>` — D3 §2.4's grammar, byte-exact.
 pub const PROGRESS_PHASE_PREFIX: &str = "progress-phase=";
 
 /// The runner's own per-line bound (`logweir_core::execution_contract`'s
-/// `PROGRESS_LINE_MAX_BYTES`), MIRRORED here.
-///
-/// A line longer than this cannot have come from the runner's formatter, so
-/// it is ignored rather than parsed. Mirrored and not imported because the
-/// bound is the RUNNER's promise about what it emits, and a controller that
-/// imported it would silently follow a runner that widened it.
+/// `PROGRESS_LINE_MAX_BYTES`), mirrored rather than imported: it is the
+/// runner's promise about what it emits, and a controller that imported it
+/// would silently follow a runner that widened it. A longer line is ignored.
 pub const PROGRESS_LINE_MAX_BYTES: usize = 96;
 
 /// How many trailing log lines the progress read looks at — D3 §2.4's
@@ -933,8 +817,7 @@ pub const PROGRESS_LIMIT_BYTES: i64 = 65_536;
 /// How often the progress read is made — D3 §2.4's "at most once per 30 s".
 pub const PROGRESS_READ_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The restore runner's CLOSED phase vocabulary, at its own numbers — D3 §2.4
-/// and W5's landed grammar.
+/// The restore runner's closed phase vocabulary, at its own numbers (D3 §2.4).
 pub const RESTORE_PHASES: [&str; 10] = [
     "admit",
     "approval",
@@ -963,60 +846,38 @@ pub struct Progress {
     pub contract: Option<String>,
     /// The last well-formed, in-vocabulary phase line.
     pub phase: Option<RunnerPhase>,
-    /// How many `progress-phase=` lines were IGNORED — malformed, out of the
-    /// closed vocabulary, or overlong.
-    ///
-    /// D3 §2.4: an unknown phase or a malformed line is ignored, never a
-    /// failure. The count is what the reconciler logs; see the module header
-    /// of [`crate::controllers::backup`] for why it is not a diagnostic.
+    /// How many `progress-phase=` lines were ignored: malformed, out of the
+    /// closed vocabulary, or overlong. Never a failure (D3 §2.4); the
+    /// reconciler logs the count.
     pub ignored: usize,
 }
 
-/// Read the ratified progress grammar out of a bounded log tail — D3 §2.4.
+/// Read the progress grammar out of a bounded log tail (D3 §2.4), by key name,
+/// never by position. The last well-formed line wins: it is the phase the
+/// runner is in now, even if it printed 3 after 7.
 ///
-/// **BY KEY NAME, NEVER BY POSITION** (erratum E4), and the LAST well-formed
-/// line wins: a runner prints one line per phase and the newest is the phase
-/// it is in.
-///
-/// # Every failure mode is an absence
-///
-/// * No `progress-contract=` and no `progress-phase=` — an old runner. No
-///   phase, no error, no diagnostic.
-/// * A phase number outside `-1..=9`, a name not in the closed vocabulary, a
-///   missing `:`, a line over [`PROGRESS_LINE_MAX_BYTES`] — counted in
-///   [`Progress::ignored`] and otherwise ignored. A name that is not in the
-///   vocabulary is the important one: the vocabulary is what stops a runner
-///   (or anything that can write to its stdout) from putting arbitrary text on
-///   an object every viewer of the namespace can read.
-/// * Lines out of order — the last one wins, because that is what "the phase
-///   it is in now" means, and a runner that printed 3 after 7 has told us it
-///   is in 3.
+/// Every failure mode is an absence. No `progress-contract=` and no
+/// `progress-phase=` is an old runner: no phase, no error, no diagnostic. A
+/// phase number outside `-1..=9`, a name outside the closed vocabulary, a
+/// missing `:` or a line over [`PROGRESS_LINE_MAX_BYTES`] is counted in
+/// [`Progress::ignored`]. The vocabulary is what stops anything that can write
+/// to the runner's stdout from putting arbitrary text on an object every viewer
+/// of the namespace can read.
 #[must_use]
 pub fn parse_progress(log: &str) -> Progress {
     parse_progress_after(log, false)
 }
 
-/// [`parse_progress`], told whether the channel has **already** announced
-/// itself on an earlier pass — review finding **F2**.
+/// [`parse_progress`], told whether the channel has already announced itself
+/// on an earlier pass.
 ///
-/// # Why the gate needs a memory
-///
-/// `progress-contract=` is printed ONCE, at the top of the run
-/// (`docs/stability.md`: "printed once, before the first `progress-phase=`
-/// line"). This controller reads the last [`PROGRESS_TAIL_LINES`] lines. So
-/// the moment a run's merged stdout and stderr pass fifty lines — a matter of
-/// how chatty the run is, not whether — the announcement is outside every
-/// window this controller will ever read, and a gate with no memory would then
-/// decide there is no channel, write `runnerPhase: null` over a phase it had
-/// already recorded, and make D3 §2.5's `Verifying` row unreachable for the
-/// rest of the run.
-///
-/// **A stored phase is itself proof the channel announced itself**, because a
-/// phase can only have been published through this gate. That is the memory,
-/// and it needs no new status field: `announced` is
-/// `stored.runner_phase.is_some()`. Publishing the version (gap G1) would also
-/// fix it and is the better long-term answer; this is what makes that field
-/// optional rather than urgent.
+/// `progress-contract=` is printed once, at the top of the run, and this
+/// controller reads only the last [`PROGRESS_TAIL_LINES`] lines, so on a chatty
+/// run the announcement scrolls out of every window. A gate with no memory would
+/// then write `runnerPhase: null` over a recorded phase and make D3 §2.5's
+/// `Verifying` row unreachable. A stored phase proves the channel announced
+/// itself (a phase can only be published through this gate), so `announced` is
+/// `stored.runner_phase.is_some()`.
 #[must_use]
 pub fn parse_progress_after(log: &str, announced: bool) -> Progress {
     let mut out = Progress::default();
@@ -1042,16 +903,9 @@ pub fn parse_progress_after(log: &str, announced: bool) -> Progress {
             }
         }
     }
-    // THE VERSION ANNOUNCEMENT IS THE GATE — D3 §2.4's "an old runner (no
-    // `progress-contract=`) yields no progress and no error", ratified by W5's
-    // review as "one line, once, before the first phase line".
-    //
-    // The version itself is NOT PUBLISHED, and that is a recorded gap rather
-    // than a choice: `crds::RunnerPhase` is `{number, name}` and the CRD
-    // declares no field for a contract version. This worker owns no CRD file,
-    // so the line is used for the one thing it can be used for without a
-    // schema change — deciding whether there IS a progress channel — and the
-    // field is reported to the shapes owner.
+    // The version announcement is the gate: an old runner (no
+    // `progress-contract=`) yields no progress and no error. The version itself
+    // is not published; the CRD declares no field for it.
     if out.contract.is_none() && !announced {
         out.phase = None;
     }
@@ -1059,12 +913,9 @@ pub fn parse_progress_after(log: &str, announced: bool) -> Progress {
 }
 
 impl Progress {
-    /// What a pass that did NOT read the log publishes: whatever the object
-    /// already says.
-    ///
-    /// A merge patch that omitted `runnerPhase` would leave the stored value
-    /// alone — but [`apply`] writes the whole `progress` object, so the phase
-    /// has to be carried explicitly or a throttled pass would blank it.
+    /// What a pass that did not read the log publishes: whatever the object
+    /// already says. [`apply`] writes the whole `progress` object, so the phase
+    /// is carried explicitly or a throttled pass would blank it.
     #[must_use]
     pub fn carried(stored: Option<&RunProgress>) -> Self {
         let phase = stored.and_then(|p| p.runner_phase.clone());
@@ -1083,28 +934,17 @@ impl Progress {
 /// field for it — and never compared against a version.
 const CARRIED: &str = "<carried>";
 
-/// Whether this pass reads the pod log for progress — D3 §2.4's "at most once
+/// Whether this pass reads the pod log for progress: D3 §2.4's "at most once
 /// per 30 s, while `RunnerReady=True` and not finished".
 ///
 /// The throttle is keyed on `progress.lastObservedTime`, the only per-object
-/// clock this controller stores, and it is compared against
-/// [`OBSERVED_HEARTBEAT`] — the interval at which that field actually MOVES.
-///
-/// # Why not against [`PROGRESS_READ_INTERVAL`] — review finding F3
-///
-/// Because the clock is not the reconcile's; it is the stored field's, and
-/// that field is rewritten at most once a minute (E11(d)). Comparing a
-/// once-a-minute timestamp against a thirty-second bound makes the predicate
-/// true at +30 s, +45 s **and** +60 s of every heartbeat cycle — with
-/// `REQUEUE_SECS = 15`, three 64 KiB `pods/log` GETs a minute where §2.4
-/// allows at most two. The first version of this function did exactly that
-/// while its own doc comment claimed the opposite.
-///
-/// So the effective rate is one read per minute. That satisfies "at most once
-/// per 30 s" strictly, and it is the honest consequence of refusing to add a
-/// second timestamp field to a status for the sake of a log read: a reconciler
-/// that kept the interval in memory would lose it on every restart and then
-/// read on every pass until the next heartbeat.
+/// clock this controller stores, and compared against [`OBSERVED_HEARTBEAT`],
+/// the interval at which that field actually moves, not against
+/// [`PROGRESS_READ_INTERVAL`]: a once-a-minute timestamp against a 30-second
+/// bound is true at +30, +45 and +60 s of every cycle with a 15 s requeue, three
+/// reads a minute. The effective rate is one read per minute, which satisfies
+/// the bound without a second status timestamp (an in-memory interval would be
+/// lost on every restart).
 #[must_use]
 pub fn should_read_progress(
     stored: Option<&RunProgress>,
@@ -1120,30 +960,20 @@ pub fn should_read_progress(
     (now - last).to_std().is_ok_and(|d| d >= OBSERVED_HEARTBEAT)
 }
 
-/// The progress read itself — D3 §2.4's bounded `LogParams`.
+/// The progress read itself, with D3 §2.4's bounded `LogParams`.
 ///
-/// # The read looks for NEW lines, and an absence is not a retraction
-///
-/// Review finding **F2**. Three things about this window are true at once: the
-/// contract announcement is printed once at the very top of the run and
-/// scrolls out of it; a phase line is printed once per phase and scrolls out
-/// of it too; and [`apply`] writes the WHOLE `progress` object, so whatever
-/// this function does not return is erased rather than left alone.
-///
-/// So `stored` is consulted twice. It supplies the gate's memory (a stored
-/// phase proves the channel announced itself — [`parse_progress_after`]), and
-/// it supplies the answer whenever this window carries no phase line of its
-/// own: a run that has been in phase 6 for two minutes prints nothing new, and
-/// "nothing new" means the phase has not changed, never that there is no
-/// phase.
+/// It looks for new lines, and an absence is not a retraction: the
+/// announcement and each phase line are printed once and scroll out of the
+/// window, and [`apply`] writes the whole `progress` object. So `stored`
+/// supplies the gate's memory ([`parse_progress_after`]) and the answer whenever
+/// this window carries no phase line: "nothing new" means the phase has not
+/// changed.
 ///
 /// # Errors
 ///
-/// Never. A pod log that cannot be read is NOT an error on this path: the
-/// channel is optional by contract, the pod may have just been garbage
-/// collected, and a reconcile that failed because an optional log read 404ed
-/// would turn a cosmetic field into an outage. The failure is logged and the
-/// answer is what the object already said.
+/// Never. The channel is optional by contract and the pod may have just been
+/// collected, so a failed read is logged and the answer is what the object
+/// already said; a cosmetic field must not become an outage.
 pub async fn read_progress(
     client: &kube::Client,
     namespace: &str,
@@ -1156,17 +986,14 @@ pub async fn read_progress(
             let mut progress =
                 parse_progress_after(&log, stored.is_some_and(|p| p.runner_phase.is_some()));
             if progress.phase.is_none() {
-                // NO NEW PHASE LINE IN THE WINDOW is not "no phase" — see this
-                // function's header. Carrying is what keeps `runnerPhase` from
-                // blinking out on every pass of a long phase.
+                // No new phase line in the window is not "no phase": carry the
+                // stored one so `runnerPhase` does not blink out.
                 progress.phase = stored.and_then(|p| p.runner_phase.clone());
             }
             if progress.ignored > 0 {
-                // D3 §2.4: ignored, never a failure. It is a LOG LINE and not
-                // a `status.progress.diagnostics` entry, and the reason is
-                // D3 §2.3: that vocabulary is CLOSED and has no member for
-                // "the runner printed something I could not read". Inventing
-                // one would be exactly the invention §2.3 forbids.
+                // Ignored, never a failure (D3 §2.4), and a log line rather
+                // than a diagnostic: the closed diagnostic vocabulary has no
+                // member for "the runner printed something unreadable".
                 warn!(
                     namespace,
                     pod = pod_name,
@@ -1193,21 +1020,15 @@ pub async fn read_progress(
 
 /// The events for one Job and its pod, by `involvedObject.uid`.
 ///
-/// **BY UID AND NEVER BY NAME** (seam **S6**). D3 §2.3 specifies
-/// `involvedObject.kind=Pod,involvedObject.name=<pod>`; a name is not an
-/// identity, `FailedCreate` is a common event in a namespace with a
-/// `ResourceQuota`, and `waiting::from_failed_create`'s own note records that
-/// a classifier handed somebody else's event would cancel a healthy Job. The
-/// UID form is strictly narrower, is what `controllers/preflight.rs` already
-/// uses, and is recorded as a deliberate deviation.
+/// By UID, never by name (seam **S6**), a deliberate deviation from D3 §2.3's
+/// name selector: a name is not an identity, `FailedCreate` is common in a
+/// namespace with a `ResourceQuota`, and a classifier handed somebody else's
+/// event would cancel a healthy Job.
 ///
 /// # Errors
 ///
-/// Never. An events list that fails yields an EMPTY slice, which D2's
-/// classifier reads as "none were read" — the weaker code (`WaitingForPod`),
-/// never an invented cause (D3 §16). A reconcile that failed because a
-/// best-effort, rotated resource could not be listed would convert a
-/// diagnostic aid into an outage.
+/// Never. A failed list yields an empty slice, which the classifier reads as
+/// "none were read" (the weaker `WaitingForPod`), never an invented cause.
 pub async fn events_for(
     client: &kube::Client,
     namespace: &str,
@@ -1237,54 +1058,37 @@ pub async fn events_for(
 /// D3 §2.3's `limit=20` on each events list.
 pub const EVENT_LIMIT: u32 = 20;
 
-/// How recently a WARNING-class diagnostic must have been observed, measured
-/// back from the instant the Job ended, to be read as what ended it.
+/// How recently a warning-class diagnostic must have been observed, back from
+/// the instant the Job ended, to be read as what ended it.
 ///
-/// `lastSeen` is rewritten at most once per [`OBSERVED_HEARTBEAT`] while the
-/// cause persists and a running Job is reconciled every 15 s, so a cause that
-/// was still true when the Job ended carries a `lastSeen` within about 75 s of
-/// the end. Three heartbeats is that with room for one missed pass, and still
-/// short enough that a warning from a run's preparing minutes — an image pull
-/// that backed off and then succeeded — cannot be read as the reason a run
-/// that later ran for a quarter of an hour ended.
+/// While the cause persists `lastSeen` moves once per [`OBSERVED_HEARTBEAT`] and
+/// a running Job is reconciled every 15 s, so a cause still true at the end is
+/// within about 75 s of it. Three heartbeats allows one missed pass and is
+/// still too short for a warning from a run's preparing minutes (an image pull
+/// that backed off and then succeeded) to explain how a long run ended.
 pub const WARNING_CAUSE_WINDOW: Duration = Duration::from_secs(3 * 60);
 
-/// The terminal state a run reached WITHOUT an exit code, when a recorded
-/// diagnostic explains it — D3 §2.2.
+/// The terminal state a run reached without an exit code, when a recorded
+/// diagnostic explains it (D3 §2.2).
 ///
 /// `None` when the stored status carries no diagnostic with a terminal
-/// projection, in which case `crash_terminal_state`'s existing table is
-/// unchanged and the answer is still `NoExitCode`. The NEWEST qualifying
-/// diagnostic wins, which is the list's own order; `WaitingForPod` is never a
-/// verdict ("nothing has happened yet" cannot be a cause).
+/// projection; `crash_terminal_state` then answers `NoExitCode`. `WaitingForPod`
+/// is never a verdict. Error-class codes come first, then the newest qualifying
+/// warning.
 ///
-/// # A WARNING THAT ENDED THE RUN IS ITS TERMINAL REASON
+/// A warning can be the terminal reason: the Job controller deletes the pod of
+/// a Job that hit its deadline, and fail-fast ends a run by hitting its
+/// deadline, so the pod is not there to read. Because a warning may resolve on
+/// its own, it is read as the cause only when both hold:
 ///
-/// Defect WARNING-DIAGNOSTICS-NOEXITCODE (PLAT-14.1). The first landing kept
-/// only `Error`-severity codes, on the theory that a warning's pod would
-/// still be there for `crash_terminal_state` to read. It is not: the Job
-/// controller deletes the pod of a Job that hit its deadline, and fail-fast
-/// ends a run BY hitting its deadline. So a projected ConfigMap that never
-/// mounted (fail-fast fired, deadline 900 → 1) and a pod no node would take
-/// (the Job's own deadline) both ended `NoExitCode` — live, on harness-rows-11's
-/// `operation-states` rows — while their diagnostics named the cause. D3 §2.2
-/// says the new states replace `NoExitCode` "when the matching diagnostic was
-/// recorded before the Job ended", and names no severity.
-///
-/// A warning is read as the cause only when BOTH hold, because "may resolve on
-/// its own" (D3 §2.3's column) means an old one may have:
-///
-/// * **the runner never started**, as far as the stored status says — no
-///   `startedAt`, no `Running`/`Terminated` container state, no runner phase.
-///   A warning about a runner that then ran explains nothing about how it
-///   ended; and
+/// * **the runner never started**, as far as the stored status says (no
+///   `startedAt`, no `Running`/`Terminated` container state, no runner phase);
+///   and
 /// * **it was still being observed when the Job ended**: its `lastSeen` is
-///   within [`WARNING_CAUSE_WINDOW`] of `ended_at`. A warning that stopped
-///   being seen had resolved.
+///   within [`WARNING_CAUSE_WINDOW`] of `ended_at`.
 ///
-/// Anything else falls back to `NoExitCode`, the weaker answer — never an
-/// invented cause (D3 §16). `Error`-severity codes are read exactly as
-/// before: they do not resolve on their own.
+/// Anything else falls back to `NoExitCode`, the weaker answer, never an
+/// invented cause.
 #[must_use]
 pub fn recorded_terminal_state(
     stored: Option<&RunProgress>,
@@ -1300,9 +1104,8 @@ pub fn recorded_terminal_state(
             .filter(|r| *r != REASON_WAITING_FOR_POD)?;
         Some((code.severity(), reason))
     };
-    // ERROR-CLASS FIRST, exactly as before the warning path existed (review
-    // L6): a newer warning must not outrank a recorded code that does not
-    // resolve on its own. Then the newest warning that qualifies.
+    // Error-class first: a newer warning must not outrank a recorded code that
+    // does not resolve on its own. Then the newest qualifying warning.
     diagnostics
         .iter()
         .find_map(|d| match projected(d)? {
@@ -1373,16 +1176,10 @@ fn parse_phase(value: &str) -> Option<RunnerPhase> {
     })
 }
 
-// ===========================================================================
-// The status write — D3 §2.2
-// ===========================================================================
-
 /// Everything [`apply`] needs to turn a [`Derived`] into status bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct Write<'a> {
-    /// This pass's derivation.
     pub derived: &'a Derived,
-    /// What the progress channel said.
     pub progress: &'a Progress,
     /// The object's STORED `status.progress`, for the two timestamp rules.
     pub stored: Option<&'a RunProgress>,
@@ -1394,7 +1191,6 @@ pub struct Write<'a> {
     /// column reads — `true` for `Restore`, `false` for `Backup`, which has no
     /// such column and no such field.
     pub scalar_reason: bool,
-    /// This pass's instant.
     pub now: DateTime<Utc>,
 }
 
@@ -1402,30 +1198,20 @@ pub struct Write<'a> {
 /// `Restore`) the scalar `reason` into a `/status` merge patch another builder
 /// already produced.
 ///
-/// # Why this composes rather than replaces
+/// It composes rather than replaces so there is one producer of
+/// `status.conditions` per patch: a merge patch replaces arrays, so a second
+/// builder's array would delete what the first wrote. `base`'s array is read
+/// back and `RunnerReady` merged into it.
 ///
-/// `running_status_patch` and the terminal builders are each called from
-/// sixteen places, four of them in crates this worker does not own. Folding
-/// the progress block in here keeps every one of those call sites, and — the
-/// part that matters — keeps **one** producer of `status.conditions` per
-/// patch: a merge patch REPLACES arrays, so a second builder emitting its own
-/// array would delete whatever the first one wrote. `base`'s array is read
-/// back out and `RunnerReady` is merged into it.
+/// A reconciler's own status patch wakes it, so a steady object sends nothing:
 ///
-/// # The two timestamp rules, and why a steady object sends nothing
-///
-/// Plan erratum **E11(d)**: a reconciler's own status patch is what wakes it.
-///
-/// * `lastTransitionTime` moves only when `stage` or `reason` moves — the
-///   `metav1.Condition` rule, applied to the progress block.
+/// * `lastTransitionTime` moves only when `stage` or `reason` moves;
 /// * `lastObservedTime` is rewritten at most once per [`OBSERVED_HEARTBEAT`],
-///   and only in an ACTIVE stage; a `Finished` stage clears it with an
-///   explicit `null`, because "last observed" does not hold for a run that is
-///   over.
+///   and only in an active stage; `Finished` clears it with an explicit `null`.
 ///
 /// Every other field is a pure function of the Job, the pod and the log, so an
-/// unchanged run recomputes byte-identical bytes and
-/// [`crate::conditions::status_unchanged`] sends no patch at all.
+/// unchanged run recomputes identical bytes and
+/// [`crate::conditions::status_unchanged`] sends no patch.
 #[must_use]
 pub fn apply(base: Value, write: &Write<'_>) -> Value {
     let Value::Object(mut root) = base else {
@@ -1439,7 +1225,6 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
     let stage = d.stage;
     let reason = d.runner_ready.reason;
 
-    // ---- the condition -------------------------------------------------
     let next = merge_condition(
         current_condition(write.conditions, CONDITION_RUNNER_READY),
         Condition {
@@ -1458,17 +1243,10 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
         .unwrap_or_default();
     owned.retain(|c| c.get("type") != Some(&json!(CONDITION_RUNNER_READY)));
     owned.push(json!(next));
-    // AND EVERY STORED CONDITION THIS PATCH IS NOT ABOUT — defect
-    // RESTORE-ADMITTED-DROPPED. The base builder's array is the array a merge
-    // PATCH will REPLACE, so a type neither the builder nor this fold names is
-    // deleted from the object. `Admitted` was exactly such a type:
-    // `running_status_patch` writes it on the CREATING pass only, and the
-    // second reconcile of an unchanged running `Restore` took it straight back
-    // off — the one statement on the object saying the run had been approved,
-    // gone one pass after it appeared, on an object nothing else re-asserts it
-    // for. It is not a list of types to remember: `upsert_conditions` carries
-    // whatever the object holds, in the order it holds it, so this stays fixed
-    // for the next condition somebody adds.
+    // And every stored condition this patch is not about: the merge patch
+    // replaces the array, so a type neither the builder nor this fold names
+    // (such as `Admitted`, written on the creating pass only) would be deleted.
+    // `upsert_conditions` carries whatever the object holds, in its order.
     status.insert(
         "conditions".to_string(),
         Value::Array(crate::conditions::upsert_conditions(
@@ -1477,19 +1255,13 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
         )),
     );
 
-    // ---- the scalar reason ---------------------------------------------
-    //
-    // D3 §2.2: `Restore.status.reason` is "the reason of the condition this
-    // patch writes about current state" — the `RunnerReady` reason WHILE IT IS
-    // FALSE, and otherwise whatever the base builder already wrote
-    // (`JobCreated`, or the terminal reason). `every_status_write_sets_the_
-    // scalar_reason` is extended by this, not weakened: the field is still
-    // always set, still CamelCase, still verbatim a condition's own reason.
+    // `Restore.status.reason` is the reason of the condition this patch writes
+    // about current state (D3 §2.2): the `RunnerReady` reason while it is
+    // false, otherwise whatever the base builder wrote.
     if write.scalar_reason && d.runner_ready.status == "False" {
         status.insert("reason".to_string(), json!(reason));
     }
 
-    // ---- the progress block --------------------------------------------
     let changed = write
         .stored
         .is_none_or(|p| p.stage != stage.as_str() || p.reason.as_deref() != Some(reason));
@@ -1518,19 +1290,15 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
     );
     progress.insert(
         "lastObservedTime".to_string(),
-        // EXPLICIT `null` AND NOT AN OMISSION. A merge patch that omits a key
-        // leaves the stored value alone, and "this run was last observed at
-        // 14:02" is false the moment the run is over — D3 §2.2's "a status
-        // field cleared with explicit null when it no longer holds".
+        // Explicit `null`, not an omission: an omitted key keeps the stored
+        // value, and "last observed at 14:02" is false once the run is over.
         observed.map_or(Value::Null, |t| json!(t)),
     );
-    // "THE RUNNER STARTED" IS STICKY (review M3). A pass that finds no pod —
-    // the Job controller deleted it at a deadline, an eviction, a node loss —
-    // derives no `startedAt`, and the terminal pass reads this block to decide
-    // whether a warning could have been what ended the run
-    // ([`recorded_terminal_state`]). A started runner must never read as one
-    // that never started, so the stored instant is carried EXPLICITLY rather
-    // than left to a merge patch's "absent means unchanged".
+    // "The runner started" is sticky: a pass that finds no pod derives no
+    // `startedAt`, and the terminal pass reads this block to decide whether a
+    // warning could have ended the run ([`recorded_terminal_state`]). The
+    // stored instant is carried explicitly, not left to "absent means
+    // unchanged".
     let mut runner = d.runner.clone();
     if runner.started_at.is_none() {
         runner.started_at = write
@@ -1586,17 +1354,11 @@ pub fn heartbeat(
 /// `(code, object.kind, object.name)`, sorted by `lastSeen` newest first, and
 /// truncated to eight.
 ///
-/// # `count` counts OBSERVATIONS, not Events, and the difference is recorded
-///
-/// D3 §2.3 says `count` increments by the Event `count`/series delta. The fact
-/// slice this controller is handed is [`EventFact`], D2's four-field value
-/// type, which carries no `count` — and widening it is an edit to D2's
-/// classifier, not to this task's files. So `count` increments once per
-/// HEARTBEAT: it moves exactly when `lastSeen` moves, which is at most once
-/// per [`OBSERVED_HEARTBEAT`]. That keeps the number meaningful ("this has
-/// been true for `count` minutes"), keeps it bounded, and — the reason it is
-/// not simply incremented per reconcile — keeps a steady object's status
-/// byte-identical between heartbeats, which is the whole of E11(d).
+/// `count` counts heartbeats, not Events: [`EventFact`] carries no Event
+/// `count`, so `count` moves exactly when `lastSeen` moves, at most once per
+/// [`OBSERVED_HEARTBEAT`]. That keeps it meaningful ("true for `count`
+/// minutes"), bounded, and a steady object's status byte-identical between
+/// heartbeats.
 #[must_use]
 pub fn merge_diagnostics(
     stored: Option<&Vec<Diagnostic>>,
@@ -1619,7 +1381,7 @@ pub fn merge_diagnostics(
         );
         match by_key.get_mut(&key) {
             Some(existing) => {
-                // THE HEARTBEAT, AND NOTHING ELSE. `firstSeen` never moves;
+                // The heartbeat and nothing else: `firstSeen` never moves;
                 // `lastSeen` and `count` move together or not at all.
                 if existing.last_seen != Some(last_seen) {
                     existing.last_seen = Some(last_seen);
@@ -1661,9 +1423,9 @@ pub fn merge_diagnostics(
     if out.is_empty() {
         return None;
     }
-    // NEWEST `lastSeen` FIRST. `sort_by` is STABLE, so two diagnostics seen in
-    // the same heartbeat keep the order they were first recorded in — a total
-    // order, so a steady object computes the same array on every pass.
+    // Newest `lastSeen` first. `sort_by` is stable, so two diagnostics seen in
+    // the same heartbeat keep their recorded order and a steady object computes
+    // the same array on every pass.
     out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
     out.truncate(DIAGNOSTICS_MAX);
     Some(out)
@@ -1687,26 +1449,19 @@ fn diagnostic_key(d: &Diagnostic) -> (String, String, String) {
     (d.code.clone(), kind, name)
 }
 
-// ===========================================================================
-// Fail fast — D3 §2.3
-// ===========================================================================
-
-/// Whether this pass should cancel the Job before it does any work — D3
-/// §2.3's "fail fast before any work".
+/// Whether this pass should cancel the Job before it does any work (D3 §2.3's
+/// "fail fast before any work"). All four are required:
 ///
-/// Four conditions, and all four are required:
-///
-/// 1. there IS a diagnosis;
-/// 2. it is **not transient** at the duration it has held;
-/// 3. the runner container has **never started** — a run whose process began
-///    has consumed its approval and its plan, and the cancellation D2's
-///    `cancel.rs` performs is an `activeDeadlineSeconds` patch, not a rollback;
+/// 1. there is a diagnosis;
+/// 2. it is not transient at the duration it has held;
+/// 3. the runner container has never started: a run whose process began has
+///    consumed its approval and its plan, and cancelling is a deadline patch,
+///    not a rollback;
 /// 4. it has held continuously for at least `fail_fast`.
 ///
-/// `held_for` is computed from the STORED diagnostic's `firstSeen`, which is
-/// what makes "continuously" true rather than "at some point": a diagnosis
-/// that cleared and came back gets a new `firstSeen`, because
-/// [`merge_diagnostics`] only keeps the old one while the key keeps matching.
+/// `held_for` is computed from the stored diagnostic's `firstSeen`, which
+/// [`merge_diagnostics`] keeps only while the key keeps matching, so a
+/// diagnosis that cleared and came back starts again.
 #[must_use]
 pub fn should_fail_fast(
     diagnosis: Option<&Diagnosis>,
@@ -1736,13 +1491,10 @@ pub fn held_for(
         .diagnostics
         .as_ref()?
         .iter()
-        // THE WHOLE DEDUP KEY — `(code, object.kind, object.name)`, D3 §2.3's,
-        // and review finding F10. Matching on the name alone would let a Job
-        // and a Pod of the same name share one `firstSeen`, and "continuously
-        // observed for `failFastSeconds`" would then be measured from another
-        // object's clock. Unreachable today (a Job's pod always carries the
-        // generated suffix) and it is the fail-fast PRECONDITION, so it is
-        // written as the whole key rather than as most of it.
+        // The whole dedup key, `(code, object.kind, object.name)`: matching on
+        // the name alone would let a Job and a Pod of the same name share one
+        // `firstSeen`, measuring the fail-fast precondition from another
+        // object's clock.
         .find(|d| {
             d.code == diagnosis.code.as_str()
                 && d.object
@@ -1754,30 +1506,20 @@ pub fn held_for(
     (now - first).to_std().ok()
 }
 
-/// The terminal state a fail-fast cancellation writes — D3 §2.2's four new
-/// members of [`crate::conditions::TERMINAL_STATES`], plus the two that were
-/// already there.
-///
-/// It is the diagnosis's `RunnerReady` PROJECTION and not its raw code,
-/// because that is the value D3 §15's L1 and L2 assert live
-/// (`Failed/CredentialReferenceMissing`, `Failed/PodUnschedulable`) and
-/// because the raw code vocabulary is not a `TERMINAL_STATES` vocabulary.
+/// The terminal state a fail-fast cancellation writes: the diagnosis's
+/// `RunnerReady` projection, not its raw code, because the raw code vocabulary
+/// is not a [`crate::conditions::TERMINAL_STATES`] vocabulary.
 #[must_use]
 pub fn terminal_state(diagnosis: &Diagnosis) -> Option<&'static str> {
     let reason = diagnosis.code.runner_ready_reason()?;
-    // `WaitingForPod` is NOT a terminal state and never becomes one: "nothing
-    // has happened yet" is the one answer that cannot be a verdict.
+    // `WaitingForPod` is never a terminal state: "nothing has happened yet"
+    // cannot be a verdict.
     (reason != REASON_WAITING_FOR_POD).then_some(reason)
 }
-
-// ===========================================================================
-// The observation seam both reconcilers call
-// ===========================================================================
 
 /// One pass's whole observation of a running Job-backed run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Run {
-    /// The derivation.
     pub derived: Derived,
     /// What the progress channel said, or what the object already said when
     /// this pass was throttled out of reading it.
@@ -1786,27 +1528,22 @@ pub struct Run {
     pub pod_name: Option<String>,
 }
 
-/// **The seam.** Observe one unfinished runner Job: find its owned pod, list
-/// the events that explain it when it is not running, read the progress
-/// channel when it is, and derive.
-///
-/// ONE IMPLEMENTATION FOR BOTH RECONCILERS — D3 §2.3's "one implementation for
-/// every Job-backed run". `controllers/backup.rs` and `controllers/restore.rs`
-/// call exactly this; neither classifies anything itself.
-///
-/// # What is read, and what is not
+/// Observe one unfinished runner Job: find its owned pod, list the events that
+/// explain it when it is not running, read the progress channel when it is, and
+/// derive. The one implementation `controllers/backup.rs` and
+/// `controllers/restore.rs` call; neither classifies anything itself.
 ///
 /// * The pod, through [`crate::check::pod::find_owned_pod_by_selectors`],
 ///   which verifies the controller owner UID (seam **S6**).
-/// * Core `v1/events`, **only when the pod is not Running** — D3 §2.3. A
-///   healthy run costs one pod list per reconcile and nothing else.
-/// * The pod log, **only when the runner has started and the throttle allows
-///   it** ([`should_read_progress`]).
+/// * Core `v1/events`, only when the pod is not running, so a healthy run costs
+///   one pod list per reconcile.
+/// * The pod log, only when the runner has started and the throttle allows it
+///   ([`should_read_progress`]).
 ///
 /// # Errors
 ///
 /// [`kube::Error`] from the pod list alone. The events list and the log read
-/// are best effort by design; see [`events_for`] and [`read_progress`].
+/// are best effort; see [`events_for`] and [`read_progress`].
 pub async fn observe(
     client: &kube::Client,
     namespace: &str,
@@ -1831,9 +1568,8 @@ pub async fn observe(
             .as_ref()
             .is_some_and(|s| s.running.is_some() || s.terminated.is_some())
     });
-    // D3 §2.3: the events list is made ONLY while the pod is not running. A
-    // healthy run must not pay a namespace-wide list every fifteen seconds
-    // for a diagnostic it will never need.
+    // The events list only while the pod is not running: a healthy run must
+    // not pay a list every fifteen seconds for a diagnostic it never needs.
     let events = if running {
         Vec::new()
     } else {
@@ -1844,10 +1580,9 @@ pub async fn observe(
         )
         .await
     };
-    // DERIVED TWICE, AND DELIBERATELY. The first derivation answers "has the
-    // runner started", which is what decides whether the progress read happens
-    // at all; the second carries the phase that read produced, because D3
-    // §2.5's `Verifying` stage is a function of it.
+    // Derived twice: the first answers "has the runner started", which decides
+    // whether the progress read happens; the second carries the phase it
+    // produced, which D3 §2.5's `Verifying` stage depends on.
     let first = derive(&Facts {
         job,
         pod,
@@ -1875,15 +1610,14 @@ pub async fn observe(
     })
 }
 
-/// Cancel a runner Job that cannot start — D3 §2.3's "fail fast before any
-/// work", through **D2's `cancel.rs`** and not a second cancellation path.
+/// Cancel a runner Job that cannot start (D3 §2.3), through the check
+/// framework's `cancel.rs` rather than a second cancellation path.
 ///
-/// Returns the terminal state the cancellation is FOR, or `None` when nothing
-/// was sent. The Job then fails with `DeadlineExceeded`, the existing
-/// crashed-Job path runs on the next pass, and
-/// [`recorded_terminal_state`] turns the diagnostic this pass recorded into
-/// the terminal reason — which is why the status patch that records it must
-/// have landed BEFORE this is called.
+/// Returns the terminal state the cancellation is for, or `None` when nothing
+/// was sent. The Job then fails with `DeadlineExceeded`, the crashed-Job path
+/// runs on the next pass, and [`recorded_terminal_state`] turns the recorded
+/// diagnostic into the terminal reason, so the status patch that records it
+/// must have landed before this is called.
 ///
 /// # Errors
 ///
@@ -1900,10 +1634,8 @@ pub async fn fail_fast(
     let Some(diagnosis) = run.derived.diagnosis.as_ref() else {
         return Ok(None);
     };
-    // OFF IS OFF, AND IT IS CHECKED FIRST. `None` means the installation asked
-    // for no fail-fast at all, so no Job is cancelled and every run reaches
-    // its own `activeDeadlineSeconds` exactly as it did before this behaviour
-    // existed.
+    // Off is off, checked first: no Job is cancelled and every run reaches its
+    // own `activeDeadlineSeconds`.
     let Some(window) = fail_fast_seconds() else {
         return Ok(None);
     };
@@ -1930,23 +1662,17 @@ pub async fn fail_fast(
     Ok(Some(state))
 }
 
-/// Whether this Job is one whose missing TTL may be repaired — D3 §2.7's three
-/// conditions, as a PURE predicate.
+/// Whether this Job's missing TTL may be repaired (D3 §2.7), as a pure
+/// predicate so each condition is testable without a route table (on the
+/// reconcile path the compatibility guard refuses a foreign Job first, which
+/// would hide whether this check exists):
 ///
-/// Separate from [`repair_ttl`] because it is the whole of the rule, and a
-/// rule inside an `async fn` that needs a `kube::Client` is a rule whose only
-/// test is a route table. A route table can prove the patch was not sent; it
-/// cannot easily prove WHICH of the three conditions stopped it, and on the
-/// reconcile path the compatibility guard refuses a foreign Job before this is
-/// ever reached — so the belt would hide whether the braces exist at all.
-///
-/// 1. **Finished.** An unfinished Job with a TTL is a Job with a deadline it
-///    did not ask for.
-/// 2. **No TTL already.** Re-sending the same value every reconcile is the
-///    write loop E11(d) is about.
-/// 3. **Controlled by exactly this object.** A Job named after the CR proves
-///    nothing — the name is derived, not owned. Patching a stranger's Job with
-///    a TTL is deleting somebody else's work on a timer.
+/// 1. **Finished.** An unfinished Job with a TTL has a deadline it did not ask
+///    for.
+/// 2. **No TTL already.** Re-sending the same value every reconcile is a write
+///    loop.
+/// 3. **Controlled by exactly this object.** A name proves nothing; patching a
+///    stranger's Job with a TTL deletes somebody else's work on a timer.
 #[must_use]
 pub fn needs_ttl_repair(job: &Job, owner_uid: &str) -> bool {
     if !crate::controllers::backup::job_finished(job) {
@@ -1970,14 +1696,12 @@ pub fn needs_ttl_repair(job: &Job, owner_uid: &str) -> bool {
             .any(|o| o.uid == owner_uid && o.controller == Some(true))
 }
 
-/// Patch a finished Job's missing `ttlSecondsAfterFinished` — D3 §2.7's
-/// repair.
+/// Patch a finished Job's missing `ttlSecondsAfterFinished` (D3 §2.7's repair).
 ///
-/// Four conditions, and the caller has already established the first: the
-/// object's status is TERMINAL. Here: the Job is finished, it carries exactly
-/// this object's controller owner, and it has no TTL. **"Status first, TTL
-/// second" is preserved by construction** — this runs only on a pass over an
-/// object whose terminal status is already stored.
+/// The caller has established that the object's status is terminal; this
+/// checks the rest ([`needs_ttl_repair`]). "Status first, TTL second" holds by
+/// construction: this runs only on a pass over an object whose terminal status
+/// is already stored.
 ///
 /// Returns whether a patch was sent.
 ///
@@ -2006,31 +1730,19 @@ pub async fn repair_ttl(
     Ok(true)
 }
 
-/// Move `status.progress` to [`Stage::Finished`] on a terminal `/status`
-/// merge patch — D3 §2.2 and §2.5.
+/// Move `status.progress` to [`Stage::Finished`] on a terminal `/status` merge
+/// patch (D3 §2.2 and §2.5).
 ///
-/// # Why a terminal patch has to say this at all
+/// Without it a finished run would read `stage: Running` with a stalled
+/// `lastObservedTime`, which §2.5's staleness row turns into `unknown`
+/// (`StatusStale`) five minutes later.
 ///
-/// `progress.stage` is what the console renders and what D3 §2.5 normalizes
-/// into the API `state`. A terminal patch that left the block alone would
-/// leave a finished run reading `stage: Running` with a `lastObservedTime`
-/// that stops moving — which §2.5's staleness row turns into `unknown`
-/// (`StatusStale`) three hundred seconds later. A run that succeeded would
-/// render as a run nobody can account for.
-///
-/// # A PARTIAL merge, and that is the difference from [`apply`]
-///
-/// This writes four keys. `runner`, `runnerPhase` and `diagnostics` are
-/// **omitted**, which in RFC 7386 means "leave them alone": the last runner
-/// facts, the last phase and the diagnostics that explain the outcome are
-/// exactly what an operator looking at a failed run needs, and re-deriving
-/// them from a pod that may already be collected is the defect step 2b's guard
-/// exists to prevent. `lastObservedTime` is cleared with an **explicit null**
-/// because "last observed" does not hold for a run that is over.
-///
-/// The reason is read out of `base`'s own first condition, which every
-/// terminal builder in this crate puts its terminal condition at — so the
-/// progress block cannot disagree with the condition it is about.
+/// A partial merge, unlike [`apply`]: `runner`, `runnerPhase` and
+/// `diagnostics` are omitted, which RFC 7386 reads as "leave them alone", so
+/// the facts that explain a failed run survive and are never re-derived from a
+/// pod that may be gone. `lastObservedTime` is cleared with an explicit null.
+/// The reason is read from `base`'s first condition, where every terminal
+/// builder puts its terminal condition, so the block cannot disagree with it.
 #[must_use]
 pub fn apply_finished(base: Value, stored: Option<&RunProgress>, now: DateTime<Utc>) -> Value {
     let Value::Object(mut root) = base else {

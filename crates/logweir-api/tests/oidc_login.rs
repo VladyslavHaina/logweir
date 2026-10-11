@@ -587,7 +587,7 @@ async fn the_login_state_the_cookie_and_the_pkce_verifier_are_all_checked() {
 /// does not present it again.** Clearing is advice to the browser; what makes
 /// the `state` single-use against someone who kept a copy is the replica's
 /// record of redeemed states, with the provider's single-use code behind it,
-/// asserted in `tests/sign_in_state.rs` (FX-13a).
+/// asserted in `tests/sign_in_state.rs`.
 #[tokio::test]
 async fn a_consumed_login_cookie_is_cleared() {
     let key = TestKey::ec("k-ec-1");
@@ -626,18 +626,13 @@ fn login_cookie_clear_of(response: &TestResponse) -> Option<String> {
         .find(|c| c.starts_with("__Host-logweir_login=;") && c.contains("Max-Age=0"))
 }
 
-/// **FX-32: every refused callback really clears the login cookie.**
+/// **Every refused callback really clears the login cookie.**
 ///
 /// The callback appends the clearing `Set-Cookie` to its refusal, and the
-/// request-context layer then re-renders the problem document. That layer
-/// used to keep `Allow` and nothing else, so the clear never reached the
-/// browser and the login module's "the callback clears it … on every refusal"
-/// was not true (found by FX-28). Each refusal below goes through the whole
-/// router, so it is the response the browser gets that is read.
-///
-/// The control is the same row on the old rendering (FX-32's mutant), where
-/// every case fails on the missing `Set-Cookie`; the positive half is that the
-/// rest of the problem document is unchanged.
+/// request-context layer then re-renders the problem document; a rendering
+/// that kept only `Allow` would drop the clear. Each refusal below goes
+/// through the whole router, so it is the response the browser gets that is
+/// read, and the rest of the problem document is unchanged.
 #[tokio::test]
 async fn every_refused_callback_clears_the_login_cookie() {
     let key = TestKey::ec("k-ec-1");
@@ -908,7 +903,7 @@ async fn a_provider_error_is_reported_without_echoing_it() {
 /// This drives the limiter the route uses rather than the route. The route's
 /// use of it — which key a request is counted against, through the trusted
 /// ingress or not — is held through the real router, with a peer address
-/// injected, by the FX-13 rows at the end of `tests/entry_point.rs`.
+/// injected, by the sign-in limiter rows at the end of `tests/entry_point.rs`.
 #[tokio::test]
 async fn the_login_surface_is_rate_limited() {
     use logweir_api::auth::ratelimit::{Decision, RateLimiter};
@@ -1025,14 +1020,12 @@ async fn an_algorithm_off_the_allowlist_is_refused_even_with_a_published_key() {
 /// **A session that would not fit in a browser cookie is refused at sign-in,
 /// and a session carries only the groups the binding table could match.**
 ///
-/// REGRESSION REASON (review finding F-2). Nothing measured the sealed cookie.
-/// Up to 64 group strings of up to 256 bytes each went into it, which is ~22 KB
-/// of `Set-Cookie` against the ~4096-byte ceiling Chrome and Firefox enforce.
-/// The callback answered `303`, the browser silently discarded the cookie,
-/// `/ui/` read `401 session_expired` and bounced back to `/auth/login`: an
-/// unbreakable sign-in loop with nothing in the log saying why, hitting exactly
-/// the large-directory installations shared mode exists for. Fail-closed, but
-/// unusable and undiagnosable.
+/// Up to 64 group strings of up to 256 bytes each is ~22 KB of `Set-Cookie`
+/// against the ~4096-byte ceiling Chrome and Firefox enforce: the callback
+/// answers `303`, the browser silently discards the cookie, `/ui/` reads
+/// `401 session_expired` and bounces back to `/auth/login` -- an unbreakable
+/// sign-in loop with nothing in the log saying why, hitting exactly the
+/// large-directory installations shared mode exists for.
 #[tokio::test]
 async fn a_session_that_would_not_fit_a_cookie_is_refused_at_sign_in() {
     let key = TestKey::ec("k-ec-1");
@@ -1126,7 +1119,7 @@ fn claims_for(nonce: &str, groups: &[String]) -> Value {
 ///
 /// A claim that cannot grant anything has no business in a cookie: it costs the
 /// browser's 4 KB ceiling and it tells anyone who steals the cookie the whole
-/// directory membership of its owner. Part of review finding F-2's fix.
+/// directory membership of its owner.
 #[tokio::test]
 async fn a_session_carries_only_bindable_group_claims() {
     let key = TestKey::ec("k-ec-1");
@@ -1193,10 +1186,10 @@ async fn a_session_carries_only_bindable_group_claims() {
 
 /// **`azp`, when present, must be this client — whatever shape `aud` took.**
 ///
-/// REGRESSION REASON (review finding F-3). `azp` was verified only in the
-/// multi-audience branch, so a token with `aud: "logweir-console"` and `azp:
-/// "another-client"` was accepted: an authorized party this client is not.
-/// OIDC Core §3.1.3.7(6) says it must be checked whenever the claim is present.
+/// `azp` must be checked whenever the claim is present (OIDC Core
+/// §3.1.3.7(6)), not only in the multi-audience branch: a token with `aud:
+/// "logweir-console"` and `azp: "another-client"` names an authorized party
+/// this client is not.
 #[tokio::test]
 async fn azp_is_checked_whenever_it_is_present() {
     let key = TestKey::ec("k-ec-1");
@@ -1262,13 +1255,12 @@ async fn azp_is_checked_whenever_it_is_present() {
 /// **A discovery document may not point the browser, or the client secret, at a
 /// plain-HTTP endpoint.**
 ///
-/// REGRESSION REASON (review finding F-4). `authorization_endpoint` goes
-/// straight into a `Location` header and `token_endpoint` RECEIVES the client
-/// secret, and neither was scheme-checked. The discovery fetch itself is
-/// HTTPS-pinned except for the loopback affordance — so this needs a
-/// compromised or misconfigured issuer — but under that affordance the client
-/// is built `https_or_http()`, which is precisely where the secret would have
-/// left in cleartext.
+/// `authorization_endpoint` goes straight into a `Location` header and
+/// `token_endpoint` RECEIVES the client secret, so both must be
+/// scheme-checked. The discovery fetch itself is HTTPS-pinned except for the
+/// loopback affordance -- so this needs a compromised or misconfigured issuer
+/// -- but under that affordance the client is built `https_or_http()`, which
+/// is precisely where the secret would leave in cleartext.
 #[tokio::test]
 async fn a_discovery_document_may_not_name_a_plain_http_endpoint() {
     let key = TestKey::ec("k-ec-1");

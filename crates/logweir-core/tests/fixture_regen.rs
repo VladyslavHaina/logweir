@@ -1,13 +1,9 @@
 //! The committed signed fixtures and the generator that produces them must not
 //! drift apart.
 //!
-//! Before Task 2 they had. `emit_fixture` emitted `last_phase_completed: 7` and
-//! the checked-in documents said `9`; `emit_fixture` emitted
-//! `evidence.create_only_enforced: true` and phase 8 emits `false`
-//! unconditionally — so the project's own worked example falsified the sentence
-//! `docs/verify_scorecard.py` printed on every successful verification, and
-//! `drill verify` said `VALID` over it. Nothing compared the two, because the
-//! only thing that had ever compared them was a person.
+//! A drifted pair can make the project's own worked example falsify the
+//! sentence `docs/verify_scorecard.py` prints on every successful
+//! verification, while `drill verify` says `VALID` over it.
 //!
 //! `just fixtures-sign` is the ONLY sanctioned way to change the four files
 //! under `e2e/fixtures/signed/` that this crate's generator feeds. These tests
@@ -51,7 +47,7 @@ fn parse_json(name: &str) -> serde_json::Value {
 ///
 /// This is the test that catches a hand-edit of a signed fixture, and the one
 /// that catches a generator change nobody re-minted. It kills both directions
-/// of the drift Task 2 found.
+/// of that drift.
 ///
 /// The separate `--target-dir` is deliberate: the outer `cargo test` run holds
 /// the default target directory's build lock, so a child `cargo run` into it
@@ -91,7 +87,7 @@ fn emit_fixture_reproduces_the_committed_scorecard_bytes() {
 }
 
 /// `last_phase_completed` is `7` in both signed documents: the generator's
-/// value, settled in Task 2 over the checked-in `9`.
+/// value.
 ///
 /// This is the PINNED VALUE, not the domain. Global Constraint 18 keeps the
 /// `-1..=9` domain exactly as it was, and this test says nothing about it — a
@@ -143,11 +139,9 @@ fn committed_fixtures_have_a_zeroed_evidence_block() {
 /// `approval.key_id` equals the key id its own DSSE sidecar was signed under —
 /// and `scorecard.json` derivably is NOT.
 ///
-/// Task 3 replaces the reader's trust in `approval.self_attested` (a claim the
-/// document makes about itself) with exactly this comparison. Minting the pair
-/// so both answers are already correct is what spares the stage a second
-/// re-mint, and this test is what stops the property being dropped from
-/// `mint_fixture` in between.
+/// The reader derives `approval.self_attested` (a claim the document makes
+/// about itself) from exactly this comparison; this test stops the property
+/// being dropped from `mint_fixture`.
 #[test]
 fn self_attested_fixture_key_id_equals_the_signature_keyid() {
     let doc = parse_json("scorecard-self-attested.json");
@@ -188,12 +182,12 @@ fn self_attested_fixture_key_id_equals_the_signature_keyid() {
 /// `just fixtures-sign` never redirects into a tracked fixture.
 ///
 /// The shell truncates a redirect target BEFORE the program runs, and
-/// `emit_fixture` ends with `validate_invariants().expect(...)`. The recipe
-/// used to emit straight into the tracked, signed, fingerprint-pinned
-/// `e2e/fixtures/signed/scorecard.json`, so a generator that refused its own
-/// document zeroed the committed fixture first and panicked second. Emitting
-/// into `target/` and `mv`-ing on success is the whole fix, and it is one
-/// careless edit away from being undone.
+/// `emit_fixture` ends with `validate_invariants().expect(...)`. Emitting
+/// straight into the tracked, signed, fingerprint-pinned
+/// `e2e/fixtures/signed/scorecard.json` would let a generator that refused its
+/// own document zero the committed fixture first and panic second, so the
+/// recipe emits into `target/` and `mv`s on success — one careless edit away
+/// from being undone.
 #[test]
 fn fixtures_recipe_is_non_destructive() {
     let justfile =

@@ -1,28 +1,20 @@
-// replication-factor.spec.js -- FX-5: the restore wizard's replication factor
-// comes from what the page can read, is an input, is refused by the readiness
+// replication-factor.spec.js -- the restore wizard's replication factor comes
+// from what the page can read, is an input, is refused by the readiness
 // check's own code when the target's brokers cannot hold it, and is shown on
 // the review step with where it came from.
 //
-// THE DEFECT. `initialState` wrote `replicationFactor: 1` and step 4 printed it
-// read-only, so every console restore created replication-factor-1 topics, on
-// any cluster, and nothing on screen said that was a choice.
+// WHAT THE PAGE CAN READ. The source's factor is in the archive manifest; the
+// receipt projects it, the catalog point copies it, and a recovery catalog's
+// view lists it per topic (`PointView.topics[]`, read by
+// `sourceReplicationFactorsOf`). The target's broker count is the product
+// API's `brokerCount` from the target connection's newest successful
+// discovery, when that discovery is fresh. So the default is the source's
+// factor capped at the broker count when both are known, the broker count at
+// most 3 when only that is known, and the grammar's 1 -- said, never silent
+// -- when nothing is.
 //
-// WHAT THE PAGE CAN READ, AND WHAT IT CANNOT. The source's factor is recorded
-// in the archive manifest; since PROD-05.1 the receipt projects it, the
-// catalog point copies it and a recovery catalog's view lists it per topic
-// (`PointView.topics[]`), which `sourceReplicationFactorsOf` reads -- the
-// PROD-05.1 rows at the end of this file. The target's broker count is
-// `TopicDiscovery.status.result.brokerCount`, which the product API now
-// publishes as `brokerCount`, and the wizard reads it from the target
-// connection's newest successful discovery when that discovery is fresh. So
-// the default is the source's factor capped at the broker count when both are
-// known, the broker count
-// at most 3 when only that is known, and the grammar's 1 -- said, never
-// silent -- when nothing is.
-//
-// NEGATIVE CONTROLS. Every assertion that carries "NEGATIVE CONTROL" names the
-// value that makes it fail, and `claude/artifacts/fx-5/tools/ui-mutants.py`
-// runs this file against copies of `ui/` with each behaviour removed.
+// Every assertion that carries "NEGATIVE CONTROL" names the value that makes
+// it fail.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -132,8 +124,6 @@ function byId(html, id) {
   return html.slice(open, close === -1 ? at + 200 : close + name.length + 3);
 }
 
-// --------------------------------------------------------------- the rule
-
 test("fx5_the_default_rule_source_capped_by_brokers_brokers_capped_at_three_else_the_grammar", () => {
   // THE SOURCE, when it is known: the LARGEST selected topic's factor.
   assert.deepEqual(replicationDefault([3, 2], null),
@@ -154,8 +144,8 @@ test("fx5_the_default_rule_source_capped_by_brokers_brokers_capped_at_three_else
   assert.deepEqual(replicationDefault(null, 2), { value: 2, basis: "brokers", source: null, brokers: 2 },
     "NEGATIVE CONTROL: 1 (the old literal) or 3 (the ceiling, above two brokers) fails this");
   assert.deepEqual(replicationDefault(null, 3), { value: 3, basis: "brokers", source: null, brokers: 3 });
-  // THE CEILING'S BOUNDARY (FX-5 review L1): the FIRST count above it is
-  // capped, not only a count well above it.
+  // THE CEILING'S BOUNDARY: the FIRST count above it is capped, not only a
+  // count well above it.
   assert.deepEqual(replicationDefault(null, 4),
     { value: DEFAULT_REPLICATION_CEILING, basis: "ceiling", source: null, brokers: 4 },
     "NEGATIVE CONTROL: 4 -- the ceiling one broker late (`count > CEILING + 1`) -- fails this");
@@ -200,10 +190,9 @@ test("fx5_the_basis_is_said_in_the_words_the_review_step_prints", () => {
 });
 
 test("fx5_a_backup_with_no_catalog_row_reads_no_source_factor_and_says_why", () => {
-  // PROD-05.1 REWROTE THIS ROW, as FX-5 said it would: the source's factor is
-  // now read from a recovery catalog's view of the point. A state whose source
-  // facts were never read -- or a Backup no catalog lists -- still knows none,
-  // and step 4 says where it would come from AND why it is not known here.
+  // A state whose source facts were never read, or a Backup no catalog lists,
+  // knows no source factor, and step 4 says where it would come from AND why
+  // it is not known here.
   const state = wizardState();
   assert.equal(sourceReplicationFactorsOf(state), null,
     "NEGATIVE CONTROL: any factor read without a catalog row fails this row");
@@ -216,8 +205,6 @@ test("fx5_a_backup_with_no_catalog_row_reads_no_source_factor_and_says_why", () 
     "been read.", "step 4 says where the source's factor is and why it is not read");
 });
 
-// ---------------------------------------------------- the broker-count fact
-
 test("fx5_the_broker_count_comes_from_this_targets_discovery_fresh_or_expired_alone", () => {
   const state = wizardState();
   const cluster = state.clusters.items.find((c) => c.metadata.uid === state.targetClusterUid);
@@ -228,9 +215,9 @@ test("fx5_the_broker_count_comes_from_this_targets_discovery_fresh_or_expired_al
   assert.equal(fresh.observedAt, DISCOVERY().lastSuccessful.observedAt);
   assert.equal(fresh.why, "");
 
-  // PAST ITS FRESHNESS ALONE (review L5): the same connection object,
-  // generation and principal, read more than `freshSeconds` ago. The count is
-  // kept, NOT fresh, and running a discovery again would make it fresh.
+  // PAST ITS FRESHNESS ALONE: the same connection object, generation and
+  // principal, read more than `freshSeconds` ago. The count is kept, NOT
+  // fresh, and running a discovery again would make it fresh.
   const expired = DISCOVERY();
   expired.lastSuccessful.stale = true;
   expired.lastSuccessful.staleReasons = ["expired"];
@@ -304,10 +291,10 @@ test("fx5_the_broker_count_comes_from_this_targets_discovery_fresh_or_expired_al
 
 test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_nothing",
   async () => {
-    // FX-5 review L5. A discovery whose only stale reason is `expired` still
-    // sets the default -- the broker count rarely changes -- and the basis says
-    // when it was read, on both steps. It refuses nothing: a fresh count may
-    // refuse, an old one could refuse a factor a cluster grown since would hold.
+    // A discovery whose only stale reason is `expired` still sets the default --
+    // the broker count rarely changes -- and the basis says when it was read, on
+    // both steps. It refuses nothing: an old count could refuse a factor a
+    // cluster grown since would hold.
     const expired = () => {
       const answer = DISCOVERY();
       answer.lastSuccessful.stale = true;
@@ -363,8 +350,6 @@ test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_n
     assert.equal(replicationText(withAnswer(big)), "3 (at most 3 by default, of the target's 5 " +
       "brokers" + asOf + "; the source's replication factor is not known for this point)");
   });
-
-// ------------------------------------------------- the state and the steps
 
 test("fx5_with_nothing_read_the_factor_is_the_grammar_default_and_says_so", async () => {
   const state = wizardState();
@@ -426,8 +411,8 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
   assert.equal(visible(byId(renderPlanStep(await preparePlan(big), big), "review-replication")),
     "3 (at most 3 by default, of the target's 5 brokers; the source's replication factor is " +
     "not known for this point)");
-  // THE BOUNDARY, through a state and the plan (review L1): four brokers is
-  // the first count the ceiling caps.
+  // THE BOUNDARY, through a state and the plan: four brokers is the first
+  // count the ceiling caps.
   const four = withBrokers(wizardState(), 4);
   assert.equal(replicationFactorOf(four), 3,
     "NEGATIVE CONTROL: 4 -- the ceiling one broker late -- fails this");
@@ -442,13 +427,12 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
 });
 
 test("fx5_the_factor_can_differ_from_the_sources_and_both_steps_and_the_docs_say_so", async () => {
-  // FX-5 review M1. A default worked out from the TARGET's brokers knows
-  // nothing of the source's factor, and the difference is the operator's
-  // storage bill: a topic the source kept on one replica, restored at 3, is
-  // stored three times. Where the factor is set (step 4, beside the basis) and
-  // where it is reviewed (step 6, under its row, above Create), the page says
-  // so whenever the source's factor is not known to equal the plan's -- every
-  // basis this build reaches.
+  // A default worked out from the TARGET's brokers knows nothing of the
+  // source's factor, and the difference is the operator's storage bill: a
+  // topic the source kept on one replica, restored at 3, is stored three
+  // times. Where the factor is set (step 4) and reviewed (step 6, above
+  // Create), the page says so whenever the source's factor is not known to
+  // equal the plan's.
   const typedOne = withBrokers(wizardState(), BROKERS);
   setReplicationFactor(typedOne, "1");
   for (const [label, state] of [
@@ -492,8 +476,6 @@ test("fx5_the_factor_can_differ_from_the_sources_and_both_steps_and_the_docs_say
       "NEGATIVE CONTROL: " + doc + " without the page's sentence fails this");
   }
 });
-
-// ---------------------------------------------- the edit and its refusal
 
 test("fx5_an_edited_factor_above_the_brokers_is_refused_before_create_by_the_checks_code",
   async () => {
@@ -609,12 +591,11 @@ test("fx5_the_readiness_checks_own_refusal_still_holds_create", async () => {
 
 test("fx5_with_no_readiness_check_create_stays_enabled_and_the_page_and_quickstart_say_so",
   async () => {
-    // FX-5 review L4. The readiness check is advisory: with none, Create is
-    // enabled. Before FX-5 every plan asked for 1, which any broker holds; now a
-    // factor above the target's brokers can reach the runner, which fails the
-    // approved run when it creates the topics (after phase 5). The warning
-    // beside Create names the factor, and the quickstart no longer says the
-    // check must pass before Create.
+    // The readiness check is advisory: with none, Create is enabled, and a factor
+    // above the target's brokers can reach the runner, which fails the approved
+    // run when it creates the topics (after phase 5). The warning beside Create
+    // names the factor, and the quickstart does not say the check must pass
+    // before Create.
     const state = wizardState();
     setReplicationFactor(state, "3");
     const prepared = await preparePlan(state);
@@ -636,8 +617,6 @@ test("fx5_with_no_readiness_check_create_stays_enabled_and_the_page_and_quicksta
       assert.ok(quickstart.includes(said), "docs/install.md's first-restore step 3 says: " + said);
     }
   });
-
-// ------------------------------------------------------- the draft
 
 test("fx5_a_factor_the_operator_set_survives_the_draft_and_a_default_does_not", () => {
   assert.ok(WIZARD_DRAFT_FIELDS.includes("replicationFactor"));
@@ -664,8 +643,6 @@ test("fx5_a_factor_the_operator_set_survives_the_draft_and_a_default_does_not", 
   assert.equal(older.replicationChosen, false);
   assert.equal(replicationFactorOf(older), 2);
 });
-
-// ------------------------------------------------------- the mount half
 
 function mountApi(answers, asked) {
   const backups = fixture("wizard-backups.json");
@@ -770,8 +747,7 @@ test("fx5_legacy_mode_has_no_discovery_and_says_so_with_the_grammar_default", as
     "no discovery to run where there is no route for one");
 });
 
-// ------------------------------------- the class: a draft value the store drops
-
+// The class: a draft value the store drops.
 import { catalogRecoveryPoint, selectedTopics, setCatalogTopics } from "../pages/restore-wizard.js";
 
 /** The catalog point's id: a point with no Backup behind it. */
@@ -824,11 +800,11 @@ function catalogPointState(ns) {
 }
 
 test("fx5_a_catalog_point_mount_reads_the_targets_discovery_before_the_first_paint", async () => {
-  // THE CATALOG HALF (FX-5 review L2). A catalog point with no Backup behind
-  // it (PLAT-15.2) is mounted by its own path, `mountCatalogPoint`, which must
-  // read the TARGET's broker count before its first paint exactly as the
-  // Backup mount does -- or every restore from a catalog point shows the
-  // grammar's 1 and "the target's topic discoveries have not been read".
+  // A catalog point with no Backup behind it is mounted by its own path,
+  // `mountCatalogPoint`, which must read the TARGET's broker count before its
+  // first paint exactly as the Backup mount does -- or every restore from a
+  // catalog point shows the grammar's 1 and "the target's topic discoveries
+  // have not been read".
   const asked = [];
   const view = fakeView();
   const ns = "team-fx5-cat-mount";
@@ -853,12 +829,11 @@ test("fx5_a_catalog_point_mount_reads_the_targets_discovery_before_the_first_pai
 });
 
 test("fx5_class_every_wizard_draft_value_is_one_the_draft_store_keeps", () => {
-  // THE CLASS (FX-5's sweep). `keepDraft` keeps strings and booleans and DROPS
-  // anything else without a word. The replication factor met it as a number;
-  // the topic subset and a catalog point's typed topic list had met it as
-  // arrays since they were added, so a re-mount put every frozen topic back
-  // under "your unsubmitted edits ... are back". Every value the wizard hands
-  // the store is held to the store's two types, over both kinds of point.
+  // THE CLASS: `keepDraft` keeps strings and booleans and DROPS anything else
+  // without a word -- a number factor, or the arrays of a topic subset and a
+  // catalog point's typed topic list (a re-mount would put every frozen topic
+  // back). Every value the wizard hands the store is held to the store's two
+  // types, over both kinds of point.
   const backupPoint = withBrokers(wizardState("team-fx5-class"), BROKERS);
   const catalogPoint = catalogPointState("team-fx5-class-cat");
   setCatalogTopics(catalogPoint, ["orders", "payments"]);
@@ -908,8 +883,7 @@ test("fx5_class_the_subset_and_a_catalog_points_topics_survive_the_draft", () =>
   assert.deepEqual(selectedTopics(byHand), ["orders"]);
 });
 
-// ------------------------------------------- PROD-05.1: the source's factor
-
+// The source's factor, from the catalog.
 import {
   MAX_SOURCE_CATALOGS,
   SOURCE_FACTS_NOT_READ,
@@ -956,7 +930,7 @@ test("prod051_the_point_id_of_a_backup_is_its_receipts_digest_prefix", () => {
   }
 });
 
-// L6 (fix round): ONE fixture, read by this row AND by the catalog's own
+// ONE fixture, read by this row AND by the catalog's own
 // (`crates/logweir/tests/catalog.rs::the_point_id_fixture_is_the_catalogs`):
 // the checked-in signed receipt, its digest and the point id the catalog
 // writes for it. A drift on either side fails the side that drifted.
@@ -981,7 +955,7 @@ test("prod051_the_source_factor_from_the_catalog_capped_by_the_brokers_with_its_
       "2 (capped at the target's 2 brokers; the source's is 3, as recovery catalog `archive` " +
       "records point `" + catalogPointId() + "`, the largest of the selected topics')");
     assert.equal(replicationFactorOf(state), 2, "the plan carries the capped default");
-    // FX-5's refusal above the broker count STAYS: 3 typed over a fresh 2.
+    // The refusal above the broker count STAYS: 3 typed over a fresh 2.
     setReplicationFactor(state, "3");
     assert.match(replicationProblems(state).replicationFactor || "",
       /^`ReplicationFactorExceedsBrokers`: the target's topic discovery/,

@@ -1,5 +1,4 @@
-//! PROD-17.1 C1 (OD-12) — the `Restore` reconciler's STANDING arm is
-//! withdrawn.
+//! The `Restore` reconciler's STANDING arm is withdrawn.
 //!
 //! A `Restore` carrying `spec.authorization` (a standing rehearsal
 //! authorization) is refused BY NAME at admission, whatever `Approval` exists,
@@ -30,7 +29,7 @@ fn now() -> DateTime<Utc> {
 
 /// The plan every row freezes: inside the scope below, and nothing else.
 ///
-/// The exact `DrillSpec` grammar the runner parses — `plan_scope_facts` reads
+/// The exact `DrillSpec` grammar the runner parses: `plan_scope_facts` reads
 /// `target.mode`, the topic prefix, `source.topics`, `sample.max_partitions`
 /// and `sample.records_per_partition` out of it, so a fixture that drifted
 /// from the real shape would make every scope row vacuous.
@@ -115,7 +114,7 @@ fn approval() -> weirkeeper::crds::approval::Approval {
     approval_over(&envelope())
 }
 
-/// The rehearsal `Restore` a firing slot creates — `spec.authorization`, no
+/// The rehearsal `Restore` a firing slot creates: `spec.authorization`, no
 /// `spec.approvalRef`, and the slot label `triggered_by` reads.
 fn standing_restore() -> Restore {
     serde_json::from_value(serde_json::json!({
@@ -129,7 +128,7 @@ fn standing_restore() -> Restore {
                 "logweir.dev/rehearsal-schedule": SCHEDULE,
                 "logweir.dev/rehearsal-slot": "20260920T030000",
             },
-            // The UID of the Approval this slot was authorised against — the
+            // The UID of the Approval this slot was authorised against: the
             // `RehearsalSchedule` reconciler writes it, and `admit` requires
             // the object it resolved BY NAME to carry it.
             "annotations": {"logweir.dev/approval-uid": APPROVAL_UID},
@@ -176,19 +175,17 @@ fn cluster(reachable: bool) -> weirkeeper::crds::kafka_cluster::KafkaCluster {
     .expect("the fixture is a KafkaCluster")
 }
 
-// ---------------------------------------------------------------------------
 // The named refusal
-// ---------------------------------------------------------------------------
 
 /// **A standing `Restore` is refused BY NAME, whatever its `Approval`.** The
 /// fixture's standing `Approval` is `Verified=True` and bound to the schedule,
-/// and the target is reachable — every input the withdrawn arm used to admit
-/// on — and the verdict is still `StandingAuthorizationRefused`. With no
+/// and the target is reachable (every input the withdrawn arm admitted on),
+/// and the verdict is still `StandingAuthorizationRefused`. With no
 /// `Approval` and no cluster at all it is the same refusal: nothing else is
 /// looked at.
 ///
 /// NEGATIVE CONTROL: removing step 0 of `admit_with_policy` makes this row
-/// fail — the standing `Restore` has no `spec.approvalRef`, so it then falls
+/// fail: the standing `Restore` has no `spec.approvalRef`, so it then falls
 /// to `ApprovalNotReceived` (terminal, but not by name).
 #[test]
 fn a_standing_restore_is_refused_by_name_whatever_its_approval() {
@@ -210,9 +207,7 @@ fn a_standing_restore_is_refused_by_name_whatever_its_approval() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The per-run path is unchanged
-// ---------------------------------------------------------------------------
 
 /// An ordinary `Restore`'s argv carries `--approval` and no standing material,
 /// and its trigger names the approval.

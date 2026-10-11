@@ -1,6 +1,6 @@
 //! Phase −1's admission guard: the source-side twin of `phase0_admit`, with
 //! the same structure and for the same reason — **all local checks first,
-//! network second** (`phase0_admit.rs:28-43` local, `:94` network).
+//! network second**.
 //!
 //! A local refusal must not need a reachable broker: a plan this build will
 //! never accept is knowable with no cluster, no bucket and no engine, and
@@ -28,14 +28,14 @@ pub struct Admitted {
 ///
 /// `args` is taken so step 4 — interface **I6**'s refusal — can be raised
 /// here: it is a property of the FLAGS alone and needs no cluster, no bucket
-/// and no engine (Task 4 review, F-3).
+/// and no engine.
 pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result<(), BackupError> {
     // 1. `?` on purpose: the scan FAILS CLOSED. A spec text this scanner
     //    cannot parse is a spec it did not scan, and that is a refusal (exit
     //    3), never an empty result silently treated as clean. Same predicate
-    //    (`guard.rs:30`) and same refusal wording as `phase0_admit.rs:31-43`
-    //    — Global Constraint 4 extends to the rendered `backup.yaml`, and the
-    //    guard refuses on the KEY, never on the value.
+    //    and refusal wording as phase 0's: Global Constraint 4 extends to the
+    //    rendered `backup.yaml`, and the guard refuses on the KEY, never on the
+    //    value.
     let bad = scan_forbidden_keys(spec_text)?;
     if !bad.is_empty() {
         return Err(GuardRefusal(format!(
@@ -50,18 +50,18 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
-    // 1b. **C15** (PROD-00.3f): an `http://` archive endpoint with
-    //     `allow_http: false` is refused here, exit 3, before any client
-    //     exists. The pinned engine would otherwise derive plaintext from the
-    //     scheme; `render_storage_block`'s refusal is the backstop (exit 1).
+    // 1b. An `http://` archive endpoint with `allow_http: false` is refused
+    //     here, exit 3, before any client exists. The pinned engine would
+    //     otherwise derive plaintext from the scheme; `render_storage_block`'s
+    //     refusal is the backstop (exit 1).
     logweir_core::guard::reject_plaintext_endpoint_without_allow_http("storage", &spec.storage)?;
 
-    // 1b'. **FX-20 fix round (review F1)**: a region that is not a region
-    //      name is refused here, exit 3 (`StorageRegionInvalid`), before any
-    //      store or client exists; without an endpoint it is the host.
+    // 1b'. A region that is not a region name is refused here, exit 3
+    //      (`StorageRegionInvalid`), before any store or client exists; without
+    //      an endpoint it is the host.
     logweir_core::guard::reject_invalid_storage_region("storage", &spec.storage)?;
 
-    // 1c. **PROD-01.3**: SASL/PLAIN without TLS (`refusal-reason=
+    // 1c. SASL/PLAIN without TLS (`refusal-reason=
     //     PlainWithoutTls`) and `mtls` without TLS are refused here, exit 3,
     //     before any client exists — so a PLAIN password never leaves this
     //     process for a source the plan would have dialled in the clear.
@@ -72,7 +72,7 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
     //    `render_backup::render` carries the identical call, and that is NOT
     //    where a plan gets refused: a renderer refusal is reached inside
     //    `DataEngine::backup` and is exit 1 with no `refusal-reason=` line
-    //    (ruling R-E, which is not reopened here). A wildcard in a spec is an
+    //    (ruling R-E). A wildcard in a spec is an
     //    adopter-written string this build will never accept, knowable with
     //    no broker — so it is refused HERE, where the code is 3.
     //
@@ -121,7 +121,7 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
-    // 3a. **FX-33.** At most `MAX_BACKUP_TOPICS` names. A backup signs
+    // 3a. At most `MAX_BACKUP_TOPICS` names. A backup signs
     //     several blocks per topic in its receipt, and the catalog and the
     //     controller read a receipt under one bound
     //     (`logweir_core::topic_budget`); a selection over the count would
@@ -135,7 +135,7 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
-    // 3b. **PROD-05.1.** A declared owner names one of the plan's topics, a
+    // 3b. A declared owner names one of the plan's topics, a
     //     kind the receipt defines and a usable reference — or the plan is
     //     refused here, exit 3, rather than recording an owner the receipt's
     //     arm 18 would refuse after the archive exists, or silently dropping
@@ -153,7 +153,7 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
-    // PROD-04.1: the consumer groups whose positions the receipt records —
+    // The consumer groups whose positions the receipt records —
     // the plan's `source.consumer_groups` and `--consumer-group` together. A
     // selection the receipt could not record one outcome per id for is
     // refused before anything runs, never trimmed.
@@ -168,22 +168,13 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
-    // 4. Interface **I6**'s refusal, LAST among the local checks.
-    //
-    //    Task 4's placeholder refused `--out`/`--receipt-out` outright,
-    //    because it wrote no receipt. **Task 5b writes one**, so the flags
-    //    work and the only thing left to refuse is the one shape that cannot
-    //    be honoured: two DIFFERENT paths for the one document this command
-    //    writes.
-    //
-    //    Ordering, both ways round, and unchanged. It is AFTER steps 1–3
-    //    because a guard refusal must win over a bad flag combination: a spec
-    //    carrying `purge_topics` and two receipt paths is exit 3, on the key,
-    //    not exit 1 on the flags. It is inside the LOCAL stage — not after
-    //    `network`, where Task 4's fix round 1 found it — because a property
-    //    of the FLAGS is knowable with ZERO I/O, and refusing it after step 5
-    //    cost a measured 20.1 s and ~360 librdkafka lines against the SOURCE
-    //    cluster, i.e. the production one (review F-3).
+    // 4. Interface **I6**'s refusal, LAST among the local checks: two
+    //    DIFFERENT paths for the one document this command writes cannot be
+    //    honoured. After steps 1–3, because a guard refusal wins over a bad
+    //    flag combination (exit 3 on the key, not exit 1 on the flags); inside
+    //    the local stage, because a property of the flags is knowable with
+    //    zero I/O and must not cost a metadata timeout against the production
+    //    source cluster.
     refuse_two_receipt_paths(args)
 }
 
@@ -231,14 +222,14 @@ pub fn network(
 
     // 5. **GC18(c) rail 4, stated once.**
     //
-    //    `allowed.allowed_cluster_ids` (`logweir-core/src/spec.rs:333`) is the
+    //    `allowed.allowed_cluster_ids` is the
     //    restore-TARGET allowlist: the set of scratch clusters a drill may
     //    restore INTO. A cluster cannot be both the source of an archive and
     //    a permitted scratch target — a scratch cluster is one whose topics a
     //    drill deletes in phase 9 — so an observed source cluster appearing
     //    in that list is refused.
     //
-    //    **`allowed.source_cluster_id` (`spec.rs:336`) is NOT read by the
+    //    **`allowed.source_cluster_id` is NOT read by the
     //    backup path.** Do not look for it here. That field is the drill's:
     //    phase 0 uses it to refuse a TARGET that equals the source, and it is
     //    `Option<String>` with `#[serde(default)]`, so an allowlist file that

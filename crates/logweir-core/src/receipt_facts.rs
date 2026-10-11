@@ -1,12 +1,12 @@
-//! **FX-33 — the facts a reader takes from a backup receipt WITHOUT building
+//! **The facts a reader takes from a backup receipt WITHOUT building
 //! a tree of it.**
 //!
 //! The shared controller verifies a receipt of up to
 //! [`crate::topic_budget::MAX_RECEIPT_BYTES`] and then needs five things from
 //! it: the `backup_id` it names, the capture's two instants (`started_at`,
 //! `finished_at` — the second is also the signing time the trust check
-//! reads), the `covered` window, and the sum of `records`. It used to parse
-//! the whole document into a `serde_json::Value`, which costs up to 37 times
+//! reads), the `covered` window, and the sum of `records`. Parsing the whole
+//! document into a `serde_json::Value` costs up to 37 times
 //! the document's size; at the receipt bound that is 190 MB in a process that
 //! serves every namespace. [`ReceiptFacts::fold`] reads the same five things
 //! as the bytes stream past and keeps nothing per topic.

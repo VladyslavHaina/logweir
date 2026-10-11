@@ -1,15 +1,10 @@
 //! D2 §4.2's check runner, `logweir check run` — the contract, the frames, the
 //! exit codes and the six mutants.
 //!
-//! # What this file is, and why it is shaped this way
-//!
-//! The runner's whole output is a byte stream a CONTROLLER parses. So the
-//! strongest assertion available is not "the result struct has this field" but
-//! "these exact bytes are accepted by `check_contract::frames::Decoder` — the
-//! decoder `weirkeeper::check::relay` calls — and carry this". Every kind's
-//! row therefore runs the real emission path (`check::execute_with`) into a
-//! buffer and decodes it, so a change that breaks the relay fails here rather
-//! than in a controller integration test nobody runs on a laptop.
+//! The runner's output is a byte stream a CONTROLLER parses, so every kind's
+//! row runs the real emission path (`check::execute_with`) into a buffer and
+//! decodes it with `check_contract::frames::Decoder`, the decoder
+//! `weirkeeper::check::relay` calls: a change that breaks the relay fails here.
 //!
 //! # Nothing here dials, except the e2e-gated rows at the end
 //!
@@ -63,10 +58,6 @@ use logweir_kafka::inventory::{
     CheckFailure, InventoryProbe, ListedTopic, Listing, TopicCreateOutcome, TopicPresence,
 };
 use logweir_kafka::reader::NewTopicSpec;
-
-// ===========================================================================
-// Fixtures
-// ===========================================================================
 
 /// The subject this suite's plans are about.
 const SUBJECT_UID: &str = "11111111-2222-3333-4444-555555555555";
@@ -167,10 +158,6 @@ fn mount(plan: &CheckPlan) -> Mounted {
     }
 }
 
-// ===========================================================================
-// Doubles
-// ===========================================================================
-
 /// What a fake object store answers instead of an object.
 #[derive(Clone, Debug)]
 enum Fault {
@@ -195,10 +182,8 @@ impl Fault {
 struct ObjectState {
     objects: BTreeMap<String, Vec<u8>>,
     get_fault: Option<Fault>,
-    /// Faults scoped to ONE key. A whole-store `get_fault` cannot tell a
-    /// receipt read from a record read — which is how review finding F4's
-    /// guard gap survived: the record read failed first, so the receipt
-    /// branch was never reached with a failure at all.
+    /// Faults scoped to ONE key: a whole-store `get_fault` cannot tell a
+    /// receipt read from a record read.
     key_faults: BTreeMap<String, Fault>,
     /// The same, for a listing: one day shard that will not list is a
     /// different fact from a whole store that will not.
@@ -207,7 +192,7 @@ struct ObjectState {
     put_fault: Option<Fault>,
     /// The backend answered `NotSupported`/`NotImplemented` to
     /// `PutMode::Create` and `put_create_only` fell back to HEAD-then-PUT, so
-    /// the write happened WITHOUT the precondition (reviewer question Q1).
+    /// the write happened WITHOUT the precondition.
     unconditional_put: bool,
     puts: Vec<(String, Vec<u8>)>,
     /// Every operation this handle was asked for, as `get <key>`,
@@ -215,13 +200,13 @@ struct ObjectState {
     /// principal was only ever asked to create one key") is an assertion and
     /// not a reading of the code.
     calls: Vec<String>,
-    /// FX-31: every read's key and the cap it was made with, in call order —
+    /// Every read's key and the cap it was made with, in call order —
     /// so "this read is bounded by THAT cap" is an assertion too.
     read_caps: Vec<(String, u64)>,
-    /// FX-31: sizes the store reports for keys, over their real bytes.
+    /// Sizes the store reports for keys, over their real bytes.
     reported_sizes: BTreeMap<String, u64>,
     prefix: String,
-    /// FX-7: a key's VERSION history, oldest first; the last entry is the
+    /// A key's VERSION history, oldest first; the last entry is the
     /// current version, and its bytes are also the key's entry in `objects`.
     /// A key with no history is an object on an unversioned bucket.
     versions: BTreeMap<String, Vec<(String, Vec<u8>)>>,
@@ -251,7 +236,7 @@ impl FakeObjects {
         self
     }
 
-    /// FX-31: the store REPORTS `size` for `key`, whatever its bytes are —
+    /// The store REPORTS `size` for `key`, whatever its bytes are —
     /// so a row can hold a multi-gigabyte object without allocating one.
     fn reporting_size(self, key: &str, size: u64) -> Self {
         self.state
@@ -267,7 +252,7 @@ impl FakeObjects {
         self
     }
 
-    /// FX-7: make `key` an object on a VERSIONED bucket with this history,
+    /// Make `key` an object on a VERSIONED bucket with this history,
     /// oldest first. Its current bytes become the last version's.
     fn with_versions(self, key: &str, history: &[(&str, &[u8])]) -> Self {
         let mut s = self.state.lock().unwrap();
@@ -334,7 +319,7 @@ impl FakeObjects {
     }
 }
 
-/// `Store::get_capped`'s first fence, in memory (FX-31): an object over the
+/// `Store::get_capped`'s first fence, in memory: an object over the
 /// caller's cap is `TooLarge` and its bytes are not handed back.
 fn within_cap(key: &str, bytes: Vec<u8>, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
     let size = bytes.len() as u64;
@@ -433,7 +418,7 @@ impl ObjectAccess for FakeObjects {
         }
     }
 
-    /// FX-7: the current version, when the key has a history.
+    /// The current version, when the key has a history.
     fn get_with_version(
         &self,
         key: &str,
@@ -449,15 +434,15 @@ impl ObjectAccess for FakeObjects {
         Ok((bytes, current))
     }
 
-    /// FX-7: one retained version by id; an unversioned key cannot be read by
+    /// One retained version by id; an unversioned key cannot be read by
     /// version at all, which is an error and never the current bytes.
     fn get_version(&self, key: &str, version: &str, max_bytes: u64) -> Result<Vec<u8>, StoreError> {
         let mut s = self.state.lock().unwrap();
         let at = format!("{key}?versionId={version}");
         s.calls.push(format!("get {at}"));
         s.read_caps.push((at.clone(), max_bytes));
-        // A fault scoped to ONE version read (FX-7 fix round): `failing_key`
-        // with the `<key>?versionId=<id>` spelling.
+        // A fault scoped to ONE version read: `failing_key` with the
+        // `<key>?versionId=<id>` spelling.
         if let Some(f) = s.key_faults.get(&at) {
             return Err(f.to_error(&at));
         }
@@ -471,7 +456,7 @@ impl ObjectAccess for FakeObjects {
                 .map(|(_, bytes)| bytes.clone())
                 .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")))
                 .and_then(|bytes| {
-                    // FX-31: a size the store REPORTS for one version
+                    // A size the store REPORTS for one version
                     // (`reporting_size` with the `<key>?versionId=<id>`
                     // spelling), refused before its bytes as a current read is.
                     match s.reported_sizes.get(&at) {
@@ -487,12 +472,12 @@ impl ObjectAccess for FakeObjects {
     }
 }
 
-/// FX-7: a REAL `Store` behind the check's object trait, shared across the
-/// handles a wiring hands out — so a row can hold the live implementation's
+/// A REAL `Store` behind the check's object trait, shared across the handles a
+/// wiring hands out, so a row can hold the live implementation's
 /// `get_with_version` override in place. Every method delegates to `Store`'s
-/// OWN trait implementation, including the two FX-7 methods: were `Store` to
-/// lose its override, it would answer the trait's default (no version) here
-/// too, and the row reading it would fail.
+/// OWN trait implementation, including the two version methods: were `Store`
+/// to lose its override, it would answer the trait's default here too, and the
+/// row reading it would fail.
 struct SharedStore(Arc<logweir_engine_oso::storage::Store>);
 
 impl ObjectAccess for SharedStore {
@@ -539,11 +524,11 @@ struct ProbeState {
     create_fault: Option<(CheckCode, String)>,
     create_calls: Vec<Vec<NewTopicSpec>>,
     describe_calls: Vec<String>,
-    /// PROD-01.2: what the endpoint answered ApiVersions. `None` is the
+    /// What the endpoint answered ApiVersions. `None` is the
     /// trait's own default: not observed.
     api_versions: Option<Result<ApiVersions, (CheckCode, String)>>,
     api_versions_calls: usize,
-    /// PROD-01.2: topics whose DescribeConfigs fails, and how.
+    /// Topics whose DescribeConfigs fails, and how.
     topic_config_faults: BTreeMap<String, (CheckCode, String)>,
     topic_config_calls: Vec<String>,
 }
@@ -556,9 +541,8 @@ struct FakeProbe {
 impl FakeProbe {
     /// A healthy Apache Kafka broker: it names a cluster id, and its
     /// configuration reports the record-timestamp bound, as every Apache
-    /// Kafka broker does (unbounded is the value `i64::MAX`). PROD-01.2: a
-    /// broker answer WITHOUT the key is "not reported", which is its own row
-    /// (`without_broker_config`).
+    /// Kafka broker does (unbounded is the value `i64::MAX`). A broker answer
+    /// WITHOUT the key is "not reported" (`without_broker_config`).
     fn new() -> Self {
         let p = Self::default();
         p.state.lock().unwrap().cluster_id = Some("M29I2S7FQPyHBEX12Vx7XA".to_string());
@@ -574,7 +558,7 @@ impl FakeProbe {
         self
     }
 
-    /// PROD-01.2: the endpoint's ApiVersions answer, as `(key, min, max)`.
+    /// The endpoint's ApiVersions answer, as `(key, min, max)`.
     fn with_api_versions(self, ranges: &[(i16, i16, i16)]) -> Self {
         self.state.lock().unwrap().api_versions = Some(Ok(ApiVersions::of(ranges)));
         self
@@ -654,10 +638,10 @@ impl FakeProbe {
         self
     }
 
-    /// FX-4 / T13: the broker configuration read is REFUSED — what
-    /// `KafkaInventory::broker_configs` now returns for the empty answer
-    /// rdkafka 0.36.2 hands back when the principal lacks DescribeConfigs on
-    /// the cluster (`ClusterAuthorizationFailed`), instead of an empty map.
+    /// The broker configuration read is REFUSED: what
+    /// `KafkaInventory::broker_configs` returns for the empty answer rdkafka
+    /// 0.36.2 hands back when the principal lacks DescribeConfigs on the
+    /// cluster (`ClusterAuthorizationFailed`).
     fn failing_broker_configs(self, code: CheckCode, message: &str) -> Self {
         self.state.lock().unwrap().broker_configs_fault = Some((code, message.to_string()));
         self
@@ -793,7 +777,7 @@ struct FakeWiring {
     reader_grants: Arc<Mutex<Vec<Option<GrantRef>>>>,
     signer: Option<Result<String, String>>,
     files: BTreeMap<String, Vec<u8>>,
-    /// FX-7: when set, EVERY `objects` handle is this real `Store` (see
+    /// When set, EVERY `objects` handle is this real `Store` (see
     /// [`SharedStore`]) instead of a `FakeObjects`.
     shared_store: Option<Arc<logweir_engine_oso::storage::Store>>,
 }
@@ -963,10 +947,6 @@ impl Wiring for FakeWiring {
     }
 }
 
-// ===========================================================================
-// Harness
-// ===========================================================================
-
 /// Run the whole emission path into a buffer and DECODE it with the
 /// controller's own decoder.
 struct Run {
@@ -998,19 +978,12 @@ impl Run {
         self.result().checks.iter().any(|c| c.id == id)
     }
 
-    /// The raw stdout PLUS every decoded stream's bytes.
-    ///
-    /// A disclosure assertion over `stdout` alone is not one: every stream
-    /// travels as base64 part frames, so a credential inside the result
-    /// document is invisible to a plaintext scan of the log. The mutant round
-    /// for M4 found exactly that — the planted secret was redacted, the
-    /// bypass was planted, and the test still passed, because it was reading
-    /// the wrapper and not the payload.
-    ///
-    /// The decoded bytes here are the RUNNER's, before
-    /// `CheckRelay::result()`'s `sanitise` — which is the point: the claim is
-    /// that the runner did not print a credential, not that the controller
-    /// would have scrubbed one.
+    /// The raw stdout PLUS every decoded stream's bytes. Every stream travels
+    /// as base64 part frames, so a credential inside the result document is
+    /// invisible to a plaintext scan of stdout alone. The decoded bytes are the
+    /// RUNNER's, before `CheckRelay::result()`'s `sanitise`: the claim is that
+    /// the runner did not print a credential, not that the controller would
+    /// have scrubbed one.
     fn everything(&self) -> String {
         let mut all = self.stdout.clone();
         if let Ok(relay) = &self.relay {
@@ -1091,9 +1064,7 @@ fn as_pairs<'a>(v: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)>
     v.iter().map(|(k, x)| (*k, x.as_str())).collect()
 }
 
-// ===========================================================================
-// 1. The startup order (D2 §4.2 steps 1-4): exit 3, no frames, no network
-// ===========================================================================
+// 1. The startup order (D2 §4.2 steps 1-4): exit 3, no frames, no network.
 
 /// **M2.** The digest the Job pinned decides which bytes may run.
 #[test]
@@ -1177,14 +1148,9 @@ fn a_malformed_plan_sha_env_is_refused() {
 
 /// An unknown kind is a PARSE error, which D2 §4.2 step 4 wants: the request
 /// enum is externally tagged, so a tag this build does not know names a variant
-/// serde cannot construct.
-///
-/// **The example used to be `{"catalogSync": …}`**, which has landed as the
-/// sixth kind. It is now `retentionSweep` — D3 §6's, and not this build's — so
-/// the row still asserts what it was written to assert. The second half of the
-/// row is the one that would have gone quiet otherwise: a KNOWN tag carrying
-/// the WRONG body is refused too, because every variant keeps its own
-/// `deny_unknown_fields`.
+/// serde cannot construct (`retentionSweep` is D3 §6's, not this build's). A
+/// KNOWN tag carrying the WRONG body is refused too, because every variant
+/// keeps its own `deny_unknown_fields`.
 #[test]
 fn an_unknown_plan_kind_is_refused() {
     let m = mount(&inventory_plan(100, 1 << 20));
@@ -1288,38 +1254,21 @@ fn the_refusal_key_is_the_controllers_key() {
     );
 }
 
-/// **M1 and MR-B, the structural half.** Nothing D2 §4.2's startup order can
-/// reach builds a client.
-///
-/// # Why this is a MODULE rule and not a two-function rule
-///
-/// The first version brace-counted the bodies of `load` and `runner_bounds`
-/// and forbade the constructors plus this crate's wrappers around them. The
-/// reviewer's mutant **MR-B** walked straight past it: a new helper
-/// `fn prewarm(bytes: &[u8])` in `check/mod.rs` that dials, called from `load`
-/// before `parse_and_verify`, is invisible to a scan of two bodies — and
-/// `check/mod.rs` is not a `no_network_in_unit_tests` construction site
-/// either, because it names `kafka::dial(` and not `KafkaInventory::connect(`.
-/// A plan `ConfigMap` swapped under a running Job would have reached a broker
-/// with the projected SASL password before the digest refused it, which is the
-/// one property the startup order exists for.
-///
-/// That was the same defect one level up as the one the M1 round already fixed
-/// once: a rule about NAMES where a rule about REACHABILITY was needed. So the
-/// rule is now about the module:
+/// **M1, the structural half.** Nothing D2 §4.2's startup order can reach
+/// builds a client: a plan `ConfigMap` swapped under a running Job must not
+/// reach a broker with the projected SASL password before the digest refuses
+/// it. The rule is about REACHABILITY, not names:
 ///
 /// * **every function in `check/mod.rs` except [`EXECUTION_FUNCTIONS`] is
-///   forbidden to name a dialling or handle-building token** — so a helper
+///   forbidden to name a dialling or handle-building token**, so a helper
 ///   cannot be added at all, wherever it is called from;
-/// * **`load` may call only functions on a named allowlist**, so a future
-///   helper is a deliberate, reviewable addition to that list rather than an
-///   edit nobody sees;
+/// * **every function reachable before step 5 may call only a named
+///   allowlist**, so a new callee is a deliberate, reviewable addition;
 /// * and `run` still calls `load` before `execute`, which still takes a
 ///   `&Loaded` that only `load` produces.
 ///
-/// The two execution functions are exempt because reaching a kind IS their job,
-/// and they are reachable only from a verified plan: `execute_with` takes a
-/// `&Loaded`, and the third clause is what keeps that true.
+/// The two execution functions are exempt because reaching a kind IS their
+/// job, and they are reachable only from a verified plan.
 #[test]
 fn the_startup_path_builds_no_client() {
     let src = std::fs::read_to_string(repo_root().join("crates/logweir/src/check/mod.rs"))
@@ -1360,20 +1309,12 @@ fn the_startup_path_builds_no_client() {
 
     // (b) EVERY FUNCTION REACHABLE BEFORE STEP 5 CALLS ONLY WHAT IT IS ALLOWED
     //     TO. Clause (a) stops a dialling helper being added to this module;
-    //     this stops one being reached in another module.
-    //
-    //     It is a CLOSURE and not a check of `load` alone, which is reviewer
-    //     finding R-F1: `runner_bounds` is step 4 too and is itself on the
-    //     allowlist, so a `kafka::prewarm(` reached from THERE satisfied
-    //     clause (a) — the token is not a client constructor — and clause (b)
-    //     never looked at it. Mutant MR-B3 dialled before the digest check
-    //     with the whole suite green.
-    //
-    //     The walk starts at the three startup roots and follows every callee
-    //     that is DEFINED in this module, so a new startup helper is pulled in
-    //     automatically. It stops at the execution functions, which are the
-    //     step-5 boundary by definition: `execute_with` takes a `&Loaded`,
-    //     which only `load` produces.
+    //     this stops one being reached in another module. It is a CLOSURE, not
+    //     a check of `load` alone, because `runner_bounds` is step 4 too: the
+    //     walk starts at the three startup roots, follows every callee DEFINED
+    //     in this module, and stops at the execution functions, the step-5
+    //     boundary (`execute_with` takes a `&Loaded`, which only `load`
+    //     produces).
     let defined: BTreeSet<String> = bodies.iter().filter_map(|(sig, _)| fn_name(sig)).collect();
     let execution: BTreeSet<String> = bodies
         .iter()
@@ -1427,8 +1368,8 @@ fn the_startup_path_builds_no_client() {
             }
         }
     }
-    // The closure really walked past its roots — a walk that stopped at `load`
-    // would assert nothing about `runner_bounds`, which is R-F1 exactly.
+    // The closure really walked past its roots: a walk that stopped at `load`
+    // would assert nothing about `runner_bounds`.
     assert!(
         seen.contains("runner_bounds"),
         "the startup closure did not reach `runner_bounds`: {seen:?}"
@@ -1457,8 +1398,7 @@ fn the_startup_path_builds_no_client() {
 const EXECUTION_FUNCTIONS: [&str; 2] = ["pub fn execute<", "pub fn execute_with<"];
 
 /// Every token that means "a client or a store handle is built or reached
-/// here" — the constructors AND this crate's own wrappers around them, because
-/// a wrapper is what mutant MR-B used.
+/// here": the constructors AND this crate's own wrappers around them.
 const CLIENT_TOKENS: [&str; 13] = [
     "KafkaInventory::connect(",
     "RdKafkaReader::connect(",
@@ -1484,18 +1424,13 @@ const STARTUP_ROOTS: [&str; 3] = ["pub fn run(", "pub fn load(", "pub fn runner_
 
 /// Everything a function reachable before step 5 may call.
 ///
-/// A LIST, so a new callee there is a reviewable decision rather than an edit
-/// nobody sees. That is the half of the fix for reviewer mutants MR-B / MR-B2 /
-/// MR-B3 that clause (a) cannot make on its own: (a) stops a dialling helper
-/// being ADDED to `check/mod.rs`, and this stops one being REACHED in any other
-/// module.
-///
-/// Only callees DEFINED OUTSIDE this module appear here — one defined inside it
-/// is followed by the walk instead, and clause (a) has already forbidden it a
-/// client token. `format!` does not appear because a macro's `!` ends the
-/// identifier run, which is a property of the tokeniser and not an exemption.
+/// A LIST, so a new callee there is a reviewable decision: clause (a) stops a
+/// dialling helper being ADDED to `check/mod.rs`, and this stops one being
+/// REACHED in any other module. Only callees DEFINED OUTSIDE this module
+/// appear; one defined inside it is followed by the walk. `format!` is absent
+/// because a macro's `!` ends the identifier run.
 /// `every_startup_allowlist_entry_is_still_earned` fails on an entry nothing
-/// calls, so the list cannot rot into a comment.
+/// calls.
 const STARTUP_MAY_CALL: [&str; 25] = [
     // -- control flow: Result/Option constructors and combinators ---------
     "Ok",
@@ -1532,15 +1467,9 @@ const STARTUP_MAY_CALL: [&str; 25] = [
 ];
 
 /// Callees the walk reaches through a function DEFINED in `check/mod.rs` that
-/// is itself pure — the stderr subscriber, the deadline's clock and the stdout
-/// handle a refusal is printed through.
-///
-/// SEPARATE from [`STARTUP_MAY_CALL`] because they are a different claim: those
-/// are what STARTUP calls, these are what startup's own helpers call. Splitting
-/// them keeps the first list readable as "what steps 1-4 do".
-///
-/// None of them opens a socket or a bucket. `std::io::stdout` is the refusal
-/// line's writer, and D2 §4.2 requires that line on exit 3.
+/// is itself pure: the stderr subscriber, the deadline's clock and the stdout
+/// handle a refusal is printed through (D2 §4.2 requires that line on exit 3).
+/// Separate from [`STARTUP_MAY_CALL`], which lists what steps 1-4 call.
 const STARTUP_HELPERS_MAY_CALL: [&str; 9] = [
     "Instant::now",
     "Duration::from_secs",
@@ -1563,13 +1492,10 @@ fn fn_name(sig: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Every `name(` called in a function body, as a bare identifier path.
-///
-/// A TOKENISER, not a parser: it takes the identifier run immediately before
-/// each `(` that is not a definition, which is exactly what "which functions
-/// does this body call" needs and is why the allowlist above can be a list of
-/// names. Method calls arrive as their final segment (`foo.trim()` is `trim`),
-/// which is what makes the list readable.
+/// Every `name(` called in a function body, as a bare identifier path: a
+/// TOKENISER that takes the identifier run before each `(` that is not a
+/// definition. Method calls arrive as their final segment (`foo.trim()` is
+/// `trim`).
 fn calls_in(body: &str) -> Vec<String> {
     let bytes: Vec<char> = body.chars().collect();
     let mut out: Vec<String> = Vec::new();
@@ -1606,12 +1532,8 @@ fn calls_in(body: &str) -> Vec<String> {
     out
 }
 
-/// Neither startup allowlist may hold an entry nothing calls.
-///
-/// The repository's own idiom (`no_network_in_unit_tests::
-/// every_allow_list_entry_is_still_earned`): a list that outlives the call it
-/// was written for stops describing the code and starts hiding it, and the
-/// next reader cannot tell which entries are load-bearing.
+/// Neither startup allowlist may hold an entry nothing calls: a list that
+/// outlives its call stops describing the code and starts hiding it.
 #[test]
 fn every_startup_allowlist_entry_is_still_earned() {
     let src = std::fs::read_to_string(repo_root().join("crates/logweir/src/check/mod.rs"))
@@ -1644,11 +1566,8 @@ fn every_startup_allowlist_entry_is_still_earned() {
     );
 }
 
-/// The bodies of every `fn` in a source file, keyed by its signature line.
-///
-/// Brace-counted, and consumed in shape from
-/// `crates/logweir/tests/no_network_in_unit_tests.rs::fn_bodies`, whose own
-/// header records why a line-based scan cannot answer a question about a body.
+/// The bodies of every `fn` in a source file, keyed by its signature line,
+/// brace-counted as `no_network_in_unit_tests.rs::fn_bodies` is.
 fn fn_bodies(src: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut line_start = 0usize;
@@ -1682,9 +1601,7 @@ fn fn_bodies(src: &str) -> Vec<(String, String)> {
     out
 }
 
-// ===========================================================================
-// 2. The frame writer
-// ===========================================================================
+// 2. The frame writer.
 
 fn entries(n: usize) -> Vec<TopicEntry> {
     (0..n)
@@ -1749,8 +1666,7 @@ fn the_two_relay_costs_agree() {
 }
 
 /// An inventory that never ran declares NO `topicLines` block; an empty
-/// cluster declares one with `count: 0`. PLAT-09.1 requires a user to be able
-/// to tell "empty" from "failed".
+/// cluster declares one with `count: 0`, so "empty" and "failed" differ.
 #[test]
 fn an_inventory_that_did_not_run_has_no_topic_lines_block() {
     let m = mount(&inventory_plan(100, 1 << 20));
@@ -1837,9 +1753,7 @@ fn every_frame_line_is_within_the_bound() {
     assert!(run.relay.is_ok());
 }
 
-// ===========================================================================
-// 3. `topicInventory`
-// ===========================================================================
+// 3. `topicInventory`.
 
 #[test]
 fn a_topic_inventory_relays_the_listing_and_its_digest() {
@@ -1960,19 +1874,13 @@ fn an_expected_topic_that_is_hidden_is_not_authorized_and_not_absent() {
         && r.state == logweir_core::check_contract::ExpectedTopicState::NotAuthorized));
 }
 
-// ===========================================================================
-// 4. `destinationAccess`
-// ===========================================================================
+// 4. `destinationAccess`.
 
 /// A store's refusal in the words `object_store` 0.14.1 hands over: its
 /// request line, its status line, and the store's error document (captured
 /// with the real client; `crates/logweir-store/tests/options.rs` holds the
-/// shape to the client itself).
-///
-/// The classifier reads an answer's own status and code and searches no text
-/// (PROD-01.2 review, M1: the text echoes the bucket and the key), so a row
-/// offers a refusal in the shape the product meets. The rows here used to
-/// pass on strings no store sends, with the code anywhere in them.
+/// shape to the client itself). The classifier reads an answer's own status
+/// and code and searches no text (the text echoes the bucket and the key).
 fn s3_refusal(status: &str, code: &str) -> String {
     format!(
         "Generic S3 error: Error performing GET https://s3.example.com/lw-archive/k in 3ms - \
@@ -1990,7 +1898,7 @@ fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
     }))
 }
 
-/// FX-20c: a `destinationAccess` plan that lists a Secret-backed grant emits
+/// A `destinationAccess` plan that lists a Secret-backed grant emits
 /// `destination.credentialBound` beside its role rows. The `want` literal is
 /// what `weirkeeper`'s `job_rows` mirror is held against
 /// (`the_expected_rows_include_the_binding_row_when_a_grant_is_listed`).
@@ -2171,9 +2079,7 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
     assert_eq!(row.state, CheckState::NotReady);
 }
 
-// ===========================================================================
-// 4-bis. One row, one principal (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL)
-// ===========================================================================
+// 4-bis. One row, one principal.
 
 /// The Secret a separated `evidenceWrite` grant names in these rows.
 const EVIDENCE_SECRET: &str = "evidence-writer";
@@ -2192,15 +2098,10 @@ fn access_denied() -> Fault {
     Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"))
 }
 
-/// **The defect's own shape.** A destination whose ARCHIVE principal may write
-/// under `logweir/` and whose EVIDENCE-WRITE principal may not: the row must be
-/// red, it must be red about the evidence-write principal, and the archive
-/// principal must not have written anything.
-///
-/// MUTANT RP-1 (`access.rs`): hand `evidence_writer` `None` instead of
-/// `probe.evidence_write`. The destination grant's handle then writes the
-/// marker, the row reads `MarkerWritten`, and this test fails on the first
-/// assertion.
+/// A destination whose ARCHIVE principal may write under `logweir/` and whose
+/// EVIDENCE-WRITE principal may not: the row is red, about the evidence-write
+/// principal, and the archive principal wrote nothing. Kills `access.rs`
+/// handing `evidence_writer` `None` instead of `probe.evidence_write`.
 #[test]
 fn a_separated_evidence_write_principal_that_cannot_write_is_red_for_that_principal() {
     let grant = GrantRef::static_secret(EVIDENCE_SECRET);
@@ -2297,17 +2198,11 @@ const MARKER_PUTS_PER_PROBE: usize = 2;
 
 /// **Least privilege, asserted.** The evidence-write principal's handle is
 /// asked for EXACTLY [`MARKER_PUTS_PER_PROBE`] create-only puts of the marker
-/// key: no read, no list,
-/// no delete (the `ObjectAccess` seam has no delete at all, and
-/// `the_only_write_in_the_check_runner_is_create_only` pins that). D2 §3.11
-/// grants `evidenceWrite` `s3:PutObject` (conditional create) and
+/// key: no read, no list, no delete (the `ObjectAccess` seam has no delete).
+/// D2 §3.11 grants `evidenceWrite` `s3:PutObject` (conditional create) and
 /// `s3:GetObject` on `logweir/*`; the probe needs the first on
-/// `logweir/readiness/*` and nothing else.
-///
-/// MUTANT RP-2 (`access.rs`): make the evidence-READ arm open its handle with
-/// `evidence_writer(dest, probe.evidence_write, …)` — a "reuse the writable
-/// handle" shortcut. The evidence principal is then asked for a `get`, and
-/// this test fails.
+/// `logweir/readiness/*` and nothing else. Kills an evidence-READ arm that
+/// reuses the writable handle.
 #[test]
 fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_else() {
     let grant = GrantRef::static_secret(EVIDENCE_SECRET);
@@ -2344,8 +2239,8 @@ fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_els
 }
 
 /// **Unchanged when the grants are one grant.** No `evidenceWrite` in the
-/// plan: the destination grant writes the marker, exactly as every earlier
-/// build did, and the row says the principal was the destination's.
+/// plan: the destination grant writes the marker, and the row says the
+/// principal was the destination's.
 #[test]
 fn without_a_separate_grant_the_destination_grant_writes_the_marker_as_before() {
     let m = mount(&separated_access_plan(None));
@@ -2408,10 +2303,8 @@ fn a_backup_readiness_plan_answers_evidence_writable_for_the_evidence_write_prin
 /// The principal selection itself, over an injected environment — the unit
 /// under both rows above, driven with no process-environment mutation.
 ///
-/// MUTANT RP-3 (`store.rs`): make the `static` arm return
-/// `StoreOptions::static_from_env()` (the destination grant's `AWS_*`). The
-/// first assertion fails: the options would name `StaticFromEnv`, not the
-/// evidence keys.
+/// Kills a `static` arm in `store.rs` that returns
+/// `StoreOptions::static_from_env()` (the destination grant's `AWS_*`).
 #[test]
 fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
     use logweir::check::store::{
@@ -2427,8 +2320,8 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
         k if k == EVIDENCE_SECRET_ACCESS_KEY_ENV => Some("evidence-secret-fixture".to_string()),
         "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
         "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
-        // The DESTINATION grant's session token is right there too (review
-        // L5): it must not be paired with the evidence keys.
+        // The DESTINATION grant's session token is right there too: it must
+        // not be paired with the evidence keys.
         "AWS_SESSION_TOKEN" => Some("destination-token-fixture".to_string()),
         _ => None,
     };
@@ -2521,14 +2414,10 @@ fn read_plan(grant: Option<GrantRef>) -> CheckPlan {
     }))
 }
 
-/// **The class sweep's own shape.** The destination grant may read the
-/// evidence root and the `evidenceRead` principal may not: the row is red,
-/// about the evidence-read principal, and the destination grant's handle was
-/// asked for nothing under the evidence root.
-///
-/// MUTANT RP-10 (`access.rs`): hand `evidence_reader` `None` instead of
-/// `probe.evidence_read`. The destination grant's handle answers, the row reads
-/// `EvidenceReadable`, and this test fails on its first assertion.
+/// The destination grant may read the evidence root and the `evidenceRead`
+/// principal may not: the row is red, about the evidence-read principal, and
+/// the destination grant's handle was asked for nothing under the evidence
+/// root. Kills `access.rs` handing `evidence_reader` `None`.
 #[test]
 fn a_separated_evidence_read_principal_that_cannot_read_is_red_for_that_principal() {
     let grant = GrantRef::static_secret(EVIDENCE_READ_SECRET);
@@ -2597,12 +2486,9 @@ fn a_separated_evidence_read_principal_that_can_read_is_green_whatever_the_desti
     );
 }
 
-/// **FX-31: the readiness probe reads no body.** It GETs a key nobody wrote
-/// under `caps::PROBE` (0 bytes); when an object IS there, the store's answer
+/// **The readiness probe reads no body.** It GETs a key nobody wrote under
+/// `caps::PROBE` (0 bytes); when an object IS there, the store's answer
 /// (refused unread, over the cap) still proves the grant, and is green.
-///
-/// KILLS: "the probe reads whatever is at the key" (the cap is not 0);
-/// "TooLarge is a refusal" (the row turns `notReady`/unclassified).
 #[test]
 fn the_evidence_probe_reads_no_body_and_a_planted_object_still_proves_the_grant() {
     let m = mount(&read_plan(Some(GrantRef::static_secret(
@@ -2633,10 +2519,7 @@ fn the_evidence_probe_reads_no_body_and_a_planted_object_still_proves_the_grant(
 /// A grant no check pod holds — the controller's identity, or none at all —
 /// is answered `unknown` with NO request by anybody.
 ///
-/// MUTANT RP-11 (`access.rs`): delete the `!exercisable_in_pod()` early
-/// answer. The row is then built through `evidence_reader` with a grant no pod
-/// holds; the fake's handle answers, the row reads `EvidenceReadable`, and
-/// this test fails.
+/// Kills deleting the `!exercisable_in_pod()` early answer in `access.rs`.
 #[test]
 fn an_evidence_read_grant_no_pod_holds_is_unknown_and_reads_nothing() {
     for credentials in [
@@ -2691,15 +2574,10 @@ fn without_a_separate_read_grant_the_destination_grant_reads_as_before() {
     assert_eq!(destination_principal.calls().len(), 1);
 }
 
-/// **Decision 1 (orchestrator, 2026-09-23): the archive-write grant is a
-/// documented limit, and its row can NEVER read green** — not with the marker
-/// probe on, not with a writer that would accept anything, not with a
-/// separate evidence-write grant. It says why, naming the archive prefix, and
-/// nothing is written anywhere but the marker key.
-///
-/// MUTANT RP-12 (`access.rs`): answer the `ArchiveWrite` arm with
-/// `ready(..., MarkerWritten)` when `write_probe` is set (the "reuse the
-/// marker for the archive" shortcut). The first assertion fails.
+/// **The archive-write grant is a documented limit, and its row can NEVER
+/// read green**: not with the marker probe on, not with a writer that would
+/// accept anything, not with a separate evidence-write grant. It says why,
+/// naming the archive prefix, and nothing is written but the marker key.
 #[test]
 fn the_archive_write_row_is_never_green_and_names_the_archive_prefix() {
     for grant in [None, Some(GrantRef::static_secret(EVIDENCE_SECRET))] {
@@ -2767,9 +2645,7 @@ fn the_archive_write_row_is_never_green_and_names_the_archive_prefix() {
 /// The evidence-read principal's options: its OWN three variables, never the
 /// destination's `AWS_*` and never the evidence-write grant's.
 ///
-/// MUTANT RP-13 (`store.rs`): map `EvidenceRead` to `EVIDENCE_WRITE_ENV` in
-/// `grant_env`. The options then carry the evidence-WRITE keys, and the first
-/// assertion fails.
+/// Kills `grant_env` mapping `EvidenceRead` to `EVIDENCE_WRITE_ENV`.
 #[test]
 fn the_evidence_read_options_are_the_evidence_read_grants_and_never_fall_back() {
     use logweir::check::store::evidence_read_options;
@@ -2893,9 +2769,7 @@ fn the_marker_handle_is_built_only_through_the_principal_selection() {
     );
 }
 
-// ===========================================================================
-// 4a. `sourceConnection` (D2-SOURCECHECK): PLAT-03.1's source-connectivity kind
-// ===========================================================================
+// 4a. `sourceConnection`: the source-connectivity kind.
 
 fn source_connection_plan() -> CheckPlan {
     plan_of(CheckRequest::SourceConnection(
@@ -2955,17 +2829,12 @@ fn a_source_connection_check_reports_every_row_it_owns() {
 
 /// The row this kind must NOT publish.
 ///
-/// MUTANT: emit `connection.topicsDescribable` from
-/// `kinds::source_connection::run` — for instance by delegating to
-/// `readiness::topics_describable` over the empty slice, which returns a READY
-/// `TopicsDescribable` row. This test fails, and so does
-/// `the_expected_rows_are_the_rows_the_runner_emits` in `weirkeeper`, because
-/// the controller's mirror does not list it.
-///
-/// The claim is not stylistic. `TopicNotFound` and `TopicNotAuthorized` are
-/// facts about a topic the requester NAMED; over an empty selection `ready`
-/// would be a green verdict about the empty set and `unknown` on a blocking
-/// row would pin every connection test at `unknown` for ever.
+/// `kinds::source_connection::run` must not emit
+/// `connection.topicsDescribable` (the controller's mirror,
+/// `the_expected_rows_are_the_rows_the_runner_emits` in `weirkeeper`, does not
+/// list it): `TopicNotFound` and `TopicNotAuthorized` are facts about a topic
+/// the requester NAMED, so over an empty selection `ready` would be a verdict
+/// about the empty set, and `unknown` would pin every connection test there.
 #[test]
 fn a_source_connection_check_makes_no_claim_about_topics() {
     let m = mount(&source_connection_plan());
@@ -3000,10 +2869,9 @@ fn a_source_connection_check_makes_no_claim_about_topics() {
 /// A broker that does not answer is `connection.authenticated notReady`, with
 /// the broker's own classified code, a remedy, and the scope still on it.
 ///
-/// MUTANT: drop `.with_scope(scope)` from the `Err` arm of
-/// `kinds::source_connection::run`. The row an operator actually reads is the
-/// failing one, and it is the one that used to reach a status with
-/// `scope: null` (the same defect `readiness::authenticated` records).
+/// Kills dropping `.with_scope(scope)` from the `Err` arm of
+/// `kinds::source_connection::run`: the failing row is the one an operator
+/// reads.
 #[test]
 fn a_source_connection_check_reports_the_dial_that_failed() {
     let m = mount(&source_connection_plan());
@@ -3069,9 +2937,7 @@ fn every_kind_reports_the_runner_contract() {
     assert_eq!(row.state, CheckState::Ready);
 }
 
-// ===========================================================================
-// 5. `operationReadiness`
-// ===========================================================================
+// 5. `operationReadiness`.
 
 fn readiness_plan(topics: Vec<&str>, write_probe: bool, signer: Option<&str>) -> CheckPlan {
     plan_of(CheckRequest::OperationReadiness(Box::new(
@@ -3164,11 +3030,9 @@ fn a_readiness_check_reports_every_row_it_owns() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 5a. PROD-01.2 — the capability rows. For each: the capability PRESENT (no
-//     finding), ABSENT (the finding, with its fallback text), and NOT
-//     OBSERVED (unknown, never ready).
-// ---------------------------------------------------------------------------
+// 5a. The capability rows. For each: the capability PRESENT (no finding),
+// ABSENT (the finding, with its fallback text), and NOT OBSERVED (unknown,
+// never ready).
 
 /// Apache Kafka 4.3.1's ranges for the APIs these rows read
 /// (`docs/support-matrix.md`, measured).
@@ -3440,9 +3304,8 @@ fn connection_engine_protocol_asks_for_the_sasl_requests_only_on_a_sasl_connecti
     );
 }
 
-/// **PROD-01.2 review, M3: a capability row is about EVERY broker of the
-/// cluster, or it is `unknown`.** The first version said `ready` from
-/// whichever brokers the observing client had dialled.
+/// **A capability row is about EVERY broker of the cluster, or it is
+/// `unknown`.**
 ///
 /// * All three brokers answered and agree: `ready`, and both the message and
 ///   the fact say three, as DISTINCT BROKERS of how many.
@@ -3575,7 +3438,7 @@ fn a_capability_row_is_about_every_broker_or_it_is_unknown() {
     );
 }
 
-/// **Review L9: the observation is not started with no budget left.** A row
+/// **The observation is not started with no budget left.** A row
 /// that reads the ApiVersions answer is `unknown` and says the endpoint was
 /// not asked; the probe is never called, so nothing is dialled after the
 /// check's deadline.
@@ -3711,7 +3574,7 @@ fn connection_group_types_says_when_a_group_cannot_be_typed() {
 }
 
 /// `connection.topicConfigsReadable`. PRESENT when DescribeConfigs answers
-/// for every selected topic. ABSENT when one is refused (FX-4's `acl` fixture,
+/// for every selected topic. ABSENT when one is refused (the `acl` fixture,
 /// measured): the row names the topic, says the backup records it as
 /// `captureDenied`, and gives the grant and the alternative. A read that did
 /// not answer is unknown; topics the principal cannot even describe leave the
@@ -3773,10 +3636,9 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
         "the backup still runs: the row advises"
     );
 
-    // NO TOPIC SELECTED: nothing was read, so the row is not `ready` (review
-    // L12: it was, with the words "the operation selects no topic by name").
-    // It is `unknown` and says no configuration was read. Advisory, so the
-    // verdict is not moved.
+    // NO TOPIC SELECTED: nothing was read, so the row is `unknown`, never
+    // `ready`, and says no configuration was read. Advisory, so the verdict is
+    // not moved.
     let none = mount(&capability_plan(vec![], listed.clone()));
     let probe = both_present();
     let run = drive(&none, &capability_wiring(probe));
@@ -3826,7 +3688,7 @@ fn connection_topic_configs_readable_names_the_topic_whose_read_is_refused() {
     assert!(hidden.topic_config_calls().is_empty());
 }
 
-/// **PROD-01.2: a bootstrap that answers and advertised brokers that do not**
+/// **A bootstrap that answers and advertised brokers that do not**
 /// (measured on the `confluent` profile's OFFNET listener, which advertises
 /// `127.0.0.1:1`). The cluster id is read off the bootstrap connection and the
 /// listing then cannot reach a broker: the row stays `BrokerUnreachable` and
@@ -3973,14 +3835,9 @@ fn a_connection_that_does_not_authenticate_blocks_the_topic_row() {
 }
 
 /// **D2 §6.3's acceptance sentence names "check time AND scope".** The row an
-/// operator reads is the one that FAILED, and both of `authenticated`'s early
-/// returns used to drop the scope on the floor — so `connection.authenticated
-/// notReady` reached the live status with `scope: null` while the blocked
-/// `topicsDescribable` beside it carried one
-/// (`objects/s14/notready-rows.json`).
-///
-/// Both probes, because the two returns are separate lines and a fix to one is
-/// not a fix to the other.
+/// operator reads is the one that FAILED, so both of `authenticated`'s early
+/// returns carry the scope, as the blocked `topicsDescribable` beside them
+/// does. Both probes, because the two returns are separate lines.
 #[test]
 fn a_connection_row_that_fails_still_names_its_principal() {
     for probe in [
@@ -4101,9 +3958,7 @@ fn a_skipped_check_is_not_relayed() {
     assert!(run.has(CheckId::ConnectionAuthenticated));
 }
 
-// ===========================================================================
-// 6. `evidenceFetch`
-// ===========================================================================
+// 6. `evidenceFetch`.
 
 fn fetch_plan(key: &str, max_bytes: u64) -> CheckPlan {
     plan_of(CheckRequest::EvidenceFetch(EvidenceFetchRequest {
@@ -4174,12 +4029,11 @@ fn an_evidence_fetch_tells_absence_from_denial() {
     assert_eq!(e.code, Some(CheckCode::AccessDenied));
 }
 
-/// **FX-31: an object over `maxBytes` is never read past the cap.** It is
-/// reported present and `truncated`, with NO bytes relayed and no digest: the
-/// controller refuses a truncated object whatever was relayed, so a prefix was
+/// **An object over `maxBytes` is never read past the cap.** It is reported
+/// present and `truncated`, with NO bytes relayed and no digest: the
+/// controller refuses a truncated object whatever was relayed, so a prefix is
 /// never worth relaying, and the read itself is made UNDER the plan's cap (the
-/// fake records it), where the pre-FX-31 Job read the whole object and then cut
-/// it. An object exactly at the cap is relayed whole.
+/// fake records it). An object exactly at the cap is relayed whole.
 ///
 /// KILLS: "read whole, then truncate" (the read's cap is not `maxBytes`);
 /// "relay a prefix" (a stream and a digest appear).
@@ -4273,9 +4127,7 @@ fn an_evidence_fetch_whose_handle_fails_relays_nothing() {
     assert_eq!(run.code, ExitCode::Ok, "an end line was printed");
 }
 
-// ===========================================================================
-// 7. `restorePreflight`
-// ===========================================================================
+// 7. `restorePreflight`.
 
 const PLAN_FILE: &str = "/check/plan.yaml";
 /// The destination's `storage.prefix`, as `location()` declares it.
@@ -4283,8 +4135,7 @@ const ARCHIVE_PREFIX: &str = "kafka-backups";
 /// The manifest key the CONTROLLER renders into a check plan: `<backupId>/
 /// manifest.json`, the archive's own convention, RELATIVE to the prefix
 /// (`build_job_shape`, and `Store::qualify`'s header). The runner joins the
-/// prefix — this fixture used to carry it already, which is exactly how
-/// D2-PREFLIGHT-PREFIX went unnoticed by every test in this file.
+/// prefix, so this fixture must not carry it.
 const MANIFEST_KEY: &str = "20260915T030000Z/manifest.json";
 /// Where that manifest actually IS in the bucket.
 const MANIFEST_OBJECT_KEY: &str = "kafka-backups/20260915T030000Z/manifest.json";
@@ -4506,7 +4357,7 @@ fn a_healthy_restore_preflight_reports_every_row_it_owns() {
     );
 }
 
-/// **PROD-01.2: `target.engineProtocol`, the row Redpanda v26.2.4 is missing.**
+/// **`target.engineProtocol`, the row Redpanda v26.2.4 is missing.**
 /// A replay sends Metadata v9 and Produce v8. PRESENT on Apache Kafka's
 /// ranges: ready, and the verdict is `ready`. ABSENT on Redpanda's (Produce
 /// v0-v7, measured: the restore then fails with "early eof" after five
@@ -4841,8 +4692,8 @@ fn a_segment_the_manifest_names_and_the_archive_lacks_is_reported_with_details()
     )
     .unwrap();
     assert!(details.contains("segment-1.bin"), "{details}");
-    // D2-REDACT-OVERBROAD: the details document exists to carry the key an
-    // operator has to go and recover, and it used to read `[redacted].bin`.
+    // The details document carries the key an operator has to go and
+    // recover, never `[redacted].bin`.
     assert!(
         details.contains(&format!(
             "kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-1.bin"
@@ -4851,21 +4702,11 @@ fn a_segment_the_manifest_names_and_the_archive_lacks_is_reported_with_details()
     );
 }
 
-/// **D2-PREFLIGHT-PREFIX.** A destination with a `storage.prefix` — which is
-/// every destination the live run used — gets the same answers as a
-/// prefix-less one.
-///
-/// The live finding (`d2w14.result.md` §5.2, `objects/s16/preflight-pf-flat.
-/// json`): `dest-a` with `prefix: team/prod` answered `archive.backupSet
-/// notReady/AccessDenied` for a manifest `mc` reads as the same principal at
-/// `lw-a/team/prod/<id>/manifest.json`, while `dest-c` with no prefix answered
-/// `ready/ManifestReadable` for the same set. No restore preflight could be
-/// green for any prefixed destination, so a green preview was reachable only
-/// prefix-less.
-///
-/// The fixture places every object where the backup engine writes it —
-/// `<prefix>/<backupId>/…`, with the manifest naming its segments RELATIVE —
-/// and hands the request the relative `manifest_key` the controller renders.
+/// A destination with a `storage.prefix` gets the same answers as a
+/// prefix-less one. The fixture places every object where the backup engine
+/// writes it — `<prefix>/<backupId>/…`, with the manifest naming its segments
+/// RELATIVE — and hands the request the relative `manifest_key` the controller
+/// renders.
 #[test]
 fn a_prefixed_destination_reads_its_manifest_and_its_segments() {
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
@@ -4950,8 +4791,7 @@ fn a_prefixed_destination_reads_its_manifest_and_its_segments() {
 }
 
 /// The manifest key a refusal NAMES is the qualified one, so an operator can
-/// paste it into `mc` — which is exactly how the live run established that the
-/// object was readable and the check was wrong.
+/// paste it into `mc`.
 #[test]
 fn an_unreadable_manifest_names_the_prefixed_key() {
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
@@ -4976,7 +4816,7 @@ fn an_unreadable_manifest_names_the_prefixed_key() {
     );
 }
 
-/// **FX-31: a manifest over the read cap is refused unread, and the row
+/// **A manifest over the read cap is refused unread, and the row
 /// NAMES the cap** — Logweir's own sentence, never the backend's text.
 #[test]
 fn a_manifest_over_the_read_cap_is_refused_naming_the_cap() {
@@ -5009,7 +4849,7 @@ fn a_manifest_over_the_read_cap_is_refused_naming_the_cap() {
         vec![(MANIFEST_OBJECT_KEY.to_string(), caps::MANIFEST)],
         "one read, under the manifest cap"
     );
-    // REVIEW F7: nothing refused, so the remedy does not blame the store.
+    // Nothing refused, so the remedy does not blame the store.
     assert!(
         row.remedy.contains("larger than this build reads")
             && !row.remedy.contains("does not classify"),
@@ -5071,25 +4911,17 @@ fn the_timestamp_bound_is_the_execution_guards_arithmetic() {
     );
 }
 
-/// **PROD-01.2: an answer WITHOUT the bound is "not reported", never "no
-/// bound".** Every Apache Kafka broker reports at least one of the two keys;
-/// Redpanda v26.2.4's broker resource answers nine keys and neither (it keeps
-/// the bound per topic). This row answered `ready`, "the target declares no
-/// record-timestamp bound", for it: an empty answer recorded as a fact.
-///
-/// CONTROL, in the same test: the SAME broker answer plus the key is `ready`,
-/// so the unknown is about the missing key and nothing else.
-///
-/// Negative control (mutant): restore the `ready(TimestampWithinBound)` arm
-/// for a missing key and the first assertion fails with `TimestampWithinBound`.
+/// **An answer WITHOUT the bound is "not reported", never "no bound".** Every
+/// Apache Kafka broker reports at least one of the two keys; Redpanda v26.2.4's
+/// broker resource answers nine keys and neither (it keeps the bound per
+/// topic). CONTROL: the SAME answer plus the key is `ready`.
 ///
 /// **The code is one the plan's controller can read.** The code vocabulary is
-/// closed on the reading side, and this row is answered for EVERY restore
-/// plan. A plan that lists capability rows came from a controller that knows
-/// `TimestampBoundNotReported`; a plan that lists none came from an older
-/// one, which would refuse the whole result over the new code, so it gets the
-/// same `unknown`, message and remedy under `BrokerConfigsNotReadable`.
-/// Mutant: answer the new code for both and the older-plan assertion fails.
+/// closed on the reading side: a plan that lists capability rows came from a
+/// controller that knows `TimestampBoundNotReported`; a plan that lists none
+/// came from an older one, which would refuse the whole result over the new
+/// code, so it gets the same `unknown`, message and remedy under
+/// `BrokerConfigsNotReadable`.
 #[test]
 fn a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound() {
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
@@ -5188,15 +5020,11 @@ fn a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound() {
     );
 }
 
-/// **FX-4 / T13, consumer 1 — the false-green readiness row.** A principal
-/// without DescribeConfigs on the cluster used to get an EMPTY broker
-/// configuration back (rdkafka 0.36.2 never reads the per-resource error), and
-/// this row read "no bound declared" as READY. The inventory now returns the
-/// refusal; this row must take its `Err` arm and say UNKNOWN.
-///
-/// Negative control: make the row read a refused configuration as an empty
-/// map (`probe.broker_configs().unwrap_or_default()`) and this test fails with
-/// `TimestampWithinBound` — the pre-fix behaviour.
+/// **A refused broker configuration is UNKNOWN, never "no bound".** rdkafka
+/// 0.36.2 hands a principal without DescribeConfigs on the cluster an EMPTY
+/// configuration (it never reads the per-resource error); the inventory
+/// returns the refusal, and this row must take its `Err` arm. Reading it as an
+/// empty map fails with `TimestampWithinBound`.
 #[test]
 fn a_refused_broker_configuration_read_is_unknown_never_within_bound() {
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
@@ -5310,12 +5138,10 @@ fn a_refused_validate_only_create_reports_the_brokers_code() {
     assert!(!row.remedy.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// FX-14: a plan BOUND TO A RECOVERY POINT (`source.point`). The preflight
-// judges the manifest it read with the point's pin, exactly as the runner's
-// binding (`drill::binding::verify_point_binding`) will, so it never passes a
-// point the run then refuses.
-// ---------------------------------------------------------------------------
+// A plan BOUND TO A RECOVERY POINT (`source.point`). The preflight judges the
+// manifest it read with the point's pin, exactly as the runner's binding
+// (`drill::binding::verify_point_binding`) will, so it never passes a point
+// the run then refuses.
 
 /// The bound fixture's archive prefix. `Store::in_memory*` holds only keys
 /// under `logweir/` (Global Constraint 6), so the archive sits there — the
@@ -5454,9 +5280,8 @@ fn bound_point_of(set: &str, run: &str, pin: bool) -> BoundPoint {
 }
 
 /// The read cap of one object of a [`BoundPoint`]'s archive, by what the key
-/// names (FX-31: every read names its class from `logweir_store::caps`). A
-/// whole-archive copy reads four kinds of object, so the class is the
-/// document's own and not one cap for all four.
+/// names: every read names its class from `logweir_store::caps`, so the class
+/// is the document's own and not one cap for all four kinds.
 fn archive_object_cap(key: &str) -> u64 {
     use logweir_engine_oso::storage::caps;
     if key.ends_with("/manifest.json") {
@@ -5596,7 +5421,7 @@ fn assert_archive_rest_blocked(run: &Run) {
     }
 }
 
-/// **FX-14 item 1, the row the ledger asks for.** A pinned point whose set was
+/// A pinned point whose set was
 /// written again after it was signed — engine 0.21.0 rewrites a set in place
 /// and can put a manifest with IDENTICAL bytes, which only the version shows —
 /// is refused by the preflight (`ManifestSuperseded`, the superseded remedy),
@@ -5683,7 +5508,7 @@ fn a_point_bound_preflight_refuses_a_manifest_written_again_after_the_point() {
     );
 }
 
-/// **FX-14 — the preflight and the runner's binding agree, case by case**,
+/// **The preflight and the runner's binding agree, case by case**,
 /// over ONE archive each: the real `Store` both read (the versioned in-memory
 /// double, and an unversioned copy of it). "Agree" is the binding's outcome
 /// read as a preview: proven → `ready`; proven with the note → `ready` with the
@@ -5771,14 +5596,14 @@ fn the_point_bound_preflight_and_the_runners_binding_agree_on_every_pin_case() {
     );
 }
 
-/// **FX-14 — the receipt half of the binding, in the preview.** The pin is
+/// **The receipt half of the binding, in the preview.** The pin is
 /// read from the RECEIPT, so the preflight must be holding the receipt the
 /// plan binds before it can judge it: each way the runner refuses that
 /// receipt (exit 3, or exit 1 when it is not there) is refused here, and none
 /// is ever `ready`.
 ///
-/// **One answer for "absent" and "not these bytes"** (the orchestrator's
-/// security note): a receipt that is not there and one whose bytes are not
+/// **One answer for "absent" and "not these bytes"**: a receipt that is not
+/// there and one whose bytes are not
 /// the bound digest get the SAME code and the SAME message, so the answer
 /// does not say whether an object exists at a key the plan's author chose —
 /// and no answer repeats the stored receipt's own digest.
@@ -5851,8 +5676,8 @@ fn a_point_bound_preflight_refuses_every_receipt_the_runner_refuses() {
     );
 }
 
-/// **FX-14 — the set the receipt describes is the set this restore reads**
-/// (FX-16's `PointBindingSetMismatch`). A receipt of set `nightly-7` copied
+/// **The set the receipt describes is the set this restore reads**
+/// (`PointBindingSetMismatch`). A receipt of set `nightly-7` copied
 /// into set `nightly-8`'s receipt namespace, under a plan that restores
 /// `nightly-8`: the key is confined, the bytes are the bound ones, and the
 /// receipt still describes another set and another manifest — refused, and
@@ -5971,19 +5796,14 @@ fn assert_both_refuse_the_set(point: BoundPoint) -> String {
     row.message
 }
 
-/// **FX-14 review M2 (O4) — the manifest-KEY half of the set comparison, on
-/// its own.** The receipt names THIS set and attests its manifest at ANOTHER
-/// key than the one this restore reads: the archive copied under another
-/// prefix of the same bucket, byte for byte, with a destination at the copy.
-/// Receipts are bucket-absolute and shared by both copies, so the set id
-/// agrees and the digest agrees; only the key tells the two apart. The
-/// runner's binding refuses it (FX-16 review M-1, the engine's key), and the
-/// preflight must too — `a_point_bound_preflight_refuses_a_set_the_point_does_
-/// not_describe` changes the set id and the key together, so it cannot see
-/// this half dropped.
+/// **The manifest-KEY half of the set comparison, on its own.** The receipt
+/// names THIS set and attests its manifest at ANOTHER key than the one this
+/// restore reads: the archive copied under another prefix of the same bucket,
+/// byte for byte. Receipts are bucket-absolute and shared by both copies, so
+/// the set id and the digest agree; only the key tells the two apart. The
+/// runner's binding refuses it, and the preflight must too.
 ///
-/// KILLS: the preflight's set comparison without `same_object_key` (it is
-/// then `ready` for a point the run refuses).
+/// KILLS: the preflight's set comparison without `same_object_key`.
 #[test]
 fn a_receipt_attesting_its_manifest_at_another_key_is_refused_by_the_binding_and_the_preflight() {
     const ELSEWHERE: &str = "logweir/elsewhere/nightly-7/manifest.json";
@@ -6001,15 +5821,14 @@ fn a_receipt_attesting_its_manifest_at_another_key_is_refused_by_the_binding_and
     );
 }
 
-/// **FX-14 review M2 (O5) — the set-ID half, on its own.** The receipt
-/// attests the manifest at exactly the key this restore reads, with its
-/// digest, and says it is a receipt of ANOTHER set. No writer produces such a
-/// receipt; a reader is still held to what the receipt says, because every
-/// decision the receipt informs is about the set it names. The runner's
-/// binding refuses it (FX-16), and so does the preflight.
+/// **The set-ID half, on its own.** The receipt attests the manifest at
+/// exactly the key this restore reads, with its digest, and says it is a
+/// receipt of ANOTHER set. No writer produces such a receipt; a reader is
+/// still held to what the receipt says, because every decision it informs is
+/// about the set it names. The runner's binding refuses it, and so does the
+/// preflight.
 ///
-/// KILLS: the preflight's set comparison without the `backup_id` (it is then
-/// `ready`: the key, the digest and the pin all agree).
+/// KILLS: the preflight's set comparison without the `backup_id`.
 #[test]
 fn a_receipt_of_another_set_naming_this_sets_manifest_is_refused_by_the_binding_and_the_preflight()
 {
@@ -6024,7 +5843,7 @@ fn a_receipt_of_another_set_naming_this_sets_manifest_is_refused_by_the_binding_
     );
 }
 
-/// **FX-14 review M1 — a set id and a run id that hold a SPACE.** A backup
+/// **A set id and a run id that hold a SPACE.** A backup
 /// set id is free text (`BackupSpec::backup_id`; `Restore.spec.backupSetRef`
 /// carries no pattern), a space is addressed by the store exactly as written,
 /// and the runner's binding restores such a set. So the preflight judges it
@@ -6101,12 +5920,10 @@ fn a_set_id_and_a_run_id_with_a_space_are_judged_as_the_runners_binding_judges_t
     assert_archive_rest_blocked(&run);
 }
 
-// ---------------------------------------------------------------------------
-// FX-14, the orchestrator's security note: a preflight runs BEFORE any
-// approval, with the namespace's archive-read credential, so a plan's receipt
-// key is CONFINED before anything is read. These rows use the read-counting
-// double: `FakeObjects::calls` records every `get` and every `list`.
-// ---------------------------------------------------------------------------
+// A preflight runs BEFORE any approval, with the namespace's archive-read
+// credential, so a plan's receipt key is CONFINED before anything is read.
+// These rows use the read-counting double: `FakeObjects::calls` records every
+// `get` and every `list`.
 
 /// The confined fixture: set [`BACKUP_ID`] under [`ARCHIVE_PREFIX`], its
 /// receipt at the key `backup run` writes, and the SAME receipt bytes at every
@@ -6285,7 +6102,7 @@ fn a_receipt_key_outside_the_plans_own_receipts_is_refused_with_no_store_read() 
 
 /// **The other two plan-only refusals read nothing either.** A binding that
 /// is malformed on its face, and a bound plan whose `source.backup` is not the
-/// set this check reads (`latestCompleted` included — FX-16: a bound plan
+/// set this check reads (`latestCompleted` included: a bound plan
 /// names its point's own set), are answered from the plan alone.
 ///
 /// KILLS: the shape check skipped (a malformed digest then reaches the read,
@@ -6384,7 +6201,7 @@ fn a_bound_receipt_is_read_only_after_its_sets_manifest_was() {
     );
 }
 
-/// **FX-14 review M1 — the space is allowed, and the confinement is still of
+/// **The space is allowed, and the confinement is still of
 /// BYTES.** For a plan that restores set `nightly 7`, the one receipt key
 /// that may be read is `logweir/backups/nightly 7/<run id>.receipt.json`,
 /// byte for byte. Everything that only LOOKS like it is refused with the
@@ -6500,17 +6317,16 @@ fn a_look_alike_of_a_set_id_with_a_space_is_refused_with_no_store_read() {
     );
 }
 
-/// **FX-14 review M2 (O3) — a store FAILURE is a classified code, never the
-/// store's own text.** A preflight's answer is read by whoever can create
-/// one, before any approval, and a backend's error text carries what the
-/// backend chose to say: request ids, host ids, bucket and endpoint names.
-/// So a failed read of the bound receipt, and a failed read of the manifest
+/// **A store FAILURE is a classified code, never the store's own text.** A
+/// preflight's answer is read by whoever can create one, before any approval,
+/// and a backend's error text carries request ids, host ids, bucket and
+/// endpoint names. So a failed read of the bound receipt, and of the manifest
 /// at the version the receipt pins, answer with the classified code and a
-/// message made of the plan's own values — and the text planted in each
-/// failure is nowhere in the output, in any stream.
+/// message made of the plan's own values, and the planted text is nowhere in
+/// the output.
 ///
-/// KILLS: the store's error interpolated into the message in place of its
-/// code (`PointRefusal::store`).
+/// KILLS: the store's error interpolated in place of its code
+/// (`PointRefusal::store`).
 #[test]
 fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stores_text() {
     const PLANTED: [&str; 2] = ["PLANTED-REQUEST-7Q2", "PLANTED-HOST-9Z4"];
@@ -6599,39 +6415,26 @@ fn a_failed_read_under_a_bound_plan_answers_a_classified_code_and_never_the_stor
     assert_archive_rest_blocked(&run);
 }
 
-/// **FX-14 under FX-31 — the bound receipt is read under the receipt cap, and
-/// an object over it gets the answer of an absent one.** FX-14 read the
-/// receipt whole (its review's L2); FX-31 gives every read a cap, and the
-/// preflight names the class the runner's binding reads the same document
-/// under, `caps::SIGNED_DOCUMENT`, so the two readers agree on which objects
-/// can be read at all.
+/// **The bound receipt is read under the receipt cap, and an object over it
+/// gets the answer of an absent one.** The preflight reads it under
+/// `caps::SIGNED_DOCUMENT`, as the runner's binding does, so the two readers
+/// agree on which objects can be read at all. Saying an over-cap object is
+/// THERE would undo the confinement (a preflight runs before any approval, and
+/// its author chose the key), so absent, other bytes and over the cap are ONE
+/// answer, at the same two store calls under the same caps; the reported size
+/// is nowhere in the output. The over-cap object HOLDS the bound receipt's
+/// bytes, so a build that read past the cap would answer `ready`.
 ///
-/// An object over the cap is THERE, and saying so would bring back what the
-/// confinement closed: a preflight runs before any approval, and its author
-/// chose the key. So absent, other bytes and over the cap are ONE answer —
-/// the same state, code, message and remedy, the same rows elsewhere in the
-/// result, the same exit code — at the same two store calls in the same
-/// order under the same caps: the set's manifest, then one `get` of the
-/// receipt. The size the store reports is nowhere in the output.
+/// CONTROL: the same bytes reported at EXACTLY the cap are read and `ready`.
 ///
-/// The over-cap object HOLDS the bound receipt's bytes in this fixture, so a
-/// build that read past the cap would find the digest it was told to expect
-/// and answer `ready`.
+/// **The manifest at the pinned version** is read under `caps::MANIFEST`, only
+/// once the receipt's bytes are proven, and a version over the cap is
+/// `pin::judge`'s "could not tell": the classified code, and neither the size
+/// nor the version id.
 ///
-/// CONTROL: the same bytes at the same key, reported at EXACTLY the cap, are
-/// read and judged `ready`: the cap is the receipt class's, not a tighter one.
-///
-/// **The manifest at the pinned version** is read under `caps::MANIFEST`, the
-/// class the binding and the catalog's deep check read it under. That read is
-/// made only once the receipt's bytes are proven the bound ones, and a
-/// version over the cap is the shared `pin::judge`'s "could not tell": the
-/// classified code, and neither the size nor the version id.
-///
-/// KILLS: the receipt read under a larger cap (`caps::MANIFEST`, `u64::MAX`:
-/// the over-cap object is read and the row is `ready`) or a smaller one
-/// (`caps::SIDECAR`, the catalog walk's 256 KiB: the control is refused);
-/// `TooLarge` left to the store-failure arm (its own code, so present is told
-/// from absent); the pinned version read under another cap.
+/// KILLS: the receipt read under a larger cap or a smaller one
+/// (`caps::SIDECAR`); `TooLarge` left to the store-failure arm; the pinned
+/// version read under another cap.
 #[test]
 fn a_bound_receipt_over_the_read_cap_is_answered_as_an_absent_one_at_the_same_store_calls() {
     use logweir::catalog::pin::UNREADABLE_REMEDY;
@@ -6805,18 +6608,13 @@ fn a_bound_receipt_over_the_read_cap_is_answered_as_an_absent_one_at_the_same_st
     assert_archive_rest_blocked(&run);
 }
 
-// ===========================================================================
-// 8. Parity with `logweir_store`'s own manifest walk
-// ===========================================================================
+// 8. Parity with `logweir_store`'s own manifest walk.
 
-/// D2 §6.7 names `Store::segment_keys_for_set`. The runner reads the manifest
-/// through a four-method seam instead, so the denial paths are fakeable — and
-/// that makes [`logweir::check::archive`] a SECOND implementation of one JSON
-/// shape. This row holds the two to the same answer over the same archive,
-/// including the `qualify` rule a review already found wrong once.
-///
-/// It builds a REAL `Store` over a tempdir filesystem URL: no endpoint, no
-/// network, and the same shape `crates/weirkeeper/tests/retention.rs` uses.
+/// D2 §6.7 names `Store::segment_keys_for_set`; the runner reads the manifest
+/// through a four-method seam instead, so the denial paths are fakeable, which
+/// makes [`logweir::check::archive`] a SECOND implementation of one JSON shape.
+/// This row holds the two to the same answer over the same archive, including
+/// the `qualify` rule, over a REAL `Store` on a tempdir filesystem URL.
 #[test]
 fn the_pure_segment_walk_agrees_with_the_store() {
     use logweir_engine_oso::storage::Store;
@@ -6891,9 +6689,7 @@ fn the_pure_manifest_window_agrees_with_the_store() {
     assert_eq!(ours.newest_ms, facts.newest_record_ms);
 }
 
-// ===========================================================================
-// 9. Redaction — D2 §4.2 "never prints a credential"
-// ===========================================================================
+// 9. Redaction: D2 §4.2 "never prints a credential".
 
 /// **M4.** A credential planted in EVERY input that can reach a message never
 /// reaches a frame.
@@ -7087,9 +6883,7 @@ fn the_marker_body_names_only_the_destination() {
     assert_eq!(body, logweir::check::store::marker_body(DEST_UID));
 }
 
-// ===========================================================================
-// 10. Structural guards
-// ===========================================================================
+// 10. Structural guards.
 
 fn check_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -7213,7 +7007,7 @@ fn every_relayed_row_has_a_catalogue_entry() {
     }
 }
 
-/// PLAT-03.1's acceptance: every failure names a remedy.
+/// Every failure names a remedy.
 #[test]
 fn every_failing_code_the_runner_emits_has_a_remedy() {
     let mut named: BTreeSet<CheckCode> = BTreeSet::new();
@@ -7242,9 +7036,9 @@ fn every_failing_code_the_runner_emits_has_a_remedy() {
         CheckCode::MappedTopicsAbsent,
         CheckCode::TopicCreateValidated,
         CheckCode::TimestampWithinBound,
-        // FX-20c: `destination.credentialBound`'s ready code.
+        // `destination.credentialBound`'s ready code.
         CheckCode::CredentialBound,
-        // PROD-01.2: the capability rows' ready codes.
+        // The capability rows' ready codes.
         CheckCode::EngineProtocolSupported,
         CheckCode::TopicConfigsReadable,
         CheckCode::GroupTypesListed,
@@ -7289,15 +7083,10 @@ fn an_execution_only_row_can_never_claim_a_verdict() {
     }
 }
 
-// ===========================================================================
-// 11. The shipped binary: the exit-code table
-// ===========================================================================
+// 11. The shipped binary: the exit-code table.
 
 /// Run the shipped binary with a DEADLINE, killing and REAPING it if it
-/// overruns.
-///
-/// Every subprocess a test spawns must have a timeout: a hung child blocks the
-/// whole worker (a 13-hour hang on 2026-09-15 is why).
+/// overruns: a hung child blocks the whole worker.
 struct BoundedRun {
     code: Option<i32>,
     stdout: String,
@@ -7533,14 +7322,11 @@ fn a_check_usage_error_is_operational() {
     );
 }
 
-// ===========================================================================
-// 12. The controller's invocation and this runner's are ONE contract
-// ===========================================================================
+// 12. The controller's invocation and this runner's are ONE contract.
 
 /// `weirkeeper::check::job` writes the argv and the environment; this runner
 /// reads them. The controller crate is not a dependency of this test binary,
-/// so the assertion reads its source — which is the point: a rename on either
-/// side fails here rather than at 03:00 in a cluster.
+/// so the assertion reads its source: a rename on either side fails here.
 #[test]
 fn the_controller_and_the_runner_agree_on_the_invocation() {
     let src = std::fs::read_to_string(repo_root().join("crates/weirkeeper/src/check/job.rs"))
@@ -7600,9 +7386,7 @@ fn the_relay_bounds_are_the_controllers() {
     );
 }
 
-// ===========================================================================
-// 13. Live rows, against the compose stack (`just e2e-up`)
-// ===========================================================================
+// 13. Live rows, against the compose stack (`just e2e-up`).
 //
 // `#[cfg(feature = "e2e")]` per row, this repository's gating convention: under
 // the default feature set the module compiles to nothing, so
@@ -7614,8 +7398,7 @@ fn the_relay_bounds_are_the_controllers() {
 //     cargo test --locked -p logweir --features e2e --test check_cli -- --test-threads=1
 //     just e2e-down
 /// The stack this process addresses, read as the e2e package reads it (the
-/// same module, compiled in), so the live rows run on any compose slot
-/// (PROD-01.5b).
+/// same module, compiled in), so the live rows run on any compose slot.
 #[cfg(feature = "e2e")]
 #[path = "../../../e2e/tests/harness/stack.rs"]
 #[allow(dead_code)]
@@ -7673,9 +7456,9 @@ mod live {
             region: Some("us-east-1".to_string()),
             endpoint: Some(s3_endpoint()),
             addressing: Addressing::PathStyle,
-            // The compose MinIO serves plaintext on 9000, and D2 R3 makes that
-            // reachable ONLY through an explicit `InsecureHTTP` transport —
-            // never derived from the endpoint scheme (D-SEAMS S5).
+            // The compose MinIO serves plaintext on 9000, reachable ONLY
+            // through an explicit `InsecureHTTP` transport, never derived from
+            // the endpoint scheme.
             transport: TransportSecurity::InsecureHttp,
         };
         DestinationPlan {
@@ -7862,22 +7645,12 @@ mod live {
         );
     }
 
-    /// `catalogSync` against REAL MinIO.
-    ///
-    /// # What a server shows that a `BTreeMap` cannot
-    ///
-    /// The in-memory fake answers `list_page` with `starts_with` over a sorted
-    /// map. A real backend does neither: `ObjectStore::list` matches a prefix
-    /// on a PATH SEGMENT basis and contracts **no ordering at all**, and
-    /// `list_with_offset` pushes the cursor down into the request. Three of
-    /// this kind's claims rest on exactly those behaviours — the day-shard
-    /// listing, the `Full` rescan's resume, and `NotFound` being a different
-    /// answer from every other storage error — and none of them is worth
-    /// making against a double.
-    ///
-    /// It also proves the one thing a unit test cannot: the walk runs through
-    /// `kinds::Live`, i.e. `Store::read_only_with`, a handle that physically
-    /// cannot put.
+    /// `catalogSync` against REAL MinIO. A real backend matches a prefix on a
+    /// PATH SEGMENT basis, contracts **no ordering at all**, and
+    /// `list_with_offset` pushes the cursor into the request; the day-shard
+    /// listing, the `Full` rescan's resume and `NotFound` versus every other
+    /// storage error rest on those behaviours. The walk also runs through
+    /// `kinds::Live`, i.e. `Store::read_only_with`, a handle that cannot put.
     #[test]
     fn a_catalog_sync_walks_a_real_archive_and_writes_nothing() {
         std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
@@ -8020,14 +7793,9 @@ mod live {
         std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
         std::env::set_var("AWS_REGION", "us-east-1");
         let dir = tempfile::tempdir().unwrap();
-        // A TOPIC OF THIS ROW'S OWN, with records in it.
-        //
-        // `topic-setup` creates `test-topic` and produces nothing into it, and
-        // a backup of it is an EMPTY CAPTURE (PROD-02.1): a receipt with no
-        // window, which is not the evidence this row relays. So this row
-        // seeds its own topic rather than depending on
-        // `scripts/e2e-seed.sh`, and it does not touch `test-topic`, which
-        // other e2e suites assert the shape of.
+        // A TOPIC OF THIS ROW'S OWN, with records in it: a backup of the
+        // empty `test-topic` is an EMPTY CAPTURE, a receipt with no window,
+        // and other e2e suites assert `test-topic`'s shape.
         let source_topic = "check-e2e-src";
         let seed = std::process::Command::new("docker")
             .args([
@@ -8092,13 +7860,11 @@ mod live {
         )
         .unwrap();
 
-        // THE ENGINE ROUTE, resolved the way `scripts/demo.sh` resolves it and
-        // never hardcoded: upstream publishes `osodevops/kafka-backup` for
-        // linux/amd64 only, so on darwin/arm64 `.engine/kafka-backup` cannot be
-        // exec'd at all (ENOEXEC) and `e2e/fixtures/engine-docker.sh` is the
-        // stand-in. The version in the SIGNED receipt has to describe the
-        // binary that really ran, which is why it is read off `--version`
-        // rather than typed here (global ruling GR8 permits `--version`).
+        // THE ENGINE ROUTE, resolved as `scripts/demo.sh` does: upstream
+        // publishes linux/amd64 only, so on darwin/arm64 `.engine/kafka-backup`
+        // cannot be exec'd (ENOEXEC) and `e2e/fixtures/engine-docker.sh` stands
+        // in. The SIGNED receipt's version is read off `--version` (ruling GR8)
+        // so it describes the binary that really ran.
         let native = repo_root().join(".engine/kafka-backup");
         let shim = repo_root().join("e2e/fixtures/engine-docker.sh");
         let engine_bin = if std::process::Command::new(&native)
@@ -8218,16 +7984,12 @@ mod live {
         );
     }
 
-    /// **FX-31, live on the compose MinIO.** An evidence fetch of an object
-    /// over the plan's `maxBytes` reports it present and `truncated`, relays
-    /// NO bytes for it and never reads it; a normal object in the same fetch
-    /// is relayed whole.
-    ///
-    /// The oversized object is seeded here at 4 MiB. For a memory reading,
-    /// where the object must not live in this process, seed it out of process
-    /// and name it in `FX31_LIVE_OVERSIZED_KEY` (`claude/fx-31.result.md` §5
-    /// seeds 768 MiB with `curl --aws-sigv4` and reads this process's peak RSS
-    /// with `/usr/bin/time`).
+    /// **Live on the compose MinIO.** An evidence fetch of an object over the
+    /// plan's `maxBytes` reports it present and `truncated`, relays NO bytes
+    /// for it and never reads it; a normal object in the same fetch is relayed
+    /// whole. The oversized object is seeded here at 4 MiB; for a memory
+    /// reading, seed one out of process and name it in
+    /// `FX31_LIVE_OVERSIZED_KEY`.
     #[test]
     fn an_evidence_fetch_of_an_oversized_receipt_relays_nothing() {
         std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
@@ -8313,18 +8075,11 @@ mod live {
     }
 }
 
-// ===========================================================================
-// 14. Review fixes (2026-09-17)
-// ===========================================================================
-
-/// **F1 / reviewer probe R3.** TLS without SASL is REFUSED, not downgraded.
-///
-/// `AuthSpec::Plaintext` has no TLS field, so a mapping that answered it for
-/// `authMode: plaintext` would DISCARD `ConnectionPlan::tls` and dial a
-/// listener the operator believes is encrypted in the clear. `probe.rs` refuses
-/// exactly this shape ("this is the runner's half") and
-/// `weirkeeper::connection` refuses it before any Job exists; the check runner
-/// is the fifth dialling site and must refuse it too (D-SEAMS S5).
+/// **TLS without SASL is REFUSED, not downgraded.** `AuthSpec::Plaintext` has
+/// no TLS field, so a mapping that answered it for `authMode: plaintext` would
+/// DISCARD `ConnectionPlan::tls` and dial in the clear a listener the operator
+/// believes is encrypted. `probe.rs` and `weirkeeper::connection` refuse the
+/// same shape, and so must the check runner.
 #[test]
 fn plaintext_with_tls_is_refused_and_never_dialled_in_the_clear() {
     let mut plan = connection();
@@ -8374,15 +8129,11 @@ fn plaintext_with_tls_is_refused_and_never_dialled_in_the_clear() {
     assert!(logweir::check::kafka::auth_spec(&scram).is_ok());
 }
 
-/// **F1, the other half.** The check client carries NO private rdkafka
-/// configuration: `security.protocol`, `sasl.*`, the hostname pin and the
-/// trust anchor all come from `RdKafkaReader::client_config`, the ONE
-/// implementation the drill reader and the check share.
-///
-/// Asserted over `logweir-kafka`'s source, because a private copy there would
-/// be invisible from this crate and is exactly how the two came to disagree
-/// once already (a check against a private-CA broker failing to verify the CA
-/// while a drill against the same broker succeeded).
+/// The check client carries NO private rdkafka configuration:
+/// `security.protocol`, `sasl.*`, the hostname pin and the trust anchor all
+/// come from `RdKafkaReader::client_config`, the ONE implementation the drill
+/// reader and the check share. Asserted over `logweir-kafka`'s source, because
+/// a private copy there would be invisible from this crate.
 #[test]
 fn the_check_client_shares_the_readers_client_config() {
     let src = std::fs::read_to_string(repo_root().join("crates/logweir-kafka/src/inventory.rs"))
@@ -8404,18 +8155,14 @@ fn the_check_client_shares_the_readers_client_config() {
     }
 }
 
-/// **F2 / reviewer probes R1 and R2.** The `details` stream is redacted like
-/// every other stream.
-///
-/// The M4 row could not reach this: its restore case forces a
-/// `PlanHashMismatch`, so `archive_checks` and `target_checks` never run. These
-/// two cases reach `archive.segments` and `target.mappedTopics` with a planted
-/// key in a segment key and in a mapped topic name, and assert the DECODED
-/// details stream — which the controller writes verbatim into an immutable
-/// `<job>-details` ConfigMap — carries neither.
+/// The `details` stream is redacted like every other stream. These two cases
+/// reach `archive.segments` and `target.mappedTopics` with a planted key in a
+/// segment key and in a mapped topic name, and assert the DECODED details
+/// stream, which the controller writes verbatim into an immutable
+/// `<job>-details` ConfigMap, carries neither.
 #[test]
 fn the_details_stream_is_redacted_like_every_other_stream() {
-    // R1: a mapped target topic that exists, whose name carries the key.
+    // A mapped target topic that exists, whose name carries the key.
     let poisoned = format!("o-{PLANTED_KEY_ID}");
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &[poisoned.as_str()], "scratch");
     let m = mount(&restore_plan(&yaml, None));
@@ -8451,7 +8198,7 @@ fn the_details_stream_is_redacted_like_every_other_stream() {
         "`{PLANTED_KEY_ID}` reached the details stream:\n{details}"
     );
 
-    // R2: a MISSING segment whose key carries the key.
+    // A MISSING segment whose key carries the key.
     let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
     let m = mount(&restore_plan(&yaml, None));
     let mut manifest = manifest_json();
@@ -8493,8 +8240,7 @@ fn the_details_stream_is_redacted_like_every_other_stream() {
     );
 }
 
-/// The one verbatim field is still ONE. The code, `docs/stability.md` and the
-/// report all say so; this asserts it over every stream the runner writes.
+/// The one verbatim field is still ONE, over every stream the runner writes.
 #[test]
 fn only_the_evidence_key_is_written_verbatim() {
     let ordinary = [
@@ -8551,10 +8297,9 @@ fn a_planted_key_in_a_key_path_is_still_redacted() {
     // ...and an ORDINARY archive key survives whole.
     let ordinary = "kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin";
     assert_eq!(logweir::check::redact_path(ordinary), ordinary);
-    // Since review finding **F5** the whole-string form keeps it too — a run
-    // carrying `topics`, `partition=<n>` or `manifest` is an object key
-    // whatever the adopter called their backup set, and blanking this exact
-    // message is what D2-REDACT-OVERBROAD is about.
+    // The whole-string form keeps it too: a run carrying `topics`,
+    // `partition=<n>` or `manifest` is an object key whatever the adopter
+    // called their backup set.
     assert_eq!(
         logweir_core::check_contract::redact(ordinary),
         ordinary,
@@ -8577,23 +8322,14 @@ fn a_planted_key_in_a_key_path_is_still_redacted() {
     );
 }
 
-/// **The `redact_path` half of review finding F1.** A credential whose own `/`
-/// characters split it is not an object key, and this function used to say it
-/// was.
-///
-/// `redact_path` split the value on `/` and ran the long-run rule over each
-/// piece. `/` is base64's 64th character, so the canonical AWS secret access key
-/// `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` — 40 characters, split into 13, 7
-/// and 18 — had no piece the rule could see, and came through untouched while
-/// `redact` replaced it. Roughly 45% of real keys carry at least one `/`. The
-/// header excused the gap by asserting what this function is applied to; nothing
-/// checked the assertion, which is the shape of mistake the whole finding is
-/// about.
-///
-/// The DIE half is every form of the key, alone and inside the values
-/// `redact_path` really receives: a `missingSegment` JSON line and a catalog
-/// `receiptKey`. The KEEP half is the reason the function exists at all, so
-/// both are here — a fix that redacted the keys would re-open F7.
+/// **A credential whose own `/` characters split it is not an object key.**
+/// `/` is base64's 64th character, so the canonical AWS secret access key
+/// `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` splits into pieces of 13, 7 and
+/// 18 that the per-piece long-run rule cannot see; roughly 45% of real keys
+/// carry at least one `/`. The DIE half is every form of the key, alone and
+/// inside the values `redact_path` really receives (a `missingSegment` JSON
+/// line, a catalog `receiptKey`); the KEEP half is the reason the function
+/// exists, so a fix that redacted the keys fails it.
 #[test]
 fn a_slash_bearing_credential_is_not_an_object_key() {
     const AWS: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
@@ -8626,11 +8362,10 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
             }
         }
     }
-    // A base64 component carrying `+` — base64's 63rd character, which no
-    // object key contains — inside an otherwise key-shaped path, and short
-    // enough that the free-component cap alone would let it through. This is
-    // what the `[A-Za-z0-9._=-]` alphabet clause is for; without a row for it,
-    // mutant M29 deleted the clause and survived.
+    // A base64 component carrying `+` (base64's 63rd character, which no
+    // object key contains) inside an otherwise key-shaped path, and short
+    // enough that the free-component cap alone would let it through: the
+    // `[A-Za-z0-9._=-]` alphabet clause's row.
     for value in [
         "team/prod/n4bQgYhMfWWaL+qgxVrQFaO/manifest.json".to_string(),
         serde_json::json!({"missingSegment": "team/prod/n4bQgYhMfWWaL+qgxVrQFaO/manifest.json"})
@@ -8650,9 +8385,9 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
     );
 
     // --- KEEP: a real object path still survives, whole ---------------------
-    // The two anchors an archive key actually carries. If a fix closes the leak
-    // by redacting these, it has re-opened F7 — the `detailsRef` ConfigMap
-    // saying "3 missing segments: [redacted], [redacted], [redacted]".
+    // The two anchors an archive key actually carries. Redacting these would
+    // make the `detailsRef` ConfigMap say "3 missing segments: [redacted],
+    // [redacted], [redacted]".
     for keep in [
         format!("team/prod/{SET}/topics/payments/partition=2/segment-00000000000000000000.bin.zst"),
         format!(
@@ -8660,8 +8395,7 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
         ),
         format!("logweir/backups/{SET}/run-a.receipt.json"),
         // The same key as `logweir backup run` really writes it: the run id is
-        // a 26-character ULID, two over the free-component budget
-        // (CATALOG-RECEIPTKEY-REDACTED).
+        // a 26-character ULID, two over the free-component budget.
         format!("logweir/backups/{SET}/01M2VKCST7EF12EW5T2Y7SJ86Q.receipt.json"),
         format!("logweir/blobs/{DIGEST}/manifest.json"),
         format!("kafka-backups/{DIGEST}"),
@@ -8685,29 +8419,22 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
     }
 }
 
-/// **CATALOG-RECEIPTKEY-REDACTED, at the function the catalog really calls.**
-/// A 26-character ULID run id is an identity; a component merely its length is
-/// not.
+/// **A 26-character ULID run id is an identity; a component merely its length
+/// is not.** `.` is not a run character, so the run `redact_path` weighs in a
+/// receipt key is `<prefix>/<backup_id>/<run_id>`, and the run id, at 26
+/// characters, is over the free-component budget of 24: without the
+/// exemption the catalog publishes `receiptKey: "[redacted].receipt.json"`,
+/// the half of a plan binding the console cannot reconstruct.
 ///
-/// REGRESSION REASON. `.` is not a run character, so the run `redact_path`
-/// weighs in a receipt key is `<prefix>/<backup_id>/<run_id>` and the run id is
-/// its one free component. At 26 characters it was over the free-component
-/// budget of 24, so the run went and the catalog published
-/// `receiptKey: "[redacted].receipt.json"` — the half of a restore's plan
-/// binding that the console cannot reconstruct from anything else.
-///
-/// The DIE half is what pins the fix as a SHAPE exemption rather than a bigger
-/// budget: a 27-character component still goes, and so does a 26-character one
-/// that is not a ULID. A cap raised to 26 passes the KEEP half and fails all of
-/// these.
+/// The DIE half pins the fix as a SHAPE exemption rather than a bigger budget:
+/// a 27-character component still goes, and so does a 26-character one that
+/// is not a ULID.
 #[test]
 fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
     const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
-    // The live lab's own prefix, set id and run id, from the D3 W14 capture in
-    // `crates/logweir-api/tests/fixtures/catalog-page-entries.jsonl` — whose
-    // `receiptKey` column held the defect verbatim
-    // (`"[redacted].receipt.json"`) until this fix.
+    // The live lab's own prefix, set id and run id
+    // (`crates/logweir-api/tests/fixtures/catalog-page-entries.jsonl`).
     const LAB: &str = "archive/e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a/01M2VKCST7EF12EW5T2Y7SJ86Q";
 
     // --- KEEP: the plan binding survives, bare and in the line it travels in -
@@ -8754,14 +8481,11 @@ fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
             }
         }
     }
-    // REVIEW MED-1: and the exemption needs the ANCHOR. `redact_path` reads a
-    // run as a key on its SHAPE alone — no UUID, no digest, none of this
-    // product's own archive components required — and `locationId` is
-    // `s3://<adopter bucket>/<adopter prefix>`, so the position is reachable.
-    // The alphabet that mints 26-character tokens is base32: an unpadded RFC
-    // 4648 encoding of a 128-bit seed (a TOTP secret, a recovery seed) is
-    // exactly 26 characters and is ULID-shaped 6.7e-3 of the time — 1 in 155,
-    // where before the exemption it was 0 in 400,000.
+    // The exemption needs the ANCHOR. `redact_path` reads a run as a key on
+    // its SHAPE alone, and `locationId` is `s3://<adopter bucket>/<adopter
+    // prefix>`, so the position is reachable. An unpadded RFC 4648 base32
+    // encoding of a 128-bit seed (a TOTP secret, a recovery seed) is exactly
+    // 26 characters and is ULID-shaped 1 time in 155.
     const BASE32_SECRET: &str = "2BSWY3DPEHPK3PXPJBSWY3DPEH";
     for value in [
         format!("my-archive-bucket-name/{BASE32_SECRET}"),
@@ -8798,9 +8522,8 @@ fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
 /// still matches exactly one rule.
 ///
 /// A rename in `logweir-core` would otherwise silently make the per-segment
-/// clause apply nothing (every rule filtered into the "shape" half) — which
-/// would be SAFE but would restore the F7 destruction — or apply everything,
-/// which would restore the userinfo hole.
+/// clause apply nothing (every rule filtered into the "shape" half) or
+/// everything, which would reopen the userinfo hole.
 #[test]
 fn the_long_run_rule_is_the_only_one_applied_per_segment() {
     let named: Vec<&str> = logweir_core::check_contract::redaction_rules()
@@ -8826,17 +8549,15 @@ fn the_long_run_rule_is_the_only_one_applied_per_segment() {
     );
 }
 
-/// **F3 / reviewer probe R5.** A closed port is `EndpointUnreachable`, not
-/// `Timeout`.
-///
-/// `options_for` sets `retry_timeout`, object_store renders it into the error
-/// text, and the shared classifier tests its TIMEOUT tokens before its
-/// UNREACHABLE ones — so every transport failure under a check classified as
-/// `Timeout`, which is `unknown` rather than blocking `notReady` and carries
-/// the remedy "raise the check timeout" instead of "check the URL and port".
+/// **A closed port is `EndpointUnreachable`, not `Timeout`.** `options_for`
+/// sets `retry_timeout`, object_store renders it into the error text, and the
+/// shared classifier tests its TIMEOUT tokens before its UNREACHABLE ones, so
+/// without the strip every transport failure classifies as `Timeout`
+/// (`unknown`, "raise the check timeout") instead of a blocking `notReady`
+/// ("check the URL and port").
 #[test]
 fn a_transport_failure_under_a_retrying_check_is_unreachable_not_a_timeout() {
-    // The EXACT text object_store produced in the reviewer's live probe.
+    // The EXACT text object_store produced in a live probe.
     let real = "Generic S3 error: Error performing GET https://minio.example:9000/lw-archive \
                 in 1.0s, after 2 retries, max_retries: 2, retry_timeout: 5s - HTTP error: error \
                 sending request for url (https://minio.example:9000/lw-archive)";
@@ -8890,14 +8611,13 @@ fn a_genuine_timeout_survives_the_strip() {
     );
 }
 
-/// **F5 / reviewer probe R4.** An `evidenceFetch` object may name only an
+/// An `evidenceFetch` object may name only an
 /// evidence stream.
 ///
-/// An object claiming `result` or `details` had its bytes printed to that
-/// stream and then the runner's own document printed to it again; the decoder
-/// answered `DuplicatePart` and the controller reported `ResultUnreadable`
-/// with no way to say why — the outcome the duplicate-stream refusal was
-/// written to prevent, reached from the other side.
+/// An object claiming `result` or `details` would print its bytes to that
+/// stream before the runner's own document, and the decoder would answer
+/// `DuplicatePart`, which the controller can only report as
+/// `ResultUnreadable`.
 #[test]
 fn an_evidence_object_may_not_name_a_stream_the_runner_writes() {
     for stream in [Stream::Result, Stream::Details] {
@@ -8938,14 +8658,13 @@ fn an_evidence_object_may_not_name_a_stream_the_runner_writes() {
     }
 }
 
-/// **Q1.** A marker put reports whether `PutMode::Create` was really enforced.
-///
+/// A marker put reports whether `PutMode::Create` was really enforced.
 /// `put_create_only` falls back to HEAD-then-PUT when a backend answers
-/// `NotSupported` / `NotImplemented` to a conditional put — a real,
-/// non-conditional write with a TOCTOU window. An enforced put is
-/// `MarkerWritten` with `createOnlyEnforced=true`; since RECEIPT-DUP the
-/// fallback is `notReady / ConditionalCreateUnsupported` (the backup runner's
-/// execution claim needs the enforcement).
+/// `NotSupported` / `NotImplemented` to a conditional put, a non-conditional
+/// write with a TOCTOU window. An enforced put is `MarkerWritten` with
+/// `createOnlyEnforced=true`; the fallback is `notReady /
+/// ConditionalCreateUnsupported`, because the backup runner's execution claim
+/// needs the enforcement.
 #[test]
 fn a_marker_row_says_whether_create_only_was_enforced() {
     let m = mount(&access_plan(vec![DestinationRole::EvidenceWrite], true));
@@ -8963,18 +8682,16 @@ fn a_marker_row_says_whether_create_only_was_enforced() {
         &FakeWiring::default().with_writer(FakeObjects::new().unconditional_put()),
     );
     let row = run.row(CheckId::DestinationEvidenceWritable);
-    // CHANGED BY RECEIPT-DUP (review F3). The grant is proved, but a store
-    // that falls back to HEAD-then-PUT cannot hold the backup runner's
-    // execution claim, so every backup to it would exit 4
-    // `ExecutionClaimUnproven`. The row says so BEFORE the first backup:
-    // notReady, not a written marker with a fact.
+    // The grant is proved, but a store that falls back to HEAD-then-PUT
+    // cannot hold the backup runner's execution claim, so every backup to it
+    // would exit 4 `ExecutionClaimUnproven`. The row says so BEFORE the first
+    // backup.
     assert_eq!(row.code, CheckCode::ConditionalCreateUnsupported);
     assert_eq!(row.state, CheckState::NotReady);
 }
 
-/// **F7.** The two readiness-marker messages name the key FAMILY rather than
-/// the whole key — and, since D2-REDACT-OVERBROAD, the whole key survives the
-/// redactor too.
+/// The two readiness-marker messages name the key FAMILY rather than the whole
+/// key, and the whole key survives the redactor too.
 #[test]
 fn the_marker_messages_name_a_family_that_survives_redaction() {
     let family = logweir::check::store::MARKER_PREFIX;
@@ -8983,13 +8700,10 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
         family,
         "the key family must survive redaction or the message says nothing"
     );
-    // F7's ORIGINAL finding was that the whole key did not survive: `/`, `-`
-    // and a UUID's hex are all in the base64 alphabet, so the long-run rule ate
-    // `logweir/readiness/<uid>` entire. That is the same rule that blanked the
-    // missing segment's path and the `signerKeyId` in the D2 live run, and it
-    // now exempts a run whose `/` components are public identifiers. The
-    // message still names the family — an operator wants the family, not one
-    // probe's UID — but redaction is no longer the reason.
+    // `/`, `-` and a UUID's hex are all in the base64 alphabet, so the
+    // long-run rule must exempt a run whose `/` components are public
+    // identifiers. The message still names the family, because an operator
+    // wants the family, not one probe's UID.
     let whole = logweir::check::store::absent_probe_key(DEST_UID);
     assert_eq!(
         logweir_core::check_contract::redact(&whole),
@@ -9027,24 +8741,12 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
     }
 }
 
-// ===========================================================================
-// 15. Re-verification fixes (2026-09-17)
-// ===========================================================================
-
-/// **R-F2.** The transport comes from `plan.tls` and from NOTHING else
-/// (D-SEAMS S5: transport security is never derived).
-///
-/// The shipped line was already right, and nothing asserted it: the reviewer's
-/// mutant **F1b** re-derived it as `tls: plan.ca_file.is_some()` and survived
-/// the whole suite, because the default fixture is `tls: Some(false)` with no
-/// `ca_file`, so the `true` branch was never exercised. Under that mutant a
-/// connection with `tls: true` and a publicly-trusted CA — no projected bundle,
-/// which is the ordinary case for a managed broker — dials `SASL_PLAINTEXT`,
-/// and `with_tls_ca_file` cannot notice because the mutant keeps the CA and the
-/// transport consistent with each other.
-///
-/// So the assertion is over all four `(tls, ca_file)` combinations: the answer
-/// must track `tls` alone, in both directions, with and without a CA.
+/// The transport comes from `plan.tls` and from NOTHING else: transport
+/// security is never derived. Re-deriving it as `tls: plan.ca_file.is_some()`
+/// would dial `SASL_PLAINTEXT` for a `tls: true` connection with a
+/// publicly-trusted CA (no projected bundle, the ordinary case for a managed
+/// broker), so the assertion covers all four `(tls, ca_file)` combinations:
+/// the answer tracks `tls` alone, in both directions.
 #[test]
 fn the_transport_comes_from_plan_tls_and_from_nothing_else() {
     for tls in [None, Some(false), Some(true)] {
@@ -9084,21 +8786,14 @@ fn the_transport_comes_from_plan_tls_and_from_nothing_else() {
     assert_eq!(err.code, CheckCode::AuthenticationFailed);
 }
 
-/// **R-F3 / reviewer probe R7.** A details line stays parseable JSON however
-/// long the key is.
-///
-/// `redact_path` used to end with `redact`'s 512-CHARACTER cap, and
-/// `details_stream` applies it per LINE — so a line carrying a long S3 key with
-/// no 40-character run (nothing to redact) was cut mid-string and the stream,
-/// which D2 §6.7 documents as JSON lines, emitted an unparseable one. The cap
-/// now lives where each bound belongs: on the message (`with_message`), on the
-/// sample VALUE (`readiness::detail`, re-serialised by serde_json), and on the
-/// stream in BYTES (`details_stream`, which drops whole lines).
+/// A details line stays parseable JSON however long the key is. The caps live
+/// where each bound belongs: on the message (`with_message`), on the sample
+/// VALUE (`readiness::detail`, re-serialised by serde_json), and on the stream
+/// in BYTES (`details_stream`, which drops whole lines), never mid-line.
 #[test]
 fn a_long_key_leaves_the_details_stream_parseable() {
-    // R7's shape: 120 short `/`-separated segments, 888 characters, and no run
-    // anywhere near 40 — so redaction has nothing to do and only a cap could
-    // damage it.
+    // 120 short `/`-separated segments, 888 characters, and no run anywhere
+    // near 40: redaction has nothing to do and only a cap could damage it.
     let long_key: String = (0..120)
         .map(|i| format!("seg{i:03}"))
         .collect::<Vec<_>>()
@@ -9133,9 +8828,8 @@ fn a_long_key_leaves_the_details_stream_parseable() {
     assert_eq!(round_trip["count"], 1);
 
     // A Kafka topic name is at most 249 characters, so the VALUE cap never
-    // cuts one. (Redaction may still fire on a name that is itself one long
-    // run of the base64 alphabet — that is F7's documented trade-off for a
-    // value with no `/` to split on, and it is a redaction, not a cut.)
+    // cuts one. Redaction may still fire on a name that is itself one long
+    // run of the base64 alphabet: a redaction, not a cut.
     let longest_topic: String = std::iter::repeat("orders.eu-west-1.")
         .flat_map(|s| s.chars())
         .take(249)
@@ -9146,15 +8840,12 @@ fn a_long_key_leaves_the_details_stream_parseable() {
     assert!(!sample["sample"][0].as_str().unwrap().ends_with('…'));
 }
 
-/// **D2 W8 seam.** A connection's `caFile` is an OPAQUE IN-POD PATH: the
-/// runner hands it to the client and never opens it.
-///
-/// W8's `TopicDiscovery` reconciler does not render `source-ca.pem` into the
-/// plan `ConfigMap` — a `KafkaCluster` may name its CA in a Secret and that
-/// controller holds no verb on `secrets` — so it projects the same mount an
-/// execution Job gets and names `/connection/source-ca/ca.crt` in the plan.
-/// A runner that assumed `/check/source-ca.pem`, or that read the file to
-/// inline it, would refuse every discovery against a private-CA broker.
+/// A connection's `caFile` is an OPAQUE IN-POD PATH: the runner hands it to
+/// the client and never opens it. The `TopicDiscovery` reconciler holds no
+/// verb on `secrets`, so it projects the mount an execution Job gets and names
+/// `/connection/source-ca/ca.crt` in the plan; a runner that assumed
+/// `/check/source-ca.pem`, or read the file to inline it, would refuse every
+/// discovery against a private-CA broker.
 ///
 /// The DESTINATION side is deliberately not this: `DestinationPlan::ca_file`
 /// is read, because `StoreOptions::with_root_certificate` takes PEM bytes.
@@ -9165,7 +8856,7 @@ fn a_connection_ca_is_an_opaque_in_pod_path() {
     const PASSWORD_VAR: &str = "LOGWEIR_CHECK_TEST_CA_ROW_PASSWORD";
     std::env::set_var(PASSWORD_VAR, "not-a-real-password");
     for path in [
-        // W8's projected mount…
+        // The projected mount…
         "/connection/source-ca/ca.crt",
         // …and D2 §4.3's plan-ConfigMap key, which other kinds may still use.
         "/check/source-ca.pem",
@@ -9207,7 +8898,7 @@ fn a_connection_ca_is_an_opaque_in_pod_path() {
     }
 
     // And it still cannot decide the transport: a CA on a clear connection is
-    // refused rather than upgrading it (D-SEAMS S5).
+    // refused rather than upgrading it.
     let clear = ConnectionPlan {
         auth_mode: "scramSha512".to_string(),
         username: Some("backup".to_string()),
@@ -9224,9 +8915,7 @@ fn a_connection_ca_is_an_opaque_in_pod_path() {
     );
 }
 
-// ===========================================================================
-// 12. `catalogSync` — D3 §5.3's bounded walk, and the body §7d specifies
-// ===========================================================================
+// 12. `catalogSync`: D3 §5.3's bounded walk, and the body §7d specifies.
 //
 // THE CONTROLLER'S PARSER IS THE ORACLE HERE, and it lives in a crate this one
 // does not link. So the pinning runs in both directions:
@@ -9238,10 +8927,6 @@ fn a_connection_ca_is_an_opaque_in_pod_path() {
 //     fixture, and `crates/weirkeeper/tests/catalog_controller.rs`'s
 //     `the_runners_pinned_body_is_one_this_parser_reads` extracts it from THIS
 //     file and runs `view::parse_body` over it.
-//
-// Either side moving breaks a test, and neither crate gained a dependency
-// edge — which is the pattern D2 W9 used for the expected-row set, for the
-// same reason.
 
 /// The signer key id the pinned fixture's sidecar CLAIMS.
 ///
@@ -9469,9 +9154,7 @@ fn drive_sync(
     drive(&mount(&catalog_plan(request)), wiring)
 }
 
-// ---------------------------------------------------------------------------
-// FX-7: points pinned to a manifest VERSION
-// ---------------------------------------------------------------------------
+// Points pinned to a manifest VERSION.
 
 /// A receipt taken on a VERSIONED bucket: the pin's format, pinning `version`.
 fn pinned_catalog_receipt(version: &str) -> BackupReceipt {
@@ -9507,16 +9190,12 @@ fn only_entry(objects: FakeObjects) -> serde_json::Value {
     entries[0].clone()
 }
 
-// ---------------------------------------------------------------------------
-// PROD-05.1: the view lists a point's topics with their recorded layout
-// ---------------------------------------------------------------------------
+// The view lists a point's topics with their recorded layout.
 
-/// A 1.3.0 receipt over `topics`, each captured with the given replication
-/// factor and partition count, `orders` owned by a Strimzi `KafkaTopic`.
 /// A 1.3.0 receipt over `(topic, replication factor, partitions)`; a `0`
 /// count is NOT RECORDED (arm 19 forbids a recorded zero), the shape engine
-/// 0.23.3's manifest leaves for every topic after the first (FX-21). `orders`
-/// is owned by a Strimzi `KafkaTopic`, so the run read the resources.
+/// 0.23.3's manifest leaves for every topic after the first. `orders` is
+/// owned by a Strimzi `KafkaTopic`, so the run read the resources.
 fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
     use logweir_core::backup_receipt::{TopicConfigCoverage, TopicConfiguration, TopicOwner};
     let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
@@ -9567,10 +9246,10 @@ fn modelled_catalog_receipt(topics: &[(&str, u32, u32)]) -> BackupReceipt {
     r
 }
 
-/// **M3 (fix round): an absent count stays absent.** A topic whose replication
-/// factor was not recorded — engine 0.23.3's manifest keeps it for the first
-/// topic only (FX-21) — and one whose partition count was not, are listed
-/// WITHOUT the key: never `1`, never `0`, never another topic's.
+/// **An absent count stays absent.** A topic whose replication factor was not
+/// recorded (engine 0.23.3's manifest keeps it for the first topic only), and
+/// one whose partition count was not, are listed WITHOUT the key: never `1`,
+/// never `0`, never another topic's.
 #[test]
 fn a_topic_whose_factor_or_count_was_not_recorded_is_listed_without_it() {
     let receipt = modelled_catalog_receipt(&[("orders", 3, 6), ("ledger", 0, 4), ("audit", 2, 0)]);
@@ -9587,7 +9266,7 @@ fn a_topic_whose_factor_or_count_was_not_recorded_is_listed_without_it() {
         ]),
         "{entry}"
     );
-    // Where the run looked for owners travels with the topics (M2).
+    // Where the run looked for owners travels with the topics.
     assert_eq!(
         entry["ownerDetection"],
         serde_json::json!(["kafkaTopicResources"]),
@@ -9595,7 +9274,7 @@ fn a_topic_whose_factor_or_count_was_not_recorded_is_listed_without_it() {
     );
 }
 
-/// **M2 (fix round).** A run that looked for owners nowhere publishes an EMPTY
+/// A run that looked for owners nowhere publishes an EMPTY
 /// `ownerDetection` beside its topics — not an absent one, which is NOT
 /// PUBLISHED — so a reader can say "owner not checked" for every topic.
 #[test]
@@ -9670,7 +9349,7 @@ fn a_point_with_more_topics_than_the_cap_lists_none_and_counts_them() {
     assert!(entry.get("ownerDetection").is_none(), "{entry}");
 }
 
-/// **PROD-04.1.** A 1.7.0 receipt over `orders` (one partition) selecting
+/// A 1.7.0 receipt over `orders` (one partition) selecting
 /// `ids`: the first captured at a position the archive holds, every other
 /// excluded GroupNotFound — built by the RUNNER's own builder, so the block is
 /// the one `backup run` signs.
@@ -9717,8 +9396,8 @@ fn capturable_group(id: &str) -> logweir_kafka::groups::CapturableGroup {
 /// **`backup run`'s own builder** over `ids`, the `(topic, partitions)` named,
 /// every partition's marks `[0, 10]` read before and after the engine and
 /// `[0, 9]` archived. A group `captured(i)` selects is a live classic group
-/// committed at 5 on EVERY partition of every topic — the review's worst
-/// case, the one that grows the positions — and every other id is absent.
+/// committed at 5 on EVERY partition of every topic (the worst case, the one
+/// that grows the positions), and every other id is absent.
 fn built_positions(
     receipt: &BackupReceipt,
     ids: &[String],
@@ -9836,27 +9515,20 @@ fn built_positions(
     .expect("the builder builds")
 }
 
-/// **PROD-04.1 review H1: the receipt stays small however many partitions the
-/// selected groups hold, and the point stays `Available`.** The review's two
-/// sizes, through the runner's own builder with every group committed on every
-/// partition: 10 groups over 20 topics of 12 partitions, and 100 groups — the
-/// most a backup may select — over 10 topics of 11. Each receipt is far under
-/// the 256 KiB the catalog read a document under when PROD-04.1 landed (and
-/// the evidence fetch's cap), the catalog reads the point `Available` with its
-/// summary, and the receipt's block alone is under its enforced cap. NEGATIVE
-/// CONTROL: the positions themselves — the document the receipt binds — are
-/// over that 256 KiB at both sizes, which is what the receipt carried inline
-/// before the fix.
-///
-/// FX-33 replaced that cap with the topic budget's (`caps::CATALOG_RECEIPT`),
-/// so the number this row holds the receipt under is written down here: the
-/// row's claim is that positions do not grow the receipt, whatever a reader's
-/// cap is.
+/// **The receipt stays small however many partitions the selected groups
+/// hold, and the point stays `Available`.** Through the runner's own builder
+/// with every group committed on every partition: 10 groups over 20 topics of
+/// 12 partitions, and 100 groups (the most a backup may select) over 10
+/// topics of 11. Each receipt is far under 256 KiB, the catalog reads the
+/// point `Available` with its summary, and the receipt's block alone is under
+/// its enforced cap. NEGATIVE CONTROL: the positions document the receipt
+/// binds is over 256 KiB at both sizes. The row's claim is that positions do
+/// not grow the receipt, whatever a reader's cap is.
 #[test]
 fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
     use logweir::check::kinds::catalog_sync::MAX_ENTRY_GROUPS;
     use logweir_core::consumer_positions::{MAX_BLOCK_BYTES, MAX_SELECTED_GROUPS};
-    /// The catalog walk's document cap when this row was written.
+    /// The bound this row holds each receipt under.
     const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
     for (groups, topics, partitions) in [(10usize, 20usize, 12i32), (MAX_SELECTED_GROUPS, 10, 11)] {
         let names: Vec<String> = (0..topics).map(|t| format!("topic-{t:02}")).collect();
@@ -9923,7 +9595,7 @@ fn the_reviews_two_sizes_keep_the_receipt_small_and_the_point_available() {
     }
 }
 
-/// **PROD-04.1: the catalog view shows the snapshot's freshness and whether
+/// **The catalog view shows the snapshot's freshness and whether
 /// each group's positions relate to archived data.** An `Available` 1.7.0
 /// point publishes when its positions were observed and, per group, its
 /// outcome and counts; the control — a 1.3.0 point — publishes nothing (NOT
@@ -9965,7 +9637,7 @@ fn an_available_1_7_0_point_publishes_its_consumer_position_summary() {
     assert!(control.get("consumerPositions").is_none(), "{control}");
 }
 
-/// **The review's A7: a summary the receipt does not back is never shown.**
+/// **A summary the receipt does not back is never shown.**
 /// A record whose consumer position summary was changed after it was written
 /// — a failed group made captured — is a `Conflict` (rule 3), and the entry
 /// publishes NO `consumerPositions`: the view never shows a summary the sync
@@ -10038,7 +9710,7 @@ fn a_pinned_point_whose_version_is_current_is_available() {
 
 /// **The pin's whole point, in the catalog.** Engine 0.21.0 re-running over a
 /// set can put a manifest whose bytes are IDENTICAL while it rewrites the
-/// segments under it (measured, FX-7). The digest cannot see that; the version
+/// segments under it (measured). The digest cannot see that; the version
 /// can: the point is `Conflict`, not selectable, with a remedy that says the
 /// set was written again. The control is the same history under a point that
 /// pins nothing — `Available`, which is exactly the blindness the pin closes.
@@ -10143,10 +9815,8 @@ fn catalog_sync_reads_the_version_the_live_store_reports() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-7 fix round (review H-1): a byte-identical COPY of a pinned point is the
-// same point in another place — never "written again"
-// ---------------------------------------------------------------------------
+// A byte-identical COPY of a pinned point is the same point in another place,
+// never "written again".
 
 /// The remedy of an `Available` point whose pin could not be checked here:
 /// the table's own remedy (these fixtures trust no key, so `notAttempted`'s)
@@ -10163,10 +9833,10 @@ fn assert_noted(entry: &serde_json::Value) {
     );
 }
 
-/// **H-1, the unversioned copy.** A pinned point copied byte for byte into an
+/// **The unversioned copy.** A pinned point copied byte for byte into an
 /// UNVERSIONED bucket: the copy answers no version id and cannot be read by
 /// one. It is the same signed point (one point in two places), `Available` by
-/// its digest, with the note. Before the fix it was `Conflict`.
+/// its digest, with the note.
 #[test]
 fn a_byte_identical_copy_of_a_pinned_point_in_an_unversioned_bucket_is_available() {
     let f = catalog_fixture(
@@ -10188,7 +9858,7 @@ fn a_byte_identical_copy_of_a_pinned_point_in_an_unversioned_bucket_is_available
     );
 }
 
-/// **H-1, the versioned copy.** The same copy into a VERSIONED bucket that
+/// **The versioned copy.** The same copy into a VERSIONED bucket that
 /// issued its OWN ids: the pinned id is not in its history (`NotFound`).
 #[test]
 fn a_byte_identical_copy_in_a_versioned_bucket_with_its_own_ids_is_available() {
@@ -10201,7 +9871,7 @@ fn a_byte_identical_copy_in_a_versioned_bucket_with_its_own_ids_is_available() {
     assert_noted(&entry);
 }
 
-/// **Review L-1, K4: a store that answers NO version is not, by itself, a
+/// **A store that answers NO version is not, by itself, a
 /// copy.** Versioning SUSPENDED and the key written again: S3 then answers the
 /// current read with the literal `null` (no pinnable version), while the
 /// version the receipt pins is still in the bucket's history. The read by id
@@ -10306,8 +9976,8 @@ fn a_pinned_version_that_cannot_be_read_is_unreadable() {
             .contains(logweir::catalog::pin::UNCHECKED_NOTE),
         "{entry}"
     );
-    // FX-7 re-check, nit 1: the remedy names the grant a by-id read needs,
-    // which the generic `Unreadable` remedy does not.
+    // The remedy names the grant a by-id read needs, which the generic
+    // `Unreadable` remedy does not.
     assert_eq!(
         entry["remedy"],
         logweir::catalog::pin::UNREADABLE_REMEDY,
@@ -10818,13 +10488,12 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
         counts["total"], 2,
         "the walk still SAW both points — the shard listing is what establishes that"
     );
-    // FX-33: AND BOTH ARE LISTED, by the point id each key carries. They
-    // used to be counted and listed by no entry. A read that did not answer
-    // is the one cause whose remedy names the grant.
+    // AND BOTH ARE LISTED, by the point id each key carries. A read that did
+    // not answer is the one cause whose remedy names the grant.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "both points are listed: {body}");
     for f in [&newer, &older] {
-        // FX-50: entries with no record carry no instant, so the body lists
+        // Entries with no record carry no instant, so the body lists
         // them last, by point id.
         let entry = entries
             .iter()
@@ -10898,11 +10567,11 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
         counts["available"], 1,
         "the other point still lists: {body}"
     );
-    // FX-33: and the point this build cannot read is listed too, as what it
+    // And the point this build cannot read is listed too, as what it
     // is, with the version it declares.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "{body}");
-    // FX-50: an entry with no record carries no instant, so it is listed last.
+    // An entry with no record carries no instant, so it is listed last.
     let unsupported = &entries[1];
     assert_eq!(unsupported["pointId"], newer.point.point_id.as_str());
     assert_eq!(
@@ -11229,10 +10898,6 @@ fn a_full_rescan_resumes_after_its_cursor() {
 
 /// The plan's `indexShard` never moves the window: the walk starts at today
 /// and ends at the archive's own oldest day, whatever the cursor says.
-///
-/// It used to be CONSUMED as a floor derived from the previous reach, which is
-/// review finding F3's ratchet. It is reported and not consumed now, and this
-/// row is what says so.
 #[test]
 fn the_index_cursor_bounds_the_walk_and_never_moves_the_window() {
     let (objects, newer, older) = two_point_objects();
@@ -11318,10 +10983,6 @@ fn the_long_run_rule_is_named_once() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fix round 1 — the review's F1..F5
-// ---------------------------------------------------------------------------
-
 /// Seed `n` points on `n` consecutive days ending today, newest first.
 fn many_points(n: usize) -> (FakeObjects, Vec<String>) {
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
@@ -11345,14 +11006,10 @@ fn many_points(n: usize) -> (FakeObjects, Vec<String>) {
     (objects, ids)
 }
 
-/// **F1.** A `Full` rescan EXAMINES everything it counts. `viewLimit` bounds the
-/// lines the body carries and nothing else.
-///
-/// It used to bound examination: the walk stopped calling `examine` at
-/// `viewLimit` while it kept counting, then reported `complete: true` with no
-/// cursor. On a 20 000-point archive with the default `viewLimit: 2000` the
-/// other 18 000 points were never manifest-checked, and never would be on any
-/// cadence, because a completed walk leaves nothing to resume from.
+/// A `Full` rescan EXAMINES everything it counts: `viewLimit` bounds the lines
+/// the body carries and nothing else, or points past it would never be
+/// manifest-checked on any cadence, because a completed walk leaves nothing to
+/// resume from.
 #[test]
 fn a_full_rescan_examines_every_point_it_counts() {
     let (objects, _) = many_points(9);
@@ -11383,13 +11040,9 @@ fn a_full_rescan_examines_every_point_it_counts() {
     );
 }
 
-/// **F2.** The availability buckets sum to `total` on EVERY walk — over a
-/// fixture larger than one page and larger than the view limit, in both modes.
-///
-/// §7d states the invariant; it used to be false, because a walk that reached
-/// its floor with more than `viewLimit` points reported `complete: true` with
-/// buckets covering only `viewLimit`. An operator read "no conflicts in 50 000
-/// points" from a walk that examined 2 000.
+/// The availability buckets sum to `total` on EVERY walk (§7d's invariant),
+/// over a fixture larger than one page and larger than the view limit, in both
+/// modes.
 #[test]
 fn the_buckets_sum_to_total_on_every_walk() {
     // Eleven points over eleven days, one of them broken, with a view limit of
@@ -11439,18 +11092,14 @@ fn the_buckets_sum_to_total_on_every_walk() {
     }
 }
 
-/// **F3.** The `Index` floor is the ARCHIVE's own oldest day, so the reported
-/// cursor is stable and `complete: true` is reachable at any archive age.
-///
-/// The floor used to be the previous walk's reported cursor minus a day, so it
-/// receded one day per sync for ever; past the shard cap the loop could never
-/// reach it, `complete` was never true again, and every sync published
-/// `ScanIncomplete` — "the object budget ran out" — on a healthy archive whose
-/// budget was never touched.
+/// The `Index` floor is the ARCHIVE's own oldest day, so the reported cursor
+/// is stable and `complete: true` is reachable at any archive age. A floor
+/// that receded one day per sync would, past the shard cap, never be reached,
+/// and every sync would publish `ScanIncomplete` on a healthy archive.
 #[test]
 fn the_index_floor_is_the_archives_own_oldest_day_and_does_not_ratchet() {
-    // An archive whose oldest point is a THOUSAND days old — past the cap the
-    // old walk could ever reach.
+    // An archive whose oldest point is a THOUSAND days old, past the shard
+    // cap.
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let mut objects = FakeObjects::new();
     let mut days = Vec::new();
@@ -11513,14 +11162,10 @@ fn the_index_floor_is_the_archives_own_oldest_day_and_does_not_ratchet() {
     assert_eq!(summary_of(&empty_body, "catalog-cursor=")["complete"], true);
 }
 
-/// **F4.** The receipt's three outcomes are three different facts, and the
-/// record's and the sidecar's too. A key-scoped fault is what makes each one
-/// reachable on its own.
-///
-/// The reviewer's mutant folded the receipt `get`'s `Err(_) => Unreadable` into
-/// `Missing` and the whole suite stayed green: the one row that installed a
-/// fault failed EVERY `get`, so the record read failed first and the receipt
-/// branch was never reached with a failure at all.
+/// The receipt's three outcomes are three different facts, and the record's
+/// and the sidecar's too. A key-scoped fault makes each one reachable on its
+/// own: a fault on EVERY `get` fails the record read first, and the receipt
+/// branch is never reached with a failure.
 #[test]
 fn a_receipt_that_cannot_be_read_is_never_missing() {
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
@@ -11532,7 +11177,7 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
     );
     let denied = Fault::Io(s3_refusal("403 Forbidden", "AccessDenied"));
 
-    // The last column is the cause (FX-33): the document the examination
+    // The last column is the cause: the document the examination
     // stopped at and why, or `None` for a point that is `Available`. Only a
     // read that did not answer has a remedy naming the grant.
     type Cause<'a> = Option<(&'a str, &'a str)>;
@@ -11612,8 +11257,8 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
         let body = body_of(&run);
         let counts = summary_of(&body, "catalog-counts=");
         assert_eq!(counts["total"], 1, "{what}: {body}");
-        // FX-33: EVERY counted point is listed — a point whose RECORD could
-        // not be read too, which used to be counted and listed by no entry.
+        // EVERY counted point is listed, a point whose RECORD could not be
+        // read too.
         let entries = entries_of(&body);
         assert_eq!(entries.len(), 1, "{what}: the point is not listed: {body}");
         let entry = &entries[0];
@@ -11649,11 +11294,8 @@ fn a_receipt_that_cannot_be_read_is_never_missing() {
     }
 }
 
-/// **F4, the size half (question F12), and FX-33's.** A record larger than
-/// the bound a record is read under is `Unreadable`, is not parsed — and is
-/// LISTED, with its size against the bound.
-///
-/// Before FX-33 the outcome was the count alone: the point had no entry.
+/// **A record larger than the bound a record is read under is `Unreadable`,
+/// is not parsed, and is LISTED, with its size against the bound.**
 ///
 /// KILLS: the record read uncapped or under a larger cap; `build_entry`
 /// dropping a point with no parsed record; the size reported with the
@@ -11670,9 +11312,8 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     );
     // A RECORD THAT WOULD OTHERWISE PARSE. Unknown fields are ignored inside
     // major 1 (D3 §5.2 rule 2), so padding one with a long string leaves a
-    // document `read_record` accepts — which is what makes the ceiling, and not
-    // the parser, the thing under test. A block of spaces would fail to parse
-    // either way and the mutant that deletes the ceiling would survive.
+    // document `read_record` accepts, which makes the ceiling, and not the
+    // parser, the thing under test.
     let cap = usize::try_from(caps::CATALOG_RECORD).expect("fits");
     let mut doc: serde_json::Value =
         serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
@@ -11717,9 +11358,9 @@ fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
     assert!(!remedy.contains("grant"), "a size names no grant: {remedy}");
 }
 
-/// **FX-31: the catalog walk READS under its caps**, not only measures after:
-/// the record under `caps::CATALOG_RECORD`, the receipt under
-/// `caps::CATALOG_RECEIPT` (FX-33: the topic budget's two bounds, the second
+/// **The catalog walk READS under its caps**, not only measures after: the
+/// record under `caps::CATALOG_RECORD`, the receipt under
+/// `caps::CATALOG_RECEIPT` (the topic budget's two bounds, the second
 /// the controller's own), the sidecar under `caps::SIDECAR`, the manifest
 /// under `caps::MANIFEST`. The row above holds the outcome (`Unreadable`);
 /// this one holds the read.
@@ -11759,7 +11400,7 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
     assert_eq!(cap_of(&f.receipt_key), caps::CONTROLLER_RECEIPT);
     assert_eq!(cap_of(&f.sidecar_key), caps::SIDECAR);
     assert_eq!(cap_of(&f.manifest_key), caps::MANIFEST);
-    // FX-33: each of the five kinds has ITS cap, and no two reads of one walk
+    // Each of the five kinds has ITS cap, and no two reads of one walk
     // share a number by accident — a record is never read under the
     // manifest's 256 MiB, nor a sidecar under a receipt's 5 MB.
     const _: () = assert!(
@@ -11775,20 +11416,16 @@ fn a_catalog_walk_reads_every_document_under_its_cap() {
     }
 }
 
-/// **F5.** A walk stopped by the object budget says so on the WALK, and no
-/// point is reported `Unreadable` for it.
-///
-/// A point abandoned between its record and its receipt used to be
-/// `Unreadable`, whose fixed remedy names the `archiveRead` grant and the
-/// network — and which the controller takes BEFORE the `!complete` branch and
-/// publishes as `PartialScan`: "a permission or transport failure". A
-/// budget-bounded walk is the designed, normal state the cursor exists for.
+/// **A walk stopped by the object budget says so on the WALK, and no point is
+/// reported `Unreadable` for it.** `Unreadable`'s remedy names the
+/// `archiveRead` grant and the network, and the controller publishes it as
+/// `PartialScan`, while a budget-bounded walk is the designed, normal state
+/// the cursor exists for.
 #[test]
 fn a_budget_stop_is_the_walks_outcome_and_never_a_points() {
     // FOUR POINTS ON ONE DAY, so the budget runs out BETWEEN POINTS inside a
-    // shard rather than between shards. A point-per-day fixture only ever
-    // exercises the shard-level guard, which is how two mutants on the
-    // point-level one survived a campaign.
+    // shard rather than between shards: a point-per-day fixture only
+    // exercises the shard-level guard.
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
     let mut objects = FakeObjects::new();
     for i in 0..4 {
@@ -11805,12 +11442,10 @@ fn a_budget_stop_is_the_walks_outcome_and_never_a_points() {
         objects = place(objects, &f);
     }
     // NINE OBJECTS: the floor listing, one shard listing and exactly ONE whole
-    // point, with three left over — fewer than a point costs. The leftover is
-    // the point of the number: a guard that asked `objects < budget` instead of
-    // `objects + OBJECTS_PER_POINT <= budget` would begin a second point it
-    // cannot pay for, overspend the budget and count it. A budget that happens
-    // to be a whole number of points cannot tell the two apart, and that is how
-    // this mutant survived its first campaign.
+    // point, with three left over, fewer than a point costs. A guard that
+    // asked `objects < budget` instead of `objects + OBJECTS_PER_POINT <=
+    // budget` would begin a second point it cannot pay for; a budget that is a
+    // whole number of points cannot tell the two apart.
     let run = drive_sync(
         logweir_core::check_contract::CatalogSyncRequest {
             max_objects_per_run: 9,
@@ -11917,7 +11552,7 @@ fn a_budget_stop_is_the_walks_outcome_and_never_a_points() {
     );
 }
 
-/// **F11.** A credential planted in a field that is not a digest is redacted by
+/// A credential planted in a field that is not a digest is redacted by
 /// the WHOLE rule set, and the three digests still come through.
 #[test]
 fn a_long_credential_in_a_non_digest_field_is_redacted() {
@@ -11928,8 +11563,7 @@ fn a_long_credential_in_a_non_digest_field_is_redacted() {
         &sidecar,
         CATALOG_CLAIMED_KEY_ID,
     );
-    // Forty-four characters of base64 — over the long-run rule's threshold, and
-    // exactly the shape the exemption used to let through.
+    // Forty-four characters of base64, over the long-run rule's threshold.
     const PLANTED_LONG: &str = "c2VjcmV0LWNyZWRlbnRpYWwtbm9ib2R5LXNob3VsZC1zZWU";
     assert!(PLANTED_LONG.len() >= 40);
     let mut doc: serde_json::Value =
@@ -12010,24 +11644,17 @@ fn a_long_credential_in_a_non_digest_field_is_redacted() {
     );
 }
 
-/// **CATALOG-RECEIPTKEY-REDACTED, end to end.** The `receiptKey` the sync
-/// publishes is the one `logweir backup run` wrote, character for character,
-/// for a run id as the product really mints it.
-///
-/// REGRESSION REASON. Every fixture above spells the run id `run-a` — a
-/// lower-case public NAME, which never reached the free-component budget — so
-/// the whole suite was green while every LIVE point published
-/// `receiptKey: "[redacted].receipt.json"`. A real run id is a 26-character
-/// ULID (`logweir_core::ids::format_run_id`), two over the budget of 24, and
-/// it is the ONE free component of the key. D3 §5.5 step 4 builds
-/// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`
-/// from this line, so the key that arrived redacted was a plan binding the
+/// **The `receiptKey` the sync publishes is the one `logweir backup run`
+/// wrote, character for character, for a run id as the product really mints
+/// it.** A real run id is a 26-character ULID
+/// (`logweir_core::ids::format_run_id`), two over the free-component budget
+/// of 24, and the ONE free component of the key; D3 §5.5 step 4 builds
+/// `source.point` from this line, so a redacted key is a plan binding the
 /// runner refuses with exit 3 `PointBindingMismatch`.
 ///
-/// The second half is the negative control the first half needs: a run id one
-/// character LONGER is not a ULID, is over the budget, and is still redacted.
-/// A fix that raised the budget instead of exempting the shape passes the
-/// first half and fails the second.
+/// The negative control: a run id one character LONGER is not a ULID, is over
+/// the budget, and is still redacted, so raising the budget instead of
+/// exempting the shape fails.
 #[test]
 fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
@@ -12107,7 +11734,7 @@ fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
     );
 }
 
-/// **FX-17's class sweep: the resume cursor is a value the NEXT sync decides
+/// **The resume cursor is a value the NEXT sync decides
 /// on**, and it passes `redact_path` (`catalog_sync.rs` `cursor_document`).
 /// A redacted cursor would be a listing start-after no key equals. It is a
 /// point's RECORD key, `logweir/catalog/v1/points/<pointId>/record.json`,
@@ -12137,22 +11764,14 @@ fn the_catalog_resume_cursor_is_a_record_key_the_redactor_keeps() {
     );
 }
 
-/// **FX-17, end to end.** A SCHEDULED run's point is published with its set
-/// id, its receipt key and its manifest key whole.
+/// **A SCHEDULED run's point is published with its set id, its receipt key
+/// and its manifest key whole.** A scheduled run's set id is
+/// `<schedule uid>-<yyyymmdd>-<hhmmss>` (`weirkeeper::slot::
+/// backup_id_for_attempt`), 52 characters, neither a UUID nor a public name;
+/// redacted, the console could build no plan binding for any nightly point.
 ///
-/// REGRESSION REASON. The row above, and every catalog fixture in this file,
-/// spells the backup set id as a UUID — a manual run's. A scheduled run's set
-/// id is `<schedule uid>-<yyyymmdd>-<hhmmss>` (`weirkeeper::slot::
-/// backup_id_for_attempt`), 52 characters, which the redactor read as neither a
-/// UUID nor a public name. So on the PoC every nightly point reached the
-/// console as `backupId: "[redacted]"`, `receiptKey: "[redacted].receipt.json"`
-/// and `manifestKey: "[redacted].json"` — 84 of 370 points, the whole first
-/// page of the Catalog view — and the console offered none of them, because a
-/// plan binding cannot be built from the redactor's output.
-///
-/// The second half is the negative control: a set id with the same shape but
-/// a slot that is not a real instant was never minted, and it is still
-/// withheld from all three fields.
+/// The negative control: a set id with the same shape but a slot that is not a
+/// real instant was never minted, and it is withheld from all three fields.
 #[test]
 fn a_scheduled_runs_point_is_published_with_its_set_id_and_keys_whole() {
     /// The PoC's own nightly schedule UID and one of its run ids.
@@ -12280,7 +11899,7 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
     assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
     assert_eq!(usize_const("MAX_ENTRY_TOPICS"), cs::MAX_ENTRY_TOPICS);
     assert_eq!(usize_const("MAX_ENTRY_GROUPS"), cs::MAX_ENTRY_GROUPS);
-    // PROD-03.0: the controller skips an entry listing more schema ids than
+    // The controller skips an entry listing more schema ids than
     // the receipt format lists, so the runner never writes more.
     assert_eq!(
         usize_const("MAX_ENTRY_SCHEMA_IDS"),
@@ -12336,7 +11955,7 @@ fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
     );
 }
 
-/// **THE CROSS-CRATE GUARD, for a point whose record gave no facts (FX-33).**
+/// **THE CROSS-CRATE GUARD, for a point whose record gave no facts.**
 /// The EXACT body the emitter produces for the fixture below: one point whose
 /// record reads, one whose record is over its bound, and one whose record is
 /// not a record. The second and third are listed by their point ids alone.
@@ -12386,9 +12005,7 @@ fn the_recordless_catalog_sync_body_is_pinned_for_the_controllers_parser() {
     );
 }
 
-// ===========================================================================
-// PROD-11.1 — the replay selection's PREVIEW, through the shared function
-// ===========================================================================
+// The replay selection's PREVIEW, through the shared function.
 
 /// `restore_yaml` whose `restore:` block states `point_in_time` as the
 /// interval `"<start>/<end>"` when `start_ms` is given, plus `extra` keys.
@@ -12465,7 +12082,7 @@ fn the_preview_refuses_a_window_start_before_coverage() {
 }
 
 /// `selecting_yaml` with a partition subset, written beside the interval
-/// form a subset needs (PROD-11.1b): `"<start>/<pit>"`, or `"../<pit>"` from
+/// form a subset needs: `"<start>/<pit>"`, or `"../<pit>"` from
 /// the archive's floor.
 fn subset_yaml(start_ms: Option<i64>, point_in_time_ms: i64, partitions: &str) -> String {
     let pit = ms_to_rfc3339(point_in_time_ms);
@@ -12480,7 +12097,7 @@ fn subset_yaml(start_ms: Option<i64>, point_in_time_ms: i64, partitions: &str) -
 }
 
 /// **A partition subset is previewed through the shared function**
-/// (PROD-11.1b, OD-9 (a)): a subset the archive satisfies is `ready` at
+/// (OD-9 (a)): a subset the archive satisfies is `ready` at
 /// `plan.parse` and covered at `archive.coverage`, which names how many
 /// partitions it selects, from where and in how many engine runs; a subset
 /// naming a partition the archive does not list is `PartitionNotInBackupSet`;
@@ -12688,7 +12305,7 @@ fn the_preview_and_execution_resolve_the_same_selection() {
     let mapping: BTreeMap<String, String> = [("orders".to_string(), "restore-orders".to_string())]
         .into_iter()
         .collect();
-    // Three window starts, and (PROD-11.1b) two partition subsets: one from
+    // Three window starts, and two partition subsets: one from
     // the archive's floor and one from a start.
     let plans: Vec<(String, String)> = [1_757_900_000_000i64, 1_757_901_600_001, 1_757_906_500_000]
         .iter()
@@ -12748,7 +12365,7 @@ fn the_preview_and_execution_resolve_the_same_selection() {
     }
 }
 
-/// **PROD-03.0: the sync lists each topic's schema dependency as the shared
+/// **The sync lists each topic's schema dependency as the shared
 /// fixture says.** `ui/tests/fixtures/console/catalog-point-schema-dependency.json`
 /// holds a point record's `topics[].schema_dependency` (`recordTopics`) and the
 /// entry the view must list for each (`entryTopics`): the verdict, the basis or
@@ -12777,7 +12394,7 @@ fn the_sync_lists_each_topics_schema_dependency_as_the_fixture_says() {
     }
 }
 
-/// **PROD-15.1 review L6.** The readiness check's `plan.parse` refuses an
+/// The readiness check's `plan.parse` refuses an
 /// original-name block in a shape phase 0 refuses — in scratch mode, beside a
 /// prefix, in a SAMPLED plan (an original-name restore requires complete
 /// verification), or beside a PARTITION SUBSET (it restores whole topics) —
@@ -12814,7 +12431,7 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
             "OriginalNameNeedsCompleteCoverage",
         ),
         (
-            // PROD-15.1 after PROD-11.1b: an original-name restore restores
+            // An original-name restore restores
             // whole topics. Complete coverage, so the subset is what refuses.
             "with a partition subset",
             base.replace(
@@ -12867,14 +12484,11 @@ fn the_preview_refuses_an_original_name_block_in_a_shape_phase_0_refuses() {
     assert_eq!(run.row(CheckId::PlanParse).state, CheckState::Ready);
 }
 
-// ===========================================================================
-// FX-33 — a backup of many topics stays listed; a counted point is never
-// dropped
-// ===========================================================================
+// A backup of many topics stays listed; a counted point is never dropped.
 
 /// The budget's reference receipt of `topics` topics — each with the 13
 /// recorded entries, a `generations` entry, a `schema_dependency` entry, and
-/// PROD-04.1's largest consumer position summary beside them
+/// the largest consumer position summary beside them
 /// (`logweir_core::topic_budget::reference_receipt`, the `FULL` shape) — as a
 /// run on `started` wrote it into set `backup_id`, over [`CATALOG_MANIFEST`].
 fn fx33_receipt(topics: usize, backup_id: &str, started: &str) -> BackupReceipt {
@@ -12933,17 +12547,16 @@ fn fx33_assert_recordless(entry: &serde_json::Value) {
     }
 }
 
-/// **FX-33's acceptance, at the catalog: a backup of 70, 105, 113, 300, 500 or
-/// 1,000 topics with full recorded configuration is LISTED, `Available`, and
-/// its signature VERIFIED** — every one of them a record that the walk's old
-/// 256 KiB cap dropped from the catalog without a line.
+/// **A backup of 70, 105, 113, 300, 500 or 1,000 topics with full recorded
+/// configuration is LISTED, `Available`, and its signature VERIFIED**, where
+/// a 256 KiB walk cap would drop it from the catalog without a line.
 ///
 /// KILLS: the walk's record or receipt cap put back to one a backup
 /// outgrows (the point is `Unreadable`, not `Available`); the entry dropped.
 #[test]
 fn a_backup_of_many_topics_is_listed_available_and_verified() {
     use logweir_engine_oso::storage::caps;
-    /// The catalog walk's one document cap before FX-33.
+    /// The 256 KiB document cap these records outgrow.
     const OLD_WALK_CAP: usize = 256 * 1024;
     let key = logweir_evidence::keys::SigningKey::generate_p256();
     let key_id = key.verifying_key().key_id();
@@ -13000,7 +12613,7 @@ fn a_backup_of_many_topics_is_listed_available_and_verified() {
         );
         assert!(entry.get("remedy").is_none(), "{sizes}: {entry}");
         // More topics than an entry lists: counted, and the signed record
-        // names each (PROD-05.1).
+        // names each.
         assert_eq!(entry["topicsOmitted"], topics, "{sizes}: {entry}");
         assert_eq!(
             entry["consumerPositions"]["groupsOmitted"],
@@ -13347,9 +12960,9 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
 /// **A readable point never pushes EVIDENCE out of the window.** Entries
 /// that say something about the archive's integrity — a `Conflict` (the
 /// archive contradicts the signed receipt), a record whose bytes are not a
-/// record — are never the ones an OLDER `Available` point displaces (since
-/// FX-50 a newer point with a record takes the place of an older one, and
-/// bytes that are not a record keep theirs). Here three such points are
+/// record — are never the ones an OLDER `Available` point displaces (a newer
+/// point with a record takes the place of an older one, and bytes that are
+/// not a record keep theirs). Here three such points are
 /// newer than three readable ones, the window holds three, and it keeps the
 /// three pieces of evidence; the readable points are counted, and the view
 /// says it is a window.
@@ -13417,7 +13030,7 @@ fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
     assert_eq!(ids, evidence, "the evidence stays listed: {listed:?}");
 }
 
-/// The H1 fixture: set `set-x` written twice (a re-created Job), its newer
+/// The shared-set fixture: set `set-x` written twice (a re-created Job), its newer
 /// receipt's read failing in this sync, then `others` older `Available`
 /// points, one a day further back. Returns the store and the newer point's id.
 fn fx33_shared_set(others: usize) -> (FakeObjects, String) {
@@ -13463,14 +13076,12 @@ fn fx33_listed(objects: &FakeObjects, view_limit: i64) -> Vec<(String, String, S
         .collect()
 }
 
-/// **Review finding H1, the viewLimit-2 case: a skipped entry that names a
-/// set keeps its place.** Set `set-x` has two receipts; the newer one's read
-/// fails in this sync, so it is `Unreadable` but keeps its record, and with
-/// it the set it names, which retention protects for it. An older
-/// `Available` point arriving at a full window must not push it out (it did:
-/// the window then held the older receipt of `set-x` and an unrelated point,
-/// and retention could plan `set-x` away). CONTROL: with room for all three,
-/// all three are listed.
+/// **The viewLimit-2 case: a skipped entry that names a set keeps its
+/// place.** Set `set-x` has two receipts; the newer one's read fails in this
+/// sync, so it is `Unreadable` but keeps its record, and with it the set it
+/// names, which retention protects for it. An older `Available` point arriving
+/// at a full window must not push it out, or retention could plan `set-x`
+/// away. CONTROL: with room for all three, all three are listed.
 ///
 /// KILLS: an entry with a record treated as displaceable.
 #[test]
@@ -13487,7 +13098,7 @@ fn a_skipped_point_that_names_a_set_keeps_its_place_at_view_limit_two() {
     assert_eq!(fx33_listed(&objects, 3).len(), 3, "CONTROL");
 }
 
-/// **Review finding H1, the viewLimit-3 case: the pair inside the window, and
+/// **The viewLimit-3 case: the pair inside the window, and
 /// an unrelated older point arriving.** The window holds the newer and older
 /// receipts of `set-x` and one more point; a fourth, older, `Available` point
 /// does not take the newer receipt's place. CONTROL: with room for all four,
@@ -13508,7 +13119,7 @@ fn a_skipped_point_that_names_a_set_keeps_its_place_against_an_unrelated_point()
     assert_eq!(fx33_listed(&objects, 4).len(), 4, "CONTROL");
 }
 
-/// **Review HUNT-1: a newer receipt of a set is never overtaken by its older
+/// **A newer receipt of a set is never overtaken by its older
 /// sibling.** viewLimit 3 over, newest first: an `Available` point; a point
 /// whose record is over its bound (record-less, displaceable); another
 /// `Available` point; the newer receipt of `set-y`, whose receipt read fails
@@ -13563,9 +13174,7 @@ fn a_newer_receipt_of_a_set_is_never_overtaken_by_its_older_sibling() {
     assert_eq!(fx33_listed(&objects, 5).len(), 5, "CONTROL");
 }
 
-// ---------------------------------------------------------------------------
-// FX-50: the window is the newest `viewLimit` points, whatever the walk order
-// ---------------------------------------------------------------------------
+// The window is the newest `viewLimit` points, whatever the walk order.
 
 /// The entries (in body order) and the counts of one sync of `objects`.
 fn fx50_sync(
@@ -13605,21 +13214,18 @@ fn fx50_point(set: &str, at: DateTime<Utc>) -> CatalogFixture {
     )
 }
 
-/// **FX-50 R1: a window over a larger archive holds its newest points with a
-/// record, in either walk.** PoC batch 7's `pb7-c1` (`mode: Full`,
-/// `viewLimit: 100`, 386 points) listed about the first 100 point ids in key
-/// order, without the newest point. Here 386 points, one an hour, whose ids
-/// are digests and so in an order unrelated to time. The newest has a record
-/// and a deleted manifest (`Missing`, as on the PoC); one has a record over
-/// its read bound, so no record and no instant. A `Full` rescan and an
-/// `Index` walk each list exactly the 100 newest points with a record,
-/// newest first, and count all 386.
+/// **A window over a larger archive holds its newest points with a record, in
+/// either walk.** 386 points, one an hour, whose ids are digests and so in an
+/// order unrelated to time. The newest has a record and a deleted manifest
+/// (`Missing`); one has a record over its read bound, so no record and no
+/// instant. A `Full` rescan and an `Index` walk each list exactly the 100
+/// newest points with a record, newest first, and count all 386.
 ///
-/// CONTROL: the fixture tells the selections apart. The first 100 points with
-/// a record in key order, the ones a `Full` rescan meets first and the old
-/// window kept, share fewer than half their ids with the newest 100.
+/// CONTROL: the first 100 points with a record in key order, the ones a
+/// `Full` rescan meets first, share fewer than half their ids with the newest
+/// 100.
 ///
-/// KILLS: the first `viewLimit` points the walk met kept (FX-50 mutant 1).
+/// KILLS: the first `viewLimit` points the walk met kept.
 #[test]
 fn fx50_a_window_holds_the_newest_points_with_a_record_in_either_walk() {
     use logweir_core::check_contract::CatalogSyncMode;
@@ -13702,14 +13308,14 @@ fn fx50_a_window_holds_the_newest_points_with_a_record_in_either_walk() {
     }
 }
 
-/// **FX-50: a tie at the window's edge is broken by point id, so every walk
+/// **A tie at the window's edge is broken by point id, so every walk
 /// of one archive lists one window.** Six points recorded at one instant,
 /// `viewLimit: 3`. An `Index` walk meets them in descending point-id order
 /// (the log key ends in the id), a `Full` rescan in ascending order; both
 /// list the three smallest ids, which is the controller's own order for a
 /// tie. CONTROL: `viewLimit: 6` lists all six in both walks.
 ///
-/// KILLS: the tie-break dropped (FX-50 mutant 2): the `Index` walk keeps the
+/// KILLS: the tie-break dropped: the `Index` walk keeps the
 /// three it met first, the three largest ids.
 #[test]
 fn fx50_a_tie_at_the_edge_lists_the_same_window_in_either_walk() {
@@ -13732,11 +13338,11 @@ fn fx50_a_tie_at_the_edge_lists_the_same_window_in_either_walk() {
     }
 }
 
-/// **FX-50 R2: FX-33's window rules hold in a `Full` rescan too.** The rows
-/// above walk `Index`, newest first; a `Full` rescan meets the same points in
-/// point-id order. On the H1 fixtures the newer receipt of `set-x` (its
-/// receipt read failing, so `Unreadable` with its record) stays listed,
-/// naming its set, in both walks. CONTROL: the FX-33 rows above, unchanged.
+/// **The window rules hold in a `Full` rescan too.** The rows above walk
+/// `Index`, newest first; a `Full` rescan meets the same points in point-id
+/// order. On the shared-set fixtures the newer receipt of `set-x` (its receipt
+/// read failing, so `Unreadable` with its record) stays listed, naming its
+/// set, in both walks.
 #[test]
 fn fx50_a_newer_receipt_stays_listed_in_a_full_rescan() {
     use logweir_core::check_contract::CatalogSyncMode;
@@ -13755,7 +13361,7 @@ fn fx50_a_newer_receipt_stays_listed_in_a_full_rescan() {
     }
 }
 
-/// **Review finding M1: a record read that did not answer leaves the walk
+/// **A record read that did not answer leaves the walk
 /// incomplete.** Such a point is listed by its id only, with no set, so a
 /// view with it in is not whole until a sync reads the record; the cursor
 /// says `complete: false` and the row counts it (`catalogRecordsUnread`).
@@ -13797,9 +13403,8 @@ fn a_record_read_that_did_not_answer_leaves_the_walk_incomplete() {
     assert!(unread.is_none());
 }
 
-/// **A day shard of more than one page is read to its end (review finding
-/// D4).** Per-minute backups write 1,440 points a day; the walk used to read
-/// a day's first page of keys and report the view complete. Here one day
+/// **A day shard of more than one page is read to its end.** Per-minute
+/// backups write 1,440 points a day. Here one day
 /// holds 1,005 points (their records absent, so each costs one read): every
 /// one is counted and listed, and the walk is complete. CONTROL: a budget
 /// that runs out after the shard's first page ends the walk incomplete,
@@ -13903,8 +13508,7 @@ fn a_full_rescan_lists_a_point_without_a_record_from_its_key_alone() {
     );
 }
 
-// FX-33: the walk's peak memory, measured in child processes
-// ---------------------------------------------------------------------------
+// The walk's peak memory, measured in child processes.
 
 const FX33_WALK_TEST: &str = "the_walks_peak_memory_is_one_points";
 const FX33_WALK_CHILD_ENV: &str = "FX33_WALK_CHILD";
@@ -13918,10 +13522,8 @@ const FX33_WALK_BUNDLE: &str = "/check/trust/trust-bundle.pem";
 
 /// This process's own peak resident set, in bytes.
 fn fx33_self_peak_rss() -> u64 {
-    // Linux keeps `ru_maxrss` across `execve`, so a child started by a parent
-    // that already held about 300 MB of planted documents reported the
-    // parent's peak and every walk "added 0 B" (PR #23's CI). The child's own
-    // address space has its own high-water mark, `VmHWM`, reset at exec.
+    // Linux keeps `ru_maxrss` across `execve`, so a child reports its
+    // parent's peak; the child's own `VmHWM` is reset at exec.
     if cfg!(target_os = "linux") {
         if let Some(kib) = std::fs::read_to_string("/proc/self/status")
             .ok()
@@ -14089,7 +13691,7 @@ fn fx33_walk_peak(mode: &str, root: &Path) -> (u64, u64) {
         .env(FX33_WALK_CHILD_ENV, mode)
         .env(FX33_WALK_ROOT_ENV, root)
         // The meter measures live memory, not an allocator's cache of freed
-        // blocks (`crates/weirkeeper/tests/read_caps.rs`, review F2).
+        // blocks (`crates/weirkeeper/tests/read_caps.rs`).
         .env("MallocLargeCache", "0")
         .env("MALLOC_MMAP_THRESHOLD_", "131072")
         .output()
@@ -14118,32 +13720,23 @@ fn fx33_walk_peak(mode: &str, root: &Path) -> (u64, u64) {
 }
 
 /// **The catalog walk's peak memory is ONE point's, however many it walks.**
-///
-/// What a walk holds at once is bounded by construction (`examine`): the
-/// parsed record of the point it is on, and beside it one of — the receipt's
-/// bytes with their parse; the receipt's bytes with the signature's copy of
-/// them; the manifest's bytes. Each is released before the next is read, and
-/// the point's entry (under 1 KB without its topic list) is all that is kept
-/// when the walk moves on.
-///
-/// Measured in child processes over points whose receipt is within one
-/// percent of the largest Logweir writes, each signature VERIFIED:
+/// `examine` holds the parsed record of the point it is on and one of the
+/// receipt (bytes and parse, or bytes and the signature's copy) or the
+/// manifest's bytes, each released before the next is read; only the point's
+/// entry is kept. Measured in child processes over points whose receipt is
+/// within one percent of the largest Logweir writes, each signature VERIFIED:
 ///
 /// - a walk of [`FX33_WALK_POINTS`] such points adds no more than a walk of
 ///   one, plus a fixed slack;
 /// - a walk of one adds less than [`FX33_WALK_BOUND`];
-/// - the CONTROL — the same documents read and kept — adds at least two
-///   points' documents more than the walk of many does, so the meter sees an
-///   accumulating walk.
+/// - the CONTROL, the same documents read and kept, adds at least two points'
+///   documents more than the walk of many does.
 ///
-/// Check Jobs state no memory limit in the chart (`check/job.rs`,
-/// `resources: None`), so a namespace `LimitRange` is what applies; the
-/// figure printed here is what a `catalogSync` Job needs above its baseline.
+/// Check Jobs state no memory limit in the chart (`resources: None`), so the
+/// figure printed is what a `catalogSync` Job needs above its baseline.
 ///
 /// KILLS: a walk that keeps each point's record or receipt until the body is
-/// rendered. (A read cap removed is
-/// `a_counted_point_is_always_listed_with_its_own_reason`'s and
-/// `a_catalog_walk_reads_every_document_under_its_cap`'s.)
+/// rendered.
 #[test]
 fn the_walks_peak_memory_is_one_points() {
     if let Ok(mode) = std::env::var(FX33_WALK_CHILD_ENV) {
@@ -14214,8 +13807,7 @@ fn the_walks_peak_memory_is_one_points() {
 /// with the signature's pre-authentication copy (at most 5,131,072 each).
 /// Measured with a 5.09 MB receipt and a 4.2 MB record: about 41 MB.
 ///
-/// The MANIFEST is not in this number. The walk reads a point's manifest
-/// whole to hash it, one at a time, under the runner's 256 MiB manifest cap
-/// (FX-31); a real manifest is about 540 bytes a segment, and this row's is
-/// 13 bytes.
+/// The MANIFEST is not in this number: the walk reads a point's manifest whole
+/// to hash it, one at a time, under the 256 MiB manifest cap; a real manifest
+/// is about 540 bytes a segment, and this row's is 13 bytes.
 const FX33_WALK_BOUND: u64 = 64 << 20;

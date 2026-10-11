@@ -1,5 +1,4 @@
-//! PLAT-15.2 — a restore readiness check about a CATALOG point (D3 §5.5
-//! step 5).
+//! A restore readiness check about a CATALOG point.
 //!
 //! The controller re-reads the catalog row when the check runs and reports
 //! `recoveryPoint.state` from it. Every row below has a negative control: the
@@ -638,15 +637,13 @@ fn the_shipped_crd_carries_the_catalog_point_reference_and_rule_p10() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// M-2 — the row's signer against the CURRENT trust (D3 §5.5 step 5)
-// ---------------------------------------------------------------------------
+// The row's signer against the CURRENT trust
 
-/// **THE REVIEW'S M-2.** The catalog synced while the key was Active and wrote
-/// `Verified`; the key was revoked for compromise afterwards. The row must not
-/// stay green on the sync-time verdict.
+/// **The catalog synced while the key was Active and wrote `Verified`; the
+/// key was revoked for compromise afterwards.** The row must not stay green on
+/// the sync-time verdict.
 ///
-/// CONTROL: `a_selectable_row_bound_into_the_plan_is_ready` — the same row
+/// CONTROL: `a_selectable_row_bound_into_the_plan_is_ready`: the same row
 /// under the same key, Active, is `ready`.
 ///
 /// MUTANTS: `catalog_point_row` skipping the signer match; `signer_recheck`
@@ -672,8 +669,8 @@ fn a_signer_revoked_after_the_sync_makes_the_row_not_ready() {
         message.contains(SIGNER_KEY_ID) && message.contains("Revoked"),
         "the message names the key and why: {message}"
     );
-    // A missing `\` continuation once carried the source indentation into
-    // this operator-facing sentence as runs of 30+ spaces.
+    // A missing `\` continuation would carry the source indentation into
+    // this operator-facing sentence as runs of spaces.
     assert!(
         !message.contains("  "),
         "one space between words: {message:?}"
@@ -681,7 +678,7 @@ fn a_signer_revoked_after_the_sync_makes_the_row_not_ready() {
 }
 
 /// A key RETIRED before the receipt was written refuses it; retired AFTER, it
-/// keeps what it signed (D3 §7.4) — the control, which is `ready`.
+/// keeps what it signed (the control, which is `ready`).
 #[test]
 fn a_signer_retired_before_the_point_refuses_it_and_after_keeps_it() {
     use weirkeeper::crds::trust_policy::KeyState;

@@ -470,9 +470,7 @@ async fn two_replicas_sending_one_key_create_one_object() {
 /// aborting a read cancels only that read.**
 ///
 /// D0: "Aborting a list/get or leaving a UI route cancels only that HTTP and
-/// Kubernetes read. It never retracts an accepted mutation." The review found
-/// no test exercising a disconnect at all — the design answers it, but the
-/// required test did not exist.
+/// Kubernetes read. It never retracts an accepted mutation."
 ///
 /// A dropped future IS the disconnect: dropping it cancels the handler exactly
 /// where a closed connection would. The fake's delay puts the drop in the one

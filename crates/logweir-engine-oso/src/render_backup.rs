@@ -1,6 +1,5 @@
 //! Renders the `backup.yaml` handed to the engine's `backup` subcommand — the
-//! `--from-cluster` half of the drill, unblocked by Global Constraint 18 after
-//! global ruling GR4 Part B deferred it.
+//! `--from-cluster` half of the drill (Global Constraint 18).
 //!
 //! # The four rails of GC18(c), and where each one lives
 //!
@@ -25,11 +24,11 @@
 //!    `logweir_core::guard::scan_forbidden_keys`, which fails closed. A hit is
 //!    unreachable from `render`'s emission set; the check exists because
 //!    Global Constraint 4 states the rail as "never emitted, at any value",
-//!    and global ruling GR7 forbids an injection hook, so the backstop is
+//!    and there is no injection hook, so the backstop is
 //!    proved by feeding a CONSTRUCTED document to the predicate as input.
 //! 4. **The source `cluster_id` recorded and re-asserted `!= target`** — NOT
-//!    here. It lands in Task 4, where the run happens; see `BackupPlan`'s own
-//!    doc comment for why no field on the plan could carry it.
+//!    here: it is the run's; see `BackupPlan`'s own doc comment for why no
+//!    field on the plan could carry it.
 //!
 //! # Why this document is rendered rather than checked in
 //!
@@ -50,11 +49,10 @@ use logweir_core::engine::BackupPlan;
 /// All THREE renderers share it — `render_restore::render` and
 /// `render_validation::render` return the same type — so a new variant is a
 /// change to every call site in the workspace and is added only when a rail
-/// needs one. Task 2 shipped the first two; Task 3 adds the three below,
-/// because each is a distinct refusal an operator has to act on differently:
-/// a `${` in an INPUT VALUE names the field to fix, a `${…}` in the FINISHED
-/// DOCUMENT names a sequence no input could explain, and an unsupported auth
-/// mode names a capability this build does not have.
+/// needs one: each is a distinct refusal an operator has to act on
+/// differently. A `${` in an INPUT VALUE names the field to fix, a `${…}` in
+/// the FINISHED DOCUMENT names a sequence no input could explain, and an
+/// unsupported auth mode names a capability this build does not have.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderError {
     #[error("topic include entry `{0}` contains a glob metacharacter (one of * ? [ ] {{ }}); the engine's TopicSelection treats include entries as glob patterns, so a single name would silently widen to a set")]
@@ -77,38 +75,37 @@ pub enum RenderError {
     /// `Plaintext` arm would be an authentication DOWNGRADE performed on the
     /// operator's behalf.
     ///
-    /// **Task 6 made it unreachable from `render`, and it stays.** Both of
-    /// `AuthRender`'s arms render, so nothing in `crate::yaml::
-    /// render_security_block` constructs this today. It is the rail for the
-    /// THIRD mode — `logweir_kafka::reader::AuthConfig::Token` (OAUTHBEARER /
-    /// MSK IAM, SP4) has no `AuthRender` twin yet, and the task that adds one
-    /// must decide, in the type system, whether the engine can render it. A
-    /// variant kept for that is cheaper than the `todo!()` its absence
-    /// invites; `crates/logweir-engine-oso/tests/render_scram.rs::
-    /// the_unsupported_auth_mode_rail_is_unreachable_from_both_arms` pins
-    /// which of the two claims is true today.
+    /// **Unreachable from `render`, and kept.** Both of `AuthRender`'s arms
+    /// render, so nothing in `crate::yaml::render_security_block` constructs
+    /// this. It is the rail for a THIRD mode —
+    /// `logweir_kafka::reader::AuthConfig::Token` (OAUTHBEARER / MSK IAM) has
+    /// no `AuthRender` twin, and adding one must decide, in the type system,
+    /// whether the engine can render it. A variant kept for that is cheaper
+    /// than the `todo!()` its absence invites;
+    /// `tests/render_scram.rs::the_unsupported_auth_mode_rail_is_unreachable_from_both_arms`
+    /// pins it.
     #[error("auth mode `{0}` is not supported by this build; it renders PLAINTEXT, SASL/SCRAM-SHA-512, SASL/SCRAM-SHA-256, SASL/PLAIN over TLS and TLS client certificates (mtls) and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
     UnsupportedAuthMode(String),
-    /// A TLS CA file attached to a connection whose transport is not TLS
-    /// (PLAT-07.1). Refused rather than rendered without the key: a document
+    /// A TLS CA file attached to a connection whose transport is not TLS.
+    /// Refused rather than rendered without the key: a document
     /// that silently dropped the trust anchor would dial in the clear a
     /// connection its author configured to verify.
     #[error("a TLS CA file (ssl_ca_location) was attached to a connection whose security protocol is not TLS; the CA is refused rather than dropped, because dropping it would dial without TLS a connection configured to be verified")]
     TlsCaWithoutTls,
-    /// **PROD-01.3.** SASL/PLAIN on a connection that is not TLS. Refused,
+    /// SASL/PLAIN on a connection that is not TLS. Refused,
     /// never rendered: PLAIN sends the password itself, and a document with
     /// `SASL_PLAINTEXT` + `PLAIN` would put it on the wire in the clear. The
     /// named reason is `PlainWithoutTls`, the runner's refusal of the same
     /// spec before any plan exists.
     #[error("PlainWithoutTls: auth mode `plain` (SASL/PLAIN) on a connection without TLS; PLAIN sends the password itself, so it is rendered only over SASL_SSL and this document is refused rather than rendered")]
     PlainWithoutTls,
-    /// **PROD-01.3.** `mtls` on a connection that is not TLS.
+    /// `mtls` on a connection that is not TLS.
     #[error("auth mode `mtls` on a connection without TLS; a client certificate is presented in a TLS handshake, so this document is refused rather than rendered")]
     MtlsWithoutTls,
-    /// **PROD-01.3.** `mtls` with no client-certificate pair attached.
+    /// `mtls` with no client-certificate pair attached.
     #[error("auth mode `mtls` with no client certificate and key attached; the engine would dial with no identity to present, so this document is refused rather than rendered")]
     ClientCertificateMissing,
-    /// **C15** (PROD-00.3f): an S3 storage block whose endpoint is plain
+    /// An S3 storage block whose endpoint is plain
     /// `http://` while `allow_http` is false. Engine 0.22.0 and later derive
     /// plaintext transport from the endpoint's scheme on the YAML path, so the
     /// rendered `allow_http: false` would not stop a plaintext dial. Refused
@@ -117,19 +114,19 @@ pub enum RenderError {
     /// endpoint is operator input and is never echoed.
     #[error("the storage endpoint is a plain http:// endpoint but allow_http is false; the pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so this document would dial the archive in the clear (C15). Refused rather than rendered")]
     PlaintextEndpointWithoutAllowHttp,
-    /// **PROD-11.1.** A caller asked for THE restore document of a plan whose
+    /// A caller asked for THE restore document of a plan whose
     /// partition subsets need more than one engine run (the engine's
     /// `source_partitions` applies to every topic of a run). Refused rather
     /// than rendering one run's document as if it were the plan's: the caller
     /// must take every run's document (`render_restore::render_all`).
     #[error("this restore plan needs {0} engine runs (its partition subsets differ between topics, and the engine's source_partitions applies to every topic of one run); render every run's document with render_all, never one of them as the plan's")]
     MultipleRuns(usize),
-    /// **FX-20 fix round (review F1)**: an S3 storage block whose `region` is
-    /// not a region name (`^[a-z0-9-]{1,32}$`). With no endpoint the engine's
-    /// client builds the host from the region, so the document would send the
-    /// archive credential's signed requests wherever the region points. The
-    /// runner refuses the same block before any plan exists; this is the
-    /// renderer's backstop. Carries no payload: the value is never echoed.
+    /// An S3 storage block whose `region` is not a region name
+    /// (`^[a-z0-9-]{1,32}$`). With no endpoint the engine's client builds the
+    /// host from the region, so the document would send the archive
+    /// credential's signed requests wherever the region points. The runner
+    /// refuses the same block before any plan exists; this is the renderer's
+    /// backstop. Carries no payload: the value is never echoed.
     #[error("StorageRegionInvalid: the storage region is not an S3 region name (^[a-z0-9-]{{1,32}}$); without an endpoint the region is part of the host the engine dials, so this document is refused rather than rendered")]
     StorageRegionInvalid,
 }
@@ -153,7 +150,7 @@ pub fn render_and_digest(plan: &BackupPlan) -> Result<(String, String), RenderEr
 }
 
 /// GC18(c) rail 3 as a function of a document, so the backstop can be proved
-/// against a CONSTRUCTED input (global ruling GR7: there is no injection hook,
+/// against a CONSTRUCTED input (there is no injection hook,
 /// and no Logweir code path may exist that is capable of emitting one of the
 /// three keys).
 ///
@@ -166,10 +163,9 @@ pub fn render_and_digest(plan: &BackupPlan) -> Result<(String, String), RenderEr
 /// type, and the honest mapping is the refusing one: an unscannable rendered
 /// document has NOT been cleared of the forbidden keys, so it is refused
 /// exactly as a hit is, with the guard's own reason carried in the payload
-/// where the key name would be. Widening `RenderError` for it was rejected —
-/// the variant would be unreachable from `render`'s emission set (this
-/// renderer's output is always valid YAML) while costing every match site in
-/// the workspace an arm.
+/// where the key name would be. A separate `RenderError` variant would be
+/// unreachable from `render`'s emission set (this renderer's output is always
+/// valid YAML) while costing every match site in the workspace an arm.
 pub fn scan_rendered_document(doc: &str) -> Result<(), RenderError> {
     match logweir_core::guard::scan_forbidden_keys(doc) {
         Ok(found) => match found.first() {
@@ -213,20 +209,14 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     for t in &plan.topics {
         s.push_str(&format!("      - {}\n", yaml_scalar_checked(t)?));
     }
-    // THE SASL BLOCK (Task 6, interface **I1**). `Plaintext` emits NOTHING AT
-    // ALL, which is why the two backup goldens that predate SCRAM are
-    // byte-identical after this task; the `ScramSha512` arm emits the engine's
-    // `security:` map — the protocol, the ONE-hyphen mechanism, the username
-    // FROM THE PLAN BYTES (**G-ID**) and the password PLACEHOLDER, never the
-    // password. `crate::yaml::render_security_block` is the single
-    // implementation all three renderers share, and its doc comment carries
-    // the measured evidence for the nesting and for the unquoted placeholder.
-    //
-    // Task 2 shipped a `todo!()` here and Task 3 replaced it with
-    // `RenderError::UnsupportedAuthMode` — a typed refusal, because Task 4
-    // wired backup RUNS before this block existed. That variant stays (see
-    // its own doc comment): it is the rail for a mode `AuthRender` does not
-    // yet have, not a placeholder for this one.
+    // THE SASL BLOCK (interface **I1**). `Plaintext` emits NOTHING AT ALL, so
+    // the plaintext backup goldens carry no security keys; the `ScramSha512`
+    // arm emits the engine's `security:` map — the protocol, the ONE-hyphen
+    // mechanism, the username FROM THE PLAN BYTES (**G-ID**) and the password
+    // PLACEHOLDER, never the password. `crate::yaml::render_security_block` is
+    // the single implementation all three renderers share, and its doc comment
+    // carries the measured evidence for the nesting and for the unquoted
+    // placeholder.
     s.push_str(&crate::yaml::render_security_block(
         &plan.source_auth,
         crate::yaml::PLACEHOLDER_SOURCE_PASSWORD,
@@ -260,39 +250,23 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
         "  max_concurrent_partitions: {}\n",
         plan.max_concurrent_partitions
     ));
-    // RENDERED EXPLICITLY (spec §6.1 M5/N1). Upstream defaults
-    // `include_offset_headers` true
-    // [U/kafka-backup/config/example-backup.yaml]; this line writes the
-    // default out so the invariant is an assertion in this document and in
-    // this golden rather than an upstream default we are trusting.
+    // RENDERED EXPLICITLY. Upstream defaults `include_offset_headers` true
+    // [U/kafka-backup/config/example-backup.yaml]; writing the default out
+    // makes the invariant an assertion in this document and its golden. The
+    // backup stamps `x-original-offset` and `x-original-timestamp` on every
+    // archived record, and phase 7 reconciles the restored records BY that
+    // header: an archive written without it is unverifiable while still exiting 0.
     //
-    // `x-original-offset` and `x-original-timestamp` are stamped on every
-    // archived record by the backup, and
-    // `crates/logweir/src/drill/phase7_verify.rs:243-265` reconciles the
-    // restored records BY that header. So an archive written with
-    // `include_offset_headers: false` carries nothing phase 7 can key on and a
-    // windowed restore stops being verifiable at all — while still exiting 0.
-    // Global Constraint 4's sibling failure mode: a signed scorecard measured
-    // around nothing.
-    //
-    // **THE OTHER END OF THAT INVARIANT IS A RESTORE KEY, AND IS NOT RENDERED
-    // HERE** (Task 4 review, F-1). `strip_offset_headers` is a field of
-    // `RestoreOptions` [U:crates/kafka-backup-core/src/config.rs:793-801] and
-    // of nothing else; `BackupOptions` (`:404-541`) has exactly one
-    // offset-header field, `include_offset_headers` (`:455-458`). The engine
-    // at the GC8 floor (`kafka-backup` 0.21.0), and the 0.23.3 pin in
-    // `third_party/kafka-backup-binary.digest` alike, therefore reads
-    // `backup.strip_offset_headers` as an UNKNOWN key and drops it with
-    // *"Ignoring unknown config key"*
-    // [U:crates/kafka-backup-cli/src/commands/config.rs:46] — and
-    // `OsoCliEngine`'s `assert_no_dropped_logweir_key` correctly aborts on any
-    // key of ours the engine ignored (spec §7.2(a)), so rendering it made
-    // `logweir backup run` exit 1 AFTER a complete archive had been written.
-    // `render_restore` still renders it, at `restore.strip_offset_headers`,
-    // where the engine accepts it — see `render_restore.rs:131-143`. The
-    // absence here is asserted by
-    // `the_backup_document_names_no_restore_side_offset_key` and by both
-    // backup goldens, and is closed end-to-end against the real engine by
+    // **`strip_offset_headers` IS A RESTORE KEY, AND IS NOT RENDERED HERE.** It
+    // is a field of `RestoreOptions`
+    // [U:crates/kafka-backup-core/src/config.rs:793-801] and of nothing else,
+    // so the pinned engine drops `backup.strip_offset_headers` as an unknown
+    // key [U:crates/kafka-backup-cli/src/commands/config.rs:46], and
+    // `assert_no_dropped_logweir_key` then aborts the run with exit 1 after a
+    // complete archive was written. `render_restore` renders it at
+    // `restore.strip_offset_headers`. Pinned by
+    // `the_backup_document_names_no_restore_side_offset_key`, both backup
+    // goldens, and
     // `e2e/tests/backup_argv.rs::the_real_engine_accepts_the_rendered_backup_document`.
     s.push_str("  include_offset_headers: true\n");
     // GC18(c) rail 2, the read-only assertion, is the ABSENCE of everything

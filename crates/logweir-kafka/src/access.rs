@@ -1,12 +1,11 @@
-//! **PROD-04.0b: what DescribeCluster says the capturing principal may do on
+//! **What DescribeCluster says the capturing principal may do on
 //! the cluster** (KIP-430's authorized operations). Pure: the broker glue is
 //! `crate::rdkafka_admin` (feature `client`), through
 //! `logweir-rdkafka-ffi::cluster::describe_cluster`.
 //!
-//! It decides **T14, listing completeness**
-//! (`docs/to-do/decisions/PROD-04.0-admin-path.md`): ListGroups shows a
-//! principal without Describe on the cluster only the groups it may Describe,
-//! silently. With Describe on the cluster the listing is unfiltered (§3.9).
+//! It decides **T14, listing completeness**: ListGroups shows a principal
+//! without Describe on the cluster only the groups it may Describe, silently.
+//! With Describe on the cluster the listing is unfiltered.
 //!
 //! The answer has THREE states, and the first two must never be confused:
 //! the broker REPORTED a set (possibly empty: a refusal), the broker reported
@@ -66,7 +65,7 @@ mod tests {
         );
         assert_eq!(ClusterAccess::from_operations(None).describe(), None);
         assert_eq!(ClusterAccess::Unread("timed out".into()).describe(), None);
-        // §3.8's measured sets: no authorizer gives every operation; the
+        // The measured sets: no authorizer gives every operation; the
         // control principal was allowed Describe alone.
         let all = vec![3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         assert_eq!(

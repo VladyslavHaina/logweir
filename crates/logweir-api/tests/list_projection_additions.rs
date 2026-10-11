@@ -1,11 +1,10 @@
-//! MCP-13 and MCP-17 (console-ux-1): two ADDITIVE projections the shared
-//! console needed and the product API did not publish.
+//! Two ADDITIVE projections the shared console needs:
 //!
-//! * `ScheduleStatusView.lastSlot` / `missedSlots` — what happened to the most
-//!   recent slot and how many were skipped. The console used to tell an
-//!   operator to "read the schedule with kubectl".
-//! * `OperationSummary.exitCode` / `outcome` on a LIST row — the Backups
-//!   table's EXIT and the History table's RESULT read `-` on every row.
+//! * `ScheduleStatusView.lastSlot` / `missedSlots` -- what happened to the
+//!   most recent slot and how many were skipped, so the console need not send
+//!   an operator to kubectl.
+//! * `OperationSummary.exitCode` / `outcome` on a LIST row -- the Backups
+//!   table's EXIT and the History table's RESULT.
 //!
 //! BOTH SIDES READ ONE FIXTURE. `ui/tests/fixtures/console/schedule-last-slot.json`
 //! is this crate's projection of `ui/tests/fixtures/schedule-policy.json`, and
@@ -100,7 +99,7 @@ fn a_list_row_carries_the_runs_exit_code_and_a_restores_outcome() {
     assert_eq!(row["operation"].get("exitCode"), None::<&Value>);
 }
 
-/// **FX-8 review M-2: the signed time basis reaches the API.** A `Restore`
+/// **The signed time basis reaches the API.** A `Restore`
 /// whose controller copied the scorecard's `source.time_basis` onto
 /// `status.timeBasis` publishes it as `timeBasis`, verbatim — and the console
 /// fixture `console/restore-time-basis.json` is this projection, read by

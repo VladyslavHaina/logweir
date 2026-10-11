@@ -1,15 +1,14 @@
-// trust-basis-class.spec.js -- TRUST-VALID-BASIS-CLASS, the console half
-// (review LOW-1 of `claude/api-trust-state`).
+// trust-basis-class.spec.js -- legacy mode reads a custom resource's
+// `trust.basis` with the controller's rule.
 //
-// THE DEFECT. Legacy mode read a custom resource's `trust.basis` with the rule
-// written for the product API's DTO (`basisAllowsGreen`), where the string
-// `None` spells an ABSENT block. A custom resource can say "no block" by having
-// none, so there a PRESENT `{basis: "None"}`, `{}` or `{basis: null}` is a block
-// the controller refuses: `weirkeeper::verification::valid_verification` says
-// `VerificationUntrusted`, `logweir-api` says `untrusted`, and the console-mode
-// detail folds it to `Untrusted`. Legacy mode alone painted it green.
+// The DTO rule (`basisAllowsGreen`) treats the string `None` as an ABSENT
+// block. A custom resource says "no block" by having none, so there a
+// PRESENT `{basis: "None"}`, `{}` or `{basis: null}` is a block the
+// controller refuses: `weirkeeper::verification::valid_verification` says
+// `VerificationUntrusted`, `logweir-api` says `untrusted`, and the
+// console-mode detail folds it to `Untrusted`.
 //
-// THE RULE NOW (render.js `trustBlockAllowsGreen`, the controller's
+// THE RULE (render.js `trustBlockAllowsGreen`, the controller's
 // `ValidBasis`): NO `trust` key keeps D3 section 12's pre-existing rule; a
 // present block is green only on `Current` or `Historical`.
 //
@@ -42,7 +41,7 @@ const SHAPES = [
   ["no trust key (D3 section 12)", ABSENT, true],
   // `trust: null` is the same absence: the CRD field is nullable, and the
   // controller (`ValidBasis::of_json`), the typed readers and the API all read
-  // it as no block (review LOW-1 of `trust-basis-class`).
+  // it as no block.
   ["a null trust (the same absence)", null, true],
   ["Unverified", { basis: "Unverified", keyState: "Active" }, false],
   ["RecordedBeforeRevocation", { basis: "RecordedBeforeRevocation", keyState: "Revoked" }, false],
@@ -168,10 +167,9 @@ test("a_console_detail_keeps_an_absent_block_absent_and_green", async () => {
 });
 
 test("the_old_legacy_rule_fails_the_rows_above", () => {
-  // NEGATIVE CONTROL. The rule legacy mode used before this change read a raw
-  // resource's basis with the DTO rule (`basisAllowsGreen`), so a present
-  // `None`, `{}` and `{basis: null}` all read as absence and went green.
-  // Under it the table above must fail.
+  // NEGATIVE CONTROL: reading a raw resource's basis with the DTO rule
+  // (`basisAllowsGreen`) takes a present `None`, `{}` and `{basis: null}` for
+  // absence and paints them green. Under it the table above must fail.
   const oldRule = (trust) => {
     const green = basisAllowsGreen(((trust === ABSENT ? undefined : trust) || {}).basis);
     return { oldRule: green };

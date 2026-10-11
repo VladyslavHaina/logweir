@@ -1,48 +1,40 @@
 //! The `RecoveryCatalog` reconciler: run a bounded sync, and publish a bounded
-//! view of what can actually be recovered — D3 §5.3, PLAT-15.1's controller
-//! half.
-//!
-//! # What it does, in one paragraph
+//! view of what can actually be recovered (D3 §5.3).
 //!
 //! It resolves the catalog's destination, renders an immutable `catalogSync`
-//! check plan, runs it as ONE short-lived Job through the shared check
-//! framework, finds that Job's pod **by controller-owner UID** (D-SEAMS **S6**),
-//! reads the framed stdout, re-evaluates every point's signer against this
-//! installation's trust source, materialises the newest ≤ 5 000 points into
-//! immutable `ConfigMap` pages **owned by the sync Job**, and writes the counts,
-//! the histogram, the signer summary and the fence pointer onto `/status` with a
-//! conditional merge PATCH (D-SEAMS **S7**).
+//! check plan, runs it as one short-lived Job through the shared check
+//! framework, finds that Job's pod by controller-owner UID (seam **S6**), reads
+//! the framed stdout, re-evaluates every point's signer against this
+//! installation's trust, materialises the newest ≤ 5 000 points into immutable
+//! `ConfigMap` pages owned by the sync Job, and writes the counts, the
+//! histogram, the signer summary and the fence pointer onto `/status` with a
+//! conditional merge PATCH (seam **S7**).
 //!
-//! # It deletes nothing, and that is a design and not an omission
+//! # It deletes nothing
 //!
-//! There is no `delete` verb anywhere in the `weirkeeper` `ClusterRole` and
-//! `Api::delete` is called nowhere under `crates/weirkeeper/src/`. The view is
-//! collected by the sync Job's `ttlSecondsAfterFinished`
-//! ([`crate::catalog_view::ttl_seconds`]): when the TTL controller removes the
-//! Job, Kubernetes garbage collection removes its pages. A catalog whose syncing
-//! stopped therefore reports `Stale` and then `ViewExpired` rather than an empty
-//! archive — honest, and the durable truth in object storage is untouched.
+//! This reconciler calls no delete. The view is collected by the sync Job's
+//! `ttlSecondsAfterFinished` ([`crate::catalog_view::ttl_seconds`]): when the
+//! TTL controller removes the Job, garbage collection removes its pages. A
+//! catalog whose syncing stopped reports `Stale` and then `ViewExpired` rather
+//! than an empty archive, and the durable truth in object storage is untouched.
 //!
 //! # It is never a second source of truth
 //!
-//! D3 §17: the view is a derived, bounded projection. The signed receipt is the
+//! The view is a derived, bounded projection (D3 §17): the signed receipt is the
 //! verification root, the counts describe the whole walk while the pages carry
-//! only the window, and every restore re-verifies its point at execution
-//! (PLAT-15.2 §5.5.6). Nothing here is evidence; it is an index onto evidence.
+//! only the window, and every restore re-verifies its point at execution. It is
+//! an index onto evidence, not evidence.
 //!
-//! # The one thing the Job decides and the one thing this file decides
+//! # The Job decides availability; this file decides trust
 //!
 //! The Job reads the archive, so it decides availability and whether a DSSE
-//! signature verified. **Trust is decided here**, once, in
-//! [`crate::catalog_view::classify_verification`], against
-//! [`crate::catalog_view::TrustView`] — the trust bound to the catalog's
-//! namespace, resolved by [`crate::trust::resolve`] exactly as the `Approval`
-//! controller and the restore preflight resolve it: the governing
-//! `TrustPolicy`, else the synthesised `legacy-roster-v1`. A `TrustPolicy`
-//! event wakes every catalog in the namespaces it could govern (the same
-//! re-trust trigger the `Approval` controller carries), so a new, retired or
-//! revoked key reaches `TrustAvailable` and the next sync's bundle and
-//! classification without waiting for the requeue.
+//! signature verified. Trust is decided here, once, in
+//! [`crate::catalog_view::classify_verification`], against the namespace's
+//! [`crate::catalog_view::TrustView`] resolved by [`crate::trust::resolve`] as
+//! the `Approval` controller and the restore preflight resolve it. A
+//! `TrustPolicy` event wakes every catalog in the namespaces it could govern, so
+//! a new, retired or revoked key reaches `TrustAvailable` and the next sync
+//! without waiting for the requeue.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -73,10 +65,6 @@ use crate::destination::{self, ResolveError};
 use crate::job::RunnerOwner;
 
 use super::Context;
-
-// ---------------------------------------------------------------------------
-// Conditions — the four D3 §5.3 names, and their closed reasons
-// ---------------------------------------------------------------------------
 
 /// `Ready`: a usable view exists right now.
 pub const CONDITION_READY: &str = "Ready";
@@ -114,11 +102,9 @@ pub const REASON_PAGE_CONFLICT: &str = "PageConflict";
 /// `Ready=False`: a Job carrying this sync's name is controlled by something
 /// else. D-SEAMS **S6**: a name is not an identity.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
-/// `Ready=False`: an OLDER `RecoveryCatalog` in this namespace already
-/// catalogs the same `BackupDestination` — D3 §5.5 item 1, "two catalogs for
-/// one destination in one namespace are refused (`Ready=False/DuplicateCatalog`
-/// on the newer object)". The newer one runs no sync and publishes no view;
-/// see [`duplicate_of`] for which one is "newer".
+/// `Ready=False`: an older `RecoveryCatalog` in this namespace already catalogs
+/// the same `BackupDestination` (D3 §5.5 item 1). The newer one runs no sync and
+/// publishes no view; see [`duplicate_of`] for which one is newer.
 pub const REASON_DUPLICATE_CATALOG: &str = "DuplicateCatalog";
 
 /// `Synced=True`: the walk completed and its result read.
@@ -168,20 +154,13 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_TRUST_POLICY_CONFLICT,
 ];
 
-/// What `Ready=False/LegacyArchiveUnsupported` says.
-///
-/// AN ABSENT CAPABILITY, NAMED (D3 §5.3's own rule for `catalogWindowQuery`).
-/// `spec.legacyArchive` is admitted by the CRD because PLAT-15.2 will use it;
-/// this controller resolves `spec.destinationRef` and nothing else, and says so
-/// rather than creating a Job it cannot address.
+/// What `Ready=False/LegacyArchiveUnsupported` says: an absent capability,
+/// named (D3 §5.3's rule). This controller syncs through `spec.destinationRef`
+/// only, and says so rather than creating a Job it cannot address.
 pub const LEGACY_ARCHIVE_MESSAGE: &str =
     "this build syncs a catalog through spec.destinationRef only; spec.legacyArchive is \
      the connect-an-existing-archive path and no sync Job is created for it. Create a \
      BackupDestination with a read-only archiveRead grant and a RecoveryCatalog that names it.";
-
-// ---------------------------------------------------------------------------
-// Timing
-// ---------------------------------------------------------------------------
 
 /// The requeue while a sync Job is running.
 pub const RUNNING_REQUEUE_SECONDS: u64 = 15;
@@ -192,25 +171,16 @@ pub const IDLE_REQUEUE_SECONDS: u64 = 60;
 /// The requeue after an error.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 
-/// The sync plan's own budget, in seconds.
-///
-/// FIFTEEN MINUTES, against `maxObjectsPerRun`'s ceiling of a million keys. The
-/// Job's `activeDeadlineSeconds` is this plus the framework's 90-second margin
-/// for image pull and scheduling, so a deadline that fires means the POD never
-/// got going — a different fact from a walk that ran out of budget, which
-/// records its cursor and continues.
+/// The sync plan's own budget, in seconds: fifteen minutes, against
+/// `maxObjectsPerRun`'s ceiling of a million keys. The Job's deadline adds the
+/// framework's 90-second start-up margin, so a deadline that fires means the
+/// pod never got going, unlike a walk that ran out of budget, which records its
+/// cursor and continues.
 pub const SYNC_TIMEOUT_SECONDS: i64 = 900;
 
-// ---------------------------------------------------------------------------
-// Errors and outcomes
-// ---------------------------------------------------------------------------
-
-/// Why a reconcile could not finish.
-///
-/// ONE VARIANT, AND THAT IS THE DESIGN: every refusal this reconciler can make
-/// is a VERDICT and is written to the status, so the only thing left to fail on
-/// is the API server. A reconciler that returned `Err` for "the destination is
-/// not valid" would requeue forever and publish nothing an operator could read.
+/// Why a reconcile could not finish. One variant: every refusal is a verdict
+/// written to the status, so only the API server can fail a pass; an `Err` for
+/// "the destination is not valid" would requeue forever and publish nothing.
 #[derive(Debug)]
 pub enum ReconcileError {
     /// The API server could not be talked to. **Requeue.**
@@ -271,10 +241,6 @@ pub struct Outcome {
     pub job_name: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// The context a pass needs
-// ---------------------------------------------------------------------------
-
 /// Everything one pass reads that is not the object itself.
 ///
 /// `now` and `policy` are ARGUMENTS and not reads, which is what lets a whole
@@ -290,26 +256,20 @@ pub struct SyncContext<'a> {
     /// This pass's instant.
     pub now: DateTime<Utc>,
     /// Every `TrustPolicy`, from the process-wide store once it has synced
-    /// (`crate::trust::spawn_policy_reflector`, review LOW-5): the namespace's
-    /// trust is then resolved from it with no API call. `None` — the store has
-    /// not synced, or a caller holds none — resolves with one cluster-wide
-    /// `LIST`, as before, because an unsynced store looks like a cluster with
-    /// no policy at all and would hand every namespace to the roster.
+    /// (`crate::trust::spawn_policy_reflector`), so the namespace's trust is
+    /// resolved with no API call. `None` (not synced, or a caller holds none)
+    /// resolves with one cluster-wide `LIST`, because an unsynced store looks
+    /// like a cluster with no policy and would hand every namespace to the
+    /// roster.
     pub trust_policies: Option<&'a [crate::crds::trust_policy::TrustPolicy]>,
-    /// The `RecoveryCatalog`s this pass compares the catalog with for D3
-    /// §5.5's one-catalog-per-destination rule ([`duplicate_of`]): this
-    /// controller's own store once it has finished its first list (zero API
-    /// calls — it is the index the watch already keeps), and `None` otherwise,
-    /// which reads the namespace with ONE `LIST`. An unsynced store looks like
-    /// a namespace with no other catalog at all, and would let a duplicate run
-    /// the sync its elder already runs. Objects in other namespaces, and the
-    /// catalog itself, may be included: [`duplicate_of`] filters them.
+    /// The `RecoveryCatalog`s compared for D3 §5.5's one-catalog-per-destination
+    /// rule ([`duplicate_of`]): this controller's own store once its first list
+    /// is done, and `None` otherwise, which lists the namespace once. An unsynced
+    /// store looks like a namespace with no other catalog and would let a
+    /// duplicate sync. Other namespaces and the catalog itself may be included:
+    /// [`duplicate_of`] filters them.
     pub peers: Option<&'a [RecoveryCatalog]>,
 }
-
-// ---------------------------------------------------------------------------
-// The pass
-// ---------------------------------------------------------------------------
 
 /// Reconcile one `RecoveryCatalog`.
 ///
@@ -375,21 +335,15 @@ fn refused_outcome(reason: &'static str) -> Outcome {
     }
 }
 
-/// The trust bound to the catalog's namespace, projected
-/// (CATALOG-TRUST-ROSTER-ONLY).
+/// The trust bound to the catalog's namespace, projected.
 ///
-/// [`crate::trust::resolve`] — THE resolution: the `Approval` controller
+/// [`crate::trust::resolve`] is the one resolution: the `Approval` controller
 /// verifies against it, the restore preflight re-judges a catalog point's
-/// signer against it, and the runner's evidence keyring is rendered from it.
-/// A namespace a `TrustPolicy` governs is judged by that policy's
-/// `EvidenceSigning` keys, with their `Retired`/`Revoked` states; one no
-/// policy governs falls back to the synthesised `legacy-roster-v1`, projected
-/// exactly as the roster was before. Builds before this read only the
-/// `TrustRoster`, so a point signed under a `TrustPolicy` key was never
-/// `Verified` and a policy's retirement or revocation never reached the view.
-///
-/// A failed read is a reconcile error and the pass is retried under
-/// [`error_policy`]'s fixed delay — the same answer a failed roster read gave.
+/// signer against it, and the runner's evidence keyring is rendered from it. A
+/// namespace a `TrustPolicy` governs is judged by that policy's
+/// `EvidenceSigning` keys and their `Retired`/`Revoked` states; otherwise by the
+/// synthesised `legacy-roster-v1`. A failed read is a reconcile error, retried
+/// under [`error_policy`]'s fixed delay.
 async fn trust_view(
     client: &kube::Client,
     namespace: &str,
@@ -409,11 +363,10 @@ struct Pass<'a> {
     uid: String,
     trust: TrustView,
     ctx: &'a SyncContext<'a>,
-    /// Whether the Job named in `status.lastSyncJob` still exists.
-    ///
-    /// SET ONCE PER PASS, BEFORE ANY ARM RUNS (review finding F2). The pages
-    /// are owned by that Job, so "the Job is gone" IS "the pages are gone", and
-    /// every arm that writes a status has to know it — not only the idle one.
+    /// Whether the Job named in `status.lastSyncJob` still exists, set once per
+    /// pass before any arm runs: the pages are owned by that Job, so "the Job is
+    /// gone" is "the pages are gone", and every arm that writes a status needs
+    /// it.
     job_present: bool,
 }
 
@@ -443,9 +396,9 @@ impl Pass<'_> {
     }
 
     async fn run(&mut self) -> Result<Outcome, ReconcileError> {
-        // 1. The tracked Job, BEFORE every other decision — including the
-        //    refusal arms, which must also know whether the published view's
-        //    Job is still there (review finding F2).
+        // 1. The tracked Job, before every other decision, including the
+        //    refusal arms, which also need to know whether the view's Job is
+        //    still there.
         let tracked = self
             .catalog
             .status
@@ -468,11 +421,10 @@ impl Pass<'_> {
                 .await;
         }
 
-        // 2b. ONE CATALOG PER DESTINATION PER NAMESPACE — D3 §5.5 item 1 (PoC
-        //     defect P11). BEFORE the tracked Job is harvested or a new one is
-        //     started: a duplicate that was syncing when this rule arrived
-        //     (an upgrade over existing duplicates) reads nothing from its Job
-        //     and starts no other; the Job ages out on its own TTL.
+        // 2b. One catalog per destination per namespace (D3 §5.5 item 1),
+        //     before the tracked Job is harvested or a new one started: a
+        //     duplicate that was syncing reads nothing from its Job and starts
+        //     no other; the Job ages out on its own TTL.
         let listed;
         let peers = match self.ctx.peers {
             Some(peers) => peers,
@@ -559,33 +511,22 @@ impl Pass<'_> {
         Some(SyncTrigger::Periodic(slot))
     }
 
-    /// Whether a sync has ALREADY FINISHED inside this interval slot — in which
+    /// Whether a sync has already finished inside this interval slot, in which
     /// case the slot is served and nothing is due.
     ///
-    /// THE SECOND HALF OF CATALOG-RESYNC-NOT-HARVESTED. Without this, a
-    /// `syncRequest` that completed at 11:55 was followed one reconcile later
-    /// by the 12:00 slot's own sync, because the slot's Job name is not the
-    /// request's Job name and the tracked-name comparison therefore matched
-    /// nothing. That second Job wrote `Synced=Unknown/PodNotStarted` over the
-    /// `Synced=True/Succeeded` the publish had just written — which is why the
-    /// live harness could not use `Synced` as a completion signal and watched
-    /// `status.syncedAt` instead. `intervalSeconds` is a CADENCE, not an
-    /// alarm clock: a walk that finished inside the slot is the walk the slot
-    /// asked for, whatever started it.
-    ///
-    /// `lastSyncJob.finishedAt` and not `syncedAt`, deliberately: a sync that
-    /// ran and FAILED has also spent the slot's budget against the same
-    /// archive, and re-running it every reconcile until the slot rolls over is
-    /// the retry storm this controller's requeue is designed to avoid. The
-    /// failure is on `Synced` for an operator to act on.
+    /// Without it, a `syncRequest` that completed at 11:55 would be followed by
+    /// the 12:00 slot's own sync (a different Job name), which would overwrite
+    /// `Synced=True/Succeeded` with `Synced=Unknown/PodNotStarted`.
+    /// `intervalSeconds` is a cadence, not an alarm clock: a walk that finished
+    /// inside the slot is the walk the slot asked for. `lastSyncJob.finishedAt`,
+    /// not `syncedAt`: a sync that failed has also spent the slot's budget, and
+    /// re-running it every reconcile would be a retry storm; the failure is on
+    /// `Synced` for an operator.
     fn slot_already_served(&self, slot: i64) -> bool {
-        // A SLOT SERVED BY A SYNC THIS CATALOG'S VIEW WAS THEN WITHDRAWN FROM IS
-        // NOT SERVED (review L6). A duplicate that takes over after its elder is
-        // deleted has no view — its pages were withdrawn — and its last sync
-        // may have finished inside the current slot; counting that sync would
-        // leave it with no view and `Synced=False/DuplicateCatalog` naming an
-        // elder that no longer exists, until the next slot (up to a day, or
-        // for ever at `intervalSeconds: 0`). Its first pass as the owner syncs.
+        // A slot served by a sync whose view was then withdrawn is not served:
+        // a duplicate that takes over after its elder is deleted has no view,
+        // and counting its last sync would leave it viewless until the next slot
+        // (or forever at `intervalSeconds: 0`).
         if current_condition(
             self.catalog
                 .status
@@ -607,10 +548,6 @@ impl Pass<'_> {
             .is_some_and(|served| served >= slot)
     }
 
-    // -----------------------------------------------------------------------
-    // Starting a sync
-    // -----------------------------------------------------------------------
-
     async fn start(
         &mut self,
         trigger: &SyncTrigger,
@@ -626,12 +563,10 @@ impl Pass<'_> {
             self.ctx.client,
             &self.namespace,
             &reference.name,
-            // ArchiveRead: this sync LISTS and READS and writes nothing. A
-            // destination that declares no `archiveRead` grant falls back to
-            // `archiveWrite` (D2 §3.4's defaulting), so an operator who wants a
-            // genuinely read-only credential configures `spec.access.archiveRead`
-            // — which is what D3 §5.3's "a read-only credential" asks for and
-            // what this controller cannot enforce from here.
+            // ArchiveRead: this sync lists and reads and writes nothing. With no
+            // `archiveRead` grant the destination falls back to `archiveWrite`
+            // (D2 §3.4), so a read-only credential is the operator's to
+            // configure in `spec.access.archiveRead`.
             DestinationRole::ArchiveRead,
             self.ctx.policy,
         )
@@ -713,31 +648,16 @@ impl Pass<'_> {
             ..check::plan::PlanDocuments::default()
         };
 
-        // ==================================================================
-        // THE JOB IS CREATED FIRST, AND THE PLAN SECOND — review finding F1
-        // ==================================================================
-        //
-        // The plan `ConfigMap` must be owned by the **sync Job**, because the
-        // Job's `ttlSecondsAfterFinished` is the only thing in this design that
-        // ever removes anything. Owned by the CATALOG — which is long-lived and
-        // whose plan name changes every slot — each plan would be an orphan
-        // nothing collects: one per sync, forever, with no `delete` verb
-        // anywhere and no remedy short of deleting the `RecoveryCatalog`.
-        //
-        // An owner reference needs the owner's UID, and a Job's UID exists only
-        // after the API server has created it. So the order inverts, and the
-        // consequence is stated rather than hidden: **there is a window in
-        // which the Job exists and its plan does not**, and a pod scheduled
-        // inside it sits `ContainerCreating` on the missing volume. The kubelet
-        // retries that mount indefinitely, so the ordinary case resolves in
-        // milliseconds; a controller that crashed between the two calls leaves
-        // a pod pending until the Job's `activeDeadlineSeconds` fires.
-        //
-        // WHICH IS WHY NOTHING IS RECORDED UNTIL BOTH EXIST. `lastSyncJob.name`
-        // is written only after the plan is in place, so a pass that died in
-        // the window is reached again by the SAME trigger token, computes the
-        // SAME name, gets 409 `AlreadyExists` on the Job, reads its UID back
-        // and creates the plan the pod is waiting for.
+        // The Job is created first and the plan second. The plan `ConfigMap`
+        // must be owned by the sync Job, whose TTL is the only thing that
+        // removes anything; owned by the long-lived catalog, every plan would be
+        // an orphan. An owner reference needs the Job's UID, which exists only
+        // once the Job does, so for a moment the Job exists without its plan and
+        // a pod scheduled then waits in `ContainerCreating` (the kubelet retries
+        // the mount). `lastSyncJob.name` is written only after both exist, so a
+        // pass that died between them computes the same name from the same
+        // trigger token, gets 409 on the Job, reads its UID back and creates the
+        // plan.
         let env = resolved.job_env();
         let spec = view::SyncJobSpec {
             name: stem.to_string(),
@@ -764,10 +684,9 @@ impl Pass<'_> {
             .await
         {
             Ok(job) => job,
-            // A 409 IS THE DUPLICATE RECONCILE WORKING. The name is a pure
-            // function of the catalog UID and the trigger token, so a second
-            // pass computing the same name finds the Job it wanted — and reads
-            // it back, because the plan below needs its UID.
+            // A 409 is the duplicate reconcile: the name is a pure function of
+            // the catalog UID and the trigger token. Read the Job back, because
+            // the plan below needs its UID.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(catalog = %self.name, namespace = %self.namespace, job = %stem,
                        "the sync Job this pass wanted already exists");
@@ -830,27 +749,14 @@ impl Pass<'_> {
             }
         }
 
-        // ==================================================================
-        // `lastSyncJob` IS REPLACED, NEVER MERGED INTO — CATALOG-RESYNC-NOT-HARVESTED
-        // ==================================================================
-        //
-        // The status write is an RFC 7386 MERGE patch, and a merge patch
-        // recurses into an object: `{"lastSyncJob": {"name": …}}` over a
-        // harvested `{"name": …, "startedAt": …, "finishedAt": …,
-        // "exitCode": …}` left the PREVIOUS Job's timestamps on the record of
-        // the NEW one. `run` decides whether a finished Job has been read from
-        // exactly one fact — `lastSyncJob.finishedAt` is set — so every sync
-        // after the first was born already looking harvested and was never
-        // read: its Job ran to `Complete`, the view was never republished, and
-        // the only way left to refresh a catalog was to delete and re-create
-        // it (D3 W14, 19 of 19 sync Jobs `Complete` and none harvested).
-        //
-        // `null` DELETES A KEY in a merge patch, so naming every other field
-        // of `LastSyncJob` here is what makes this ONE record of ONE Job
-        // rather than a union of two. A field added to `LastSyncJob` without a
-        // line here would resurrect this bug, which is why
-        // `the_started_record_names_every_field_of_last_sync_job` reads the
-        // struct's own schema and fails until it is added.
+        // `lastSyncJob` is replaced, never merged into. In an RFC 7386 merge
+        // patch `{"lastSyncJob": {"name": …}}` would keep the previous Job's
+        // timestamps, and `run` decides whether a finished Job was read from
+        // `lastSyncJob.finishedAt` alone, so every later sync would be born
+        // looking harvested and never read. `null` deletes a key, so naming
+        // every other field of `LastSyncJob` here makes this one record of one
+        // Job; `the_started_record_names_every_field_of_last_sync_job` fails
+        // until a new field is added here.
         let mut status = json!({
             "observedGeneration": self.generation(),
             "lastSyncJob": {
@@ -861,20 +767,15 @@ impl Pass<'_> {
                 "refusalReason": Value::Null,
             },
         });
-        // `observedSyncRequest` IS RECORDED AT CREATION, not at harvest. The
-        // token records what this controller has ACTED on; recording it only
-        // after a result would make a crash mid-sync look like a request that
-        // was never served and start a second walk for it.
+        // `observedSyncRequest` is recorded at creation, not at harvest: it
+        // records what this controller has acted on, so a crash mid-sync does
+        // not start a second walk for the same request.
         if let SyncTrigger::Requested(token) = trigger {
             status["observedSyncRequest"] = Value::String(token.clone());
         }
-        // `Ready` IS ABOUT THE VIEW, NOT ABOUT THE SYNC (review finding F6).
-        // A catalog with live pages that starts its hourly sync still HAS a
-        // usable view, which is D3 §5.3's own definition of `Ready`; hardcoding
-        // `Unknown` here made it flap `True -> Unknown -> True` every hour
-        // inside the fifteen-second requeue gap, and any alerting that reads
-        // `Ready != True` as "no view" blinked with it. `SyncInProgress` lives
-        // on `Synced`, where it belongs.
+        // `Ready` is about the view, not the sync (D3 §5.3): a catalog with
+        // live pages that starts a sync still has a usable view, and
+        // `SyncInProgress` lives on `Synced`.
         let ready = self.published_ready();
         let conditions = self.conditions(
             ready,
@@ -927,15 +828,10 @@ impl Pass<'_> {
         }
     }
 
-    /// The trust source's generation — what makes the bundle's name change when
-    /// the keys do.
-    ///
-    /// The digest of the key ids and nothing else: a `TrustPolicy` (and the
-    /// roster) carries a `metadata.generation`, but it moves on edits that do
-    /// not change the bundle — a retirement, a revocation — and a digest over
-    /// what was actually projected is the number that cannot disagree with the
-    /// bytes. A key's STATE is not in the bundle (it is public material only);
-    /// it is applied here, at classification.
+    /// The trust source's generation, which renames the bundle when the keys
+    /// change: a digest of the key ids, because `metadata.generation` also moves
+    /// on edits that do not change the bundle (a retirement, a revocation). A
+    /// key's state is not in the bundle; it is applied at classification.
     fn trust_generation(&self) -> i64 {
         let joined = self
             .trust
@@ -948,17 +844,11 @@ impl Pass<'_> {
         i64::from_str_radix(&digest[..12], 16).unwrap_or(0)
     }
 
-    // -----------------------------------------------------------------------
-    // Watching a running sync
-    // -----------------------------------------------------------------------
-
     async fn report_running(&mut self, job: &Job) -> Result<Outcome, ReconcileError> {
         let expect = frame_expectations(job, &self.uid);
-        // FX-11: the Job's Events are read when its pod has not started, so a
-        // pod a `ResourceQuota` or a `LimitRange` refused at creation is
-        // `PodCreateRejected`, with the admission's words, 30 seconds after
-        // the Job — and is cancelled below — instead of `PodNotStarted` until
-        // the deadline fifteen minutes away.
+        // The Job's Events are read while its pod has not started, so a pod
+        // refused at creation is `PodCreateRejected` with the admission's words
+        // 30 seconds after the Job, and cancelled below.
         let observation = check::observe_reading_events(
             self.ctx.client,
             &self.namespace,
@@ -967,9 +857,8 @@ impl Pass<'_> {
             self.ctx.now,
         )
         .await?;
-        // A TERMINAL WAITING STATE IS CANCELLED EARLY, exactly as every other
-        // check is: a pod whose credential Secret does not exist cannot succeed,
-        // and its `activeDeadlineSeconds` is fifteen minutes away.
+        // A terminal waiting state is cancelled early, as for every check: it
+        // cannot succeed and its deadline is fifteen minutes away.
         if observation.cancel_now
             && check::cancel(self.ctx.client, &self.namespace, job, &self.uid).await?
         {
@@ -1002,17 +891,12 @@ impl Pass<'_> {
         })
     }
 
-    // -----------------------------------------------------------------------
-    // Harvesting a finished sync
-    // -----------------------------------------------------------------------
-
     async fn harvest(&mut self, job: &Job) -> Result<Outcome, ReconcileError> {
         let job_name = job.name_any();
         let expect = frame_expectations(job, &self.uid);
-        // THE SAME READ AS `report_running`, and it has to be: the Job that
-        // pass cancelled finishes with `DeadlineExceeded`, and a harvest that
-        // read no Events would publish that consequence instead of the
-        // refusal that caused it.
+        // The same read as `report_running`: the Job that pass cancelled
+        // finishes `DeadlineExceeded`, and without the Events a harvest would
+        // publish that consequence instead of the refusal that caused it.
         let observation = check::observe_reading_events(
             self.ctx.client,
             &self.namespace,
@@ -1033,17 +917,11 @@ impl Pass<'_> {
             .map(|t| t.0)
             .unwrap_or(self.ctx.now);
 
-        // THE HARVEST WRITE REPLACES THE RECORD TOO — review finding L1.
-        //
-        // Seeded with the same explicit `null`s `start` writes, for the same
-        // RFC 7386 reason, and then overwritten by the arms below where a
-        // value exists. The path that needs it is the UPGRADE one: a harvest
-        // is normally preceded by this build's `start`, which already cleared
-        // the record, but a catalog stuck by
-        // `CATALOG-RESYNC-NOT-HARVESTED` is harvested with NO such `start` in
-        // front of it — so a stale `refusalReason` from the one sync that did
-        // refuse would be published beside `exitCode: 0` and
-        // `Synced=True/Succeeded`, describing two different Jobs as one.
+        // The harvest write replaces the record too, seeded with the same
+        // explicit `null`s `start` writes and overwritten below where a value
+        // exists, so a stale `refusalReason` never sits beside `exitCode: 0` and
+        // `Synced=True/Succeeded`, describing two Jobs as one. It matters for a
+        // catalog harvested with no preceding `start` of this build.
         let last_job = |reason: Option<&CheckCode>| {
             let mut value = json!({
                 "name": job_name,
@@ -1116,10 +994,8 @@ impl Pass<'_> {
             }
         };
         let limits = ViewLimits::from_settings(&self.catalog.spec.sync);
-        // The entry cap is this catalog's OWN `viewLimit`, not a constant: the
-        // runner is told to relay the newest `viewLimit` points and nothing
-        // more, so a body that carries more is a body that did not honour the
-        // plan it was given (review finding F7).
+        // The entry cap is this catalog's own `viewLimit`: the runner relays the
+        // newest `viewLimit` points, so a longer body did not honour its plan.
         let parsed = match view::parse_body(body, limits.view_limit) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -1130,10 +1006,9 @@ impl Pass<'_> {
         };
 
         let counts = parsed.counts.clone().unwrap_or_default();
-        // THE FULL SIGNER LIST FEEDS THE COUNTERS, the bounded one feeds the
-        // status (review finding F10): `untrustedSigner` covers the whole walk,
-        // and summing it over the sixteen rows the status can display would
-        // under-report an archive written by more installations than that.
+        // The full signer list feeds the counters and the bounded one the
+        // status: `untrustedSigner` covers the whole walk, and summing over the
+        // sixteen displayed rows would under-report.
         let all_signers = view::signer_summaries(&parsed.signers, &self.trust);
         let signers = view::bounded(all_signers.clone());
         let materialised = view::materialise(
@@ -1213,16 +1088,16 @@ impl Pass<'_> {
 
         let cursor = parsed.cursor.clone().unwrap_or_default();
         let complete = cursor.complete;
-        // A WALK THAT DID NOT START AT THE BEGINNING OF THE ARCHIVE IS A
-        // WINDOW (FX-40 review D1): a resumed Full rescan lists only the tail.
+        // A walk that did not start at the beginning of the archive is a
+        // window: a resumed Full rescan lists only the tail.
         let from_start = self.walked_from_start(job).await?;
         let unreadable = counts.unreadable > 0;
         let (synced_status, synced_reason, mut synced_message) = if unreadable {
             (
                 "False",
                 REASON_PARTIAL_SCAN.to_string(),
-                // FX-33: by CAUSE. A document over its read bound is a size,
-                // and is never called a permission or transport failure.
+                // By cause: a document over its read bound is a size, never a
+                // permission or transport failure.
                 view::unreadable_message(&counts),
             )
         } else if !complete {
@@ -1387,10 +1262,6 @@ impl Pass<'_> {
         })
     }
 
-    // -----------------------------------------------------------------------
-    // Idle, expiry and refusals
-    // -----------------------------------------------------------------------
-
     async fn report_idle(&mut self) -> Result<Outcome, ReconcileError> {
         let expired = self.view_gone();
         let ready = self.published_ready();
@@ -1432,11 +1303,9 @@ impl Pass<'_> {
                 self.published_synced(),
             ),
         });
-        // THE REFUSAL PATH CLEARS AN EXPIRED VIEW TOO (review finding F2). A
-        // catalog whose destination went invalid after its sync Job aged out
-        // kept naming garbage-collected page ConfigMaps forever, with `Ready`'s
-        // reason pointing at the destination and nothing at all saying the
-        // window was gone.
+        // The refusal path clears an expired view too, or a catalog whose
+        // destination went invalid after its Job aged out would name collected
+        // page ConfigMaps forever.
         self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         warn!(
@@ -1455,22 +1324,16 @@ impl Pass<'_> {
         })
     }
 
-    /// `Ready=False/DuplicateCatalog` — D3 §5.5 item 1 — and NO VIEW.
+    /// `Ready=False/DuplicateCatalog` (D3 §5.5 item 1) and no view.
     ///
-    /// [`Self::publish_refusal`], plus one thing it does not do: a published
-    /// view is withdrawn even while its pages still exist. The console, the
-    /// API's point listing and a catalog-point restore's preflight all read
-    /// `status.pages[]` and none of them reads `Ready` first, so a refused
-    /// catalog that kept listing pages would still hand out points — which is
-    /// exactly the second, competing index onto one archive the rule exists to
-    /// prevent. The page `ConfigMap`s are left alone (this controller holds no
-    /// `delete`) and age out with their sync Job's TTL; the elder catalog
-    /// indexes the same archive.
+    /// [`Self::publish_refusal`], plus withdrawing a published view even while
+    /// its pages exist: the console, the API's point listing and a catalog-point
+    /// restore's preflight read `status.pages[]` without reading `Ready`, so a
+    /// refused catalog that kept its pages would still be a second, competing
+    /// index onto one archive. The pages age out with their sync Job's TTL.
     async fn publish_duplicate(&mut self, message: &str) -> Result<Outcome, ReconcileError> {
-        // `Synced` SAYS SO TOO. Carrying the last sync's condition would leave
-        // an upgraded duplicate reading `Synced=Unknown/SyncInProgress` — "a
-        // sync is running right now" — for a catalog that will never run one,
-        // or `True/Succeeded` beside a withdrawn view.
+        // `Synced` says so too, rather than carry `SyncInProgress` or
+        // `Succeeded` beside a withdrawn view.
         let synced = (
             "False",
             REASON_DUPLICATE_CATALOG.to_string(),
@@ -1485,12 +1348,9 @@ impl Pass<'_> {
                 synced,
             ),
         });
-        // `viewExpiresAt` GOES WITH THE PAGES (review L5). It is the one field
-        // a `ProtectionPolicy` reads before the pages: left behind, a withdrawn
-        // view reads as a FRESH, EMPTY one, and a policy over this catalog
-        // raises "no available point" — the point is gone — when the truth is
-        // that this catalog lists nothing. Without it the view reads as stale,
-        // which is what a withdrawn view is.
+        // `viewExpiresAt` goes with the pages: a `ProtectionPolicy` reads it
+        // first, and left behind it would make a withdrawn view read as fresh
+        // and empty ("no available point") instead of stale.
         if self.has_pages()
             || self
                 .catalog
@@ -1542,17 +1402,10 @@ impl Pass<'_> {
         self.view_expired() || (self.has_pages() && !self.job_present)
     }
 
-    /// Stop listing pages that are gone — **on every path that writes a
-    /// status**, review finding F2.
-    ///
-    /// `null` DELETES THE KEY in an RFC 7386 merge patch. A `status.pages[]`
-    /// naming a `ConfigMap` the API server no longer has is a link to a 404,
-    /// and a reader cannot tell it from a page it simply has not fetched — the
-    /// published contract tells W11 and W12 to read these names and never
-    /// compute one, so leaving them is leading them straight into it. It used
-    /// to happen only on the idle path; a catalog whose destination went
-    /// invalid after its Job aged out kept naming garbage-collected objects
-    /// forever.
+    /// Stop listing pages that are gone, on every path that writes a status.
+    /// `null` deletes the key in an RFC 7386 merge patch; a `status.pages[]`
+    /// naming a deleted `ConfigMap` is a link to a 404 that readers, told to
+    /// read these names and never compute one, would follow.
     fn clear_expired_view(&self, status: &mut Value) {
         if !(self.view_gone() && self.has_pages()) {
             return;
@@ -1699,10 +1552,6 @@ impl Pass<'_> {
             .collect()
     }
 
-    // -----------------------------------------------------------------------
-    // The status write — D-SEAMS S7 in both halves
-    // -----------------------------------------------------------------------
-
     async fn patch_status(&self, status: Value) -> Result<(), ReconcileError> {
         let patch = json!({ "status": status });
         if status_unchanged(self.status_value().as_ref(), &patch) {
@@ -1739,9 +1588,8 @@ impl Pass<'_> {
             .await
         {
             Ok(_) => Ok(()),
-            // A 409 IS THE PRECONDITION WORKING, not a failure: something wrote
-            // this status between the read and the write, so the object in hand
-            // is stale and the next reconcile reads the newer one.
+            // A 409 is the precondition working: the object in hand is stale
+            // and the next reconcile reads the newer one.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(
                     catalog = %self.name, namespace = %self.namespace,
@@ -1754,38 +1602,20 @@ impl Pass<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// One catalog per destination — D3 §5.5 item 1 (PoC defect P11)
-// ---------------------------------------------------------------------------
-
-/// The catalog that takes precedence over `catalog` for its destination, when
-/// `catalog` is a DUPLICATE — `None` when it is the one that syncs.
+/// The catalog that takes precedence over `catalog` for its destination when
+/// `catalog` is a duplicate; `None` when it is the one that syncs.
 ///
-/// # The rule, and why it is total
+/// D3 §5.5 item 1 refuses the newer of two catalogs for one destination in one
+/// namespace. "Newer" is `(creationTimestamp, name)`: the API server's creation
+/// time, then the namespace-unique name for the one-second tie, so every pair
+/// has exactly one elder and every reconcile reaches the same answer. Existing
+/// duplicates keep exactly one syncing catalog, the first created.
 ///
-/// D3 §5.5 item 1: two catalogs for one destination in one namespace are
-/// refused on the NEWER object. "Newer" is decided on `(creationTimestamp,
-/// name)`: the API server's own creation time first, and the name — unique
-/// within a namespace — for the second-granularity tie, so every pair of
-/// catalogs has exactly one elder and every reconcile of either object,
-/// whichever controller process runs it, reaches the same answer. Existing
-/// duplicates (an upgrade over a namespace that already holds several, as the
-/// PoC's did) therefore keep exactly one syncing catalog — the first one
-/// created — and every other one turns `Ready=False/DuplicateCatalog`.
-///
-/// # What is compared
-///
-/// Only a peer in the SAME namespace whose `spec.destinationRef.name` is the
-/// same (`destinationRef` is immutable, so a catalog cannot move onto or off a
-/// destination). A peer being deleted (`deletionTimestamp` set) is already
-/// leaving and never holds the destination against a live catalog, so the next
-/// one in line takes over as soon as the elder is gone. The catalog itself is
-/// skipped by UID (by name when a UID is missing). A `legacyArchive` catalog
-/// names no destination and is refused on its own arm before this runs.
-///
-/// A catalog with no `creationTimestamp` (never true of an object the API
-/// server returned) sorts after every one that has one — it cannot claim to be
-/// the elder of anything.
+/// Only a peer in the same namespace with the same `spec.destinationRef.name`
+/// is compared (`destinationRef` is immutable). A peer being deleted never
+/// holds the destination, so the next in line takes over as the elder goes.
+/// The catalog itself is skipped by UID (by name without one). A catalog with
+/// no `creationTimestamp` sorts after every one that has one.
 #[must_use]
 pub fn duplicate_of<'a>(
     catalog: &RecoveryCatalog,
@@ -1862,18 +1692,11 @@ pub fn duplicate_message(namespace: &str, elder: &RecoveryCatalog) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Small pure helpers
-// ---------------------------------------------------------------------------
-
-/// The `TrustAvailable` condition for this pass's resolved trust.
-///
-/// THREE ANSWERS, NOT TWO: keys to verify with (`True`), a namespace two
-/// `TrustPolicy` objects contest (`False/TrustPolicyConflict`, naming them —
-/// trust IS configured, it just does not resolve), and no key material at all
-/// (`False/NoTrustMaterial`). Reporting a conflict as "no key material" would
-/// send an operator looking for a missing roster in a cluster that has two
-/// policies.
+/// The `TrustAvailable` condition for this pass's resolved trust. Three answers:
+/// keys to verify with (`True`), a namespace two `TrustPolicy` objects contest
+/// (`False/TrustPolicyConflict`, naming them), and no key material
+/// (`False/NoTrustMaterial`). A conflict is not "no key material": trust is
+/// configured, it just does not resolve.
 #[must_use]
 pub fn trust_available(trust: &TrustView, generation: i64, now: DateTime<Utc>) -> Condition {
     let (status, reason, message) = match (&trust.unresolved, trust.is_empty()) {
@@ -1905,28 +1728,16 @@ pub fn trust_available(trust: &TrustView, generation: i64, now: DateTime<Utc>) -
     }
 }
 
-/// Whether `record` is the record of **this Job's** completion, and therefore
-/// whether this Job's result has already been read.
+/// Whether `record` is the record of this Job's completion, and so whether this
+/// Job's result has already been read.
 ///
-/// `finishedAt` is the fact that says "read"; the comparison with the Job's own
-/// `completionTime` is what makes it a fact about THIS Job. Two reasons it is
-/// not simply `finished_at.is_some()`:
-///
-/// 1. **Upgrade.** Every catalog stuck by `CATALOG-RESYNC-NOT-HARVESTED` is
-///    carrying, right now, a new Job's name beside an older Job's timestamp.
-///    The write above stops that being created; this reads past one that
-///    already exists, so a stuck catalog harvests its completed Job on the
-///    first reconcile after the upgrade instead of waiting for its next slot —
-///    and a `intervalSeconds: 0` catalog, which has no next slot, recovers at
-///    all.
-/// 2. **It is the honest question.** "Has something been written here" is a
-///    weaker claim than "this Job's result is what was written", and the
-///    difference is exactly the bug.
-///
-/// A Job that finished with NO `completionTime` — a `Failed` condition carries
-/// none — is recorded with the harvesting pass's own clock, so there is nothing
-/// to compare against and the tracked name is the identity. Answering `false`
-/// there would re-harvest a failed sync on every pass forever.
+/// `finishedAt` says "read"; comparing it with the Job's own `completionTime`
+/// makes it a fact about this Job rather than "something was written here", so
+/// a catalog carrying a new Job's name beside an older Job's timestamp harvests
+/// its completed Job. A Job that finished with no `completionTime` (a `Failed`
+/// condition carries none) is recorded with the harvesting pass's clock, so the
+/// tracked name is the identity; `false` there would re-harvest a failed sync
+/// forever.
 #[must_use]
 pub fn harvested_record(record: &LastSyncJob, job: &Job) -> bool {
     let Some(recorded) = record.finished_at else {
@@ -1997,12 +1808,12 @@ fn credential_mode(
     }
 }
 
-/// **FX-50.** What a `Synced` message adds when the published view is not
-/// the whole archive's: a `Full` rescan that resumed after the previous
-/// sync's cursor lists only the tail, and a walk that did not finish lists
-/// only what it reached. `None` for a whole walk. `status.truncated` and
-/// `status.cursor.complete` already say it; this says it in words, because
-/// "the newest 136 of 136 points" otherwise reads as the whole archive.
+/// What a `Synced` message adds when the published view is not the whole
+/// archive's: a `Full` rescan resumed after the previous cursor lists only the
+/// tail, and an unfinished walk lists only what it reached. `None` for a whole
+/// walk. `status.truncated` and `status.cursor.complete` say it too; this says
+/// it in words, so "the newest 136 of 136 points" does not read as the whole
+/// archive.
 fn partial_view_note(walked: i64, complete: bool, from_start: bool) -> Option<String> {
     let (source, rest) = if !from_start {
         ("a resumed rescan", "the archive holds more")
@@ -2050,10 +1861,6 @@ fn sync_message(materialised: &view::View, parsed: &view::SyncBody, tally: &view
     }
     message
 }
-
-// ---------------------------------------------------------------------------
-// The kube::runtime entry points
-// ---------------------------------------------------------------------------
 
 /// The installation policy, read through one process-wide cache.
 ///
@@ -2159,29 +1966,20 @@ fn policy_targets(
 
 /// Run the `RecoveryCatalog` controller until the process ends.
 ///
-/// `.owns(jobs, …)` so a sync Job finishing wakes the catalog that owns it
-/// rather than waiting out the requeue — the same arrangement the `Backup`,
-/// `Restore` and `KafkaCluster` controllers have, and it needs no verb this
-/// role does not already grant. `.watches(TrustPolicy)` is the re-trust
-/// trigger ([`policy_targets`]); like every trigger watch `Controller` runs it
-/// is backed off (`watcher::default_backoff`), so a refused or failing
-/// `TrustPolicy` LIST is retried with bounded exponential delay rather than in
-/// a tight loop. The resolution reads the process-wide `TrustPolicy` store
-/// ([`crate::trust::spawn_policy_reflector`], one per reconciler, shared by
-/// every namespace copy) once it has synced, and one `LIST` until then.
+/// It `owns` its sync Jobs, so a finishing Job wakes its catalog rather than
+/// waiting out the requeue. `.watches(TrustPolicy)` is the re-trust trigger
+/// ([`policy_targets`]), backed off like every trigger watch
+/// (`watcher::default_backoff`), so a failing `TrustPolicy` LIST is retried
+/// with bounded delay. Trust resolves from the process-wide `TrustPolicy` store
+/// ([`crate::trust::spawn_policy_reflector`]) once it has synced, and with one
+/// `LIST` until then.
 pub async fn controller(client: kube::Client, runner_image: crate::job::RunnerImage) {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
-    //
-    // The `TrustPolicy` store is built ONCE here and shared by every copy
-    // (review L3 of PLAT-17.2): the kind is cluster-scoped, so a reflector per
-    // namespace would be N identical cluster-wide watches. `trust_view`
-    // resolves from it once it has synced (review LOW-5). An `async fn`, so the
-    // reflector is spawned when the future is first polled, inside the runtime
-    // (`spawn_policy_reflector` calls `tokio::spawn`).
+    // One watch per watched namespace: the whole cluster unless
+    // `LOGWEIR_WATCH_NAMESPACES` names namespaces, and then an `Api::namespaced`
+    // watch each, the only shape the scoped chart's RoleBindings permit. The
+    // cluster-scoped `TrustPolicy` store is built once here and shared, not one
+    // identical cluster-wide watch per namespace; this is an `async fn` so the
+    // reflector is spawned inside the runtime (`tokio::spawn`).
     let policies = crate::trust::spawn_policy_reflector(&client);
     crate::scope::run_everywhere(move |namespace| {
         controller_in(
@@ -2195,7 +1993,7 @@ pub async fn controller(client: kube::Client, runner_image: crate::job::RunnerIm
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
@@ -2218,7 +2016,7 @@ fn controller_in(
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
-        // The same store, for the one-catalog-per-destination rule (P11).
+        // The same store, for the one-catalog-per-destination rule.
         let peers = controller.store();
         controller
             .owns(jobs, watcher::Config::default())

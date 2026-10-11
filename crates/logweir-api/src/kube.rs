@@ -16,7 +16,7 @@
 //! TYPE. [`ResultDocument`] is a `configmaps` GET and nothing else: it is a
 //! read-only projection with no writable `data` path, used only for the chunk
 //! and detail documents a check owns, and every read is verified by owner UID,
-//! immutability and digest by the route that asked for it (D2 §5.6).
+//! immutability and digest by the route that asked for it.
 //! [`WriteOnlyCredential`] is a `secrets` POST and nothing else: its `data`
 //! field is `skip_deserializing`, so the API server's create response CANNOT
 //! carry a credential value back into this process even in principle, and
@@ -30,7 +30,7 @@
 //! ONE configured namespace, filtered by the `kubernetes.io/service-name`
 //! label of ONE configured Service: the addresses of the ingress controller's
 //! serving pods, which `crate::trusted_proxy` trusts as the entry point's
-//! peers (chart gap G6). The projection carries addresses and conditions only;
+//! peers. The projection carries addresses and conditions only;
 //! no route can reach it, and the namespace and Service come from the
 //! configuration file, never from a request.
 //!
@@ -113,7 +113,7 @@ mod sealed {
 }
 
 /// The closed set of CUSTOM resources this service may touch. Sealed: no
-/// other crate, and no other module, can add a ninth.
+/// other crate, and no other module, can add one.
 pub trait ProductResource:
     kube::Resource<DynamicType = (), Scope = NamespaceResourceScope>
     + Clone
@@ -142,14 +142,13 @@ impl ProductResource for RetentionPolicy {}
 /// The closed set of CLUSTER-SCOPED custom resources this service may READ.
 ///
 /// A SECOND SEAL, AND DELIBERATELY SMALLER THAN THE FIRST. `TrustPolicy` is
-/// cluster-scoped for the reason `docs/kubernetes.md` §8 gives — "a roster
-/// whose name the subject supplies is a roster the subject can choose" — so it
-/// cannot travel through [`ProductResource`], whose bound is
-/// `Scope = NamespaceResourceScope` precisely so that no namespaced route can
-/// reach outside its namespace. This trait exists instead of relaxing that
-/// bound, and it carries NO create, patch or delete method: D3 §10 keeps trust
-/// WRITES off the API in v1, and the way to keep them off is for the adapter
-/// to have no method that could perform one.
+/// cluster-scoped -- "a roster whose name the subject supplies is a roster the
+/// subject can choose" -- so it cannot travel through [`ProductResource`],
+/// whose bound is `Scope = NamespaceResourceScope` precisely so that no
+/// namespaced route can reach outside its namespace. This trait exists instead
+/// of relaxing that bound, and it carries NO create, patch or delete method:
+/// trust WRITES stay off the API in v1, and the way to keep them off is for
+/// the adapter to have no method that could perform one.
 pub trait ClusterResource:
     kube::Resource<DynamicType = (), Scope = k8s_openapi::ClusterResourceScope>
     + Clone
@@ -168,18 +167,14 @@ impl ClusterResource for TrustPolicy {}
 /// The two kinds whose `spec.cancelRequested` may be raised.
 ///
 /// A SECOND SEAL INSIDE THE FIRST. `Backup` and `Restore` have no cancel in
-/// v1 (D0: "external side effects and cleanup semantics are not yet
-/// defined"), and a generic "patch any product resource" method would have
-/// given them one by accident. Only a transient check — a discovery or a
-/// preflight, both of which own nothing but a Job — implements this.
+/// v1 (their cleanup semantics are not defined), and a generic "patch any
+/// product resource" method would have given them one by accident. Only a
+/// transient check -- a discovery or a preflight, both of which own nothing
+/// but a Job -- implements this.
 pub trait CancellableCheck: ProductResource {}
 
 impl CancellableCheck for TopicDiscovery {}
 impl CancellableCheck for Preflight {}
-
-// ======================================================================
-// The two core objects, each with one verb and no way to do more
-// ======================================================================
 
 /// A `ConfigMap` this service may GET, projected down to what a check result
 /// needs.
@@ -262,7 +257,7 @@ pub struct WriteOnlyCredential {
     pub metadata: ObjectMeta,
     /// The Secret `type`. A distinct type is what a ValidatingAdmissionPolicy
     /// scoped to this ServiceAccount can require, so the create permission
-    /// cannot be spent on a ServiceAccount-token Secret (PLAT-07.1's rule).
+    /// cannot be spent on a ServiceAccount-token Secret.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
     /// Base64 data keys. Written, never read.
@@ -270,10 +265,9 @@ pub struct WriteOnlyCredential {
     pub data: std::collections::BTreeMap<String, String>,
 }
 
-// `Debug` is HAND-WRITTEN (PROD-01.3 security follow-up): a derived one
-// printed `data` — the base64 credential — into any `{:?}`, tracing field or
-// panic message that reached this value. Metadata, the type and the KEY NAMES
-// only.
+// `Debug` is HAND-WRITTEN: a derived one would print `data` -- the base64
+// credential -- into any `{:?}`, tracing field or panic message that reached
+// this value. Metadata, the type and the KEY NAMES only.
 impl std::fmt::Debug for WriteOnlyCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WriteOnlyCredential")
@@ -286,7 +280,7 @@ impl std::fmt::Debug for WriteOnlyCredential {
 
 impl WriteOnlyCredential {
     /// The create-only shape of a Secret built by
-    /// `weirkeeper::connection::credential` (PROD-01.3): the same metadata and
+    /// `weirkeeper::connection::credential`: the same metadata and
     /// type, the data base64-encoded for the wire. The Secret is consumed, so
     /// the bytes exist in one place only.
     #[must_use]
@@ -378,20 +372,20 @@ pub enum KubeFailure {
     Timeout,
     /// A transport failure, an unparseable response or a 5xx.
     Unavailable,
-    /// A durable create was asked for outside an attributed request — no
+    /// A durable create was asked for outside an attributed request -- no
     /// authenticated actor, or no decided action, in the request's audit
-    /// record. It is refused before anything is sent (PLAT-17.2).
+    /// record. It is refused before anything is sent.
     Unattributed,
 }
 
 /// A CRD validation rule the API server refused a write with.
 ///
-/// A CLOSED SET, MATCHED AGAINST THE CRD'S OWN CONSTANTS. D1 §5.2 says the API
-/// must NOT keep a second copy of R1–R3 and pre-empt them: a copy drifts from
-/// the schema, and a stored object can violate a rule this build has never
-/// heard of. So the write goes out, the API server decides, and this maps the
-/// refusal back to the rule — by comparing the returned message with the
-/// `weirkeeper::crds` constant that the CRD itself was generated from. A
+/// A CLOSED SET, MATCHED AGAINST THE CRD'S OWN CONSTANTS. The API must NOT
+/// keep a second copy of the CRD's rules and pre-empt them: a copy drifts
+/// from the schema, and a stored object can violate a rule this build has
+/// never heard of. So the write goes out, the API server decides, and this
+/// maps the refusal back to the rule by comparing the returned message with
+/// the `weirkeeper::crds` constant the CRD itself was generated from. A
 /// message that matches none of them stays [`KubeFailure::Invalid`] and is
 /// answered generically, because naming a rule this build cannot recognise
 /// would be a guess.
@@ -453,11 +447,10 @@ impl SpecRule {
     /// different sentence for each. `field_immutable` means "this cannot be
     /// changed at all, create a new object"; `selection_invalid` and
     /// `schedule_invalid` mean "this combination is not a policy". The
-    /// destination sentinel is a SHAPE rule — `archive.url` and
-    /// `destinationRef` must agree — and calling it `field_immutable` would
-    /// tell the person their destination cannot be changed, which is the
-    /// opposite of D1 §5.1 as amended. It has its own code, published in
-    /// `docs/api.md` beside the other two.
+    /// destination sentinel is a SHAPE rule -- `archive.url` and
+    /// `destinationRef` must agree -- and calling it `field_immutable` would
+    /// tell the person their destination cannot be changed, which is false. It
+    /// has its own code, published in `docs/api.md` beside the other two.
     #[must_use]
     pub const fn field(self) -> (&'static str, &'static str) {
         match self {
@@ -736,7 +729,7 @@ pub struct PageRequest {
     pub label_selector: Option<String>,
 }
 
-/// Every mutable field of a `BackupSchedule.spec` (D1 §5.1), as typed values.
+/// Every mutable field of a `BackupSchedule.spec`, as typed values.
 ///
 /// THE STRUCT IS THE ALLOWLIST. [`KubeAdapter::set_schedule_policy`] builds its
 /// merge patch from exactly these fields and can name no other key, so
@@ -928,15 +921,15 @@ impl KubeAdapter {
         .await
     }
 
-    /// Replace a `BackupSchedule`'s FUTURE policy — every mutable field of
-    /// D1 §5.1's matrix — under an optimistic-concurrency precondition.
+    /// Replace a `BackupSchedule`'s FUTURE policy -- every mutable field -- under
+    /// an optimistic-concurrency precondition.
     ///
     /// TYPED ARGUMENTS, NOT A PATCH DOCUMENT. The caller hands over a
     /// [`ScheduleSpecEdit`], and this method builds the merge patch from it.
     /// There is no key this method can write that is not a field of that
     /// struct, and `sourceRef` is not one: the identity of the protected
     /// cluster cannot be reached through this adapter at all, quite apart from
-    /// the CRD's R1 refusing it.
+    /// the CRD's own rule refusing it.
     ///
     /// AN OMITTED OPTION IS `null`, WHICH A MERGE PATCH REMOVES. That is what
     /// makes "absent means the documented default" reachable from a form: a
@@ -1044,15 +1037,15 @@ impl KubeAdapter {
         .await
     }
 
-    /// Rotate a destination's credential references and CA bundle — the ONLY
-    /// mutable half of a `BackupDestination` (D2 §3.1).
+    /// Rotate a destination's credential references and CA bundle -- the ONLY
+    /// mutable half of a `BackupDestination`.
     ///
     /// `access` is the complete four-grant object, built by the route from a
     /// validated DTO, so a merge patch that omits a grant REMOVES it rather
     /// than leaving a stale one behind. `ca_bundle` is `Some(value)` to set,
     /// `Some(Value::Null)` to clear and `None` to leave alone. Nothing in the
     /// patch can name `spec.storage` or `spec.transport.security`: this method
-    /// cannot build those keys, and the CRD's R1/R2 refuse them anyway.
+    /// cannot build those keys, and the CRD's rules refuse them anyway.
     ///
     /// # Errors
     ///
@@ -1091,8 +1084,7 @@ impl KubeAdapter {
     }
 
     /// Ask one transient check to stop: `spec.cancelRequested: false -> true`,
-    /// the single transition D0 permits, under a resourceVersion
-    /// precondition.
+    /// the single permitted transition, under a resourceVersion precondition.
     ///
     /// THE CONTROLLER STOPS THE JOB, NOT THIS SERVICE. This writes a wish on
     /// the object the caller already read and authorized; the controller
@@ -1185,9 +1177,9 @@ impl KubeAdapter {
     ///
     /// NAMED, NEVER LISTED. The name comes from `status.result.chunks[i].name`
     /// or `status.result.detailsRef.name` of an object the caller already
-    /// authorized, so this can only reach documents a check wrote; D2 §5.6's
-    /// "never list all `ConfigMap`s" is a property of there being no list
-    /// method for this type at all.
+    /// authorized, so this can only reach documents a check wrote; "never list
+    /// all `ConfigMap`s" is a property of there being no list method for this
+    /// type at all.
     ///
     /// # Errors
     ///
@@ -1201,7 +1193,7 @@ impl KubeAdapter {
         self.bounded("get", "configmaps", api.get(name)).await
     }
 
-    /// PROD-16.1: read the installation's public identity ConfigMap, for the
+    /// Read the installation's public identity ConfigMap, for the
     /// fresh-install marker on it (`logweir.dev/approval-default`).
     ///
     /// NAMED, NEVER LISTED, and the name is configuration
@@ -1298,7 +1290,7 @@ impl KubeAdapter {
     }
 
     /// The serving addresses of one Service's endpoints, for the trusted-proxy
-    /// set (chart gap G6).
+    /// set.
     ///
     /// `namespace` and `service` come from the configuration file, never from
     /// a request. One LIST of `endpointslices` in that namespace, selected by

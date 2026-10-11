@@ -1,24 +1,19 @@
-//! The `ProtectionPolicy` reconciler — PLAT-14.2, decision D3 §§3.1–3.3.
+//! The `ProtectionPolicy` reconciler (decision D3 §§3.1–3.3).
 //!
 //! # The thin half
 //!
-//! Every verdict this file publishes is computed by [`crate::protection`],
-//! which holds no client. This module reads what the API server says, calls
-//! [`crate::protection::evaluate`] and [`crate::protection::reconcile_alerts`],
-//! and patches `protectionpolicies/status`. That is the whole of it.
-//!
-//! **It writes nothing but this status.** There is no `Api<Backup>` or
-//! `Api<Restore>` status write anywhere in this file;
-//! `the_controller_names_no_backup_or_restore_status_write` asserts it. A
-//! protection verdict is a projection of runs that already happened, and this
-//! controller is not the execution authority for any of them.
+//! Every verdict is computed by [`crate::protection`], which holds no client.
+//! This module reads, calls [`crate::protection::evaluate`] and
+//! [`crate::protection::reconcile_alerts`], and patches
+//! `protectionpolicies/status`, and writes nothing else: a protection verdict
+//! is a projection of runs that already happened
+//! (`the_controller_names_no_backup_or_restore_status_write`).
 //!
 //! # Alert delivery is withdrawn
 //!
-//! v1 delivers no alert (owner decision OD-12). The alert ledger in
-//! `status.alerts` still records what is open and what resolved; a policy that
-//! still carries `spec.notifications` says by name, in its
-//! `NotificationsDelivered` condition, that nothing is delivered.
+//! v1 delivers no alert. The alert ledger in `status.alerts` still records what
+//! is open and what resolved; a policy that still carries `spec.notifications`
+//! says so by name in its `NotificationsDelivered` condition.
 
 use std::sync::Arc;
 
@@ -44,10 +39,6 @@ use crate::identity;
 use crate::protection as p;
 
 use super::approval::ReconcileError;
-
-// ===========================================================================
-// Constants
-// ===========================================================================
 
 /// `Ready` — this controller looked at the object and could publish a verdict.
 pub const CONDITION_READY: &str = "Ready";
@@ -88,10 +79,6 @@ pub const MAX_CATALOG_PAGES: usize = 8;
 /// object per line.
 pub const CATALOG_PAGE_DATA_KEY: &str = "entries.jsonl";
 
-// ===========================================================================
-// Errors, context and outcome
-// ===========================================================================
-
 /// What this reconciler needs.
 #[derive(Clone)]
 pub struct ProtectionContext {
@@ -114,10 +101,6 @@ pub struct Outcome {
     /// Seconds until the next pass.
     pub requeue_seconds: u64,
 }
-
-// ===========================================================================
-// The reconcile
-// ===========================================================================
 
 /// Reconcile one `ProtectionPolicy`.
 ///
@@ -149,9 +132,7 @@ pub async fn reconcile_policy(
     let spec = &policy.spec;
     let interval = spec.evaluation_interval_seconds;
 
-    // ------------------------------------------------------------------
     // Read.
-    // ------------------------------------------------------------------
     let clusters: Api<KafkaCluster> = Api::namespaced(ctx.client.clone(), &namespace);
     let source_exists = clusters
         .get_opt(&spec.protects.source_ref.name)
@@ -192,9 +173,7 @@ pub async fn reconcile_policy(
 
     let catalog = read_catalog(&ctx.client, &namespace, spec, now).await?;
 
-    // ------------------------------------------------------------------
     // Project, then evaluate. Both pure.
-    // ------------------------------------------------------------------
     let mut candidates: Vec<p::PointCandidate> = members
         .iter()
         .map(|b| candidate_from_backup(b, spec, &catalog))
@@ -227,9 +206,7 @@ pub async fn reconcile_policy(
         now,
     });
 
-    // ------------------------------------------------------------------
     // Move the ledger: D3 §3.3's open and resolve, and the fifth kind.
-    // ------------------------------------------------------------------
     let stored_alerts: Vec<AlertEntry> = policy
         .status
         .as_ref()
@@ -240,10 +217,8 @@ pub async fn reconcile_policy(
     let observed = p::fold_recoveries(&stored_alerts, &completions, now);
     let alerts = p::reconcile_alerts(&observed, &verdict.open_kinds, verdict.health, &uid, now);
 
-    // ------------------------------------------------------------------
-    // Status. One merge PATCH, `metadata.resourceVersion` as the
+    // Status: one merge PATCH with `metadata.resourceVersion` as the
     // precondition (seam S7).
-    // ------------------------------------------------------------------
     let status = build_status(policy, &verdict, alerts, now, interval);
     let commit = write_status(&api, policy, &status).await?;
 
@@ -272,23 +247,14 @@ fn idle() -> Outcome {
     }
 }
 
-// ===========================================================================
-// Reading
-// ===========================================================================
-
 /// Every `Backup` in the namespace, bounded by [`MAX_BACKUP_PAGES`] pages of
 /// [`BACKUP_PAGE_LIMIT`].
 ///
-/// # Why this is not narrowed by `logweir.dev/schedule-uid`
-///
-/// D3 §3.2 names that label as the INDEX and `spec.scheduleRef.uid` as the
-/// AUTHORITY. Nothing on `main` writes the label yet (it is D1 W2's), so a
-/// label-selected list answers empty and every installation would read
-/// `Unprotected` — and a **manual run of a schedule is part of its history**
-/// (`identity::is_run_of_schedule`), which a label written only by the
-/// scheduler would miss even once it exists. Membership is therefore decided
-/// by the authority, over a bounded listing. Narrowing by the label when D1's
-/// writer lands is an optimisation, not a change to the rule.
+/// Not narrowed by `logweir.dev/schedule-uid`: D3 §3.2 names that label the
+/// index and `spec.scheduleRef.uid` the authority, and a manual run of a
+/// schedule is part of its history (`identity::is_run_of_schedule`) without
+/// carrying a label only the scheduler writes. Membership is decided by the
+/// authority, over a bounded listing.
 async fn list_backups(
     client: &kube::Client,
     namespace: &str,
@@ -321,12 +287,11 @@ async fn list_backups(
 
 /// Whether this `Backup` counts towards this policy's objective.
 ///
-/// With `scheduleRefs`: membership is `identity::is_run_of_schedule` against
-/// each named schedule's UID — which accepts `spec.scheduleRef.{name,uid}`,
-/// the legacy controller `ownerReference` and PLAT-05.2's retention
-/// annotation, and therefore **counts a manual run of the schedule as
-/// history**. Without `scheduleRefs`: every run of the named source that
-/// writes to the named destination.
+/// With `scheduleRefs`: `identity::is_run_of_schedule` against each named
+/// schedule's UID, which accepts `spec.scheduleRef.{name,uid}`, the legacy
+/// controller `ownerReference` and the history-retention annotation, so a
+/// manual run of the schedule counts as history. Without `scheduleRefs`: every
+/// run of the named source that writes to the named destination.
 fn is_member(
     backup: &Backup,
     spec: &crate::crds::protection_policy::ProtectionPolicySpec,
@@ -408,24 +373,17 @@ fn schedule_facts((name, found): &(String, Option<BackupSchedule>)) -> p::Schedu
     }
 }
 
-/// D1 W2's `status.missedSlots`, read **defensively** off the serialized
-/// status rather than off a typed field.
-///
-/// The field is a CONTRACT this worker consumes and not one it can require:
-/// D1 W2 is in review, not on `main`. Reading it through `serde_json` means
-/// the day it lands the count becomes exact with no edit here, and until then
-/// the absence is an absence rather than a compile error or a pinned
-/// dependency on another worker's branch.
+/// `status.missedSlots`, read defensively off the serialized status rather
+/// than a typed field, so a shape change on the scheduler's side degrades to
+/// an absence rather than a broken verdict.
 fn declared_missed_slots(schedule: &BackupSchedule) -> Option<i64> {
     let status = serde_json::to_value(schedule.status.as_ref()?).ok()?;
     match status.get("missedSlots")? {
-        // D1 W2's landed shape: `{count, countCapped, recent, …}`. `count` is a
-        // FLOOR when `countCapped` is set — the enumeration stopped at its
-        // 1000-slot cap — and a floor is the honest number to alert on.
+        // `{count, countCapped, recent, …}`. `count` is a floor when
+        // `countCapped` is set, and a floor is the honest number to alert on.
         Value::Object(block) => block.get("count").and_then(Value::as_i64),
-        // The two shapes the field was drafted as, kept because this read is
-        // deliberately defensive: a protection verdict does not wait on a
-        // neighbouring worker's rebase, and it does not break on one either.
+        // Two earlier draft shapes, still read: this read is deliberately
+        // defensive.
         Value::Number(n) => n.as_i64(),
         Value::Array(items) => i64::try_from(items.len()).ok(),
         _ => None,
@@ -461,17 +419,13 @@ fn candidate_from_backup(
     let newest_record_at = status
         .and_then(|s| s.window_covered.as_ref())
         .and_then(|w| chrono::DateTime::from_timestamp_millis(w.to_ms.saturating_sub(1)));
-    // The archive set this run wrote into, from the pre-Job patch — BEFORE any
-    // verification is attempted, which is why it is there on the credential
-    // posture where the receipt digest is not. THE SAME `backup_set_id` the
-    // `Restore` match uses, deliberately: a second reading of the same two
-    // fields is how the two halves of this file come to disagree about which
-    // set a run belongs to.
+    // The archive set this run wrote into, from the pre-Job patch, so it is
+    // there even where the receipt digest is not. The same `backup_set_id` the
+    // `Restore` match uses, so the two halves agree on which set a run is in.
     let backup_id = backup_set_id(backup).filter(|id| !id.is_empty());
-    // PROD-02.1 (review EC-1): an EMPTY CAPTURE holds no record, so it is
-    // never a recovery point. Its `Complete` reason is written only beside a
-    // passing verdict, on the same patch as `status.capture`, so it is read
-    // here together with it; with no capture time the point is not available
+    // An empty capture holds no record, so it is never a recovery point. Its
+    // `Complete` reason is written beside a passing verdict on the same patch
+    // as `status.capture`; with no capture time the point is not available
     // and the policy ages from the last real point.
     let empty_capture = status
         .and_then(|s| s.conditions.as_ref())
@@ -503,58 +457,43 @@ fn candidate_from_backup(
 }
 
 /// Fill the two point facts the controller could not read from the catalog row
-/// for the SAME point — defect `PROTECTION-SECRETKEYS-UNPROTECTED`, clause 3.
+/// for the same point.
 ///
-/// `status.capture` is written only on a `Valid` verification verdict
-/// (`controllers::backup`), so on a destination the controller holds no Secret
-/// verb the point could be neither aged nor — where the receipt bytes were not
-/// fetched either — named. The catalog controller DID read that receipt:
-/// `recoveryPointAtMs` is `BackupReceipt.started_at` carried through the view
-/// (D3 §3.2) and `pointId` is D3 §5.1's identity over the same digest. This is
-/// the same number and the same name from the same signed document, by the
-/// route this installation's credential model leaves open.
+/// `status.capture` is written only on a `Valid` verdict, so where the
+/// controller holds no Secret verb the point can be neither aged nor named. The
+/// catalog controller did read that receipt: `recoveryPointAtMs` is
+/// `BackupReceipt.started_at` carried through the view (D3 §3.2) and `pointId`
+/// is D3 §5.1's identity over the same digest.
 ///
-/// # ONLY for the verdict the catalog is allowed to answer — review **MEDIUM-1**
+/// Only for a verdict the controller never reached ([`p::Evidence::was_reached`]):
+/// a point it fetched and refused (`Invalid`, `Untrusted`) also lacks
+/// `status.capture`, and with `requireVerifiedEvidence` off a view-supplied
+/// capture time would make a digest mismatch the newest available point.
+/// `requireVerifiedEvidence` governs whether an unverified point counts, never
+/// whether a refused one does; D3 §3.2's answer for a refused point is
+/// `Unprotected`.
 ///
-/// The fourth site of [`p::Evidence::was_reached`]'s rule, and the one that was
-/// missing it. A point the controller fetched and refused (`Invalid`,
-/// `Untrusted`) also has no `status.capture`, so it reached this function and
-/// was handed a capture time by the view — and with `requireVerifiedEvidence`
-/// turned OFF nothing downstream refused it again, so a digest mismatch became
-/// the policy's newest available point: `health: Healthy`, `Protected=True`, no
-/// alert, where `main` said `Unprotected`. The objective governs whether an
-/// UNVERIFIED point may count as protection; it never governs whether a REFUSED
-/// one may, and D3 §3.2's `Unprotected` is the answer for a refused point at
-/// every setting of it. A reached verdict therefore leaves here with the facts
-/// it came in with, which is no capture time, which is not available.
-///
-/// **Nothing is invented.** A candidate the view does not hold, or holds twice
+/// Nothing is invented: a candidate the view does not hold, or holds twice
 /// ([`p::catalog_entry_for`]), keeps its absent facts and is reported as
-/// unplaceable. A `recoveryPointAtMs` of `0` is `serde(default)`'s stand-in for
-/// a field the view did not write, not a capture in 1970, and is not read.
+/// unplaceable, and a `recoveryPointAtMs` of `0` is `serde(default)`'s
+/// stand-in for an unwritten field, not a capture in 1970.
 fn with_catalog_facts(
     mut candidate: p::PointCandidate,
     catalog: &p::CatalogAnswer,
 ) -> p::PointCandidate {
-    // The fallback-not-authority rule, in three statements. THIS one carries
-    // behaviour of its own (mutant `MED1-M1`): the catalog answers only for a
-    // verdict the controller never reached. It also spares a policy whose
-    // points the controller DID read a view scan per candidate, up to
-    // `MAX_BACKUPS_SCANNED` times a pass.
+    // The fallback-not-authority rule: the catalog answers only for a verdict
+    // the controller never reached. This also spares a view scan per
+    // candidate for points the controller did read.
     if candidate.evidence.was_reached() {
         return candidate;
     }
     let Some(entry) = p::catalog_entry_for(&candidate, catalog) else {
         return candidate;
     };
-    // The other two statements are each redundant against a DIFFERENT invariant
-    // — `point_id` against the join key's own equality (where it is `Some`,
-    // `entries_for` matched on it, so the assignment would be a no-op), and the
-    // capture time against `capture` being written only on a `Valid` verdict,
-    // which the early return above has already excluded. Neither is removable
-    // on its own with an observable result; removing all three at once makes
-    // the row authoritative, which is mutant `MED3-M1` and which the
-    // `ControllerIdentity` row catches.
+    // The two assignments below are each redundant against a different
+    // invariant (`point_id` against the join key's equality, the capture time
+    // against `capture` being written only on `Valid`); removing all three
+    // statements would make the row authoritative.
     if candidate.recovery_point_at.is_none() && entry.recovery_point_at_ms > 0 {
         candidate.recovery_point_at =
             chrono::DateTime::from_timestamp_millis(entry.recovery_point_at_ms);
@@ -598,10 +537,10 @@ fn slot_run(backup: &Backup) -> p::SlotRun {
 /// The archive-set identity of one run — the value a `Restore` names in
 /// `spec.backupSetRef`.
 ///
-/// `status.execution.id` is the server-derived identity PLAT-06.1 froze;
+/// `status.execution.id` is the server-derived identity of frozen inputs;
 /// `status.backupId` is what an older controller wrote. Both are the same
-/// string for every object either of them produced, and reading the newer one
-/// first is what makes a `Restore` of a legacy run still match.
+/// string for every object either produced, and reading the newer first lets
+/// a `Restore` of a legacy run still match.
 fn backup_set_id(backup: &Backup) -> Option<String> {
     let status = backup.status.as_ref()?;
     status
@@ -613,16 +552,11 @@ fn backup_set_id(backup: &Backup) -> Option<String> {
 
 /// Terminal `Restore`s that recovered a point this policy protects.
 ///
-/// # What "matching this policy's points" means, exactly
-///
-/// `spec.backupSetRef` is a `backupId` — the ARCHIVE SET, D3 §5.1's
-/// `backup_id` — and it has to be one of the sets this policy's own member
-/// runs produced. The destination has to match too: two policies over two
-/// destinations can name the same schedule's `backupId` only if the same run
-/// wrote to both, which it does not.
-///
-/// A restore of somebody else's archive is not this policy's recovery, and
-/// recording it here would tell one team that another team's incident is over.
+/// `spec.backupSetRef` is a `backupId` (the archive set, D3 §5.1), and it has
+/// to be one of the sets this policy's own member runs produced, at this
+/// policy's destination. A restore of somebody else's archive is not this
+/// policy's recovery, and recording it would tell one team that another team's
+/// incident is over.
 async fn read_recoveries(
     client: &kube::Client,
     namespace: &str,
@@ -665,15 +599,11 @@ async fn read_recoveries(
     Ok(out)
 }
 
-/// When this `Restore` actually FINISHED — review **F10**.
-///
-/// `RestoreStatus` carries no `finishedAt`, so the terminal instant is the
-/// `lastTransitionTime` of its terminal condition (`Complete` or `Failed`),
-/// which the restore reconciler writes when the run ends.
-/// `metadata.creationTimestamp` is the fallback and only the fallback: for a
-/// long recovery it is HOURS before completion, and it is that instant that
-/// lands in the ledger's `openedAt`/`resolvedAt` and in the event a responder
-/// reads on D3 §3.5's incident-facing surface.
+/// When this `Restore` actually finished: the `lastTransitionTime` of its
+/// terminal condition (`Complete` or `Failed`), since `RestoreStatus` carries
+/// no `finishedAt`. `metadata.creationTimestamp` is only the fallback: for a
+/// long recovery it is hours early, and this instant lands in the ledger's
+/// `openedAt`/`resolvedAt`.
 fn restore_finished_at(restore: &Restore) -> Option<Time> {
     restore
         .status
@@ -740,10 +670,9 @@ async fn read_catalog(
         ));
     };
     let status = catalog.status.as_ref();
-    // AN EXPIRED VIEW IS NOT A VIEW. `viewExpiresAt` is the catalog
-    // controller's own statement of how long its pages describe the archive;
-    // reading them past it would answer "the point is there" from a listing
-    // taken before a retention run.
+    // An expired view is not a view: `viewExpiresAt` is how long the catalog's
+    // pages describe the archive, and reading past it could answer "the point
+    // is there" from a listing taken before a retention run.
     let fresh = status
         .and_then(|s| s.view_expires_at)
         .is_some_and(|at| at > now);
@@ -794,10 +723,6 @@ async fn read_catalog(
     Ok(p::CatalogAnswer::Fresh(entries))
 }
 
-// ===========================================================================
-// Status
-// ===========================================================================
-
 /// What [`write_status`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Commit {
@@ -838,10 +763,8 @@ pub fn build_status(
             observed_generation: generation,
             last_transition_time: Some(now),
             reason: Some(REASON_EVALUATED.to_string()),
-            // `condition_summary` AND NOT `summary` — review F4. A condition
-            // `message` is part of the object; the event's sentence carries the
-            // concrete age and would make the status differ every time a minute
-            // rolled over (erratum E11(d)).
+            // `condition_summary`, not `summary`: the event's sentence carries
+            // the concrete age and would change the status every minute.
             message: Some(verdict.condition_summary.clone()),
         },
     );
@@ -893,26 +816,17 @@ pub fn build_status(
     settle_clock_fields(stored, status, interval, now)
 }
 
-/// Decide `evaluatedAt` and the two fields measured FROM it, together.
+/// Decide `evaluatedAt` and the two fields measured from it, together.
 ///
-/// # D3 §3.1's rule, and the two fields that were outside it (review F4)
-///
-/// `evaluatedAt` is "rewritten only on change or when older than interval/2".
-/// `lastAvailablePoint.ageSeconds` and `missed.sinceLastFire` are both
-/// documented as "at `evaluatedAt`" — they are *derived from that instant*, not
-/// from `now` — but they were computed from a live clock read, so a pass over
-/// unchanged cluster state produced a different status every second: a PATCH,
-/// a `resourceVersion` bump, the reconciler's own write waking it again. That
-/// is the measured `KafkaCluster` defect (erratum **E11(d)**) on every policy,
-/// for ever, and the test that claimed otherwise passed only because it froze
-/// the clock.
-///
-/// All three move together or none of them does. The comparison is over the
-/// computed status with all three stripped, so "did the VERDICT change?" is
-/// asked about the cluster and not about the clock. When nothing changed and
-/// the stored instant is younger than half the interval, the stored values for
-/// all three are restored and [`crate::conditions::status_unchanged`] then
-/// sends nothing at all.
+/// `evaluatedAt` is rewritten only on change or when older than interval/2
+/// (D3 §3.1), and `lastAvailablePoint.ageSeconds` and `missed.sinceLastFire`
+/// are measured at `evaluatedAt`, not at `now`; otherwise a pass over unchanged
+/// state would write a new status every second and wake itself. All three move
+/// together or not at all: the comparison is over the status with all three
+/// stripped, so "did the verdict change?" is asked of the cluster, not the
+/// clock. When nothing changed and the stored instant is younger than half
+/// the interval, the stored values are restored and
+/// [`crate::conditions::status_unchanged`] sends nothing.
 fn settle_clock_fields(
     stored: Option<&ProtectionPolicyStatus>,
     mut next: ProtectionPolicyStatus,
@@ -948,9 +862,8 @@ fn settle_clock_fields(
 /// `staleSince` — set the first time health becomes `Stale` or `Unprotected`
 /// and KEPT while it stays there; cleared when it does not.
 ///
-/// It is a "since when" and not a heartbeat: rewriting it on every pass would
-/// make every pass a write, and a reconciler's own status patch is what wakes
-/// it (erratum **E11(d)**).
+/// It is a "since when", not a heartbeat: rewriting it every pass would make
+/// every pass a write that wakes the reconciler.
 fn stale_since(
     stored: Option<&ProtectionPolicyStatus>,
     health: p::Health,
@@ -986,13 +899,10 @@ fn verdict_bytes(status: &ProtectionPolicyStatus) -> Value {
     value
 }
 
-/// Add the optimistic-concurrency precondition to a `/status` merge patch —
-/// D-SEAMS **S7**.
-///
-/// The API server applies a `metadata.resourceVersion` carried in a patch BODY
-/// as an update precondition and answers **409** on a mismatch, which is how a
-/// merge PATCH gets a compare-and-set without the `update` verb this role
-/// grants on nothing.
+/// Add the optimistic-concurrency precondition to a `/status` merge patch (seam
+/// **S7**): the API server applies a `metadata.resourceVersion` in a patch body
+/// as an update precondition and answers 409 on a mismatch, a compare-and-set
+/// without the `update` verb.
 fn status_patch_with_preconditions(
     policy: &ProtectionPolicy,
     mut patch: Value,
@@ -1024,20 +934,12 @@ fn status_patch_with_preconditions(
 /// Every `status` key that this pass may need to REMOVE, and therefore must
 /// spell as an explicit `null` when it computed `None`.
 ///
-/// # An omitted key is "leave it alone", not "clear it" (review F3)
-///
-/// Every field of `ProtectionPolicyStatus` is `skip_serializing_if =
-/// "Option::is_none"`, and RFC 7386 removes a key only for an explicit `null`.
-/// So a status serialized straight to a merge patch could SET each of these and
-/// never clear one — and the consequences are the two claims this controller
-/// exists to avoid making:
-///
-/// * `lastAvailablePoint` survived a verdict that just decided no point is
-///   available, so the API and the console kept naming a recovery point while
-///   `health` read `Unknown` — the exact conflation D3 §3.2 is written against,
-///   on the surface an incident responder reads;
-/// * `staleSince` from a long-resolved outage sat on a `Healthy` policy,
-///   contradicting its own field documentation.
+/// An omitted key is "leave it alone", not "clear it": every field of
+/// `ProtectionPolicyStatus` is `skip_serializing_if = "Option::is_none"`, and
+/// RFC 7386 removes a key only for an explicit `null`. Without these a status
+/// could set each field and never clear one: `lastAvailablePoint` would outlive
+/// a verdict that no point is available (naming a recovery point beside
+/// `health: Unknown`), and `staleSince` would sit on a `Healthy` policy.
 ///
 /// `conditions` is deliberately NOT here: this controller always writes them,
 /// so a `null` would be a removal that never applies, and an array in a merge
@@ -1056,22 +958,16 @@ pub const CLEARABLE_STATUS_FIELDS: [&str; 7] = [
 ];
 
 /// The `{"status": …}` merge-patch body, with an explicit `null` for every
-/// clearable field this pass computed as `None` — and, since FX-29, for every
-/// key at ANY depth that `stored` carries and this status does not.
+/// clearable field this pass computed as `None`, and for every key at any depth
+/// that `stored` carries and this status does not.
 ///
-/// [`crate::conditions::status_unchanged`] applies the body exactly as the API
-/// server would, so the no-op skip keeps working: a `null` for a key the object
-/// does not have is itself a no-op.
-///
-/// # Why the seven named fields were not enough (FX-29's class sweep)
-///
-/// No optional field INSIDE `lastAvailablePoint`, `lastAttempt`, `missed` or
-/// `rehearsal` is among them. Each of those, once it became `None`, stayed on the object under the merge — and
-/// [`settle_clock_fields`] compares the stored status with the computed one,
-/// so the stale key made "did the verdict change?" answer yes on every pass:
-/// `evaluatedAt` was `now` each time, and each write woke this reconciler's own
-/// watch. This controller is the only writer of the status, so
-/// [`crate::conditions::replacing`] makes the body replace what is stored.
+/// [`crate::conditions::status_unchanged`] applies the body as the API server
+/// would, so the no-op skip still works: a `null` for an absent key is itself a
+/// no-op. Nested optional fields (inside `lastAvailablePoint`, `lastAttempt`,
+/// `missed`, `rehearsal`) need the same, or a stale key would make "did the
+/// verdict change?" answer yes on every pass; this controller is the only
+/// writer of the status, so [`crate::conditions::replacing`] makes the body
+/// replace what is stored.
 #[must_use]
 pub fn status_patch_body(
     status: &ProtectionPolicyStatus,
@@ -1127,10 +1023,6 @@ async fn write_status(
     }
 }
 
-// ===========================================================================
-// Registration
-// ===========================================================================
-
 async fn reconcile(
     policy: Arc<ProtectionPolicy>,
     ctx: Arc<ProtectionContext>,
@@ -1142,10 +1034,9 @@ async fn reconcile(
 /// The [`Action`] a pass returns: a timed requeue of the outcome's
 /// `requeue_seconds` — the evaluation interval — never `await_change()`.
 ///
-/// A recovery point AGES with no event on any object, so this requeue is
-/// what turns a policy `Stale` when its newest point crosses the objective
-/// (FX-29 review M-1, pinned by
-/// `protection_controller::a_point_that_ages_out_is_seen_by_the_timed_requeue`).
+/// A recovery point ages with no event on any object, so this requeue is what
+/// turns a policy `Stale` when its newest point crosses the objective
+/// (`protection_controller::a_point_that_ages_out_is_seen_by_the_timed_requeue`).
 #[must_use]
 pub fn policy_action(outcome: &Outcome) -> Action {
     Action::requeue(std::time::Duration::from_secs(outcome.requeue_seconds))

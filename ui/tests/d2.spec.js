@@ -1,18 +1,13 @@
-// d2.spec.js -- D2 (PLAT-08.1, PLAT-08.2, PLAT-09.1, PLAT-03.1, PLAT-03.2)
-// under `node --test`: what the three new surfaces render for every state the
-// product API can put in front of them, and what they refuse to render.
-//
-// WHY THIS IS A FILE OF ITS OWN. `pages.spec.js` asserts the rules the five
-// older kinds carry, over fixtures shaped like `kubectl proxy`'s answers.
-// These three domains have no legacy shape: the DTO IS the shape, the fixtures
-// are the product API's own documents, and `contract.spec.js` holds every one
-// of them against `schemas/logweir-api-v1.openapi.json`. Keeping them together
-// means a reader looking for "what does the console say when a listing came
-// back empty" finds one file rather than three neighbourhoods.
+// d2.spec.js -- destinations, topic discovery and operation readiness under
+// `node --test`: what these surfaces render for every state the product API
+// can put in front of them, and what they refuse to render. They have no
+// legacy shape: the fixtures are the product API's own documents, and
+// `contract.spec.js` holds each against
+// `schemas/logweir-api-v1.openapi.json`.
 //
 // THE RULE EVERY ROW BELOW IS ABOUT. This product may render what somebody
-// OBSERVED, attributed to whoever observed it. It may not render a conclusion
-// nobody drew. That shows up here as five separate refusals:
+// OBSERVED, attributed to whoever observed it, and never a conclusion nobody
+// drew:
 //
 //   * a successful topic listing is `unknown`, never "complete";
 //   * an attestation is always "...; not verified by Logweir";
@@ -20,8 +15,7 @@
 //   * a `Preflight` with an empty `checks` array is not a pass;
 //   * `unverifiable` is "could not be checked", never "out of date".
 //
-// NOTHING HERE DIALS, and `ui_lint.rs::the_ui_behaviour_suite_never_dials`
-// holds that for the whole directory.
+// Nothing here dials (`ui_lint.rs::the_ui_behaviour_suite_never_dials`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -114,16 +108,10 @@ const destination = (name) => decodeConsoleItem("destinations", console_(name)).
 const discovery = (name) => decodeConsoleItem("topic-discoveries", console_(name)).value.item;
 const preflight = (name) => decodeConsoleItem("preflights", console_(name)).value.item;
 
-// ===========================================================================
-// destinations
-// ===========================================================================
-
 test("a_destination_no_controller_has_judged_reads_not_judged_and_never_invalid", () => {
-  // THE STATE EVERY DESTINATION ON THIS CLUSTER IS IN. No controller
-  // reconciles `BackupDestination` on the laboratory images, so `status` comes
-  // back `{}` and `valid` is absent. Absent is "not judged": rendering it as
-  // `false` would report a missing controller as a broken destination, and
-  // rendering it as `true` would be worse.
+  // Absent `valid` is "not judged" (a controller older than the kind leaves
+  // `status` empty): rendering it as `false` would report a missing controller
+  // as a broken destination, and as `true` would be worse.
   const item = destination("destination-unjudged.json");
   assert.equal(item.status.valid, null, "the fixture is the unjudged shape");
   const badge = destinationVerdict(item.status);
@@ -139,8 +127,7 @@ test("a_destination_no_controller_has_judged_reads_not_judged_and_never_invalid"
 
 test("a_judged_destination_carries_the_controllers_own_reason", () => {
   const item = destination("destination.json");
-  // MCP-11: "valid (Valid)" repeated itself; the reason is shown when it adds
-  // something the word does not.
+  // The reason is shown only when it adds something the word does not.
   assert.match(destinationVerdict(item.status), /badge-green">valid<\/span>/);
   assert.doesNotMatch(destinationVerdict(item.status), /\(Valid\)/);
   assert.match(destinationVerdict({ valid: false, reason: "EndpointNotOrigin" }),
@@ -156,8 +143,8 @@ test("the_list_separates_transport_from_addressing_and_names_plaintext_as_plaint
     "a plaintext destination is named as one and not left as a word in a cell");
   assert.match(html, /badge-green">default/);
   assert.match(html, /id="destinations-unjudged"/, "the list discloses the unjudged row");
-  // MCP-11: the default-destination paragraph is said ONCE on the page, beside
-  // the checkbox it is about, and not a second time under the list.
+  // The default-destination paragraph is said ONCE on the page, beside the
+  // checkbox it is about.
   const whole = html + renderDestinationForm({ draft: {}, state: { phase: "idle" } });
   assert.equal((whole.match(/a namespace with two defaults has none/g) || []).length, 1);
   assert.match(html, /badge-warn">insecureHttp \(plaintext\)/,
@@ -201,12 +188,9 @@ test("the_usage_list_renders_its_basis_beside_an_empty_answer", () => {
     "an empty list without its basis would read as 'nothing uses this'");
 });
 
-// ---------------------------------------------- the credential, and the draft
-
 test("MUTANT_a_credential_field_in_the_draft_allowlist_fails_this_row", () => {
   // THE GUARD: `keepDraft` takes an ALLOWLIST, and the destination form's list
-  // names no credential input. THE MUTANT: add one. It was planted by hand and
-  // this row went red on the second assertion; the row is what keeps it red.
+  // names no credential input. THE MUTANT: add one.
   for (const input of CREDENTIAL_INPUTS) {
     assert.equal(
       DESTINATION_DRAFT_FIELDS.indexOf(input),
@@ -248,14 +232,11 @@ test("the_form_never_renders_a_value_attribute_on_a_credential_input", () => {
   assert.match(html, /never read back/, "and the form says what write-only means");
 });
 
-// ------------------------------------------------ addressing is not transport
-
 test("MUTANT_addressing_never_decides_transport_in_either_direction", () => {
-  // DEFECT G5, WRITTEN AS A ROW. THE MUTANT: make `destinationBody` read the
-  // addressing radio into `transport.security`, as the wizard once read
-  // `pathStyle` into `allowHttp`. Planted by hand; the first assertion went
-  // red. Both directions are asserted, because the derivation is just as wrong
-  // the other way round.
+  // THE MUTANT: make `destinationBody` read the addressing radio into
+  // `transport.security` (as a path-style checkbox once turned TLS off). Both
+  // directions are asserted, because the derivation is as wrong the other way
+  // round.
   const base = {
     name: "p", bucket: "kafka-backups",
     archiveWriteSource: "workloadIdentity",
@@ -361,10 +342,6 @@ test("a_rotation_sends_the_complete_access_block_because_an_omitted_grant_is_rem
   assert.match(html, /the answer is a 412 and nothing is written/);
 });
 
-// ===========================================================================
-// topic discovery
-// ===========================================================================
-
 test("a_successful_listing_alone_is_unknown_and_this_page_never_calls_it_complete", () => {
   const item = discovery("discovery-unknown.json");
   assert.equal(item.visibility.state, "unknown");
@@ -390,8 +367,7 @@ test("a_limited_visibility_says_the_list_is_a_subset_and_carries_its_basis", () 
 test("MUTANT_an_attestation_is_never_rendered_without_its_disclaimer", () => {
   // THE GUARD: `attestationLine` appends "not verified by Logweir" and is the
   // only path that renders an attestation. THE MUTANT: return the recorded
-  // claim verbatim from it. Planted by hand; both the second and third
-  // assertions went red.
+  // claim verbatim from it.
   const item = discovery("discovery-attested.json");
   assert.equal(item.visibility.state, "attestedComplete");
   const html = renderDiscovery(item, "successful");
@@ -456,9 +432,9 @@ test("the_two_slots_are_rendered_separately_and_neither_hides_the_other", () => 
 test("MUTANT_a_short_page_is_followed_and_never_treated_as_the_last_one", () => {
   // THE GUARD: `scan.complete: false` means the chunk budget was spent, not
   // that the result ended; the table says so and offers the cursor. THE
-  // MUTANT: render the "end of the result" sentence whenever `items` is
-  // shorter than `page.limit`. Planted by hand; the second assertion went red
-  // for `topics-page.json`, whose four rows are a short page WITH a cursor.
+  // MUTANT: render the "end of the result" sentence whenever `items` is shorter
+  // than `page.limit` (`topics-page.json`'s four rows are a short page WITH a
+  // cursor).
   const page = decodeTopicPage(console_("topics-page.json")).value;
   assert.equal(page.scan.complete, false);
   assert.equal(page.items.length, 4, "a short page");
@@ -495,16 +471,11 @@ test("a_discovery_route_this_mode_cannot_reach_is_a_sentence_and_not_an_error_bo
     "and no control is offered for a route this mode cannot reach");
 });
 
-// ===========================================================================
-// operation readiness
-// ===========================================================================
-
 test("MUTANT_a_preflight_with_no_recorded_checks_is_never_a_pass", () => {
   // THE GUARD: the aggregate comes from `state`, and an empty `checks` array
   // gets a sentence saying an empty result is not a pass. THE MUTANT: render
-  // `checks.every(c => c.state === "ready")` as the verdict -- which is `true`
-  // for an empty array, so a pending check rendered green. Planted by hand;
-  // the first and third assertions went red.
+  // `checks.every(c => c.state === "ready")`, which is `true` for an empty
+  // array, so a pending check would render green.
   const pending = preflight("preflight-pending.json");
   assert.deepEqual(pending.checks, []);
   const html = renderPreflight(pending);
@@ -522,7 +493,7 @@ test("a_not_ready_check_carries_its_code_its_message_and_its_remedy", () => {
   assert.match(html, /AccessDenied/);
   assert.match(html, /the object store refused the listing for this prefix/);
   assert.match(html, /Grant s3:ListBucket/);
-  // Labelled in the cell since MCP round 2's R2-3 folded nine columns into four.
+  // Labelled in the cell, where the fields are folded into four columns.
   assert.match(html, /data-field="remedy">remedy: Grant s3:ListBucket/);
   assert.match(html, /data-field="expires">expires /);
 });
@@ -562,8 +533,7 @@ test("an_advisory_check_is_a_warning_and_never_changes_the_aggregate", () => {
 test("MUTANT_unverifiable_is_could_not_be_checked_and_never_out_of_date", () => {
   // THE GUARD: `staleReasonLine` gives `unverifiable` its own words and prints
   // the `basis` that says WHAT could not be compared. THE MUTANT: fall through
-  // to the generic arm, so it rendered as the bare token `unverifiable` beside
-  // the real staleness reasons. Planted by hand; the third assertion went red.
+  // to the generic arm, rendering the bare token beside real staleness reasons.
   const item = preflight("preflight-stale.json");
   const reasons = item.staleReasons.map((r) => r.reason);
   assert.deepEqual(reasons, ["planHashChanged", "referentChanged", "unverifiable"]);
@@ -612,8 +582,8 @@ test("the_check_table_prints_an_absent_field_rather_than_a_guess", () => {
   const html = checkTable([{ id: "a.b", state: "unknown" }], "none");
   assert.match(html, /<code>a\.b<\/code>/);
   assert.match(html, /badge-pending">unknown/);
-  // NINE FIELDS, FOUR CELLS since MCP round 2's R2-3: every field is still
-  // printed, and an unrecorded one as absent.
+  // NINE FIELDS, FOUR CELLS: every field is still printed, an unrecorded one as
+  // absent.
   assert.equal(html.split("<td").length - 1, 4);
   for (const field of ["code", "gating", "message", "remedy", "scope", "observed", "expires"]) {
     assert.match(html, new RegExp("data-field=\"" + field + "\""),
@@ -622,11 +592,9 @@ test("the_check_table_prints_an_absent_field_rather_than_a_guess", () => {
 });
 
 test("the_check_table_names_what_each_row_is_about", () => {
-  // REVIEW F5. PLAT-03.1's acceptance is "names each failed prerequisite and
-  // its remedy, with check time AND SCOPE". The controller fills every row's
-  // scope and `CHECK_ENTRY` declares it; this table used to drop it, so a
-  // `notReady` row's subject was invisible and an operator with two
-  // connections had to guess which one a refusal was about.
+  // "Names each failed prerequisite and its remedy, with check time AND
+  // SCOPE": without the scope, an operator with two connections would have to
+  // guess which one a `notReady` row was about.
   const html = checkTable([{
     id: "connection.authenticated", state: "notReady", code: "AuthenticationFailed",
     scope: { kind: "KafkaCluster", name: "User:backup" },
@@ -665,10 +633,6 @@ test("a_cancel_that_found_a_finished_check_says_so_rather_than_claiming_it_stopp
   assert.equal(second.alreadyTerminal, true);
   assert.equal(second.state, "succeeded", "and the state it really is, not 'cancelled'");
 });
-
-// ===========================================================================
-// the destination selector, the coverage labels and the topic picker
-// ===========================================================================
 
 test("the_selector_is_bound_to_a_uid_and_refuses_a_recreated_destination", () => {
   const all = decodeConsoleList("destinations", console_("destinations-list.json")).value.items;
@@ -711,12 +675,11 @@ test("the_selector_preselects_the_namespace_default_and_refuses_to_pick_among_tw
 
 test("MUTANT_the_coverage_labels_are_the_controllers_own_strings_character_for_character", () => {
   // THE GUARD: `COVERAGE_LABELS` copies `Coverage::label()`'s three strings and
-  // this row holds the copies. There is no JavaScript link to a Rust constant,
-  // so the copy is what can drift -- and "visible user topics only" becoming
-  // "all topics" in the one place an auditor reads is exactly what the Rust
-  // side documents as the failure. THE MUTANT: shorten
-  // `VisibleUserTopicsOnly` to "Visible user topics". Planted by hand; the
-  // third assertion went red.
+  // this row holds the copies. No JavaScript link to a Rust constant exists, so
+  // the copy is what can drift -- and "visible user topics only" becoming "all
+  // topics" in the one place an auditor reads is the failure the Rust side
+  // documents. THE MUTANT: shorten `VisibleUserTopicsOnly` to "Visible user
+  // topics".
   assert.equal(COVERAGE_LABELS.NamedTopics, "Named topics");
   assert.equal(COVERAGE_LABELS.AllUserTopicsAttested, "All user topics (attested complete)");
   assert.equal(
@@ -818,20 +781,13 @@ test("a_contract_failure_names_the_dto_and_the_path_for_every_new_domain", () =>
   });
 });
 
-// ===========================================================================
-// what D1 W6 landed, and what is still missing — fix round 1
-// ===========================================================================
-//
-// THE ROWS BELOW ARE PAIRED ON PURPOSE. For each of the four things D2 §9 asks
-// for, one row asserts what the page now DOES with the field that landed, and
-// one asserts that the sentence about what is still missing names the task
-// that owes it. A "not available yet" sentence with no owner is how a gap
-// becomes a permanent feature of a page; a "not available yet" sentence that
-// is FALSE — which two of these became when `89bba9e` landed `destinationRef`
-// and `allUserTopics` — is worse, because an operator acts on it.
+// THE ROWS BELOW ARE PAIRED ON PURPOSE: one asserts what the page DOES with a
+// field that exists, and one that no sentence still claims it is missing. A
+// FALSE "not available yet" is worse than none, because an operator acts on
+// it.
 
 test("a_schedule_that_names_a_destination_is_rendered_by_that_name_and_its_location", () => {
-  // PRESENT: `ScheduleView.destinationRef` landed with D1 W6 (PLAT-06.2).
+  // `ScheduleView.destinationRef` is rendered by name and location.
   const schedules = decodeConsoleList("schedules", console_("schedules-list.json")).value;
   const named = schedules.items.find((s) => s.name === "everything-nightly");
   assert.equal(named.destinationRef.name, "primary", "the fixture is the landed shape");
@@ -895,12 +851,8 @@ test("the_schedule_list_carries_a_destination_column_for_all_three_shapes", () =
 });
 
 test("MUTANT_the_create_form_offers_the_destination_the_create_route_now_takes", () => {
-  // THE DEBT THIS ROW USED TO HOLD IS PAID (PLAT-10.1). It asserted that the
-  // form said "POST /schedules ... has no destinationRef field. PLAT-06.2 owes
-  // that one", and the mutant it existed for was that sentence going stale --
-  // "claiming a field is missing after it lands". It has landed, so the row
-  // now holds the OTHER direction: the create form must OFFER a saved
-  // destination, and must not have gone back to telling people it cannot.
+  // The create form must OFFER a saved destination, and must not go back to
+  // telling people the route cannot take one.
   const html = renderScheduleForm({
     destinations: [{ name: "primary", canonicalUrl: "s3://kafka-backups/logweir" }],
   });
@@ -921,12 +873,10 @@ test("MUTANT_the_create_form_offers_the_destination_the_create_route_now_takes",
 });
 
 test("the_edit_route_is_named_as_existing_and_as_this_pages_own_panel", () => {
-  // THIS ROW USED TO SAY "and as OUT OF this page's contract", and D1 W7 made
-  // that false: `ui/api.js` now carries exactly one replace, the page sends it
-  // from the Future policy panel, and `ui_lint` holds the module to that one.
-  // What did NOT change is the property the sentence exists for -- the route
-  // is a WHOLE-POLICY replace, so a reader has to be told that a blank field
-  // is a field being cleared before they use it.
+  // `ui/api.js` carries exactly one replace, sent from the Future policy panel
+  // (`ui_lint` holds the module to it). The route is a WHOLE-POLICY replace, so
+  // a reader must be told a blank field is a field being cleared before they
+  // use it.
   const html = renderScheduleForm({});
   assert.match(html, /id="schedule-destination-edit"/);
   assert.match(EDIT_IS_A_REPLACE, /PUT \.\.\.\/schedules\/\{name\} under expectedGeneration/);
@@ -943,11 +893,10 @@ test("the_edit_route_is_named_as_existing_and_as_this_pages_own_panel", () => {
 });
 
 test("a_dynamic_schedule_carries_no_coverage_and_the_missing_projection_is_named", () => {
-  // A SCHEDULE HAS NO COVERAGE AND NEVER WILL. `status.selection` is written on
+  // A SCHEDULE HAS NO COVERAGE AND NEVER WILL: `status.selection` is written on
   // a RUN, at the freeze, because what a dynamic policy covers is decided when
-  // the run starts. So this row's subject is a schedule and the answer is the
-  // sentence, not a label -- and the sentence now names the half that is still
-  // missing (the API's Backup projection) rather than a surface D1 W7 owed.
+  // the run starts. So the answer is the sentence, not a label, and it names
+  // the half still missing (the API's Backup projection).
   const html = renderCoverageLine({
     spec: {
       topics: [],
@@ -977,10 +926,8 @@ test("a_schedule_with_neither_shape_is_now_named_exactly_rather_than_guessed_bet
 });
 
 test("the_clusters_page_no_longer_says_no_check_kind_can_dial", () => {
-  // THE SENTENCE IS GONE BECAUSE THE CONTROL CHANGED, and this asserts the
-  // pair. `NO_CONNECTIVITY_CHECK_KIND` read "it cannot make anything dial,
-  // because no check kind does that on its own"; `sourceConnection` is that
-  // kind, so the note and its `id` went with the claim.
+  // `sourceConnection` is a check kind that dials, so the note claiming no
+  // check kind can (and its `id`) went with the claim; this asserts the pair.
   const panel = renderDiscoveryPanel({ mayOperate: true, filters: {}, state: {} });
   assert.doesNotMatch(panel, /id="no-connectivity-check"/);
   assert.doesNotMatch(panel, /no check kind does that on its own/);
@@ -992,15 +939,11 @@ test("the_clusters_page_no_longer_says_no_check_kind_can_dial", () => {
   assert.match(CONNECTION_CHECK_SENTENCE, /a ready verdict authorises nothing/);
 });
 
-// ------------------------------------------------- the rotation, after F3
-
 test("MUTANT_the_rotation_is_checked_before_it_is_sent", () => {
   // THE GUARD: `submitRotation` runs `validateGrants` and throws `invalid`
   // without a request when a grant does not make a credential. THE MUTANT:
-  // call `updateDestinationAccess` straight from the form, which is what the
-  // code did before this round -- an operator who chose `new` and typed
-  // nothing sent `secret.new.accessKeyId: ""`. Planted by hand; the second
-  // assertion went red.
+  // call `updateDestinationAccess` straight from the form, so choosing `new`
+  // and typing nothing sends `secret.new.accessKeyId: ""`.
   const problems = validateGrants({ archiveWriteSource: "new" });
   assert.match(problems.archiveWriteAccessKeyId, /needs both an access key id and a secret/);
   assert.match(problems.archiveWriteAccessKeyId, /cleared on every render/,
@@ -1026,12 +969,8 @@ test("MUTANT_the_rotation_is_checked_before_it_is_sent", () => {
 test("MUTANT_a_credential_form_never_claims_it_kept_what_it_just_cleared", () => {
   // THE GUARD: a form whose subject carries `clearsCredentials: true` gets
   // `CREDENTIALS_CLEARED_CLAUSE` instead of " Your input is kept." THE MUTANT:
-  // drop the flag from the rotate form's subject. Planted by hand; the second
-  // and fourth assertions went red.
-  //
-  // The failure this is about is real and was on screen: the 409 banner said
-  // "nothing was changed. Your input is kept" directly above twelve credential
-  // fields the re-render had just emptied.
+  // drop the flag from the rotate form's subject, so a 409 banner says "Your
+  // input is kept" above twelve credential fields the re-render just emptied.
   const conflicted = {
     phase: "failed",
     kind: "conflict",
@@ -1062,11 +1001,9 @@ test("MUTANT_a_credential_form_never_claims_it_kept_what_it_just_cleared", () =>
 });
 
 test("MUTANT_every_credential_field_name_is_outside_the_draft_allowlist_including_the_token", () => {
-  // THE EXTENSION OF M1 (review F4). `grantBody` already reads
-  // `<role>SessionToken` and puts it in `secret.new`, so the name belongs in
-  // `CREDENTIAL_INPUTS` before the input exists rather than after somebody
-  // notices. THE MUTANT: add `archiveWriteSessionToken` to the draft
-  // allowlist. Planted by hand; the loop below went red on that name.
+  // `grantBody` already reads `<role>SessionToken` into `secret.new`, so the
+  // name belongs in `CREDENTIAL_INPUTS` before the input exists. THE MUTANT:
+  // add `archiveWriteSessionToken` to the draft allowlist.
   assert.equal(CREDENTIAL_INPUTS.length, 12, "three field names per role, four roles");
   for (const role of GRANT_ROLES) {
     assert.ok(CREDENTIAL_INPUTS.indexOf(role + "SessionToken") !== -1,
@@ -1083,11 +1020,6 @@ test("MUTANT_every_credential_field_name_is_outside_the_draft_allowlist_includin
   assert.equal(kept.archiveWriteSessionToken, undefined);
   assert.doesNotMatch(JSON.stringify(readDraft("d2-draft/token")), /session-token-value/);
 });
-
-// ===========================================================================
-// D2-SOURCECHECK -- "Test connection" dials (PLAT-03.1's kind, PLAT-07.2's
-// control)
-// ===========================================================================
 
 test("the_connection_check_sends_one_reference_and_no_field_it_does_not_ask_about", () => {
   const body = connectionCheckRequest("orders-prod");
@@ -1140,11 +1072,10 @@ test("the_connection_check_panel_renders_the_objects_own_rows_and_claims_nothing
 });
 
 test("a_refused_connection_disables_the_control_and_prints_the_controllers_own_reason", () => {
-  // THE DISABLED STATE NAMES THE CONTROLLER'S REASON. PLAT-07.1's resolver
-  // refuses before any credential is renderable, so `build_job_shape` would
-  // return "the source connection did not resolve" and the Preflight would
-  // land on `phase: Failed` with no row at all -- a pod spent to say what the
-  // object already says.
+  // THE DISABLED STATE NAMES THE CONTROLLER'S REASON. The resolver refuses
+  // before any credential is renderable, so the Preflight would land on
+  // `phase: Failed` with no row at all -- a pod spent to say what the object
+  // already says.
   const html = renderConnectionCheck({
     mayOperate: true, state: {}, preflight: null,
     refusedReason: "CredentialNotRenderable",
@@ -1155,9 +1086,7 @@ test("a_refused_connection_disables_the_control_and_prints_the_controllers_own_r
     "the gloss is beside the reason, never instead of it");
   assert.match(html, /<button type="submit" disabled>Test connection<\/button>/);
 
-  // A HEALTHY CONNECTION LEAVES IT ENABLED, and a reason this build does not
-  // know is not treated as a refusal: failing open costs a pod, failing closed
-  // hides the control an operator needs.
+  // A HEALTHY CONNECTION LEAVES IT ENABLED.
   const ok = renderConnectionCheck({ mayOperate: true, state: {}, preflight: null });
   assert.match(ok, /<button type="submit">Test connection<\/button>/);
   // The filtering belongs to `connectionRefusal`, which reads `status.reason`
@@ -1180,12 +1109,10 @@ test("a_viewer_is_told_it_may_read_a_check_and_not_start_one", () => {
   assert.doesNotMatch(html, /<button/, "no control at all, rather than one that 403s");
 });
 
-// --- the mount half: one click, one Preflight, one key ---------------------
-
 /** A node stand-in that hands out a fresh element per selector on every paint
  *  and remembers the FIRST one, so a test can fire an event at the control the
  *  operator would have clicked rather than at whichever repaint happened last.
- *  `node --test` has no DOM and this tree has no shim (Global Constraint 21). */
+ *  `node --test` has no DOM and this tree has no shim. */
 const fakeParse = (html) => [{ html: html }];
 
 function checkNode() {
@@ -1253,17 +1180,12 @@ function preflightItem(id, state, terminal) {
 }
 
 test("two_page_loads_mint_different_tokens_for_their_first_click", () => {
-  // REVIEW F1. The first cut composed `"<ns>.<name>.attempt-" + <counter>`,
-  // and a module counter starts at zero on every page load -- so the FIRST
-  // click of one load and the FIRST click of the next composed the same token,
-  // hence (through `preflightTag`) the same `Idempotency-Key`, hence the same
-  // object name, hence a REPLAY. An operator who read `AuthenticationFailed`,
-  // fixed the Secret, reloaded and clicked again got the first check's stale
-  // rows back as the new verdict. The reviewer reproduced the collision across
-  // two browser sessions.
-  //
-  // `resetConnectionAttempts` is a page load: it forgets the nonce AND the
-  // ordinal, which is exactly what a reload does.
+  // The token must not be a bare per-load counter: the FIRST click of two page
+  // loads would then compose the same token, hence (through `preflightTag`)
+  // the same `Idempotency-Key` and object name -- a REPLAY, so an operator who
+  // fixed the Secret, reloaded and clicked again would get the old check's
+  // rows back as the new verdict. `resetConnectionAttempts` is a page load: it
+  // forgets the nonce AND the ordinal.
   resetConnectionAttempts();
   const firstLoad = [nextConnectionAttempt("team-a", "orders"), nextConnectionAttempt("team-a", "orders")];
   resetConnectionAttempts();
@@ -1310,8 +1232,8 @@ test("a_double_click_makes_one_preflight_and_a_second_test_makes_a_new_one", asy
       await held;
       return { item: preflightItem("pf-" + started.length, "ready", true), replayed: false };
     },
-    // A TERMINAL CREATE ANSWER STILL OWES ONE READ (P8): it was projected
-    // without recomputing staleness, so the follower reads it once.
+    // A terminal create answer still owes one read: it was projected without
+    // recomputing staleness.
     preflight: async (ns, id) => ({ item: preflightItem(id, "ready", true) }),
     wait: async () => {},
   };
@@ -1375,11 +1297,10 @@ test("a_started_check_is_followed_until_it_is_terminal_and_the_rows_are_repainte
 });
 
 test("a_replayed_connection_check_is_read_once_before_it_is_believed", async () => {
-  // DEFECT P8's CLASS. A replay is terminal on arrival, and the create answer
-  // says "this response did not recompute staleness; read the preflight
-  // itself". The follower stopped at `terminal === true` before its first read,
-  // so a replayed verdict was painted as "does not apply / could not be
-  // checked" for as long as the page stayed open.
+  // A replay is terminal on arrival, and the create answer says "this response
+  // did not recompute staleness; read the preflight itself". A follower that
+  // stopped at `terminal === true` before its first read would paint a
+  // replayed verdict as "does not apply / could not be checked" for good.
   const painted = [];
   let read = 0;
   const replay = Object.assign(preflightItem("pf-replay", "ready", true), {
@@ -1430,12 +1351,11 @@ test("a_check_that_never_settles_is_followed_to_its_deadline_and_the_page_says_i
   node.fire("#connection-check-form", "submit");
   await new Promise((done) => { setTimeout(done, 0); });
 
-  // BOUNDED BY THE CHECK'S OWN DEADLINE, AND IT SAYS SO (poc-upgrade-3's
-  // P15). An unbounded timer would keep reading a namespace for as long as a
-  // tab is open; a spinner that stopped silently would be a page that looks
-  // like it is still watching; and a budget shorter than the check's own was
-  // a verdict that never arrived. `wait` returns at once here, so the deadline
-  // is reached on the gaps waited: the follow's own backoff, summed.
+  // BOUNDED BY THE CHECK'S OWN DEADLINE, AND IT SAYS SO. An unbounded timer
+  // would read a namespace for as long as a tab is open, a silent stop would
+  // look like a page still watching, and a budget shorter than the check's own
+  // is a verdict that never arrives. `wait` returns at once here, so the
+  // deadline is reached on the follow's own backoff, summed.
   let expected = 0;
   for (let waited = 0; waited < PREFLIGHT_FOLLOW_MS; expected += 1) {
     waited += Math.min(followGap(expected), PREFLIGHT_FOLLOW_MS - waited);
@@ -1452,8 +1372,8 @@ test("a_check_that_never_settles_is_followed_to_its_deadline_and_the_page_says_i
 });
 
 test("a_follow_that_outlives_its_route_paints_nothing", async () => {
-  // PLAT-13.1, for the one loop this panel adds: an answer for a view that has
-  // left must not paint a check from namespace A over namespace B.
+  // An answer for a view that has left must not paint a check from namespace A
+  // over namespace B.
   const node = checkNode();
   let reads = 0;
   const routes = createRouteLifecycle();
@@ -1479,16 +1399,11 @@ test("a_follow_that_outlives_its_route_paints_nothing", async () => {
   assert.equal(painted.length, atDeparture, "and nothing was painted after it left");
 });
 
-// ===========================================================================
-// ui-conn-followups -- what a reload can still say, and the uid it prints
-// ===========================================================================
-
 test("a_reload_finds_the_last_connectivity_check_and_labels_a_stale_one", () => {
-  // A CHECK OUTLIVES THE PAGE THAT STARTED IT. Until the API labelled these
-  // objects the panel had no way to find one again, so a reload read as though
-  // nothing had ever run and invited a second check for an answer that already
-  // existed. `lastTest` is the product API's summary, computed on the detail
-  // read from `logweir.dev/connection-test`.
+  // A CHECK OUTLIVES THE PAGE THAT STARTED IT: `lastTest`, the product API's
+  // summary computed on the detail read from `logweir.dev/connection-test`,
+  // lets a reload find it rather than invite a second check for an answer that
+  // already exists.
   const fresh = renderConnectionCheck({
     mayOperate: true, state: {}, preflight: null,
     lastTest: {
@@ -1538,11 +1453,9 @@ test("a_reload_finds_the_last_connectivity_check_and_labels_a_stale_one", () => 
 });
 
 test("the_started_check_status_prints_the_uid_the_server_minted", () => {
-  // THE LAB SAW `Created Preflight pf-4zqwo4... (uid ).` -- a hole where the
-  // uid goes. Every other create on this page answers with the stored OBJECT,
-  // so `mutationStatus` reads `result.object.metadata`; a console create
-  // answers with the product API's DTO, which carries the same two facts under
-  // its own names.
+  // A console create answers with the product API's DTO, not the stored
+  // OBJECT `mutationStatus` reads, so the uid must be projected from the DTO's
+  // own names or the status line prints "(uid )".
   const projected = startedPreflight({ item: { id: "pf-1", uid: "1f4c-2b8a" }, replayed: false });
   assert.deepEqual(projected.object, { metadata: { name: "pf-1", uid: "1f4c-2b8a" } });
   assert.equal(projected.item.id, "pf-1", "and the watcher's own field is still there");
