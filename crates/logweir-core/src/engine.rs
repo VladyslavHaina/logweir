@@ -316,9 +316,9 @@ pub enum EngineReport {
 ///
 /// **Phase 5 does not read it**: `check_rendered_window_floor` compares the
 /// rendered `time_window_start` INTEGER with a floor re-derived from the spec
-/// and the manifest, so a guard that read the claim could not be talked out of
-/// refusing by the plan it refuses. `InheritedFromSpec` is what a plan says
-/// when its spec states a window start
+/// and the manifest, never from this claim: a guard that read the claim could
+/// be talked out of refusing by the plan it refuses. `InheritedFromSpec` is
+/// what a plan says when its spec states a window start
 /// (`restore.point_in_time: "<start>/<end>"`); the complete lane selects its
 /// expected output from it (`complete::window_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
