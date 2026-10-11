@@ -5870,3 +5870,99 @@ fn fx19_a_recorded_delivery_whose_job_is_being_collected_is_never_read() {
         requests(&recorder)
     );
 }
+
+// ------------------------------------------------- PROD-02.1, review EC-1
+
+/// A verified `Backup` whose `Complete` reason is `EmptyCapture`: Succeeded,
+/// exit 0, `Valid`, a capture time and no `windowCovered`, exactly as the
+/// backup controller leaves an empty capture.
+fn empty_capture_backup(name: &str, hours_ago: i64) -> Value {
+    let mut b = backup(
+        name,
+        hours_ago,
+        json!({"status": {
+            "records": 0,
+            "conditions": [{"type": "Complete", "status": "True", "reason": "EmptyCapture",
+                            "message": "an EMPTY CAPTURE"}]
+        }}),
+    );
+    b["status"]
+        .as_object_mut()
+        .expect("a status")
+        .remove("windowCovered");
+    b
+}
+
+fn no_catalog_policy() -> ProtectionPolicy {
+    let mut value = spec_value();
+    merge(
+        &mut value,
+        &json!({"objectives": {"requireCatalogAvailability": false}}),
+    );
+    policy_with(value, json!({}))
+}
+
+/// **EC-1.** An empty capture holds no record, so a policy without a
+/// `catalogRef` never names it as its newest recovery point: beside an older
+/// real point, the real point is `lastAvailablePoint`; alone, there is no
+/// available point (`NoAvailablePoint`, `Unprotected`), never Protected. Control: the
+/// same object as an ordinary Backup is the newest point, as before.
+#[test]
+fn an_empty_capture_is_never_a_policys_recovery_point() {
+    // Beside a real point 10 hours old (inside the 26-hour objective).
+    let mut routes = read_routes(
+        vec![
+            empty_capture_backup("b-empty", 2),
+            backup("b-real", 10, json!({})),
+        ],
+        json!({}),
+    );
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&no_catalog_policy(), routes);
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        status["status"]["lastAvailablePoint"]["pointId"].as_str(),
+        Some(point_id("b-real").as_str()),
+        "{status}"
+    );
+    assert_eq!(outcome.health, p::Health::Healthy);
+
+    // Alone: no available point at all (the policy pages, as for any stale
+    // point, so the delivery routes are in the table).
+    let mut routes = read_routes(vec![empty_capture_backup("b-empty", 2)], json!({}));
+    routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
+    routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&no_catalog_policy(), routes);
+    let status = last_status_patch(&bodies);
+    // Freshness Stale for `NoAvailablePoint`, which the health table renders
+    // `Unprotected` (no point at all), and `Protected=False`.
+    assert_eq!(outcome.health, p::Health::Unprotected, "{status}");
+    assert!(status["status"]["lastAvailablePoint"].is_null(), "{status}");
+    assert_eq!(
+        condition(&status, "Protected")["reason"].as_str(),
+        Some("NoAvailablePoint"),
+        "{status}"
+    );
+    assert_ne!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("True")
+    );
+
+    // CONTROL: the same Backup with an ordinary `Complete` reason is the
+    // policy's newest point, exactly as before PROD-02.1.
+    let mut ordinary = empty_capture_backup("b-empty", 2);
+    ordinary["status"]["conditions"][0]["reason"] = json!("Ok");
+    let mut routes = read_routes(vec![ordinary, backup("b-real", 10, json!({}))], json!({}));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&no_catalog_policy(), routes);
+    assert_eq!(
+        last_status_patch(&bodies)["status"]["lastAvailablePoint"]["pointId"].as_str(),
+        Some(point_id("b-empty").as_str())
+    );
+    assert_eq!(outcome.health, p::Health::Healthy);
+}
