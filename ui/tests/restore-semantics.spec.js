@@ -1,38 +1,29 @@
-// restore-semantics.spec.js -- FX-6: the restore review step says what a
-// restore copies, above Create.
+// restore-semantics.spec.js -- the restore review step says what a restore
+// copies, above Create.
 //
-// WHY THE PAGE HAS TO SAY IT. PROD-01.1 measured four ways a restored topic
-// differs from its source on the pinned engine: aborted and open transactions
-// and their commit and abort markers come back as ordinary records; a
-// `LogAppendTime` topic comes back with the producers' `CreateTime`; a repeated
-// header key keeps one copy; and with out-of-order timestamps a full or
-// point-in-time restore can miss records. A passing drill rules none of them
-// out. It compares the restored topic with the ARCHIVE, never with the source,
-// so what is changed when the archive is written is on both sides and passes,
-// and a record that point-in-time selection skips is outside both sides. Some
-// do fail a drill -- a full restore that drops a below-floor record fails its
-// count check, and so does a sampled record whose own `x-original-offset` the
-// restore replaced -- but a pass is not evidence of their absence. The decision
-// record (docs/to-do/decisions/PROD-01.1-record-semantics.md, section 8.3)
-// wrote the one sentence the console shows where the plan is reviewed; sections
-// 8.1 and 8.2 are the long form in docs/verify-a-scorecard.md and
-// docs/stability.md.
+// WHY THE PAGE HAS TO SAY IT. On the pinned engine a restored topic differs
+// from its source in four ways: aborted and open transactions and their
+// markers come back as ordinary records; a `LogAppendTime` topic comes back
+// with the producers' `CreateTime`; a repeated header key keeps one copy; and
+// with out-of-order timestamps a full or point-in-time restore can miss
+// records. A passing drill rules none of them out, because it compares the
+// restored topic with the ARCHIVE, never with the source. The console shows
+// one sentence where the plan is reviewed; the long form is in
+// docs/verify-a-scorecard.md and docs/stability.md.
 //
-// THE ROWS. The sentence is on step 6, once, as the record words it, with its
-// two identifiers as <code> and no backtick on screen. It follows the plan and
-// comes before the approval-policy block and Create, with each of the four
-// approval-policy blocks step 6 can show. It is VISIBLE, not merely present: a
-// direct child of step 6's section, so no wrapper (a `hidden` element, a
-// `<details>`) can fold it away, and on the step that is on screen when the
-// wizard opens at step 6. (Placed under the approval block's heading, in the
-// same style, it read as part of the approval in the 1440 px screenshot.)
+// THE ROWS. The sentence is on step 6, once, with its two identifiers as
+// <code> and no backtick on screen. It follows the plan and comes before the
+// approval-policy block and Create, with each of the four approval-policy
+// blocks step 6 can show. It is VISIBLE, not merely present: a direct child
+// of step 6's section, so no wrapper (a `hidden` element, a `<details>`) can
+// fold it away, and on the step that is on screen when the wizard opens at
+// step 6.
 //
 // NEGATIVE CONTROL: deleting the paragraph from `renderPlanStep`, printing the
 // constant through `esc` or `cell`, stripping its code spans, moving it below
 // Create, under the approval block or above the plan, wrapping it in a hidden
 // element or a `<details>`, showing it only when a policy was read, or
-// rewording one clause each fails a row here. The FX-6 report records the
-// mutants and the command that ran them.
+// rewording one clause each fails a row here.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

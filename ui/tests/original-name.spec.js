@@ -1,5 +1,5 @@
-// original-name.spec.js -- PROD-15.1: the console restores under the ORIGINAL
-// topic names only as an explicit choice in `newTopic` mode, with the owner
+// original-name.spec.js -- the console restores under the ORIGINAL topic
+// names only as an explicit choice in `newTopic` mode, with the owner
 // statement the runner needs; it renders the plan the runner reads, declares
 // the choice on the request, and shows the separate approval subject,
 // `originalName`, wherever an approver reads what they approve.
@@ -84,8 +84,6 @@ function wizardState() {
   return state;
 }
 
-// ------------------------------------------------------------ the plan
-
 test("prod151_the_plan_the_console_renders_is_the_golden_the_runner_reads", () => {
   // KILLS: an emitter that renders the block under another key, or the prefix
   // as anything but the empty string (ui_lint.rs parses the same golden).
@@ -103,8 +101,6 @@ test("prod151_the_plan_the_console_renders_is_the_golden_the_runner_reads", () =
   // The plain plan carries no block (KILLS: a block rendered for every plan).
   assert.doesNotMatch(renderPlanBytes(fixture("plan-fields.json")), /original_name/);
 });
-
-// ------------------------------------------------------------ the wizard
 
 test("prod151_the_choice_maps_every_topic_onto_itself_and_keeps_the_scratch_prefix", () => {
   const state = wizardState();
@@ -207,8 +203,6 @@ test("prod151_a_draft_and_an_edit_bring_the_choice_back", () => {
   assert.equal(fields.target.originalNameNoOwner, false);
   assert.ok(fields.target.topicMappingPrefix.length > 0);
 });
-
-// ------------------------------------------- complete coverage is required
 
 test("choosing_the_original_names_selects_complete_coverage_and_says_why", async () => {
   // An original-name restore REQUIRES complete verification: a sampled check
@@ -315,8 +309,6 @@ test("a_sampled_plan_under_the_original_names_is_never_rendered_or_sent", async 
   assert.equal(ordinary.sample.coverage, undefined);
 });
 
-// ------------------------------------------------------------ approvals
-
 test("prod151_an_approval_shows_the_subject_its_signed_bytes_carry", () => {
   // KILLS: an unreadable document shown as ordinary; a subject read from
   // anything but the signed bytes.
@@ -350,8 +342,7 @@ test("prod151_the_console_decodes_the_new_fields", () => {
   assert.equal(item.target.originalName, false);
 });
 
-// ------------------------------------------------------------ OD-10, typed
-
+// ONE-PERSON CONFIRMATION: the original names, typed.
 const ORDINARY = Object.freeze({
   name: "team-ordinary", mode: "ordinary", legacy: false,
   ordinaryConfirmationAvailable: true, ticketRequired: false,
@@ -454,8 +445,6 @@ test("od10_the_approvals_page_says_a_confirmation_was_made_with_the_names_typed"
   assert.doesNotMatch(visible(renderApprovalStatus(plain)), /re-typed/);
 });
 
-// ------------------------------------------------ a stopped creation step
-
 test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", async () => {
   // Nothing is ever deleted under an original name, so the page must say what
   // is on the cluster. KILLS: a detail that never shows the left topics; one
@@ -511,9 +500,8 @@ test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", 
   // CONTROL: no block on the status, nothing rendered.
   assert.equal(creationStoppedWarning(undefined), "");
   assert.ok(!renderRestoreDetail(restore(undefined)).includes("restore-creation-stopped"));
-  // A hostile name is escaped, never markup -- in EVERY list (review 2, L4:
-  // the control fed only `left`, and an unescaped `appeared` sentence
-  // survived). KILLS: a list rendered without `esc` (mutant R2-09).
+  // A hostile name is escaped, never markup, in EVERY list. KILLS: a list
+  // rendered without `esc`.
   const hostile = "<img src=x onerror=alert(1)>";
   for (const key of ["appeared", "left", "unconfirmed"]) {
     const lists = { appeared: [], left: [], unconfirmed: [], unconfirmedSeen: true };
@@ -527,7 +515,7 @@ test("a_stopped_creation_step_names_every_topic_it_left_on_the_restore_detail", 
 });
 
 test("a_stopped_creation_step_shows_what_it_cannot_account_for_and_how_many_more", async () => {
-  // Review 2, M2. KILLS: an unconfirmed topic shown with the "created by this
+  // KILLS: an unconfirmed topic shown with the "created by this
   // restore" sentence, or not shown; "exists now" when the runner could not
   // look; a list the 100-name bound cut that says nothing; the "new topics"
   // row listing a name the restore cannot account for.
@@ -697,28 +685,16 @@ test("the_console_projection_carries_the_topics_a_stopped_creation_step_left", a
   }
 });
 
-// ===========================================================================
-// FX-48: the choice reaches the product API, and the API's answer reaches the
-// page -- through the REAL client
-// ===========================================================================
-//
-// EVERY ROW ABOVE THAT SUBMITS USES AN API DOUBLE, and every row that reads
-// the approval subject hands a page function an object written in the test.
-// So nothing above ever ran the three places in `ui/client.js` and
-// `ui/validate.js` that stand between this wizard and the product API -- and
-// all three dropped the choice (found by FX-48's sweep, the same class as the
-// schema dependency):
-//
-//   * the page's own pre-send check required a non-empty prefix, so an
-//     original-name Restore was refused before the network, in both modes;
-//   * `requestBody` copied `topicNaming.prefix` and nothing else, and never
-//     copied `originalNameConfirmation`, so the request the API requires for
-//     such a restore could not have been built;
-//   * the projection copied neither `approvalSubject` nor
-//     `target.originalName`, so the approval page said an original-name
-//     Restore needed an `ordinary` approval.
-//
-// These rows go through `apiClient()` over the transport seam.
+// THE CHOICE REACHES THE PRODUCT API, AND THE API'S ANSWER REACHES THE PAGE,
+// through the REAL client. The rows above use an API double or hand a page
+// function an object written in the test, so they never run the three places
+// in `ui/client.js` and `ui/validate.js` between this wizard and the product
+// API: the page's pre-send check (which must accept the empty prefix here),
+// `requestBody` (which must carry the naming block and
+// `originalNameConfirmation`), and the projection (which must carry
+// `approvalSubject` and `target.originalName`, or the approval page asks for
+// an `ordinary` approval). These rows go through `apiClient()` over the
+// transport seam.
 
 /** The shared console, signed in to the wizard state's namespace with every
  *  capability, and a transport that answers `answer(url, init)`. */
@@ -894,8 +870,7 @@ test("fx48_the_console_shows_the_approval_subject_the_api_publishes", async () =
   }
 });
 
-// ------------------------------------------- FX-49: the boxes call `refresh`
-
+// THE BOXES CALL `refresh`.
 /** The plan `#plan-bytes` shows -- "exactly as it will be sent" -- decoded,
  *  or `null` when the page shows `#plan-problem` instead. */
 function shownPlan(view) {
@@ -904,7 +879,7 @@ function shownPlan(view) {
 }
 
 test("fx49_ticking_the_original_name_box_on_the_mounted_page_changes_the_plan", async () => {
-  // R1. Only DOM `change` events on the real page; no `refresh`, no state.
+  // Only DOM `change` events on the real page; no `refresh`, no state.
   const backups = fixture("wizard-backups.json");
   const point = recoveryPoints(backups)[0];
   const view = fakeView();
@@ -949,8 +924,8 @@ test("fx49_ticking_the_original_name_box_on_the_mounted_page_changes_the_plan", 
   assert.equal(view.find("#original-name-no-owner").checked, true);
 });
 
-/** FX-49 R2: an id `refresh` reads that no `change` listener re-reads, with
- *  why. A new entry needs its reason; none is needed today. */
+/** An id `refresh` reads that no `change` listener re-reads, with why. A new
+ *  entry needs its reason; none is needed today. */
 const READ_ONLY_AT_SUBMIT = Object.freeze({});
 
 /** The `#id`s `wire`'s `refresh` reads, and those in its `change` list. */

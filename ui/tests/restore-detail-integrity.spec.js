@@ -2,28 +2,18 @@
 // the shared console: the level the API published is on the page, and a value
 // the API does not publish is SAID not to be published, never shown as "-".
 //
-// THE DEFECT (FX-48; PoC batch 6, F-4). On a live install the detail of a
-// restore whose status read `integrity.level: byte-fingerprint` and
-// `integrity.result: pass` showed
+// For a restore whose status read `integrity.level: byte-fingerprint` and
+// `integrity.result: pass`, a table of "-" cells would be wrong in two ways:
 //
-//     Integrity
-//     level           -
-//     result          -
-//     partial reason  -
-//
-// TWO CAUSES, AND ONLY ONE OF THEM WAS THE DECODER.
-//
-//   1. THE LEVEL WAS PUBLISHED AND DROPPED. The operation route answers
+//   1. THE LEVEL IS PUBLISHED. The operation route answers
 //      `OperationViewResponse`, whose `completion.integrityLevel` is the
-//      scorecard's own word. The detail read decoded that route with the
-//      narrower `OperationResponse` -- sixteen members, no `completion` -- so
-//      the block never arrived. Same class as the schema dependency: a decoder
-//      that declares less than the route publishes.
+//      scorecard's own word; a detail read decoded with the narrower
+//      `OperationResponse` (sixteen members, no `completion`) would drop it.
 //   2. THE RESULT AND THE PARTIAL REASON ARE PUBLISHED BY NO ROUTE. Neither
-//      `Restore` nor `OperationView` carries them. A cell that says "-" for
-//      them says "the controller recorded none", which the page does not know;
-//      the cell now says the product API does not publish the value, and one
-//      sentence says where it is.
+//      `Restore` nor `OperationView` carries them, and "-" would say "the
+//      controller recorded none", which the page does not know; the cell says
+//      the product API does not publish the value, and one sentence says
+//      where it is.
 //
 // EVERY ROW GOES THROUGH THE REAL CLIENT: the transport is stubbed at the
 // platform boundary, the two routes answer with the checked-in documents, and

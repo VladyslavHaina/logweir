@@ -1,38 +1,26 @@
-// pages.spec.js -- the behaviour arm of the four read-and-create pages.
+// pages.spec.js -- the behaviour arm of the read-and-create pages.
 //
-// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`, which is what
-// `scripts/check-ui-behaviour.sh` runs on every `just lint`. The quoted glob is
-// not decoration: `node --test ui/tests/` executes a DIRECTORY argument as a
-// module on node 22 and later and fails with `Cannot find module`, and a bare
-// `node --test` from the repository root reports `tests 0` and exits 0 -- a
-// green run that asserted nothing. The gate uses the glob AND refuses a run
-// whose reported test count is zero.
+// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`, as
+// `scripts/check-ui-behaviour.sh` does on every `just lint`. The quoted glob
+// matters: `node --test ui/tests/` executes a DIRECTORY as a module on node 22
+// and later and fails, and a bare `node --test` from the repository root
+// reports `tests 0` and exits 0. The gate uses the glob AND refuses a run
+// whose test count is zero. Only `*.spec.js` files are tests; anything else
+// here is a tool the gate invokes by name (a wider glob would count
+// `emit-plan.js` as a passing test).
 //
-// THE `.spec` SUFFIX IS PART OF THAT REFUSAL. `ui/tests/` also holds the tool
-// `emit-plan.js`, and under the wider glob node ran it as a test file and
-// counted it as one passing test -- so with every `*.spec.js` removed the gate
-// still saw `# tests 1` and exited 0. Only files named `*.spec.js` are tests
-// here; anything else in this directory is a tool the gate invokes by name.
+// THE ASSERTIONS ARE STRING CONTAINMENT because every function under test is
+// a pure function from a JSON object to an HTML string, and this tree has no
+// npm, bundler, browser or DOM shim. The objects are checked-in fixtures in
+// the API server's shape, generated from the CRD types in
+// `crates/weirkeeper/src/crds/`.
 //
-// WHY THESE ASSERTIONS ARE STRING CONTAINMENT. Every function under test is a
-// pure function from a JSON object to an HTML string: no DOM, no network, no
-// clock. There is no npm, no bundler, no browser and no DOM shim in this tree
-// (Global Constraints 17 and 21), so a page rule is only checkable if a page
-// produces a VALUE, and it does. The objects below are checked-in fixtures in
-// the shape the API server returns, generated field-for-field from the CRD
-// types in `crates/weirkeeper/src/crds/`.
+// THERE IS NO TEXT-CHECK FALLBACK: a scan could show an assertion was
+// WRITTEN, not that it HOLDS, and a guard whose mutant passes is worse than
+// none. `check-ui-behaviour.sh` fails on a machine without node instead.
 //
-// THERE IS NO TEXT-CHECK FALLBACK, AND THERE MUST NOT BE. A scan over this
-// file could assert that an assertion was WRITTEN. It could not assert that it
-// HOLDS -- so on a machine without node every page mutant would survive while
-// the gate reported green, which is the failure mode STANDING RULE 21 names:
-// a guard whose mutant passes is worse than no guard, because the ledger
-// records it as closed. `check-ui-behaviour.sh` fails instead of degrading.
-//
-// NOTHING HERE REACHES THE NETWORK. No module under test issues a request; the
-// two mount halves that do are not imported. `ui_lint.rs`'s
-// `the_ui_behaviour_suite_never_dials` asserts the absence of every dial token
-// from this whole directory.
+// NOTHING HERE REACHES THE NETWORK (`ui_lint.rs`'s
+// `the_ui_behaviour_suite_never_dials`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -61,7 +49,7 @@ import {
   restorePointCell,
 } from "../pages/history.js";
 
-// -- Task 27: the wizard, the approval flow and the roster ------------------
+// The wizard, the approval flow and the roster.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -132,8 +120,6 @@ import {
   SELF_ATTESTED_TRUE,
 } from "../render.js";
 
-// ------------------------------------------------------------------ helpers
-
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
 function fixture(name) {
@@ -152,12 +138,11 @@ function decode(html) {
     .replace(/&amp;/g, "&");
 }
 
-/** The first badge in a rendered output, class and caption together. The badge
- *  is where the verdict lives, so the assertions about what a verdict may and
- *  may not say are made on it and not on the surrounding page -- a `Restore`
- *  detail view RENDERS its `outcome`, so the whole-output form of the "never
- *  the word pass" rule is available on the `Backup` path only, and is asserted
- *  there in its strong form as well. */
+/** The first badge in a rendered output, class and caption together. The
+ *  verdict lives in the badge, so the rules about what a verdict may say are
+ *  asserted on it -- a `Restore` detail RENDERS its `outcome`, so the
+ *  whole-output "never the word pass" form is available on the `Backup` path
+ *  only, and is asserted there as well. */
 function badgeOf(html) {
   const match = html.match(/<span class="badge[^"]*">[^<]*<\/span>/);
   assert.ok(match !== null, "the rendered output carries a badge");
@@ -180,8 +165,6 @@ const RESTORE_FIXTURES = [
   ["restore-invalid-pass.json", false],
   ["restore-notattempted-pass.json", false],
 ];
-
-// -------------------------------------------------------------------- rows
 
 test("evidence_immutable_never_renders_as_a_tick", () => {
   for (const [name] of BACKUP_FIXTURES) {
@@ -299,14 +282,10 @@ test("a_backup_green_badge_needs_a_valid_verification_and_exit_code_zero", () =>
         "labelled one would be reading a field that does not exist.",
     );
 
-    // AND THE WHOLE-OUTPUT FORM, with the one exemption the wire format
-    // forces. `status.exitReason` for a not-a-pass run is the literal string
-    // `drill-not-pass` (Global Constraint 11's wire reasons), and this page
-    // echoes the status the controller wrote, verbatim, because a page that
-    // paraphrased a recorded reason would be inventing one. So the rule is:
-    // remove the value the status itself carries, and the word must not
-    // appear anywhere else in a Backup view -- not in a caption, not in a
-    // column, not in a heading.
+    // AND THE WHOLE-OUTPUT FORM, with the one exemption the wire format forces:
+    // a not-a-pass run's `status.exitReason` is the literal `drill-not-pass`, and
+    // the page echoes recorded reasons verbatim. Remove that value, and the word
+    // must appear nowhere else in a Backup view.
     const echoed =
       typeof object.status.exitReason === "string" ? object.status.exitReason : "";
     const withoutEchoedStatus = echoed === "" ? out : out.split(echoed).join("");
@@ -363,18 +342,14 @@ test("a_restore_green_badge_needs_a_valid_verification_and_a_pass_outcome", () =
 });
 
 test("the_restore_badge_reads_the_outcome_and_the_exit_code_is_authoritative", () => {
-  // Every checked-in Restore fixture has `outcome == "pass"` exactly when
-  // `exitCode == 0`, so a rule that read ONLY the exit code would pass the rows
-  // above unnoticed (Task 26's review, finding M-1). These objects pull the
-  // fields apart: a Valid scorecard SAYING the restore did not reconcile, with
-  // exit 0, must not be green; and a Valid `pass` with NO recorded exit code
-  // is green -- the rule reads `outcome`, not the code.
-  //
-  // AMENDED by the rehearsal-fix review (LOW-4): since interface I8's
-  // amendment an exit-2 run publishes a signed failure that verifies Valid, so
-  // the controller's rule (`weirkeeper::verification::restore_badge`) also
-  // refuses a RECORDED non-zero exit code. A Valid `pass` at exit 2 -- which
-  // this row used to assert green -- is now not green.
+  // Every Restore fixture has `outcome == "pass"` exactly when `exitCode == 0`,
+  // so a rule that read ONLY the exit code would pass the rows above. These
+  // objects pull the fields apart: a Valid scorecard SAYING the restore did not
+  // reconcile, with exit 0, is not green; a Valid `pass` with NO recorded exit
+  // code is green. And since an exit-2 run publishes a signed failure that
+  // verifies Valid, the controller's rule
+  // (`weirkeeper::verification::restore_badge`) also refuses a RECORDED
+  // non-zero exit code: a Valid `pass` at exit 2 is not green.
   const base = fixture("restore-valid-pass.json");
   assert.equal(base.status.evidence.verification.result, "Valid");
 
@@ -500,9 +475,9 @@ test("every_list_view_carries_the_bucket_footer", () => {
 });
 
 test("the_retention_panel_points_at_a_retention_policy_and_prints_no_report", () => {
-  // PROD-17.1 B1: a schedule's own retention report is withdrawn. The panel
-  // points at a RetentionPolicy and prints none of a report -- not even the
-  // one this fixture still carries from a controller before the withdrawal.
+  // A schedule's own retention report is withdrawn. The panel points at a
+  // RetentionPolicy and prints none of a report, not even the one this
+  // fixture still carries.
   assert.equal(RETENTION_SENTENCE, "Logweir never deletes from your archive.");
   const object = fixture("schedule-retention.json");
   const report = object.status.retentionReport;
@@ -536,17 +511,12 @@ test("no_secret_value_is_rendered", () => {
   assert.ok(out.includes("logweir-reader"), "and the username, which is what planBytes binds");
 });
 
-// ===========================================================================
-// TASK 27 -- the restore wizard, the out-of-band approval flow, and the
-// read-only roster.
+// THE RESTORE WIZARD, THE OUT-OF-BAND APPROVAL FLOW AND THE READ-ONLY ROSTER.
 //
-// THE ONE ROW THAT LEAVES THIS PROCESS is the cross-language hash equality: it
-// spawns the release `logweir` binary, because the whole value of that
-// assertion is that the two numbers were computed by two languages and a stub
-// would make it a test of one. It writes into `node:os.tmpdir()` and nothing
-// into the worktree. `the_ui_behaviour_suite_never_dials` still holds -- a
-// subprocess is not a socket, and this one reaches no network.
-// ===========================================================================
+// THE ONE ROW THAT LEAVES THIS PROCESS is the cross-language hash equality:
+// it spawns the release `logweir` binary, because its value is that two
+// languages computed the two numbers. It writes into `node:os.tmpdir()` only,
+// and a subprocess is not a socket.
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -622,8 +592,8 @@ function bytesOf(text) {
   return new TextEncoder().encode(text);
 }
 
-/** The route identity for a fixture's newest recovery point. Since PLAT-11.1
- *  the wizard is entered ON a point, by uid; it no longer picks one. */
+/** The route identity for a fixture's newest recovery point: the wizard is
+ *  entered ON a point, by uid, and picks none itself. */
 function newestPoint(list) {
   const point = recoveryPoints(list)[0];
   return { uid: point.metadata.uid, backup: point.metadata.name };
@@ -650,15 +620,11 @@ function wizardState() {
   );
 }
 
-// -------------------------------------------------------------------- rows
-
 test("render_plan_bytes_emits_a_document_the_runner_parses", () => {
-  // ARM 2 (node). Arm 1 lives in `crates/logweir/tests/ui_lint.rs` and
-  // deserialises this same golden into `logweir_core::spec::RestoreSpec` from
-  // Rust -- because a hash-equality test cannot catch an invented shape
-  // (sha256 of X in JavaScript equals sha256 of X in Rust whatever X is), and
-  // a byte comparison between two JavaScript halves cannot either once both
-  // have been regenerated together.
+  // ARM 2 (node). Arm 1, in `crates/logweir/tests/ui_lint.rs`, deserialises
+  // this same golden into `logweir_core::spec::RestoreSpec`: a hash-equality
+  // test cannot catch an invented shape, and neither can a byte comparison of
+  // two JavaScript halves regenerated together.
   const fields = fixture("plan-fields.json");
   const golden = readFileSync(FIXTURES + "plan.golden.yaml", "utf8");
   const rendered = renderPlanBytes(fields);
@@ -1110,9 +1076,8 @@ test("the_keys_page_shows_expiry_from_the_roster_status", () => {
   );
 
   // The fingerprint command and the trust snippet, neither of them submitted.
-  // D3 §7 REPLACED THE ROSTER WITH A `TrustPolicy`, so the document this page
-  // offers a cluster admin is a policy and the migration command beside it --
-  // a roster is not edited by hand into one.
+  // The policy document a cluster admin applies (D3 section 7 replaced the
+  // roster with a `TrustPolicy`), and the migration command beside it.
   const text = decode(out);
   assert.ok(
     text.includes("openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256"),
@@ -1184,10 +1149,9 @@ test("an_edit_creates_a_new_restore_and_says_so", async () => {
 
 test("the_wizard_prefills_the_default_prefix", async () => {
   // The DEFAULT route: the newest backup's covered `toMs` is
-  // 2026-09-07T14:05:00Z, which is EXCLUSIVE (WIZARD-DEFAULT-PIT-EXCLUSIVE), so
-  // the wizard's own default point in time is one millisecond before it -- the
-  // last instant the runner accepts -- and the prefix follows from it with
-  // nothing typed.
+  // 2026-09-07T14:05:00Z and EXCLUSIVE, so the wizard's default point in time
+  // is one millisecond before it -- the last instant the runner accepts -- and
+  // the prefix follows from it with nothing typed.
   const state = wizardState();
   assert.equal(state.fields.pointInTime, "2026-09-07T14:04:59.999Z");
   assert.notEqual(state.fields.pointInTime, "2026-09-07T14:05:00Z",
@@ -1234,11 +1198,9 @@ test("the_client_side_window_check_is_labelled_a_convenience", () => {
   );
   assert.equal(out.indexOf("Invalid Date"), -1);
   assert.equal(out.indexOf("1788782400000"), -1, "the raw integers are never printed");
-  // THE SENTENCE FOLLOWS THE BEHAVIOUR (PLAT-11.1). Step 3 used to print
-  // `CONVENIENCE_SENTENCE` -- "this check is a convenience and never the gate"
-  // -- under a field that only complained. It now REFUSES, so the note says
-  // that, and still says what this page cannot see: the archive's own manifest,
-  // which is what guard G-WIN reads.
+  // THE SENTENCE FOLLOWS THE BEHAVIOUR: step 3 REFUSES a point outside the
+  // window, so the note says that, and still says what this page cannot see --
+  // the archive's own manifest, which guard G-WIN reads.
   assert.ok(out.includes(WINDOW_REFUSAL_SENTENCE), "the page says what it does: " + out);
   assert.ok(
     out.includes("refuses a point outside the coverage above before anything is sent"),
@@ -1255,11 +1217,8 @@ test("the_client_side_window_check_is_labelled_a_convenience", () => {
   );
 
   // A point outside the window complains, and a point inside does not. The
-  // complaint carries an id since PLAT-11.2: the bound itself is printed
-  // beside the input in EVERY state, so a live journey that scanned for the
-  // window SENTENCE could not tell a refused point from an accepted one, and
-  // its own negative control caught that. The element is what distinguishes
-  // them, so the element is what these two lines look for.
+  // bound is printed beside the input in EVERY state, so the complaint's
+  // element id, not the window sentence, is what tells the two apart.
   const outside = wizardState();
   outside.fields.pointInTime = "2026-09-08T00:00:00Z";
   assert.ok(renderPointInTimeStep(outside).includes("id=\"point-in-time-complaint\""));
@@ -1321,10 +1280,8 @@ test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async 
 
 test("the_approvals_route_values_reach_the_form_in_their_own_positions", async () => {
   // THE HOP FROM THE HASH TO THE PAGE. `subject` names which Restore; `hash`
-  // and `name` are what the linking page reviewed. The extraction is
-  // `approvalRouteParams`, exported by the page module itself because the
-  // router cannot be imported here, and this row is the guard the hop did not
-  // have.
+  // and `name` are what the linking page reviewed. `approvalRouteParams` is
+  // exported by the page module because the router cannot be imported here.
   const digest = "sha256:" + "ab12cd34".repeat(8);
   const hash =
     "#/approvals?subject=restore-1a2b3c4d&hash=" + digest + "&name=approval-1a2b3c4d";
@@ -1412,12 +1369,10 @@ test("the_literal_default_namespace_survives_the_restore_to_approval_handoff", a
 });
 
 test("the_restore_names_the_archive_credential_the_runner_reads_it_with", async () => {
-  // WHY THIS ROW EXISTS. `spec.sourceArchive` is `ArchiveRef` -- a URL AND a
-  // Secret name -- and weirkeeper injects the object-store credential into the
-  // runner Job only when the second half is set. `secretRef` is optional in the
-  // CRD, so a Restore created without it is ADMITTED and fails later, at the
-  // archive, with the Job unable to read a single object. Nothing between this
-  // page and that failure would have noticed.
+  // `spec.sourceArchive` is `ArchiveRef` -- a URL AND a Secret name -- and
+  // weirkeeper injects the object-store credential into the runner Job only
+  // when the second half is set. `secretRef` is optional in the CRD, so a
+  // Restore without it is ADMITTED and fails later, at the archive.
 
   // (a) THE ARCHIVE NAMES A SECRET -> the body carries its name, beside the URL.
   const withSecret = wizardState();
@@ -1550,22 +1505,15 @@ test("the_archive_step_shows_the_credential_name_and_says_what_it_is_for", async
   assert.equal(blank.indexOf("undefined"), -1);
 });
 
-// -- Task 28a: the two defects the laptop walkthrough found ------------------
-
 test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () => {
-  // DEFECT 2, measured by Task 28 on a live cluster. `renderTargetStep` and
-  // `firstTarget` listed only `KafkaCluster`s with `spec.role == "target"`, so
-  // a namespace whose only cluster is `role: source` rendered an EMPTY select,
-  // left `target.bootstrapServers` empty, and made `plan.js`'s grammar throw:
-  //   `target.bootstrapServers is required by the runner's grammar and must
-  //    not be empty`
-  // — the whole page an error box. And the RUNNER has no such rule:
-  // `drill/phase0_admit.rs` branches on `spec.target.mode` and puts all three
+  // A namespace whose only cluster is `role: source` must still be offered:
+  // the RUNNER has no target-role rule. `drill/phase0_admit.rs` puts all three
   // cluster checks (the allowlist, target != source, the marker topic) inside
-  // the `Scratch` arm; `TargetMode::NewTopic` is empty, with a comment saying
-  // the source cluster is exactly where a point-in-time recovery belongs.
-  // `scripts/k8s-demo.sh` proves it by running: one cluster, `role: source`,
-  // `mode: newTopic`, green.
+  // the `Scratch` arm, and `TargetMode::NewTopic` restores into the source
+  // cluster, which is where a point-in-time recovery belongs
+  // (`scripts/k8s-demo.sh` runs exactly that: one cluster, `role: source`,
+  // `mode: newTopic`, green). Listing only `role: target` clusters left the
+  // select empty and the page an error box.
   //
   // ARM 1: one cluster, `role: source`. It renders, it is preselected, and the
   // page says what the role is and is not.
@@ -1587,9 +1535,9 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
       "is the value that was EMPTY before Task 28a, and an empty list is what threw",
   );
   const step4 = renderTargetStep(only);
-  // SINCE PLAT-07.2 the option's VALUE is the UID and the caption carries the
-  // role and the connection probe. Both halves are asserted: the identity is
-  // what is submitted, the caption is what a person reads.
+  // The option's VALUE is the UID and the caption carries the role and the
+  // connection probe. Both halves are asserted: the identity is what is
+  // submitted, the caption is what a person reads.
   const demoUid = fixture("wizard-clusters-source-only.json").items[0].metadata.uid;
   assert.ok(
     step4.includes("<option value=\"" + demoUid + "\" selected"),
@@ -1619,7 +1567,7 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     "the select is NOT empty, which is the shape the defect produced",
   );
 
-  // AND THE WHOLE WIZARD RENDERS — the assertion the defect actually broke.
+  // AND THE WHOLE WIZARD RENDERS.
   const whole = await renderRestoreWizard(only);
   assert.ok(whole.includes("id=\"plan-bytes\""), "all six steps render, plan bytes included");
   assert.ok(
@@ -1701,15 +1649,10 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
   assert.ok(stillRenders.includes("id=\"plan-bytes\""), "the plan still renders in scratch mode");
 });
 
-// -- PLAT-11.1: the wizard is bound to a recovery point somebody chose ------
-
 test("the_wizard_binds_to_the_recovery_point_the_route_names_and_picks_none_itself", async () => {
-  // THE DEFECT PLAT-11.1 REMOVES. `initialState` used to answer "the newest
-  // Succeeded Backup" when nothing had been chosen, so the page picked for the
-  // operator — and changed its mind whenever a schedule completed. Task 28
-  // measured three `Backup` objects in six minutes with the chosen set, the
-  // covered window, the plan bytes, the plan hash and BOTH minted names moving
-  // between one render and the next.
+  // The page must never pick a point for the operator: "the newest Succeeded
+  // Backup" changes whenever a schedule completes, moving the chosen set, the
+  // window, the plan bytes, the hash and both minted names between renders.
   const backups = fixture("wizard-backups-schedule-running.json");
   const clusters = fixture("wizard-clusters-source-only.json");
 
@@ -1793,11 +1736,10 @@ test("the_wizard_binds_to_the_recovery_point_the_route_names_and_picks_none_itse
 });
 
 test("a_newer_backup_arriving_mid_wizard_does_not_move_the_selection", async () => {
-  // THE ACCEPTANCE SENTENCE OF PLAT-11.1: "an older selected backup remains
-  // selected throughout review and submission". The list is read again — which
-  // is what every re-mount of this page does, and the ONLY way it ever looks at
-  // the namespace again — and a run that completed in between must not become
-  // the chosen one.
+  // "An older selected backup remains selected throughout review and
+  // submission." The list is read again -- what every re-mount of this page
+  // does -- and a run that completed in between must not become the chosen
+  // one.
   const clusters = fixture("wizard-clusters-source-only.json");
   const before = fixture("wizard-backups-schedule-running.json");
   const older = pointNamed(before, "logweir-backup-laptop-20260911-183400");
@@ -2042,15 +1984,14 @@ test("the_point_route_carries_name_and_uid_and_is_read_back_exactly", () => {
     ns: "team a",
     uid: point.metadata.uid,
     backup: point.metadata.name,
-    // PLAT-11.2: an ordinary restore retries nothing, and the empty string is
-    // that state rather than an absent key -- so a reader of this object never
-    // has to tell "not a retry" from "the key was not parsed".
+    // An ordinary restore retries nothing, and the empty string is that state
+    // rather than an absent key, so "not a retry" never reads as "not parsed".
     retryOf: "",
-    // PLAT-15.2: a Backup link names no catalog point, and the empty strings
-    // are that state for the same reason.
+    // A Backup link names no catalog point, and the empty strings are that
+    // state for the same reason.
     catalog: "",
     point: "",
-    // MCP-29: a link that names no step opens the first; `0` is that state.
+    // A link that names no step opens the first; `0` is that state.
     step: 0,
   });
   // TWO VALUES THAT MUST NOT BE SWAPPED. A hand-off that read the name into
@@ -2071,10 +2012,8 @@ test("the_point_route_carries_name_and_uid_and_is_read_back_exactly", () => {
 });
 
 test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusively", async () => {
-  // PLAT-11.1: "constrain the requested timestamp to disclosed archive
-  // coverage", with the boundary INCLUSIVE at both ends. Until this row the
-  // out-of-window case was a grey complaint and the create went out anyway,
-  // so an approver could sign a document phase 0 was always going to refuse.
+  // The requested timestamp is constrained to the disclosed coverage, so an
+  // approver is never asked to sign a document phase 0 would refuse.
   const backups = fixture("wizard-backups.json");
   const state = initialState(
     "logweir-t27",
@@ -2083,8 +2022,8 @@ test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusive
     newestPoint(backups),
   );
   const covered = recoveryPoints(backups)[0].status.windowCovered;
-  // WIZARD-DEFAULT-PIT-EXCLUSIVE: the window is half-open and the runner
-  // refuses the floor itself, so the accepted range is [fromMs + 1, toMs - 1].
+  // The window is half-open and the runner refuses the floor itself, so the
+  // accepted range is [fromMs + 1, toMs - 1].
   const floor = new Date(covered.fromMs + 1).toISOString();
   const ceiling = new Date(covered.toMs - 1).toISOString();
 
@@ -2154,8 +2093,8 @@ test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusive
 });
 
 test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", () => {
-  // Task 28a's review: with no Succeeded Backup the mount threw inside the
-  // plan renderer and the page was an error box, pre-existing at 352a4b8.
+  // With no Succeeded Backup the page renders a sentence and step 2, not an
+  // error box from inside the plan renderer.
   const list = fixture("wizard-backups.json");
   assert.ok(completedBackups(list).length >= 1, "the fixture has a completed run (control)");
   const running = JSON.parse(JSON.stringify(list));
@@ -2187,8 +2126,6 @@ test("the_wizard_renders_a_sentence_and_step_2_when_no_backup_has_completed", ()
     "a Succeeded run without a backupId (written before Task 28a) is not a completed set",
   );
 });
-
-// -- PLAT-11.1: the links that carry a point's identity into the wizard ------
 
 test("a_history_row_and_a_schedule_card_link_to_that_point_by_uid", () => {
   const backups = fixture("wizard-backups-schedule-running.json");

@@ -1,19 +1,13 @@
-// tests/selector.spec.js -- PLAT-07.2: the saved-cluster selector, connection
-// contract v1's references in the cluster form, and the honesty of a connection
-// probe.
+// tests/selector.spec.js -- the saved-cluster selector, connection contract
+// v1's references in the cluster form, and the honesty of a connection probe.
 //
-// EVERY ROW HERE IS ABOUT ONE OF FIVE THINGS THE TRACKER NAMES: a cluster
-// deleted and recreated, a delayed refresh, a credential rotation, a change of
-// role/capability, and namespace navigation. Each is asserted in BOTH client
-// modes wherever the two modes can disagree -- the legacy direct-CR mode reads
-// a `KafkaCluster` and the console mode reads a `Connection` the product API
-// projected, and a rule that held on one shape and not the other would be a
-// rule this page does not actually have.
-//
-// AND EACH GUARD HAS A MUTANT. The five the task names are recorded beside the
-// row that kills them: selection by name, a stale observation rendered as
-// valid, a password field kept in a draft, a recreated cluster silently
-// re-selected, and the word `ready`.
+// Every row is about a cluster deleted and recreated, a delayed refresh, a
+// credential rotation, a change of role/capability, or namespace navigation,
+// asserted in BOTH client modes wherever they can disagree (a `KafkaCluster`
+// in legacy mode, a projected `Connection` in console mode). Each guard's
+// mutant is recorded beside the row that kills it: selection by name, a
+// stale observation rendered as valid, a password field kept in a draft, a
+// recreated cluster silently re-selected, and the word `ready`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -113,9 +107,9 @@ function cluster(over) {
 const NOW = Date.parse("2026-09-16T12:01:00Z");
 
 /** A minimal DOM stand-in for one selector: a `<select>` with its options and
- *  the two hidden inputs beside it. The suite has no DOM (Global Constraint
- *  21), so the DOM half is exercised against the same shape the browser hands
- *  it -- `value`, `options`, `selectedIndex`, `getAttribute`, `hidden`. */
+ *  the two hidden inputs beside it. The suite has no DOM, so the DOM half is
+ *  exercised against the shape the browser hands it -- `value`, `options`,
+ *  `selectedIndex`, `getAttribute`, `hidden`. */
 function selectNode(options, selectedIndex) {
   const nodes = options.map((option) => ({
     value: option.uid,
@@ -159,10 +153,7 @@ function selectNode(options, selectedIndex) {
   };
 }
 
-// ===========================================================================
 // 1. IDENTITY. The selector chooses an object, not a label.
-// ===========================================================================
-
 test("a_selection_is_resolved_by_uid_and_a_rename_does_not_move_it", () => {
   const clusters = [cluster({ uid: "uid-a", name: "orders-prod" })];
   const first = resolveClusterSelection(clusters, { uid: "uid-a", name: "orders-prod" });
@@ -221,10 +212,8 @@ test("a_deleted_and_recreated_cluster_is_refused_and_names_both_uids", () => {
 });
 
 test("an_existing_name_only_reference_still_resolves_and_is_pinned_from_then_on", () => {
-  // MIGRATION. `BackupSchedule.spec.sourceRef.name` was written before saved
-  // connections had identities in this page, and a draft kept before PLAT-07.2
-  // carries a name and no uid. Both must keep working, and both become
-  // identities the moment they resolve.
+  // A selection or draft that carries a name and no uid must keep working, and
+  // becomes an identity the moment it resolves.
   const clusters = [cluster({ uid: "uid-a", name: "orders-prod" })];
   const legacy = resolveClusterSelection(clusters, { uid: "", name: "orders-prod" });
   assert.equal(legacy.state, "selected");
@@ -256,8 +245,7 @@ test("nothing_chosen_is_none_and_the_default_is_a_visible_preselect_not_a_decisi
 
   // ORDERED BY NAME, and every cluster is offered whatever its role: the CRD
   // documents `role` as a label the adopter picks, and the runner's own guard
-  // is the gate. A selector that filtered by role rendered an empty select for
-  // this product's own demo (Task 28a).
+  // is the gate.
   assert.deepEqual(savedClusters(clusters).map((c) => c.metadata.name), ["a-target", "b-source"]);
   const rendered = renderClusterSelector({
     id: "t", name: "t", clusters: clusters, selection: {}, prefer: "target", now: NOW,
@@ -266,10 +254,7 @@ test("nothing_chosen_is_none_and_the_default_is_a_visible_preselect_not_a_decisi
   assert.ok(rendered.includes("value=\"uid-b\" selected"), "and the preferred role is preselected");
 });
 
-// ===========================================================================
 // 2. FRESHNESS. `status.reachable` is a probe, and an old one says so.
-// ===========================================================================
-
 test("a_probe_older_than_the_freshness_budget_is_stale_and_says_it_is", () => {
   const fresh = probeState(cluster({}), NOW);
   assert.equal(fresh.verdict, "reachable");
@@ -318,9 +303,9 @@ test("every_absent_reachable_case_gets_its_own_words_and_the_controllers_own_rea
   for (const [status, verdict] of table) {
     assert.equal(probeState(cluster({ status: status }), NOW).verdict, verdict, JSON.stringify(status));
   }
-  // THE FOUR REFUSALS PLAT-07.1's RESOLVER WRITES. It CLEARS `reachable`, so
-  // without this arm the page would render "never probed" over a connection
-  // the controller has told it is broken.
+  // THE FOUR REFUSALS THE RESOLVER WRITES. It CLEARS `reachable`, so without
+  // this arm the page would render "never probed" over a connection the
+  // controller has told it is broken.
   for (const reason of CONNECTION_REFUSAL_REASONS) {
     const state = probeState(cluster({ status: { reason: reason } }), NOW);
     assert.equal(state.verdict, "refused", reason);
@@ -330,11 +315,10 @@ test("every_absent_reachable_case_gets_its_own_words_and_the_controllers_own_rea
   }
   // A probe in flight is not stale: there is no observation to be old.
   assert.equal(probeState(cluster({ status: { reason: "ProbeRunning" } }), NOW).stale, false);
-  // AND NEITHER IS A CONNECTION THAT WAS NEVER OBSERVED (review finding F2).
-  // `stale` means "this reading describes the past" and is a statement ABOUT an
-  // observation; with no `observedAt` there is none for it to be about, and
-  // labelling it stale said two contradictory things at once and told an
-  // operator to wait for a refresh that a refused connection never gets.
+  // AND NEITHER IS A CONNECTION THAT WAS NEVER OBSERVED. `stale` is a
+  // statement ABOUT an observation; with no `observedAt` there is none, and a
+  // stale label would tell an operator to wait for a refresh a refused
+  // connection never gets.
   for (const status of [
     { reachable: false },
     { reason: "ConnectionConfigInvalid" },
@@ -406,10 +390,7 @@ test("no_probe_surface_anywhere_says_ready", () => {
   // the noun living in one module.
 });
 
-// ===========================================================================
 // 3. CONTRACT v1's REFERENCES, and the absence of a credential.
-// ===========================================================================
-
 test("the_cluster_form_carries_contract_v1s_references_and_never_a_value", () => {
   const form = renderClusterForm();
   // THE TWO NEW REFERENCES ARE INPUTS.
@@ -530,17 +511,14 @@ test("the_rendered_cluster_views_name_both_references_and_no_value", () => {
   assert.ok(detail.includes("ca-bundle") && detail.includes("ca.crt"));
   assert.ok(detail.includes("<code id=\"cluster-uid\">uid-a</code>"), "and the identity is shown");
 
-  // The LIST still names no credential word at all, which is what
-  // `no_secret_value_is_rendered` has asserted since Task 26: the key's own
-  // name travels as `key <name>` and the list never spells the field.
+  // The LIST names no credential word at all
+  // (`no_secret_value_is_rendered`): the key's own name travels as `key <name>`
+  // and the list never spells the field.
   const list = renderClusterList({ items: [object] }, "ns", NOW);
   assert.ok(list.includes("key sasl-pw"));
 });
 
-// ===========================================================================
-// 4. THE FIVE TRACKER CASES, end to end, on the forms that use the selector.
-// ===========================================================================
-
+// 4. THE FIVE CASES, end to end, on the forms that use the selector.
 test("the_schedule_form_selects_a_source_by_uid_and_refuses_a_recreated_one", async () => {
   const before = { items: [cluster({ uid: "uid-a", name: "orders-prod" })] };
   const after = { items: [cluster({ uid: "uid-b", name: "orders-prod" })] };
@@ -660,8 +638,7 @@ test("a_wizard_draft_carries_the_identity_and_an_older_draft_still_applies", () 
   assert.equal(applyWizardDraft(fresh, draft), true);
   assert.equal(fresh.targetClusterUid, sourceUid, "the identity is restored, not the label");
 
-  // A DRAFT FROM BEFORE PLAT-07.2 has a name and no uid: it resolves by name
-  // and is pinned.
+  // A DRAFT WITH A NAME AND NO UID resolves by name and is pinned.
   const older = Object.assign({}, draft);
   delete older.targetClusterUid;
   const legacyApply = initialState("logweir-t27", clusters, backups, point);
@@ -679,11 +656,9 @@ test("a_wizard_draft_carries_the_identity_and_an_older_draft_still_applies", () 
 });
 
 test("namespace_navigation_clears_the_selection", () => {
-  // PLAT-13.1's rule, stated for this selector: a draft belongs to its
-  // namespace. The key is `{ns, form}`, so nothing chosen in one namespace is
-  // visible in another -- and the route the namespace picker writes
-  // (`#/<route>?ns=<name>`) carries no identity, so a deep link into the
-  // wizard does not survive a namespace change either.
+  // A draft belongs to its namespace: the key is `{ns, form}`, and the route
+  // the namespace picker writes (`#/<route>?ns=<name>`) carries no identity,
+  // so a deep link into the wizard does not survive a namespace change either.
   const a = formKey("team-a", "schedule-form");
   const b = formKey("team-b", "schedule-form");
   keepDraft(a, { source: "orders-prod", sourceUid: "uid-a" }, SCHEDULE_DRAFT_FIELDS);
@@ -699,10 +674,8 @@ test("namespace_navigation_clears_the_selection", () => {
 });
 
 test("a_delayed_refresh_after_the_route_left_paints_nothing", async () => {
-  // The tracker's "delayed refresh". `mountClusterDetail`'s Test connection
-  // control is a READ, and a read that answers after the view is gone is
-  // dropped -- the PLAT-13.1 rule, asserted for the one control PLAT-07.2
-  // adds.
+  // `mountClusterDetail`'s Test connection control is a READ, and a read that
+  // answers after the view is gone is dropped.
   const routes = createRouteLifecycle();
   const view = routes.begin();
   let resolveRead;
@@ -728,7 +701,7 @@ test("a_delayed_refresh_after_the_route_left_paints_nothing", async () => {
 });
 
 test("a_credential_rotation_moves_the_observation_and_not_the_reference", () => {
-  // THE TRACKER'S "credential rotation". Rotating the password means writing
+  // CREDENTIAL ROTATION. Rotating the password means writing
   // the Secret; the `KafkaCluster` is untouched (`spec` is immutable and the
   // controller resolves the reference at run time), so what the page must show
   // changing is the PROBE and nothing else.
@@ -766,10 +739,7 @@ test("a_role_change_keeps_the_selection_and_updates_what_the_option_says", () =>
   assert.ok(rendered.includes("value=\"uid-a\" selected"));
 });
 
-// ===========================================================================
 // 5. THE SEARCH, and the DOM half.
-// ===========================================================================
-
 test("the_search_filters_options_and_never_changes_what_would_be_submitted", () => {
   const nodes = selectNode([
     { uid: "uid-a", name: "orders-prod", search: "orders-prod source tls" },
@@ -810,10 +780,7 @@ test("reading_a_selection_back_gives_the_uid_and_the_name_the_option_carried", (
   assert.deepEqual(readClusterSelection(empty, "s"), { uid: "u", name: "n" });
 });
 
-// ===========================================================================
 // 6. BOTH CLIENT MODES.
-// ===========================================================================
-
 test("both_client_modes_produce_the_same_selection_and_the_same_probe_words", async () => {
   // The legacy mode reads a `KafkaCluster`; the console mode reads a
   // `Connection` and `ui/client.js` projects it. The selector must say the
@@ -870,13 +837,12 @@ test("both_client_modes_produce_the_same_selection_and_the_same_probe_words", as
 });
 
 test("console_mode_types_the_credential_once_names_no_secret_and_refuses_what_it_cannot_carry", async () => {
-  // PROD-01.3 security follow-up. The product API no longer accepts the NAME
-  // of an existing Secret for a connection's credential: a connection that
-  // could name any Secret could make Logweir present another team's
-  // credential to brokers of its author's choosing. So the console TYPES the
-  // credential once and names no Secret; a CA may come from a ConfigMap only;
-  // a data key or a Secret-held CA is refused by name and never reaches the
-  // network.
+  // The product API does not accept the NAME of an existing Secret for a
+  // connection's credential: one that could name any Secret could make Logweir
+  // present another team's credential to brokers of its author's choosing. So
+  // the console TYPES the credential once and names no Secret; a CA may come
+  // from a ConfigMap only; a data key or a Secret-held CA is refused by name
+  // and never reaches the network.
   const originalFetch = globalThis.fetch;
   resetMode();
   await selectMode({ probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }) });
@@ -939,21 +905,16 @@ test("console_mode_types_the_credential_once_names_no_secret_and_refuses_what_it
   }
 });
 
-// ===========================================================================
-// 7. THE LIST's OWN Test connection control, and its UID check.
-// ===========================================================================
-
+// 7. THE LIST's OWN probe control, and its UID check.
 test("the_clusters_list_offers_a_test_connection_per_row_and_names_the_row_by_uid", async () => {
   const clusters = { items: [cluster({ uid: "uid-a" }), cluster({ uid: "uid-b", name: "scratch" })] };
   const html = renderClusterList(clusters, "team-a", NOW);
   assert.ok(html.includes("data-cluster-uid=\"uid-a\""), "each row carries its identity: " + html);
   assert.ok(html.includes("data-probe-uid=\"uid-b\""));
-  // THE LIST's CONTROL IS A RE-READ AND NOW SAYS SO. It used to be labelled
-  // "Test connection", which is a sentence about a broker; it reads a
-  // `KafkaCluster` and shows what the controller recorded. The control that
-  // really dials is the cluster page's, which starts a `sourceConnection`
-  // `Preflight` -- and two controls under one label would have been the same
-  // lie in a second place.
+  // THE LIST's CONTROL IS A RE-READ AND SAYS SO: it reads a `KafkaCluster` and
+  // shows what the controller recorded. The control that really dials is the
+  // cluster page's "Test connection" (a `sourceConnection` `Preflight`), and
+  // one label on both would be a lie.
   assert.ok(html.includes("<button type=\"submit\">Re-read probe</button>"));
   assert.ok(!html.includes(">Test connection</button>"), "the label moved to the dial");
   assert.match(html, /It dials nothing/, "and says what the control actually does");
@@ -985,10 +946,7 @@ test("the_clusters_list_offers_a_test_connection_per_row_and_names_the_row_by_ui
   assert.deepEqual(wired, ["uid-a:submit", "uid-b:submit"], "one control per row, and no more");
 });
 
-// ===========================================================================
 // 8. THE WINDOW BETWEEN OPENING A FORM AND SUBMITTING IT.
-// ===========================================================================
-
 test("both_submits_read_the_connections_again_and_refuse_what_changed_under_them", async () => {
   // Resolving against the list the view read at mount only catches a
   // connection that was already gone when the form opened. The window that
@@ -1059,18 +1017,13 @@ test("both_submits_read_the_connections_again_and_refuse_what_changed_under_them
   );
 });
 
-// ===========================================================================
-// 9. A REFUSAL SELECTS NOTHING (review finding F1).
-// ===========================================================================
-
+// 9. A REFUSAL SELECTS NOTHING.
 test("a_refused_selector_selects_nothing_and_a_further_create_click_sends_nothing", async () => {
-  // THE DEFECT THIS ROW IS ABOUT. In the two refusal states the selector
-  // marked no option `selected` while filling the hidden inputs from
-  // `preferredCluster` -- which can be a THIRD cluster. A browser defaults an
-  // unselected `<select>` to its first option, so one more click on Create,
-  // without touching anything, submitted against whatever sorted first. A form
-  // that has just said "the connection you chose is gone" must not be one click
-  // from creating against a connection nobody chose.
+  // In the two refusal states the hidden inputs must not be filled from
+  // `preferredCluster` (possibly a THIRD cluster) while no option is marked
+  // `selected`: a browser defaults an unselected `<select>` to its first
+  // option, so one more click on Create would submit against a connection
+  // nobody chose, right after the form said the chosen one is gone.
   const clusters = [
     cluster({ uid: "uid-A", name: "aaa-target", role: "target" }),
     cluster({ uid: "uid-B", name: "zzz-source", role: "source" }),
@@ -1169,12 +1122,10 @@ test("a_refused_selector_selects_nothing_and_a_further_create_click_sends_nothin
 });
 
 test("the_re_read_before_a_restore_submit_follows_a_rename_into_the_create_body", async () => {
-  // REVIEW FINDING F4. `restoreBody` spells `target.clusterRef.name` from the
-  // state, and `confirmClusters` used to refresh only `state.clusters` -- so a
-  // connection renamed between opening the wizard and submitting it was sent
-  // under the name it no longer has. This row NEVER CALLS `selectTarget`,
-  // because the submit path does not: the guard has to hold on the product's
-  // own sequence.
+  // `restoreBody` spells `target.clusterRef.name` from the state, so the
+  // submit's re-read must refresh the selection too, or a connection renamed
+  // between opening the wizard and submitting is sent under its old name. This
+  // row NEVER CALLS `selectTarget`, because the submit path does not.
   const backups = fixture("wizard-backups.json");
   const point = { uid: recoveryPoints(backups)[0].metadata.uid, backup: "" };
   const before = { items: [cluster({ uid: "uid-t", name: "old-target", role: "target" })] };
