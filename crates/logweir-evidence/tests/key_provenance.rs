@@ -1,7 +1,7 @@
 //! The fixture signing key is PINNED, not minted.
 //!
-//! `mint_fixture` used to call `SigningKey::generate_p256()` unconditionally,
-//! so every regeneration of the signed fixtures orphaned the `917cf9a2…`
+//! If `mint_fixture` called `SigningKey::generate_p256()` unconditionally,
+//! every regeneration of the signed fixtures would orphan the `917cf9a2…`
 //! fingerprint that `docs/verify-a-scorecard.md` teaches an auditor to pin and
 //! that both committed `.sig` sidecars carry. These tests hold the pin from
 //! four directions: the checked-in key is the pinned key, an absent key really

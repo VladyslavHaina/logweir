@@ -1,4 +1,4 @@
-//! **PROD-03.0 — `kbak::scan_segment`, the streaming prefix scan the backup's
+//! **`kbak::scan_segment`, the streaming prefix scan the backup's
 //! schema dependency detector reads segments through.** It must agree with
 //! `decode_segment` on every record it hands over (offsets, null-ness and the
 //! first bytes of each key and value), stop when told, and refuse — as
@@ -46,7 +46,7 @@ fn the_scan_agrees_with_the_full_decoder_on_every_fixture() {
                 assert_eq!(s.offset, f.offset, "{name}");
                 assert_eq!(s.key, cut(&f.key, prefix), "{name} prefix {prefix}");
                 assert_eq!(s.value, cut(&f.value, prefix), "{name} prefix {prefix}");
-                // PROD-01.1a: each header's key, in order, cut the same way.
+                // Each header's key, in order, cut the same way.
                 let keys: Vec<Vec<u8>> = f
                     .headers
                     .iter()
@@ -162,7 +162,7 @@ fn frame(value: &[u8]) -> Vec<u8> {
     out
 }
 
-/// M1 (review): a zstd frame that DECLARES a large window is refused before
+/// A zstd frame that DECLARES a large window is refused before
 /// the decoder allocates it — windowLog 27 is 128 MiB of resident memory
 /// whatever the output cap. The same records at the default window read.
 #[test]

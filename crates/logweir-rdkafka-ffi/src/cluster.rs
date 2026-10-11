@@ -1,5 +1,5 @@
 //! `rd_kafka_DescribeCluster` with the caller's authorized operations
-//! (KIP-430): the probe that says whether a group listing is complete (T14).
+//! (KIP-430): the probe that says whether a group listing is complete.
 use crate::raw::{array, run, text};
 use crate::{sys, CText, CallError};
 use rdkafka::bindings as rd;

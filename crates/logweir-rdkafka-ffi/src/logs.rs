@@ -1,5 +1,5 @@
 //! librdkafka's own log lines, read as events from a private queue
-//! (`rd_kafka_set_log_queue`, `rd_kafka_event_log`; PROD-01.2).
+//! (`rd_kafka_set_log_queue`, `rd_kafka_event_log`).
 //!
 //! # Why Logweir reads a client's log at all
 //!
@@ -10,8 +10,7 @@
 //! (`rd_kafka_handle_ApiVersion`, `rdkafka_request.c:3194-3209` in rdkafka-sys
 //! 4.10.0+2.12.1). The engine Logweir drives never negotiates and sends each
 //! request at one fixed version, so that answer decides whether an operation
-//! can run against an endpoint at all
-//! (`docs/to-do/decisions/PROD-01.2-compatibility-contract.md`).
+//! can run against an endpoint at all.
 //!
 //! rust-rdkafka 0.36.2 installs no log callback and does not enable the log
 //! event on the queues it polls (`base_consumer.rs:66-72`), so those lines go

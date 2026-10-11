@@ -1,4 +1,4 @@
-//! PLAT-20.2: what the runner's half of a topic discovery costs at the sizes
+//! What the runner's half of a topic discovery costs at the sizes
 //! the contract admits — a MEASUREMENT, not a check, and socketless.
 //!
 //! [`assemble`] is the pure step between the broker's all-topics metadata

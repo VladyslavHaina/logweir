@@ -9,11 +9,10 @@
 #![forbid(unsafe_code)]
 pub mod engine;
 pub mod kbak;
-// The object-store half of this crate now lives in `logweir-store`, so a
-// component that must not link the OSO engine wrapper can still hold a
-// bucket handle (ADR 0008 §E; `02-k8s-transition-plan.md:963`). The
-// re-export keeps `logweir_engine_oso::storage::…` and `crate::storage::…`
-// resolving, so the extraction changed no call site.
+// The object-store half lives in `logweir-store`, so a component that must
+// not link the OSO engine wrapper can still hold a bucket handle (ADR 0008
+// §E). The re-export keeps `logweir_engine_oso::storage::…` and
+// `crate::storage::…` resolving.
 pub use logweir_store as storage;
 pub mod subprocess;
 pub mod vendored;
@@ -24,22 +23,19 @@ pub mod vendored;
 /// writing them; `tests/render.rs` pins the property for the first two, and
 /// `render_backup::render_and_digest` additionally re-scans its own output
 /// with `logweir_core::guard::scan_forbidden_keys` (GC18(c) rail 3), which
-/// `tests/render_backup.rs` proves against a constructed document per GR7.
+/// `tests/render_backup.rs` proves against a constructed document.
 pub const FORBIDDEN_KEYS: [&str; 3] = ["purge_topics", "dry_run", "header_preflight_external"];
 pub mod render_backup;
 pub mod render_restore;
 pub mod render_validation;
-// The workspace's SINGLE YAML scalar escaper, extracted from
-// `render_restore.rs` so the three renderers import it instead of one of them
-// owning it and the others reaching into it. `tests/render_backup.rs::
-// there_is_exactly_one_yaml_escaper` pins the "exactly one" half by reading
-// the three renderer sources rather than by calling the function.
+// The workspace's SINGLE YAML scalar escaper, which the three renderers import.
+// `tests/render_backup.rs:: there_is_exactly_one_yaml_escaper` pins the
+// "exactly one" half by reading the three renderer sources rather than by
+// calling the function.
 //
-// The module was `pub(crate)` under Task 2, on the argument that nothing
-// outside this crate renders an engine document. Task 3 makes it `pub`
-// because **G-EXP**'s post-render sweep, `yaml::assert_no_unnamed_dollar_brace`,
-// is a PREDICATE OVER A DOCUMENT rather than a step in rendering one: it is
-// named in this task's Interfaces block, `tests/expansion.rs` asserts its
+// The module is `pub` because **G-EXP**'s post-render sweep,
+// `yaml::assert_no_unnamed_dollar_brace`, is a PREDICATE OVER A DOCUMENT
+// rather than a step in rendering one: `tests/expansion.rs` asserts its
 // behaviour over hand-written documents that no renderer produced, and a
 // guard that can only be reached through the code it guards cannot be tested
 // against an adversarial input. `yaml_scalar` itself stays `pub(crate)`, so

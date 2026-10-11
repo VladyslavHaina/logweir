@@ -1,4 +1,4 @@
-//! FX-20 fix round, review F1: the store's own backstop. On an endpoint-less
+//! The store's own region backstop. On an endpoint-less
 //! S3 location `object_store` builds the host from the region
 //! (`s3.<region>.amazonaws.com`), so no constructor builds a client over a
 //! region that is not a region name — whether the location names it or, on

@@ -1,18 +1,16 @@
-//! **FX-8** — which clock a restore's TIME SELECTION reads, per source topic,
+//! Which clock a restore's TIME SELECTION reads, per source topic,
 //! and the refusal of a selection by producer time the plan did not accept.
 //!
-//! # The defect
+//! # Why
 //!
 //! The pinned engine archives each record's PRODUCER timestamp: it reads a
 //! batch's first timestamp plus the record's delta and discards the batch's
 //! max timestamp, which is the only place a broker on `LogAppendTime` writes
-//! its append time (PROD-01.1 S3). Every selection by time — the restore
-//! window's end — therefore reads producer time. For a `CreateTime` topic that
-//! is the topic's own clock. For a `LogAppendTime` topic it is not, and phase 7
-//! cannot notice, because it compares the target with the archive and both
-//! carry producer time: PROD-01.1 restored six records at a point in 2001 that
-//! the broker had appended in 2026, signed `pass` 6/6
-//! (`docs/to-do/decisions/PROD-01.1-record-semantics.md` §2.3).
+//! its append time. Every selection by time — the restore window's end —
+//! therefore reads producer time. For a `CreateTime` topic that is the topic's
+//! own clock. For a `LogAppendTime` topic it is not, and phase 7 cannot
+//! notice, because it compares the target with the archive and both carry
+//! producer time.
 //!
 //! # The rule ([`decide`])
 //!
@@ -22,7 +20,7 @@
 //!    two records and nothing else: the archive manifest's
 //!    `configurations["message.timestamp.type"]` (a TOPIC OVERRIDE — the engine
 //!    keeps explicit overrides only), and the effective value a VERIFIED backup
-//!    receipt recorded at backup time (FX-4's `config_coverage[topic].
+//!    receipt recorded at backup time (the receipt's `config_coverage[topic].
 //!    timestamp_type`, which is how a broker-wide default reaches a restore).
 //!    `LogAppendTime` from either wins; else `CreateTime` from either; else the
 //!    type is NOT RECORDED. A live read of the source cluster is never taken:
@@ -51,8 +49,8 @@ use crate::scorecard::TimeBasisLabel;
 use crate::spec::{DrillSpec, TimeBasis};
 use std::collections::BTreeMap;
 
-/// The topic configuration key the engine captures as an override and FX-4's
-/// read records as an effective value.
+/// The topic configuration key the engine captures as an override and the
+/// receipt's configuration read records as an effective value.
 pub const TIMESTAMP_TYPE_KEY: &str = "message.timestamp.type";
 /// Kafka's two values for [`TIMESTAMP_TYPE_KEY`].
 pub const CREATE_TIME: &str = "CreateTime";
@@ -66,7 +64,7 @@ pub enum RecordedTimestampType {
     LogAppendTime,
     /// Neither record says: no manifest override, and no effective value in a
     /// verified receipt (a plan bound to no receipt, a receipt from before
-    /// FX-4's format 1.1.0, or a backup whose configuration read failed).
+    /// format 1.1.0, or a backup whose configuration read failed).
     NotRecorded,
 }
 
@@ -85,7 +83,7 @@ pub struct TopicTimestampType {
 /// winning.
 ///
 /// Either record saying `LogAppendTime` is enough, because the two are
-/// written by two reads at two moments (FX-4: Logweir's own DescribeConfigs
+/// written by two reads at two moments (Logweir's own DescribeConfigs
 /// immediately before the engine starts, the engine's capture after it) and a
 /// disagreement between them is a configuration that changed in between —
 /// the archive may then hold records appended under either type. A value
@@ -139,23 +137,23 @@ pub fn recorded_timestamp_type(
 /// * A stated `restore.point_in_time` always does: the engine filters every
 ///   record by its own timestamp at the point, and nothing the manifest holds
 ///   proves the point leaves every record in (a segment records its first and
-///   last timestamps, not its maximum — PROD-01.1 S6).
-/// * A stated window start (`restore.point_in_time: "<start>/<end>"`) (PROD-11.1) always does, for the same
+///   last timestamps, not its maximum).
+/// * A stated window start (`restore.point_in_time: "<start>/<end>"`) always does, for the same
 ///   reason at the other end of the window.
 /// * With no point stated the window's end is `sample.window_end`, and it
 ///   selects by time when that end is EARLIER than the newest timestamp the
 ///   manifest records for the topic: a record the archive certainly holds is
 ///   then outside the window. At or after it, the restore takes the archive
-///   as the manifest records it (a full restore, which FX-6 discloses) — as
-///   far as the segment bounds show: with out-of-order timestamps inside a
-///   segment a record later than both ends can still fall outside the window,
-///   which is PROD-01.1b's (review L-1).
+///   as the manifest records it (a full restore) — as far as the segment
+///   bounds show: with out-of-order timestamps inside a segment a record later
+///   than both ends can still fall outside the window, which this does not
+///   detect.
 ///
 /// `None` for the topic's facts (the manifest does not describe it) counts as
 /// "no recorded timestamp", so only a stated point selects it by time.
 #[must_use]
 pub fn selects_by_time(spec: &DrillSpec, topic: Option<&TopicFacts>) -> bool {
-    // PROD-11.1: a stated window START is a selection by time exactly as a
+    // A stated window START is a selection by time exactly as a
     // stated point is — it excludes every archived record older than it.
     if spec.restore.point_in_time.is_some() || spec.restore.window_start.is_some() {
         return true;
@@ -219,7 +217,7 @@ pub fn decide(
     if refused.is_empty() {
         return Ok(label);
     }
-    // PROD-11.1 (review L2): a stated window start is a time selection too,
+    // A stated window start is a time selection too,
     // and is written inside `point_in_time`, so the refusal names the whole
     // interval when there is one.
     let selection = match (spec.restore.window_start, spec.restore.point_in_time) {
@@ -330,8 +328,6 @@ mod tests {
             "the archive manifest's topic override message.timestamp.type=LogAppendTime"
         );
     }
-
-    // ------------------------------------------------------------ decide
 
     /// 2026-09-06T00:00:00Z and one hour later: the one segment every topic
     /// below holds, first record at T0 and last at T1.
@@ -481,10 +477,10 @@ mod tests {
         );
     }
 
-    /// **PROD-11.1 (review L2).** A stated window start — the interval form
-    /// of `restore.point_in_time` — is a selection by time, and the refusal
-    /// names the whole interval, never `sample.window_end`. KILLS: the start
-    /// not counted as a time selection; the refusal naming only the end.
+    /// A stated window start — the interval form of `restore.point_in_time` —
+    /// is a selection by time, and the refusal names the whole interval, never
+    /// `sample.window_end`. KILLS: the start not counted as a time selection;
+    /// the refusal naming only the end.
     #[test]
     fn a_window_start_over_a_log_append_time_topic_is_refused_and_named() {
         let mut spec = plan(&["lat"], Some(T0 + 1_500), None, T1);
@@ -529,8 +525,8 @@ mod tests {
             "{err}"
         );
         // ...and BEFORE it was recorded (no verified receipt: an unbound plan
-        // or a receipt older than FX-4) the same archive reads NOT RECORDED:
-        // the restore runs and the label says so.
+        // or a receipt older than format 1.1.0) the same archive reads NOT
+        // RECORDED: the restore runs and the label says so.
         let label = decide(&spec, &f, &SourceConfigCoverage::unknown(), &names(&["bd"]))
             .expect("an unrecorded type is labelled, not refused");
         assert_eq!(label.not_recorded, names(&["bd"]));
@@ -625,12 +621,12 @@ mod tests {
         ));
     }
 
-    /// **Review L-2 (mutant X4).** A segment whose FIRST record is later than
-    /// its LAST (out-of-order timestamps, PROD-01.1 S6): the newest timestamp
-    /// the manifest records is the first record's, so a `sample.window_end`
-    /// between the two ends cuts the archive — a selection by time, refused
-    /// for a `LogAppendTime` topic. A reader of the last timestamp alone sees
-    /// the window end past it, calls the restore full, and signs nothing.
+    /// A segment whose FIRST record is later than its LAST (out-of-order
+    /// timestamps): the newest timestamp the manifest records is the first
+    /// record's, so a `sample.window_end` between the two ends cuts the archive
+    /// — a selection by time, refused for a `LogAppendTime` topic. A reader of
+    /// the last timestamp alone sees the window end past it, calls the restore
+    /// full, and signs nothing.
     #[test]
     fn a_segment_whose_first_record_is_the_later_one_still_bounds_the_window() {
         let mut lat = topic("lat", &[(TIMESTAMP_TYPE_KEY, LOG_APPEND_TIME)]);
@@ -687,7 +683,7 @@ mod tests {
             );
         }
         // Serialised, an absent value stays absent: a plan rendered from the
-        // type (a rehearsal slot's) is byte-identical to before FX-8.
+        // type (a rehearsal slot's) carries no `time_basis` key.
         let text = serde_yaml::to_string(&plan(&["a"], Some(T0 + 1), None, T1).restore).unwrap();
         assert!(!text.contains("time_basis"), "{text}");
         let text =

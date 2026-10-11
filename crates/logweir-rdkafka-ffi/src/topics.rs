@@ -1,13 +1,12 @@
 //! `rd_kafka_DescribeTopics`: the topic ID (KIP-516) of each named topic,
-//! which rust-rdkafka 0.36.2's safe API does not wrap (PROD-01.4 §1.3 C1;
-//! PROD-01.4a, OD-6 (a2)).
+//! which rust-rdkafka 0.36.2's safe API does not wrap.
 //!
 //! Values only. The ID is handed back as its two 64-bit halves, exactly as
 //! librdkafka holds them, and never through `rd_kafka_Uuid_base64str`: that
 //! helper encodes with the STANDARD base64 alphabet while Kafka prints topic
 //! IDs in the URL-safe one, so the same ID would read `Cf6zT/mcTNCoxuPmv1Ztxw`
 //! here and `Cf6zT_mcTNCoxuPmv1Ztxw` in `kafka-topics.sh --describe`
-//! (PROD-01.4 §1.3 C4, measured). What the halves MEAN — the all-zero ID is
+//! (measured). What the halves MEAN — the all-zero ID is
 //! Kafka's "no ID", the canonical text, a per-topic code read as "not found"
 //! or "not authorized" — is decided in `logweir_kafka::topic_ids` and
 //! `logweir_core::topic_identity`, which keep `#![forbid(unsafe_code)]` and
@@ -167,7 +166,7 @@ pub fn describe_topics<C: ClientContext>(
 ) -> Result<Vec<DescribedTopic>, CallError> {
     let request = describe_request(names)?;
     // The bound is checked here too, before `send` creates the collection, so
-    // a refused timeout creates no librdkafka object at all (review L3).
+    // a refused timeout creates no librdkafka object at all.
     crate::raw::timeout_ms(timeout)?;
     send(client, &request, timeout)
 }
@@ -387,8 +386,8 @@ mod tests {
         );
     }
 
-    /// **The DescribeTopics soak** (PROD-01.4 §6.1, PROD-04.0 §7.2): thousands
-    /// of calls with a bounded resident set. Each iteration creates and
+    /// **The DescribeTopics soak**: thousands of calls with a bounded
+    /// resident set. Each iteration creates and
     /// destroys a topic collection with copied names, an options object, a
     /// queue, a request and an event, and alternates librdkafka's two
     /// immediate answers: the refusal (an error result whose message is

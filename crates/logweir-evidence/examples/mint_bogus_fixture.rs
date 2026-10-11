@@ -19,9 +19,7 @@
 //!    fixture signed by a key nobody pinned would test nothing. It writes
 //!    neither `public.pem` nor `signing.pem`.
 //! 2. It is ADDITIVE. It writes EXACTLY TWO files, both of which are new, and
-//!    re-mints nothing. Ruling R-G (`plan.md:60`) makes Task 2 the one and
-//!    only re-mint of the five existing signed-fixture files; this program
-//!    must never touch `scorecard.json`, `scorecard.sig`,
+//!    re-mints nothing: this program must never touch `scorecard.json`, `scorecard.sig`,
 //!    `scorecard-self-attested.json`, `scorecard-self-attested.sig`,
 //!    `public.pem` or `signing.pem`.
 //! 3. It leaves `approval.key_id` alone. `mint_fixture.rs` sets the
@@ -88,7 +86,7 @@ fn main() {
     );
 
     // Sign the EXACT bytes that are written — never a re-serialisation of a
-    // parsed value (spec §6 C3, verify-as-read).
+    // parsed value (verify-as-read).
     let bogus_bytes = to_deterministic_json(&sc).expect("the bogus scorecard serialises");
     std::fs::write(dir.join("scorecard-self-attested-bogus.json"), &bogus_bytes)
         .expect("write scorecard-self-attested-bogus.json");

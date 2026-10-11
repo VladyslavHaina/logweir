@@ -395,8 +395,8 @@ mod tests {
     }
 }
 
-/// **The broker-free soak** (PROD-04.0 §7.2: thousands of calls with a
-/// bounded resident set). It drives [`run`] through librdkafka's own
+/// **The broker-free soak** (thousands of calls with a bounded resident
+/// set). It drives [`run`] through librdkafka's own
 /// immediate refusals, which need no broker: a description of NO groups and a
 /// description that names one group twice are both answered at once with an
 /// INVALID_ARG result (`rdkafka_admin.c:8756-8763`, `:8782-8791`), after

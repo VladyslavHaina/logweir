@@ -55,7 +55,7 @@ fn an_unknown_coverage_state_degrades_to_unknown_carrying_the_raw_string() {
 }
 
 // ---------------------------------------------------------------------------
-// FX-1: the consumer-groups snapshot, against bytes the engine really wrote.
+// The consumer-groups snapshot, against bytes the engine really wrote.
 // ---------------------------------------------------------------------------
 
 mod snapshot {
@@ -107,7 +107,7 @@ mod snapshot {
         (kept, left_out)
     }
 
-    /// **The FX-1 regression row.** The engine's real bytes parse, and every
+    /// **The engine's real bytes parse**, and every
     /// position equals what the broker says the group committed. Under the
     /// invented shape (`offsets` a list) the parse itself failed: "invalid
     /// type: map, expected a sequence".
@@ -156,8 +156,8 @@ mod snapshot {
     }
 
     /// **The negative control: the old parser fails on these bytes.** The
-    /// structs that stood in `vendored/consumer_groups.rs` before FX-1,
-    /// verbatim (at `632ea345`), refuse the committed fixture with the exact
+    /// structs that once stood in `vendored/consumer_groups.rs`, verbatim (at
+    /// `632ea345`), refuse the committed fixture with the exact
     /// error the drill reported on the compose stack. If the fixture ever
     /// stopped discriminating — replaced by an empty snapshot, say, which the
     /// old parser read happily — this fails, and the regression row above
@@ -235,7 +235,7 @@ mod snapshot {
         );
     }
 
-    /// The shape that stood in the vendored file before FX-1: `offsets` as a
+    /// The shape that once stood in the vendored file: `offsets` as a
     /// LIST is a type the engine never writes, and it is refused, not read as
     /// "no positions".
     #[test]
