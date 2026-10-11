@@ -623,9 +623,16 @@ fn the_matrix_runs_the_ci_e2e_setup_and_command() {
             .cloned()
     };
     let ci_command = e2e_command(&ci).expect("the CI e2e job runs the e2e suite");
+    // CI splits the suite into shards by test binary (FX-41); the matrix runs
+    // every binary, so it is the CI command without the shard's selection.
+    let shard = " --test ${{ join(matrix.tests, ' --test ') }}";
+    assert!(
+        ci_command.contains(shard),
+        "the CI e2e job runs its shard: {ci_command}"
+    );
     assert_eq!(
         e2e_command(&matrix).as_deref(),
-        Some(ci_command.as_str()),
+        Some(ci_command.replace(shard, "").as_str()),
         "the matrix's full drill must be the CI e2e job's command"
     );
 }

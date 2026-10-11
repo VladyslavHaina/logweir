@@ -52,8 +52,10 @@ restored under its own name, behind its own approval subject), 57 (FX-14, a cata
 the runner will, and reads only that point's own receipt), 58 (FX-22, a `RetentionPolicy`'s status says what the per-run
 ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
-the capability rows a readiness check asks of the endpoint itself) and 61 (FX-34, a
-guard-refused Restore or Backup says why in its status) so far. Items continue the next entry's
+the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
+guard-refused Restore or Backup says why in its status) and 62 (PROD-01.5a
+and FX-41, CI tests on Kafka 4.3.1 in three shards; nothing in the product
+changes) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -214,6 +216,9 @@ and `Backup` Job gains that argument) and the console's text, and the PoC
 upgrade that carries it moves the controller and the runner image in one
 `helm upgrade`, submits a `Restore` the runner refuses and reads the reason
 on its status and in the console after the pod is gone.
+Item 62 is rows PROD-01.5a and FX-41, proven on the compose stack (4.3.1 and
+3.7.1) and by the shard guard; it changes CI and the test fixtures only, and
+needs no PoC row.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -2840,6 +2845,26 @@ always wrote, over this runner or an older one. The runner image first leaves
 THIS controller over an older runner, which does not start (above). Statuses
 already written keep the text they have.
 
+#### 62. CI tests on Apache Kafka 4.3.1, in three shards; nothing in the product changes (PROD-01.5a, FX-41)
+
+**Changed.** Only how the repository is tested. The e2e fixture's default
+broker, and the line CI's e2e job runs on every pull request, is Apache Kafka
+4.3.1 instead of 3.7.1, which Apache and Amazon MSK no longer support. 3.7.1
+stays a legacy line: `KAFKA_VERSION=3.7.1` (or `e2e/compose/stack-env.sh
+--kafka 3.7`) starts it, and the weekly `engine-matrix.yml` rows still run the
+whole e2e suite on it. Six consumer-position rows that need a broker that types
+groups now run on every pull request instead of by hand. The e2e job runs in
+three shards by test binary, each with its own stack, and `check` fails when
+a test binary is in no shard or in two.
+**Operator action:** none. No binary, image, chart value or signed document
+changes, and no broker line's status changes
+([support-matrix.md](support-matrix.md#broker-versions-apache-kafka)).
+**Scope:** the e2e package on 4.3.1 on the default compose stack with the
+`auth` profile, the un-ignored rows included; `full_drill`'s main row on
+3.7.1; the shard guard with one binary taken out of its shard and one listed
+twice. The shards' durations are measured on the pull request's CI run.
+**Rollback:** revert the change; nothing deployed is affected.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -2939,7 +2964,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60 and 61, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 and 62, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3005,7 +3030,8 @@ controller and the console's text, and needs `controllerImage` and
 `runnerImage` moved in one upgrade: this controller passes `--line-token` to
 every `Restore` and `Backup` Job, and every runner image published before the
 change exits 1 on it (for a tagged release's runner item 35 already required
-the roll). To roll back to
+the roll); item 62 changes only how the repository is tested and needs
+nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a

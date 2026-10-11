@@ -46,7 +46,7 @@ volumes:
 
 services:
   kafka-broker-1:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-broker-1
     restart: always
     networks: [kafka-net]
@@ -214,7 +214,7 @@ services:
   # image's own entrypoint is the broker's `run` script, and the argv is a LIST
   # so no shell stands between `kafka-configs.sh` and its exit code.
   scram-setup:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     networks: [kafka-net]
     depends_on:
       kafka-broker-1: { condition: service_healthy }
@@ -361,7 +361,7 @@ services:
       - ../../.e2e/auth/${COMPOSE_PROJECT_NAME}:/certs
 
   kafka-auth:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-auth
     profiles: [auth]
     networks: [kafka-net]
@@ -429,7 +429,7 @@ services:
   # PLAINTEXT listener. Long-running with a readiness marker, so `up --wait`
   # waits for the credential and fails if the alter fails.
   kafka-auth-setup:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [auth]
     networks: [kafka-net]
     depends_on:
@@ -457,7 +457,7 @@ services:
   # leader-movement behaviour needs (FX-5, PROD-10.1). Its own CLUSTER_ID,
   # one per stack and shared by the three nodes, loaded like kafka-auth's.
   kafka-c3-1:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-c3-1
     profiles: [cluster3]
     networks: [kafka-net]
@@ -491,7 +491,7 @@ services:
       start_period: 20s
 
   kafka-c3-2:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-c3-2
     profiles: [cluster3]
     networks: [kafka-net]
@@ -511,7 +511,7 @@ services:
       start_period: 20s
 
   kafka-c3-3:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-c3-3
     profiles: [cluster3]
     networks: [kafka-net]
@@ -537,7 +537,7 @@ services:
   # cluster-id allowlist. The marker topic exists, so the second cluster can
   # be a `scratch` drill target.
   kafka-cluster2:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-cluster2
     profiles: [cluster2]
     networks: [kafka-net]
@@ -580,7 +580,7 @@ services:
   # absence check and the creation step (the race, lost by name). Its own
   # CLUSTER_ID per stack, like kafka-cluster2's; no marker topic.
   kafka-autocreate:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-autocreate
     profiles: [autocreate]
     networks: [kafka-net]
@@ -618,7 +618,7 @@ services:
       start_period: 20s
 
   kafka-cluster2-setup:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [cluster2]
     networks: [kafka-net]
     depends_on:
@@ -654,7 +654,7 @@ services:
   # cluster operation from `logweir`; `e2e/compose/groups.sh visibility
   # apply` adds it and `remove` takes it away again (e2e/README.md).
   kafka-acl:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     hostname: kafka-acl
     profiles: [acl]
     networks: [kafka-net]
@@ -698,7 +698,7 @@ services:
   # written once the quorum serves; long-running with a readiness marker, like
   # kafka-auth-setup, so `up --wait` waits for both and fails if either fails.
   kafka-acl-setup:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [acl]
     networks: [kafka-net]
     depends_on:
@@ -727,7 +727,7 @@ services:
   # what PROD-06's application-recovery rows need. Topics are created first
   # because the broker refuses auto-creation.
   streams-topics:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [streams]
     networks: [kafka-net]
     depends_on:
@@ -742,7 +742,7 @@ services:
         --config cleanup.policy=compact
 
   streams-wordcount:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [streams]
     networks: [kafka-net]
     depends_on:
@@ -786,7 +786,7 @@ services:
   # default): a 3.x client refuses `group.protocol=streams`, the application
   # exits, and `up --wait` fails.
   streams-protocol-topics:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [streams-protocol]
     networks: [kafka-net]
     depends_on:
@@ -805,7 +805,7 @@ services:
         --if-not-exists --topic streams-wordcount-processor-output --partitions 1 --replication-factor 1
 
   streams-protocol-wordcount:
-    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
     profiles: [streams-protocol]
     networks: [kafka-net]
     depends_on:

@@ -2199,6 +2199,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
+        // PROD-01.5a and FX-41 (2026-10-10, item 62): CI's default broker
+        // line is 4.3.1 and its e2e job runs in shards; the variable that
+        // still starts the legacy line.
+        (
+            "CI tests on Kafka 4.3.1, in three shards",
+            "KAFKA_VERSION=3.7.1",
+        ),
     ];
     assert_eq!(
         items.len(),
