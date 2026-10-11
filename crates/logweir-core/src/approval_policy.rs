@@ -1,34 +1,28 @@
-//! PLAT-19.2 — ordinary confirmation and governed approval: the pure contract.
+//! Ordinary confirmation and governed approval: the pure contract.
 //!
 //! # What lives here
 //!
 //! Everything about the two approval modes that is decidable without a clock
 //! read, a key, a cluster or a file: the installation's policy set and how a
-//! namespace resolves to one policy; the policy SNAPSHOT (the exact bytes a
-//! run freezes, and the digest every signed document names); the
-//! authorization document v2 that both modes produce (decision D0,
-//! "Authorization document v2"); and the binding checks every boundary makes
-//! over it — the Approval controller, Restore admission and the runner. The
-//! signatures are checked by the crates that link a verifier; this crate
-//! links no crypto (`scripts/check-pure-core.sh`).
+//! namespace resolves to one policy; the policy SNAPSHOT (the exact bytes a run
+//! freezes, and the digest every signed document names); the authorization
+//! document v2 both modes produce; and the binding checks every boundary makes
+//! over it (the Approval controller, Restore admission and the runner). The
+//! signatures are checked by the crates that link a verifier; this crate links
+//! no crypto (`scripts/check-pure-core.sh`).
 //!
 //! # Where the policy lives, and why it is not a namespaced object
 //!
-//! D0 names an immutable `ApprovalPolicy` "or the exact PLAT-19.1 policy
-//! resource", bound to a namespace by INSTALLATION configuration that also
-//! carries the `allowOrdinaryConfirmation` floor, and says "selecting a
-//! different policy is an explicit installation-admin rollout and audit event,
-//! not a namespace operator edit". This build keeps the policies AND the
-//! binding in that one installation document, which the chart renders once and
-//! mounts into both the controller and `logweir-api`, so the two consume the
-//! same bytes and therefore the same digest (D0: "API and controller consume
-//! the same content hash"). A namespaced policy object would be writable by
-//! whoever holds namespace RBAC — the "a namespace names its own authority"
-//! shape D3 §7.1 forbids for trust — and a new cluster-scoped kind would be a
-//! second writable authority beside `TrustPolicy`. Immutability comes from the
-//! content address: a signed document names the policy's `digest`, so ANY edit
-//! to a policy is a different policy to every outstanding document, which is
-//! D0's "binding/policy mismatch requires re-confirmation/re-approval".
+//! The policies AND their namespace bindings live in one installation document,
+//! which the chart renders once and mounts into both the controller and
+//! `logweir-api`, so the two consume the same bytes and the same digest. A
+//! namespaced policy object would let whoever holds namespace RBAC name its own
+//! authority, and a new cluster-scoped kind would be a second writable
+//! authority beside `TrustPolicy`; selecting another policy is an
+//! installation-admin rollout. Immutability comes from the content address: a
+//! signed document names the policy's `digest`, so ANY edit to a policy is a
+//! different policy to every outstanding document, which then needs
+//! re-confirmation or re-approval.
 //!
 //! # The two modes, and the one that is never synthesised
 //!
@@ -41,11 +35,11 @@
 //! A namespace with no binding resolves to [`EffectivePolicy::Legacy`]
 //! (`legacy-governed-v1`), which is TODAY'S behaviour byte for byte: a v1
 //! approval document signed by a `GovernedApproval` key — UNLESS the
-//! installation's unbound default says `confirm` (PROD-16.1, below).
+//! installation's unbound default says `confirm` (below).
 //!
-//! # PROD-16.1: the unbound default, and why an upgrade never reaches it
+//! # The unbound default, and why an upgrade never reaches it
 //!
-//! OD-8 (2026-10-07) amends D0: a FRESH install starts with one-person
+//! A FRESH install starts with one-person
 //! confirmation in the console for every namespace without a binding, so the
 //! first restore needs no personal key. An unbound namespace then resolves to
 //! [`default_confirm_policy`] (`default-confirm-v1`, `Ordinary`), a concrete,
@@ -66,8 +60,7 @@
 //!    it only beside that exact, hook-made trust entry. An upgraded install's
 //!    identity already existed, so the hook never marks it and never trusts
 //!    its console key, and an annotation patched in later names no such
-//!    entry: it stays `legacy-governed-v1` (D0: "Ordinary mode cannot be
-//!    enabled merely by upgrading");
+//!    entry: it stays `legacy-governed-v1`;
 //! 3. otherwise `legacy-governed-v1`.
 //!
 //! The marker is runtime state (the API and the controller read it from the
@@ -81,10 +74,10 @@
 //! [`ApprovalRoute`] is the ONE mapping between the internal names, which stay
 //! because they are inside signed bytes and snapshots (`Ordinary`, `Governed`,
 //! `legacy-governed-v1`), and the names the chart values, the console and the
-//! docs use: `confirm`, `two-person` (PROD-16.2: `Governed` with
+//! docs use: `confirm`, `two-person` (`Governed` with
 //! `approverSignature: Console`) and `strict`.
 //!
-//! # PROD-16.2: two-person approval in the console
+//! # Two-person approval in the console
 //!
 //! A `Governed` policy may say WHO signs the approval:
 //! [`ApproverSignature::Console`] (`approverSignature: Console`; absent is the
@@ -195,7 +188,7 @@ pub const MAX_BINDINGS: usize = 256;
 /// signature cannot be replayed as a v2 document or the reverse, because the
 /// payload type is inside what the signature covers (DSSE PAE). An old
 /// controller reached by rollback refuses every v2 document as a
-/// `PayloadTypeMismatch` — fail closed, which is D0's rollback rule.
+/// `PayloadTypeMismatch`: fail closed.
 pub const PAYLOAD_TYPE_RESTORE_AUTHORIZATION: &str =
     "application/vnd.logweir.restore-authorization+json;version=2.0.0";
 
@@ -246,7 +239,7 @@ pub fn restore_authorization_format_version_for(
 /// PLACE a writer takes the version from:
 ///
 /// * **2.2.0** when it carries the console approver (`approver`,
-///   `approvedAt`; PROD-16.2);
+///   `approvedAt`);
 /// * else **2.1.0** when it carries the approval subject or the typed
 ///   confirmation;
 /// * else **2.0.0**.
@@ -270,13 +263,13 @@ pub fn restore_authorization_format_version(
 }
 
 /// The issuer of the in-cluster administrator console's one identity
-/// (`localAdmin` mode). PROD-16.2: never a party to a console approval — its
-/// one identity cannot be two people — at any reader.
+/// (`localAdmin` mode): never a party to a console approval, because its one
+/// identity cannot be two people.
 pub const LOCAL_ADMIN_ISSUER: &str = "urn:logweir:local-admin";
 
 /// Kubernetes' reserved subject prefix (`system:serviceaccount:…`,
-/// `system:node:…`, `system:admin`). PROD-16.2: a subject under it is a
-/// machine, never one of the two people of a console approval.
+/// `system:node:…`, `system:admin`): a subject under it is a machine, never
+/// one of the two people of a console approval.
 pub const KUBERNETES_SYSTEM_SUBJECT_PREFIX: &str = "system:";
 
 /// The longest subject a console approval compares: OpenID Connect Core's
@@ -319,12 +312,11 @@ impl ApprovalMode {
     /// The key usages whose signatures a v2 document in this mode requires,
     /// in the order they are checked.
     ///
-    /// The console's `ConsoleConfirmation` signature is required in BOTH modes
-    /// (D0: "the console signature attests the verified requester in both
-    /// modes"); `Governed` adds the approver's. A `GovernedApproval`
-    /// signature is never sufficient on its own for a v2 document, because
-    /// without the console's attestation nothing says who the requester was
-    /// and separation of duties is not checkable.
+    /// The console's `ConsoleConfirmation` signature is required in BOTH modes,
+    /// because it attests the verified requester; `Governed` adds the
+    /// approver's. A `GovernedApproval` signature is never sufficient on its
+    /// own for a v2 document: without the console's attestation nothing says
+    /// who the requester was, and separation of duties is not checkable.
     #[must_use]
     pub const fn required_usages(self) -> &'static [KeyUsage] {
         match self {
@@ -340,7 +332,7 @@ impl std::fmt::Display for ApprovalMode {
     }
 }
 
-/// **PROD-16.2 — who signs a `Governed` policy's approval.**
+/// **Who signs a `Governed` policy's approval.**
 ///
 /// A property of the POLICY, frozen into its snapshot and so into the digest
 /// every signed document names: a request confirmed under one value is a
@@ -353,7 +345,8 @@ impl std::fmt::Display for ApprovalMode {
 pub enum ApproverSignature {
     /// A personal `GovernedApproval` key countersigns the console's
     /// confirmation (`strict`). ABSENT on the wire: every policy written
-    /// before PROD-16.2 is this, with the snapshot bytes it always had.
+    /// before the setting existed is this, with the snapshot bytes it always
+    /// had.
     #[default]
     #[serde(skip)]
     PersonalKey,
@@ -540,7 +533,7 @@ impl std::fmt::Display for ApprovalRoute {
     }
 }
 
-/// PROD-16.1 — what the installation's fresh-install marker says, as one of
+/// What the installation's fresh-install marker says, as one of
 /// its readers observed it. Never parsed from the policy document: the marker
 /// lives on the installation identity ([`APPROVAL_DEFAULT_ANNOTATION`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -553,7 +546,7 @@ pub enum InstallationMarker {
     FreshInstallConfirm,
 }
 
-/// PROD-16.1 — the fresh-install claim the identity hook writes on the public
+/// The fresh-install claim the identity hook writes on the public
 /// identity ConfigMap:
 /// `confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`.
 ///
@@ -683,8 +676,8 @@ impl MarkerRefusal {
     }
 }
 
-/// PROD-16.1 — THE ONE DECISION both readers (the console and the controller)
-/// make over the fresh-install marker, so they cannot disagree about it.
+/// THE ONE DECISION both readers (the console and the controller) make over
+/// the fresh-install marker, so they cannot disagree about it.
 ///
 /// * `annotation`: the [`APPROVAL_DEFAULT_ANNOTATION`] value on the public
 ///   identity ConfigMap, if any;
@@ -692,14 +685,13 @@ impl MarkerRefusal {
 /// * `installation_namespace`: its namespace;
 /// * `policy`: the `TrustPolicy` the claim names, as read (`None`: absent).
 ///
-/// WHY THE BINDING (the PROD-16.1 security review). Before PROD-16.1, turning
-/// a governed namespace into one-person confirmation took two separate gates:
-/// an approval-policy rollout, and a trust administrator trusting the console
-/// key. An annotation alone would have been ONE ConfigMap patch. Bound, the
+/// WHY THE BINDING. Without it, turning a governed namespace into one-person
+/// confirmation would take ONE ConfigMap patch instead of an approval-policy
+/// rollout plus a trust administrator trusting the console key. Bound, the
 /// marker is honoured only beside a trust entry the identity hook made in the
-/// same fresh-install run — so on an install that existed before, patching
-/// the annotation in changes nothing, and forging the trust entry is the
-/// trust administrator's gate, as before.
+/// same fresh-install run, so on an install that existed before, patching the
+/// annotation in changes nothing, and forging the trust entry is the trust
+/// administrator's gate.
 ///
 /// # Errors
 ///
@@ -786,7 +778,7 @@ impl UnboundBasis {
     }
 }
 
-/// PROD-16.1 — the policy an unbound namespace resolves to under a `confirm`
+/// The policy an unbound namespace resolves to under a `confirm`
 /// unbound default: `Ordinary`, the ordinary default lifetime, no approver.
 ///
 /// A CONSTANT, so the console and the controller compute the same snapshot and
@@ -813,8 +805,7 @@ pub struct ApprovalPolicy {
     /// declare.
     pub max_age_seconds: i64,
     /// Whether the governed approver's principal must differ from the
-    /// requester's. Always `true` for `Governed` (D0: "must be true for
-    /// Governed in the supported baseline"); meaningless and `false` for
+    /// requester's. Always `true` for `Governed`; meaningless and `false` for
     /// `Ordinary`, which has no approver.
     pub require_distinct_principal: bool,
     /// Who signs the approval of a `Governed` policy: a
@@ -1083,10 +1074,8 @@ struct PolicySetDocument {
 ///
 /// `Default` is the installation that configured nothing and is not marked:
 /// every namespace resolves to [`EffectivePolicy::Legacy`], which is what an
-/// upgrade without a policy document must mean (D0: "existing installations
-/// retain their approval requirement until explicitly changed"). A fresh
-/// install's readers apply the marker they observed with
-/// [`Self::with_installation`].
+/// upgrade without a policy document must mean. A fresh install's readers apply
+/// the marker they observed with [`Self::with_installation`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApprovalPolicySet {
     allow_ordinary_confirmation: bool,
@@ -1128,13 +1117,11 @@ impl ApprovalPolicySet {
     /// * an unknown field anywhere (`deny_unknown_fields`);
     /// * a policy name that is not a DNS label, repeated, or the reserved
     ///   [`LEGACY_GOVERNED_POLICY_NAME`];
-    /// * an `Ordinary` policy while `allowOrdinaryConfirmation` is not `true` —
-    ///   D0's installation floor, refused rather than silently demoted, because
-    ///   an operator who bound `Ordinary` and got `Governed` would be told
-    ///   nothing;
-    /// * `requireDistinctPrincipal: false` on a `Governed` policy (D0's
-    ///   supported baseline) and `requireDistinctPrincipal: true` on an
-    ///   `Ordinary` one, which has no approver to compare;
+    /// * an `Ordinary` policy while `allowOrdinaryConfirmation` is not `true`:
+    ///   the installation floor, refused rather than silently demoted;
+    /// * `requireDistinctPrincipal: false` on a `Governed` policy and
+    ///   `requireDistinctPrincipal: true` on an `Ordinary` one, which has no
+    ///   approver to compare;
     /// * `maxAgeSeconds` outside [`MIN_MAX_AGE_SECONDS`]..=[`MAX_MAX_AGE_SECONDS`];
     /// * a binding naming an invalid namespace or an undeclared policy;
     /// * more than [`MAX_POLICIES`] policies or [`MAX_BINDINGS`] bindings.
@@ -1150,10 +1137,10 @@ impl ApprovalPolicySet {
             .map_err(|e| PolicyConfigError(format!("the document does not parse: {e}")))?;
         let default_mode = match document.default_mode.as_deref() {
             None => None,
-            // D0's floor, kept for the explicit opt-in (PROD-16.1 security
-            // review): an Ordinary unbound default is an Ordinary policy, and
-            // a document that does not also say allowOrdinaryConfirmation
-            // never enables one.
+            // The installation floor holds for the explicit opt-in too: an
+            // Ordinary unbound default is an Ordinary policy, and a document
+            // that does not also say allowOrdinaryConfirmation never enables
+            // one.
             Some("confirm") if !document.allow_ordinary_confirmation => {
                 return Err(PolicyConfigError(
                     "defaultMode confirm is ordinary confirmation for every unbound namespace, \
@@ -1396,7 +1383,7 @@ impl ApprovalPolicySet {
     }
 
     /// `sha256:<hex>` over the canonical form of the whole document — the
-    /// readiness value D0 asks both processes to expose, so an operator can
+    /// readiness value both processes expose, so an operator can
     /// see that the console and the controller run the same configuration.
     ///
     /// It also covers what an UNBOUND namespace resolves to, when
@@ -1424,10 +1411,6 @@ impl ApprovalPolicySet {
         sha256_prefixed(&serde_json::to_vec(&canonical).unwrap_or_default())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Authorization document v2 (D0)
-// ---------------------------------------------------------------------------
 
 /// The exact Kubernetes object a v2 document authorises.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1502,7 +1485,7 @@ pub struct PolicyRef {
 ///
 /// `deny_unknown_fields`: a field this build does not know is a field whose
 /// meaning it cannot enforce, and an authorization is the last place to ignore
-/// one. A new field is a new `formatVersion`: PROD-15.1's `approvalSubject`
+/// one. A new field is a new `formatVersion`: `approvalSubject`
 /// and `originalNameConfirmation` are format **2.1.0**
 /// ([`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`]) — OPTIONAL, absent from
 /// every document that does not need them (which stays 2.0.0, byte for byte),
@@ -1532,12 +1515,12 @@ pub struct RestoreAuthorization {
     pub issued_at: DateTime<Utc>,
     /// After this instant it authorises nothing new.
     pub expires_at: DateTime<Utc>,
-    /// A change ticket: REQUIRED under `Governed`, optional under `Ordinary`
-    /// (D0), and in both at most [`MAX_TICKET_LEN`] printable characters —
-    /// [`check_ticket`].
+    /// A change ticket: REQUIRED under `Governed`, optional under `Ordinary`,
+    /// and in both at most [`MAX_TICKET_LEN`] printable characters
+    /// ([`check_ticket`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
-    /// **PROD-15.1: the separate approval subject** — `originalName` for a
+    /// **The separate approval subject**: `originalName` for a
     /// restore under the ORIGINAL topic names, ABSENT for every other one
     /// (`crate::original_name::ApprovalSubject`). The console writes it only
     /// for a `Restore` that declares `spec.target.topicNaming.originalName`,
@@ -1552,7 +1535,7 @@ pub struct RestoreAuthorization {
     /// ordinary authorization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_subject: Option<String>,
-    /// **OD-10 (2026-10-09): the typed confirmation.** On a one-person
+    /// **The typed confirmation.** On a one-person
     /// confirmation (`authorizationMode: Ordinary`) of a restore under the
     /// ORIGINAL topic names, the topic names the requester re-typed, as the
     /// console received them; ABSENT on every other document. Every boundary
@@ -1561,7 +1544,7 @@ pub struct RestoreAuthorization {
     /// 2.1.0, as `approval_subject` is, and refused under 2.0.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name_confirmation: Option<crate::original_name::OriginalNameConfirmation>,
-    /// **PROD-16.2: the second person.** On an APPROVAL under a policy whose
+    /// **The second person.** On an APPROVAL under a policy whose
     /// `approverSignature` is `Console`, the principal who signed in to the
     /// shared console and clicked Approve; ABSENT on every other document —
     /// the request such a policy's approver is shown, a one-person
@@ -1577,7 +1560,7 @@ pub struct RestoreAuthorization {
     /// unknown field by every reader built before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver: Option<Approver>,
-    /// **PROD-16.2: when the approver clicked**, on the console's clock — the
+    /// **When the approver clicked**, on the console's clock, the
     /// clock that stamped `issuedAt`. Every reader requires
     /// `issuedAt <= approvedAt < expiresAt` ([`check_console_approval`]).
     /// Format 2.2.0, as `approver` is.
@@ -1617,7 +1600,7 @@ impl RestoreAuthorization {
         self.approver.is_some() || self.approved_at.is_some()
     }
 
-    /// **PROD-16.2: `approver` and `approvedAt` are format 2.2.0, and come
+    /// **`approver` and `approvedAt` are format 2.2.0, and come
     /// together.** A document that carries either under an older minor (or
     /// under a version this rule cannot read: three numeric parts,
     /// [`numeric_version`]) is refused: a 2.0.0 or 2.1.0 document says who
@@ -1662,7 +1645,7 @@ impl RestoreAuthorization {
         self.approval_subject.is_some() || self.original_name_confirmation.is_some()
     }
 
-    /// **PROD-15.1: `approvalSubject` and `originalNameConfirmation` are
+    /// **`approvalSubject` and `originalNameConfirmation` are
     /// format 2.1.0.** A document that carries either and declares an older
     /// minor (or none this build can read) is refused: a 2.0.0 document
     /// authorises an ordinary restore and nothing else, so one that names the
@@ -1670,7 +1653,7 @@ impl RestoreAuthorization {
     /// that knows the subject. Can only refuse; a document without the fields
     /// is decided exactly as before.
     ///
-    /// **The version is THREE NUMERIC PARTS** (review 2, L8): `2.<minor>.<patch>`,
+    /// **The version is THREE NUMERIC PARTS**: `2.<minor>.<patch>`,
     /// each part decimal digits with no sign, no padding and nothing after
     /// it ([`numeric_version`]). `2.1`, `2.01.0`, `2.+1.0`, `2.1.x`,
     /// `2.1.0-rc1` and `2.1.0.0` are not versions this rule reads, and a
@@ -1855,7 +1838,8 @@ pub fn check_binding(
 /// rules and its binding to the subject, the plan and the policy. What a
 /// REQUEST and an approval have in common.
 ///
-/// PROD-16.2 adds two rules here, both of which can only refuse: `approver`
+/// Two rules about the console approver, both of which can only refuse:
+/// `approver`
 /// and `approvedAt` obey their version rule
 /// ([`RestoreAuthorization::check_approver_fields`]), and they belong to a
 /// policy whose `approverSignature` is `Console` and to no other — so a
@@ -1879,7 +1863,7 @@ fn check_document_binding(
     doc.check_subject_fields_version()?;
     // And the 2.2.0 fields under 2.0.0 or 2.1.0, the same way.
     doc.check_approver_fields()?;
-    // PROD-16.2: THE POLICY IS ONE OF THE TABLE'S ROWS, or nothing is judged
+    // THE POLICY IS ONE OF THE TABLE'S ROWS, or nothing is judged
     // under it. Every reader reaches this, whatever else it calls.
     let route = policy.route()?;
     let subject = &doc.subject;
@@ -1970,7 +1954,7 @@ fn check_document_binding(
     Ok(())
 }
 
-/// **PROD-16.2: what the console reads BEFORE it signs an approval** — a
+/// **What the console reads BEFORE it signs an approval**: a
 /// stored REQUEST under a policy whose approval the console signs, checked at
 /// `now`.
 ///
@@ -2016,8 +2000,7 @@ pub fn check_request_binding(
 pub const MAX_SHOWN_CHARS: usize = 96;
 
 /// **A string someone else chose, as a refusal sentence, a status condition
-/// or a log line may carry it** (PROD-16.2; the rule PROD-15.1 made for the
-/// runner's own lines, applied where a principal is named).
+/// or a log line may carry it.**
 ///
 /// An issuer and a subject come from an identity provider's token, and a
 /// document's `requester` and `approver` from whoever wrote the document: to
@@ -2145,8 +2128,8 @@ impl SeparationFault {
     }
 }
 
-/// **PROD-16.2: whether a principal can take part in a console approval at
-/// all** — on either side.
+/// **Whether a principal can take part in a console approval at
+/// all**, on either side.
 ///
 /// 1. **Comparable form.** Issuer and subject are each non-empty and visible
 ///    ASCII only; the issuer carries no `#` (the principal id is
@@ -2219,7 +2202,7 @@ pub fn fold_subject(subject: &str) -> String {
     subject.to_ascii_lowercase()
 }
 
-/// **PROD-16.2 — SEPARATION OF DUTIES FOR A CONSOLE APPROVAL: THE ONE RULE**
+/// **SEPARATION OF DUTIES FOR A CONSOLE APPROVAL: THE ONE RULE**
 /// the console (before it signs), the Approval controller, Restore admission,
 /// the runner and both scorecard readers apply, over the requester the
 /// console attested and the approver it attested.
@@ -2363,7 +2346,7 @@ pub fn console_approval_of(
     }
 }
 
-/// **PROD-16.2 — the console approval, as every reader judges it** on top of
+/// **The console approval, as every reader judges it** on top of
 /// the binding: who approved, and when.
 ///
 /// * [`ApprovalRoute::RequesterConfirms`] and [`ApprovalRoute::PersonalKey`]:
@@ -2421,8 +2404,7 @@ pub fn check_console_approval(
     Ok(())
 }
 
-/// The change ticket's rule (D0: "ticket (required in Governed, optional in
-/// Ordinary)"): under `Governed` a non-blank ticket of at most
+/// The change ticket's rule: under `Governed` a non-blank ticket of at most
 /// [`MAX_TICKET_LEN`] characters; under `Ordinary` absent or the same shape.
 ///
 /// # Errors
@@ -2474,7 +2456,7 @@ pub fn check_window_shape(
 /// ([`check_binding`]'s document, subject, plan and policy), then
 /// [`check_window_shape`], then the clock, then — under a policy whose
 /// approval the console signs — the second person and the instant they
-/// approved ([`check_console_approval`], PROD-16.2).
+/// approved ([`check_console_approval`]).
 ///
 /// # Errors
 ///
@@ -2496,14 +2478,11 @@ pub fn check_restore_authorization(
 /// The clock half of [`check_restore_authorization`]: `issuedAt` not ahead of
 /// `now` beyond the skew bound, `expiresAt` not passed.
 fn check_clock(doc: &RestoreAuthorization, now: DateTime<Utc>) -> Result<(), AuthorizationRefusal> {
-    // NO CLOCK IN EITHER MESSAGE (defect P9, poc-install 2026-09-24). The
-    // `Approval` controller writes this text into a condition and skips the
-    // write only when the status is byte-for-byte unchanged, so a message that
-    // named `now` was a different status on every pass: each pass wrote, the
-    // write woke the controller's own watch, and one expired `Approval` logged
-    // `approval refused` every ~2 s for ever. The boundary that failed is the
-    // stable fact; the instant it was judged is the condition's
-    // `lastTransitionTime`.
+    // NO CLOCK IN EITHER MESSAGE. The `Approval` controller writes this text
+    // into a condition and skips the write only when the status is
+    // byte-for-byte unchanged, so a message naming `now` would rewrite the
+    // status, and wake the controller's own watch, on every pass. The instant
+    // it was judged is the condition's `lastTransitionTime`.
     if doc.issued_at > now + chrono::Duration::seconds(MAX_ISSUED_AT_SKEW_SECONDS) {
         return Err(AuthorizationRefusal::WindowInvalid(format!(
             "the authorization document was issued at {}, more than {MAX_ISSUED_AT_SKEW_SECONDS}s \
@@ -2523,7 +2502,7 @@ fn check_clock(doc: &RestoreAuthorization, now: DateTime<Utc>) -> Result<(), Aut
 
 /// Whether a key's `principal.id` is in the `<issuer>#<subject>` form the
 /// console attests a requester in — the only form separation of duties can
-/// compare (review M4). Anything else — an email, a display name, an
+/// compare. Anything else — an email, a display name, an
 /// `install:` digest, surrounding whitespace — is a principal that could be
 /// the requester under another spelling, so it cannot establish separation.
 #[must_use]
@@ -2534,7 +2513,7 @@ pub fn is_issuer_subject_principal(principal_id: &str) -> bool {
             .is_some_and(|(issuer, subject)| !issuer.is_empty() && !subject.is_empty())
 }
 
-/// Separation of duties (D0): the governed approver's principal must not be
+/// Separation of duties: the governed approver's principal must not be
 /// the requester's. Compares the stable `principal_id` strings exactly —
 /// never display names, and never key ids — and FAILS CLOSED on an approver
 /// principal that is not `<issuer>#<subject>` ([`is_issuer_subject_principal`]):
@@ -2777,8 +2756,8 @@ namespaces:
         assert_eq!(RestoreAuthorization::from_bytes(&bytes), Ok(d));
     }
 
-    /// **PROD-15.1: `approvalSubject` and `originalNameConfirmation` are
-    /// document format 2.1.0** — the standing authorization's 1.1.0 pattern.
+    /// **`approvalSubject` and `originalNameConfirmation` are document format
+    /// 2.1.0**, the standing authorization's 1.1.0 pattern.
     /// A document that carries either is WRITTEN as 2.1.0 and REFUSED under
     /// 2.0.0, by the parser and by the binding check; every document without
     /// them is written as 2.0.0, byte for byte what the writer before the
@@ -2860,8 +2839,8 @@ namespaces:
             ("the subject alone", false, true),
             ("the typed names alone", true, false),
         ] {
-            // 2.0.x, and (review 2, L8) every string that is not three
-            // numeric parts, each of which the looser rule read as 2.1.
+            // 2.0.x, and every string that is not three numeric parts, each of
+            // which a looser rule would read as 2.1.
             for version in [
                 "2.0.0",
                 "2.0.9",
@@ -2908,7 +2887,7 @@ namespaces:
             }
         }
         // Another major stays refused, whatever it carries — a major that
-        // is not written exactly `2` included (L8).
+        // is not written exactly `2` included.
         for version in ["3.1.0", "1.1.0", " 2.1.0", "02.1.0", "+2.1.0"] {
             let mut major = subject.clone();
             major.format_version = version.into();
@@ -3083,7 +3062,7 @@ namespaces:
         assert!(!separation_holds(&requester, " https://idp.example#alice "));
         assert!(!separation_holds(&requester, ""));
         assert!(separation_holds(&requester, "https://idp.example#bob"));
-        // FAILS CLOSED (review M4): a principal not in `<issuer>#<subject>`
+        // FAILS CLOSED: a principal not in `<issuer>#<subject>`
         // form cannot be compared with a requester, so it never establishes
         // separation -- `alice@example.com` may be Alice.
         for other_form in [
@@ -3144,10 +3123,6 @@ namespaces:
         );
     }
 
-    // ------------------------------------------------------------------
-    // The unbound default
-    // ------------------------------------------------------------------
-
     #[test]
     fn a_fresh_install_resolves_every_unbound_namespace_to_confirm() {
         let fresh =
@@ -3173,7 +3148,7 @@ namespaces:
     #[test]
     fn an_upgraded_install_keeps_legacy_for_its_unbound_namespaces() {
         // An upgraded install's identity already existed, so it carries no
-        // marker; its document (here the PLAT-19.2 example) keeps every
+        // marker; its document (here the example) keeps every
         // unbound namespace on legacy-governed-v1, and every binding as it was.
         let upgraded = set();
         assert_eq!(upgraded.installation(), InstallationMarker::Unmarked);
@@ -3285,7 +3260,7 @@ namespaces:
         }
     }
 
-    /// THE BOUND MARKER (PROD-16.1 security review): honoured only beside the
+    /// THE BOUND MARKER: honoured only beside the
     /// trust entry the identity hook made in the same fresh-install run. Each
     /// row below breaks ONE binding and must read unmarked.
     #[test]
@@ -3427,8 +3402,8 @@ namespaces:
         }
     }
 
-    /// THE OLDER READER, frozen: `PolicySetDocument` exactly as PLAT-19.2
-    /// shipped it. A document carrying `defaultMode` must be REFUSED by it —
+    /// THE OLDER READER, frozen: `PolicySetDocument` exactly as it was before
+    /// `defaultMode`. A document carrying `defaultMode` must be REFUSED by it:
     /// an older controller or console reached by rollback refuses to start
     /// rather than run every unbound namespace on a default it cannot know
     /// (fail closed, never open).
@@ -3494,7 +3469,7 @@ namespaces:
 
     #[test]
     fn the_set_digest_names_the_unbound_default_only_when_it_is_not_legacy() {
-        // An install whose unbound namespaces are legacy keeps the PLAT-19.2
+        // An install whose unbound namespaces are legacy keeps its earlier
         // digest, computed here by the old formula.
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -3527,10 +3502,6 @@ namespaces:
             "confirm is confirm, whatever decided it"
         );
     }
-
-    // ------------------------------------------------------------------
-    // Two-person approval in the console
-    // ------------------------------------------------------------------
 
     const TWO_PERSON_DOC: &str = "policies:
   - name: prod-pair
@@ -3652,7 +3623,8 @@ namespaces:
         }
     }
 
-    /// THE OLDER RUNNER, frozen: `Snapshot` exactly as PROD-16.1 shipped it.
+    /// THE OLDER RUNNER, frozen: `Snapshot` exactly as it was before
+    /// `approverSignature`.
     /// It refuses a two-person snapshot (an unknown field) — it never runs
     /// one as a personal-key policy — and still reads every other snapshot.
     #[test]
@@ -3765,7 +3737,8 @@ namespaces:
     }
 
     /// THE OLDER CONTROLLER AND CONSOLE, frozen: the policy entry exactly as
-    /// PROD-16.1 shipped it. A document that says `approverSignature` is
+    /// it was before `approverSignature`. A document that says
+    /// `approverSignature` is
     /// refused at start (fail closed), and so is `mode: two-person`, which
     /// that build refused by name.
     #[test]
@@ -4030,7 +4003,7 @@ namespaces:
         assert!(RestoreAuthorization::from_bytes(&newer_request.to_bytes()).is_ok());
     }
 
-    /// THE OLDER READER, frozen: the document exactly as PROD-15.1 shipped it
+    /// THE OLDER READER, frozen: the document exactly as a 2.1.0 reader had it
     /// (2.1.0's fields, `deny_unknown_fields`). It refuses every 2.2.0
     /// document this build writes — each carries `approver` — and still reads
     /// a 2.0.0 and a 2.1.0 one.
@@ -4390,7 +4363,8 @@ namespaces:
         }
     }
 
-    /// **THE COMBINATION WITH PROD-15.1.** An original-name restore approved
+    /// **THE COMBINATION WITH THE ORIGINAL-NAME RESTORE.** An original-name
+    /// restore approved
     /// by a second person carries the subject and the approver, at 2.2.0; the
     /// typed names of a one-person confirmation are refused on it, as on
     /// every `Governed` document.
@@ -4511,7 +4485,7 @@ namespaces:
         );
     }
 
-    /// **THE APPROVAL TABLE, ROW BY ROW** (the coordinator's addition 4).
+    /// **THE APPROVAL TABLE, ROW BY ROW.**
     /// Every `(mode, approverSignature)` pair is one of three routes or is
     /// refused; every route says which usage authorises, whether an approver
     /// is still awaited, which console may request and which may approve,
@@ -4638,7 +4612,7 @@ namespaces:
         }
     }
 
-    /// **NO FABRICATED TIME** (the coordinator's addition 3). The approver
+    /// **NO FABRICATED TIME.** The approver
     /// and the instant they approved are taken out of a document by ONE
     /// function, which refuses by name when either is missing: an approval
     /// time is never the request's time under another name.
@@ -4679,7 +4653,7 @@ namespaces:
     }
 
     /// **REFUSAL TEXT CARRIES NOTHING A REQUESTER CHOSE, UNBOUNDED OR AS IT
-    /// IS** (the coordinator's addition 5). An issuer and a subject are
+    /// IS.** An issuer and a subject are
     /// attacker-chosen strings: in a sentence they are quoted, cut at
     /// [`MAX_SHOWN_CHARS`] and written in visible ASCII, so they cannot start
     /// a line, end a quotation, hide a character or grow a message.

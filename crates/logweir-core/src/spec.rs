@@ -2,35 +2,28 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// **Interface I20's canonical name for this document.** `RestoreSpec` is what
-/// all new code and every producer of `Restore.spec.planBytes` uses;
-/// `DrillSpec` is the same type under its tag-0 name, kept valid so every
-/// checked-in reference keeps compiling.
+/// **The canonical name for this document.** `RestoreSpec` is what all new code
+/// and every producer of `Restore.spec.planBytes` uses; `DrillSpec` is the same
+/// type under its older name.
 ///
-/// An ALIAS and not a new type, deliberately: spec §6.1 amendment 4 says "the
-/// restore plan document has ONE grammar, and it is the runner's
-/// `restore.yaml`", and two types would be two grammars the moment one of them
-/// grew a field. `crates/logweir/tests/restore_mode.rs::
-/// restore_spec_is_the_canonical_name` asserts `serde_yaml::from_str` accepts
-/// the same bytes under both names, so neither can drift from the other.
+/// An ALIAS and not a new type, deliberately: the restore plan document has ONE
+/// grammar, the runner's `restore.yaml`, and two types would be two grammars
+/// the moment one grew a field.
+/// `crates/logweir/tests/restore_mode.rs::restore_spec_is_the_canonical_name`
+/// asserts both names accept the same bytes.
 ///
-/// It is NOT `RestoreSpecBlock`. That is the nested `{point_in_time}` block
-/// INSIDE this document (Task 9), reached as `RestoreSpec::restore`, and it is
-/// not a synonym for the document.
+/// It is NOT `RestoreSpecBlock`, the nested `{point_in_time}` block INSIDE this
+/// document (`RestoreSpec::restore`).
 pub type RestoreSpec = DrillSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrillSpec {
-    /// This drill's own stable identity, per ruling **R-D**. It named the
-    /// drill's PagerDuty incident until the drill's notification post was
-    /// withdrawn; it is still part of the plan grammar.
+    /// This drill's own stable identity. It named the drill's PagerDuty
+    /// incident until the drill's notification post was withdrawn; it is still
+    /// part of the plan grammar.
     ///
     /// Optional, so every spec written before this field existed still parses.
-    ///
-    /// It is NOT `drill_id`. An artifact-side identity that travels ON the
-    /// scorecard is backlog T1-8, assigned to decision O16 with default *not
-    /// funded*; this field is the interim, spec-side half and is deliberately
-    /// never written to a scorecard (that would be a GC12 format change).
+    /// It is never written to a scorecard (that would be a format change).
     #[serde(default)]
     pub name: Option<String>,
     pub source: SourceSpec,
@@ -59,23 +52,20 @@ pub struct DrillSpec {
     pub notifications: Notifications,
 }
 
-/// Spec §3.2 `Restore.spec`'s restore block — the recovery POINT, which is the
-/// half of the window every spec states, and the optional replay
-/// selection: an inclusive window START and per-topic partition subsets.
+/// `Restore.spec`'s restore block: the recovery POINT, which is the half of the
+/// window every spec states, and the optional replay selection: an inclusive
+/// window START and per-topic partition subsets.
 ///
-/// # The window start: absent is the archive's floor (guard G-WIN, amended)
+/// # The window start: absent is the archive's floor (guard G-WIN)
 ///
-/// Spec §6.1 H7: the window is a closed interval and, by default, the spec
-/// binds its **start** to the archive, not to a field. `RestorePlan.time_window.0`
-/// is then the archive set's earliest covered timestamp as recorded in the
-/// manifest (`crate::engine::WindowFloorSource::ArchiveManifest`). What guard
-/// **G-WIN** exists to refuse is a start that is INHERITED SILENTLY: a restore
-/// that took a later start from somewhere nobody approved loses everything
-/// before it, while phase 7 reconciles only the *sampled* records and the
-/// scorecard says pass.
+/// The window is a closed interval and, by default, its **start** is the
+/// archive set's earliest covered timestamp as the manifest records it
+/// (`crate::engine::WindowFloorSource::ArchiveManifest`). Guard **G-WIN**
+/// refuses a start that is INHERITED SILENTLY: a restore that took a later
+/// start from somewhere nobody approved loses everything before it, while phase
+/// 7 reconciles only the *sampled* records and the scorecard says pass.
 ///
-/// PROD-11.1's recorded amendment (`docs/to-do/decisions/PROD-11.1-replay-selection.md`
-/// §2) admits ONE stated start, [`RestoreSpecBlock::window_start`]: it is in
+/// ONE stated start is admitted, [`RestoreSpecBlock::window_start`]: it is in
 /// the plan bytes (inside `plan_hash`, so an approver saw it), the plan says so
 /// (`WindowFloorSource::InheritedFromSpec`), it is never earlier than the
 /// archive's coverage (refused, never silently widened), phase 5 re-derives it
@@ -83,29 +73,26 @@ pub struct DrillSpec {
 /// (`source.selection`, format 1.7.0).
 ///
 /// `point_in_time` is the window's END when it is present, and
-/// `sample.window_end` when it is absent — which preserves every existing
-/// drill's behaviour for the end of the window.
+/// `sample.window_end` when it is absent.
 ///
 /// # The wire form of a stated start: `point_in_time: "<start>/<end>"`
 ///
 /// A start is written INSIDE `restore.point_in_time`, as an ISO 8601 interval
 /// of two RFC 3339 instants (`"2026-09-07T13:00:00Z/2026-09-07T14:05:00Z"`),
-/// never as a key of its own. That is deliberate (the PROD-11.1 review's M2):
-/// every runner, controller and preflight built before PROD-11.1 reads
-/// `point_in_time` as one RFC 3339 instant, so it REFUSES the interval at
-/// parse ("drill spec does not parse", exit 1, before any client exists)
-/// instead of ignoring an unknown key and restoring more than the approved
-/// window. A `restore.window_start` key is refused at parse for the same
-/// reason: a key an older build would ignore cannot carry a narrowing. A plan
-/// that states no start keeps the instant form byte for byte.
+/// never as a key of its own: a runner that reads `point_in_time` as one
+/// instant REFUSES the interval at parse ("drill spec does not parse", exit 1,
+/// before any client exists) instead of ignoring an unknown key and restoring
+/// more than the approved window. A `restore.window_start` key is refused at
+/// parse for the same reason. A plan that states no start keeps the instant
+/// form byte for byte.
 ///
 /// # Partition subsets ride on the same mechanism
 ///
-/// `restore.partitions` IS a key of its own, which a runner built before
-/// PROD-11.1 ignores. So a plan stating one must write its point in time in an
-/// interval form — `"<start>/<end>"`, or `"../<end>"` when it states no start
-/// (ISO 8601's open start: from the archive's floor) — and every older runner
-/// refuses the plan at parse instead of restoring every partition
+/// `restore.partitions` IS a key of its own, which an older runner ignores. So
+/// a plan stating one must write its point in time in an interval form
+/// (`"<start>/<end>"`, or `"../<end>"` when it states no start: ISO 8601's open
+/// start, from the archive's floor), and every older runner refuses the plan at
+/// parse instead of restoring every partition
 /// ([`RestoreSpecBlock::partitions`]).
 ///
 /// # It is INCLUSIVE, and its receipt twin is not
@@ -128,19 +115,19 @@ pub struct RestoreSpecBlock {
     /// Which clock this plan accepts for its time selection over a
     /// `LogAppendTime` source topic.
     ///
-    /// The archive holds each record's PRODUCER timestamp — the pinned engine
+    /// The archive holds each record's PRODUCER timestamp: the pinned engine
     /// reads a batch's first timestamp plus each record's delta and discards
     /// the batch's max timestamp, which is the only place a broker writes
-    /// `LogAppendTime` (PROD-01.1 S3) — so every selection by time reads
-    /// producer time. For a `CreateTime` topic that IS the topic's own clock.
-    /// For a `LogAppendTime` topic it is not: PROD-01.1 restored six records
-    /// at a point in 2001 that the broker had appended in 2026, signed `pass`.
+    /// `LogAppendTime`. So every selection by time reads producer time. For a
+    /// `CreateTime` topic that IS the topic's own clock; for a `LogAppendTime`
+    /// topic it is not, and a point in time can select records the broker
+    /// appended years later.
     ///
-    /// ABSENT — every plan written before FX-8 — a time selection over a topic
-    /// whose recorded timestamp type is `LogAppendTime` is refused before any
-    /// target is created, `PointInTimeByProducerTime`
-    /// (`crate::time_basis::decide`). `producerTime` accepts it: the restore
-    /// runs and the signed scorecard says so (`source.time_basis`).
+    /// ABSENT, a time selection over a topic whose recorded timestamp type is
+    /// `LogAppendTime` is refused before any target is created,
+    /// `PointInTimeByProducerTime` (`crate::time_basis::decide`).
+    /// `producerTime` accepts it: the restore runs and the signed scorecard
+    /// says so (`source.time_basis`).
     ///
     /// INSIDE THE PLAN BYTES, so inside `plan_hash`: an approval minted over a
     /// plan without it does not authorise the same plan with it, and the
@@ -158,25 +145,25 @@ pub struct RestoreSpecBlock {
     /// wire it is the first half of `point_in_time: "<start>/<end>"` (above);
     /// it is never a key of its own.
     ///
-    /// ABSENT — every plan written before PROD-11.1 — the start is the archive
-    /// set's floor, exactly as before (guard G-WIN). PRESENT, it must not be
-    /// earlier than that floor: a start the archive does not cover is REFUSED,
-    /// exit 3, naming both instants, and is never moved to the floor (that
-    /// would silently widen the selection the approver read). It must also be
-    /// earlier than the window's end. It is a time selection, so FX-8's
-    /// `restore.time_basis` rule applies to it as it does to `point_in_time`.
+    /// ABSENT, the start is the archive set's floor (guard G-WIN). PRESENT, it
+    /// must not be earlier than that floor: a start the archive does not cover
+    /// is REFUSED, exit 3, naming both instants, and is never moved to the
+    /// floor (that would silently widen the selection the approver read). It
+    /// must also be earlier than the window's end. It is a time selection, so
+    /// the `restore.time_basis` rule applies to it as it does to
+    /// `point_in_time`.
     /// Present only beside a `point_in_time`: the interval states both ends.
     pub window_start: Option<DateTime<Utc>>,
-    /// **PROD-11.1b (owner decision OD-9 (a)).** Per-topic partition subsets,
+    /// Per-topic partition subsets,
     /// `{topic: [partition, …]}`: each named topic restores ONLY the listed
     /// partitions; a selected topic not named restores every partition. A run
     /// that states one signs scorecard format **2.0.0**, which every reader
     /// before it refuses as an unsupported major instead of reading it as a
     /// full restore.
     ///
-    /// **Only beside the interval form of `point_in_time`** (the PROD-11.1
-    /// record §6, "the residual"): a runner built before PROD-11.1 ignores an
-    /// unknown `partitions` key and would restore EVERY partition of the plan
+    /// **Only beside the interval form of `point_in_time`**: an older runner
+    /// ignores an unknown `partitions` key and would restore EVERY partition of
+    /// the plan
     /// an approver narrowed. So a plan stating a subset writes its point in
     /// time as `"<start>/<end>"`, or `"../<end>"` (an ISO 8601 interval with an
     /// open start: from the archive's floor), which no older runner can parse:
@@ -380,7 +367,7 @@ impl Serialize for RestoreSpecBlock {
 impl RestoreSpecBlock {
     /// `true` when the plan states no replay selection of its own: no window
     /// start and no partition subset. Such a plan is restored, verified and
-    /// signed exactly as every plan before PROD-11.1.
+    /// signed exactly as a plan written before the replay selection existed.
     #[must_use]
     pub fn selects_everything(&self) -> bool {
         self.window_start.is_none() && self.partitions.is_empty()
@@ -392,8 +379,7 @@ impl RestoreSpecBlock {
 /// [`Anchor`] rule).
 ///
 /// One value today. A future `appendTime` (selection by the broker's own
-/// clock) needs an archive that keeps it, which is PROD-00.3c, not a plan
-/// field.
+/// clock) needs an archive that keeps it, not a plan field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TimeBasis {
@@ -430,25 +416,13 @@ pub struct Notifications {
     #[serde(default)]
     pub pagerduty_routing_key: Option<String>,
     /// PagerDuty's Events v2 enqueue endpoint. `None` means the US default,
-    /// `crate::…::PAGERDUTY_US_ENDPOINT` in the `logweir` crate.
+    /// `crate::…::PAGERDUTY_US_ENDPOINT` in the `logweir` crate; the EU value
+    /// is `https://events.eu.pagerduty.com/v2/enqueue`.
     ///
-    /// This existed as a string LITERAL in the POST, so an adopter whose
-    /// PagerDuty account is on the EU service region posted every event into a
-    /// region that does not hold their account, got a non-2xx, and the failure
-    /// was swallowed into a warning. The EU value is
-    /// `https://events.eu.pagerduty.com/v2/enqueue`.
-    ///
-    /// NOT A SECRET — but FREE-FORM ADOPTER INPUT, which is not the same
-    /// thing, and fix round 1 (finding F1) corrects the conclusion that was
-    /// drawn from it here. This field was logged and `Debug`-printed in full
-    /// on the argument that "redacting it would reproduce the defect the field
-    /// exists to fix". `redact_url` refutes that: it keeps `scheme://host/…`,
-    /// which IS the whole diagnostic — the region — and drops the userinfo,
-    /// path and query, which are exactly where an adopter who pastes a signed
-    /// or tokenised URL puts a credential. A `?token=…` or a `user:pass@` in
-    /// this field reached a WARN line and any `{:?}` of the spec. That was a
-    /// per-sink exemption from the rule the three fields above obey, and a
-    /// per-sink exemption is how the next credential reaches a log.
+    /// NOT A SECRET, but FREE-FORM ADOPTER INPUT: it is logged and
+    /// `Debug`-printed only through `redact_url`, which keeps `scheme://host/…`
+    /// (the region, the whole diagnostic) and drops the userinfo, path and
+    /// query, where a pasted signed or tokenised URL carries a credential.
     ///
     /// Only `https://` is accepted; anything else is refused before a request
     /// is made, because the routing key travels in the request BODY and
@@ -494,7 +468,7 @@ impl std::fmt::Debug for Notifications {
                 &self.pagerduty_routing_key.as_ref().map(|_| "***"),
             )
             // REDACTED TO `scheme://host/…`, like every sink URL that reaches
-            // a display surface (fix round 1, F1). The host is the whole
+            // a display surface. The host is the whole
             // diagnostic — it is what says US region or EU region — and the
             // tail that is dropped is the only part an adopter could have put
             // a credential in. `None` still renders as `None`: "no endpoint
@@ -511,36 +485,22 @@ impl std::fmt::Debug for Notifications {
 /// A webhook URL reduced to the part that identifies the SINK, never the part
 /// that authorises posting to it.
 ///
-/// `notifications.slack_webhook` is a `https://hooks.slack.com/services/T…/B…/…`
-/// URL, and that URL **is** a bearer credential: whoever holds it can post as
-/// the integration, with no other secret. It was logged verbatim at INFO on
-/// the success path and again on the error path, to the JSON subscriber
-/// intended for a log aggregator — while `pagerduty_routing_key`, four lines
-/// below, was deliberately never logged. The asymmetry was the tell.
-///
-/// `notifications.pagerduty_endpoint` is not a credential but IS free-form
-/// adopter input, and the same reasoning reaches the same place: the region is
-/// the diagnostic, the tail is where a token would be. Fix round 1, F1.
+/// `notifications.slack_webhook` (`https://hooks.slack.com/services/T…/B…/…`)
+/// **is** a bearer credential: whoever holds it can post as the integration.
+/// `notifications.pagerduty_endpoint` is not, but it is free-form adopter
+/// input, and the region is the diagnostic while the tail is where a token
+/// would be.
 ///
 /// Only scheme and host survive. The path, the query, the fragment and any
 /// `user:password@` userinfo are all dropped, because the secret can live in
 /// any of them (Slack puts it in the path; a signed webhook puts it in the
-/// query). An operator can still tell WHICH sink a line is about — that is the
-/// whole diagnostic value of the field — without the line being enough to use
-/// it. A URL that will not parse is reported as `<unparseable url>` rather
-/// than echoed, because "it did not look like a URL to me" is not a reason to
-/// print a secret.
+/// query). A URL that will not parse is reported as `<unparseable url>` rather
+/// than echoed.
 ///
-/// It lives HERE, in the pure core, rather than beside its first caller in
-/// `crates/logweir`, because `Notifications`' hand-written `Debug` above is a
-/// second site that has to redact and this crate cannot depend on that one.
-/// Fix round 1 (F1) moved it; `logweir::drill::phase7_verify::redact_url`
-/// re-exports it, so every caller keeps its path. Two copies of a redactor is
-/// how the two copies come to disagree about what a credential looks like.
-///
-/// It reads no clock, no file and no socket — GC1 is untouched.
-///
-/// Pinned by `crates/logweir/tests/notify.rs`.
+/// It lives in the pure core because `Notifications`' hand-written `Debug`
+/// above must redact too; `logweir::drill::phase7_verify::redact_url`
+/// re-exports it, so there is one redactor. It reads no clock, no file and no
+/// socket (GC1). Pinned by `crates/logweir/tests/notify.rs`.
 pub fn redact_url(url: &str) -> String {
     // Hand-parsed rather than pulled in as a dependency: the pure core
     // carries no URL crate, and the rule is "keep the prefix up to the first
@@ -591,18 +551,17 @@ fn latest() -> String {
 pub struct TargetSpec {
     pub bootstrap_servers: Vec<String>,
     /// How Logweir's own client AND the engine authenticate to the restore
-    /// TARGET (Task 6, interface **I1**). `#[serde(default)]` so every
-    /// checked-in spec that predates this field keeps parsing as `Plaintext`.
+    /// TARGET (interface **I1**). `#[serde(default)]` so every spec that
+    /// predates this field keeps parsing as `Plaintext`.
     ///
-    /// It is HERE and deliberately NOT on `SourceSpec` (critique A F15):
-    /// `SourceSpec` is the ARCHIVE's location — `{storage, backup, topics}`,
-    /// no `bootstrap_servers` and no broker — so an auth block on it would
-    /// ship a field nothing reads. `BackupSourceSpec`, which does name a
-    /// broker, carries its own.
+    /// It is HERE and NOT on `SourceSpec`, which is the ARCHIVE's location
+    /// (`{storage, backup, topics}`, no broker), so an auth block there would
+    /// be a field nothing reads. `BackupSourceSpec`, which does name a broker,
+    /// carries its own.
     #[serde(default)]
     pub auth: AuthSpec,
-    /// **Interface I33.** WHICH of the two restores this is (spec §6.1;
-    /// §3.1's `Drill` = `Restore` with `target.mode: scratch`).
+    /// **Interface I33.** WHICH of the two restores this is (a `Drill` is a
+    /// `Restore` with `target.mode: scratch`).
     ///
     /// `#[serde(default)]` — `Scratch` — so every checked-in spec that
     /// predates this field keeps its exact behaviour, which is what makes
@@ -743,9 +702,9 @@ impl std::fmt::Display for TargetMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TopicNaming {
     pub prefix: String,
-    /// **PROD-15.1: restore under the ORIGINAL topic names, into topics that
-    /// do not exist** — the one original-name path (OD-2; the tracker's rule
-    /// 5), and the explicit opt-in an identity mapping needs.
+    /// **Restore under the ORIGINAL topic names, into topics that do not
+    /// exist**: the one original-name path, and the explicit opt-in an identity
+    /// mapping needs.
     ///
     /// It is valid only beside `prefix: ""` in `newTopic` mode
     /// ([`crate::original_name::refuse_shape`]): the empty prefix IS the
@@ -754,7 +713,8 @@ pub struct TopicNaming {
     /// than silently restore under some other name. An empty prefix WITHOUT
     /// this block is refused exactly as before.
     ///
-    /// Optional and skipped when absent, so every plan written before PROD-15.1
+    /// Optional and skipped when absent, so every plan written before the block
+    /// existed
     /// serialises, hashes and means exactly what it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_name: Option<OriginalNameSpec>,
@@ -803,8 +763,7 @@ pub struct OriginalNameSpec {
 /// **The compact `YYYYmmddTHHMMSSZ` form is for KAFKA TOPIC NAMES ONLY.**
 /// Kafka permits `[a-zA-Z0-9._-]`, so it is legal there. Kubernetes object
 /// names are DNS-1123 and permit neither the uppercase `T`/`Z` nor a leading
-/// digit after a dot; those names use the form Task 18 defines and never this
-/// one.
+/// digit after a dot; those names use another form and never this one.
 ///
 /// A PURE function of its argument — no clock, no environment (Global
 /// Constraint 1) — so the mapped names a plan carries are a function of the
@@ -852,9 +811,8 @@ pub struct SampleSpec {
     /// detected somewhere downstream. Rotating across runs is the adopter's
     /// job; the scorecard always records which was used.
     ///
-    /// Defaults to `head` — the behaviour v0.1 actually implements end to end.
-    /// It defaulted to `random` until Task 21c ran a drill against a real
-    /// archive: see `Anchor`'s own doc comment for what that cost.
+    /// Defaults to `head`, the behaviour v0.1 implements end to end (see
+    /// `Anchor` for why).
     #[serde(default)]
     pub anchor: Anchor,
     #[serde(default)]
@@ -897,15 +855,15 @@ fn n25() -> usize {
 ///   `records_per_partition` records of each sampled partition, reconciled by
 ///   their sorted-header fingerprint; the sha256 of the segments those
 ///   records came from; and the manifest's count BOUND for the window, which
-///   reads segment first and last timestamps (PROD-01.1 S6, S9).
+///   reads segment first and last timestamps.
 /// - **`Complete`** — every archived segment of every partition of every
 ///   restored topic is read, its sha256 checked against the manifest and its
 ///   records decoded; the expected output is the archived records whose OWN
 ///   timestamp is inside the restore window, independent of the engine's
 ///   first/last-timestamp segment selection; every restored record is read
 ///   back and compared with it by `x-original-offset` — content (with header
-///   order), count, duplicates and order. The contract is
-///   `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.
+///   order), count, duplicates and order. The signed block is described in
+///   `docs/formats/drill-scorecard.md`, *`integrity.verification`*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Coverage {
@@ -936,54 +894,30 @@ impl Coverage {
 ///
 /// # Why this is an enum, and why `Head` is the default
 ///
-/// It was a free-form `String` defaulting to `"random"` until Task 21c. Two
-/// consequences, both measured against a live cluster and a real archive:
+/// Phase 7 reads the target's FIRST `records_per_partition` records
+/// (`consume_range(mapped, partition, 0, count)`, a drill's destination being a
+/// freshly created topic), so phase 4 must pick the archive's first records
+/// too: measured on a real archive, a `random` sample overlapped the read-back
+/// in 2 offsets of 25, and a byte-for-byte correct restore scored
+/// `fail-integrity`. As an enum, an unsupported spelling fails to parse instead
+/// of degrading silently.
 ///
-/// 1. **Every adopter who omitted the field got `random`**, and phase 4 honours
-///    the anchor when choosing WHICH archive records to fingerprint while
-///    `phase7_verify::verdict_for_selection` reads the target's FIRST
-///    `records_per_partition` records (`consume_range(mapped, partition, 0,
-///    count)`, because a drill's destination is a freshly created scratch
-///    topic). The two therefore sample different records. Measured on 338
-///    records per partition with 25 sampled: they overlapped in 2 offsets, and
-///    a byte-for-byte correct restore scored `records_sampled_matching:
-///    12 / 150`, `pass_rate_measured: 0.08`, `outcome: fail-integrity`. The
-///    small overlap was arithmetic coincidence, not partial success.
-/// 2. **Any unsupported spelling degraded silently to head-like behaviour**,
-///    because nothing between the spec and `select_sample` constrained the
-///    string.
+/// `Tail` and `Random` remain SPELLABLE and are REFUSED by `phase0_admit::run`
+/// with exit 3, before anything runs, for DIFFERENT reasons:
 ///
-/// The enum removes (2) outright — an unsupported value now fails to parse —
-/// and `Head` as the default removes (1) for everyone who does not ask for
-/// something else. `Tail` and `Random` remain SPELLABLE and are REFUSED by
-/// `phase0_admit::run` with exit 3, before anything runs, naming the
-/// limitation. They are refused for DIFFERENT reasons, and the distinction
-/// matters to whoever lifts the refusal:
+/// - **`Tail` is UNSOUND, not unbounded.** The last `count` records of the
+///   target are the last `count` OF THE RESTORED WINDOW, and phase 4's `Tail`
+///   selects the last `count` archive records IN THE SAMPLED WINDOW. Those
+///   coincide only if the restore wrote every in-window record contiguously
+///   with none dropped, which is exactly the property the drill exists to test.
+/// - **`Random` is both.** Reaching spread offsets means seeking the target by
+///   original offset (unsound for the same reason, and a scratch topic's
+///   offsets are window-relative) or consuming the whole span between the
+///   lowest and highest sampled offsets, the opposite of sampling.
 ///
-/// - **`Tail` is UNSOUND, not unbounded.** Reading the last `count` records of
-///   the target is perfectly bounded — phase 6 already reads the target's end
-///   offsets, so `consume_range(topic, partition, hi - count, count)` needs no
-///   new machinery. What it returns is the last `count` records OF THE RESTORED
-///   WINDOW, and phase 4's `Tail` selects the last `count` archive records IN
-///   THE SAMPLED WINDOW. Those coincide only if the restore wrote every
-///   in-window record contiguously with none dropped or filtered — which is
-///   exactly the property the drill exists to test, so it may not be assumed. A
-///   drill that assumed it would reconcile the wrong records precisely when the
-///   restore was faulty.
-/// - **`Random` is both.** Its offsets are spread across the window, so
-///   reaching them means either seeking the target by original offset (unsound
-///   for the same reason plus one more — a scratch topic's offsets are
-///   window-relative, which is why `phase7_verify::compare` reads
-///   `x-original-offset` instead of trusting positions) or consuming the whole
-///   span between the lowest and highest sampled offsets, which on a
-///   million-record partition reads the entire partition and is the opposite of
-///   what sampling is for.
-///
-/// Refusing is the honest answer until phase 7 gains a read strategy that can
-/// honour them. Note also that both lanes share `verdict_for_selection`'s one
-/// `consumed` vector — `records_restored` and the consume-only lane's "at least
-/// `claimed` records read back" obligation are computed from it — so changing
-/// the read strategy is a change to both, not to the fingerprint lane alone.
+/// Lifting either refusal changes phase 7's read strategy, and both lanes share
+/// `verdict_for_selection`'s one `consumed` vector (`records_restored` and the
+/// consume-only lane's read-back obligation), so it changes both lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Anchor {
@@ -999,8 +933,8 @@ pub enum Anchor {
 
 impl Anchor {
     /// The wire spelling, which is also what reaches `sample.anchor` in the
-    /// signed scorecard. That field stays a `String` in `logweir_core::
-    /// scorecard`: Global Constraint 12 freezes `format_version` at 1.0.0, and
+    /// signed scorecard. That field stays a `String` in
+    /// `logweir_core::scorecard`:
     /// narrowing a published field's type is not an optional addition.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1027,30 +961,17 @@ pub struct ObjectivesSpec {
     pub pass_rate: Option<f64>,
 }
 
-/// How a cluster's client authenticates. Task 2 landed the SHAPE; Task 6
-/// landed the three methods below that wire it to a client and to a rendered
-/// document (interface **I1**).
-///
-/// It landed in Task 2 rather than in Task 6 because `BackupSourceSpec`
-/// below is declared with an `auth` field, so a Task-2 implementer reading
-/// only Task 2 could not compile the type it was told to produce.
+/// How a cluster's client authenticates (interface **I1**).
 ///
 /// **No password field, at any variant.** A SCRAM secret reaches the engine
 /// through the engine's own `${VAR}` expansion of its config file
 /// [U/kafka-backup/crates/kafka-backup-cli/src/commands/config.rs:6-35] and
-/// Logweir's own client through its environment — never through a spec file
-/// an adopter commits, and never through a rendered document. `tls` is
-/// separate from the mechanism because SASL/SCRAM over PLAINTEXT and over SSL
-/// are two different `security.protocol` values for one mechanism, and an
-/// adopter with a private CA has to configure BOTH trust stores (Global
-/// Constraint 29).
-/// The default is `Plaintext`, expressed as `#[derive(Default)]` +
-/// `#[default]` rather than as the hand-written `impl Default for AuthSpec`
-/// the plan's interface block writes. The two are the same value —
-/// `AuthSpec::default() == AuthSpec::Plaintext` either way, which is what a
-/// consumer of this interface can observe — and `just lint`'s
-/// `clippy::derivable_impls` (under `-D warnings`) rejects the hand-written
-/// form. `Anchor`, forty lines up, is the same shape written the same way.
+/// Logweir's own client through its environment, never through a spec file an
+/// adopter commits, and never through a rendered document. `tls` is separate
+/// from the mechanism because SASL/SCRAM over PLAINTEXT and over SSL are two
+/// different `security.protocol` values for one mechanism, and an adopter with
+/// a private CA has to configure BOTH trust stores (Global Constraint 29). The
+/// default is `Plaintext`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum AuthSpec {
@@ -1140,11 +1061,11 @@ impl AuthSpec {
 
     /// The mode as the documents spell it: one of
     /// [`crate::connection::AUTH_MODES`] — `"plaintext"`, `"scramSha512"`,
-    /// and since PROD-01.3 `"scramSha256"`, `"plain"` and `"mtls"`.
+    /// `"scramSha256"`, `"plain"` and `"mtls"`.
     ///
     /// **These are the serde tag values of this enum, and they are the
     /// `KafkaCluster` CRD's `auth.mode` enum, byte for byte and in that
-    /// order** (Task 15b, interface **I33**). Three surfaces have to agree —
+    /// order** (interface **I33**). Three surfaces have to agree —
     /// the YAML an adopter writes, the CRD an adopter applies, and the signed
     /// documents a reader parses — so the strings are asserted equal by
     /// `crates/weirkeeper/tests/crd_shape.rs::the_crd_auth_mode_enum_and_auth_spec_agree`
@@ -1294,7 +1215,7 @@ pub struct BackupSourceSpec {
 /// each one costs if flipped). `strip_offset_headers` is the other end of the
 /// same invariant and is pinned in the RESTORE document only: it is a field of
 /// the engine's `RestoreOptions` and of nothing else, so a backup config
-/// naming it is dropped as an unknown key (Task 4 review, F-1).
+/// naming it is dropped as an unknown key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupSettings {
     #[serde(default = "zstd")]
@@ -1346,9 +1267,8 @@ pub struct AllowedClusters {
 /// The wire spelling `subject_kind` takes when the approval does not say.
 ///
 /// `Restore`, and this is a COMPATIBILITY default, not a policy one: every
-/// approval minted before Task 22 carries no `subject_kind` at all, and tag
-/// 1's only approved subject is a restore (spec §5 contains no `approv`; §16
-/// puts the second kind in tag 2). A pre-existing `approval.json` therefore
+/// approval minted before the field existed carries none, and tag 1's only
+/// approved subject is a restore. A pre-existing `approval.json` therefore
 /// keeps verifying unchanged on the runner path. The CONTROLLER makes the
 /// opposite call on purpose: `weirkeeper::controllers::approval`'s document
 /// defaults the field to `""`, so an absent field is refused by check 8 when
@@ -1384,11 +1304,11 @@ pub struct ApprovalDoc {
     /// document this workspace produces always names its kind.
     #[serde(default = "default_subject_kind")]
     pub subject_kind: String,
-    /// **PROD-15.1: the separate approval subject.** `originalName` when the
-    /// approver approved a restore under the ORIGINAL topic names
+    /// **The separate approval subject.** `originalName` when the approver
+    /// approved a restore under the ORIGINAL topic names
     /// (`logweir drill approve --approval-subject original-name`); ABSENT for
-    /// every other approval, so every document minted before PROD-15.1 — and
-    /// every ordinary one minted after it — is byte for byte what it was.
+    /// every other approval, so every ordinary document is byte for byte what
+    /// it was.
     ///
     /// INSIDE THE SIGNED BYTES, for `subject_kind`'s reason. The runner and the
     /// controller compare it with the plan in both directions
@@ -1408,10 +1328,8 @@ mod tests {
         serde_yaml::from_str(yaml)
     }
 
-    /// THE DEFAULT IS `head`. It was `random` — an anchor phase 7 cannot
-    /// reconcile — so every adopter who omitted the field got a drill that
-    /// reported a healthy backup as broken. A default must never name
-    /// behaviour the product does not have.
+    /// THE DEFAULT IS `head`: `random` is an anchor phase 7 cannot reconcile,
+    /// and a default must never name behaviour the product does not have.
     #[test]
     fn an_omitted_anchor_defaults_to_head_not_random() {
         let s = sample("window_start: 2026-08-29T00:00:00Z\nwindow_end: 2026-08-30T00:00:00Z\n")
@@ -1437,11 +1355,9 @@ mod tests {
         }
     }
 
-    /// UNSPELLABLE, not detected. `anchor` was a free-form `String`, so any
-    /// unsupported value reached `select_sample` and — before Task 21c added a
-    /// catch-all there — degraded silently to head-like behaviour. The closed
-    /// enum makes the invalid state unrepresentable, which is the same
-    /// structural move that closed phase 7's false pass.
+    /// UNSPELLABLE, not detected: an unsupported value fails to parse instead
+    /// of
+    /// reaching `select_sample`.
     #[test]
     fn an_unsupported_anchor_spelling_does_not_parse_at_all() {
         let err = sample(

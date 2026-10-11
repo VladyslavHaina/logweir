@@ -1,4 +1,4 @@
-//! Bounded, read-only Kafka probes for the check contract — D2 **W3**.
+//! Bounded, read-only Kafka probes for the check contract.
 //!
 //! # What this module is, and what it deliberately is not
 //!
@@ -9,14 +9,14 @@
 //! is the right shape for a backup or a restore, which either work or fail.
 //!
 //! A CHECK is a different question. It has a wall-clock budget it must not
-//! overrun (D2 §4.2's `timeoutSeconds`), it has to say WHY a call failed in the
+//! overrun (`timeoutSeconds`), it has to say WHY a call failed in the
 //! closed [`CheckCode`] vocabulary rather than in prose, and — the part that
 //! decides whether an operator is told the truth — it has to distinguish "the
 //! broker refused this principal" from "nothing answered in time". librdkafka
 //! reports a SASL or TLS failure through the client's ERROR CALLBACK and then
 //! lets the metadata request time out, so a reader that looks only at the
-//! call's return value reports `MetadataTimeout` for a wrong password
-//! (D2 §4.2 **[VERIFY U5]**). [`FaultLog`] is this module's answer: the
+//! call's return value reports `MetadataTimeout` for a wrong password.
+//! [`FaultLog`] is this module's answer: the
 //! callback records what it saw, and [`escalate`] lets the observed fault win
 //! over the call's own generic outcome.
 //!
@@ -25,8 +25,8 @@
 //! Every call is metadata, `DescribeConfigs`, or `CreateTopics` with
 //! [`rdkafka::admin::AdminOptions::validate_only`] set. No topic is created,
 //! altered or deleted, nothing is produced, and no consumer group is joined —
-//! [`KafkaInventory`] builds a consumer whose only use is metadata. D2 §6.7
-//! G12: preflight never creates a topic.
+//! [`KafkaInventory`] builds a consumer whose only use is metadata, and
+//! preflight never creates a topic (G12).
 //!
 //! # The layering, and the seam that is still open
 //!
@@ -53,15 +53,11 @@ use logweir_core::check_contract::{
     InventoryResult, TopicEntry, TruncationReason, TOPIC_FRAME_PREFIX, TOPIC_INVENTORY_FORMAT,
 };
 
-// ---------------------------------------------------------------------------
-// Failure
-// ---------------------------------------------------------------------------
-
 /// A check-shaped failure: a closed code and a message that has already been
 /// through [`redact`].
 ///
-/// A RAW BROKER STRING NEVER LEAVES THIS MODULE. D2 §4.2: "Raw errors are never
-/// printed, only codes plus a redacted message". librdkafka's error reasons
+/// A RAW BROKER STRING NEVER LEAVES THIS MODULE: only codes plus a redacted
+/// message. librdkafka's error reasons
 /// carry the broker list, and a SASL failure's reason has been observed to
 /// carry the mechanism and the principal; [`CheckFailure::new`] is the ONE
 /// constructor, and it redacts, so a caller cannot build one that has not been
@@ -93,10 +89,6 @@ impl std::fmt::Display for CheckFailure {
 }
 
 impl std::error::Error for CheckFailure {}
-
-// ---------------------------------------------------------------------------
-// The fault log — D2 §4.2 [VERIFY U5]
-// ---------------------------------------------------------------------------
 
 /// How strongly an observed fault outranks the outcome of the call it happened
 /// during. Higher wins.
@@ -265,10 +257,6 @@ impl FaultLog {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The probe seam
-// ---------------------------------------------------------------------------
-
 /// What a targeted metadata request said about one name.
 ///
 /// Four answers and no fifth, because the broker gives exactly these: metadata
@@ -294,17 +282,11 @@ impl TopicPresence {
     /// The answer a per-topic metadata error carries — **pure**, and the only
     /// place that decision is made.
     ///
-    /// # Why this is a function and not three arms inside `describe_topic`
-    ///
-    /// The `TopicAuthorizationFailed` arm is signal (ii) of D2 §5.4: it is the
-    /// ONLY thing that turns an ACL-limited principal into visibility
-    /// `limited` rather than `unknown`, and "permission-limited" is a named
-    /// PLAT-09.1 distinguishable outcome. Inside `describe_topic` it was
-    /// reachable only from a real broker with real ACLs, which the compose
-    /// stack does not have — an independent review planted
-    /// `TopicAuthorizationFailed => Unknown` there and it **survived the whole
-    /// suite**. A regression in that direction reports an ACL-restricted
-    /// cluster as merely unknown, which is the softer and wrong answer.
+    /// The `TopicAuthorizationFailed` arm is the ONLY thing that turns an
+    /// ACL-limited principal into visibility `limited` rather than `unknown`.
+    /// The compose stack has no ACLs, so the rule lives here, where a unit test
+    /// reaches it; reporting an ACL-restricted cluster as merely unknown is the
+    /// softer and wrong answer.
     ///
     /// Everything else — a leader election, a transient broker state, a code
     /// this build does not model — is [`TopicPresence::Unknown`] and never
@@ -319,7 +301,7 @@ impl TopicPresence {
         }
     }
 
-    /// FX-4, T13: the code an EMPTY DescribeConfigs answer for this topic
+    /// The code an EMPTY DescribeConfigs answer for this topic
     /// stands for, given what the same principal's metadata said — **pure**,
     /// the inventory's twin of `crate::reader::empty_topic_config_answer`.
     ///
@@ -368,7 +350,7 @@ pub struct ListedTopic {
 /// One all-topics metadata read.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listing {
-    /// `metadata.brokers.len()`. D2 §6.3's `connection.authenticated` fact.
+    /// `metadata.brokers.len()`: the `connection.authenticated` fact.
     pub broker_count: u32,
     /// Every entry the broker named, in the order it named them.
     pub topics: Vec<ListedTopic>,
@@ -388,9 +370,7 @@ pub struct TopicCreateOutcome {
 /// The bounded, read-only broker surface a check needs.
 ///
 /// A TRAIT AND NOT A STRUCT, so every rule in [`collect`] is testable against a
-/// fake with no socket (`crates/logweir/tests/no_network_in_unit_tests.rs`), and
-/// so the runner (D2 W4) can be written against the seam before PLAT-07.1's
-/// `rdkafka_reader.rs` edit lands.
+/// fake with no socket (`crates/logweir/tests/no_network_in_unit_tests.rs`).
 ///
 /// **Every method is time-bounded by the implementation**, not by the caller:
 /// the timeout belongs to the client that issues the request, and a trait whose
@@ -409,7 +389,7 @@ pub trait InventoryProbe {
     /// [`CheckFailure`] with a Kafka code.
     fn list_topics(&self) -> Result<Listing, CheckFailure>;
 
-    /// Metadata for ONE name — D2 §5.2 step 5, the probe that can distinguish
+    /// Metadata for ONE name: the probe that can distinguish
     /// "not authorized" from "absent".
     ///
     /// # Errors
@@ -424,14 +404,14 @@ pub trait InventoryProbe {
     /// [`CheckFailure`] with a Kafka code.
     fn topic_configs(&self, name: &str) -> Result<BTreeMap<String, String>, CheckFailure>;
 
-    /// `DescribeConfigs` on the first broker metadata names — D2 §6.3's
+    /// `DescribeConfigs` on the first broker metadata names, for
     /// `target.timestampBound`, whose unknown code is `BrokerConfigsNotReadable`.
     ///
     /// # Errors
     /// [`CheckFailure`] with a Kafka code.
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, CheckFailure>;
 
-    /// `CreateTopics` with `validate_only = true` — D2 §6.7(b).
+    /// `CreateTopics` with `validate_only = true`.
     ///
     /// **This never creates a topic.** An implementation that dropped the flag
     /// would create every mapped target topic of a restore during its
@@ -455,7 +435,7 @@ pub trait InventoryProbe {
     /// dials, waits and reads inside it, and does not start with none left.
     ///
     /// The DEFAULT observes nothing and says so, so a probe that does not
-    /// implement it (every test double written before PROD-01.2) can only
+    /// implement it (a test double) can only
     /// leave a capability row `unknown`, never `ready`.
     ///
     /// # Errors
@@ -475,16 +455,12 @@ pub trait InventoryProbe {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Timeouts
-// ---------------------------------------------------------------------------
-
-/// The per-call timeout for a targeted metadata request — D2 §5.2 step 5's
-/// "one name at a time with a 2 s timeout".
+/// The per-call timeout for a targeted metadata request: one name at a
+/// time with a 2 s timeout.
 pub const TARGETED_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The fraction of a check's whole budget the targeted expected-topic probe may
-/// spend — D2 §5.2 step 5.
+/// The fraction of a check's whole budget the targeted expected-topic probe
+/// may spend.
 pub const TARGETED_BUDGET_NUMERATOR: u32 = 2;
 /// The denominator of [`TARGETED_BUDGET_NUMERATOR`] (40 % = 2/5).
 pub const TARGETED_BUDGET_DENOMINATOR: u32 = 5;
@@ -540,10 +516,6 @@ impl Default for ProbeTimeouts {
         Self::for_budget(Duration::from_secs(120))
     }
 }
-
-// ---------------------------------------------------------------------------
-// The inventory algorithm (pure)
-// ---------------------------------------------------------------------------
 
 /// What [`collect`] was asked for — the Kafka-side projection of
 /// `logweir_core::check_contract::TopicInventoryRequest`.
@@ -605,7 +577,7 @@ pub fn relay_cost(entry: &TopicEntry) -> u64 {
 
 /// Build the inventory from a listing plus the answers to the targeted probes.
 ///
-/// PURE, and the whole of D2 §5.2 steps 4, 6 and 7 that is not I/O:
+/// PURE, and the whole of the inventory that is not I/O:
 ///
 /// 1. every listed entry becomes a [`TopicEntry`], carrying its per-entry error
 ///    as `error:<Code>` and its `internal` flag from the `__` rule;
@@ -747,7 +719,7 @@ pub fn assemble(
     Inventory { entries, result }
 }
 
-/// Run one `topicInventory` against a probe — D2 §5.2's runner half.
+/// Run one `topicInventory` against a probe: the runner half.
 ///
 /// `targeted_budget` is the WALL-CLOCK ceiling on step 5 as a whole
 /// ([`ProbeTimeouts::targeted_budget`]). Once it is spent, every remaining
@@ -789,10 +761,6 @@ pub fn collect(
     Ok(inventory)
 }
 
-// ---------------------------------------------------------------------------
-// The rdkafka half
-// ---------------------------------------------------------------------------
-
 #[cfg(feature = "client")]
 mod client {
     use super::{
@@ -815,13 +783,12 @@ mod client {
     /// rdkafka's configuration map, re-exported for the same reason: a
     /// `ClientConfig` is a map until `create()` is called, so a test can read
     /// the `ssl.ca.location` and `ssl.endpoint.identification.algorithm` a
-    /// check would dial with and open no socket. W4 needs the same path to
-    /// assert what its runner sends.
+    /// check would dial with and open no socket.
     pub use rdkafka::config::ClientConfig;
 
     /// The `client.id` every check connection announces.
     ///
-    /// D2 §5.2 step 1. DISTINCT FROM THE DRILL'S `logweir-drill`, so a broker
+    /// DISTINCT FROM THE DRILL'S `logweir-drill`, so a broker
     /// operator reading their own logs can tell a read-only check from a run
     /// that moves data.
     pub const CHECK_CLIENT_ID: &str = "logweir-check";
@@ -845,7 +812,7 @@ mod client {
     /// * **`Authentication` and `SaslAuthenticationFailed` are one code.** The
     ///   first is librdkafka's local "the handshake did not complete", the
     ///   second is the broker's own refusal; an operator's next action is the
-    ///   same for both and D2 §4.2 gives them one spelling.
+    ///   same for both, so they have one spelling.
     /// * **`SSL` splits on the reason text, and only on a whitelist of
     ///   fragments.** A certificate the client will not trust
     ///   (`TlsTrustFailed`) and a handshake that failed for any other reason
@@ -885,7 +852,7 @@ mod client {
             C::BrokerTransportFailure | C::AllBrokersDown | C::Resolve | C::BrokerDestroy => {
                 CheckCode::BrokerUnreachable
             }
-            // NEVER A READY CODE. D2 §4.2: unknown is the generic failure.
+            // NEVER A READY CODE: unknown is the generic failure.
             _ => CheckCode::BrokerUnreachable,
         }
     }
@@ -893,7 +860,7 @@ mod client {
     /// Every [`CheckCode`] [`classify_error_code`] can return, **derived by
     /// sweeping librdkafka's own error-code space** rather than listed.
     ///
-    /// `crates/logweir-kafka/tests/inventory.rs` computes D2 §5.5's worst-case
+    /// `crates/logweir-kafka/tests/inventory.rs` computes the worst-case
     /// relayed line from this set. A hand-written list would let a ninth,
     /// longer code be added to the classifier without moving the arithmetic
     /// that the relay budget is built on — which is the quiet invalidation the
@@ -943,11 +910,10 @@ mod client {
 
     /// The code one entry of a validate-only `CreateTopics` response carries.
     ///
-    /// D2 §6.3's `target.topicCreate` row, verbatim. `TopicAlreadyExists` is
-    /// `MappedTopicExists` and not a create failure: it is the SECOND answer
-    /// D2 §6.7 wants, because a broker that authorises `CREATE` reports it even
-    /// for a topic the principal may not `DESCRIBE` (**[VERIFY U2]**), which is
-    /// a collision a targeted metadata request alone could not see.
+    /// The `target.topicCreate` row. `TopicAlreadyExists` is
+    /// `MappedTopicExists` and not a create failure: a broker that authorises
+    /// `CREATE` reports it even for a topic the principal may not `DESCRIBE`, a
+    /// collision a targeted metadata request alone could not see.
     #[must_use]
     pub fn classify_create_code(code: RDKafkaErrorCode) -> CheckCode {
         use RDKafkaErrorCode as C;
@@ -969,8 +935,8 @@ mod client {
 
     /// The librdkafka client context that turns the error callback into facts.
     ///
-    /// D2 §4.2 **[VERIFY U5]**. Without it, a wrong SASL password is reported as
-    /// `MetadataTimeout` — see this module's header.
+    /// Without it, a wrong SASL password is reported as `MetadataTimeout`: see
+    /// this module's header.
     #[derive(Clone)]
     pub struct CapturingContext {
         faults: Arc<FaultLog>,
@@ -1005,42 +971,27 @@ mod client {
         pub bootstrap_servers: Vec<String>,
         /// The auth, built by the caller and never pinned here.
         ///
-        /// **THE PRIVATE CA TRAVELS ON THIS, NOT BESIDE IT.** PLAT-07.1 put the
-        /// projected trust anchor inside `AuthConfig::ScramSha512`'s
-        /// `tls_ca_file`, reached through
-        /// [`AuthConfig::with_tls_ca_file`], which REFUSES a CA on a
-        /// connection that is not TLS. A second `ca_file` field here — which
-        /// this struct used to carry — was a second place that decision could
-        /// be made, and it made the wrong one: it would have turned a
-        /// `Plaintext` connection into `SSL` because a CA happened to be
-        /// present, which is the silent transport change D-SEAMS S5 forbids.
-        /// W4 renders `ConnectionPlan::ca_file` by calling
-        /// `with_tls_ca_file`, exactly as the drill path does.
+        /// **THE PRIVATE CA TRAVELS ON THIS, NOT BESIDE IT**: inside the auth's
+        /// `tls_ca_file`, reached through [`AuthConfig::with_tls_ca_file`],
+        /// which REFUSES a CA on a connection that is not TLS. A second CA
+        /// field here would be a second place that decision could be made, and
+        /// a `Plaintext` connection must never become `SSL` because a CA
+        /// happened to be present. The runner renders `ConnectionPlan::ca_file`
+        /// through `with_tls_ca_file`, as the drill path does.
         pub auth: AuthConfig,
         /// Per-call timeouts.
         pub timeouts: ProbeTimeouts,
     }
 
-    /// The shared `ClientConfig` both handles are built from.
+    /// The shared `ClientConfig` both handles are built from:
+    /// [`RdKafkaReader::client_config`], so the check client and the drill
+    /// client derive their `security.protocol`, `sasl.*`,
+    /// `ssl.endpoint.identification.algorithm` and `ssl.ca.location` from ONE
+    /// implementation.
     ///
-    /// # THE DEFERRED SEAM, NOW CLOSED
-    ///
-    /// D2 §13.2 gave W3 a later edit that would stop this module building its
-    /// own rdkafka configuration. PLAT-07.1 has landed and extracted
-    /// [`RdKafkaReader::client_config`], so that edit is this function: the
-    /// check client and the drill client now derive their
-    /// `security.protocol`, `sasl.*`, `ssl.endpoint.identification.algorithm`
-    /// and `ssl.ca.location` from ONE implementation.
-    ///
-    /// **Why sharing it is a security property and not tidiness.** Two of
-    /// those keys are controls: hostname verification, and which trust anchor
-    /// the connection accepts. A second copy is a second place they can drift,
-    /// and the copy this replaced had already drifted — it set
-    /// `ssl.ca.location` from a field of its own, with no TLS check and no
-    /// `ssl.endpoint.identification.algorithm` at all, so a check against a
-    /// private-CA broker would have failed to verify the CA while a drill
-    /// against the same broker succeeded, and a `Plaintext` connection carrying
-    /// a CA would have been silently upgraded to `SSL`.
+    /// **A security property, not tidiness.** Two of those keys are controls
+    /// (hostname verification, and which trust anchor the connection accepts),
+    /// and a second copy is a second place they can drift.
     ///
     /// The ONE thing that is overridden afterwards is `client.id`
     /// ([`CHECK_CLIENT_ID`]), so a broker operator reading their own logs can
@@ -1165,8 +1116,7 @@ mod client {
 
         /// Serve librdkafka's event queue so the error callback actually runs.
         ///
-        /// # D2 §4.2's [VERIFY U5] was only half true, and this is the other
-        /// half
+        /// # Installing a context is not enough
         ///
         /// Installing a [`CapturingContext`] is NOT enough. In rdkafka 0.36
         /// `ClientContext::error` is invoked from
@@ -1201,45 +1151,24 @@ mod client {
         }
 
         /// Dial the consumer when nothing has yet, so the error callback has
-        /// something to report — the ADMIN half of D2 §4.2's `[VERIFY U5]`.
+        /// something to report on an admin-first failure.
         ///
-        /// [`FaultLog`]'s header has the crate-source citations: the admin
-        /// client's `CapturingContext` is never consulted in rdkafka 0.36, so
-        /// the only handle that can fill the log is the consumer, and the only
-        /// thing that makes the consumer dial is a request. On an admin-first
-        /// failure the consumer has never dialled, the log is empty, and
-        /// [`FaultLog::explain`] has nothing to escalate with — the exact
-        /// defect the drain was added to remove, surviving on the admin half.
+        /// The admin client's `CapturingContext` is never consulted in rdkafka
+        /// 0.36 ([`FaultLog`] has the citations), so only the consumer can fill
+        /// the log, and only a request makes it dial. **Bounded, and only on
+        /// the failure path**: it runs only when the log is empty, under
+        /// [`ProbeTimeouts::targeted_metadata`], and its result is discarded:
+        /// the CONNECTION ATTEMPT is what is wanted.
         ///
-        /// **Bounded, and only on the failure path.** It runs only when the log
-        /// is empty (a populated log already has the answer), under
-        /// [`ProbeTimeouts::targeted_metadata`] — two seconds by default, the
-        /// shortest timeout this struct carries — and its result is discarded:
-        /// the metadata is not wanted, the CONNECTION ATTEMPT is.
-        ///
-        /// # What it is worth, measured
-        ///
-        /// It is belt-and-braces, and saying so is more useful than implying
-        /// otherwise. MEASURED against the compose broker's SASL listener with
-        /// `validate_create_topics` as the very first call: removing this
-        /// function alone leaves
+        /// Measured against the compose broker's SASL listener with
+        /// `validate_create_topics` first, removing this alone leaves
         /// `tests/live.rs::an_admin_first_refusal_is_authentication_failed_and_not_a_timeout`
-        /// GREEN, because librdkafka 2.12 connects a consumer handle to its
-        /// bootstrap brokers eagerly at `rd_kafka_new` — so by the time a
-        /// ten-second admin call has failed, the consumer's own error callback
-        /// has already queued the refusal and [`drain_events`] serves it.
-        /// Removing the DRAIN turns the same test red
-        /// (`BrokerUnreachable`), with or without this function.
-        ///
-        /// It stays because that greenness rests on a librdkafka timing
-        /// assumption this code does not control: a shorter admin timeout, a
-        /// build that connects lazily, or a `metadata.refresh` change would
-        /// restore the empty-log case the reviewer identified, and the cost of
-        /// covering it is one skipped call on a path that has already failed.
+        /// green, because librdkafka 2.12 connects a consumer eagerly at
+        /// `rd_kafka_new`; removing [`drain_events`] turns it red. It stays
+        /// because that greenness rests on a librdkafka timing this code does
+        /// not control.
         /// `an_admin_failure_dials_the_consumer_before_it_classifies` is the
-        /// always-on guard, and
-        /// `an_admin_first_failure_has_nothing_to_escalate_until_the_consumer_has_dialled`
-        /// is the unit row for the state it removes.
+        /// always-on guard.
         ///
         /// [`drain_events`]: KafkaInventory::drain_events
         fn dial_consumer_if_silent(&self) {
@@ -1338,8 +1267,8 @@ mod client {
             match t.error() {
                 // THE THREE-WAY DECISION IS `TopicPresence::of_error`'s, not
                 // this function's: the authorization arm is unreachable from
-                // the compose stack (no ACLs), so a mutant in it survived the
-                // whole suite until the rule moved to the pure layer.
+                // the compose stack (no ACLs), so the rule lives in the pure
+                // layer, where a unit test reaches it.
                 Some(err) => Ok(TopicPresence::of_error(classify_error_code(
                     RDKafkaErrorCode::from(err),
                     "",
@@ -1357,7 +1286,7 @@ mod client {
                 &[ResourceSpecifier::Topic(name)],
                 &AdminOptions::new().request_timeout(Some(self.timeouts.describe_configs)),
                 &what,
-                // FX-4, T13: an EMPTY answer is a refused or failed read,
+                // An EMPTY answer is a refused or failed read,
                 // named from this principal's metadata for the same name —
                 // never an empty set of overrides.
                 &|| {
@@ -1394,11 +1323,10 @@ mod client {
                 &[ResourceSpecifier::Broker(broker_id)],
                 &AdminOptions::new().request_timeout(Some(self.timeouts.describe_configs)),
                 &what,
-                // FX-4, T13: Kafka answers a broker resource with no
-                // configuration only beside CLUSTER_AUTHORIZATION_FAILED (the
-                // id is this broker's own, from metadata). Read as an empty
-                // map, `target.timestampBound` reported READY: "the target
-                // declares no record-timestamp bound".
+                // Kafka answers a broker resource with no configuration only
+                // beside CLUSTER_AUTHORIZATION_FAILED (the id is this broker's
+                // own, from metadata), so an empty map is a refusal, never "the
+                // target declares no record-timestamp bound".
                 &|| {
                     self.fail(
                         CheckCode::ClusterAuthorizationFailed,
@@ -1478,7 +1406,7 @@ mod client {
         CheckFailure::new(CheckCode::ApiVersionsNotObserved, why)
     }
 
-    /// **PROD-01.2: what EVERY broker of a cluster answered ApiVersions, read
+    /// **What EVERY broker of a cluster answered ApiVersions, read
     /// off a dedicated client's own log.**
     ///
     /// `base` is the configuration a check's handles are built from
@@ -1500,7 +1428,7 @@ mod client {
     ///   4.10.0+2.12.1). Without it the handle dials one or two brokers of a
     ///   larger cluster, a different one or two from run to run.
     ///
-    /// # A whole view, or not an answer (review, M3)
+    /// # A whole view, or not an answer
     ///
     /// The handle reads the cluster's broker list from metadata, and the
     /// observation answers only when every broker on it has answered
@@ -1514,8 +1442,7 @@ mod client {
     ///
     /// One to each bootstrap address and one to each broker the cluster
     /// lists, for the length of the observation: on a three-broker cluster
-    /// with three bootstrap addresses that is six, where the first version
-    /// said "one more connection" and opened three or four. The handle is an
+    /// with three bootstrap addresses that is six. The handle is an
     /// ADMIN client, as the check's own second handle is: it has no group, so
     /// it dials no group coordinator (a consumer handle needs a `group.id`,
     /// and looks its coordinator up), and it can produce nothing. The one
@@ -1598,10 +1525,10 @@ mod client {
     }
 
     /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so
-    /// the T13 rule below is testable over constructed rdkafka results with no
+    /// the rule below is testable over constructed rdkafka results with no
     /// broker (`the_empty_describe_answer_is_never_an_empty_configuration`).
     ///
-    /// T13 (PROD-04.0 §6): rdkafka 0.36.2 hands a refused resource back as
+    /// rdkafka 0.36.2 hands a refused resource back as
     /// `Ok` with NO entries and never reads the per-resource error; a broker
     /// never answers a successful describe that way (Kafka 4.3.1
     /// `ConfigHelper.scala:54-79`, `:88-98`). So an empty resource is

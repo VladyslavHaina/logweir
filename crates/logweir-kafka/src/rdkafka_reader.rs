@@ -13,8 +13,7 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 // `BorrowedHeaders::count`/`::get` (used in `consume_range` below) are
-// provided by the `Headers` trait, not the type itself — this import isn't
-// in the brief's Step 5 listing but the code doesn't compile without it.
+// provided by the `Headers` trait, not the type itself.
 use rdkafka::message::Headers;
 use rdkafka::{Message, Offset, TopicPartitionList};
 use std::collections::BTreeMap;
@@ -22,9 +21,8 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
 
-/// **PROD-15.1 review 2, M2: how long the BROKER may take over `CreateTopics`
-/// before it answers, set explicitly BELOW the client's request timeout
-/// [`T`].**
+/// **How long the BROKER may take over `CreateTopics` before it answers, set
+/// explicitly BELOW the client's request timeout [`T`].**
 ///
 /// librdkafka's operation timeout defaults to the admin request timeout of
 /// the client configuration (`rdkafka_admin.c`, `socket.timeout.ms`, 60 s),
@@ -63,7 +61,7 @@ pub struct RdKafkaReader {
     /// The bound of one positions fetch or commit wait.
     position_bound: Duration,
     /// The bound of one admin call through `logweir-rdkafka-ffi`
-    /// (PROD-04.0b; `crate::rdkafka_admin`).
+    /// (`crate::rdkafka_admin`).
     admin_bound: Duration,
     /// The drill's own scratch-topic namespace. `TopicDeleter::delete_topics`
     /// refuses any name that does not start with this prefix, and refuses
@@ -112,11 +110,8 @@ impl RdKafkaReader {
     /// **EXTRACTED SO THE SECURITY-CRITICAL SETTINGS ARE ASSERTABLE WITHOUT A
     /// BROKER.** Two of the keys below are controls, not tuning:
     /// `ssl.endpoint.identification.algorithm` (hostname verification) and
-    /// `ssl.ca.location` (which trust anchor). While they were built inline
-    /// inside `connect`, no test could read either without opening a socket —
-    /// and a review mutant that turned hostname verification off, and one that
-    /// denied this reader the projected CA, both survived the whole suite. A
-    /// `ClientConfig` is a map until `create()` is called, so
+    /// `ssl.ca.location` (which trust anchor). A `ClientConfig` is a map until
+    /// `create()` is called, so
     /// `tests::the_tls_client_pins_hostname_verification_and_the_projected_ca`
     /// asserts them with `ClientConfig::get` and dials nothing.
     ///
@@ -246,16 +241,9 @@ impl RdKafkaReader {
 
     pub fn connect(bootstrap: &[String], auth: AuthConfig) -> Result<Self, KafkaError> {
         let base = Self::client_config(bootstrap, &auth)?;
-        // Fix round 2, nit M7: these four properties are meaningful only to
-        // a CONSUMER. Setting them on `base` and sharing `base` with the
-        // admin client's `create()` (the previous shape) made librdkafka log
-        // a `CONFWARN` for every one of them when the admin client's
-        // underlying (producer-shaped) handle was built — four lines of
-        // noise interleaved into `doctor`'s check list, and into every
-        // `drill run`'s log, on every single connection. Cloning `base` here
-        // means the admin client's `create()` below never sees these keys at
-        // all, so librdkafka has nothing to warn about — this removes the
-        // cause rather than filtering the symptom.
+        // These four properties are meaningful only to a CONSUMER. Set on a
+        // clone, so the admin client's `create()` never sees them and
+        // librdkafka logs no `CONFWARN` for each one on every connection.
         let mut consumer_cfg = base.clone();
         consumer_cfg
             .set("group.id", "logweir-canary-do-not-commit")
@@ -348,7 +336,7 @@ impl RdKafkaReader {
     ///   with no committed offset is [`PartitionPosition::NoCommittedPosition`],
     ///   never offset 0; so is every partition of an ABSENT group and of a
     ///   SHARE group (K7), so classify the group before reading meaning into
-    ///   it (PROD-04.0 §5).
+    ///   it.
     /// - A pending transactional offset commit makes the whole bounded fetch
     ///   time out: [`PositionsError::PositionsUnstable`] for a group the
     ///   caller's listing shows, [`PositionsError::NotVisibleOrUnreachable`]
@@ -388,7 +376,7 @@ impl RdKafkaReader {
     ///   the group [`CommitError::NotAuthorized`]; no coordinator within the
     ///   bound [`CommitError::NotVisibleOrUnreachable`], nothing sent.
     /// - An ABSENT group id is created by the commit as a simple classic
-    ///   group (K3): classify the target first (PROD-04.0 §4.3, §5).
+    ///   group (K3): classify the target first.
     /// - Only each position's offset is committed, with leader epoch −1 and
     ///   [`crate::positions::COMMIT_METADATA_MARKER`] as its metadata.
     /// - Any other failure is [`CommitError::Failed`] with its integer code;
@@ -547,8 +535,8 @@ impl RdKafkaReader {
 /// creation is still propagating, and nothing else: `UnknownTopicOrPartition`
 /// (the answering broker's metadata does not hold it yet) and its two
 /// client-side spellings, `LeaderNotAvailable` (no leader elected yet) and
-/// `NotLeaderForPartition` (the listed leader has not yet become one —
-/// main CI run 37753000930's failure). An authorization failure, a timeout or a
+/// `NotLeaderForPartition` (the listed leader has not yet become one). An
+/// authorization failure, a timeout or a
 /// transport error is not on the list: waiting cannot change it.
 fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
     use rdkafka::error::RDKafkaErrorCode as Code;
@@ -568,8 +556,8 @@ fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
 /// (`NotAuthorized` here is T13's inference from an EMPTY DescribeConfigs
 /// answer, never a code the broker sent); anything else (unreachable, a
 /// timeout, a client error) is final. A pure function so a unit row pins the
-/// exact set: dropping `NotAuthorized` brings PROD-00.3f's empty-answer
-/// failure back, and widening it makes a transport failure or a refused read
+/// exact set: dropping `NotAuthorized` brings back the empty-answer
+/// failure, and widening it makes a transport failure or a refused read
 /// cost `within` before the same exit.
 fn created_topic_config_settling(
     answer: Result<BTreeMap<String, String>, KafkaError>,
@@ -712,8 +700,8 @@ impl ClusterReader for RdKafkaReader {
     }
 
     /// Metadata first (the topic, every partition, every leader), then
-    /// one ListOffsets per partition through the leader, which is the read
-    /// that failed in CI run 37753000930. One attempt is two kinds of request;
+    /// one ListOffsets per partition through the leader, which can fail while
+    /// the topic propagates. One attempt is two kinds of request;
     /// [`settle`] repeats it while the answers are those of a creation in
     /// progress.
     fn await_served(
@@ -784,8 +772,7 @@ impl ClusterReader for RdKafkaReader {
     /// (rdkafka 0.36.2 does not read the per-resource error). Kafka answers a
     /// topic its metadata does not hold yet with exactly that empty list, and
     /// the metadata read that names it a moment later finds the topic
-    /// "visible": PROD-00.3f's matrix row failed so
-    /// ("DescribeConfigs answered this visible topic with no configuration").
+    /// "visible".
     /// A principal that really lacks DescribeConfigs therefore costs `within`
     /// before the same refusal is returned.
     fn created_topic_configs(
@@ -815,23 +802,19 @@ impl ClusterReader for RdKafkaReader {
             .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
         let mut out = BTreeMap::new();
         for r in res {
-            // `describe_configs` yields one `Result<_, RDKafkaErrorCode>`
-            // per resource [VERIFIED rdkafka-0.36.2/src/admin.rs:948, the
-            // alias whose Ok side is the resource-plus-entries struct at
-            // :1019]. The error is a BARE code, not the
-            // `(String, RDKafkaErrorCode)` tuple that belongs to
-            // `TopicResult`; the tuple pattern does not match and the crate
-            // does not compile. (The alias's own NAME is spelled out in
-            // `tests/reader.rs`'s
-            // `the_broker_resource_is_spelled_the_rdkafka_way`, which is why
-            // it is a file:line here.)
+            // `describe_configs` yields one `Result<_, RDKafkaErrorCode>` per
+            // resource [VERIFIED rdkafka-0.36.2/src/admin.rs:948, the alias
+            // whose Ok side is the resource-plus-entries struct at :1019]: a
+            // BARE code, not `TopicResult`'s `(String, RDKafkaErrorCode)`
+            // tuple. The alias is named only by file:line: `tests/reader.rs`'s
+            // `the_broker_resource_is_spelled_the_rdkafka_way` keeps its name
+            // out of this file.
             //
-            // **AND THAT `Err` NEVER ARRIVES (FX-4, T13).** rdkafka 0.36.2's
-            // future pushes `Ok` for every resource and never reads the
-            // per-resource error (`src/admin.rs:1121-1159`), so a DENIED topic
-            // used to come back here as an empty entry list and leave this
-            // function as `Ok({})` — "no overrides". `topic_answer` turns the
-            // empty list into the refusal it stands for.
+            // **AND THAT `Err` NEVER ARRIVES.** rdkafka 0.36.2's future pushes
+            // `Ok` for every resource and never reads the per-resource error
+            // (`src/admin.rs:1121-1159`), so a DENIED topic comes back as an
+            // empty entry list; `topic_answer` turns it into the refusal it
+            // stands for, never `Ok({})`.
             for e in self.topic_answer(topic, r)? {
                 if let Some(v) = e.value {
                     out.insert(e.name, v);
@@ -841,7 +824,7 @@ impl ClusterReader for RdKafkaReader {
         Ok(out)
     }
 
-    /// FX-4. One DescribeConfigs request for every named topic.
+    /// One DescribeConfigs request for every named topic.
     ///
     /// librdkafka returns the resources IN REQUEST ORDER — "As a convenience to
     /// the application we insert result in the same order as they were
@@ -939,10 +922,10 @@ impl ClusterReader for RdKafkaReader {
             let cfg = r.map_err(|e| {
                 KafkaError::Client(format!("DescribeConfigs on broker {broker_id}: {e}"))
             })?;
-            // FX-4, T13: an EMPTY answer is the refusal rdkafka 0.36.2 does
-            // not report (PROD-04.0 §3.8 measured it for a principal refused
-            // on the cluster). Read as `Ok({})` it made phase 0's G-TS assume
-            // the Apache default `CreateTime` and skip the timestamp bound.
+            // An EMPTY answer is the refusal rdkafka 0.36.2 does not report
+            // (measured for a principal refused on the cluster). Read as
+            // `Ok({})` it would make phase 0's G-TS assume the Apache default
+            // `CreateTime` and skip the timestamp bound.
             out.extend(Self::broker_answer(broker_id, cfg)?);
         }
         Ok(out)
@@ -1024,59 +1007,23 @@ impl ClusterReader for RdKafkaReader {
         from: i64,
         max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        // Bound the read by the partition's high watermark rather than
-        // relying on an end-of-partition ERROR to know when to stop — the
-        // previous version matched `e.to_string().contains("Broker: No more
-        // messages")` against whatever `poll()` returned on EOF, but rdkafka
-        // 0.36.2 routes `RD_KAFKA_RESP_ERR__PARTITION_EOF` to a DEDICATED
-        // variant, `KafkaError::PartitionEOF(i32)`, before it ever reaches
-        // the generic error path
-        // [VERIFIED rdkafka-0.36.2/src/consumer/base_consumer.rs's
-        // `handle_error_event`: `if rdkafka_err ==
-        // RD_KAFKA_RESP_ERR__PARTITION_EOF { ...
-        // Some(KafkaError::PartitionEOF(partition)) } else if ... else {
-        // Some(KafkaError::MessageConsumption(rdkafka_err.into())) }` — EOF
-        // is matched and returned before the generic
-        // `MessageConsumption` arm is ever reached]. That variant's
-        // `Display` is `"Partition EOF: {n}"`
-        // [VERIFIED rdkafka-0.36.2/src/error.rs:283, the `impl fmt::Display
-        // for KafkaError` block — NOT line 236's `impl fmt::Debug`, which
-        // renders the same variant as `"KafkaError (Partition EOF: {n})"`;
-        // `.to_string()` calls `Display`], a string the old guard never
-        // matched — `"Broker: No more messages"` does not appear anywhere in
-        // either impl. So every short read (the common case: `max` bigger
-        // than what remains in the partition) fell through to the generic
-        // arm below and turned an ordinary end-of-partition into a hard
-        // error that discarded every record already collected.
+        // Bound the read by the partition's high watermark rather than by an
+        // end-of-partition ERROR: rdkafka 0.36.2 routes
+        // `RD_KAFKA_RESP_ERR__PARTITION_EOF` to its own variant,
+        // `KafkaError::PartitionEOF(i32)` (`base_consumer.rs`'s
+        // `handle_error_event`), whose `Display` is `"Partition EOF: {n}"`, so
+        // a short read (`max` bigger than what remains) must not reach the
+        // generic error arm, which discards every record collected. Upstream's
+        // fetch path keys off the same `high_watermark`. The `PartitionEOF` arm
+        // below is a fallback for a watermark that shifts during the loop.
         //
-        // Bounding by the watermark up front — the same value upstream's own
-        // fetch path keys off (`kafka-backup-core/src/kafka/fetch.rs`'s
-        // `high_watermark`, read from the raw Fetch response rather than
-        // inferred from an error) — means the common short-read case never
-        // needs the error path at all; the `PartitionEOF` match below is now
-        // a defensive fallback for the rarer case where the watermark shifts
-        // between this call and the poll loop (e.g. concurrent retention).
+        // ONE `fetch_watermarks(topic, partition, ..)`, not
+        // `end_offsets(topic)`, which does a metadata fetch plus one
+        // ListOffsets per partition of the whole topic.
         //
-        // A single `fetch_watermarks(topic, partition, ..)` call, not
-        // `end_offsets(topic)`: `end_offsets` does one `fetch_metadata` PLUS
-        // one blocking `fetch_watermarks` per partition of the whole topic,
-        // then this call would have discarded every result but the one
-        // partition it asked for. A drill phase reading a P-partition topic
-        // partition-by-partition would have driven P metadata fetches and
-        // P² ListOffsets round trips for information a single call already
-        // provides directly.
-        //
-        // The error from this single-partition call cannot distinguish "the
-        // topic does not exist" from "the topic exists but this partition
-        // index does not" — Kafka's own wire protocol returns the identical
-        // `UNKNOWN_TOPIC_OR_PARTITION` code for both, so there is no basis
-        // to call this `KafkaError::TopicNotFound` (whose payload is a bare
-        // topic name everywhere else it's constructed, and whose own doc
-        // says the TOPIC does not exist — not "this specific
-        // topic:partition combination could not be resolved, cause
-        // unknown"). A generic `Client` error naming both coordinates is the
-        // honest option here, not a new variant whose semantics would need
-        // the same qualification.
+        // Its error cannot tell "no such topic" from "no such partition": Kafka
+        // returns `UNKNOWN_TOPIC_OR_PARTITION` for both, so it is a `Client`
+        // error naming both coordinates, not `TopicNotFound`.
         let (_lo, hi) = self
             .consumer
             .fetch_watermarks(topic, partition, T)
@@ -1104,18 +1051,13 @@ impl ClusterReader for RdKafkaReader {
                 // this ever fires, but a shifted watermark makes it
                 // reachable.
                 Some(Err(rdkafka::error::KafkaError::PartitionEOF(_))) => break,
-                // `auto.offset.reset=error` (set in `connect`) turns a
-                // `from` outside the log's retained range into this
-                // specific error instead of librdkafka silently reseeking
-                // to the log start or end and returning the WRONG records
-                // with no signal that it did so. It surfaces as
-                // `KafkaError::MessageConsumption` carrying this specific
-                // code, not a dedicated variant of its own
-                // [VERIFIED rdkafka-0.36.2/src/consumer/base_consumer.rs's
-                // `handle_error_event`: PARTITION_EOF and fatal errors get
-                // their own arms, everything else — including
-                // AUTO_OFFSET_RESET — falls into
-                // `KafkaError::MessageConsumption(code)`].
+                // `auto.offset.reset=error` (set in `connect`) turns a `from`
+                // outside the log's retained range into this error instead of
+                // librdkafka silently reseeking and returning the WRONG
+                // records. It is `KafkaError::MessageConsumption` carrying this
+                // code, not a variant of its own [VERIFIED
+                // rdkafka-0.36.2/src/consumer/base_consumer.rs's
+                // `handle_error_event`].
                 Some(Err(rdkafka::error::KafkaError::MessageConsumption(
                     rdkafka::error::RDKafkaErrorCode::AutoOffsetReset,
                 ))) => {
@@ -1292,13 +1234,9 @@ impl TopicDeleter for RdKafkaReader {
     /// element type used by `topic_configs` and `broker_configs`
     /// (rdkafka-0.36.2/src/admin.rs:948), whose error is a bare code.
     ///
-    /// This is the only code path in the entire product that destroys data.
-    /// The trait's contract ("never a pattern, never a prefix") describes
-    /// how a caller SPECIFIES what to delete — always exact, full names,
-    /// never a wildcard — and says nothing about what this concrete impl
-    /// may additionally refuse. It refuses two things beyond that contract,
-    /// neither of which turns deletion into a pattern-based operation:
-    /// every name must still be passed out in full, exactly as given.
+    /// This is the only code path in the entire product that destroys data. A
+    /// caller names exact, full names (the trait's contract: never a pattern,
+    /// never a prefix), and this impl additionally refuses:
     ///
     /// 1. Every name must start with the prefix set via
     ///    `RdKafkaReader::with_scratch_prefix`. Without that guard, this
@@ -1331,13 +1269,10 @@ impl TopicDeleter for RdKafkaReader {
                 })
                 .collect());
         };
-        // Names outside the configured namespace are reported as refused
-        // and never reach the broker call at all; only in-namespace names
-        // are sent to `AdminClient::delete_topics`. (Ordering note: refused
-        // entries are reported first, followed by the broker's results for
-        // the in-namespace names in the order rdkafka returned them — this
-        // impl has no unit test asserting input-order preservation, unlike
-        // `FakeDeleter` in `tests/reader.rs`, per addendum ruling A1.)
+        // Names outside the configured namespace are reported as refused and
+        // never reach the broker call; only in-namespace names are sent to
+        // `AdminClient::delete_topics`. Refused entries are reported first,
+        // then the broker's results in the order rdkafka returned them.
         let mut allowed: Vec<&str> = Vec::new();
         let mut out: Vec<(String, Result<(), String>)> = Vec::new();
         for n in names {
@@ -1398,18 +1333,13 @@ fn replication_factor_of(replica_counts: impl Iterator<Item = usize>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    //! These need the `client` feature (this whole file is gated on it) but
-    //! no broker — they pin the exact rdkafka facts `consume_range`'s FIX 1
-    //! (see its doc comment) depends on, so a future rdkafka upgrade that
-    //! silently changed either fact would fail CI instead of silently
-    //! reintroducing the original bug: every short read (`max` larger than
-    //! what remains in the partition) discarding every record already
-    //! collected. A full end-to-end short-read scenario needs a live broker
-    //! (`BorrowedMessage` has no public constructor) and is not attempted
-    //! here — see the Task 10 fix report's "unproven without a live broker"
-    //! list.
+    //! These need the `client` feature but no broker: they pin the rdkafka
+    //! facts `consume_range` depends on, so an upgrade that changed one fails
+    //! CI instead of making every short read discard the records already
+    //! collected. A full short-read scenario needs a live broker
+    //! (`BorrowedMessage` has no public constructor).
 
-    /// **PROD-01.3: librdkafka's settings for the three new modes**, with no
+    /// **librdkafka's settings for the three newer modes**, with no
     /// socket. Each row is the property its mutant breaks: SCRAM-SHA-256's
     /// two-hyphen spelling (the ENGINE writes one), PLAIN only as `SASL_SSL`
     /// with hostname verification pinned, and mTLS as `SSL` with the two FILE
@@ -1492,7 +1422,7 @@ mod tests {
         .is_err());
     }
 
-    /// **PROD-01.3: the transport refusals at the ONE construction site, and
+    /// **The transport refusals at the ONE construction site, and
     /// no password in `Debug` for either new SASL arm.**
     #[test]
     fn from_spec_refuses_plain_and_mtls_without_tls_and_debug_redacts() {
@@ -1529,7 +1459,7 @@ mod tests {
         }
     }
 
-    /// L5 (PROD-05.1 fix round): the SMALLEST replica count is the factor —
+    /// The SMALLEST replica count is the factor:
     /// a partition mid-reassignment (four replicas listed while the topic's
     /// factor is three) must not raise it, and an RF-1 partition beside RF-3
     /// ones is what a restore can count on. No partitions, or a zero, is NOT
@@ -1545,14 +1475,8 @@ mod tests {
     }
 
     /// **THE TLS CLIENT PINS HOSTNAME VERIFICATION AND TRUSTS THE PROJECTED
-    /// CA** — PLAT-07.1 review findings H1 and H2.
-    ///
-    /// Both are CONTROLS and both were unguarded: a review planted
-    /// `ssl.endpoint.identification.algorithm = "none"` and a mutant that
-    /// denied this reader the projected CA, and each survived all 725 rows of
-    /// `-p logweir -p logweir-kafka`. A librdkafka upgrade, a merge resolution
-    /// or a refactor could turn either off and CI would say nothing; the only
-    /// signal would be a live TLS run nobody does per commit.
+    /// CA.** Both are CONTROLS, and a librdkafka upgrade, a merge resolution or
+    /// a refactor could turn either off with no other test failing.
     ///
     /// `https` is librdkafka 2.x's own default, so this pin is not a change of
     /// behaviour — it is the statement that a future default change cannot
@@ -1574,7 +1498,7 @@ mod tests {
             tls_ca_file: ca.map(str::to_string),
         };
 
-        // H1 — TLS, with and without a private CA: hostname verification is
+        // TLS, with and without a private CA: hostname verification is
         // `https` in BOTH, because a public-root connection needs it just as
         // much as a private-CA one.
         for ca in [None, Some(CA)] {
@@ -1589,7 +1513,7 @@ mod tests {
             );
         }
 
-        // H2 — the CA the controller projected reaches librdkafka, as the
+        // The CA the controller projected reaches librdkafka, as the
         // path and nothing derived from it. With `ssl.ca.location` set,
         // librdkafka skips the default verify paths, so the connection trusts
         // exactly this file.
@@ -1643,12 +1567,9 @@ mod tests {
         // depends on: this is a real, matchable variant, not folded into
         // `MessageConsumption`.
         assert!(matches!(eof, RdErr::PartitionEOF(_)));
-        // The fact that made the OLD guard dead code: `.to_string()` (what
-        // `e.to_string().contains(...)` read) calls `Display`, and
-        // `Display`'s text for this variant is "Partition EOF: {n}" — the
-        // string "Broker: No more messages" the old code searched for never
-        // appears here, in `Debug`'s "KafkaError (Partition EOF: {n})", or
-        // anywhere else in rdkafka 0.36.2's error text for this variant.
+        // `.to_string()` calls `Display`, whose text for this variant is
+        // "Partition EOF: {n}": a guard that searched it for "Broker: No more
+        // messages" never matched.
         assert_eq!(eof.to_string(), "Partition EOF: 0");
         assert!(!eof.to_string().contains("Broker: No more messages"));
         assert!(!format!("{eof:?}").contains("Broker: No more messages"));
@@ -1695,7 +1616,7 @@ mod tests {
         }
     }
 
-    /// **FX-18 review LOW-1.** The configuration read after a create waits out
+    /// The configuration read after a create waits out
     /// exactly `TopicNotFound` and `NotAuthorized` (an empty answer while the
     /// topic propagates), and returns every other error at once.
     #[test]
@@ -1744,22 +1665,13 @@ mod tests {
 
     #[test]
     fn with_scratch_prefix_rejects_an_empty_prefix_at_construction_not_at_delete_time() {
-        // `connect` does not dial anything synchronously — librdkafka's
-        // client creation validates config and starts background IO
-        // threads, it does not block waiting for a broker — so this needs
-        // no broker to prove `with_scratch_prefix("")` is refused at THIS
-        // call, before any `delete_topics` call could ever see it. This is
-        // the regression test for the hole the previous fix round left
-        // open: `with_scratch_prefix("")` used to store `Some("")`, and
-        // `"anything".starts_with("")` is unconditionally true, so every
-        // name — including a production topic — would have passed the
-        // namespace check while the reader still reported as properly
-        // scoped.
+        // `connect` does not dial anything synchronously, so this needs no
+        // broker to prove `with_scratch_prefix("")` is refused at THIS call:
+        // `"anything".starts_with("")` is true, so an empty prefix would pass
+        // every name, a production topic included.
         //
-        // `with_scratch_prefix` consumes `self`, so each case below needs
-        // its own freshly connected reader rather than reusing one across
-        // assertions (connecting is local and broker-free either way, per
-        // the doc comment above).
+        // `with_scratch_prefix` consumes `self`, so each case below needs its
+        // own freshly connected reader.
         fn reader() -> super::RdKafkaReader {
             super::RdKafkaReader::connect(
                 &["127.0.0.1:1".to_string()],
@@ -1815,12 +1727,10 @@ mod tests {
         assert!(reader.with_scratch_prefix("drill-20260903-").is_ok());
     }
 
-    // -----------------------------------------------------------------------
-    // FX-4 / T13: an empty DescribeConfigs answer is a REFUSAL, never "no
-    // overrides". Constructed rdkafka results, no broker: the result structs
+    // An empty DescribeConfigs answer is a REFUSAL, never "no overrides".
+    // Constructed rdkafka results, no broker: the result structs
     // `rdkafka::admin::ConfigResource` and `ConfigEntry` have public fields
     // (rdkafka-0.36.2/src/admin.rs:1000-1024).
-    // -----------------------------------------------------------------------
 
     fn entry(
         name: &str,
@@ -1847,8 +1757,8 @@ mod tests {
         })
     }
 
-    /// **The mutant the orchestrator named for FX-4: "a denied resource read
-    /// back as 'no overrides'".** rdkafka 0.36.2 hands a refused topic back
+    /// **A denied resource is never read back as "no overrides".** rdkafka
+    /// 0.36.2 hands a refused topic back
     /// as `Ok` with NO entries; the reader must turn that into the refusal it
     /// stands for, whatever the metadata says, and never into `Ok`.
     #[test]
@@ -1929,7 +1839,7 @@ mod tests {
         assert_eq!(got[5].value, None, "a withheld value stays withheld");
     }
 
-    /// **The no-misfire direction (FX-4 review M4, mutant R1).** Most topics
+    /// **The no-misfire direction.** Most topics
     /// carry NO override: an authorised describe of one answers every entry
     /// from the broker or the built-in defaults, and none from the topic (31
     /// entries on 3.7.1, 33 on 4.3.1, measured). Such an answer is a
@@ -1985,7 +1895,7 @@ mod tests {
     }
 
     /// The broker twin: an empty broker answer is the cluster authorizer's
-    /// refusal (measured by PROD-04.0 §3.8), never an empty configuration —
+    /// refusal (measured), never an empty configuration —
     /// which phase 0's G-TS read as "the Apache default, CreateTime".
     #[test]
     fn an_empty_broker_answer_is_a_refusal_never_an_empty_configuration() {
