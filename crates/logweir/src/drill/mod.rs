@@ -3659,9 +3659,8 @@ fn teardown(
         // FX-44: and the line the controller copies to `status.teardown`.
         phase9_teardown::print_left(&a.topics_failed);
         // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
-        // The attestation is what the controller fetches, verifies with
-        // `PAYLOAD_TYPE_TEARDOWN` and copies into `status.teardown`; a key
-        // line printed after a failed put would send it after an object that
+        // The attestation is the durable record of the teardown; a key line
+        // printed after a failed put would send a reader after an object that
         // is not there. So the answer is carried out of the closure rather
         // than logged and forgotten.
         let persisted = match phase9_teardown::persist_with_signer(&a, signer, &c.store) {

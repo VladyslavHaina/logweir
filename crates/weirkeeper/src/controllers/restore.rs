@@ -4277,6 +4277,25 @@ fn time_basis_block(block: &Value) -> Option<crate::crds::restore::RestoreTimeBa
 /// `Restore.status.completion.newTopics`'s `maxItems` (`crds/restore.rs`).
 pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 
+/// **FX-44.** `status.teardown.failed` from the runner's `teardown-failed=`
+/// line (the last one in the tail), held to this Restore's mapped target
+/// names: a topic its plan does not map is not this run's to name. `None`
+/// when there is no line or nothing in it survives.
+#[must_use]
+pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
+    use logweir_core::execution_contract::{parse_teardown_failed, TEARDOWN_FAILED_PREFIX};
+    let raw = backup::tail_lines(log)
+        .into_iter()
+        .rev()
+        .find_map(|line| line.strip_prefix(TEARDOWN_FAILED_PREFIX))?;
+    let kept: Vec<Value> = parse_teardown_failed(raw)?
+        .into_iter()
+        .filter(|f| mapped.iter().any(|m| m == &f.topic))
+        .map(|f| json!({"topic": f.topic, "error": f.error}))
+        .collect();
+    (!kept.is_empty()).then(|| json!({ "failed": kept }))
+}
+
 /// Guard **G-TS**'s observation, read off the pod log by key name.
 ///
 /// Returns the object the runner printed, **filtered to the three fields
@@ -8534,13 +8553,22 @@ async fn reconcile_restore_inner(
         preflight.as_ref(),
         now,
     );
-    let finished = match (creation_stop, race.as_ref()) {
+    let mut finished = match (creation_stop, race.as_ref()) {
         (_, Some(lists)) => with_target_topics_appeared(finished, lists),
         // The state is named and no list can be shown: say so, and do not
         // call the plan's names "created".
         (Some(_), None) => with_unread_creation_stop(finished),
         (None, None) => finished,
     };
+    // FX-44: what the run's teardown left, on any exit code.
+    if let Some(teardown) = teardown_failed(
+        &log,
+        topics.as_ref().map_or(&[][..], |(_, new)| new.as_slice()),
+    ) {
+        if let Some(status) = finished.get_mut("status").and_then(Value::as_object_mut) {
+            status.insert("teardown".to_string(), teardown);
+        }
+    }
     let terminal = diagnostics::apply_finished(
         finished,
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),

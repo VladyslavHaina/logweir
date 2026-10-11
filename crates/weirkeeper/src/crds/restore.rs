@@ -1075,13 +1075,15 @@ pub struct TeardownFailure {
     pub error: String,
 }
 
-/// What phase 9 removed, read from the SIGNED teardown attestation.
+/// What a run's teardown removed, and what it could not.
 ///
-/// THE CONTROLLER DELETES NO TOPIC, EVER. The runner's phase 9 deletes the
+/// THE CONTROLLER DELETES NO TOPIC, EVER. The runner's teardown deletes the
 /// exact names it created, through a deleter that refuses any name outside the
-/// run's prefix; this block is the controller reading what that attested. A
-/// non-empty `failed` is what makes the next rehearsal slot SKIP rather than
-/// adopt topics it did not create.
+/// run's prefix. The controller writes `failed` from the runner's
+/// `teardown-failed=` line (FX-44), on a run that passed and on one that
+/// failed after its creation step; it writes neither `deleted` nor
+/// `attestationKey`. A non-empty `failed` is what makes the next rehearsal
+/// slot SKIP rather than adopt topics it did not create.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Teardown {
