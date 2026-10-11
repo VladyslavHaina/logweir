@@ -2199,6 +2199,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
+        // FX-44 (2026-10-10, item 62): a failed restore removes or names the
+        // scratch topic it created; the line the controller reads it from.
+        (
+            "a failed restore removes or names the scratch topic it created",
+            "teardown-failed=",
+        ),
     ];
     assert_eq!(
         items.len(),

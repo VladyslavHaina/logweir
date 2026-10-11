@@ -265,9 +265,13 @@ fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
 }
 
 /// **The trait method is called from exactly two places: the phase-0 probe,
-/// for its own probe topic, and phase 9.** KILLS: a third caller (a cleanup
-/// after the creation step, in the creation step, or anywhere between it and
-/// phase 6); the probe's delete handed anything but the probe's name.
+/// for its own probe topic, and phase 9.** Phase 9's file also holds FX-44's
+/// teardown of a run that failed after the restore started, through the same
+/// one call; the orchestrator reaches it only from the error returns of
+/// phase 6 onwards. KILLS: a third caller (a cleanup after the creation step,
+/// in the creation step, or anywhere between it and phase 6); the probe's
+/// delete handed anything but the probe's name; the failure teardown called
+/// before phase 6.
 #[test]
 fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
     let callers: Vec<String> = sources()
@@ -327,6 +331,20 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
     assert!(
         !production[from..to].contains("delete"),
         "nothing is deleted between creation and the restore"
+    );
+    // FX-44: the failure teardown is defined once, before the creation step,
+    // and every use of it but its own definition comes after phase 6 starts.
+    assert_eq!(count(&production, "phase9_teardown::after_failure("), 1);
+    assert!(production.find("phase9_teardown::after_failure(").unwrap() < from);
+    assert_eq!(count(&production, "remove_created("), 1);
+    let uses: Vec<usize> = production
+        .match_indices("torn_down")
+        .map(|(i, _)| i)
+        .collect();
+    assert!(uses.len() >= 2, "{uses:?}");
+    assert!(
+        uses[1..].iter().all(|i| *i > to),
+        "the failure teardown runs only once the restore has started"
     );
 }
 

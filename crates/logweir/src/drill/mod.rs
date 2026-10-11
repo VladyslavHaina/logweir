@@ -3336,6 +3336,21 @@ fn execute_with_validated_approval(
     // `validate-restore`, which force-sets `dry_run = true` and writes nothing,
     // so it needs no target topic; `restore` does.
     //
+    // **FX-44: a run that fails AFTER the restore started tears down what the
+    // creation step created**, by phase 9's rule, and names what it left.
+    // Defined here, before the creation step, and called only from the error
+    // returns of phases 6 to 8 that are not a signed `NotPass` (whose path
+    // runs phase 9): a stopped creation step itself still deletes nothing.
+    let remove_created = |created: &[String]| {
+        phase9_teardown::after_failure(
+            deleter,
+            &admitted.topic_mapping,
+            created,
+            &c.spec.target.teardown,
+            c.spec.target.mode,
+            run_id,
+        );
+    };
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
     // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
     phase0_admit::create_target_topics(
@@ -3346,19 +3361,9 @@ fn execute_with_validated_approval(
         c.spec.target.default_replication_factor,
         &mut topic_preflight,
     )?;
-    // **FX-44: a run that fails from here on tears down what it created**,
-    // by phase 9's rule, and names what it left. Every error return below
-    // that is not a signed `NotPass` (whose path runs phase 9) goes through it.
     let created = topic_preflight.topics_created.clone();
-    let failed = |e: DrillError| -> DrillError {
-        phase9_teardown::after_failure(
-            deleter,
-            &admitted.topic_mapping,
-            &created,
-            &c.spec.target.teardown,
-            c.spec.target.mode,
-            run_id,
-        );
+    let torn_down = |e: DrillError| -> DrillError {
+        remove_created(&created);
         e
     };
 
@@ -3416,7 +3421,7 @@ fn execute_with_validated_approval(
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
             let signed =
-                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(failed)?;
+                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(torn_down)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -3441,7 +3446,7 @@ fn execute_with_validated_approval(
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
-        Err(e) => return Err(failed(e)),
+        Err(e) => return Err(torn_down(e)),
     };
     // Every config key Logweir rendered that the engine dropped, from both
     // readbacks. Phase 5's were recorded above; phase 6's arrive here.
@@ -3473,7 +3478,7 @@ fn execute_with_validated_approval(
             &restored.engine_report,
         )
     })
-    .map_err(failed)?;
+    .map_err(torn_down)?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
@@ -3526,7 +3531,7 @@ fn execute_with_validated_approval(
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
     let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
-        .map_err(failed)?;
+        .map_err(torn_down)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
