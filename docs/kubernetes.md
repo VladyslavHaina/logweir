@@ -7229,12 +7229,13 @@ See [keys.md](keys.md) for key identity and attestation.
 **different principal** from the runner's `logweir-s3` (spec §9; Global
 Constraint 6 already contemplates "a separate bucket and a separate
 principal"). It needs `s3:GetObject` on the evidence prefix and nothing else.
-It cannot write or delete in any bucket, and — because a schedule's retention
-only reports (guard **G-RET**) — **neither the controller nor any component it
-links holds a delete capability against object storage.** The one component
-that can delete archive objects is the separately linked `logweir-retention`
-worker of a `RetentionPolicy` in `mode: Enforce`, under its own credential
-(§7f, ADR 0008 Amendment H); an installation that never enforces has none.
+It cannot write or delete in any bucket, and — because the controller's one
+archive handle is read-only (guard **G-RET**) — **neither the controller nor
+any component it links holds a delete capability against object storage.**
+The one component that can delete archive objects is the separately linked
+`logweir-retention` worker of a `RetentionPolicy` in `mode: Enforce`, under
+its own credential (§7f, ADR 0008 Amendment H); an installation that never
+enforces has none.
 
 That sentence is about **object storage**. The controller
 does now hold a Kubernetes `delete` verb, on exactly two resources:
