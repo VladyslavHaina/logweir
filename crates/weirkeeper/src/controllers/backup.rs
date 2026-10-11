@@ -1,63 +1,46 @@
-//! The `Backup` reconciler — one Job, and the exit-code contract made
-//! visible.
+//! The `Backup` reconciler: one Job, and the exit-code contract made visible.
 //!
-//! # The whole problem in one paragraph
+//! # The problem
 //!
 //! Kubernetes hides the one number Logweir exists to produce. `kubectl get
-//! pods` renders every non-zero exit as a generic `Error`, the Job's own
-//! `.status` carries only `BackoffLimitExceeded`, and the code lives at
-//! exactly one path —
-//! `pod.status.containerStatuses[].state.terminated.exitCode`. Worse,
-//! `restartPolicy: OnFailure` **deletes the pod** (measured live,
-//! `docs/kubernetes.md` §1), so the code is not buried in `lastState` — it is
-//! gone. Global Constraint 11 has five codes and the corpus has a whole
-//! exit-code-to-condition table with nothing implementing it. This module is
-//! the implementation: [`job::build`]'s Job shape keeps the code readable,
-//! and [`reconcile_backup`] lifts it onto `Backup.status.exitCode`, which is
-//! the field spec §8's green badge reads.
+//! pods` renders every non-zero exit as `Error`, the Job's `.status` carries
+//! only `BackoffLimitExceeded`, and the code lives at exactly one path,
+//! `pod.status.containerStatuses[].state.terminated.exitCode`.
+//! `restartPolicy: OnFailure` deletes the pod, so the code is gone, not in
+//! `lastState`. [`job::build`]'s Job shape keeps the code readable, and
+//! [`reconcile_backup`] lifts it onto `Backup.status.exitCode`, which the
+//! green badge reads.
 //!
 //! # The green rule reads the exit code, and there is no `outcome`
 //!
 //! A `Backup` is green ⟺ `status.evidence.verification.result == Valid`
 //! **and** `status.exitCode == 0` (interface **I21**). `Restore` has an
-//! `outcome`; `Backup` deliberately does not (spec §3.2, C95), and
+//! `outcome`; `Backup` deliberately does not, and
 //! `the_backup_green_rule_reads_exit_code_and_not_an_outcome` asserts the
-//! absence rather than trusting it. Adding one would give the badge two
-//! sources of truth that a partial status could disagree about.
+//! absence. One would give the badge two sources of truth that a partial
+//! status could disagree about.
 //!
 //! # The ordering that is load-bearing
 //!
 //! The status patch carrying the exit code happens **before** the Job is
-//! patched with `ttlSecondsAfterFinished`. Pod garbage collection must never
-//! race the exit-code read (`design-operator.md:264-266`): the TTL controller
-//! deletes the Job **and its pods**, and the code lives on the pod. So
-//! [`job::build`] sets no TTL at creation time, and this reconciler patches
-//! one on only after the status write has returned 200.
-//! `ttl_is_patched_only_after_status` asserts both halves — the index order,
-//! and that a status patch answered 500 produces zero Job patches.
+//! patched with `ttlSecondsAfterFinished`: the TTL controller deletes the Job
+//! **and its pods**, and the code lives on the pod. [`job::build`] sets no TTL
+//! at creation time. `ttl_is_patched_only_after_status` asserts the order, and
+//! that a status patch answered 500 produces zero Job patches.
 //!
-//! # The case nothing in the corpus handled
+//! # A Job with no terminated `runner`
 //!
-//! A Job that finishes with **no terminated state for `runner` at all** — the
-//! node was lost, the pod never scheduled, the pod was garbage-collected.
-//! There is no exit code to read and there never will be, so the reconciler
-//! writes a TERMINAL status naming what it observed and stops. It never leaves
-//! the CR in `Running` forever, and it never invents a code: a fabricated `1`
-//! would be indistinguishable from a real operational failure, and a
-//! fabricated `0` would turn a lost run into a green badge.
+//! A lost node, an unscheduled pod or a garbage-collected one leaves no exit
+//! code to read, ever. The reconciler writes a terminal status naming what it
+//! observed and stops; it never leaves the CR `Running` forever, and never
+//! invents a code (a `1` would look like a real failure, a `0` would turn a
+//! lost run green).
 //!
-//! # What this module deletes: nothing
+//! # What this module does not do
 //!
-//! Not the Job, not the pod, and not an orphaned scorecard. Global Constraint
-//! 6 gives no Logweir component a delete capability over the archive in tag 1,
-//! and a failed pod is the only place its exit code exists.
-//!
-//! # What this module does NOT do
-//!
-//! **It performs no signature verification.** Task 24 does, through
-//! `logweir-verify` (Global Constraint 27, as narrowed: this crate links the
-//! verifying half and never the signer). This reconciler records the two
-//! evidence KEYS and leaves `status.evidence.verification` untouched.
+//! It deletes nothing: not the Job, not the pod, not an orphaned scorecard. It
+//! performs no signature verification (`crate::verification` does); it records
+//! the two evidence keys and leaves `status.evidence.verification` untouched.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,12 +107,9 @@ use logweir_store::{caps, Store};
 /// `ttlSecondsAfterFinished`, **patched on after the status write** and never
 /// set at creation time.
 ///
-/// SEVEN DAYS. The TTL controller deletes the Job and its pods together, and
-/// the exit code lives only on the pod, so this value is how long an operator
-/// has to go and look at the thing the status already recorded. A shorter
-/// value buys nothing — the status is already written by the time this is
-/// patched — and a longer one accumulates finished Jobs in a namespace whose
-/// quota is somebody else's.
+/// Seven days: the TTL controller deletes the Job and its pods together, so
+/// this is how long an operator can look at what the status already recorded.
+/// A longer value accumulates finished Jobs in someone else's quota.
 pub const TTL_SECONDS_AFTER_FINISHED: i32 = 604_800;
 
 /// The current label the job controller puts on every pod it creates.
@@ -137,27 +117,21 @@ pub const TTL_SECONDS_AFTER_FINISHED: i32 = 604_800;
 /// `batch.kubernetes.io/job-name` is the 1.27+ spelling and the one to prefer.
 pub const JOB_NAME_LABEL: &str = "batch.kubernetes.io/job-name";
 
-/// The legacy, unprefixed label — still set on 1.29, and the fallback.
+/// The legacy, unprefixed label, the fallback.
 ///
-/// BOTH ARE SET ON 1.29 AND ONLY THE PREFIXED ONE IS CURRENT, so the
-/// reconciler tries the prefixed selector first and falls back to this one
-/// when it returns nothing. A controller that used only the legacy label would
-/// break on the release that finally drops it; one that used only the current
-/// label would break on a cluster at the floor that has not backfilled it.
-/// Two selectors, tried in that order, is the only shape that works across
-/// both — and critique B M10 asked for a stated rule rather than an
-/// improvisation at the call site.
+/// Both are set on 1.29 and only the prefixed one is current, so the
+/// reconciler tries the prefixed selector first and falls back to this one:
+/// the legacy label alone breaks on the release that drops it, the current
+/// one alone on a cluster at the floor that has not backfilled it.
 pub const JOB_NAME_LABEL_LEGACY: &str = "job-name";
 
 /// The ServiceAccount the runner pod names.
 ///
-/// NAMED BUT NOT TOKEN-MOUNTED. `job::build` sets
-/// `automountServiceAccountToken: false`, because a runner pod makes ZERO
-/// Kubernetes API calls and the key-holder is deliberately the component with
-/// no cluster credential. The NAME still matters: PodSecurity admission,
-/// image-pull secrets and Task 21's RBAC all attach to it, and a pod with no
-/// ServiceAccount named silently gets `default`, which is the one account an
-/// operator is most likely to have granted something to.
+/// Named but not token-mounted: `job::build` sets
+/// `automountServiceAccountToken: false`, because a runner pod makes no
+/// Kubernetes API calls. The name matters for PodSecurity admission,
+/// image-pull secrets and RBAC; a pod with none named gets `default`, the
+/// account an operator is most likely to have granted something to.
 pub const RUNNER_SERVICE_ACCOUNT: &str = "logweir-runner";
 
 /// The Secret holding the receipt signing key.
@@ -186,31 +160,16 @@ pub const ARCHIVE_ACCESS_KEY: &str = "access-key-id";
 /// The key within `Backup.spec.archive.secretRef` holding the secret key.
 pub const ARCHIVE_SECRET_KEY: &str = "secret-access-key";
 
-/// The object-store ADDRESSING variables the controller forwards to every
-/// runner Job it creates — Task 24.
+/// The object-store addressing variables the controller forwards to every
+/// runner Job it creates.
 ///
-/// # Why the controller forwards its own environment
-///
-/// Critique B **H20**: *nothing in the design says where the object store is.*
-/// A `Backup` names its archive as a URL (`spec.archive.url`) and a credential
-/// (`spec.archive.secretRef`), and neither can carry an ENDPOINT — which is
-/// everything an adopter on MinIO, Ceph, or any S3-compatible store needs,
-/// and exactly what the Phase B demo needs to reach the compose stack's MinIO
-/// at `http://host.docker.internal:9000`.
-///
-/// These four are `object_store`'s OWN variable names, not Logweir knobs, and
-/// two of them ALREADY reach the runner by another route:
-/// [`crate::retention::storage_url_for`] reads `AWS_ALLOW_HTTP` and
-/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` out of the CONTROLLER's environment when
-/// it renders `plan_backup_spec`'s `storage` block. Forwarding all four makes
-/// one configuration point instead of two halves that can disagree — an
-/// adopter points the controller at their store and the runners follow.
-///
-/// **A VARIABLE THAT IS NOT SET IS NOT FORWARDED.** The default install sets
-/// none of them, so a default runner Job's env is exactly what it was before
-/// this task: `RUST_LOG` plus `job::build`'s own three. Nothing about the
-/// default chart render changes; the chart's `archive.*` values are what set
-/// them.
+/// A `Backup` names its archive as a URL and a credential, neither of which can
+/// carry an endpoint, which every MinIO, Ceph or other S3-compatible store
+/// needs. These are `object_store`'s own variable names, and
+/// [`crate::retention::storage_url_for`] already reads `AWS_ALLOW_HTTP` and
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from the controller's environment, so
+/// forwarding all four makes one configuration point. A variable that is not
+/// set is not forwarded; the chart's `archive.*` values set them.
 pub const ARCHIVE_ADDRESSING_ENV: [&str; 4] = [
     "AWS_ENDPOINT_URL",
     "AWS_REGION",
@@ -221,11 +180,10 @@ pub const ARCHIVE_ADDRESSING_ENV: [&str; 4] = [
 /// [`ARCHIVE_ADDRESSING_ENV`]'s variables that are actually set on this
 /// process, in declaration order, as `env_literal` pairs.
 ///
-/// NEVER A CREDENTIAL. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are
-/// deliberately not in the list: the runner's archive credential comes from
-/// the `Backup`'s own `spec.archive.secretRef` through `env_from_secret`, and
-/// the controller's is a DIFFERENT PRINCIPAL (`logweir-evidence-ro`, read-only,
-/// spec §9) which must never be handed to a pod that writes.
+/// Never a credential: the runner's archive credential comes from
+/// `spec.archive.secretRef` through `env_from_secret`, and the controller's
+/// own is a different, read-only principal (`logweir-evidence-ro`) that must
+/// never reach a pod that writes.
 #[must_use]
 pub fn archive_addressing_env() -> Vec<(String, String)> {
     ARCHIVE_ADDRESSING_ENV
@@ -246,74 +204,48 @@ pub const RECEIPT_KEY_PREFIX: &str = "receipt-key=";
 pub const RECEIPT_SHA256_PREFIX: &str = "receipt-sha256=";
 /// `sidecar-key=` — interface **I7**'s second line.
 pub const SIDECAR_KEY_PREFIX: &str = "sidecar-key=";
-/// `refusal-reason=` — Global Constraint 11's final line for exit 3.
+/// `refusal-reason=`: the runner's final line for exit 3.
 pub const REFUSAL_REASON_PREFIX: &str = "refusal-reason=";
-/// `failure-reason=` — the runner's final line for an exit 1 or 4 whose state
-/// is more specific than its code (RECEIPT-DUP's execution claim). The one
-/// spelling lives in `logweir-core`, which the runner prints it through.
+/// `failure-reason=`: the runner's final line for an exit 1 or 4 whose state
+/// is more specific than its code. The one spelling lives in `logweir-core`.
 pub const FAILURE_REASON_PREFIX: &str = logweir_core::guard::FAILURE_REASON_PREFIX;
 
 /// How many trailing lines of the pod log the key scan looks at.
 ///
-/// THE CONTRACT SAYS "THE FINAL TWO STDOUT LINES", AND THIS IS SIXTEEN. The
-/// extra reads cost nothing and buy tolerance for a trailing blank line, a
-/// `\r\n`, or a shutdown line a future runner appends — none of which changes
-/// which line carries which key, because the scan matches on the KEY NAME and
-/// not on a position. It is bounded rather than unbounded so a 200 MB log
-/// cannot make the scan the expensive part of a reconcile.
+/// The contract says "the final two stdout lines"; the extra lines tolerate a
+/// trailing blank line, a `\r\n`, or a shutdown line, because the scan matches
+/// on the key name, not a position. Bounded, so a 200 MB log cannot make the
+/// scan the expensive part of a reconcile.
 ///
-/// # Why it was eight and is now sixteen — D3 W5's review finding F5
-///
-/// Execution contract v2 added a conditional `teardown-key=` line to the
-/// restore runner's tail. Measured on a PASSING restore
-/// (`crates/logweir/tests/progress_channel.rs`, child row
-/// `the_progress_child_runs_one_restore_and_exits`): summary,
-/// `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
-/// `offset-report-key=` — six lines, **seven** in production where `tracing`
-/// also emits `drill finished`. That is seven of eight, and the next worker to
-/// append one trailing line would push `topic-preflight=` — erratum E10(c)'s
-/// only producer for `Restore.status.topicPreflight` — out of the window. The
-/// scan matches by key NAME, so the failure mode is a silently absent status
-/// field and not an error, which is exactly the kind of defect a budget
-/// exists to prevent.
-///
-/// So the constant is RAISED rather than the runner trimmed, and the budget is
-/// written down: **7 used, 9 reserved**. A larger window is safe by
-/// construction — every scanner here takes the LAST occurrence of each key
-/// prefix, so widening it can only find a key it would otherwise have missed,
-/// never a different one. [`BUDGETED_TRAILING_LINES`] is the measured seven,
-/// and `the_key_scan_window_has_room_for_the_runners_trailing_block` in
-/// `tests/backup_controller.rs` is what fails when the two disagree — mirrored
-/// from the runner-side row, which is where a runner-side change is caught.
+/// The budget: a passing restore prints seven trailing lines in production
+/// ([`BUDGETED_TRAILING_LINES`]), so sixteen leaves nine spare. A key pushed out
+/// of the window is a silently absent status field, not an error. Widening is
+/// safe: every scanner takes the last occurrence of each key prefix.
+/// `the_key_scan_window_has_room_for_the_runners_trailing_block` fails when
+/// the two disagree.
 pub const KEY_SCAN_TAIL_LINES: usize = 16;
 
 pub use crate::runner_log::tail_lines;
 
-/// How many trailing lines a passing restore actually prints in production —
-/// the number [`KEY_SCAN_TAIL_LINES`] is a budget over.
+/// How many trailing lines a passing restore actually prints in production;
+/// [`KEY_SCAN_TAIL_LINES`] is a budget over it.
 ///
-/// MIRRORED from `crates/logweir/tests/progress_channel.rs`'s
+/// Mirrored from `crates/logweir/tests/progress_channel.rs`'s
 /// `the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window`,
-/// which measures it by running the real runner. A `weirkeeper` dependency in
-/// that crate would invert the layering, so the number is stated on both sides
-/// and each side's test names the other. Raise this when a runner appends a
-/// trailing line; the controller-side row then says whether the window still
-/// has room.
+/// which measures the real runner; each side's test names the other. Raise
+/// this when a runner appends a trailing line.
 pub const BUDGETED_TRAILING_LINES: usize = 7;
 
 /// How long before an unfinished Job is looked at again.
 ///
-/// FIFTEEN SECONDS. A Job's own events wake this controller, so the requeue
-/// exists for the one transition no watch delivers: a pod that terminated
-/// while the controller was down. Half `backup_schedule`'s interval, because a
-/// run in flight is the state an operator is actually watching.
+/// A Job's own events wake this controller, so the requeue exists for the one
+/// transition no watch delivers: a pod that terminated while the controller
+/// was down.
 pub const REQUEUE_SECS: u64 = 15;
 
 /// The two label selectors used to find the pod, in the order they are tried.
 ///
-/// Pure, and returned as an array rather than built at the call site, so
-/// `the_exit_code_and_the_keys_come_from_the_logs_subresource` can assert the
-/// order and the spelling without a client.
+/// Pure, so a test can assert the order and spelling without a client.
 #[must_use]
 pub fn pod_selectors(job_name: &str) -> [String; 2] {
     [
@@ -325,30 +257,22 @@ pub fn pod_selectors(job_name: &str) -> [String; 2] {
 /// The plan ConfigMap a `Backup`'s runner reads its rendered `backup.yaml`
 /// and cluster allowlist from.
 ///
-/// **THIS TASK RENDERS IT** — errata **E5a**, review finding HIGH-1. Task 18's
-/// runner argv points at `/plan/backup.yaml` and
-/// `/plan/allowed-clusters.json`, so the mount has to exist; `Backup.spec`
-/// carries no `planBytes` (unlike `Restore`, whose controller writes the bytes
-/// verbatim into a ConfigMap of its own) and no task's Files block owned the
-/// renderer. Measured live before the fix: the pod stalled in
-/// `ContainerCreating` on `MountVolume.SetUp failed for volume "plan":
-/// configmap "<name>-plan" not found`, the `activeDeadlineSeconds` fired, the
-/// job controller deleted the pod, and the reconciler wrote a terminal
-/// `NoExitCode` — every scheduled backup in tag 1 failing as an unexplained
-/// "NoExitCode".
-///
-/// See [`plan_config_map`] for the object and [`plan_backup_spec`] for the
-/// document.
+/// The runner argv points at `/plan/backup.yaml` and
+/// `/plan/allowed-clusters.json`, so this ConfigMap must exist before the Job:
+/// without it the pod stalls in `ContainerCreating` until its deadline and
+/// ends as `NoExitCode`. `Backup.spec` carries no `planBytes`, so the
+/// controller renders the document ([`plan_config_map`],
+/// [`plan_backup_spec`]).
 #[must_use]
 pub fn plan_config_map_name(backup_name: &str) -> String {
     format!("{backup_name}-plan")
 }
 
 /// The key in the plan ConfigMap carrying the rendered `BackupSpec`, and the
-/// file name Task 18's argv points `--spec` at.
+/// file name the argv points `--spec` at.
 pub const PLAN_SPEC_KEY: &str = "backup.yaml";
-/// The key carrying the cluster allowlist, and the file name Task 18's argv
-/// points `--allowed-clusters` at.
+/// The key carrying the cluster allowlist, and the file name the argv points
+/// `--allowed-clusters` at.
 pub const PLAN_ALLOWED_CLUSTERS_KEY: &str = "allowed-clusters.json";
 
 /// The `backup_id` a run of this `Backup` reports.
@@ -361,8 +285,7 @@ pub const PLAN_ALLOWED_CLUSTERS_KEY: &str = "allowed-clusters.json";
 /// `slot::backup_id_for(<schedule uid>, <slot>)`), else this object's own UID.
 /// For every `Backup` [`execution_identity`] accepts, the two values are equal.
 ///
-/// NOT FROM `metadata.name`, which the archive prefix is not, and never from an
-/// annotation.
+/// Never from `metadata.name` or an annotation.
 #[must_use]
 pub fn plan_backup_id(backup: &Backup) -> String {
     backup
@@ -384,9 +307,9 @@ fn refused(refusal: ExecutionRefusal) -> BackupError {
 /// identity, resolved from the typed spec, the referent and this controller's
 /// forwarded archive addressing, in canonical form.
 ///
-/// PURE apart from the environment read of the addressing variables, which is
-/// the same read [`archive_addressing_env`] and
-/// [`crate::retention::storage_url_for`] have always made.
+/// Pure apart from the environment read of the addressing variables, the same
+/// read [`archive_addressing_env`] and [`crate::retention::storage_url_for`]
+/// make.
 ///
 /// # Errors
 ///
@@ -401,11 +324,8 @@ pub fn desired_execution_inputs(
 
 /// [`desired_execution_inputs`] for a selection that has ALREADY been resolved.
 ///
-/// # THE ENTRY POINT D1 W5 (PLAT-09.2) CALLS
-///
-/// The dynamic path resolves its topic list from a discovery Job — an async,
-/// multi-pass affair that cannot live inside a pure resolver — and then freezes
-/// through exactly this function, so a dynamic run and a named one share one
+/// The dynamic path resolves its topic list from a discovery Job and then
+/// freezes through this function, so a dynamic run and a named one share one
 /// canonical encoding, one `status.execution` write and one
 /// [`verify_frozen_config_map`] comparison. See
 /// [`backup_execution::ResolvedSelection`].
@@ -423,31 +343,23 @@ pub fn desired_execution_inputs_for(
 }
 
 /// [`desired_execution_inputs_for`] for a run whose location comes from a
-/// saved `BackupDestination` — D2 §3.5, §3.7, seam **S4**.
+/// saved `BackupDestination` (seam **S4**).
 ///
-/// # THE TWO PATHS DIFFER IN WHAT THE CONTROLLER'S OWN PROCESS CONTRIBUTES
-///
-/// `None` is the legacy inline-`archive` run, byte for byte as it has always
-/// been: `storage` from [`crate::retention::storage_url_for`] (which reads
-/// `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` out of this
-/// process) and [`archive_addressing_env`]'s four forwarded variables frozen
-/// into the snapshot. That is defect **SEC-ENVHTTP**, and it stays on the
-/// legacy path deliberately: those four variables are how every existing
-/// install points its runners at a non-AWS store, and removing them would
-/// break every upgrade at the moment of the upgrade. What closes the defect
-/// there is moving OFF the legacy path to an explicitly created
-/// `BackupDestination`, and until an operator does, `docs/kubernetes.md` (*What a
-/// destination-backed run carries*) names the
-/// forwarding as the reason a controller-level `AWS_ALLOW_HTTP=true` is a
-/// cluster-wide setting.
+/// `None` is the legacy inline-`archive` run: `storage` from
+/// [`crate::retention::storage_url_for`] (which reads `AWS_ALLOW_HTTP` and
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` out of this process) and
+/// [`archive_addressing_env`]'s four forwarded variables frozen into the
+/// snapshot. That forwarding stays on the legacy path deliberately: it is how
+/// existing installs point their runners at a non-AWS store, and removing it
+/// would break every upgrade. It makes a controller-level
+/// `AWS_ALLOW_HTTP=true` a cluster-wide setting, which a `BackupDestination`
+/// avoids.
 ///
 /// `Some(destination)` is the closed path: `storage` from the destination's own
-/// location, NO forwarded addressing in the snapshot at all, and the complete
-/// explicit `AWS_*` set rendered into the Job from
-/// [`ResolvedDestination::job_env`] — which reads no environment variable of
-/// any kind. A planted `AWS_ENDPOINT_URL` in the controller's process cannot
-/// reach such a Job, and `no_controller_environment_reaches_a_destination_backed_job`
-/// is the guard.
+/// location, no forwarded addressing in the snapshot, and the complete explicit
+/// `AWS_*` set rendered into the Job from [`ResolvedDestination::job_env`],
+/// which reads no environment variable.
+/// `no_controller_environment_reaches_a_destination_backed_job` is the guard.
 ///
 /// # Errors
 ///
@@ -461,18 +373,14 @@ pub fn desired_execution_inputs_for_destination(
     selection: &ResolvedSelection,
     destination: Option<&BackupDestinations>,
 ) -> Result<FrozenInputs, BackupError> {
-    // THE BYTES TRAVEL WITH THE SNAPSHOT, NOT INSIDE IT (D2 §3.7). `ca_pem` is
-    // read here, from the resolution the reconciler already made, so the plan
-    // `ConfigMap` and the digest in the frozen document are written in one act
-    // and cannot disagree.
+    // The CA bytes travel with the snapshot, not inside it: read here, from
+    // the reconciler's resolution, so the plan `ConfigMap` and the digest in
+    // the frozen document are written in one act.
     //
-    // NOT `from_utf8_lossy`. A `ConfigMap`'s `data` values are strings, so
-    // bytes that are not UTF-8 would be replacement-charactered on the way in
-    // and the plan would then digest to something the snapshot does not name —
-    // a `PlanConfigMapConflict` on every later pass, with a message about a
-    // digest rather than about the bundle. `check_ca_bundle` has already
-    // refused anything that is not a PEM bundle; this is the second rail, and
-    // it names the real problem.
+    // Not `from_utf8_lossy`: mangled bytes would digest to something the
+    // snapshot does not name, a `PlanConfigMapConflict` on every later pass
+    // with a message about a digest. `check_ca_bundle` has already refused
+    // anything that is not PEM; this second rail names the real problem.
     let ca_pem = match destination.and_then(|d| d.archive.ca_pem.as_ref()) {
         None => None,
         Some(bytes) => Some(String::from_utf8(bytes.clone()).map_err(|_| {
@@ -497,22 +405,17 @@ pub fn desired_execution_inputs_for_destination(
 }
 
 /// [`desired_execution_inputs_for_destination`] for a run whose destination has
-/// ALREADY been frozen — the readback path.
+/// already been frozen: the readback path.
 ///
-/// # Why a frozen run never re-resolves its destination
-///
-/// Every edit to a `BackupDestination` bumps `metadata.generation`, and the
-/// frozen block records the generation it resolved, so `verify_frozen_config_map`
-/// compares it. A pass that re-creates a garbage-collected Job by RESOLVING the
-/// live object would therefore terminate a running backup because somebody
-/// rotated a Secret name while it ran — fail-closed, and still exactly the
-/// thing D2 §3.7 says cannot happen ("later destination edits cannot affect a
-/// created run"). `backup_execution::stored_destination` reads the snapshot
-/// back out of the immutable plan, and this is what renders from it.
-///
-/// `ca_pem` is the `archive-ca.pem` key of that same plan, so the digest bind
-/// in `FrozenInputs::freeze_with_ca` is evaluated against the bytes a kubelet
-/// would actually mount.
+/// A frozen run never re-resolves its destination. Every edit bumps
+/// `metadata.generation`, which `verify_frozen_config_map` compares, so
+/// re-resolving the live object to re-create a garbage-collected Job would
+/// terminate a running backup because someone edited the destination; later
+/// destination edits must not affect a created run.
+/// `backup_execution::stored_destination` reads the snapshot back out of the
+/// immutable plan, and this renders from it. `ca_pem` is that plan's
+/// `archive-ca.pem` key, so the digest bind in `FrozenInputs::freeze_with_ca`
+/// is evaluated against the bytes a kubelet would mount.
 ///
 /// # Errors
 ///
@@ -537,15 +440,14 @@ pub fn desired_execution_inputs_frozen(
     FrozenInputs::freeze_with_ca(inputs, ca_pem).map_err(refused)
 }
 
-/// Which of D1 §7.1's two selection shapes this `Backup` declares — the check
-/// that runs before ANY read and before any `POST`.
+/// Which of the two selection shapes this `Backup` declares: the check that
+/// runs before any read and before any `POST`.
 ///
 /// # Errors
 ///
 /// [`TERMINAL_STATE_INVALID_TOPIC_SELECTION`], naming every field-level reason,
-/// for a spec that declares neither shape. TERMINAL, because `Backup.spec` is
-/// CEL-immutable and a requeue over a shape that cannot be edited would never
-/// succeed.
+/// for a spec that declares neither shape. Terminal, because `Backup.spec` is
+/// CEL-immutable.
 pub fn declared_selection_shape(backup: &Backup) -> Result<SelectionShape, BackupError> {
     crate::policy::validate_topic_selection(&backup.spec).map_err(|errors| {
         let detail = errors
@@ -567,19 +469,16 @@ pub fn declared_selection_shape(backup: &Backup) -> Result<SelectionShape, Backu
 /// The topic list this run freezes, when it can be decided WITHOUT reading the
 /// cluster.
 ///
-/// # The SYNCHRONOUS half of the selection
-///
 /// The `SelectedTopics` arm is complete and final: the named allowlist,
-/// verbatim, coverage `NamedTopics`. The `AllUserTopics` arm cannot be answered
-/// here at all — it is a topic discovery Job, several reconcile passes and an
-/// installation policy (D1 §7.2, [`backup_selection::resolve`]) — so this pure
-/// entry point says so rather than guessing. What it must never do is fall
-/// through to the freeze with the empty `spec.topics` a dynamic object carries:
-/// an empty allowlist rendered into `backup.yaml` is the "no allowlist means
-/// everything" shape guard **G-GLOB** exists to prevent.
+/// verbatim, coverage `NamedTopics`. The `AllUserTopics` arm needs a topic
+/// discovery Job, several passes and an installation policy
+/// ([`backup_selection::resolve`]), so this pure entry point refuses it rather
+/// than fall through to the freeze with an empty `spec.topics`: an empty
+/// allowlist is the "no allowlist means everything" shape guard **G-GLOB**
+/// prevents.
 ///
-/// [`desired_execution_inputs`] is the only caller, and it exists for tests and
-/// for callers that hold a `Backup` and a `KafkaCluster` and no client.
+/// [`desired_execution_inputs`] is the only caller, for tests and for callers
+/// that hold no client.
 ///
 /// [`backup_selection::resolve`]: crate::controllers::backup_selection::resolve
 ///
@@ -606,31 +505,23 @@ pub fn resolved_selection(backup: &Backup) -> Result<ResolvedSelection, BackupEr
 /// The typed `BackupSpec` the runner's `--spec` file carries, rendered from
 /// the resolved execution inputs.
 ///
-/// **TYPED, AND THAT IS THE POINT.** The document is built as
-/// `logweir_core::spec::BackupSpec` and serialised, never assembled as text:
-/// `storage` is an internally tagged enum whose variants have incompatible
-/// REQUIRED fields, so a stringly-typed renderer produces `backend:
-/// filesystem` beside a `bucket:` key and the engine's config load fails with
-/// a hard "missing field" the unknown-key readback cannot catch (the argument
-/// `logweir_core::engine::StorageUrl`'s own doc comment makes). Rendering
-/// through the type the CLI parses is also what lets
+/// Typed, never assembled as text: `storage` is an internally tagged enum
+/// whose variants have incompatible required fields, so a text renderer could
+/// produce `backend: filesystem` beside a `bucket:` key, which fails the
+/// engine's config load. It also lets
 /// `the_rendered_plan_parses_back_as_a_backup_spec` read the ConfigMap body
-/// back with `serde_yaml::from_str::<BackupSpec>` and compare field by field.
+/// back as a `BackupSpec`.
 ///
-/// # What each field comes from
-///
-/// * `source.bootstrap_servers`, `source.auth` — the `KafkaCluster`
-///   `spec.sourceRef` names. **Never from `Backup.spec`**, which carries
-///   neither.
-/// * `source.topics` — `Backup.spec.topics` **verbatim**, behind
+/// * `source.bootstrap_servers`, `source.auth`: the `KafkaCluster`
+///   `spec.sourceRef` names, never `Backup.spec`.
+/// * `source.topics`: `Backup.spec.topics` verbatim, behind
 ///   [`logweir_core::guard::reject_glob_metacharacters`] in
 ///   [`reconcile_backup`] step 0.
-/// * `storage` — `Backup.spec.archive.url`, through
-///   [`crate::retention::storage_url_for`], the same parser the controller's
-///   own read-only handle is built with.
-/// * `backup_id` — the server-derived run identity
-///   ([`execution_identity`]).
-/// * `backup` — `BackupSettings::default()`. `Backup.spec` has no tunables.
+/// * `storage`: `Backup.spec.archive.url`, through
+///   [`crate::retention::storage_url_for`], the parser the controller's own
+///   read-only handle uses.
+/// * `backup_id`: the server-derived run identity ([`execution_identity`]).
+/// * `backup`: `BackupSettings::default()`; `Backup.spec` has no tunables.
 ///
 /// The document is a projection of [`FrozenInputs`]; see
 /// [`FrozenInputs::backup_spec`].
@@ -639,8 +530,8 @@ pub fn resolved_selection(backup: &Backup) -> Result<ResolvedSelection, BackupEr
 ///
 /// [`BackupError::Refused`] for a spec that states no runnable identity, an
 /// unreadable `archive.url`, or a source connection
-/// [`crate::connection::resolve`] refuses (PLAT-07.1) — a `scramSha512`
-/// cluster with no username or `secretRef` among them.
+/// [`crate::connection::resolve`] refuses (for example a `scramSha512`
+/// cluster with no username or `secretRef`).
 pub fn plan_backup_spec(
     backup: &Backup,
     cluster: &KafkaCluster,
@@ -650,35 +541,21 @@ pub fn plan_backup_spec(
 
 /// The cluster allowlist the runner's `--allowed-clusters` file carries.
 ///
-/// **THE SHAPE IS `logweir_core::spec::AllowedClusters`, WHICH IS WHAT THE
-/// READER PARSES** — `crates/logweir/src/backup/mod.rs:263-267` reads the file
-/// and `serde_json::from_str::<AllowedClusters>`s it, so the format is the type
-/// and not a convention.
+/// The shape is `logweir_core::spec::AllowedClusters`, which the runner parses
+/// the file as.
 ///
-/// # `allowed_cluster_ids` IS EMPTY, AND THE CLUSTER ID GOES IN
-/// `source_cluster_id`
+/// `allowed_cluster_ids` is empty and the cluster id goes in
+/// `source_cluster_id`. On the backup path `allowed_cluster_ids` is the
+/// restore-target allowlist, and the runner refuses a run whose observed
+/// source cluster id appears in it (a cluster cannot be both an archive's
+/// source and a drill's deletable target), so the source id there would make
+/// every backup exit 3.
 ///
-/// READ `crates/logweir/src/backup/phase_minus1_admit.rs:158-190` BEFORE
-/// CHANGING THIS. On the BACKUP path `allowed_cluster_ids` is the restore-
-/// TARGET allowlist — the set of scratch clusters a drill may restore INTO —
-/// and Global Constraint 18(c)'s fourth rail **REFUSES** a run whose observed
-/// source cluster id appears in it, because a cluster cannot be both the
-/// source of an archive and a cluster whose topics a drill deletes. So putting
-/// the source cluster's id in that list would make every backup exit 3.
-/// `source_cluster_id` is the field that carries it; the backup path does not
-/// read that field at all (phase −1's comment says so in as many words —
-/// it is the drill's, for refusing a TARGET equal to the source).
-///
-/// # And that is why the allowlist can stay a ConfigMap key here
-///
-/// Errata **E5a**: on this path the allowlist is a **consistency rail, not a
-/// boundary**. The bootstrap address the run dials comes from the
-/// CEL-immutable `sourceRef`, not from this file, so a subject with `patch
-/// configmaps` who replaces it can only ADD ids to `allowed_cluster_ids` — and
-/// every id they could add makes the backup REFUSE, never widen. Task 22 moved
-/// the drill path's allowlist into the `logweir-approval-bundle` Secret
-/// because there it authorises a restore TARGET, which is the opposite
-/// direction.
+/// On this path the allowlist is a consistency rail, not a boundary: the
+/// address the run dials comes from the CEL-immutable `sourceRef`, so whoever
+/// can patch configmaps can only add ids, and every added id makes the backup
+/// refuse, never widen. That is why it can stay a ConfigMap key here, while a
+/// restore's allowlist lives in its approval bundle.
 ///
 /// [`FrozenInputs::allowed_clusters`] renders the same document from frozen
 /// inputs; for inputs resolved from `cluster` the two are equal.
@@ -699,21 +576,17 @@ pub fn plan_allowed_clusters(cluster: &KafkaCluster) -> logweir_core::spec::Allo
 /// ([`backup_execution::INPUTS_KEY`]) and the two runner documents rendered
 /// from it, and annotated with the run identity and the snapshot digest.
 ///
-/// PURE, so the object a test builds is byte-identical to the one the
+/// Pure, so the object a test builds is byte-identical to the one the
 /// reconciler `POST`s.
 ///
-/// `ownerReferences` WITH `controller: true` AND `blockOwnerDeletion: true`:
-/// deleting the `Backup` garbage-collects its plan, and a half-deleted
-/// `Backup` cannot orphan a ConfigMap naming its source cluster. It is also
-/// what makes the 409 case decidable — see
-/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`].
+/// `ownerReferences` with `controller: true` and `blockOwnerDeletion: true`:
+/// deleting the `Backup` garbage-collects its plan, and it makes the 409 case
+/// decidable (see [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`]).
 ///
-/// NO CREDENTIAL IN ANY KEY, AND NO SECRET NAME. `AuthSpec` carries a username
-/// and never a password at any variant; the SCRAM password and the
-/// object-store credential reach the runner as `secretKeyRef` env built from
-/// the pinned `KafkaCluster` and the immutable `Backup.spec`, so a ConfigMap —
-/// an object with no encryption at rest and a much wider read surface than a
-/// Secret — carries nothing but the snapshot and the two documents.
+/// No credential and no Secret name in any key: `AuthSpec` never carries a
+/// password, and the SCRAM password and object-store credential reach the
+/// runner as `secretKeyRef` env. A ConfigMap has no encryption at rest and a
+/// wider read surface than a Secret.
 ///
 /// # Errors
 ///
@@ -722,40 +595,26 @@ pub fn plan_config_map(backup: &Backup, cluster: &KafkaCluster) -> Result<Config
     inputs_config_map(backup, &desired_execution_inputs(backup, cluster)?).map_err(refused)
 }
 
-// ---------------------------------------------------------------------------
-// Destination admission — D2 §3.6
-// ---------------------------------------------------------------------------
-
-/// Whether the pinned engine has been PROVED to honour a destination's custom
-/// CA bundle — D2 §3.5's `[UNVERIFIED — U1: whether the engine honours a custom CA file]`.
+/// Whether the pinned engine has been proved to honour a destination's custom
+/// CA bundle.
 ///
-/// # `false`, AND IT STAYS `false` UNTIL SOMEBODY MEASURES IT
+/// `false` until someone measures it. The claim that the engine honours
+/// `SSL_CERT_FILE` through rustls-platform-verifier on Linux is undemonstrated,
+/// and if wrong a Backup to a private-CA endpoint fails its TLS handshake
+/// inside the engine child with an opaque operational error. So a destination
+/// declaring `spec.transport.caBundle` is refused for Backup and Restore with
+/// [`CheckCode::CaBundleUnsupportedByEngine`]; Logweir-only paths (checks,
+/// verification, the evidence handle) build their own rustls client and
+/// support the CA today.
 ///
-/// The claim is that the engine honours `SSL_CERT_FILE` through
-/// rustls-platform-verifier on Linux. It is plausible, it is undemonstrated,
-/// and the failure mode if it is wrong is a Backup that dials a private-CA
-/// endpoint, fails its TLS handshake inside the engine child, and reports an
-/// opaque operational error with no mention of certificates. So a destination
-/// declaring `spec.transport.caBundle` is REFUSED for Backup and Restore
-/// admission with [`CheckCode::CaBundleUnsupportedByEngine`] — while
-/// Logweir-only paths (checks, verification, the evidence handle) support the
-/// CA today, because those build their own rustls client and no engine child
-/// is involved.
-///
-/// It is a COMPILED CONSTANT and not a field: flipping it is a claim about a
-/// recorded engine digest, which is a code change somebody reviews, not a
-/// cluster setting somebody flips. The administrator-governed escape hatch is
-/// the policy key `engine.allowUnverifiedCustomCa`, default `false`, which
-/// D2 §14 sets to run scenario S2b; the constant flips only after S2b passes,
-/// and the key returns to `false`.
+/// A compiled constant, not a field: flipping it is a reviewed claim about a
+/// recorded engine digest. The administrator's escape hatch is the policy key
+/// `engine.allowUnverifiedCustomCa`, default `false`.
 pub const ENGINE_CUSTOM_CA_VERIFIED: bool = false;
 
-/// Whether a destination's CA bundle may be handed to an ENGINE-driven run —
-/// [`ENGINE_CUSTOM_CA_VERIFIED`] or the administrator's opt-in.
-///
-/// The two are OR-ed and not AND-ed: the constant is "we proved it", the policy
-/// key is "an administrator accepts the risk for this installation". Either is
-/// sufficient; neither is implied by the other.
+/// Whether a destination's CA bundle may be handed to an engine-driven run:
+/// [`ENGINE_CUSTOM_CA_VERIFIED`] ("we proved it") or the administrator's opt-in
+/// ("this installation accepts the risk"). Either is sufficient.
 #[must_use]
 pub fn engine_custom_ca_allowed(policy: &crate::check::policy::Policy) -> bool {
     ENGINE_CUSTOM_CA_VERIFIED || policy.engine.allow_unverified_custom_ca
@@ -776,28 +635,20 @@ pub fn engine_custom_ca_refusal(namespace: &str, name: &str) -> String {
 }
 
 /// The longest a `Backup` waits for its `BackupDestination` to exist and be
-/// `Valid` before the wait becomes the answer — D2 §3.6.
+/// `Valid` before the wait becomes the answer.
 ///
-/// # Why a HOLD at all, and why it ends
-///
-/// A `destinationRef` and the `BackupDestination` it names are created by two
-/// different `kubectl apply`s, often in one directory, in whatever order the
-/// server happens to take them. Refusing terminally on the first pass would
-/// make a correct manifest set fail on a race the operator cannot influence —
-/// and a `Backup.spec` is CEL-immutable, so that refusal could never be
-/// repaired in place.
-///
-/// It ends because a HOLD that never ends is a `Backup` that sits at `Pending`
-/// for the rest of the cluster's life with nothing to observe it. Ten minutes
-/// is long enough for a second `apply` and short enough that a scheduled run's
-/// next slot has not yet overtaken it.
+/// A hold, because the `destinationRef` and its `BackupDestination` arrive in
+/// two applies in either order, and a terminal refusal over a CEL-immutable
+/// spec could never be repaired. Bounded, because an endless hold is a
+/// `Backup` stuck at `Pending` for ever. Ten minutes is long enough for a
+/// second `apply` and short enough that the next scheduled slot has not
+/// overtaken it.
 pub const DESTINATION_HOLD_MAX_SECONDS: i64 = 600;
 
 /// How long this `Backup` may hold: `min(spec.deadlineSeconds, 600)`.
 ///
-/// **THE RUN'S OWN DEADLINE CAPS IT.** A `Backup` whose runner is allowed sixty
-/// seconds should not spend ten minutes waiting to start one; the operator
-/// already said how long this run is worth.
+/// The run's own deadline caps it: the operator already said how long this
+/// run is worth.
 #[must_use]
 pub fn destination_hold_budget(backup: &Backup) -> i64 {
     backup
@@ -806,13 +657,11 @@ pub fn destination_hold_budget(backup: &Backup) -> i64 {
         .clamp(0, DESTINATION_HOLD_MAX_SECONDS)
 }
 
-/// Whether this `Backup` has held for its whole budget — D2 §3.6 step 1.
+/// Whether this `Backup` has held for its whole budget.
 ///
-/// Measured from `metadata.creationTimestamp`, which is the API server's own
-/// clock reading and the one timestamp a `Backup` carries that no controller
-/// wrote. A `Backup` with no creation timestamp (impossible from an API server,
-/// reachable from a hand-built fixture) has not expired: inventing an expiry
-/// from a missing timestamp would fail runs for want of a field.
+/// Measured from `metadata.creationTimestamp`, the API server's clock and the
+/// one timestamp no controller wrote. A `Backup` with none (only a hand-built
+/// fixture) has not expired.
 #[must_use]
 pub fn destination_hold_expired(backup: &Backup, now: DateTime<Utc>) -> bool {
     let Some(created) = backup.meta().creation_timestamp.as_ref() else {
@@ -821,24 +670,14 @@ pub fn destination_hold_expired(backup: &Backup, now: DateTime<Utc>) -> bool {
     (now - created.0).num_seconds() >= destination_hold_budget(backup)
 }
 
-/// The ONE `BackupDestination` a `Backup` names, resolved for BOTH roles a
+/// The one `BackupDestination` a `Backup` names, resolved for both roles a
 /// backup run needs.
 ///
-/// # A BACKUP WRITES TWO THINGS, AND THEY MAY BE TWO PRINCIPALS
-///
-/// The archive, through `archiveWrite`; and its signed receipt, through
-/// `evidenceWrite` over Global Constraint 6's `logweir/` root of the same
-/// bucket. `evidenceWrite` falls back to `archiveWrite` (D2 §3.4), so on the
-/// common destination these are the same grant and the Job carries one
-/// credential plus `LOGWEIR_EVIDENCE_CREDENTIALS=archive`. An operator who
-/// separates the principals gets two.
-///
-/// **THE RUNNER REFUSES A RUN THAT DOES NOT SAY WHICH.** Before this struct
-/// existed the Backup path resolved only `archiveWrite` and rendered no
-/// evidence variable at all, and every destination-backed run exited 3 at the
-/// store builder with `LOGWEIR_EVIDENCE_CREDENTIALS is \`\``, after the archive
-/// handles were built and before a byte was archived — the erratum **E20**
-/// failure class, one layer further in.
+/// A backup writes the archive through `archiveWrite` and its signed receipt
+/// through `evidenceWrite` under the `logweir/` root of the same bucket.
+/// `evidenceWrite` falls back to `archiveWrite`, so usually the Job carries one
+/// credential plus `LOGWEIR_EVIDENCE_CREDENTIALS=archive`; separated principals
+/// get two. The runner refuses a run that does not say which.
 #[derive(Debug)]
 pub struct BackupDestinations {
     /// Resolved for [`DestinationRole::ArchiveWrite`], with its CA bundle read.
@@ -849,7 +688,7 @@ pub struct BackupDestinations {
 }
 
 impl BackupDestinations {
-    /// The block this run freezes — the archive resolution, carrying the
+    /// The block this run freezes: the archive resolution, carrying the
     /// evidence grant when it differs.
     #[must_use]
     pub fn snapshot(&self) -> crate::destination::ResolvedDestinationSnapshot {
@@ -866,36 +705,30 @@ pub enum DestinationAdmission {
     /// One `BackupDestination`, resolved for both roles with its CA bundle read.
     Resolved(Box<BackupDestinations>),
     /// The destination is absent or not yet `Valid`, and the hold budget has
-    /// not run out. NOTHING IS CREATED while this is the answer.
+    /// not run out. Nothing is created while this is the answer.
     Holding {
         /// The [`logweir_core::check_contract::CheckCode`] as a condition
         /// `reason`.
         reason: &'static str,
         /// What is wrong and what to do. Names objects and fields, never a
-        /// credential — the resolver has none to name.
+        /// credential.
         message: String,
     },
 }
 
 /// Resolve the `BackupDestination` a `Backup` names, for the role a backup run
-/// needs — D2 §3.6's "Backup reconcile additions", before the freeze.
+/// needs, before the freeze.
 ///
-/// # THE ROLE IS `ArchiveWrite`, AND IT DOES NOT DEFAULT TO ANYTHING
+/// The role is `ArchiveWrite` and defaults to nothing: `archiveRead` and
+/// `evidenceWrite` fall back to it, never the reverse, so a destination with
+/// only a read grant is `DestinationRoleNotConfigured`.
 ///
-/// A backup run WRITES the archive. `archiveRead` and `evidenceWrite` fall back
-/// to this grant (D2 §3.4) and never the other way round, so a destination that
-/// configures only a read grant is `DestinationRoleNotConfigured` here rather
-/// than a run that writes with whatever principal was available.
-///
-/// # The three outcomes
-///
-/// * [`DestinationAdmission::NotRequested`] — no `destinationRef`.
-/// * [`DestinationAdmission::Holding`] — `DestinationNotFound` or
+/// * [`DestinationAdmission::NotRequested`]: no `destinationRef`.
+/// * [`DestinationAdmission::Holding`]: `DestinationNotFound` or
 ///   `DestinationNotValid` within the budget ([`destination_hold_budget`]).
-/// * `Err(BackupError::Refused)` — every other refusal, and an expired hold.
-///   Terminal: a role nobody configured, two ServiceAccounts in one pod or an
-///   addressing the pinned engine cannot honour are DECISIONS, and a decision
-///   retried forever is a decision nobody sees.
+/// * `Err(BackupError::Refused)`: every other refusal, and an expired hold.
+///   Terminal, because those are decisions, and a decision retried forever is
+///   a decision nobody sees.
 ///
 /// # Errors
 ///
@@ -910,11 +743,10 @@ pub async fn admit_destination(
     let Some(reference) = backup.spec.destination_ref.as_ref() else {
         return Ok(DestinationAdmission::NotRequested);
     };
-    // THE POLICY IS READ ONLY ON THIS PATH, THROUGH ONE PROCESS-WIDE CACHE. A
-    // legacy `Backup` performs no extra `get` at all, which is what keeps every
-    // route-table double in `tests/backup_controller.rs` unchanged — and what
-    // keeps an installation that has never created a `BackupDestination` from
-    // depending on a `ConfigMap` in the release namespace to run a backup.
+    // The policy is read only on this path, through one process-wide cache,
+    // so a legacy `Backup` performs no extra `get` and an installation with no
+    // `BackupDestination` never depends on a policy `ConfigMap` to run a
+    // backup.
     let load = crate::check::policy::load(
         client,
         super::topic_discovery::configured_policy_ref().as_ref(),
@@ -923,12 +755,9 @@ pub async fn admit_destination(
     )
     .await
     .map_err(BackupError::Api)?;
-    // ONE `get` OF THE OBJECT, TWO RESOLUTIONS OF IT, ONE `get` OF ITS CA.
-    // `resolve_ref` would do the archive half in one call, and then the
-    // evidence half would need a second read of the same object on every pass
-    // — so the read is opened out here and `resolve` (pure) is called twice
-    // over the bytes it returned. Both resolutions therefore describe the SAME
-    // revision of the same object, which a second `get` could not promise.
+    // One `get` of the object, two pure resolutions of it, one `get` of its
+    // CA, so both resolutions describe the same revision of the object, which
+    // a second `get` could not promise.
     let object = match resolve_destination_object(client, namespace, &reference.name).await? {
         Ok(object) => object,
         Err(refusal) => {
@@ -960,20 +789,18 @@ pub async fn admit_destination(
     let archive = archive
         .with_ca(&observation)
         .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?;
-    // THE JOB RUNS WHERE THE REFERENCES RESOLVE, AND NOWHERE ELSE. Every
-    // reference the resolution carries is a bare object name, and the kubelet
-    // resolves a bare name in the POD's namespace; a Job placed elsewhere would
-    // project whichever Secret happens to carry that name THERE. `resolve_ref`
-    // is namespace-local, so this can only fail on a hand-built resolution —
-    // and it is checked anyway, because the consequence is a silent credential
-    // substitution.
+    // The Job runs where the references resolve, and nowhere else: the kubelet
+    // resolves a bare Secret name in the pod's namespace, so a Job placed
+    // elsewhere would project whichever Secret has that name there.
+    // `resolve_ref` is namespace-local, so this fails only on a hand-built
+    // resolution, and is checked because the consequence is a silent
+    // credential substitution.
     if let Err(refusal) = archive.check_job_namespace(namespace) {
         return Err(BackupError::Refused(refusal.reason(), refusal.message));
     }
-    // D2 §3.5's U1 gate. TERMINAL: `spec.transport.caBundle` is immutable on
-    // the destination, so a requeue would never succeed — the operator either
-    // drops the bundle, uses a public root, or an administrator opts the
-    // installation in.
+    // Terminal: `spec.transport.caBundle` is immutable on the destination, so
+    // the operator drops the bundle, uses a public root, or an administrator
+    // opts the installation in.
     if archive.ca_bundle.is_some() && !engine_custom_ca_allowed(load.policy()) {
         return Err(BackupError::Refused(
             CheckCode::CaBundleUnsupportedByEngine.as_str(),
@@ -984,21 +811,17 @@ pub async fn admit_destination(
             ),
         ));
     }
-    // THE SECOND ROLE, FROM THE SAME OBJECT AND THE SAME READ. A backup writes
-    // its receipt through `evidenceWrite`, and the runner refuses a run that
-    // does not say which credential that store uses. `resolve` is pure over the
-    // object `resolve_ref` already fetched, so this costs no API call — but it
-    // CAN refuse (an `evidenceWrite` naming a Secret with a blank name, say),
-    // and that refusal is terminal for the same reason the archive one is.
+    // The second role, from the same object and read: the runner refuses a run
+    // that does not say which credential its receipt store uses. It can
+    // refuse (an `evidenceWrite` naming a blank Secret name, say), terminally
+    // like the archive one.
     let evidence = destination::resolve(&object, DestinationRole::EvidenceWrite, load.policy())
         .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?
         .with_ca(&observation)
         .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?;
-    // AND THE TWO MUST BE SATISFIABLE BY ONE POD. `evidence_env` owns that
-    // question — one pod has one ServiceAccount — and refusing here means the
-    // conflict is a terminal `ExecutionContextConflict` before anything is
-    // frozen, rather than a Job the API server accepts and the runner cannot
-    // authenticate.
+    // One pod has one ServiceAccount, so the two must be satisfiable by one
+    // pod: a terminal `ExecutionContextConflict` before anything is frozen,
+    // rather than a Job the runner cannot authenticate.
     if let Err(refusal) = evidence.evidence_env(&archive) {
         return Err(BackupError::Refused(refusal.reason(), refusal.message));
     }
@@ -1010,9 +833,8 @@ pub async fn admit_destination(
 /// The `BackupDestination` a `destinationRef` names, or the refusal that says
 /// why there is none.
 ///
-/// `Ok(Err(refusal))` rather than `Err` for a `DestinationNotFound`: whether an
-/// absent object is a hold or a terminal refusal is the CALLER's decision (it
-/// depends on the hold budget), and this function does not know the budget.
+/// `Ok(Err(refusal))` rather than `Err` for a `DestinationNotFound`: whether
+/// it is a hold or a terminal refusal depends on the caller's hold budget.
 ///
 /// # Errors
 ///
@@ -1040,52 +862,36 @@ async fn resolve_destination_object(
     }
 }
 
-/// The ONE installation-policy cache this controller holds.
+/// The one installation-policy cache this controller holds.
 ///
-/// # Why a process-wide cache and not a fresh one per call
-///
-/// `PolicyCache::get` answers from an entry younger than its TTL; a cache
-/// constructed at the call site always misses, so the policy `ConfigMap` was
-/// re-read on every reconcile pass of every destination-backed object — twice
-/// per `Backup` pass, once for admission and once for the evidence source.
-/// `controllers::preflight` and `controllers::topic_discovery` hold theirs in
-/// their context; this controller's `Context` is shared with every route-table
-/// double in `tests/backup_controller.rs`, so a `OnceLock` beside the store
-/// cache is the same fix without reshaping a struct three test files build.
+/// `PolicyCache::get` answers from an entry younger than its TTL, so a cache
+/// built at the call site always misses and re-reads the `ConfigMap` on every
+/// pass. This controller's `Context` is shared with every route-table double
+/// in `tests/backup_controller.rs`, so a `OnceLock` replaces a context field.
 fn installation_policy_cache() -> &'static crate::check::policy::PolicyCache {
     static CACHE: std::sync::OnceLock<crate::check::policy::PolicyCache> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(crate::check::policy::PolicyCache::new)
 }
 
-/// A sentence naming the missing administrator setting, when this
-/// installation's policy document is not the one refusing — D2 W11's
-/// `weirkeeper-policy` `ConfigMap`.
+/// A sentence naming the missing administrator setting, when no installation
+/// policy document exists (the `weirkeeper-policy` `ConfigMap`).
 ///
-/// # FAIL CLOSED, AND SAY WHICH CLOSED DOOR IT IS
-///
-/// Both features this task ships are administrator settings with closed
-/// defaults: `evidence.controllerIdentityLocations` is empty and
-/// `engine.allowUnverifiedCustomCa` is `false`. When an administrator HAS
-/// written a policy and simply did not list this location, the refusal's own
-/// message is the whole story — they edit the `ConfigMap`.
-///
-/// When there is no policy document at all the refusal reads as "your
-/// administrator did not list this location" and the truth is "no policy
-/// exists, so nobody has listed anything anywhere" — and an operator who cannot
-/// tell those apart goes looking for an object that is not there. Two ways to
-/// be in that state, both covered:
+/// Both settings a destination may need have closed defaults
+/// (`evidence.controllerIdentityLocations` empty,
+/// `engine.allowUnverifiedCustomCa` `false`). With a policy document, the
+/// refusal's own message is the whole story. Without one, "your administrator
+/// did not list this location" hides that nobody listed anything anywhere.
+/// Two ways to be there:
 ///
 /// * **No reference configured.** Neither
 ///   [`crate::check::policy::POLICY_CONFIGMAP_ENV`] nor
-///   `LOGWEIR_INSTALLATION_NAMESPACE` on the controller Deployment, so
-///   `configured_ref` is `None` and nothing is ever read. A hand-wired or
-///   embedded controller; the chart sets the pair.
-/// * **Referenced and absent.** The variables are set and the `ConfigMap` is
-///   not there — `get_opt` answered `None` and the load defaulted.
+///   `LOGWEIR_INSTALLATION_NAMESPACE` is set on the controller, so nothing is
+///   read (a hand-wired controller; the chart sets the pair).
+/// * **Referenced and absent.** The `ConfigMap` is not there and the load
+///   defaulted.
 ///
-/// Empty when a policy was actually read, loaded or refused: then the document
-/// exists and the administrator's own message applies.
+/// Empty when a policy was actually read, loaded or refused.
 #[must_use]
 fn policy_reachability_note(load: &crate::check::policy::PolicyLoad) -> String {
     if !matches!(load, crate::check::policy::PolicyLoad::Defaulted(_)) {
@@ -1113,14 +919,11 @@ fn policy_reachability_note(load: &crate::check::policy::PolicyLoad) -> String {
 /// The `/status` patch a holding `Backup` carries — `phase: Pending` and one
 /// `Admitted=False` condition naming the destination refusal.
 ///
-/// # It is not a terminal state and it does not pretend to be one
-///
-/// `phase: Pending` is the phase a `Backup` already has before its Job exists,
-/// and `status_is_terminal` does not match it, so the next pass re-reads the
-/// destination and the hold resolves itself the moment the object appears.
-/// `Admitted=False` is what a console renders, and its `reason` is the
-/// resolver's own `CheckCode` — the same string the `BackupDestination`'s own
-/// `Valid` condition carries, so the two objects agree about the fault.
+/// Not terminal: `status_is_terminal` does not match `Pending`, so the next
+/// pass re-reads the destination and the hold resolves when the object
+/// appears. The condition's `reason` is the resolver's own `CheckCode`, the
+/// string the `BackupDestination`'s `Valid` condition carries, so the two
+/// objects agree about the fault.
 #[must_use]
 pub fn destination_hold_patch(
     backup: &Backup,
@@ -1140,32 +943,23 @@ pub fn destination_hold_patch(
     json!({
         "status": {
             "phase": crate::conditions::PHASE_PENDING,
-            // THE OTHER CONDITIONS ARE CARRIED, because a JSON merge patch
-            // REPLACES arrays: a hold that emitted only `Admitted` would delete
-            // whatever `TopicsResolved` a dynamic selection had already
-            // written on an earlier pass.
+            // The other conditions are carried, because a merge patch replaces
+            // arrays: an `Admitted`-only hold would delete a `TopicsResolved`
+            // written earlier.
             "conditions": carry_conditions(existing, vec![admitted]),
         }
     })
 }
 
-// ---------------------------------------------------------------------------
-// The manual-run pool — P10
-// ---------------------------------------------------------------------------
-
-/// The `/status` patch a MANUAL `Backup` carries while it waits for a slot in
-/// its namespace's manual-run pool — P10, [`crate::run_pool`].
+/// The `/status` patch a manual `Backup` carries while it waits for a slot in
+/// its namespace's manual-run pool ([`crate::run_pool`]).
 ///
 /// `phase: Queued`, `status.queue.limit`, and one `Admitted=False` condition
-/// whose reason is [`crate::conditions::REASON_CONCURRENCY_LIMITED`] — the
-/// spelling a queued `Preflight` already carries. Nothing else: no plan, no
-/// `status.execution`, no Job exists for a queued run, and nothing here claims
-/// one does. STABLE FOR A GIVEN CEILING (see
-/// [`crate::run_pool::queued_message`]), so a run that stays queued for an
-/// hour is written once, not once per pass.
-///
-/// THE OTHER CONDITIONS ARE CARRIED, as the destination hold carries them: a
-/// merge patch REPLACES the array.
+/// with reason [`crate::conditions::REASON_CONCURRENCY_LIMITED`], as a queued
+/// `Preflight` carries. No plan, `status.execution` or Job exists for a queued
+/// run. Stable for a given ceiling ([`crate::run_pool::queued_message`]), so
+/// a run queued for an hour is written once. The other conditions are carried:
+/// a merge patch replaces the array.
 #[must_use]
 pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
     let namespace = backup.namespace().unwrap_or_default();
@@ -1192,20 +986,18 @@ pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> V
     })
 }
 
-/// THE ADMISSION RECORD — the ONE write every pass that admits a manual run
-/// makes, before anything is created for it (review H1).
+/// The admission record: the one write every pass that admits a manual run
+/// makes, before anything is created for it.
 ///
-/// `Admitted=True` is the run's own, durable statement that it holds a slot:
+/// `Admitted=True` is the run's durable statement that it holds a slot:
 /// [`crate::run_pool::backup_standing`] reads it as occupying in every process
-/// and after every restart, so a controller that restarts between this write
-/// and the Job counts the run. The in-process reservation covers the moment
-/// before the watch shows this write. `status.queue` is cleared (an explicit
-/// `null`: a merge patch that omitted the key would leave it). `phase` is left
-/// for the writes that follow in the same pass (`Resolving`, `Running`) to
-/// move; `running_status_patch` re-asserts `Admitted=True` with its own message
-/// and, the reason being unchanged, keeps this write's `lastTransitionTime`.
+/// and after every restart. The in-process reservation covers the moment
+/// before the watch shows this write. `status.queue` is cleared with an
+/// explicit `null` (an omitted key would leave it). `phase` is left for the
+/// writes that follow; `running_status_patch` re-asserts `Admitted=True` with
+/// the same reason, so this write's `lastTransitionTime` stays.
 ///
-/// A FAILED WRITE CREATES NOTHING: it is `?`-propagated and every create step
+/// A failed write creates nothing: it is `?`-propagated and every create step
 /// is behind it.
 #[must_use]
 pub fn admitted_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
@@ -1236,7 +1028,7 @@ pub fn admitted_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) ->
 
 /// What the manual-run gate decided for one pass.
 enum PoolGate {
-    /// Go on over THIS object: the admission record moved its status and its
+    /// Go on over this object: the admission record moved its status and its
     /// `resourceVersion` (seam S7), and every later write of the pass must
     /// start from it.
     Admitted(Box<Backup>),
@@ -1245,10 +1037,10 @@ enum PoolGate {
     Wait,
 }
 
-/// The manual-run gate — P10. Called for a MANUAL run with no frozen inputs
-/// that does not already hold a slot ([`crate::run_pool::backup_gated`]),
-/// AFTER every refusal that can be decided without creating anything and
-/// BEFORE the first object is created for it.
+/// The manual-run gate, called for a manual run with no frozen inputs that
+/// does not already hold a slot ([`crate::run_pool::backup_gated`]), after
+/// every refusal decidable without creating anything and before the first
+/// object is created.
 ///
 /// Decide-and-reserve under the pool's one lock
 /// ([`crate::run_pool::Reservations::decide`]), then, on admit, the durable
@@ -1353,20 +1145,10 @@ async fn manual_run_gate(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Evidence observation for destination-backed runs — D2 §3.9, §3.10
-// ---------------------------------------------------------------------------
-
 /// The `detail` a `NotAttempted` carries when the destination declares no
-/// `evidenceRead` — D2 §3.9 step 2, verbatim.
-///
-/// # A DEFINED ANSWER, NOT A SILENCE
-///
-/// `evidenceRead` absent means nobody configured a reader, which is a truthful
-/// fact about the destination and NOT a green badge and NOT an error. The
-/// detail names the field to add and the command that verifies the receipt
-/// without a controller-held credential, so an operator who reads it knows
-/// both ways out.
+/// `evidenceRead`: a truthful fact about the destination, neither a green
+/// badge nor an error. It names the field to add and the command that
+/// verifies the receipt without a controller-held credential.
 pub const EVIDENCE_READ_NOT_CONFIGURED_PREFIX: &str = "BackupDestination ";
 
 /// The rest of [`EVIDENCE_READ_NOT_CONFIGURED_PREFIX`]'s sentence.
@@ -1375,29 +1157,26 @@ pub const EVIDENCE_READ_NOT_CONFIGURED_SUFFIX: &str =
 
 /// Where this run's evidence is read from, for ONE reconcile pass.
 ///
-/// `Debug` is HAND-WRITTEN, because [`Self::Destination`] holds a `Store` and
-/// `Store` is deliberately not `Debug` — a derived one would put a handle's
-/// configuration, and one day its credential provider, into whatever log line
-/// formatted it. What a reader needs is WHICH ARM, which is what the routing
-/// property is about; `evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle`
-/// asserts on the arm and never on the handle.
+/// `Debug` is hand-written: [`Self::Destination`] holds a `Store`, which is
+/// deliberately not `Debug`, so its configuration never reaches a log line.
+/// The routing property is about which arm, and
+/// `evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle`
+/// asserts only the arm.
 pub enum EvidenceSource {
-    /// A legacy inline-`archive` run: the controller's ONE global handle, as
-    /// it has always been. D2 §3.10 confines that handle to exactly this case.
+    /// A legacy inline-`archive` run: the controller's one global handle, which
+    /// serves exactly this case.
     GlobalHandle,
     /// A destination-backed run whose `evidenceRead` is
     /// [`crate::destination::ResolvedGrant::ControllerIdentity`] and whose
-    /// location the installation policy allowlists — D2 §3.8 option **E**. The
-    /// handle comes from [`crate::evidence_store::StoreCache`]: bucket, prefix,
-    /// region, endpoint, addressing and CA from the destination, and only the
-    /// CREDENTIAL from the controller's own environment.
+    /// location the installation policy allowlists. The handle comes from
+    /// [`crate::evidence_store::StoreCache`]: everything from the destination
+    /// except the credential, which is the controller's own.
     Destination(Arc<Store>),
-    /// A destination-backed run whose `evidenceRead` grant only a POD may hold
-    /// — `SecretKeys` or `WorkloadIdentity`, including an `ArchiveReadGrant`
-    /// that resolves to one of them — D2 §3.8 option **C**, the default. An
-    /// evidence-fetch check Job in the object's own namespace reads the two
-    /// objects with exactly this grant and relays them
-    /// ([`crate::evidence_fetch`]); the controller verifies what it relays.
+    /// A destination-backed run whose `evidenceRead` grant only a pod may hold
+    /// (`SecretKeys` or `WorkloadIdentity`, including an `ArchiveReadGrant`
+    /// that resolves to one): the default. An evidence-fetch check Job in the
+    /// object's own namespace reads the two objects with this grant and relays
+    /// them ([`crate::evidence_fetch`]); the controller verifies what it relays.
     FetchJob {
         /// The destination resolved for `DestinationRole::EvidenceRead`.
         destination: Box<ResolvedDestination>,
@@ -1417,9 +1196,9 @@ pub enum EvidenceSource {
 
 impl EvidenceSource {
     /// What an evidence-fetch pass needs from this source: the destination to
-    /// render a Job from, the check limits, the policy digest — or, when the
-    /// source is no longer a Job's to read, why not. A Job that already exists
-    /// is still observed either way; only CREATING one needs the destination.
+    /// render a Job from, the check limits and the policy digest, or why the
+    /// source is no longer a Job's to read. An existing Job is observed either
+    /// way; only creating one needs the destination.
     #[must_use]
     pub fn fetch_inputs(
         &self,
@@ -1477,38 +1256,31 @@ impl std::fmt::Debug for EvidenceSource {
     }
 }
 
-/// Which handle this `Backup`'s evidence is read through — D2 §3.9.
+/// Which handle this `Backup`'s evidence is read through.
 ///
-/// # THE GLOBAL HANDLE IS FOR LEGACY OBJECTS AND NOTHING ELSE (D2 §3.10)
+/// The global handle is for legacy objects only: it takes its bucket, region,
+/// endpoint and credential from the controller's own process, so reading a
+/// destination's evidence through it means the wrong bucket or principal,
+/// reported as "no evidence" rather than "wrong bucket".
 ///
-/// Grounding **G2**: the controller's one store takes its bucket, region,
-/// endpoint and credential from the controller's own process. On an
-/// installation with two destinations, reading the second one's evidence
-/// through it means the wrong bucket or the wrong principal — and the
-/// resulting `NotAttempted` reads as "no evidence" rather than "wrong bucket".
-/// So a `Backup` that names a `destinationRef` never reaches it.
-///
-/// # The three grants that are not `ControllerIdentity`
+/// The grants that are not `ControllerIdentity`:
 ///
 /// * **Absent** (`NotConfigured`): `NotAttempted` naming the field to add.
 /// * **`SecretKeys` / `WorkloadIdentity`** (and `ArchiveReadGrant`, which
-///   resolves to the destination's `archiveRead` grant): D2 §3.9 reads these
-///   through an evidence-fetch JOB in the object's own namespace, because the
-///   controller holds no verb on `secrets` and must not — option **B** was
-///   rejected for exactly that (D2 §3.8). The answer is
-///   [`EvidenceSource::FetchJob`], and [`crate::evidence_fetch`] runs it. What
-///   it must never be is a silent fall-back to the global handle, because
-///   that handle holds a different principal over a different bucket.
+///   resolves to the `archiveRead` grant): read by an evidence-fetch Job in
+///   the object's own namespace ([`EvidenceSource::FetchJob`]), because the
+///   controller holds no verb on `secrets` and must not; never a silent
+///   fall-back to the global handle.
 /// * **Not allowlisted**: the resolver's own
 ///   `ControllerIdentityNotAllowlisted`, so an operator cannot point the
-///   controller's principal at a location a cluster administrator did not list.
+///   controller's principal at a location an administrator did not list.
 ///
 /// # Errors
 ///
-/// [`kube::Error`] for a failed read. A destination that does not resolve at
-/// all is NOT an error here: this runs AFTER a Job has finished, and a
-/// destination edited or deleted in the meantime must not turn an observed run
-/// into a refusal. It is `NotAttempted` with the refusal's own message.
+/// [`kube::Error`] for a failed read. A destination that does not resolve is
+/// not an error: this runs after a Job finished, and an edited or deleted
+/// destination must not turn an observed run into a refusal. It is
+/// `NotAttempted` with the refusal's own message.
 pub async fn evidence_source(
     backup: &Backup,
     client: &kube::Client,
@@ -1521,13 +1293,10 @@ pub async fn evidence_source(
 /// [`evidence_source`] for any object that names a destination whose
 /// `evidenceRead` grant is the one to use.
 ///
-/// # WHICH REF THE CALLER PASSES IS THE WHOLE QUESTION ON THE RESTORE PATH
-///
-/// A `Restore` names TWO destinations, and its scorecard was written under the
-/// EVIDENCE destination's `evidenceWrite`. Reading it back through the SOURCE
-/// destination's bucket is the two-destination form of grounding **G2** — a
-/// read against the wrong store reported as "no document". The parameter is a
-/// ref rather than an object so the call site has to say which one it means.
+/// A `Restore` names two destinations and writes its scorecard under the
+/// evidence destination's `evidenceWrite`, so reading through the source
+/// destination's bucket would report "no document". The parameter is a ref so
+/// the call site has to say which one it means.
 ///
 /// # Errors
 ///
@@ -1560,11 +1329,9 @@ pub async fn evidence_source_for(
         Ok(resolved) => resolved,
         Err(ResolveError::Api(e)) => return Err(e),
         Err(ResolveError::Refused(refusal)) => {
-            // FAIL CLOSED, AND SAY WHICH CLOSED DOOR IT IS. A
-            // `ControllerIdentityNotAllowlisted` on an installation that
-            // renders no policy `ConfigMap` at all reads as "your
-            // administrator did not list this location" when the truth is that
-            // nobody CAN list one — see `policy_reachability_note`.
+            // Fail closed, and say which closed door: on an installation with
+            // no policy `ConfigMap`, nobody can list a location (see
+            // `policy_reachability_note`).
             return Ok(EvidenceSource::NotAttempted {
                 detail: format!("{refusal}{}", policy_reachability_note(&load)),
             });
@@ -1579,9 +1346,9 @@ pub async fn evidence_source_for(
         }),
         crate::destination::ResolvedGrant::SecretKeys { .. }
         | crate::destination::ResolvedGrant::WorkloadIdentity { .. } => {
-            // D2 §3.8 OPTION C, THE DEFAULT. The kubelet projects this grant
-            // into an evidence-fetch check Job's pod; the controller never
-            // reads it and still holds no verb on `secrets`.
+            // The default: the kubelet projects this grant into an
+            // evidence-fetch Job's pod; the controller never reads it and holds
+            // no verb on `secrets`.
             Ok(EvidenceSource::FetchJob {
                 checks: load.policy().checks,
                 policy_digest: load.policy().digest(),
@@ -1589,12 +1356,11 @@ pub async fn evidence_source_for(
             })
         }
         crate::destination::ResolvedGrant::ControllerIdentity => {
-            // ONE CACHE PER PROCESS, BOUNDED AT 32. Each handle owns a
-            // connection pool and a tokio runtime; the cache is keyed by
-            // destination UID, generation and CA digest, so an edit or a
-            // rotated root is a new handle by construction. `get_or_build`
-            // constructs inside `spawn_blocking` — interface I13's one
-            // sanctioned second construction site.
+            // One cache per process, bounded at 32: each handle owns a
+            // connection pool and a runtime. Keyed by destination UID,
+            // generation and CA digest, so an edit or a rotated root is a new
+            // handle. `get_or_build` constructs inside `spawn_blocking`
+            // (interface I13).
             static CACHE: std::sync::OnceLock<crate::evidence_store::StoreCache> =
                 std::sync::OnceLock::new();
             let cache = CACHE.get_or_init(crate::evidence_store::StoreCache::new);
@@ -1609,16 +1375,14 @@ pub async fn evidence_source_for(
 }
 
 /// [`evidence_source`]'s answer for an inline-archive `Backup`, with the global
-/// handle confined to the bucket it can see — PURE, and the `Backup` twin of
+/// handle confined to the bucket it can see. Pure; the `Backup` twin of
 /// `controllers::restore::legacy_evidence_source`.
 ///
-/// An inline-archive run writes its receipt under its OWN archive's bucket, at
-/// `logweir/` (D2 grounding G7), and prints bucket-relative keys. The
-/// controller reads them through its one global handle. A `Backup` whose
-/// `archive.url` names another bucket was read where its receipt never was:
-/// `NotAttempted` with a store `NotFound` detail that read as "the receipt is
-/// missing". It is now not read, and the verdict names both buckets. A
-/// destination-backed answer is returned unchanged.
+/// An inline-archive run writes its receipt under its own archive's bucket,
+/// at `logweir/`, and the controller reads it through its one global handle.
+/// A `Backup` whose `archive.url` names another bucket is not read there
+/// (that would report the receipt as missing); the verdict names both
+/// buckets. A destination-backed answer is returned unchanged.
 #[must_use]
 pub fn legacy_receipt_source(
     from: EvidenceSource,
@@ -1636,11 +1400,6 @@ pub fn legacy_receipt_source(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The evidence-fetch Job's half — D2 §3.9 steps 2–5, `SecretKeys` /
-// `WorkloadIdentity` `evidenceRead`
-// ---------------------------------------------------------------------------
-
 /// The `Backup` this Job and plan belong to, as an owner reference.
 fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
     Some(RunnerOwner {
@@ -1651,14 +1410,13 @@ fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
     })
 }
 
-/// Write one evidence-fetch verdict — `Pending`, a reached verdict, or an
-/// honest `NotAttempted` — with its `observation`, the `Verified` condition
-/// and any receipt facts, as ONE resourceVersion-preconditioned merge PATCH.
+/// Write one evidence-fetch verdict (`Pending`, a reached verdict, or an
+/// honest `NotAttempted`) with its `observation`, the `Verified` condition and
+/// any receipt facts, as one resourceVersion-preconditioned merge PATCH.
 ///
-/// `backup` is the CURRENT projection (the stored status this pass believes
-/// in), so the condition list the patch carries is the object's own with
-/// `Verified` merged in — a merge PATCH replaces arrays, and a list built
-/// from anything older would delete a condition another pass wrote.
+/// `backup` is the current projection, so the patch's condition list is the
+/// object's own with `Verified` merged in: a merge PATCH replaces arrays, and
+/// an older list would delete a condition another pass wrote.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 async fn write_fetch_verdict(
@@ -1681,8 +1439,8 @@ async fn write_fetch_verdict(
         .as_ref()
         .and_then(|s| s.conditions.as_deref())
         .unwrap_or_default();
-    // PROD-02.1: only beside a pass over the verified bytes (the caller's
-    // `empty_capture` is decided there and nowhere else).
+    // Only beside a pass over the verified bytes (the caller decides
+    // `empty_capture` there and nowhere else).
     let conditions = if empty_capture && result.is_pass() {
         with_empty_capture(conditions)
     } else {
@@ -1711,28 +1469,25 @@ async fn write_fetch_verdict(
 
 /// One pass over this run's evidence-fetch Job, and the status it implies.
 ///
-/// # What is decided here, in order (D2 §3.9 step 4)
+/// In order:
 ///
-/// 1. **The digest.** The relayed receipt is hashed HERE and compared with
-///    `status.evidence.receiptSha256` — the digest THE RUNNER reported for the
-///    bytes it signed and uploaded, which the terminal patch recorded before
-///    any fetch began. The relay's own digest is never the anchor. A
-///    disagreement is `Invalid` and projects NOTHING from those bytes: no
-///    window, no records, no capture (`9cda784`, `67aad4f`).
+/// 1. **The digest.** The relayed receipt is hashed here and compared with
+///    `status.evidence.receiptSha256`, the digest the runner reported for the
+///    bytes it signed and uploaded. The relay's own digest is never the
+///    anchor. A disagreement is `Invalid` and projects nothing from those
+///    bytes.
 /// 2. **The binding.** The receipt's `backup_id` must be this run's
-///    `status.backupId`. A different id is `Invalid`, and projects nothing.
-/// 3. **The signature**, through `verification::verify_relayed` — the
-///    namespace's resolved trust and `verify_fetched`, the same code the
-///    controller's own `ControllerIdentity` handle feeds.
-/// 4. **The facts**, exactly as the `ControllerIdentity` path writes them:
-///    `windowCovered` from the receipt whose digest and binding held
-///    (whatever the signature verdict, as the terminal patch does for that
-///    path), and `records` / `capture` only on `Valid`.
+///    `status.backupId`; a different id is `Invalid` and projects nothing.
+/// 3. **The signature**, through `verification::verify_relayed`, the same
+///    code the controller's own `ControllerIdentity` handle feeds.
+/// 4. **The facts**, as the `ControllerIdentity` path writes them:
+///    `windowCovered` from a receipt whose digest and binding held, whatever
+///    the signature verdict, and `records` / `capture` only on `Valid`.
 ///
 /// A Job that ends with no relay, a runner refusal, a relay that does not
-/// decode, a denial or a missing object is `NotAttempted` naming the cause,
-/// never `Valid` and never `Invalid`; a failed attempt is retried at +1 m,
-/// +5 m and +15 m and never re-runs the backup.
+/// decode, a denial or a missing object is `NotAttempted` naming the cause; a
+/// failed attempt is retried at +1 m, +5 m and +15 m and never re-runs the
+/// backup.
 #[allow(clippy::too_many_arguments)]
 async fn evidence_fetch_pass(
     backups: &Api<Backup>,
@@ -1765,8 +1520,8 @@ async fn evidence_fetch_pass(
     let request = crate::evidence_fetch::Request {
         payload_key: payload_key.clone(),
         sidecar_key: sidecar_key.clone(),
-        // FX-33: what this fetch is FOR, which decides how much of it the
-        // controller will hold (`Request::payload_cap`).
+        // What this fetch is for decides how much of it the controller holds
+        // (`Request::payload_cap`).
         payload_type,
     };
     let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
@@ -1858,8 +1613,8 @@ async fn evidence_fetch_pass(
                 now,
             )
             .await?;
-            // ONLY AFTER THE STATUS COMMIT — the relay (here: the cause) lives
-            // on the pod, and the TTL controller deletes both together.
+            // Only after the status commit: the relay lives on the pod, and the
+            // TTL controller deletes both together.
             check::set_ttl(client, namespace, &job_name)
                 .await
                 .map_err(BackupError::Api)?;
@@ -1878,8 +1633,8 @@ async fn evidence_fetch_pass(
             let mut empty_capture = false;
             let result = match relayed {
                 Relayed::Unread { detail } => {
-                    // STEP 5's ORPHAN CHECK, FROM THE RELAY'S PRESENCE. Only a
-                    // known presence counts; `Unknown` is not "absent".
+                    // The orphan check, from the relay's presence. Only a known
+                    // presence counts; `Unknown` is not "absent".
                     let known = match presence {
                         Presence::Complete => Some(EvidencePresence {
                             payload: true,
@@ -1900,22 +1655,19 @@ async fn evidence_fetch_pass(
                 }
                 Relayed::Both { payload, sidecar } => {
                     let fetched = sha256_prefixed(&payload);
-                    // FX-33: FOLDED, never parsed into a tree. A relayed
-                    // receipt may be as large as the relay carries
-                    // (`MAX_EVIDENCE_PAYLOAD_BYTES`), and a `Value` of it
-                    // would be up to 37 times that, in this shared process,
-                    // in async code under no budget. The five facts read
-                    // below are folded from the bytes by the rules the
-                    // `Value` readers had (`logweir_core::receipt_facts`).
+                    // Folded, never parsed into a tree: a relayed receipt may be
+                    // as large as the relay carries (`MAX_EVIDENCE_PAYLOAD_BYTES`)
+                    // and a `Value` up to 37 times that, in a shared process
+                    // under no budget. `logweir_core::receipt_facts` folds the
+                    // five facts read below.
                     let document = logweir_core::receipt_facts::ReceiptFacts::fold(&payload);
                     let claimed_id = document.as_ref().and_then(|d| d.backup_id.as_str());
                     let run_id = status
                         .and_then(|s| s.backup_id.clone())
                         .unwrap_or_else(|| plan_backup_id(backup));
                     match reported.as_deref() {
-                        // THE RUNNER'S DIGEST IS REQUIRED — a Job is never
-                        // created without one (`legacy_unbound` stays on the
-                        // store-less path), and this arm says so if one ever is.
+                        // The runner's digest is required: a Job is never
+                        // created without one, and this arm says so if one is.
                         None => VerificationResult::not_attempted(
                             payload_type,
                             "the runner reported no receipt-sha256 anchor; relayed evidence is \
@@ -1951,8 +1703,8 @@ async fn evidence_fetch_pass(
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
-                                // PROD-02.1's rule, on FX-33's fold: an EMPTY
-                                // window is no window (`covered_from_receipt`).
+                                // An empty window is no window
+                                // (`covered_from_receipt`).
                                 if let Some((from_ms, to_ms)) =
                                     doc.covered.filter(|(from, to)| from < to)
                                 {
@@ -1962,8 +1714,8 @@ async fn evidence_fetch_pass(
                                     );
                                 }
                                 if result.is_pass() {
-                                    // PROD-02.1: the relayed bytes ARE the
-                                    // verified ones (digest = the anchor).
+                                    // The relayed bytes are the verified ones
+                                    // (their digest is the anchor).
                                     empty_capture = receipt_is_empty_capture(&payload);
                                     if let Some(records) = doc.records {
                                         facts.insert("records".to_string(), json!(records));
@@ -1981,7 +1733,7 @@ async fn evidence_fetch_pass(
                     }
                 }
             };
-            // A TRANSIENT relay failure is retried with the next Job (P12).
+            // A transient relay failure is retried with the next Job.
             let (result, retry) = crate::evidence_fetch::relayed_schedule(result, attempt, now);
             write_fetch_verdict(
                 backups,
@@ -2009,7 +1761,7 @@ async fn evidence_fetch_pass(
     Ok(())
 }
 
-/// The fetch a TERMINAL `Backup` still owes, if any — run from the two
+/// The fetch a terminal `Backup` still owes, if any: run from the two
 /// already-terminal branches of [`reconcile_backup_inner`], which otherwise
 /// read nothing and write nothing.
 ///
@@ -2025,10 +1777,10 @@ async fn continue_evidence_fetch(
     runner: &job::RunnerImage,
     reads: &Reread<'_>,
 ) -> Result<bool, BackupError> {
-    // PoC P12 FIRST: a read the CONTROLLER owes this run — a scheduled retry
-    // of its own read, or the one re-read a new controller process gives an
-    // unverified run. Decided from the stored status alone, so a run that
-    // owes nothing costs this pass nothing.
+    // First, a read the controller owes this run: a scheduled retry of its
+    // own read, or the one re-read a new controller process gives an
+    // unverified run. Decided from the stored status alone, so a run that owes
+    // nothing costs this pass nothing.
     match backup_read_plan(backup, now, reads) {
         crate::evidence_fetch::ControllerRead::Due(attempt) => {
             controller_read_pass(backup, client, namespace, now, attempt, reads).await?;
@@ -2045,17 +1797,16 @@ async fn continue_evidence_fetch(
     let result = evidence
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
-    // A CONTROLLER READ'S OBSERVATION IS NOT A JOB'S: `owed_attempt` would
+    // A controller read's observation is not a Job's: `owed_attempt` would
     // start an evidence-fetch Job for a run whose grant no pod holds.
     let observation = evidence
         .and_then(|e| e.observation.as_ref())
         .filter(|o| !crate::evidence_fetch::is_controller_read(o.mode.as_deref()));
-    // THE CRASH WINDOW. A pass that wrote the terminal patch and stopped
-    // before recording the fetch — before the Job, or after the Job and
-    // before its `Pending` — leaves a run with both keys, the runner's digest,
-    // no verdict and no observation. Only such a run is re-examined here, and
-    // only a destination whose grant IS a Job's resumes as attempt 1 (whose
-    // Job, if it exists, is found by name, never created twice).
+    // The crash window: a pass that wrote the terminal patch and stopped
+    // before recording the fetch leaves a run with both keys, the runner's
+    // digest, no verdict and no observation. Only such a run, on a destination
+    // whose grant is a Job's, resumes as attempt 1 (its Job, if it exists, is
+    // found by name, never created twice).
     let unrecorded = result.is_none()
         && observation.is_none()
         && backup.spec.destination_ref.is_some()
@@ -2064,7 +1815,7 @@ async fn continue_evidence_fetch(
         });
     let owed = crate::evidence_fetch::owed_attempt(result, observation, now);
     if owed.is_none() && !unrecorded {
-        // THE VERDICT IS COMMITTED; ITS JOB'S TTL MAY NOT BE (review LOW-4).
+        // The verdict is committed; its Job's TTL may not be.
         if let Some(owner) = backup_owner(backup) {
             crate::evidence_fetch::repair_ttl(
                 client,
@@ -2107,15 +1858,10 @@ async fn continue_evidence_fetch(
     Ok(true)
 }
 
-// ---------------------------------------------------------------------------
-// The controller's own read, read again — PoC defect P12
-// ---------------------------------------------------------------------------
-
-/// What a terminal pass needs to read a run's evidence AGAIN: the same archive
-/// and verification oracles the terminal pass read it with, the archive
-/// handle's own location, and which runs this controller process has already
-/// read ([`crate::evidence_fetch::ReadMemory`]; `None` — every row that is not
-/// about re-reading — never starts a new schedule, only continues one).
+/// What a terminal pass needs to read a run's evidence again: the same archive
+/// and verification oracles, the archive handle's own location, and which runs
+/// this process has already read ([`crate::evidence_fetch::ReadMemory`];
+/// `None` never starts a new schedule, only continues one).
 #[derive(Clone, Copy)]
 pub struct Reread<'a> {
     /// The terminal pass's archive oracle (`windowCovered`, `records`, `capture`).
@@ -2128,7 +1874,7 @@ pub struct Reread<'a> {
     pub memory: Option<&'a crate::evidence_fetch::ReadMemory>,
 }
 
-/// `observation.mode` for a source the CONTROLLER reads through, or `None` for
+/// `observation.mode` for a source the controller reads through, or `None` for
 /// one it does not read at all (a Job reads it, or nothing may).
 #[must_use]
 pub fn controller_read_mode(source: &EvidenceSource) -> Option<&'static str> {
@@ -2140,12 +1886,10 @@ pub fn controller_read_mode(source: &EvidenceSource) -> Option<&'static str> {
 }
 
 /// One verification through the handle `source` names: the injected oracle for
-/// the global handle, and — D2 §3.9's "no second verification path" — THE SAME
-/// `verify_oracle` over the destination's own handle for `ControllerIdentity`.
-/// `verify_oracle` already takes the store it reads through, resolves this
-/// namespace's trust and runs `verify_resolved` inside one `spawn_blocking`;
-/// handing it another handle is the whole difference. Digest, DSSE and the
-/// trust projection are D3 W10's and are not re-decided here.
+/// the global handle, and the same `verify_oracle` over the destination's own
+/// handle for `ControllerIdentity`, so there is no second verification path.
+/// `verify_oracle` takes the store it reads through, resolves this namespace's
+/// trust and runs `verify_resolved` inside one `spawn_blocking`.
 async fn read_verdict(
     source: &EvidenceSource,
     reference: EvidenceRef,
@@ -2161,16 +1905,14 @@ async fn read_verdict(
     }
 }
 
-/// What this TERMINAL `Backup`'s controller read calls for now — PURE, from
-/// its stored status ([`crate::evidence_fetch::plan_controller_read`]), after
-/// the checks that make a read possible at all: a `NotAttempted` verdict, both
-/// evidence keys and the runner's own receipt digest on the status (a
-/// legacy-unbound run's `NotAttempted` is final — nothing fetched could be
-/// bound to it), and, for an inline-archive run, a configured archive handle
-/// whose bucket is the run's own (a run outside it is `NotAttempted` naming
-/// both buckets, and reading it would read the wrong bucket). A run that fails
-/// the last check while an attempt is SCHEDULED settles on that sentence
-/// instead of advertising an attempt that will never happen (review M1).
+/// What this terminal `Backup`'s controller read calls for now, from its
+/// stored status ([`crate::evidence_fetch::plan_controller_read`]), after the
+/// checks that make a read possible: a `NotAttempted` verdict, both evidence
+/// keys and the runner's receipt digest on the status (a legacy-unbound run's
+/// `NotAttempted` is final), and, for an inline-archive run, a configured
+/// archive handle whose bucket is the run's own. A run that fails the last
+/// check while an attempt is scheduled settles on that sentence instead of
+/// advertising an attempt that will never happen. Pure.
 #[must_use]
 pub fn backup_read_plan(
     backup: &Backup,
@@ -2230,9 +1972,9 @@ pub fn owed_backup_read(backup: &Backup, now: DateTime<Utc>, reads: &Reread<'_>)
     }
 }
 
-/// Record a SCHEDULED controller read that can no longer happen (review M1):
-/// `NotAttempted` with `why`, the attempt count kept, `retryAfter` cleared —
-/// ONE write, after which the run owes nothing in this process.
+/// Record a scheduled controller read that can no longer happen: `NotAttempted`
+/// with `why`, the attempt count kept, `retryAfter` cleared. One write, after
+/// which the run owes nothing in this process.
 async fn settle_controller_read(
     backup: &Backup,
     client: &kube::Client,
@@ -2276,21 +2018,18 @@ async fn settle_controller_read(
     Ok(())
 }
 
-/// One controller read of a TERMINAL `Backup`'s receipt — attempt `attempt` —
-/// and the ONE status write it implies.
+/// One controller read of a terminal `Backup`'s receipt, attempt `attempt`, and
+/// the one status write it implies.
 ///
-/// It is the terminal pass's evidence half, run again: the same source
-/// resolution ([`evidence_source`], [`legacy_receipt_source`]), the same
-/// archive observation for the receipt's window, the same digest fence
-/// against the runner's own digest, the same verifier. What it writes is what
-/// the terminal pass would have written had the read answered then —
-/// `windowCovered` whenever the fetched receipt is the runner's, `records` and
-/// `capture` only beside a passing verdict — plus the observation that records
-/// the attempt and, for a transient failure, the next one.
+/// The terminal pass's evidence half, run again (same source resolution,
+/// archive observation, digest fence and verifier), writing what the terminal
+/// pass would have written: `windowCovered` whenever the fetched receipt is the
+/// runner's, `records` and `capture` only beside a passing verdict, plus the
+/// observation recording this attempt and, for a transient failure, the next.
 ///
-/// A source that is no longer the controller's to read (the destination now
-/// names a pod-only grant, is gone, or is not allowlisted) is recorded as
-/// `NotAttempted` with its own sentence and no retry.
+/// A source that is no longer the controller's to read (a pod-only grant, gone,
+/// or not allowlisted) is recorded as `NotAttempted` with its own sentence and
+/// no retry.
 async fn controller_read_pass(
     backup: &Backup,
     client: &kube::Client,
@@ -2299,10 +2038,9 @@ async fn controller_read_pass(
     attempt: u32,
     reads: &Reread<'_>,
 ) -> Result<(), BackupError> {
-    // REVIEW L2: at most `CONTROLLER_READ_CONCURRENCY` of these in flight per
-    // process; the rest wait here for a permit. The semaphore is never closed,
-    // so `acquire` cannot fail; a failure would only mean the read is not
-    // throttled, never that it is skipped.
+    // At most `CONTROLLER_READ_CONCURRENCY` of these in flight per process.
+    // The semaphore is never closed, so `acquire` cannot fail; a failure would
+    // only mean the read is not throttled, never that it is skipped.
     let _permit = crate::evidence_fetch::controller_read_permits()
         .acquire()
         .await
@@ -2381,14 +2119,11 @@ async fn controller_read_pass(
             .await
         }
     };
-    // A PASS WITH NO WINDOW IS NOT RECORDED AS FINAL (review L1). The window
-    // and the counts come from the archive observation, a separate read from
-    // the verifier's; when that read did not answer, writing `Valid` would
-    // record a run with no `windowCovered` — "not a recovery point" — and a
-    // `Valid` is never read again, so the point would be lost for good. The
-    // attempt is recorded as a TRANSIENT failure instead and the next one
-    // reads both. (A receipt that WAS read and names no window is written as
-    // the terminal pass writes it.)
+    // A pass with no window is not recorded as final. The window and counts
+    // come from a separate archive read; if it did not answer, a `Valid` would
+    // record "not a recovery point" and never be read again. It is a transient
+    // failure instead, and the next attempt reads both. (A receipt that was
+    // read and names no window is written as the terminal pass writes it.)
     let result = if result.is_pass() && fetched.is_none() {
         VerificationResult::not_attempted(
             payload_type,
@@ -2402,13 +2137,13 @@ async fn controller_read_pass(
         result
     };
     let (result, retry) = crate::evidence_fetch::scheduled(result, attempt, now);
-    // THE TERMINAL PASS'S FACT RULES, VERBATIM: the window whenever the
-    // fetched receipt IS the runner's (the digest agrees), the attested counts
-    // only beside a pass.
+    // The terminal pass's fact rules: the window whenever the fetched receipt
+    // is the runner's (the digest agrees), the attested counts only beside a
+    // pass.
     let mut facts = serde_json::Map::new();
     let mut empty_capture = false;
     if fetched == Some(reported.as_str()) {
-        // PROD-02.1: beside a pass over these, the runner's, bytes only.
+        // Beside a pass over the runner's own bytes only.
         empty_capture = result.is_pass() && observed.as_ref().is_some_and(|o| o.empty_capture);
         if let Some((from_ms, to_ms)) = observed.as_ref().and_then(|o| o.covered) {
             facts.insert("windowCovered".to_string(), window_covered(from_ms, to_ms));
@@ -2490,15 +2225,11 @@ pub struct EvidencePresence {
 
 /// What the archive says about a finished run's evidence.
 ///
-/// TWO FACTS, ONE READ. Both of them need the same object-store handle — the
-/// presence of the two keys (step 5's orphan check) and the receipt's own
-/// `covered` block (interface **I22**'s window) — so they are one observation
-/// rather than two round trips against the same bucket.
-/// **NOT `Copy` SINCE TASK 24**, and the reason is a `String`. `receipt_sha256`
-/// is the controller-computed digest of the bytes this observation fetched.
-/// It is used only to compare those bytes with the runner's immutable capture
-/// claim; it is never substituted for that claim in status. Every call site
-/// that took the value by copy now takes it by reference.
+/// Two facts, one read: the presence of the two keys (the orphan check) and
+/// the receipt's own `covered` block (interface **I22**'s window) need the
+/// same handle. `receipt_sha256` is the controller-computed digest of the
+/// fetched bytes, used only to compare them with the runner's immutable
+/// capture claim, never substituted for it in status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveObservation {
     /// Whether each of the two evidence objects exists.
@@ -2506,134 +2237,84 @@ pub struct ArchiveObservation {
     /// The receipt's `covered{from_ms, to_ms}`, in **epoch milliseconds**,
     /// when the receipt was read and named its window.
     pub covered: Option<(i64, i64)>,
-    /// `sha256_prefixed` of the receipt bytes that were fetched, when they
-    /// were. **Computed here and never copied out of the document**: a
-    /// document cannot carry its own digest. `None` when the receipt could not
-    /// be read at all, which is NOT OBSERVED and not "the receipt is empty".
+    /// `sha256_prefixed` of the receipt bytes that were fetched, computed here
+    /// (a document cannot carry its own digest). `None` when the receipt could
+    /// not be read, which is not observed, not "the receipt is empty".
     pub receipt_sha256: Option<String>,
-    /// The sum of `BackupReceipt.records` — how many records this run
-    /// archived, across every topic it names. **Defect STATUS-RECORDS**, and
-    /// see [`observe_archive`] for why it is summed here and written only
-    /// after the receipt VERIFIES.
+    /// The sum of `BackupReceipt.records`: how many records this run archived
+    /// across every topic. Written only after the receipt verifies (see
+    /// [`observe_archive`]).
     pub records: Option<i64>,
-    /// `BackupReceipt.{started_at, finished_at}` — D3 §2.2's `status.capture`,
-    /// copied verbatim from the same verified receipt.
+    /// `BackupReceipt.{started_at, finished_at}`, `status.capture`, copied
+    /// verbatim from the same verified receipt.
     pub capture: Option<(DateTime<Utc>, DateTime<Utc>)>,
-    /// **PROD-02.1.** The fetched receipt parses, its arms hold and it is an
-    /// EMPTY CAPTURE ([`receipt_is_empty_capture`]). Acted on ONLY beside a
-    /// passing verdict over these same bytes ([`with_empty_capture`]).
+    /// The fetched receipt parses, its arms hold and it is an empty capture
+    /// ([`receipt_is_empty_capture`]). Acted on only beside a passing verdict
+    /// over these same bytes ([`with_empty_capture`]).
     pub empty_capture: bool,
 }
 
-/// What the archive-facing half of this reconciler is handed, and the reason
-/// it is a parameter.
+/// What the archive-facing half of this reconciler is handed.
 ///
-/// # Why an injected observation and not a `Store` handle
+/// An injected observation, not a `Store` handle, so
+/// `exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard` and
+/// `window_covered_is_epoch_milliseconds_on_the_status` assert the patched
+/// status without a socket. The real oracle reads through the shared
+/// read-only `Option<Arc<Store>>` on [`super::Context`] (interface **I13**).
 ///
-/// Reading the receipt and reading the two evidence keys both need a read-only
-/// archive handle, and that handle is **interface I13** — the shared
-/// `Option<Arc<Store>>` on [`super::Context`], built once in `main` before the
-/// tokio runtime exists. Global Constraint 6 fixes what it may be, too:
-/// read-only, with no delete capability anywhere in the tree. So both reads
-/// are written here as pure decisions over an INJECTED observation, which is
-/// what lets `exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard`
-/// and `window_covered_is_epoch_milliseconds_on_the_status` assert the status
-/// this reconciler patches without a socket, while this module's `reconcile`
-/// entry point builds the
-/// real one from [`super::Context::archive`].
+/// It is async because `Store::get_capped` blocks on its own current-thread
+/// runtime, and calling it from a reconciler compiles but panics with
+/// *Cannot start a runtime from within a runtime*. Every `Store` call goes
+/// through `tokio::task::spawn_blocking(move || …).await`, which
+/// `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking` enforces
+/// over this file. `EvidenceKeys` is taken by value because the future
+/// outlives the call.
 ///
-/// # WHY IT IS ASYNC, AND WHY THAT IS NOT DECORATION
+/// `None` means not observed, never "absent": treating an unavailable handle
+/// as "the sidecar is missing" would mark every exit-4 run `OrphanedScorecard`,
+/// and as "the window is empty" would overwrite a real `windowCovered`. A
+/// `None` observation omits `windowCovered` and never records an orphan.
 ///
-/// `Store::get_capped` is a **blocking** method that drives its own current-thread
-/// runtime, and `kube` drives every reconciler ON a runtime: a direct call
-/// COMPILES CLEANLY and panics with *Cannot start a runtime from within a
-/// runtime* at the first reconcile. So every `Store` call in this crate goes
-/// through `tokio::task::spawn_blocking(move || …).await` — interface **I13**,
-/// enforced over this file's source text by
-/// `tests/retention.rs::no_store_call_is_made_outside_spawn_blocking`, whose
-/// `I13_FILES` names it. A synchronous `Fn` cannot `.await` anything, so the
-/// oracle's TYPE has to be the async one: the review of this task proved by
-/// execution that the sync shape compiles and then fails that guard.
-///
-/// `EvidenceKeys` BY VALUE, not by reference: the future outlives the call, so
-/// the keys have to be owned by the closure that reads them inside
-/// `spawn_blocking`.
-///
-/// # `None` means NOT OBSERVED, never "absent"
-///
-/// A controller that treated an unavailable archive handle as "the sidecar is
-/// missing" would put `OrphanedScorecard` on every exit-4 run in a cluster
-/// with no archive credential, and one that treated it as "the window is
-/// empty" would write a `windowCovered` of nothing over a real one. So a
-/// `None` archive on [`super::Context`] yields a `None` observation, which
-/// omits `windowCovered` from the merge patch and never records an orphan.
-///
-/// # `BoxFuture<'static, …>` AND NOT `BoxFuture<'a, …>`, AND IT IS MEASURED
-///
-/// The review handed this task the second shape. It does not compile at the
-/// call site: an `Fn`'s `Output` is an associated TYPE matched exactly, so a
-/// future borrowed for `'a` makes `'a` the lifetime of the returned future AND
-/// of the `&'a dyn` — and `reconcile`'s oracle is a local, so the borrow
-/// checker asks for a `'static` local
-/// (`error[E0597]: 'oracle' does not live long enough … assignment requires
-/// that 'oracle' is borrowed for 'static`). The future owns everything it
-/// reads — an `Arc<Store>` clone and the keys, both moved in — so `'static` is
-/// what it actually is, and `'a` stays what it should be: how long the
-/// reconcile holds the oracle.
+/// `BoxFuture<'static, …>`, not `'a`: an `Fn`'s `Output` is matched exactly,
+/// so a future borrowed for `'a` would force `reconcile`'s local oracle to be
+/// `'static` (`E0597`). The future owns what it reads (an `Arc<Store>` clone
+/// and the keys).
 pub type ArchiveOracle<'a> =
     &'a (dyn Fn(EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>> + Send + Sync + 'a);
 
 /// The oracle for a controller that holds no archive handle: it observes
-/// nothing.
-///
-/// See [`ArchiveOracle`]. This is what this module's `reconcile` entry point
-/// uses when
-/// [`super::Context::archive`] is `None` — a controller with no
-/// `LOGWEIR_ARCHIVE_URL` configured — and it is what every unit test that is
-/// not about the archive passes.
+/// nothing. Used when [`super::Context::archive`] is `None` (no
+/// `LOGWEIR_ARCHIVE_URL`), and by unit tests that are not about the archive.
 #[must_use]
 pub fn unobserved_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>> {
     Box::pin(async { None })
 }
 
-/// The two `get`s the real oracle makes, as ONE blocking function.
+/// The two `get`s the real oracle makes, as one blocking function; the only
+/// place in this file that touches a `Store`. Both reads share one
+/// `spawn_blocking` thread (see [`ArchiveOracle`]).
 ///
-/// **THE ONLY PLACE IN THIS FILE THAT TOUCHES A `Store`, AND IT IS NOT
-/// `async`.** Both reads happen on one `spawn_blocking` thread (see
-/// [`ArchiveOracle`]): two round trips against the same bucket for two facts
-/// that are decided together, rather than two hops on and off the runtime.
-///
-/// **FX-31: the sidecar's presence is a `HEAD`, and the receipt is read
-/// under the controller's receipt cap** (`caps::CONTROLLER_RECEIPT` since
-/// FX-33: the largest receipt Logweir writes, and the cap `verify_evidence`
-/// reads the same document under). **FX-33: and it is FOLDED, not parsed
-/// into a `serde_json::Value`** — the window, the record sum and the two
-/// instants are read from the bytes as they stream past
+/// The sidecar's presence is a `HEAD`: reading a whole object to discard it
+/// would let an object planted at the sidecar key cost this shared process its
+/// whole size on every pass. The receipt is read under
+/// `caps::CONTROLLER_RECEIPT` (the largest receipt Logweir writes, the cap
+/// `verify_evidence` uses) and folded, not parsed into a `serde_json::Value`
 /// (`logweir_core::receipt_facts`), by the rules [`covered_from_receipt`],
-/// [`records_from_receipt`] and [`capture_from_receipt`] state. Presence needs no byte of the
-/// sidecar, and reading a whole object to discard it is exactly the unbounded
-/// read FX-31 ends: a tenant's multi-gigabyte object at the sidecar key cost
-/// this shared process its whole size, on every pass and every restart. The
-/// receipt's bytes are needed for `covered`; one over the cap is PRESENT (the
-/// store answered with its size) and unread, so `covered`, `records`,
-/// `capture` and `receipt_sha256` are not observed, and the verifier's own
-/// capped read names the cap in the verdict.
+/// [`records_from_receipt`] and [`capture_from_receipt`] state. A receipt over
+/// the cap is present and unread, so its facts are not observed, and the
+/// verifier's own capped read names the cap in the verdict.
 ///
-/// The two booleans are INDEPENDENT, because the whole point of the exit-4
-/// check is the asymmetric case: a payload that exists without its sidecar.
-/// An unreadable receipt is `payload: false`, not an error — a run whose
-/// receipt cannot be fetched has an archive that says nothing about it, and
-/// `orphan_state` is then reading a fact rather than a failure.
-///
-/// Returns `None` when there is no key to look up at all, which is NOT
-/// OBSERVED and not "absent".
+/// The two booleans are independent, because the exit-4 check is about a
+/// payload without its sidecar. An unreadable receipt is `payload: false`,
+/// not an error. `None` when there is no key to look up at all, which is not
+/// observed, not "absent".
 #[must_use]
 pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObservation> {
     if keys.receipt.is_none() && keys.sidecar.is_none() {
         return None;
     }
-    // Out of the controller's one read budget (FX-31 review F2): the receipt
-    // is held under this reservation while its facts are folded from it.
+    // Out of the controller's one read budget: the receipt is held under this
+    // reservation while its facts are folded from it.
     let _reservation = keys.receipt.as_ref().map(|_| {
         crate::read_budget::ReadBudget::controller()
             .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
@@ -2654,7 +2335,7 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     let document = receipt
         .as_deref()
         .and_then(logweir_core::receipt_facts::ReceiptFacts::fold);
-    // PROD-02.1: an EMPTY window is no window, as `covered_from_receipt` says.
+    // An empty window is no window, as `covered_from_receipt` says.
     let covered = document
         .as_ref()
         .and_then(|d| d.covered)
@@ -2663,10 +2344,9 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     let capture = document
         .as_ref()
         .and_then(logweir_core::receipt_facts::ReceiptFacts::capture);
-    // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
-    // uses (`sha256:<lowercase hex>`), so it can be compared directly with the
-    // runner's immutable capture claim during this completion pass. This
-    // observation is never published as a fallback claim.
+    // The digest of what was actually fetched (`sha256:<lowercase hex>`), to
+    // compare with the runner's immutable capture claim; never published as a
+    // fallback claim.
     let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
     let empty_capture = receipt.as_deref().is_some_and(receipt_is_empty_capture);
     Some(ArchiveObservation {
@@ -2679,32 +2359,19 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     })
 }
 
-/// The total record count out of a receipt — **defect STATUS-RECORDS**.
+/// The total record count out of a receipt, for `status.records` and the
+/// `RECORDS` printer column.
 ///
-/// `Backup.status.records` has been declared on the CRD with a `RECORDS`
-/// printer column since the kind existed and nothing ever wrote it: the column
-/// was blank on every `Backup` the PLAT-06.1 and PLAT-07.1 live runs produced,
-/// while the counts sat in the signed receipt all along. Found by
-/// `plat07-live`; D3 assigns it to PLAT-14.1.
+/// A sum: `BackupReceipt.records` is per topic and `status.records` one
+/// integer, "how many records the run archived". The per-topic breakdown stays
+/// in the signed document. `None` rather than `0` when the block is absent or a
+/// value does not fit: a blank column is honest and a zero is a claim.
 ///
-/// **A SUM, AND THE FIELD IS SCALAR.** `BackupReceipt.records` is per topic
-/// and `status.records` is one integer, so the answer is their sum — which is
-/// exactly what the column means ("how many records the run archived") and
-/// what the CRD's field description already says. The per-topic breakdown
-/// stays where it is attested, in the signed document; a status is not a
-/// second copy of a receipt.
-///
-/// `None` rather than `0` when the block is absent or a value does not fit:
-/// a blank column is honest and a zero is a claim.
-///
-/// **FX-33: THE RULE, over a parsed document.** The controller no longer
-/// parses a receipt into a `Value`: `observe_archive` and the evidence relay
-/// read this sum, [`covered_from_receipt`]'s window and
-/// [`capture_from_receipt`]'s instants through
-/// `logweir_core::receipt_facts::ReceiptFacts::fold`, which keeps nothing per
-/// topic. These three functions remain as the statement of what the fold
-/// must answer; `the_receipt_fold_answers_what_these_functions_answer` holds
-/// it to them.
+/// The controller no longer parses receipts into a `Value`: `observe_archive`
+/// and the evidence relay use `logweir_core::receipt_facts::ReceiptFacts::fold`.
+/// This function, [`covered_from_receipt`] and [`capture_from_receipt`] state
+/// what the fold must answer, and
+/// `the_receipt_fold_answers_what_these_functions_answer` holds it to them.
 #[must_use]
 pub fn records_from_receipt(receipt: &Value) -> Option<i64> {
     let records = receipt.get("records")?.as_object()?;
@@ -2715,10 +2382,9 @@ pub fn records_from_receipt(receipt: &Value) -> Option<i64> {
     Some(total)
 }
 
-/// `status.capture`, from the same receipt — D3 §2.2.
-///
-/// BOTH INSTANTS OR NEITHER, for [`covered_from_receipt`]'s reason: a half-read
-/// window cannot be told apart from a window that is genuinely open-ended.
+/// `status.capture`, from the same receipt. Both instants or neither, for
+/// [`covered_from_receipt`]'s reason: a half-read window cannot be told apart
+/// from an open-ended one.
 #[must_use]
 pub fn capture_from_receipt(receipt: &Value) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let at = |key: &str| -> Option<DateTime<Utc>> {
@@ -2727,38 +2393,26 @@ pub fn capture_from_receipt(receipt: &Value) -> Option<(DateTime<Utc>, DateTime<
     Some((at("started_at")?, at("finished_at")?))
 }
 
-/// Read the two evidence keys off a pod log — **by key name, never by
-/// position**.
+/// Read the two evidence keys off a pod log, by key name, never by position.
 ///
-/// # Why by name
+/// A controller that trusted interface **I7**'s print order would silently
+/// swap the `.sig` and `.json` keys if a runner ever printed them the other
+/// way round. The second arm of
+/// `the_runner_keys_are_read_from_the_final_two_stdout_lines` reverses the
+/// lines.
 ///
-/// Interface **I7** fixes the ORDER the runner prints them in, and a
-/// controller that trusted the order would be a controller whose evidence
-/// pointer silently swaps if a future runner emits them the other way round —
-/// writing the `.sig` key into `receiptKey` and the `.json` key into
-/// `sidecarKey`, both of which "look like" object keys and neither of which a
-/// verifier could then fetch. The second arm of
-/// `the_runner_keys_are_read_from_the_final_two_stdout_lines` feeds the lines
-/// reversed and asserts each key still lands in its own field.
-///
-/// # Why no key is ever guessed
-///
-/// A receipt key is derivable — `logweir/backups/<backup_id>/<run_id>.receipt.json` —
-/// and a controller that derived one on an unreadable log would point
-/// `status.evidence.receiptKey` at an object that may not exist. A verifier
-/// (Task 24) would then report `Invalid` for a run whose evidence was merely
-/// unread. Absent is the truthful value, and the condition reason
-/// [`REASON_EVIDENCE_KEYS_UNREADABLE`] is how the absence is explained.
-///
-/// The LAST occurrence of each prefix wins, within the final
-/// [`KEY_SCAN_TAIL_LINES`] lines: a runner that logged an earlier draft of the
-/// key would have the final one be the one that was written.
+/// No key is ever guessed: a receipt key is derivable, but deriving one on an
+/// unreadable log would point `status.evidence.receiptKey` at an object that
+/// may not exist, and verification would report `Invalid` for evidence that
+/// was merely unread. [`REASON_EVIDENCE_KEYS_UNREADABLE`] explains the
+/// absence. The last occurrence of each prefix within the final
+/// [`KEY_SCAN_TAIL_LINES`] lines wins.
 #[must_use]
 pub fn evidence_keys(log: &str) -> EvidenceKeys {
     let last = |key| runner_log::key_values(log, key).pop().map(str::to_string);
     // The grammar has one digest fact. Two lines are ambiguous even when they
-    // happen to agree, so an old/noisy runner degrades to the backward-
-    // compatible absence instead of choosing one.
+    // agree, so a noisy runner degrades to the compatible absence instead of
+    // choosing one.
     let receipt_sha256 = match runner_log::key_values(log, RECEIPT_SHA256_PREFIX)[..] {
         [v] => v
             .strip_prefix("sha256:")
@@ -2781,23 +2435,18 @@ pub fn evidence_keys(log: &str) -> EvidenceKeys {
 /// The terminal state a guard refusal named, from the log's final
 /// `refusal-reason=` line.
 ///
-/// Global Constraint 11: **the pod log API has no stream selector**, so
-/// nothing a controller reads is distinguishable by stream and the refusal
-/// discriminator has to be on stdout. An exit 3 whose log carries no such line
-/// is [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`] — a named observation,
-/// not a shrug and not a guess at which guard fired.
+/// The pod log API has no stream selector, so the discriminator is on stdout.
+/// An exit 3 whose log carries no such line is
+/// [`TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON`], a named observation and not
+/// a guess at which guard fired.
 ///
-/// # The value is a state NAME or it is nothing (FX-34)
-///
-/// The value lands on `status.exitReason`, a field the console and a
-/// `kubectl get` column print, and a pod log is untrusted text. So the LAST
-/// `refusal-reason=` line is taken, as before, and its value is kept only
-/// when it is a reason code: ASCII letters and digits, a letter first, at
-/// most 64 bytes (`logweir_core::refusal_detail::is_reason_code`). Every
-/// state a runner prints is one. A line that carries anything else names no
-/// state, which is `GuardRefusedUnknownReason` like an absent line; an
-/// earlier, well-formed line is not fallen back to. The list of states is
-/// deliberately NOT closed here, so a newer runner's state still arrives.
+/// The value lands on `status.exitReason`, which the console and `kubectl get`
+/// print, and a pod log is untrusted text. So the last `refusal-reason=` line
+/// is kept only when its value is a reason code: ASCII letters and digits, a
+/// letter first, at most 64 bytes
+/// (`logweir_core::refusal_detail::is_reason_code`). Anything else names no
+/// state, like an absent line; an earlier line is not fallen back to. The set
+/// of states is deliberately open, so a newer runner's state still arrives.
 #[must_use]
 pub fn refusal_state(log: &str) -> Option<String> {
     runner_log::key_values(log, REFUSAL_REASON_PREFIX)
@@ -2808,17 +2457,13 @@ pub fn refusal_state(log: &str) -> Option<String> {
 
 /// The exit code of the container named `runner`, if it terminated.
 ///
-/// **BY NAME, NEVER BY INDEX.** `status.containerStatuses` is not ordered by
-/// anything a controller may rely on, and an init container or a logging
-/// sidecar would put an unrelated `exitCode: 0` at index 0 — turning a failed
-/// run into a green badge. `the_container_is_selected_by_name` is the test,
-/// over a two-container fixture whose index 0 exited 0 and whose `runner`
-/// exited 2.
+/// By name, never by index: `status.containerStatuses` has no reliable order,
+/// and an init container or logging sidecar could put an unrelated
+/// `exitCode: 0` at index 0, turning a failed run green
+/// (`the_container_is_selected_by_name`).
 ///
-/// `state.terminated`, not `lastState.terminated`: under
-/// `restartPolicy: Never` there is no restart, so `state` is where the code
-/// is, and reading `lastState` would silently accept a shape this Job cannot
-/// produce.
+/// `state.terminated`, not `lastState.terminated`: under `restartPolicy: Never`
+/// there is no restart, so `state` is where the code is.
 #[must_use]
 pub fn terminated_exit_code(pod: &Pod) -> Option<i32> {
     pod.status
@@ -2875,22 +2520,16 @@ pub fn crash_terminal_state(pod: Option<&Pod>) -> &'static str {
 }
 
 /// The state an exit-1 or exit-4 run named on its final `failure-reason=`
-/// line — RECEIPT-DUP's `ExecutionAlreadyClaimed` (exit 1) or
-/// `ExecutionClaimUnproven` (exit 4) — read off the same bounded tail as the
-/// evidence keys and the refusal reason.
+/// line (`ExecutionAlreadyClaimed` at exit 1, `ExecutionClaimUnproven` at exit
+/// 4), read off the same bounded tail as the evidence keys.
 ///
-/// CLOSED, AND PAIRED WITH THE CODE: a value is lifted only when
-/// `logweir_core::guard::BACKUP_FAILURE_REASONS` lists it for THIS exit code,
+/// Closed and paired with the code: a value is lifted only when
+/// `logweir_core::guard::BACKUP_FAILURE_REASONS` lists it for this exit code,
 /// so a noisy log cannot put an arbitrary string on `status.exitReason`, and
-/// an older runner, which prints no such line, keeps the plain wire reason.
-/// The LAST occurrence wins, as for every other tail line.
-///
-/// **A BACKUP's states only** (PROD-15.1 review 2, M1's class note): the
-/// closed set is per kind, so a Backup's log can never lift a restore-only
-/// state (`TargetTopicAppeared`, `CreatedTopicsLeft`) onto a `Backup`. The
-/// Restore reconciler reads its own two through
-/// `super::restore::creation_stop_state`, which also holds the line to its
-/// place.
+/// an older runner keeps the plain wire reason. The last occurrence wins. The
+/// set is per kind, so a Backup's log can never lift a restore-only state; the
+/// Restore reconciler reads its own through
+/// `super::restore::creation_stop_state`.
 #[must_use]
 pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
     runner_log::key_values(log, FAILURE_REASON_PREFIX)
@@ -2906,13 +2545,10 @@ pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
 
 /// Whether an exit-4 run left a payload without its sidecar.
 ///
-/// Returns the terminal state, or `None` when there is nothing to record —
-/// which includes **every case where the archive was not observed**. It does
-/// not delete, does not repair, and is not rendered as a result
-/// (`design-operator.md:527-535`): an orphaned scorecard is a fact about the
-/// archive that an operator has to decide about, and a controller that "fixed"
-/// it would be a controller that wrote to an archive Global Constraint 6 gives
-/// it read-only.
+/// Returns the terminal state, or `None` when there is nothing to record,
+/// including every case where the archive was not observed. It does not
+/// delete or repair: an orphaned scorecard is a fact an operator decides
+/// about, and the controller's archive handle is read-only.
 #[must_use]
 pub fn orphan_state(exit_code: i32, presence: Option<EvidencePresence>) -> Option<&'static str> {
     if exit_code != 4 {
@@ -2927,9 +2563,8 @@ pub fn orphan_state(exit_code: i32, presence: Option<EvidencePresence>) -> Optio
 /// The [`RunnerJobSpec`] one `Backup` and its referenced source cluster produce,
 /// from the inputs that would be frozen now.
 ///
-/// PURE, so the Job a test builds is byte-identical to the one the reconciler
-/// `POST`s and an assertion over this function is an assertion over the
-/// request. The argv is [`backup_execution::runner_argv`] of the derived run
+/// Pure, so the Job a test builds is byte-identical to the one the reconciler
+/// `POST`s. The argv is [`backup_execution::runner_argv`] of the derived run
 /// identity; no annotation is read.
 ///
 /// # Errors
@@ -2984,22 +2619,18 @@ pub fn runner_job_spec_from_inputs(
         ));
     }
 
-    // THE SOURCE CONNECTION, FROM THE ONE RESOLVER THE PROBE USES (PLAT-07.1):
-    // the password as `secretKeyRef` and a private CA as a projected file,
-    // references only. A connection that does not resolve is refused here,
-    // before the Job exists.
+    // The source connection, from the one resolver the probe uses: the
+    // password as `secretKeyRef` and a private CA as a projected file,
+    // references only. A connection that does not resolve is refused before
+    // the Job exists.
     let connection =
         crate::connection::resolve(cluster, crate::connection::ConnectionUse::BackupSource)?;
     connection.check_job_namespace(&namespace)?;
-    // AND IT MUST BE THE CONNECTION THE SNAPSHOT FROZE. The UID check above
-    // says the referent is the same OBJECT; this says its connection still
-    // resolves to what the frozen plan document was rendered from and approved
-    // against. Addresses, auth and the CA reference are exactly the three
-    // things the snapshot carries and the Job or the plan acts on, so an edit
-    // to any of them between the freeze and a Job re-creation is refused here
-    // as well as by `verify_frozen_config_map` — this function is public and
-    // pure, and a caller holding frozen inputs may reach it without the
-    // reconciler's verify pass.
+    // And it must be the connection the snapshot froze: the UID check says the
+    // referent is the same object; this says its addresses, auth and CA
+    // reference still resolve to what the frozen plan was rendered from. This
+    // function is public and pure, so a caller holding frozen inputs may reach
+    // it without the reconciler's `verify_frozen_config_map` pass.
     let frozen_connection = (
         &inputs.source.bootstrap_servers,
         &inputs.source.auth,
@@ -3034,18 +2665,16 @@ pub fn runner_job_spec_from_inputs(
         )],
     }];
     secret_mounts.extend(projection.secret_mounts);
-    // Kept out of `env_from_secret` for the same reason the drill manifest
-    // keeps the signing key out of it: a key is a FILE the runner opens by
-    // path, and an env var holding PEM text would appear in
-    // `kubectl describe pod` output for anyone with pod read.
+    // A key is a file the runner opens by path, kept out of `env_from_secret`:
+    // PEM text in an env var appears in `kubectl describe pod` for anyone with
+    // pod read.
     secret_mounts.sort_by(|a, b| a.volume.cmp(&b.volume));
 
     let mut env_from_secret = projection.env_from_secret;
-    // FX-20: AN INLINE ARCHIVE'S SECRET IS BOUND TO THE LOCATION THE RUN
-    // WRITES — the frozen storage block's scheme, bucket and endpoint, which
-    // is where this run's archive AND its receipt (the same bucket's
-    // `logweir/`) go. A Secret bound to another location is refused by the
-    // runner before any store exists.
+    // An inline archive's Secret is bound to the location the run writes (the
+    // frozen storage block's scheme, bucket and endpoint, where the archive and
+    // its receipt go). The runner refuses a Secret bound elsewhere before any
+    // store exists.
     let inline_binding = match (
         backup.spec.archive.secret_ref.as_ref(),
         inputs.destination.as_ref(),
@@ -3075,27 +2704,18 @@ pub fn runner_job_spec_from_inputs(
         env_from_secret.extend(binding.from_secret.iter().cloned());
     }
 
-    // === THE DESTINATION'S CONTRIBUTION, FROM THE FROZEN BLOCK (D2 §3.5) ===
+    // The destination's contribution, from the frozen block and not a fresh
+    // read: a Job may be re-created (GC, a lost node, a controller restart),
+    // and rendering it from the destination as it reads now would let a CA or
+    // access rotation change what a half-written run addresses and trusts.
     //
-    // FROM `frozen` AND NOT FROM A FRESH READ. A Job is created once and may be
-    // RE-created — garbage collected, a node lost, a controller restarted
-    // mid-run. Rendering the second Job from the destination as it reads NOW
-    // would let a CA or access rotation between the freeze and the re-creation
-    // change what an approved, half-written run addresses and trusts. D2 §3.7:
-    // "the Job is rendered only from the snapshot".
+    // Legacy runs reach none of this: `inputs.destination` is `None`, and the
+    // Job is byte-identical to the pre-destination one (the goldens assert it).
     //
-    // LEGACY RUNS REACH NONE OF THIS. `inputs.destination` is `None` for every
-    // inline-`archive` run, `job_env` is never called, and the Job this
-    // function returns is byte-identical to the one it returned before
-    // destinations existed — which is what the untouched goldens assert.
-    //
-    // TWO HALVES, BECAUSE A BACKUP WRITES TWO THINGS. `job_env` is the ARCHIVE
-    // store the engine writes segments through; `evidence_job_env` is the
-    // receipt store, over Global Constraint 6's `logweir/` root of the same
-    // bucket. The runner builds BOTH and refuses a run that does not name the
-    // second one's credential — before this line existed, every
-    // destination-backed run exited 3 there with the archive already opened and
-    // nothing archived.
+    // `job_env` is the archive store the engine writes through;
+    // `evidence_job_env` is the receipt store under the same bucket's
+    // `logweir/` root. The runner builds both and refuses a run that does not
+    // name the second one's credential.
     let destination_env = inputs.destination.as_ref().map(|d| d.job_env());
     let evidence_env = inputs.destination.as_ref().map(|d| d.evidence_job_env());
     for env in [destination_env.as_ref(), evidence_env.as_ref()]
@@ -3104,12 +2724,11 @@ pub fn runner_job_spec_from_inputs(
     {
         env_from_secret.extend(env.from_secret.iter().cloned());
     }
-    // ONE POD, ONE ServiceAccount. A workload-identity grant REPLACES the
-    // connection's runner ServiceAccount, because the pod's identity is what
-    // the object store authenticates and a pod has exactly one. The runner
-    // reaches no API server either way (`job::build` sets
-    // `automountServiceAccountToken: false`), so this is an object-store
-    // identity and not a Kubernetes privilege change.
+    // One pod, one ServiceAccount: a workload-identity grant replaces the
+    // connection's runner ServiceAccount, because the object store
+    // authenticates the pod's identity. The runner reaches no API server
+    // (`automountServiceAccountToken: false`), so this is not a Kubernetes
+    // privilege change.
     let service_account_name = destination_env
         .as_ref()
         .and_then(|env| env.service_account_name.clone())
@@ -3121,8 +2740,8 @@ pub fn runner_job_spec_from_inputs(
         .unwrap_or_else(|| connection.execution.service_account_name.clone());
 
     Ok(RunnerJobSpec {
-        // THE JOB IS NAMED AFTER THE CR, VERBATIM. See
-        // `RunnerJobSpec::name` for the 63-character argument.
+        // Named after the CR, verbatim. See `RunnerJobSpec::name` for the
+        // 63-character argument.
         name: name.clone(),
         namespace,
         owner: RunnerOwner {
@@ -3137,18 +2756,15 @@ pub fn runner_job_spec_from_inputs(
         secret_mounts,
         config_map_mounts: projection.config_map_mounts,
         env_from_secret,
-        // `RUST_LOG` is pinned rather than inherited: below `info` the run id
-        // and the exit-code meaning line are lost, and those two are how a
-        // pod is correlated with the archive it read
-        // (`docs/kubernetes.md` §1b). The addressing variables are the FROZEN
-        // ones, so a Job recreated after a controller restart addresses the
-        // store its plan document names.
+        // `RUST_LOG` is pinned: below `info` the run id and the exit-code
+        // meaning line are lost, and they correlate a pod with its archive.
+        // The addressing variables are the frozen ones, so a Job recreated
+        // after a controller restart addresses the store its plan names.
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
-            // EMPTY FOR A DESTINATION-BACKED RUN — `resolve_inputs` froze no
-            // addressing at all for one — so these two `extend`s are exclusive
-            // in practice and the complete explicit set below is the only
-            // answer to "where is the bucket".
+            // Empty for a destination-backed run (`resolve_inputs` froze no
+            // addressing for one), so the two `extend`s are exclusive and the
+            // explicit set below is the only answer to "where is the bucket".
             env.extend(
                 inputs
                     .archive
@@ -3170,17 +2786,14 @@ pub fn runner_job_spec_from_inputs(
             env
         },
         plan_config_map: Some(plan_config_map_name(&backup.name_any())),
-        // THE SHIPPED PIN, AND THE RECONCILER OVERWRITES IT IF THIS PROCESS
-        // WAS HANDED ANOTHER IMAGE (Task 33, `job::RUNNER_IMAGE_ENV`). This
-        // function is a pure function of the custom resource and stays one:
-        // the override is a property of the PROCESS, read once in `main`.
+        // The shipped pin; the reconciler overwrites it when this process was
+        // handed another image (`job::RUNNER_IMAGE_ENV`), so this stays a
+        // pure function of the custom resource.
         image: None,
-        // AND THE COMPILED-IN `job::IMAGE_PULL_POLICY`, OVERWRITTEN THE SAME
-        // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
-        // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
+        // Likewise for `job::RUNNER_PULL_POLICY_ENV`.
         image_pull_policy: None,
         // `Backup.spec` has no resources field, so its Job states none and the
-        // namespace's `LimitRange` defaults apply (FX-2's sweep; PROD-10.1).
+        // namespace's `LimitRange` defaults apply.
         resources: None,
     })
 }
@@ -3200,9 +2813,8 @@ pub fn runner_job(
     runner: &job::RunnerImage,
 ) -> Result<Job, BackupError> {
     let mut spec = runner_job_spec_from_inputs(backup, cluster, frozen)?;
-    // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
-    // policy). `None` in either leaves the compiled-in constant in place,
-    // which is what every test that does not pass one sees.
+    // The image and pull-policy overrides. `None` leaves the compiled-in
+    // constant.
     spec.image = runner.image.clone();
     spec.image_pull_policy = runner.image_pull_policy.clone();
     let mut built = job::build(&spec);
@@ -3212,10 +2824,9 @@ pub fn runner_job(
 
 /// Whether a Job has reached a terminal condition.
 ///
-/// `Complete` or `Failed` with `status: "True"`. Not `status.succeeded` /
-/// `status.failed`, whose counters are incremented for reasons a
-/// single-pod Job cannot distinguish, and not `completionTime`, which a failed
-/// Job never gets.
+/// `Complete` or `Failed` with `status: "True"`. Not the `succeeded` /
+/// `failed` counters, which move for reasons a single-pod Job cannot
+/// distinguish, and not `completionTime`, which a failed Job never gets.
 #[must_use]
 pub fn job_finished(job: &Job) -> bool {
     job.status
@@ -3229,9 +2840,9 @@ pub fn job_finished(job: &Job) -> bool {
 
 /// Whether `status` is already terminal, so a finished run is not re-run.
 ///
-/// Reading `phase` and not `exitCode`: the crashed-Job case writes a terminal
-/// phase with NO exit code on purpose, and a check that keyed on the code
-/// would re-create the Job for exactly the run whose code is unrecoverable.
+/// Reads `phase`, not `exitCode`: the crashed-Job case writes a terminal
+/// phase with no exit code, and keying on the code would re-create the Job
+/// for exactly the run whose code is unrecoverable.
 #[must_use]
 pub fn status_is_terminal(backup: &Backup) -> bool {
     matches!(
@@ -3242,21 +2853,15 @@ pub fn status_is_terminal(backup: &Backup) -> bool {
 
 /// One condition, as a merge-patch fragment.
 ///
-/// `lastTransitionTime` moves only when the condition actually transitions,
-/// and the comparison that decides it is
-/// [`crate::conditions::merge_condition`] — ONE implementation for all six
-/// reconcilers (plan erratum E11(d)). This file used to carry a private copy
-/// of it, as did `restore.rs`, `kafka_cluster.rs` and `backup_schedule.rs`;
-/// four copies of a rule is how two other reconcilers came to ship without it
-/// at all.
+/// `lastTransitionTime` moves only on a real transition, decided by
+/// [`crate::conditions::merge_condition`], the one implementation for every
+/// reconciler.
 ///
-/// BUILT BY SERIALISING [`crate::crds::Condition`] AND NOT BY HAND. A merge
-/// patch REPLACES an array rather than merging it, so the element this writes
-/// is compared whole against the stored one by
-/// [`crate::conditions::status_unchanged`]; a hand-built element that spelled
-/// one optional field differently from the stored one — `observedGeneration:
-/// null` where the stored object simply has no such key — would compare
-/// unequal on every pass and re-open the very loop this closes.
+/// Built by serialising [`crate::crds::Condition`], not by hand: a merge patch
+/// replaces the array, so [`crate::conditions::status_unchanged`] compares the
+/// element whole, and a hand-built one spelling an optional field differently
+/// (`observedGeneration: null` against an absent key) would compare unequal on
+/// every pass and loop.
 fn condition(
     backup: &Backup,
     r#type: &str,
@@ -3308,18 +2913,13 @@ pub fn with_status_patch(backup: &Backup, patch: &Value) -> Backup {
 /// Patch `/status` — under seam **S7**'s `metadata.resourceVersion`
 /// precondition, and not at all when the patch would change nothing.
 ///
-/// THE THIRD AND FOURTH RULES OF THE STATUS-WRITE CONTRACT, at this kind's
-/// eight patch sites. Neither is re-implemented here — both are
-/// [`crate::conditions::patch_status_preconditioned`]'s — so neither can be
-/// applied at seven call sites and forgotten at the eighth, which is what
-/// defect STATUS-PATCH-NO-RV was: every write from this reconciler was
-/// unconditional. `Backup` has FOUR status writers (this one,
-/// `backup_selection`, `backup_schedule`'s reservation and `schedule_history`),
-/// so "a concurrent writer" here is the ordinary case and not a race to
-/// imagine.
+/// Both rules are [`crate::conditions::patch_status_preconditioned`]'s, so no
+/// patch site can forget one. `Backup` has four status writers (this one,
+/// `backup_selection`, `backup_schedule`'s reservation and
+/// `schedule_history`), so a concurrent writer is the ordinary case.
 ///
-/// THE PRECONDITION IS THE OBJECT THIS CALLER OBSERVED, which for the second
-/// and third write of one pass is not the object the watch delivered — see
+/// The precondition is the object this caller observed, which for later
+/// writes of one pass is not the one the watch delivered; see
 /// [`with_status_written`] and [`patch_status_at`].
 async fn patch_status_if_changed(
     api: &Api<Backup>,
@@ -3341,10 +2941,9 @@ async fn patch_status_if_changed(
 ///
 /// `at` is where the previous write of this pass left the object. The freeze
 /// pass writes the execution record, then `TopicsResolved`, then the running
-/// patch; the terminal pass writes the outcome and then the evidence verdict.
-/// Preconditioned on the watch's version instead, every one of those later
-/// writes would be refused with a `409` — and on the terminal pass the verdict
-/// would be lost, because a terminal `Backup` is never read again.
+/// patch; the terminal pass writes the outcome, then the evidence verdict.
+/// Preconditioned on the watch's version, each later write would get a `409`,
+/// and on the terminal pass the verdict would be lost for good.
 async fn patch_status_at(
     api: &Api<Backup>,
     backup: &Backup,
@@ -3368,14 +2967,10 @@ async fn patch_status_at(
     .map_err(BackupError::Api)
 }
 
-/// [`with_status_patch`], ALSO carrying the `resourceVersion` the write that
-/// stored `patch` left behind.
-///
-/// The projection exists so a later builder in the same pass sees what that
-/// write stored; seam **S7** adds the other half — a later WRITE in the same
-/// pass must also precondition on where that write left the object. Both
-/// halves travel on one value, so a call site cannot advance the status and
-/// forget the version.
+/// [`with_status_patch`], also carrying the `resourceVersion` the write that
+/// stored `patch` left behind, so a later write in the same pass
+/// preconditions on it (seam **S7**). One value carries both, so a call site
+/// cannot advance the status and forget the version.
 #[must_use]
 fn with_status_written(backup: &Backup, patch: &Value, at: &StatusVersion) -> Backup {
     let mut next = with_status_patch(backup, patch);
@@ -3387,40 +2982,25 @@ fn with_status_written(backup: &Backup, patch: &Value, at: &StatusVersion) -> Ba
 
 /// The `/status` merge patch for a Job that exists and has not finished.
 ///
-/// BUILT AS JSON AND NOT BY SERIALISING `BackupStatus`, for merge-patch
-/// semantics: every optional field on that struct skips serialising when
-/// `None`, so an absent key means "leave it alone" — which is exactly what a
-/// running reconcile wants for the fields a finished one will write, and which
-/// a serialised struct could not express.
+/// Built as JSON, not by serialising `BackupStatus`, for merge-patch
+/// semantics: an absent key means "leave it alone", which a running reconcile
+/// wants for the fields a finished one will write.
 ///
-/// The condition array CARRIES the execution-contract conditions and
-/// `Verified` ([`carry_conditions`]): a merge patch replaces arrays, and this
-/// builder owns `Admitted` and `JobCreated`.
+/// The condition array carries the conditions this builder does not own
+/// ([`carry_conditions`]): a merge patch replaces arrays.
 ///
-/// # `Admitted=True` is written here, and defect RESTORE-ADMITTED-DROPPED is
-/// why
-///
-/// `destination_hold_patch` is this kind's only other writer of `Admitted`,
-/// and it only ever writes `False`. That was survivable while every builder
-/// silently deleted the conditions it did not name — the hold's `False` went
-/// off the object the moment a run started. It is not survivable now that
-/// `diagnostics::apply` carries every stored condition this patch is not
-/// about: a `Backup` held for its destination and then admitted would carry
-/// `Admitted=False` while its runner ran, which is a false statement about a
-/// run that plainly WAS admitted.
-///
-/// So the positive is written, exactly as the `Restore` twin writes it and
-/// with `REASON_ADMITTED` for its reason. A condition type with only a
-/// negative writer is a half-answer either way: a console reading `Admitted`
-/// on a running `Backup` used to find nothing at all.
+/// `Admitted=True` is written here, as the `Restore` twin writes it. The only
+/// other writer of `Admitted` is `destination_hold_patch`, which writes
+/// `False`; since stored conditions are carried, a `Backup` held for its
+/// destination and then admitted would otherwise carry `Admitted=False`
+/// while its runner ran.
 #[must_use]
 pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>) -> Value {
-    // STORED ORDER, AND NOT `carry_conditions`' BUILDER-FIRST ORDER — review
-    // finding LOW-2. The FREEZE pass writes this patch directly, without
-    // `diagnostics::apply`, and a running object is reconciled again and again:
-    // `status_unchanged` compares arrays element by element, so the freeze pass
-    // and the running passes that follow it must compute the same order or the
-    // first running pass writes a reshuffle nobody asked for.
+    // Stored order, not `carry_conditions`' builder-first order: the freeze
+    // pass writes this patch directly and a running object is reconciled again
+    // and again, and `status_unchanged` compares arrays element by element, so
+    // both must compute the same order or the first running pass writes a
+    // reshuffle.
     let conditions = crate::conditions::upsert_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![
@@ -3451,62 +3031,28 @@ pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>)
     })
 }
 
-/// The condition types a `Backup` patch builder carries without owning them:
-/// the execution-contract observations
-/// ([`CONDITION_EXECUTION_INPUTS_UNVERIFIED`],
-/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]), D1's
-/// [`CONDITION_TOPICS_RESOLVED`], and last
-/// [`crate::conditions::CONDITION_VERIFIED`] and
-/// [`crate::conditions::CONDITION_RUNNER_READY`].
+/// The conditions a `Backup` patch builder carries without owning them: all of
+/// them ([`crate::conditions::carry_remaining`]).
 ///
-/// A MERGE PATCH REPLACES ARRAYS, so a builder that writes `conditions` owes
-/// the parts it does not own — the hot loop `verification::carry_verified`
-/// documents is the same one a dropped observation would start. The order is
-/// fixed (the builder's own, then the three observations, then `Verified` and
-/// `RunnerReady`) so a steady object computes the same array on every pass and
-/// sends nothing.
-///
-/// # `RunnerReady` is carried, and review finding F1 is why
-///
-/// D3 §2.2 says every terminal builder carries `RunnerReady` and `Verified`
-/// forward. It did not. The condition is written by the progress path and by
-/// nothing else, so the terminal patch that RECORDS a failure was deleting the
-/// one condition that says what the failure was — and a terminal object is
-/// never reconciled again, so no later pass rewrote it. A `Backup` whose
-/// Secret is missing showed `RunnerReady=False/CredentialReferenceMissing` for
-/// five minutes and then, at the fail-fast cancellation, showed nothing at
-/// all. D3 §15's L1 asserts that condition live, AFTER the terminal patch.
-///
-/// # THE LIST IS GONE, AND THAT IS THE FIX
-///
-/// This used to name five types — the two execution-contract observations,
-/// `TopicsResolved`, `Verified` and `RunnerReady` — and carry those and nothing
-/// else. An allow-list works until a type nobody put on it appears, which is
-/// defect RESTORE-ADMITTED-DROPPED: `Admitted` and `JobCreated` were on no
-/// list, so the TERMINAL patch replaced the array with the run's verdict alone
-/// and the statement that the run had been APPROVED went off the object at the
-/// exact moment it finished — on the object an auditor actually inspects, which
-/// is never reconciled again. A condition a builder owns may transition; it may
-/// not disappear. [`crate::conditions::carry_remaining`] carries whatever the
-/// object holds, so the next condition type somebody adds is carried by
-/// construction.
+/// A merge patch replaces arrays, so a builder that writes `conditions` owes
+/// the parts it does not own; dropping one starts the hot loop
+/// `verification::carry_verified` documents. A condition a builder owns may
+/// transition; it may not disappear. The terminal patch must carry
+/// `RunnerReady` (the failure's cause) and `Admitted` (the approval) onto an
+/// object that is never reconciled again. Carrying whatever the object holds
+/// means the next condition type is carried by construction; an allow-list
+/// breaks on the first type nobody put on it.
 #[must_use]
 pub fn carry_conditions(existing: Option<&Vec<Condition>>, conditions: Vec<Value>) -> Vec<Value> {
     crate::conditions::carry_remaining(existing, conditions)
 }
 
-/// The `status.destination` projection of a frozen destination snapshot —
-/// D2 §3.7.
+/// The `status.destination` projection of a frozen destination snapshot.
 ///
-/// ONE PROJECTION, SO THE STATUS AND THE FROZEN DOCUMENT CANNOT DISAGREE, for
-/// the same reason `SelectionInputs::status` is one: a reader comparing
-/// `status.destination.locationDigest` against the plan is comparing two
-/// renderings of one value, not two digests.
-///
-/// It copies four fields and derives nothing. The snapshot's storage blocks,
-/// transport, addressing, CA digest and grant stay where they are: they are
-/// what the JOB is rendered from, and a second spelling of them on the object
-/// would be a second thing to keep true.
+/// One projection, so the status and the frozen document cannot disagree. It
+/// copies four fields and derives nothing; the storage blocks, transport,
+/// addressing, CA digest and grant stay in the snapshot the Job is rendered
+/// from.
 #[must_use]
 pub fn frozen_destination_status(snapshot: &ResolvedDestinationSnapshot) -> FrozenDestination {
     FrozenDestination {
@@ -3520,28 +3066,20 @@ pub fn frozen_destination_status(snapshot: &ResolvedDestinationSnapshot) -> Froz
 /// The `/status` merge patch that records frozen inputs: `status.execution`,
 /// `status.selection`, `status.destination`, and nothing else.
 ///
-/// SENT BEFORE THE JOB IS CREATED, and a merge of object keys: it replaces no
-/// array and so cannot drop a condition another writer owns.
+/// Sent before the Job is created, and a merge of object keys, so it cannot
+/// drop a condition another writer owns.
 ///
-/// **`status.selection` IS WRITTEN AT THE FREEZE** (D1 §7.6), in this same
-/// patch and not a later one. It says what the run may claim to have covered,
-/// and a coverage label that appeared only after the Job finished would be
-/// absent for exactly the window in which somebody is watching the run. It is
-/// absent for a `Backup` frozen under grammar `v1`, which is the documented
-/// absent-field behaviour and not a degraded state.
+/// `status.selection` is written at the freeze, in this patch: it says what
+/// the run may claim to have covered, which matters while the run is being
+/// watched. It is absent for a `Backup` frozen under grammar `v1`.
 ///
-/// **`status.destination` IS WRITTEN AT THE FREEZE TOO** (D2 §3.7), from the
-/// same snapshot the plan is rendered from, and it is the only place this
-/// controller writes it. A later pass re-reads the STORED snapshot, renders
-/// this same patch and `patch_status_if_changed` sends nothing, so the block a
-/// recovery point publishes is the block its run was admitted with — a
-/// destination edited afterwards moves neither.
+/// `status.destination` is written at the freeze too, from the snapshot the
+/// plan is rendered from, and nowhere else. A later pass re-renders the same
+/// patch from the stored snapshot and sends nothing, so a destination edited
+/// afterwards does not move it.
 ///
-/// **An omitted key, never an explicit `null`.** A legacy inline-`archive` run
-/// has no destination and no `selection`, and a merge patch carrying
-/// `"destination": null` would be this controller asserting the absence on
-/// every pass of every legacy object. The absence is the object's, not a value
-/// this patch owns; `Backup.spec` is immutable, so neither key can ever need
+/// An omitted key, never an explicit `null`: a legacy run's absence is the
+/// object's, and `Backup.spec` is immutable, so neither key can need
 /// clearing.
 #[must_use]
 pub fn execution_status_patch(frozen: &FrozenInputs) -> Value {
@@ -3576,8 +3114,7 @@ pub enum JobObservation<'a> {
 /// the annotation.
 ///
 /// The message names the annotation's size and digest and whether it equals
-/// the argv this controller derives — never its content, which is
-/// client-controlled text.
+/// the derived argv, never its content, which is client-controlled text.
 #[must_use]
 pub fn runner_argv_annotation_condition(backup: &Backup, now: DateTime<Utc>) -> Option<Condition> {
     let observed = runner_argv_annotation(backup)?;
@@ -3673,15 +3210,13 @@ pub fn execution_inputs_unverified_condition(
 /// `backup` as this pass observes it: its stored status with the two
 /// execution-contract conditions replaced by what this pass computed.
 ///
-/// IN MEMORY ONLY. Patch builders read it so the observation reaches the API
-/// server inside the patch the pass sends anyway; whether a patch is sent at
-/// all is still decided against the STORED status. `lastTransitionTime` moves
-/// only on a transition ([`merge_condition`]), so a steady observation adds no
-/// write.
+/// In memory only: patch builders read it so the observation rides in the
+/// patch the pass sends anyway; whether a patch is sent is still decided
+/// against the stored status. `lastTransitionTime` moves only on a transition
+/// ([`merge_condition`]), so a steady observation adds no write.
 ///
-/// An existing Job that an older controller created (or that does not match
-/// `status.execution`) is described by `ExecutionInputsUnverified` alone: this
-/// controller did not derive or ignore anything for that Job, so the
+/// A Job an older controller created (or that does not match
+/// `status.execution`) is described by `ExecutionInputsUnverified` alone; the
 /// annotation condition is not asserted beside it.
 #[must_use]
 pub fn observed_view(backup: &Backup, job: JobObservation<'_>, now: DateTime<Utc>) -> Backup {
@@ -3770,13 +3305,11 @@ pub fn finished_status_patch(
 }
 
 /// [`finished_status_patch`] with the runner's `failure-reason=` state
-/// ([`failure_state`]) — RECEIPT-DUP. When present it becomes
-/// `status.exitReason` and is named in the terminal condition's message, so
-/// `kubectl describe backup`, the console's exit-reason cell and its message
-/// all say `ExecutionAlreadyClaimed` / `ExecutionClaimUnproven`
-/// rather than a bare `operational` / `signing-or-lock` that reads like a
-/// broker or a signing-key problem. The condition's `reason` keeps GC11's
-/// CamelCase code, as it does for exit 3.
+/// ([`failure_state`]). When present it becomes `status.exitReason` and is
+/// named in the terminal condition's message, so `kubectl describe backup` and
+/// the console say `ExecutionAlreadyClaimed` / `ExecutionClaimUnproven` rather
+/// than a bare `operational` / `signing-or-lock`. The condition's `reason`
+/// keeps the CamelCase code, as for exit 3.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn finished_status_patch_with_failure(
@@ -3805,22 +3338,17 @@ pub fn finished_status_patch_with_failure(
 }
 
 /// [`finished_status_patch_with_failure`] with what an exit-3 run's pod log
-/// said about why ([`crate::refusal::RunnerReason`]) — **FX-34**.
+/// said about why ([`crate::refusal::RunnerReason`]).
 ///
-/// The reason is appended to the terminal condition's message, after the
-/// text it always carried, so `kubectl get backup -o yaml` and the console
-/// say why the plan was refused once the pod and its log are gone.
-/// `status.progress.message` follows, because
-/// [`diagnostics::apply_finished`] copies the terminal condition.
+/// The reason is appended to the terminal condition's message, so
+/// `kubectl get backup -o yaml` and the console say why the plan was refused
+/// once the pod and its log are gone; `status.progress.message` follows via
+/// [`diagnostics::apply_finished`]. `None` and `Some(NotStated)` (an older
+/// runner's log) leave the message unchanged. `exitReason` is not touched.
 ///
-/// `None` for every other exit code and for a caller that read no reason,
-/// and then the message is byte for byte what it was; so is
-/// `Some(NotStated)`, an older runner's log. `exitReason` is not touched.
-///
-/// A THIRD BUILDER RATHER THAN A TENTH PARAMETER ON THE SECOND:
-/// `finished_status_patch_with_failure` is called from another crate's tests
-/// (`logweir-api/tests/status_mapping.rs`), and its signature is theirs to
-/// rely on.
+/// A third builder rather than a new parameter, because
+/// `finished_status_patch_with_failure`'s signature is relied on by
+/// `logweir-api/tests/status_mapping.rs`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn finished_status_patch_with_reason(
@@ -3835,13 +3363,10 @@ pub fn finished_status_patch_with_reason(
     receipt_sha256: Option<&str>,
     now: DateTime<Utc>,
 ) -> Value {
-    // TWO VOCABULARIES, TWO FIELDS (errata E5b, review LOW-2). The CONDITION's
-    // `reason` is CamelCase, because that is what a `metav1.Condition`'s own
-    // validation pattern permits; `exitReason` keeps GC11's wire string, which
-    // is what the CRD's field description, `docs/kubernetes.md`'s table and
-    // `logweir drill`'s outcome strings all already say. The message carries
-    // the wire string too, so an operator reading `kubectl describe` sees both
-    // spellings of the one fact in one place.
+    // Two vocabularies, two fields: the condition's `reason` is CamelCase, as
+    // `metav1.Condition` validation requires; `exitReason` keeps the runner's
+    // wire string, which the CRD's field description and `logweir drill`'s
+    // outcome strings use. The message carries the wire string too.
     let wire_reason = wire_reason_for_exit(exit_code);
     let cond_reason = reason_for_exit(exit_code);
     let (phase, cond_type) = if exit_code == 0 {
@@ -3869,14 +3394,9 @@ pub fn finished_status_patch_with_reason(
         },
         now,
     )];
-    // THE EVIDENCE CONDITION EXISTS ONLY AT EXIT 0, AND IS ITS OWN TYPE.
-    // Review finding HIGH-2 / errata E5c: this used to append a SECOND
-    // `Failed` condition, `status: "False"`, whenever the key lines were
-    // absent — which is always for exits 1, 3 and 4, because GC11 says those
-    // runs write no artifact. Two conditions sharing a `type` is a malformed
-    // status (the array is a map keyed by `type`), and the message was untrue
-    // for a refusal besides. So: raised only where the contract promised an
-    // artifact, under its own type, in both directions.
+    // The evidence condition exists only at exit 0, as its own type: exits 1,
+    // 3 and 4 write no artifact, and a second `Failed` condition would be
+    // malformed (the array is a map keyed by `type`).
     // `a_failed_run_carries_exactly_one_failed_condition` asserts every arm.
     if exit_code == 0 {
         let (status, reason, message) = if keys.complete() {
@@ -3906,7 +3426,7 @@ pub fn finished_status_patch_with_reason(
 
     // The terminal state, when there is one, is the most specific thing known
     // about the run: an orphaned scorecard on exit 4, or the guard's own state
-    // on exit 3. Otherwise the GC11 wire reason.
+    // on exit 3. Otherwise the runner's wire reason.
     let exit_reason = orphan.or(refusal).or(failure).unwrap_or(wire_reason);
 
     let mut evidence = serde_json::Map::new();
@@ -3916,10 +3436,9 @@ pub fn finished_status_patch_with_reason(
     if let Some(k) = keys.sidecar.as_ref() {
         evidence.insert("sidecarKey".to_string(), json!(k));
     }
-    // OMITTED, NEVER NULLED, when the runner did not report one canonical
-    // digest line: a merge patch with no key means "leave it alone". Fetched
-    // bytes never manufacture this capture claim, even when their self-hash
-    // and signature are otherwise valid.
+    // Omitted, never nulled, when the runner did not report one canonical
+    // digest line. Fetched bytes never manufacture this capture claim, even
+    // when their hash and signature are otherwise valid.
     if let Some(d) = receipt_sha256 {
         evidence.insert("receiptSha256".to_string(), json!(d));
     }
@@ -3928,34 +3447,16 @@ pub fn finished_status_patch_with_reason(
     status.insert("phase".to_string(), json!(phase));
     status.insert("exitCode".to_string(), json!(exit_code));
     status.insert("exitReason".to_string(), json!(exit_reason));
-    // THE BACKUP ID, AND IT IS THE SAME VALUE THE PLAN ALREADY CARRIES.
-    // `BackupStatus.backup_id` was declared on the CRD from the start and
-    // nothing wrote it; the one producer, [`plan_backup_id`], put the id into
-    // the runner's plan ConfigMap alone (`plan_backup_spec`,
-    // `BackupSpec.backup_id`). So the archive prefix a run wrote under was
-    // readable from the runner's input and from nowhere on the object — and
-    // `ui/pages/restore-wizard.js::initialState` reads `status.backupId` for
-    // `fields.backupSetRef`, which the plan grammar requires, so the restore
-    // wizard threw before its first step rendered on any real cluster. Task 28
-    // found it by walking the page; this is the field it was owed.
-    //
-    // ONE FUNCTION, TWO CONSUMERS, SO THEY CANNOT DISAGREE. `plan_backup_id`
-    // is pure and derives the id from the controller owner's UID and
-    // `spec.slot` — NOT from `metadata.name`, which the archive prefix is not.
-    //
-    // ON THIS PATCH AND NO OTHER. The id names a set in the archive, so it is
-    // written by the patch that speaks for a run that REACHED the archive:
-    // `running_status_patch` speaks before there is one, and
-    // `crashed_status_patch` and `refused_status_patch` speak for runs that
-    // never wrote one at all — a run that produced no archive names no set.
-    // This is the terminal patch for a run that ran, and it is the one the
-    // restore wizard's `Succeeded` rows come from.
+    // The backup id, the same value the plan carries, from one pure function
+    // (`plan_backup_id`), so the two cannot disagree. The restore wizard reads
+    // `status.backupId` for `backupSetRef`. It names a set in the archive, so
+    // only this patch writes it: the running, crashed and refused patches
+    // speak for runs that have not written, or never wrote, an archive.
     status.insert("backupId".to_string(), json!(plan_backup_id(backup)));
-    // THE EXISTING `Verified` CONDITION IS CARRIED FORWARD, and without this
-    // line the controller hot-loops: a merge patch REPLACES arrays, so this
-    // one would delete the condition the SECOND patch adds, which would re-add
-    // it, which would wake this reconciler again. Measured at 20 reconciles
-    // per second on the Phase B run. See `verification::carry_verified`.
+    // The existing `Verified` condition is carried forward. A merge patch
+    // replaces arrays, so this one would delete the condition the second
+    // patch adds, which would re-add it and wake this reconciler again: a
+    // hot loop. See `verification::carry_verified`.
     let conditions = carry_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         conditions,
@@ -3973,23 +3474,17 @@ pub fn finished_status_patch_with_reason(
 /// The `/status` merge patch for the crashed-Job case — a Job that finished
 /// with **no terminated state for `runner`**.
 ///
-/// `exitCode` IS ABSENT, AND ITS ABSENCE IS THE ASSERTION. A merge patch with
-/// no `exitCode` key leaves the field alone, and the field was never set — so
-/// the status says "this run has no exit code" rather than fabricating a `1`
-/// (indistinguishable from a real operational failure) or a `0` (a green
-/// badge for a run that never reported). `exitReason` is
-/// [`REASON_OPERATIONAL`]: a run whose code is unrecoverable produced no
-/// artifact either, which is exactly what GC11's code 1 means, and the
-/// SUB-CASE is the condition's `reason`.
+/// `exitCode` is absent, and its absence is the assertion: the status says
+/// "this run has no exit code" rather than fabricating a `1` (a real
+/// operational failure) or a `0` (a green badge for a run that never
+/// reported). `exitReason` is [`REASON_OPERATIONAL`] (no artifact either), and
+/// the sub-case is the condition's `reason`.
 ///
-/// THE CONDITION ARRAY GOES THROUGH [`crate::verification::carry_verified`],
-/// as [`finished_status_patch`]'s does — belt and braces beside the
-/// already-terminal guard in `reconcile_backup`. A merge patch REPLACES
-/// arrays, so a builder that owns the array owes the parts of it that are not
-/// its own; `Verified` is the controller's fact about the run and not this
-/// branch's to delete. With the guard in place this branch can no longer be
-/// reached by an object that carries one, and a builder whose correctness
-/// depends on a caller's guard is one refactor from being wrong again.
+/// The condition array goes through [`crate::verification::carry_verified`],
+/// as [`finished_status_patch`]'s does: a builder that owns the array owes
+/// the parts that are not its own, and `Verified` is not this branch's to
+/// delete. The already-terminal guard in `reconcile_backup` also keeps such
+/// objects out, but a builder should not depend on a caller's guard.
 #[must_use]
 pub fn crashed_status_patch(
     backup: &Backup,
@@ -4022,20 +3517,14 @@ pub fn crashed_status_patch(
 /// The `/status` merge patch for a run this CONTROLLER refused, before any
 /// `POST`.
 ///
-/// TERMINAL, WITH NO `exitCode`, AND NEVER A REQUEUE. Nothing ran, so there is
-/// no code to lift and none is invented; `exitReason` is
-/// [`REASON_OPERATIONAL`], which is what Global Constraint 11's code 1 means —
-/// the run could not be attempted and no artifact was written — and the
-/// SUB-CASE is the condition's `reason`, exactly as in
-/// [`crashed_status_patch`].
+/// Terminal, with no `exitCode` (nothing ran) and never a requeue.
+/// `exitReason` is [`REASON_OPERATIONAL`] (the run could not be attempted and
+/// no artifact was written), and the sub-case is the condition's `reason`, as
+/// in [`crashed_status_patch`].
 ///
-/// WHY A STATUS AND NOT AN ERROR. A `BackupError` reaches `error_policy` and
-/// becomes a 15-second requeue, which for a refusal that can never succeed is
-/// an infinite loop with an EMPTY status: no phase, no condition, an empty
-/// `PHASE` column, and nothing for `kubectl describe backup` to say. That is
-/// review finding MEDIUM-1, measured on a 64-character `Backup`. A refusal the
-/// controller can decide by itself is a terminal answer, and an answer belongs
-/// on the object.
+/// A status, not an error: a `BackupError` would requeue every 15 seconds over
+/// a refusal that can never succeed, with an empty status and nothing for
+/// `kubectl describe backup` to say. An answer belongs on the object.
 ///
 /// Its condition array goes through [`crate::verification::carry_verified`]
 /// for [`crashed_status_patch`]'s reason.
@@ -4068,11 +3557,9 @@ pub fn refused_status_patch(
 
 /// `status.windowCovered`, from a receipt's `covered` block.
 ///
-/// **EPOCH MILLISECONDS, TWO INTEGERS** (interface **I22**), the same shape as
-/// `BackupReceipt.covered{from_ms, to_ms}` with `to_ms` EXCLUSIVE — never two
-/// RFC 3339 strings. The receipt these two fields mirror carries integers, and
-/// a controller that converted between the two representations is a controller
-/// that can round a window boundary.
+/// Epoch milliseconds, two integers (interface **I22**), the shape of
+/// `BackupReceipt.covered{from_ms, to_ms}` with `to_ms` exclusive. Converting
+/// to RFC 3339 strings could round a window boundary.
 #[must_use]
 pub fn window_covered(from_ms: i64, to_ms: i64) -> Value {
     json!({ "fromMs": from_ms, "toMs": to_ms })
@@ -4080,14 +3567,12 @@ pub fn window_covered(from_ms: i64, to_ms: i64) -> Value {
 
 /// Read `covered{from_ms, to_ms}` out of a receipt document.
 ///
-/// Both keys or nothing: a half-read window is worse than an unread one,
-/// because a consumer cannot tell the difference between "the archive covers
-/// from here to unknown" and "the archive covers nothing".
+/// Both keys or nothing: a consumer cannot tell a half-read window ("from here
+/// to unknown") from an empty one.
 ///
-/// **PROD-02.1: an EMPTY window is no window.** An empty capture's receipt
-/// covers `[t, t)`, no record at all; written to `windowCovered` it would make
-/// the run a recovery point and give protection a newest record at `t - 1`.
-/// So it is `None`, as an unread window is.
+/// An empty window is no window: an empty capture's receipt covers `[t, t)`,
+/// and writing it to `windowCovered` would make the run a recovery point with
+/// a newest record at `t - 1`.
 #[must_use]
 pub fn covered_from_receipt(receipt: &Value) -> Option<(i64, i64)> {
     let covered = receipt.get("covered")?;
@@ -4098,21 +3583,21 @@ pub fn covered_from_receipt(receipt: &Value) -> Option<(i64, i64)> {
     (from_ms < to_ms).then_some((from_ms, to_ms))
 }
 
-/// **PROD-02.1.** Whether receipt `bytes` are an EMPTY CAPTURE: they parse as
-/// a receipt, every arm holds (arm 4 admits the empty window only beside the
-/// watermarks arm 45 proves), and the window is empty. Says nothing about the
-/// signature: a caller acts on it only beside a passing verdict over the same
-/// digest-anchored bytes, never on a listing, a log line or unverified bytes.
+/// Whether receipt `bytes` are an empty capture: they parse as a receipt,
+/// every arm holds (arm 4 admits the empty window only beside the watermarks
+/// arm 45 proves), and the window is empty. Says nothing about the signature:
+/// a caller acts on it only beside a passing verdict over the same
+/// digest-anchored bytes.
 #[must_use]
 pub fn receipt_is_empty_capture(bytes: &[u8]) -> bool {
     serde_json::from_slice::<logweir_core::backup_receipt::BackupReceipt>(bytes)
         .is_ok_and(|r| r.validate_invariants().is_ok() && r.is_empty_capture())
 }
 
-/// **PROD-02.1.** `conditions` with a `Complete=True` condition's reason and
-/// message naming an EMPTY CAPTURE. Applied on a verdict patch only beside a
-/// pass over a receipt [`receipt_is_empty_capture`] accepts; its status — and
-/// so its transition time — is unchanged.
+/// `conditions` with a `Complete=True` condition's reason and message naming
+/// an empty capture. Applied on a verdict patch only beside a pass over a
+/// receipt [`receipt_is_empty_capture`] accepts; its status, and so its
+/// transition time, is unchanged.
 #[must_use]
 pub fn with_empty_capture(conditions: &[Condition]) -> Vec<Condition> {
     conditions
@@ -4162,18 +3647,14 @@ pub enum BackupError {
     NoUid(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
-    /// A race the next pass resolves — an object answered `409` to a create
+    /// A race the next pass resolves: an object answered `409` to a create
     /// and `404` to the read that followed. Requeue; writes nothing.
     Transient(String),
-    /// A TERMINAL REFUSAL THIS CONTROLLER DECIDED BY ITSELF, carrying the
-    /// terminal state and the message its condition names.
-    ///
-    /// NOT A REQUEUE, and that is the whole reason the variant exists. A
-    /// refusal over a CEL-immutable spec can never succeed on the next pass,
-    /// so requeueing it leaves the CR with an empty status forever (review
-    /// finding MEDIUM-1). `reconcile_backup` converts this into a
-    /// [`refused_status_patch`] and returns an OUTCOME; it never reaches
-    /// `error_policy`.
+    /// A terminal refusal this controller decided by itself, carrying the
+    /// terminal state and the message its condition names. Not a requeue: a
+    /// refusal over a CEL-immutable spec never succeeds, and requeueing would
+    /// leave the CR with an empty status for ever. `reconcile_backup` turns it
+    /// into a [`refused_status_patch`]; it never reaches `error_policy`.
     Refused(&'static str, String),
 }
 
@@ -4208,11 +3689,8 @@ impl From<kube::Error> for BackupError {
 
 /// `GET` the `KafkaCluster` `spec.sourceRef` names.
 ///
-/// A MISSING REFERENT IS TERMINAL AND NOT A REQUEUE (errata **E5a**).
-/// `Backup.spec` is CEL-immutable, so a `sourceRef` that resolves to nothing
-/// resolves to nothing on every later pass too; a requeue would leave the CR
-/// with an empty status and no explanation, which is exactly the shape review
-/// finding MEDIUM-1 was about.
+/// A missing referent is terminal, not a requeue: `Backup.spec` is
+/// CEL-immutable, so it resolves to nothing on every later pass too.
 ///
 /// # Errors
 ///
@@ -4242,25 +3720,18 @@ async fn plan_source_cluster(
         })
 }
 
-/// D1 §3.1 rule 2: a scheduled-kind run needs its `BackupSchedule` to exist,
-/// with the UID its identity was derived from, **before the freeze**.
+/// A scheduled-kind run needs its `BackupSchedule` to exist, with the UID its
+/// identity was derived from, before the freeze.
 ///
-/// # Why a run has to say this itself now
+/// Scheduled runs carry no ownerReference to their schedule, so the history
+/// survives the schedule's deletion; without this check an unfrozen run of a
+/// deleted schedule would start a Job under a policy nobody can look up.
+/// Deleting a schedule stops future work.
 ///
-/// Until PLAT-05.2 a scheduled `Backup` carried a controller ownerReference to
-/// its schedule, so deleting the schedule garbage-collected every run of it and
-/// the question never arose. D1 §5.2 removes that reference to KEEP the
-/// history, which means an unfrozen run of a deleted schedule would otherwise
-/// go on and start a Job under a policy nobody can look up any more. "Deleting
-/// a schedule stops future work" is the rule, and this is where it is enforced.
-///
-/// **A recreated schedule is a different schedule.** A UID that does not match
-/// is `ScheduleNotFound` and not an adoption: two same-named schedules' runs
-/// sharing an archive prefix is exactly what the UID is in the reference for.
-///
-/// **Manual runs never reach here**, even when they copied a schedule's policy
-/// (D1 §8.3): a manual run is "run this policy now", and it stays runnable
-/// after the schedule it was copied from is gone.
+/// A recreated schedule is a different schedule: a UID that does not match is
+/// `ScheduleNotFound`, not an adoption, because two same-named schedules' runs
+/// must not share an archive prefix. Manual runs never reach here, even when
+/// they copied a schedule's policy.
 ///
 /// # Errors
 ///
@@ -4307,12 +3778,9 @@ async fn require_schedule_for_scheduled_run(
 /// The selection a previous pass froze for this `Backup`, or `None` when this
 /// run has not been frozen yet (and so has a selection to resolve).
 ///
-/// The `status.execution` gate is the same one D1 §3.1 rule 2's referent check
-/// uses, and it comes first: a run with no recorded execution has no plan to
-/// read, and one extra `GET` per unfrozen pass would be a request made for
-/// nothing. See [`backup_execution::stored_selection`] for why a frozen run
-/// re-reads rather than re-resolves, and why that does not weaken the
-/// stored-plan comparison.
+/// The `status.execution` gate comes first: a run with no recorded execution
+/// has no plan to read. See [`backup_execution::stored_selection`] for why a
+/// frozen run re-reads rather than re-resolves.
 ///
 /// # Errors
 ///
@@ -4342,24 +3810,17 @@ async fn frozen_plan(
 /// Freeze this run's inputs in the plan ConfigMap, or admit the frozen inputs
 /// already there — and return the inputs the Job must be built from.
 ///
-/// CREATE-ONLY. The desired object is `POST`ed; a `409` is decided by reading
+/// Create-only. The desired object is `POST`ed; a `409` is decided by reading
 /// the existing object and admitting it only through
-/// [`verify_frozen_config_map`], which compares it against `desired` — a
-/// resolution made NOW from the spec, the referent and this controller's
-/// addressing — and against `status.execution` when that is recorded. When
-/// `status.execution` is recorded the existing object is read FIRST: the inputs
-/// were frozen by an earlier pass, and a ConfigMap that has since disappeared
-/// is re-created only when the fresh resolution digests to exactly the recorded
-/// value.
+/// [`verify_frozen_config_map`], against `desired` (a resolution made now)
+/// and against `status.execution` when that is recorded. With
+/// `status.execution` recorded the existing object is read first, and a
+/// ConfigMap that has since disappeared is re-created only when the fresh
+/// resolution digests to exactly the recorded value.
 ///
 /// Nothing here patches, replaces or deletes a ConfigMap: a plan another pass
-/// may already have mounted is never rewritten.
-///
-/// THE CONFIGMAP WRITE IS A KUBERNETES API WRITE, NOT AN ARCHIVE WRITE.
-/// `scripts/check-no-archive-write.sh` is unaffected: its control-plane token
-/// list forbids the writable `Store` constructor and the put family, and
-/// anchors `.delete(` to a store-shaped receiver precisely so that an
-/// ordinary `api.create(…)` on a ConfigMap is not a hit.
+/// may already have mounted is never rewritten. This is a Kubernetes API
+/// write, not an archive write.
 ///
 /// # Errors
 ///
@@ -4499,32 +3960,19 @@ async fn create_runner_job(
     }
 }
 
-/// Find the pod the exit code is read from — D-SEAMS **S6**, `SEC-PODLOG`.
+/// Find the pod the exit code is read from (seam **S6**).
 ///
-/// The prefixed selector first, the legacy one as a fallback — see
-/// [`JOB_NAME_LABEL_LEGACY`] — and of the pods a selector returns, ONLY one
-/// whose **controller** `ownerReference` is a `Job` carrying THIS Job's
-/// `metadata.uid` ([`check::pod::is_owned_by_job`]).
+/// The prefixed selector first, the legacy one as a fallback (see
+/// [`JOB_NAME_LABEL_LEGACY`]), and of the pods a selector returns only one
+/// whose controller `ownerReference` is a `Job` carrying this Job's
+/// `metadata.uid` ([`check::pod::is_owned_by_job`]). The label is plain and a
+/// hand-made pod has no owners, so without the check a planted pod could put
+/// its exit code, `refusal-reason=` and evidence keys on someone else's
+/// `Backup` once the real pod was collected. Zero owned pods is "no pod yet",
+/// handled by the crashed-Job branch.
 ///
-/// # What this used to do, and why it is gone
-///
-/// It matched the label, then preferred a pod naming this Job's UID among its
-/// owner references — of any kind, controller or not — and otherwise **fell
-/// back to the first pod with no Job owner at all**. Both halves are readable
-/// by a namespace tenant: `batch.kubernetes.io/job-name` is a plain label, and
-/// a pod created by hand has no owner references, so planting a labelled,
-/// ownerless pod put its `exitCode`, its `refusal-reason=` and its two
-/// evidence keys onto somebody else's `Backup` as soon as the real pod was
-/// garbage-collected — which the Job outlives by
-/// [`TTL_SECONDS_AFTER_FINISHED`], seven days. There is no fallback now: zero
-/// owned pods is "no pod yet", the same state a Job whose pod has not been
-/// scheduled is in, and it is handled by the crashed-Job branch that already
-/// exists for it.
-///
-/// A `Backup`'s Job is named after the `Backup`, so a Job deleted and
-/// re-created from the same frozen inputs also leaves the label selector
-/// matching BOTH the new Job's pod and, until garbage collection finishes, the
-/// deleted Job's — the UID check is what separates them.
+/// The UID check also separates a re-created Job's pod from the deleted Job's,
+/// which the same name's selector matches until garbage collection finishes.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
@@ -4547,11 +3995,10 @@ async fn find_pod(
 /// # The state machine, one pass per event
 ///
 /// 0. **The object's own name is longer than [`crate::slot::NAME_LIMIT`]** →
-///    a TERMINAL status (`phase: Failed`, `exitReason: operational`, condition
-///    reason [`TERMINAL_STATE_NAME_TOO_LONG`]) and nothing is created. Before
-///    any `POST`, because the Job the API server would refuse is a Job whose
-///    pods could never be labelled, and a requeue on a refusal that can never
-///    succeed leaves the CR with NO STATUS AT ALL (review MEDIUM-1).
+///    a terminal status (`phase: Failed`, `exitReason: operational`, condition
+///    reason [`TERMINAL_STATE_NAME_TOO_LONG`]) and nothing is created: its
+///    Job's pods could never be labelled, and a requeue would leave the CR
+///    with no status at all.
 /// 1. **No Job and no terminal status** → derive the run identity
 ///    ([`execution_identity`]), resolve the inputs against the referenced
 ///    `KafkaCluster`, FREEZE them in the immutable plan ConfigMap (or verify the
@@ -4570,9 +4017,9 @@ async fn find_pod(
 ///    container's `state.terminated.exitCode`; set `status.exitCode`,
 ///    `status.phase`, and a `Complete`/`Failed` condition whose reason is the
 ///    GC11 wire string. **Then** `get` the pod's log through the `pods/log`
-///    subresource, read the FINAL TWO STDOUT LINES by key name, set the two
-///    evidence keys — and only after the status patch returns 200, `PATCH` the
-///    Job with `ttlSecondsAfterFinished`.
+///    subresource, read the evidence keys by key name, set them, and only
+///    after the status patch returns 200, `PATCH` the Job with
+///    `ttlSecondsAfterFinished`.
 /// 4. **Job finished, no terminated state for `runner`** → the crashed-Job
 ///    case: a TERMINAL status naming the sub-case, with `exitCode` absent.
 /// 5. **Exit 4** additionally consults the presence oracle and may record
@@ -4581,9 +4028,8 @@ async fn find_pod(
 ///
 /// # No clock read in this function
 ///
-/// `now` is an argument, as in `reconcile_schedule`: the one clock read is in
-/// the `kube::runtime` wrapper, before anything is decided, so every
-/// assertion below is over a value.
+/// `now` is an argument: the one clock read is in the `kube::runtime` wrapper,
+/// before anything is decided.
 ///
 /// # Errors
 ///
@@ -4607,23 +4053,15 @@ pub async fn reconcile_backup(
 }
 
 /// [`reconcile_backup`], with the runner image and pull policy this controller
-/// process was handed — Task 33, and Task 37's policy beside it.
+/// process was handed.
 ///
 /// `runner.image` is `None` for the shipped pin `job::RUNNER_IMAGE` and
 /// `Some(reference)` for the value `main` read out of `job::RUNNER_IMAGE_ENV`;
 /// `runner.image_pull_policy` is `None` for the compiled-in
-/// `job::IMAGE_PULL_POLICY` and `Some(policy)` for the value `main` read out of
-/// `job::RUNNER_PULL_POLICY_ENV`. The pair becomes
-/// `job::RunnerJobSpec::{image, image_pull_policy}` and therefore the image and
-/// the pull policy of every Job this reconciler creates, and it changes nothing
-/// else about the Job.
-///
-/// WHY THIS IS A SECOND FUNCTION AND NOT A SIXTH PARAMETER ON
-/// [`reconcile_backup`]. Forty-three rows in `tests/backup_controller.rs` and
-/// `tests/verification.rs` call that function with route-table doubles, and
-/// none of them is about the image: a sixth argument would have written
-/// `None` forty-three times and buried the one call site where the answer is
-/// not `None` (`reconcile`, below).
+/// `job::IMAGE_PULL_POLICY` and `Some(policy)` for `job::RUNNER_PULL_POLICY_ENV`'s.
+/// The pair becomes `job::RunnerJobSpec::{image, image_pull_policy}` of every
+/// Job this reconciler creates and changes nothing else. A separate function so
+/// the many test rows that are not about the image need not pass `None`.
 pub async fn reconcile_backup_with_runner_image(
     backup: &Backup,
     client: &kube::Client,
@@ -4635,17 +4073,13 @@ pub async fn reconcile_backup_with_runner_image(
     reconcile_backup_at(backup, client, archive, verify, now, runner, None).await
 }
 
-/// [`reconcile_backup_with_runner_image`], with the controller's archive
-/// handle LOCATION — the `LOGWEIR_ARCHIVE_URL` its one global handle was built
-/// from. A seventh parameter on a new function, for the reason
-/// [`reconcile_backup_with_runner_image`] gives for its sixth.
+/// [`reconcile_backup_with_runner_image`], with the location
+/// (`LOGWEIR_ARCHIVE_URL`) the controller's one global handle was built from.
 ///
-/// `None` is "not stated" and evaluates as before; `Some` confines an
-/// inline-archive run's receipt read to the handle's own bucket
-/// ([`crate::destination::legacy_backup_evidence_scope`], the class sweep of
-/// the legacy-point-restore round's defect P5): a receipt written under an
-/// archive in another bucket is `NotAttempted` naming both buckets, never a
-/// read of a bucket it is not in.
+/// `None` is "not stated"; `Some` confines an inline-archive run's receipt read
+/// to the handle's own bucket
+/// ([`crate::destination::legacy_backup_evidence_scope`]): a receipt under an
+/// archive in another bucket is `NotAttempted` naming both buckets.
 ///
 /// # Errors
 ///
@@ -4673,15 +4107,14 @@ pub async fn reconcile_backup_at(
     .await
 }
 
-/// [`reconcile_backup_at`], with THIS PROCESS'S memory of which finished runs
-/// it has read — PoC defect P12's re-read. The running controller passes the
-/// process-wide [`crate::evidence_fetch::ReadMemory::global`]; a row passes a
-/// fresh one, which is "a controller that has just started".
+/// [`reconcile_backup_at`], with this process's memory of which finished runs
+/// it has read. The running controller passes
+/// [`crate::evidence_fetch::ReadMemory::global`]; a row passes a fresh one ("a
+/// controller that has just started").
 ///
-/// Every other entry point passes none: such a pass continues a SCHEDULED
-/// retry of the controller's own read (`observation.retryAfter`) and never
-/// starts a new schedule, so the rows that are not about re-reading see the
-/// routes they always saw.
+/// Every other entry point passes none: it continues a scheduled retry of the
+/// controller's own read (`observation.retryAfter`) and never starts a new
+/// schedule.
 ///
 /// # Errors
 ///
@@ -4711,21 +4144,17 @@ pub async fn reconcile_backup_rereading(
     .await
 }
 
-/// [`reconcile_backup_at`], THROUGH THE MANUAL-RUN POOL — P10.
+/// [`reconcile_backup_at`], through the manual-run pool.
 ///
-/// This is the entry point the running controller uses
-/// ([`reconcile_in_context_pooled`]): a MANUAL `Backup` with no frozen inputs
+/// The entry point the running controller uses
+/// ([`reconcile_in_context_pooled`]): a manual `Backup` with no frozen inputs
 /// that does not already hold a slot passes [`manual_run_gate`] after every
-/// refusal that can be decided without creating anything and before the first
-/// object is created for it, and a full pool leaves it `phase: Queued` with
-/// nothing created. Scheduled, catch-up and retry runs never reach the gate.
+/// refusal decidable without creating anything and before the first object is
+/// created, and a full pool leaves it `phase: Queued` with nothing created.
+/// Scheduled, catch-up and retry runs never reach the gate.
 ///
-/// WHY [`reconcile_backup`] DOES NOT CONSULT THE POOL. The rows in
-/// `tests/backup_controller.rs` and `tests/verification.rs` that are not about
-/// the pool drive a manual fixture through route tables that name exactly the
-/// calls the pass makes, and the pool's admission record is one more write;
-/// the rows that ARE about the pool call this function with the exact snapshot
-/// and reservation registry they are about.
+/// [`reconcile_backup`] does not consult the pool, so test rows that are not
+/// about it keep their exact route tables;
 /// `the_running_controllers_reconcile_through_the_pool` holds `reconcile` to
 /// this entry point.
 ///
@@ -4770,13 +4199,11 @@ async fn reconcile_backup_run(
     pool: Option<&crate::run_pool::Pool<'_, Backup>>,
     memory: Option<&crate::evidence_fetch::ReadMemory>,
 ) -> Result<BackupOutcome, BackupError> {
-    // WHERE THE OBJECT STANDS WHEN A REFUSAL IS RAISED. The freeze pass writes
-    // the execution record (and `TopicsResolved`) BEFORE the runner Job is
-    // created, and the Job create can still refuse (`JobNameConflict`): the
-    // refusal below is then the pass's second or third write, and seam S7
-    // preconditions it on where those writes left the object — not on the
-    // object this pass was handed, which the API server would answer 409
-    // (REHEARSAL-FIRE-PASS-STATUS-LOST's class sweep).
+    // Where the object stands when a refusal is raised: the freeze pass writes
+    // the execution record (and `TopicsResolved`) before the Job create, which
+    // can still refuse (`JobNameConflict`). Seam S7 preconditions the refusal
+    // on where those writes left the object, not the object this pass was
+    // handed, which would get a 409.
     let mut written: Option<Backup> = None;
     match reconcile_backup_inner(
         backup,
@@ -4794,11 +4221,8 @@ async fn reconcile_backup_run(
     {
         Err(BackupError::Refused(state, message)) => {
             let backup = written.as_ref().unwrap_or(backup);
-            // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
-            // inside the reconcile is a `?` on `BackupError::Refused`, so the
-            // status write cannot be forgotten at one of them — which is how
-            // the 64-character `Backup` came to requeue forever with
-            // `status: null` (review MEDIUM-1).
+            // The one place a self-decided refusal is written: every refusal
+            // inside the reconcile is a `?` on `BackupError::Refused`.
             let name = backup.name_any();
             let namespace = backup
                 .namespace()
@@ -4858,7 +4282,7 @@ async fn reconcile_backup_inner(
     memory: Option<&crate::evidence_fetch::ReadMemory>,
     written: &mut Option<Backup>,
 ) -> Result<BackupOutcome, BackupError> {
-    // What a terminal pass reads a run's evidence again with (PoC P12).
+    // What a terminal pass reads a run's evidence again with.
     let reads = Reread {
         archive,
         verify,
@@ -4869,20 +4293,16 @@ async fn reconcile_backup_inner(
     let namespace = backup
         .namespace()
         .ok_or_else(|| BackupError::NoNamespace(name.clone()))?;
-    // The Job is named after the CR, VERBATIM.
+    // The Job is named after the CR, verbatim.
     let job_name = name.clone();
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
     let backups: Api<Backup> = Api::namespaced(client.clone(), &namespace);
 
-    // STEP 0. THE OBJECT'S OWN NAME, BEFORE ANY `POST`. A `Backup` whose name
-    // exceeds `slot::NAME_LIMIT` produces a Job the API server refuses
-    // (`spec.template.labels: … must be no more than 63 characters`), and the
-    // refusal used to become a `BackupError::Api` -> `error_policy` -> a
-    // 15-second requeue with `status: null`, FOREVER. Checked here so nothing
-    // is created and the answer is on the object — review finding MEDIUM-1,
-    // errata E5d. Task 18 guards the scheduled path at name-minting time; this
-    // is the same refusal for a `Backup` that reached the reconciler by any
-    // other route.
+    // STEP 0. The object's own name, before any `POST`: a name over
+    // `slot::NAME_LIMIT` produces a Job the API server refuses (pod labels
+    // are at most 63 characters), which would otherwise requeue every 15
+    // seconds with `status: null` for ever. The scheduled path is guarded at
+    // name-minting time; this covers any other route.
     if name.len() > crate::slot::NAME_LIMIT {
         return Err(BackupError::Refused(
             TERMINAL_STATE_NAME_TOO_LONG,
@@ -4896,14 +4316,11 @@ async fn reconcile_backup_inner(
         ));
     }
 
-    // STEP 0b. GLOBAL CONSTRAINT 18(c) RAIL 1, BEFORE ANY `POST`. `topics` is
-    // a mandatory NAMED allowlist and a pattern in it is a refusal, not a
-    // selector: `orders*` handed to the engine's own selector is "every topic
-    // whose name starts with orders", which is the one shape a mandatory
-    // allowlist exists to make impossible. The rail is
-    // `logweir_core::guard`'s, SHARED and not reimplemented, so the controller
-    // and the runner refuse the same six characters — and refusing HERE means
-    // the pattern never reaches a rendered document, a ConfigMap or a Job.
+    // STEP 0b. `topics` is a mandatory named allowlist, and a pattern in it is
+    // a refusal, not a selector: `orders*` handed to the engine's selector is
+    // every topic starting with `orders`. The rail is `logweir_core::guard`'s,
+    // shared with the runner, and refusing here means the pattern never
+    // reaches a rendered document, a ConfigMap or a Job.
     if let Err(entry) = logweir_core::guard::reject_glob_metacharacters(&backup.spec.topics) {
         return Err(BackupError::Refused(
             CONDITION_REASON_GUARD_REFUSED,
@@ -4915,39 +4332,26 @@ async fn reconcile_backup_inner(
         ));
     }
 
-    // STEP 0b'. THE SELECTION SHAPE, BEFORE ANY `POST`, AND FOR THE SAME
-    // REASON THE GLOB RAIL IS HERE. D1 §7.1 fixes exactly two shapes; the
-    // third — a named allowlist beside a dynamic block — is the one this
-    // build would answer WRONG rather than refuse, because nothing in it
-    // resolves `allUserTopics` yet, so an operator who asked for whole-cluster
-    // coverage would get a two-topic run and no signal.
+    // STEP 0b'. The selection shape, before any `POST`. Exactly two shapes are
+    // valid; a named allowlist beside a dynamic block would otherwise be
+    // answered wrong rather than refused.
     //
-    // ADMISSION REFUSES IT TOO (`crds::backup::SELECTION_SHAPE_RULE`), and
-    // this rail is not redundant with it: an object admitted by an OLDER CRD
-    // revision reaches this controller unchecked, and `validate_topic_selection`
-    // is the one implementation the scheduler, this reconciler and the API's
-    // 422 all share, so the three cannot disagree about what a valid policy is.
+    // Admission refuses it too (`crds::backup::SELECTION_SHAPE_RULE`), but an
+    // object admitted under an older CRD revision reaches this controller
+    // unchecked, and `validate_topic_selection` is the one implementation the
+    // scheduler, this reconciler and the API share.
     //
-    // THE SELECTION HALF ONLY. `deadlineSeconds` is part of the run policy
-    // digest but its refusal already belongs to PLAT-06.1's
-    // `ExecutionSpecInvalid`, which names the field; moving it here would
-    // change the terminal state of a run that already has one.
-    //
-    // TERMINAL, because `spec` is CEL-immutable: a requeue over a shape that
-    // cannot be edited would never succeed.
-    //
-    // THE SHAPE ONLY, HERE. Which topics a dynamic selection RESOLVES to is a
-    // question with a cluster read in it, so it is asked at the freeze
-    // boundary below — `resolved_selection` — and not in front of the Job
-    // read, where a run whose plan is already frozen would be asked it again.
+    // The selection only: `deadlineSeconds` keeps its own
+    // `ExecutionSpecInvalid` refusal. Terminal, because `spec` is
+    // CEL-immutable. Which topics a dynamic selection resolves to needs a
+    // cluster read, so it is asked at the freeze below, not here, where a
+    // frozen run would be asked again.
     let shape = declared_selection_shape(backup)?;
 
-    // STEP 0b''. THE RUN POLICY DIGEST THE OBJECT CARRIES MUST BE THE ONE ITS
-    // OWN FIELDS PRODUCE — D1 §3.1 rule 5. AN INTEGRITY CHECK AGAINST BUGS AND
-    // NOT A SECURITY BOUNDARY (D1 §8.7): `Backup.spec` is CEL-immutable and
-    // this recomputes the digest from the same object, so a mismatch means the
-    // control plane copied a schedule's policy and then wrote different
-    // fields. Terminal, because nothing can fix it in place.
+    // STEP 0b''. The run policy digest the object carries must be the one its
+    // own fields produce: an integrity check against bugs, not a security
+    // boundary (`Backup.spec` is immutable and this recomputes from the same
+    // object). Terminal, because nothing can fix it in place.
     if let Err(error) = crate::identity::check_run_policy_digest(backup) {
         return Err(BackupError::Refused(
             error.terminal_state(),
@@ -4957,17 +4361,16 @@ async fn reconcile_backup_inner(
 
     let existing = jobs.get_opt(&job_name).await.map_err(BackupError::Api)?;
 
-    // STEP 0c. A JOB THIS BACKUP DOES NOT CONTROL IS NEVER OBSERVED. The Job is
-    // named after the `Backup`, so a name alone proves nothing: a Job with no
-    // owner, a different `Backup` UID or a second owner could otherwise lift a
+    // STEP 0c. A Job this Backup does not control is never observed. The Job
+    // is named after the `Backup`, so a name alone proves nothing: a Job with
+    // no owner, a different UID or a second owner could otherwise lift a
     // stranger's exit code and evidence keys onto this object.
     if let Some(job) = existing.as_ref() {
         if !compatible_backup_job(job, backup) {
             if status_is_terminal(backup) {
-                // THE FOREIGN JOB HOLDS THE RUNNER'S NAME, NOT THE EVIDENCE
-                // JOB'S (review LOW-3). The runner Job is not read; a fetch
-                // this run still owes has its own name and its own owner check,
-                // and must not stall `Pending` behind a stranger's object.
+                // The foreign Job holds the runner's name, not the evidence
+                // Job's: a fetch this run still owes has its own name and owner
+                // check, and must not stall behind a stranger's object.
                 continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
                 return Ok(BackupOutcome {
                     job_name,
@@ -5001,9 +4404,9 @@ async fn reconcile_backup_inner(
                 namespace = %namespace,
                 "the Job is gone and the status is terminal; nothing to do"
             );
-            // …EXCEPT THE EVIDENCE FETCH IT MAY STILL OWE (D2 §3.9). The
-            // runner Job's TTL has nothing to do with the evidence-fetch
-            // Job's, and a `Pending` verdict is not a finished one.
+            // ...except the evidence fetch it may still owe: the runner Job's
+            // TTL has nothing to do with the evidence-fetch Job's, and a
+            // `Pending` verdict is not a finished one.
             continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
             return Ok(BackupOutcome {
                 job_name,
@@ -5016,21 +4419,16 @@ async fn reconcile_backup_inner(
         }
         let view = observed_view(backup, JobObservation::Absent, now);
 
-        // THE RUN IDENTITY, FROM THE TYPED SPEC AND SERVER METADATA ONLY — no
-        // annotation, before any referent is read. D1 §3.1's one derivation,
-        // which knows all four trigger kinds.
+        // The run identity, from the typed spec and server metadata only (no
+        // annotation), before any referent is read.
         let identity = execution_identity(backup).map_err(refused)?;
 
-        // D1 §3.1 RULE 2, AND ONLY BEFORE THE FREEZE. A scheduled-kind run
-        // needs the `BackupSchedule` its `scheduleRef` names to exist in this
-        // namespace with that UID: PLAT-05.2 stops a deleted schedule from
-        // garbage-collecting its runs, so "deleting a schedule stops future
-        // work" has to be said by the run itself. AFTER the freeze nothing is
-        // re-checked — a frozen run executes the policy it copied, and a
-        // schedule deleted while its Job runs does not change what that Job is
-        // doing. A MANUAL run never requires the schedule, even when it copied
-        // one (D1 §8.3): that is the difference between "run this policy now"
-        // and "this is the schedule's run".
+        // Only before the freeze: a scheduled-kind run needs the
+        // `BackupSchedule` its `scheduleRef` names to exist here with that UID,
+        // because a deleted schedule does not garbage-collect its runs and must
+        // still stop future work. After the freeze nothing is re-checked: a
+        // frozen run executes the policy it copied. A manual run never requires
+        // the schedule, even when it copied one.
         if backup
             .status
             .as_ref()
@@ -5040,57 +4438,37 @@ async fn reconcile_backup_inner(
             require_schedule_for_scheduled_run(&identity, client, &namespace).await?;
         }
 
-        // === THE D1 W5 (PLAT-09.2) CALL SITE ===
+        // Gated on the freeze, like the referent check above. This branch is
+        // re-entered after the freeze whenever the Job has gone
+        // (`a_nonterminal_backup_whose_job_is_gone_recreates_it_from_the_frozen_inputs`).
+        // A run's topic set is decided once; resolving it again would ask a
+        // question whose answer has moved on, and `verify_frozen_config_map`
+        // would refuse a possibly half-written run. So a recorded
+        // `status.execution` reads the selection back from the plan, and a
+        // frozen dynamic run never runs a second discovery Job
+        // (`a_frozen_dynamic_backup_never_reruns_discovery`).
         //
-        // GATED ON THE FREEZE, LIKE THE REFERENT CHECK ABOVE, AND FOR THE SAME
-        // REASON. This branch is re-entered AFTER the freeze whenever the Job
-        // has gone (garbage collection, a deleted Job, a node that lost it) —
-        // `a_nonterminal_backup_whose_job_is_gone_recreates_it_from_the_frozen_inputs`
-        // is that pass. A run's topic set is decided ONCE; resolving it again
-        // on such a pass asks the cluster a question whose answer has moved on,
-        // and `verify_frozen_config_map` would then refuse the run as a
-        // `PlanConfigMapConflict` on an archive that may be half written. So
-        // when `status.execution` is recorded, the selection is READ BACK from
-        // the plan the run was admitted with.
+        // `discovery_job` is `Some` only on the pass that resolved the names
+        // from a runner, and its last line is patched after the freeze's
+        // status write.
         //
-        // **DISCOVERY IS NOT IN FRONT OF THIS GATE.** Only the `AllUserTopics`
-        // arm of the inner match — the unfrozen path — resolves anything, and a
-        // frozen dynamic run therefore never runs a second discovery Job (D1
-        // §12, `a_frozen_dynamic_backup_never_reruns_discovery`);
-        // `stored_selection` is what makes that true for free.
-        //
-        // `discovery_job` is `Some` ONLY on the pass that resolved the names
-        // from a runner. It is what D1 §7.2 R9's last line is patched on, after
-        // the freeze's status write — never on a pass that read the plan back.
-        // THE PLAN THIS RUN WAS ADMITTED WITH, READ ONCE. Both readbacks below
-        // come out of it: the topic selection (D1 W5) and the resolved
-        // destination (D2 §3.7). One `get` rather than two, and — more to the
-        // point — one revision of one object, so the two answers cannot come
-        // from different passes.
+        // The admitted plan is read once, so the selection and destination
+        // readbacks come from one revision of one object.
         let stored_plan = frozen_plan(backup, client, &namespace).await?;
         let stored_destination = stored_plan
             .as_ref()
             .and_then(backup_execution::stored_destination);
 
-        // === THE DESTINATION, BEFORE ANYTHING IS CREATED (D2 §3.6) ===
+        // The destination, before anything is created, and in front of the
+        // selection block: `backup_selection::resolve` creates a discovery Job
+        // against the production cluster, which must not happen while the
+        // destination holds (nor spend the hold budget on discovery).
         //
-        // **IN FRONT OF THE SELECTION BLOCK, AND THAT POSITION IS THE CLAIM.**
-        // `backup_selection::resolve` CREATES a discovery Job against the
-        // production cluster. With the admission below it, a `Backup` naming a
-        // destination that does not exist yet ran that Job first and only then
-        // held — so "nothing is created while this holds" was false on the
-        // dynamic path, and the hold budget (measured from
-        // `creationTimestamp`) had already been spent on discovery. Here,
-        // nothing at all is created until the destination resolves.
-        //
-        // **AND IT IS SKIPPED ENTIRELY ONCE THE RUN IS FROZEN.** A pass that
-        // re-creates a garbage-collected Job renders from `stored_destination`,
-        // never from a fresh resolution: every edit to a `BackupDestination`
-        // bumps its generation, the frozen block records the generation, and
-        // `verify_frozen_config_map` compares the block whole — so re-resolving
-        // would terminate a running backup because somebody rotated a Secret
-        // name while it ran. D2 §3.7 says a later edit "cannot affect a created
-        // run"; this is what makes that true rather than fail-closed.
+        // Skipped once the run is frozen: a re-created Job renders from
+        // `stored_destination`, never a fresh resolution. Every edit bumps the
+        // destination's generation, which the frozen block records and
+        // `verify_frozen_config_map` compares, so re-resolving would terminate a
+        // running backup because someone edited the destination.
         let destination = match &stored_destination {
             Some(_) => None,
             None => match admit_destination(backup, client, &namespace, now).await? {
@@ -5125,26 +4503,17 @@ async fn reconcile_backup_inner(
             },
         };
 
-        // === THE MANUAL-RUN POOL (P10), THE LAST CHECK BEFORE ANYTHING IS
-        // CREATED ===
+        // The manual-run pool, the last check before anything is created:
+        // after every refusal decidable without creating anything and after the
+        // destination hold, so a run that cannot start is refused or held under
+        // its own reason rather than queued; before the discovery Job, the plan
+        // `ConfigMap`, `status.execution` and the runner Job. A queued run has
+        // taken no execution claim, and freezes on the pass that admits it.
         //
-        // AFTER every refusal decidable without creating anything — the name,
-        // the glob rail, the selection shape, the digest, the identity — and
-        // after the destination hold, so a run that cannot start anyway is
-        // refused or held under its own reason rather than queued. BEFORE the
-        // discovery Job, the plan `ConfigMap`, `status.execution` and the
-        // runner Job: a queued run has none of them, and in particular has
-        // taken no execution claim (the runner takes that, and there is no
-        // runner). The frozen-inputs contract is unchanged — a queued run
-        // freezes on the pass that admits it, exactly as it would have on its
-        // first pass.
-        //
-        // ONLY an unfrozen MANUAL run that does not already hold a slot. A
-        // frozen run was admitted by an earlier pass and must never be
-        // re-queued (its Job may be gone and be re-created from the frozen
-        // inputs); a `Resolving` run's discovery Job is already running. A
-        // scheduled, catch-up or retry run is bounded by its schedule's
-        // `concurrencyPolicy` and never waits behind a browser click.
+        // Only an unfrozen manual run that does not already hold a slot: a
+        // frozen run was admitted earlier and must never be re-queued, and a
+        // `Resolving` run's discovery Job is already running. Scheduled,
+        // catch-up and retry runs are bounded by `concurrencyPolicy` instead.
         let released: Box<Backup>;
         let (backup, view) = match pool {
             Some(pool) if crate::run_pool::backup_gated(backup) => {
@@ -5152,7 +4521,7 @@ async fn reconcile_backup_inner(
                     PoolGate::Admitted(object) => {
                         released = object;
                         // A refusal from here on is written over the admitted
-                        // object, not over the one the watch delivered.
+                        // object, not the one the watch delivered.
                         *written = Some((*released).clone());
                         let view = observed_view(&released, JobObservation::Absent, now);
                         (&*released, view)
@@ -5181,16 +4550,14 @@ async fn reconcile_backup_inner(
             None => match shape {
                 SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
                 SelectionShape::AllUserTopics => {
-                    // `runner` IS PASSED HERE FOR THE SAME REASON IT IS PASSED
-                    // TO `create_runner_job` BELOW: the discovery Job is a Job
-                    // this controller creates, so it takes the image and pull
-                    // policy this PROCESS was configured with and never the
-                    // compile-time pin (defect D1-DISCOVERY-IMAGE).
+                    // The discovery Job is a Job this controller creates, so it
+                    // takes the image and pull policy this process was
+                    // configured with, never the compile-time pin.
                     match backup_selection::resolve(backup, client, &namespace, now, runner).await?
                     {
                         // The discovery Job exists and has not produced a
-                        // readable result. Nothing else happens this pass; the
-                        // reconciler's own 15 s requeue is D1 §7.2 R2's.
+                        // readable result; the reconciler's 15 s requeue checks
+                        // again.
                         backup_selection::Resolution::Pending => {
                             return Ok(BackupOutcome {
                                 job_name,
@@ -5201,12 +4568,10 @@ async fn reconcile_backup_inner(
                                 ttl_patched: false,
                             })
                         }
-                        // TERMINAL, AND THE STATUS IS ALREADY ON THE OBJECT.
-                        // `backup_selection` writes it itself so that `Failed`
-                        // and `TopicsResolved` land in one array; raising a
-                        // `BackupError::Refused` here would have this pass's
-                        // conclusion written a second time, from a view that
-                        // predates the condition.
+                        // Terminal, and `backup_selection` has already written
+                        // the status, so `Failed` and `TopicsResolved` land in
+                        // one array; a `BackupError::Refused` here would write
+                        // the conclusion again from a stale view.
                         backup_selection::Resolution::Refused { state } => {
                             return Ok(BackupOutcome {
                                 job_name,
@@ -5234,10 +4599,9 @@ async fn reconcile_backup_inner(
         // KafkaCluster used by the connection probe, including its Secret.
         let cluster = plan_source_cluster(backup, client, &namespace).await?;
         let desired = match stored_destination {
-            // THE READBACK PATH. The bytes beside the snapshot are read back
+            // The readback path. The bytes beside the snapshot are read back
             // too, so the digest bind in `freeze_with_ca` is evaluated against
-            // what a kubelet would mount rather than against what the
-            // controller wishes were there.
+            // what a kubelet would mount.
             Some((snapshot, ca_pem)) => desired_execution_inputs_frozen(
                 backup,
                 &cluster,
@@ -5253,33 +4617,27 @@ async fn reconcile_backup_inner(
             )?,
         };
 
-        // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
-        // (errata E5a) — and now the freeze boundary. The Job mounts
-        // `<name>-plan` at `/plan`, so a Job created first is a pod that stalls
-        // in `ContainerCreating` until its deadline fires — measured live.
+        // The plan ConfigMap, in this same pass and before the Job `POST`; it
+        // is the freeze boundary. The Job mounts `<name>-plan`, so a Job created
+        // first stalls in `ContainerCreating` until its deadline.
         // `the_plan_config_map_is_posted_before_the_job` asserts the order.
         let frozen = freeze_execution_inputs(backup, client, &namespace, &desired).await?;
 
-        // RECORDED BEFORE ANY JOB EXISTS. A pass that stops after this write
-        // and before the Job resumes from the same record: the next pass reads
-        // the ConfigMap first and verifies it against this digest.
+        // Recorded before any Job exists: a pass that stops after this write
+        // resumes from it, verifying the ConfigMap against this digest.
         let recorded = execution_status_patch(&frozen);
-        // THE VERSION TRAVELS WITH THE PROJECTION. Two more `/status` writes
-        // follow in this same pass and seam S7 preconditions each of them on
-        // where the previous one left the object, not on the version the watch
-        // delivered — which this write has already superseded.
+        // The version travels with the projection: two more `/status` writes
+        // follow in this pass, each preconditioned on where the previous one
+        // left the object (seam S7).
         let at = patch_status_if_changed(&backups, backup, &name, recorded.clone()).await?;
         let mut stored = with_status_written(backup, &recorded, &at);
         let mut view = with_status_patch(&view, &recorded);
 
-        // D1 §7.2 R9's LAST TWO STEPS, IN THIS ORDER AND ONLY ON THE PASS THAT
-        // RESOLVED THE NAMES. `TopicsResolved=True` is written after
-        // `status.selection` exists, so the condition is never on an object
-        // whose names are not frozen — and the discovery Job's TTL is patched
-        // only after THAT write returned 200, because the TTL controller
-        // deletes a Job and its pods together and the relay lives on the pod.
-        // Both are `?`-propagated, so a failed write leaves the reconcile
-        // before the next line.
+        // Only on the pass that resolved the names: `TopicsResolved=True` is
+        // written after `status.selection` exists, and the discovery Job's TTL
+        // is patched only after that write returned 200, because the TTL
+        // controller deletes a Job and its pods together and the relay lives
+        // on the pod. Both are `?`-propagated.
         if let Some(discovery) = discovery_job.as_deref() {
             let (resolved_patch, resolved_at) =
                 backup_selection::record_resolved(&stored, client, &namespace, discovery, now)
@@ -5304,12 +4662,12 @@ async fn reconcile_backup_inner(
             );
         }
 
-        // A refusal from here on is written by the caller over THIS object.
+        // A refusal from here on is written by the caller over this object.
         *written = Some(stored.clone());
         let mut desired_job = runner_job(backup, &cluster, &frozen, runner)?;
-        // FX-34: THE JOB'S LINE TOKEN, MADE NOW AND KEPT NOWHERE BUT IN THE
-        // JOB. Not part of the frozen argv: a re-created Job gets another.
-        // Never logged; `crate::job::new_line_token` says what it is for.
+        // The Job's line token, made now and kept nowhere but in the Job; a
+        // re-created Job gets another. Never logged (see
+        // `crate::job::new_line_token`).
         if !job::add_fresh_line_token(&mut desired_job) {
             warn!(
                 backup = %name,
@@ -5351,12 +4709,10 @@ async fn reconcile_backup_inner(
 
     // STEP 2. Running.
     if !job_finished(&job) {
-        // D3 §2.3 / §2.4 — PLAT-14.1. The ONE derivation
-        // (`weirkeeper::diagnostics`), which is also the only thing on this
-        // path that lists events or reads the running pod's log. It answers
-        // the question `phase: Running` never could: a `Backup` whose pod sits
-        // in `ImagePullBackOff` is `Running` by every field that existed
-        // before this block.
+        // The one derivation (`weirkeeper::diagnostics`), and the only thing
+        // on this path that lists events or reads the running pod's log. It
+        // shows a pod stuck in `ImagePullBackOff`, which `phase: Running`
+        // cannot.
         let stored = backup.status.as_ref().and_then(|s| s.progress.as_ref());
         let run = diagnostics::observe(
             client,
@@ -5380,18 +4736,17 @@ async fn reconcile_backup_inner(
                     stored,
                     conditions: backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
                     generation: backup.meta().generation,
-                    // `Backup` HAS NO SCALAR `reason`. Its CRD carries no
-                    // REASON printer column and `BackupStatus` no such field;
-                    // `Restore`'s does, and review finding M2 is why.
+                    // `Backup` has no scalar `reason`: its CRD has no REASON
+                    // printer column.
                     scalar_reason: false,
                     now,
                 },
             ),
         )
         .await?;
-        // FAIL FAST — D3 §2.3, and AFTER the status write above, which is
-        // what makes `recorded_terminal_state` able to name the cause on the
-        // pass that observes the cancelled Job.
+        // Fail fast, after the status write above, so
+        // `recorded_terminal_state` can name the cause on the pass that
+        // observes the cancelled Job.
         let failed_fast = diagnostics::fail_fast(
             client,
             &namespace,
@@ -5413,34 +4768,19 @@ async fn reconcile_backup_inner(
         });
     }
 
-    // STEP 2b. ALREADY TERMINAL: READ NOTHING AND WRITE NOTHING.
+    // STEP 2b. Already terminal: read nothing and write nothing.
     //
-    // **PROVEN LIVE** by the Task 24 review, on both kinds, on ordinary paths.
-    // A finished `Backup` at `phase: Succeeded`, `exitCode: 0`, a signed
-    // receipt in the bucket and `verification.result: Valid` was relabelled
-    // `phase: Failed`, `exitReason: operational`, its `[Complete,
-    // EvidenceRecorded, Verified]` conditions replaced by a single
-    // `Failed/NoExitCode` — by nothing more than one `kubectl delete pod` on
-    // its finished runner. The Job outlives its pod by
-    // [`TTL_SECONDS_AFTER_FINISHED`] (seven days), and in that window pod GC,
-    // an eviction, a node restart or a plain delete is enough; on the
-    // `Restore` side a controller RESTART is enough on its own. The exit code
-    // was never re-read — it was RE-DERIVED from a pod that no longer exists,
-    // and the honest answer to "what did that pod exit with" is the one
-    // already on the object.
+    // Re-deriving here relabelled a verified `Succeeded` backup
+    // `Failed/NoExitCode` after one `kubectl delete pod` on its finished
+    // runner: the Job outlives its pod by [`TTL_SECONDS_AFTER_FINISHED`], and
+    // pod GC, an eviction or a restart is enough. The honest answer to "what
+    // did that pod exit with" is the one already on the object. `Restore`
+    // carries the twin.
     //
-    // THE SAME RULE THE JOB-ABSENT BRANCH ABOVE ALREADY APPLIES, one branch
-    // later: a run that recorded a terminal exit code is finished, and nothing
-    // a later pass can observe about its pod is news. `Restore` carries the
-    // twin.
-    //
-    // WHAT THIS GIVES UP, SAID PLAINLY: a pass that wrote the terminal status
-    // and then failed on the TTL patch or on the verification patch is not
-    // retried by a later pass over the same object — the object is terminal,
-    // so every later pass stops here. Both are recoverable by an edit (which
-    // is what `Action::await_change` waits for on the `Restore` side) and
-    // neither is a falsehood on the object; re-deriving a terminal status from
-    // a vanished pod IS one, forever, with no edit able to fix it.
+    // What this gives up: a terminal pass that failed on the TTL patch or the
+    // verification patch is not retried by a later pass. Neither is a
+    // falsehood on the object; a status re-derived from a vanished pod is,
+    // for ever.
     if status_is_terminal(backup) {
         debug!(
             backup = %name,
@@ -5449,21 +4789,18 @@ async fn reconcile_backup_inner(
             "the status is already terminal; the runner's pod is not read again and no patch is \
              sent"
         );
-        // D3 §2.7's REPAIR, and the one thing this branch does. The guard
-        // above gives up retrying the pass that made the object terminal
-        // (see its note), and the TTL is the half of that pass whose loss is
-        // silent: a finished Job with no TTL is never collected, so it and
-        // its pod sit in somebody's namespace quota forever. No pod is read
-        // and no status is written — the Job's own spec is the whole input.
+        // The one thing this branch does: repair the TTL, the half of the
+        // terminal pass whose loss is silent (a finished Job with no TTL and
+        // its pod sit in someone's quota for ever). No pod is read and no
+        // status is written.
         let ttl_patched =
             diagnostics::repair_ttl(client, &namespace, &job, &backup.uid().unwrap_or_default())
                 .await
                 .map_err(BackupError::Api)?;
-        // THE OTHER THING A TERMINAL `Backup` MAY STILL OWE: its evidence
-        // verdict, when an evidence-fetch Job is reading it (D2 §3.9). The
-        // runner's pod is still not read and the run's own fields are still
-        // not rewritten — this touches `evidence.verification`,
-        // `evidence.observation`, `Verified` and the receipt facts only.
+        // The other thing a terminal `Backup` may still owe: its evidence
+        // verdict, when an evidence-fetch Job reads it. This touches
+        // `evidence.verification`, `evidence.observation`, `Verified` and the
+        // receipt facts only.
         continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
         return Ok(BackupOutcome {
             job_name,
@@ -5477,11 +4814,9 @@ async fn reconcile_backup_inner(
 
     let job_uid = job.uid();
     let found = find_pod(client, &namespace, &job_name, job_uid.as_deref()).await?;
-    // THE POD AND ITS CODE TRAVEL TOGETHER. Binding the pair is what lets the
-    // happy path below hold a `&Pod` instead of an `Option` it has to unwrap
-    // at the `pods/log` call — an `unwrap_or_default()` there would have read
-    // `GET …/pods//log`, the pod COLLECTION, on any future path that reached
-    // it with `None` (review finding R6).
+    // The pod and its code travel together, so the happy path holds a `&Pod`:
+    // an `unwrap_or_default()` at the `pods/log` call would have read
+    // `GET …/pods//log`, the pod collection.
     let terminated = found
         .pod
         .as_ref()
@@ -5491,12 +4826,10 @@ async fn reconcile_backup_inner(
     // path needs a code and this branch is "there is none".
     let Some((pod, exit_code)) = terminated else {
         let terminal_state = if found.contested.is_empty() {
-            // D3 §2.2: the four new states REPLACE `NoExitCode` only when the
-            // matching diagnostic was recorded BEFORE the Job ended.
-            // `crash_terminal_state`'s existing table is otherwise unchanged —
-            // a disrupted node is still `DisruptedMidDrill` and an
-            // unschedulable pod is still `PodUnschedulable`, both of which are
-            // more specific than anything a diagnostic could add.
+            // The four diagnostic states replace `NoExitCode` only when the
+            // matching diagnostic was recorded before the Job ended;
+            // `DisruptedMidDrill` and `PodUnschedulable` are more specific than
+            // any diagnostic.
             let from_pod = crash_terminal_state(found.pod.as_ref());
             if from_pod == TERMINAL_STATE_NO_EXIT_CODE {
                 diagnostics::recorded_terminal_state(
@@ -5542,21 +4875,19 @@ async fn reconcile_backup_inner(
     };
 
     // STEP 3. The code is known. Read the log through the `pods/log`
-    // subresource — the only route to a runner's stdout, and the RBAC rule
-    // that grants it is Task 21's (interface I28, a declared late binding).
+    // subresource, the only route to a runner's stdout (interface I28).
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    // FX-34: A REFUSED RUN'S LOG IS READ BOUNDED, AND ITS FAILURE IS AN ANSWER.
-    // Exit 3 wrote no artifact (GC11), so all its log owes is the two refusal
-    // lines at its end: `crate::refusal::read` asks for a bounded tail, never
-    // fails the pass, and says why when there is nothing to read. THIS `if` IS
-    // THE ONLY GATE: every other exit code takes `runner_log::TERMINAL` (the
-    // last 256 lines, whose failure is still a reconcile error) and carries no
-    // runner reason at all.
+    // A refused run's log is read bounded, and its failure is an answer. Exit
+    // 3 wrote no artifact, so all its log owes is the refusal lines at its
+    // end: `crate::refusal::read` asks for a bounded tail, never fails the
+    // pass, and says why when there is nothing to read. This `if` is the only
+    // gate: every other exit code takes `runner_log::TERMINAL` (the last 256
+    // lines, whose failure is still a reconcile error).
     let (log, runner_reason) = if exit_code == 3 {
-        // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
-        // is the runner's only when it carries it; a Job with none (an older
-        // controller built it) has no line this pass will read as a reason.
+        // The Job's own line token: a `refusal-detail=` line is the runner's
+        // only when it carries it, so a Job with none (built by an older
+        // controller) has no line read as a reason.
         let line_token = job::line_token(&job);
         let read = crate::refusal::read(
             &pods,
@@ -5582,13 +4913,12 @@ async fn reconcile_backup_inner(
     } else {
         None
     };
-    // WHICH HANDLE THIS RUN'S EVIDENCE IS READ THROUGH — D2 §3.9, §3.10. A
-    // legacy object takes the oracle it has always taken; a destination-backed
-    // one takes its OWN destination's read-only handle, or a `NotAttempted`
-    // naming why there is none. The global handle is never used for a
-    // destination-backed run: it holds a different principal over a different
-    // bucket, and an answer from it would read as "no evidence" rather than
-    // "wrong bucket" (grounding G2).
+    // Which handle this run's evidence is read through: a legacy object takes
+    // the oracle it always has; a destination-backed one takes its own
+    // destination's read-only handle, or a `NotAttempted` naming why there is
+    // none. Never the global handle for a destination-backed run: a different
+    // principal over a different bucket, whose answer would read as "no
+    // evidence" rather than "wrong bucket".
     let routed = evidence_source(backup, client, &namespace, now)
         .await
         .map_err(BackupError::Api)?;
@@ -5606,17 +4936,14 @@ async fn reconcile_backup_inner(
         );
     }
 
-    // STEP 5, and interface I22's window, off ONE observation. AWAITED: the
-    // real oracle's two `Store` reads happen inside one `spawn_blocking`
-    // (interface I13, see `ArchiveOracle`), so this is the one point in the
-    // reconcile that yields to the runtime for the archive.
+    // STEP 5, and interface I22's window, off one observation, awaited: the
+    // real oracle's two `Store` reads run inside one `spawn_blocking`
+    // (interface I13).
     let observed = match &evidence_from {
         EvidenceSource::GlobalHandle => archive(keys.clone()).await,
         EvidenceSource::Destination(store) => {
-            // THE SAME `observe_archive`, ON A DIFFERENT HANDLE. One reader of
-            // a receipt, one presence vocabulary, one window extraction — a
-            // second implementation for destination-backed runs would be a
-            // second answer to "what does this receipt say".
+            // The same `observe_archive`, on a different handle: one reader of
+            // a receipt, one answer to "what does this receipt say".
             let handle = Arc::clone(store);
             let keys = keys.clone();
             tokio::task::spawn_blocking(move || observe_archive(&handle, &keys))
@@ -5624,20 +4951,15 @@ async fn reconcile_backup_inner(
                 .ok()
                 .flatten()
         }
-        // NOTHING WAS READ, AND NOTHING IS GUESSED. No presence, so
-        // `orphan_state` gets `None` and no run is called an
-        // `OrphanedScorecard` for want of a reader; no `windowCovered`, because
-        // the window is the RECEIPT's and no receipt was fetched.
-        //
-        // `FetchJob` too, ON THIS PASS: D2 §3.9 step 1 — the terminal patch of
-        // a run whose evidence a Job reads carries no window and no orphan
-        // presence, because no store read has happened yet. The Job's relay
-        // supplies both, on a later write.
+        // Nothing was read and nothing is guessed: no presence, so no run is
+        // called an `OrphanedScorecard` for want of a reader, and no
+        // `windowCovered`, because the window is the receipt's. For `FetchJob`
+        // the Job's relay supplies both on a later write.
         EvidenceSource::NotAttempted { .. } | EvidenceSource::FetchJob { .. } => None,
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
-    // RECEIPT-DUP: the claim outcome the runner named, lifted only beside its
-    // own exit code (`failure_state` is closed and paired).
+    // The claim outcome the runner named, lifted only beside its own exit code
+    // (`failure_state` is closed and paired).
     let failure = failure_state(exit_code, &log);
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
@@ -5645,31 +4967,25 @@ async fn reconcile_backup_inner(
     let digest_disagreement = reported_receipt_sha256
         .zip(observed_receipt_sha256)
         .is_some_and(|(reported, observed)| reported != observed);
-    // The runner reports the digest it computed over the exact bytes it
-    // persisted. That immutable capture claim is the fence verification must
-    // test. A controller-computed hash of fetched bytes is never an anchor:
-    // comparing those bytes to their own hash would let replacement evidence
-    // validate itself. Old runners therefore remain explicitly unbound.
+    // The runner reports the digest of the exact bytes it persisted; that
+    // immutable capture claim is the fence verification tests. A hash of
+    // fetched bytes is never an anchor, since bytes always match their own
+    // hash. Old runners therefore remain explicitly unbound.
     let receipt_sha256 = reported_receipt_sha256.map(str::to_string);
     let legacy_unbound = reported_receipt_sha256.is_none() && keys.complete();
-    // No runner digest means no immutable binding between this run and any
-    // object currently found at the reported keys, and a runner digest the
-    // fetched bytes do not hash to means those bytes are PROVABLY not this
-    // run's receipt. Either way suppress every fact parsed from those objects,
-    // including the window written by the terminal patch: a replacement
-    // receipt's window would otherwise reach protection's `newestRecordAt`
-    // and the rehearsal candidate's `covered` beside an `Invalid` verdict.
+    // No runner digest means no binding between this run and the objects at
+    // the reported keys, and a mismatched digest means those bytes are not
+    // this run's receipt. Either way every fact parsed from them is
+    // suppressed, including the window, which would otherwise reach
+    // protection's `newestRecordAt` beside an `Invalid` verdict.
     let covered = if legacy_unbound || digest_disagreement {
         None
     } else {
         observed_covered
     };
 
-    // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
-    // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
-    // "no evidence key lines" is the expected shape and a warning about it is
-    // a warning about nothing — the same defect as the condition this branch
-    // used to raise (errata E5c).
+    // Warned only where it is news: exits 1, 3 and 4 write no artifact by
+    // contract, so no key lines is the expected shape there.
     if !keys.complete() {
         if exit_code == 0 {
             warn!(
@@ -5691,10 +5007,9 @@ async fn reconcile_backup_inner(
         }
     }
 
-    // BUILT ONCE AND HELD, because the SECOND patch needs the condition array
-    // this one carries: a JSON merge patch REPLACES arrays, and after this
-    // PATCH returns, the in-memory `backup` is stale and no longer says what
-    // the object says. See `verification::second_patch`.
+    // Built once and held, because the second patch needs the condition array
+    // this one carries: a merge patch replaces arrays, and after this PATCH the
+    // in-memory `backup` is stale. See `verification::second_patch`.
     let terminal = diagnostics::apply_finished(
         finished_status_patch_with_reason(
             &view,
@@ -5711,65 +5026,43 @@ async fn reconcile_backup_inner(
         backup.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
-    // WHERE THE OBJECT NOW STANDS: the evidence verdict below is the SECOND
-    // write of this pass, and a terminal `Backup` is never reconciled again, so
-    // a `409` there would lose the verdict rather than defer it.
+    // Where the object now stands: the evidence verdict below is this pass's
+    // second write, and a terminal `Backup` is never reconciled again, so a
+    // `409` there would lose the verdict.
     let at = patch_status_if_changed(&backups, backup, &name, terminal.clone()).await?;
 
-    // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
-    // than a comment: a status patch that did not return 200 leaves this
-    // function before any TTL exists, so pod GC cannot start on a run whose
-    // code was never recorded.
-    // D3 §2.7, chart value `controller.jobTtlSeconds`. The default IS
-    // `TTL_SECONDS_AFTER_FINISHED`, so an installation that configures
-    // nothing keeps exactly the behaviour it had.
+    // Only now: the `?` above means a status patch that did not return 200
+    // leaves before any TTL exists, so pod GC cannot start on a run whose code
+    // was never recorded. Chart value `controller.jobTtlSeconds`; the default
+    // is `TTL_SECONDS_AFTER_FINISHED`.
     runner_log::set_ttl(&jobs, &job_name, diagnostics::job_ttl_seconds(), None)
         .await
         .map_err(BackupError::Api)?;
 
-    // ===================================================================
-    // THE SECOND PATCH — Task 24, interface I21's `Backup` half.
-    // ===================================================================
+    // The second patch (interface I21's `Backup` half), after the terminal
+    // status write and the TTL, so a failed verification, or a 500 on this
+    // PATCH, can never prevent the exit code from being recorded.
     //
-    // AFTER the terminal status write and after the TTL, in a patch of its
-    // own, so a verification that fails — or a 500 on this very PATCH — can
-    // never prevent the exit code from being recorded. The `?` on the terminal
-    // patch above is what makes that an ordering guarantee rather than a
-    // comment.
+    // Attempted only when an artifact was written, which both keys say. At
+    // exits 1, 3 and 4 no artifact exists and no verification block is
+    // written at all: that absence is deliberate.
     //
-    // ATTEMPTED ONLY WHEN AN ARTIFACT WAS WRITTEN, AND **BOTH KEYS ARE WHAT
-    // SAYS SO** — D2 §3.9 step 2, "if both keys are present, choose by
-    // `evidenceRead` mode". At exits 1, 3 and 4 the contract says no artifact
-    // was written (GC11), the runner prints no key lines, and there is no
-    // document to have an opinion about: no verification block is written at
-    // all. That absence is the GC11 distinction and it is DELIBERATELY kept.
-    //
-    // THE DIGEST IS REQUIRED BY THE PATHS THAT VERIFY BYTES, AND BY THEM ONLY.
-    // A `NotAttempted` source fetched nothing, but a current runner reports the
-    // digest of the exact bytes it signed and uploaded. That CAPTURE fact is
-    // published on the terminal patch above; it does not make this source a
-    // verifier and cannot change the verdict selected below. Older runners
-    // report no digest: the field remains absent, and fetched evidence is
-    // explicitly `NotAttempted`/`legacy-unbound` rather than being allowed to
-    // validate against its own controller-computed hash. While a digest was
-    // demanded of every source this whole block was skipped for it,
-    // so an operator whose destination reads evidence with a grant only a pod
-    // may hold (`SecretKeys`, `WorkloadIdentity`) saw NO
-    // `status.evidence.verification` at all rather than the honest
-    // `NotAttempted` and the sentence naming why. That is defect
-    // D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN: the sentence existed and reached
-    // nobody. NOTHING IS INVENTED HERE — the only verdict writable without
-    // bytes is `NotAttempted`, and `Valid`/`Invalid`/`Untrusted` still come
-    // only from a verifier that read the document.
+    // The digest is required only by the paths that verify bytes. A
+    // `NotAttempted` source fetched nothing; a current runner's digest is the
+    // capture fact published on the terminal patch, and does not make the
+    // source a verifier. Older runners report none, and their evidence is
+    // `NotAttempted`/`legacy-unbound` rather than validated against its own
+    // hash. A pod-only grant still records the honest `NotAttempted` and the
+    // sentence naming why. Nothing is invented: `Valid`, `Invalid` and
+    // `Untrusted` come only from a verifier that read the document.
     let reference = match (
         keys.receipt.as_deref(),
         keys.sidecar.as_deref(),
         receipt_sha256.as_deref(),
     ) {
         (Some(payload_key), Some(sidecar_key), Some(digest)) => Some(EvidenceRef {
-            // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
-            // `metadata.namespace` read off the object being reconciled —
-            // never a name the subject supplied.
+            // Trust is resolved per namespace, from `metadata.namespace` of
+            // the object being reconciled, never a name the subject supplied.
             namespace: namespace.to_string(),
             payload_key: payload_key.to_string(),
             payload_sha256: digest.to_string(),
@@ -5800,18 +5093,17 @@ async fn reconcile_backup_inner(
         ))
     } else {
         match (&evidence_from, reference) {
-            // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source`
-            // answered with the reason there is no reader for this run's evidence;
-            // the guard is `keys.complete()` and not the digest, because the
-            // question this arm answers is "was a receipt written", which the keys
-            // say and the digest — which only a fetch produces — cannot.
+            // The decision is already made: `evidence_source` gave the reason
+            // there is no reader. The guard is `keys.complete()`, not the
+            // digest, because the question is "was a receipt written", which
+            // the keys say and the digest (only a fetch produces it) cannot.
             (EvidenceSource::NotAttempted { detail }, _) if keys.complete() => {
                 Some(crate::verification::VerificationResult::not_attempted(
                     logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
                     detail.clone(),
                 ))
             }
-            // THE JOB'S VERDICT IS WRITTEN BY THE JOB'S PASS, below — never
+            // The Job's verdict is written by the Job's pass, below, never
             // here, where nothing has been read.
             (EvidenceSource::FetchJob { .. }, _) => None,
             (
@@ -5823,12 +5115,11 @@ async fn reconcile_backup_inner(
             _ => None,
         }
     };
-    // PoC P12: THE CONTROLLER'S OWN READ IS ATTEMPT 1 OF A SCHEDULE. A
-    // transient failure (no credential, a denial, a timeout, unreadable
-    // trust) records `observation.{mode, attempt: 1, retryAfter}` and names
-    // the next attempt in its sentence; the terminal branches below read it
-    // again (`continue_evidence_fetch`). Every other verdict is written
-    // exactly as before, with no observation.
+    // The controller's own read is attempt 1 of a schedule. A transient
+    // failure (no credential, a denial, a timeout, unreadable trust) records
+    // `observation.{mode, attempt: 1, retryAfter}` and names the next attempt
+    // in its sentence; the terminal branches below read it again
+    // (`continue_evidence_fetch`). Every other verdict has no observation.
     let mut read_observation: Option<Value> = None;
     let verdict = match (verdict, controller_read_mode(&evidence_from)) {
         (Some(result), Some(mode)) if !digest_disagreement && !legacy_unbound => {
@@ -5852,10 +5143,9 @@ async fn reconcile_backup_inner(
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok());
         let block = result.to_status_value(stored_verification(current.as_ref()));
-        // THE BADGE IS COMPUTED OVER THE STATUS THAT WILL EXIST, not the one
-        // that did: the terminal patch has landed, so `exitCode` is the value
-        // it wrote. Interface I21's `Backup` rule reads `exitCode` and there
-        // is no `outcome` on this path to read instead.
+        // The badge is computed over the status that will exist: the terminal
+        // patch has landed, so `exitCode` is the value it wrote. The `Backup`
+        // rule reads `exitCode`; there is no `outcome` on this path.
         let mut projected = terminal
             .pointer("/status")
             .cloned()
@@ -5878,35 +5168,22 @@ async fn reconcile_backup_inner(
             matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
             green = badge.green,
             badge = %badge.label,
-            // R2: THIS SENTENCE IS WHAT THE `NotAttempted` ARM CAN SAY TOO.
-            // It used to read "weirkeeper verified this Backup's signed
-            // receipt with its read-only evidence credential", which was true
-            // while the digest fence stood in front of this line and became
-            // false the moment a verdict reached without a fetch could get
-            // here: on `NotAttempted` nothing was fetched, no credential was
-            // used and no signature was checked. An operator greps this
-            // sentence to find the runs whose receipt WAS checked, so the
-            // verb has to be the one every arm earns. `verification` carries
-            // which verdict it was.
+            // The verb every arm earns: on `NotAttempted` nothing was fetched,
+            // no credential used and no signature checked, and operators grep
+            // this sentence. `verification` carries which verdict it was.
             "weirkeeper recorded this Backup's evidence verdict"
         );
-        // DEFECT STATUS-RECORDS AND D3 §2.2's `capture`, ON THIS PATCH AND
-        // NO OTHER, AND ONLY ON `Valid`. Both are copied out of the receipt
-        // bytes this reconcile fetched — the same bytes whose digest is on
-        // `status.evidence.receiptSha256` and whose signature `verify` has
-        // just checked against this namespace's trust. "From the verified
-        // receipt" is therefore literal: an `Invalid`, `Untrusted` or
-        // `NotAttempted` verdict writes NEITHER field, so a count on a
-        // `Backup` is a count some key this installation accepts attested to.
+        // `records` and `capture`, on this patch only and only on `Valid`:
+        // both are copied from the receipt bytes this reconcile fetched, whose
+        // digest is `status.evidence.receiptSha256` and whose signature was
+        // just checked against this namespace's trust. So a count on a
+        // `Backup` is one a key this installation accepts attested to.
         //
-        // The asymmetry with `windowCovered` — written on the terminal patch,
-        // before verification — is deliberate and is not widened here.
-        // `windowCovered` predates the trust work and changing when it is
-        // written would change the meaning of a field other code already
-        // reads (`orphan_state`'s siblings, the protection evaluation).
-        // PROD-02.1: `Complete`'s reason names an EMPTY CAPTURE only beside a
-        // pass over the receipt bytes whose digest is the runner's — the
-        // verified bytes — and never on any other verdict.
+        // `windowCovered` is written on the terminal patch, before
+        // verification; other code reads it with that meaning (the
+        // protection evaluation), so the asymmetry is deliberate.
+        // `Complete`'s reason names an empty capture only beside a pass over
+        // the runner's own bytes.
         let terminal_conditions = conditions_in(&terminal);
         let terminal_conditions = if result.is_pass()
             && observed.as_ref().is_some_and(|o| {
@@ -5946,9 +5223,8 @@ async fn reconcile_backup_inner(
             }
         }
         patch_status_at(&backups, backup, &name, &at, evidence_patch).await?;
-        // THIS PROCESS HAS READ IT: a later terminal pass in this process does
-        // not start a second schedule for it once this one is spent
-        // (`evidence_fetch::ReadMemory`).
+        // This process has read it: a later terminal pass here does not start a
+        // second schedule once this one is spent (`evidence_fetch::ReadMemory`).
         if controller_read_mode(&evidence_from).is_some() {
             if let (Some(memory), Some(uid)) = (reads.memory, backup.uid()) {
                 memory.mark(&uid);
@@ -5956,11 +5232,11 @@ async fn reconcile_backup_inner(
         }
     }
 
-    // D2 §3.9 STEP 2, THE DEFAULT ARM: an evidence-fetch Job reads this run's
-    // receipt with the destination's `evidenceRead` grant. AFTER the terminal
-    // patch and the runner Job's TTL, like every verdict. A legacy-unbound run
-    // (no runner digest) gets no Job: nothing a fetch returned could be bound
-    // to it, and its `NotAttempted` was written above.
+    // The default arm: an evidence-fetch Job reads this run's receipt with the
+    // destination's `evidenceRead` grant, after the terminal patch and the
+    // runner Job's TTL. A legacy-unbound run (no runner digest) gets no Job:
+    // nothing it fetched could be bound to the run, and its `NotAttempted` was
+    // written above.
     if matches!(evidence_from, EvidenceSource::FetchJob { .. })
         && keys.complete()
         && !legacy_unbound
@@ -6005,31 +5281,22 @@ async fn reconcile_backup_inner(
 
 /// The `kube::runtime` reconcile entry point.
 ///
-/// THE ONE CLOCK READ IN THIS FILE IS HERE.
+/// The one clock read in this file is here.
 ///
-/// # The archive oracle, built per reconcile over a handle built once
-///
-/// [`super::Context::archive`] is the controller's ONE read-only `Arc<Store>`,
-/// constructed in `main` before the tokio runtime exists — interface **I13**.
-/// The closure below is cheap (an `Arc` clone) and the HANDLE is not rebuilt:
-/// a `Store` constructor drives its own runtime, so building one here would
-/// both panic and discard the connection pool on every reconcile.
-///
-/// `None` — a controller with no `LOGWEIR_ARCHIVE_URL` — takes
-/// [`unobserved_archive`]'s answer through the same shape: the `?` inside the
-/// future is what turns "no handle" into NOT OBSERVED, so `windowCovered` is
-/// omitted and no run is ever called an `OrphanedScorecard` for want of a
-/// credential. See [`ArchiveOracle`] for why `None` is the only honest value
-/// and why the oracle is async.
+/// [`super::Context::archive`] is the controller's one read-only
+/// `Arc<Store>`, built once in `main` (interface **I13**); the closure is an
+/// `Arc` clone per reconcile, because a `Store` constructor drives its own
+/// runtime and would panic here. `None` (no `LOGWEIR_ARCHIVE_URL`) takes
+/// [`unobserved_archive`]'s answer: `windowCovered` is omitted and no run is
+/// called an `OrphanedScorecard` for want of a credential.
 async fn reconcile(
     backup: Arc<Backup>,
     ctx: Arc<Context>,
     objects: reflector::Store<Backup>,
 ) -> Result<Action, BackupError> {
-    // P10: THE MANUAL-RUN POOL COUNTS FROM THE WATCH THIS CONTROLLER ALREADY
-    // RUNS — the same store the re-trust trigger reads, so a queued run costs
-    // no API call to count, and `store_snapshot` answers `None` until that
-    // watch has finished its first list. The ceiling is the installation
+    // The manual-run pool counts from the watch this controller already runs,
+    // so a queued run costs no API call; `store_snapshot` answers `None` until
+    // the watch has finished its first list. The ceiling is the installation
     // policy's (`limit: None`), and the reservations are the process's one
     // registry, shared with the `Restore` reconciler and every namespace copy.
     let peers = move || crate::run_pool::store_snapshot(&objects);
@@ -6038,9 +5305,9 @@ async fn reconcile(
         limit: None,
         reservations: crate::run_pool::Reservations::global(),
     };
-    // PoC P12: THE PROCESS'S ONE MEMORY of which finished runs it has read,
-    // so an unverified run is read again once per controller process — the
-    // moment a created or rotated `logweir-evidence-ro` reaches it.
+    // The process's one memory of which finished runs it has read, so an
+    // unverified run is read again once per controller process, the moment a
+    // created or rotated `logweir-evidence-ro` reaches it.
     reconcile_in_context_pooled(
         &backup,
         &ctx,
@@ -6055,14 +5322,8 @@ async fn reconcile(
     )))
 }
 
-/// [`reconcile`]'s body: the oracles over [`Context::archive`] and the handle's
-/// own LOCATION, read from `env` beside it, handed to [`reconcile_backup_at`]
-/// — the `Backup` twin of `restore::reconcile_in_context`, and a parameter for
-/// the same reason (review L2).
-///
-/// # Errors
-///
-/// As [`reconcile_backup_at`].
+/// [`reconcile`]'s body, with the archive oracles and their location read
+/// from `env`. Errors as [`reconcile_backup_at`].
 pub async fn reconcile_in_context(
     backup: &Backup,
     ctx: &Context,
@@ -6072,8 +5333,8 @@ pub async fn reconcile_in_context(
     reconcile_in_context_pooled(backup, ctx, now, env, None, None).await
 }
 
-/// [`reconcile_in_context`], through the manual-run pool when one is given —
-/// what [`reconcile`] runs (P10).
+/// [`reconcile_in_context`], through the manual-run pool when one is given:
+/// what [`reconcile`] runs.
 ///
 /// # Errors
 ///
@@ -6091,8 +5352,7 @@ pub async fn reconcile_in_context_pooled(
         let handle = archive.clone();
         Box::pin(async move {
             let handle = handle?;
-            // ONE `spawn_blocking`, TWO `get`s — interface I13. `Store` drives
-            // its own current-thread runtime and this task is already on one.
+            // One `spawn_blocking`, two `get`s (interface I13).
             tokio::task::spawn_blocking(move || observe_archive(&handle, &keys))
                 .await
                 .ok()
@@ -6100,7 +5360,7 @@ pub async fn reconcile_in_context_pooled(
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    // THE HANDLE'S OWN LOCATION, read beside the handle — see
+    // The handle's own location, read beside the handle; see
     // `reconcile_backup_at`.
     let archive_url =
         crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
@@ -6128,63 +5388,41 @@ fn error_policy(backup: Arc<Backup>, err: &BackupError, _ctx: Arc<Context>) -> A
     Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
-// ---------------------------------------------------------------------------
-// The re-trust trigger — PLAT-19.1, D3 §7.4 "re-evaluation without re-fetching"
-// ---------------------------------------------------------------------------
-
 /// Every Backup a `TrustPolicy` event could change the verdict of.
 ///
-/// # No LIST, and that is the whole design
+/// No LIST: the controller's own watch store over every Backup is the same
+/// index, already warm and no staler than the event, so the trigger costs no
+/// API calls.
 ///
-/// The obvious shape is "one paginated LIST per bound namespace on every
-/// policy event". This controller already RUNS a watch over every Backup in
-/// the cluster — that is what `Controller::new` is — so `Controller::store()`
-/// is the same index, already paid for, already warm, and cannot be staler
-/// than the event being mapped. The trigger therefore costs **zero** API
-/// calls and is bounded by the objects this controller holds rather than by
-/// the cluster.
-///
-/// # It over-approximates on purpose
-///
-/// [`crate::trust::may_govern`] treats a `default: true` policy as claiming
-/// every namespace, although resolution would hand an explicitly-named
-/// namespace to its own policy instead. Enqueuing an object the policy does
-/// not govern costs one re-derivation that writes nothing
-/// (`verification::retrust` returns `None` for an unchanged block, erratum
-/// **E11(d)**); failing to enqueue one leaves a revoked key green until
-/// something else happens to reconcile it. The two errors are not symmetric.
+/// It over-approximates on purpose: [`crate::trust::may_govern`] treats a
+/// `default: true` policy as claiming every namespace. An extra enqueue costs
+/// one re-derivation that writes nothing; a missed one leaves a revoked key
+/// green until something else reconciles the object.
 fn policy_targets(
     objects: &reflector::Store<Backup>,
     scopes: &crate::trust::PolicyScopeMemory,
     policy: &crate::crds::trust_policy::TrustPolicy,
 ) -> Vec<ObjectRef<Backup>> {
-    // THE UNION OF BEFORE AND AFTER. A `watches` mapper is handed only the
-    // NEW object, so an edit that NARROWS — a namespace removed, `default`
-    // cleared — would otherwise enqueue nothing in the namespace it just
-    // stopped governing, which is the one edit that certainly changed that
-    // namespace's resolution. See `trust::PolicyScopeMemory`.
+    // The union of before and after: a `watches` mapper sees only the new
+    // object, so an edit that narrows the scope would otherwise enqueue
+    // nothing in the namespace it stopped governing. See
+    // `trust::PolicyScopeMemory`.
     let scope = scopes.observe(policy);
     crate::verification::targets_in_scope(objects.state(), &scope)
 }
 
 /// [`reconcile`], with the re-trust pass in front of it.
 ///
-/// # Why this is in FRONT and not inside
-///
-/// Because a terminal object short-circuits: [`reconcile_backup_inner`]
-/// returns long before the verification block is written, which is what keeps
-/// a finished run quiet (D3 §1) and is also why "force a reconcile" was never
-/// a way to re-apply a revocation. The re-trust pass is the other half of that
-/// rule — it re-derives the verdict from what is already ON the status, with
-/// no storage read and no signature check — so it belongs where a terminal
-/// object still reaches it.
+/// The re-trust pass runs in front because a terminal object short-circuits:
+/// [`reconcile_backup_inner`] returns before the verification block is
+/// written, which keeps a finished run quiet. The re-trust pass re-derives the
+/// verdict from what is already on the status, with no storage read and no
+/// signature check, so it must sit where a terminal object still reaches it.
 ///
 /// It runs only when the object already carries a `matchedKeyId`
 /// ([`crate::verification::has_trust_verdict`]) and the policy reflector has
-/// synced. Both guards are about cost and correctness at once: an object with
-/// no verdict has nothing to re-decide, and an unsynced store looks like a
-/// cluster with no `TrustPolicy` at all, which would resolve every namespace
-/// to the legacy roster and write a verdict nobody asked for.
+/// synced: an unsynced store looks like a cluster with no `TrustPolicy`, which
+/// would resolve every namespace to the legacy roster.
 async fn reconcile_with_trust(
     backup: Arc<Backup>,
     ctx: Arc<Context>,
@@ -6202,31 +5440,28 @@ async fn reconcile_with_trust(
                 let resolution =
                     crate::trust::resolve_with(&snapshot, &ctx.client, &namespace).await?;
                 let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
-                // ONE BOUNDED RE-READ FOR A STATUS THAT PREDATES `signedAt`
-                // (TRUST-UPGRADE-SIGNEDAT). It happens only for a block that
-                // carries a matched key, no signing time and no `trust` at all
-                // — a pre-PLAT-19.1 write — and it goes through THE SAME
-                // evidence path the original verdict came from, so a
-                // destination-backed run reads its own bucket and one whose
-                // grant only a pod may hold reads nothing and says so.
+                // One bounded re-read for a status that predates `signedAt`: a
+                // block with a matched key, no signing time and no `trust`. It
+                // goes through the same evidence path as the original verdict,
+                // so a destination-backed run reads its own bucket, and one
+                // whose grant only a pod may hold reads nothing and says so.
                 let signing_time = match crate::verification::signing_time_need(status, Utc::now())
                 {
                     crate::verification::ReadPlan::None => {
                         crate::verification::SigningTime::NotNeeded
                     }
-                    // THE BACKOFF SHORT-CIRCUITS BEFORE `evidence_source`, so a
-                    // deferred pass costs neither a `Store::get_capped` NOR the
-                    // destination read that resolving the handle would need.
+                    // The backoff short-circuits before `evidence_source`, so a
+                    // deferred pass costs neither a store read nor a destination
+                    // read.
                     crate::verification::ReadPlan::Deferred => {
                         crate::verification::SigningTime::Deferred
                     }
                     crate::verification::ReadPlan::Read(need) => {
-                        // A FAILED READ IS NOT A FAILED RECONCILE — review
-                        // finding **F6**. `?` here aborted the pass before
-                        // `apply_retrust` ran, so a kube API blip delayed a
-                        // revocation on exactly the objects this hook is about.
-                        // The error becomes the reason no read was attempted,
-                        // and the verdict is still re-derived.
+                        // A failed read is not a failed reconcile: a `?` here
+                        // would let a kube API blip delay a revocation on the
+                        // objects this hook is about. The error becomes the
+                        // reason no read was attempted, and the verdict is still
+                        // re-derived.
                         let (handle, unread) =
                             match evidence_source(&backup, &ctx.client, &namespace, Utc::now())
                                 .await
@@ -6234,7 +5469,7 @@ async fn reconcile_with_trust(
                                 Ok(EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
                                 Ok(EvidenceSource::Destination(store)) => (Some(store), None),
                                 Ok(EvidenceSource::NotAttempted { detail }) => (None, Some(detail)),
-                                // A POD-ONLY GRANT IS NOT RE-READ HERE: the
+                                // A pod-only grant is not re-read here: the
                                 // re-trust hook has no Job to wait for.
                                 Ok(EvidenceSource::FetchJob { destination, .. }) => (
                                     None,
@@ -6271,38 +5506,33 @@ async fn reconcile_with_trust(
 /// Run the `Backup` controller until the process ends.
 ///
 /// `Api::all`, and it `owns` the Jobs it creates so a pod terminating wakes
-/// this reconciler through its Job rather than only on the requeue timer —
-/// which is what keeps the gap between "the runner exited" and "the exit code
-/// is on the status" short enough that a TTL is never the thing that closes
-/// it.
+/// this reconciler through its Job rather than only on the requeue timer, so
+/// a TTL never closes the gap between "the runner exited" and "the exit code
+/// is on the status".
 ///
-/// `archive` is the controller's ONE read-only archive handle, built once in
-/// `main` before the tokio runtime exists and shared as `Arc<Store>` —
-/// interface **I13**, the same argument `backup_schedule::controller` takes.
-/// `None` is a controller with no archive configured: it writes no
-/// `windowCovered` and records no `OrphanedScorecard`, which is the truthful
-/// answer and not a degraded one (see [`ArchiveOracle`]).
+/// `archive` is the controller's one read-only archive handle, built once in
+/// `main` and shared as `Arc<Store>` (interface **I13**). `None` is a
+/// controller with no archive configured: it writes no `windowCovered` and
+/// records no `OrphanedScorecard` (see [`ArchiveOracle`]).
 ///
-/// `runner_image` is Task 33's runtime override and Task 37's beside it, read
-/// once each in `main` out of `job::RUNNER_IMAGE_ENV` and
-/// `job::RUNNER_PULL_POLICY_ENV`: an unset field is the compiled-in constant,
-/// and a set one is what the operator's install asked for — the image this
-/// cluster's nodes actually hold, and the policy that makes that reference
-/// resolvable (a LOADED tag must not be pulled; a `latest` tag must be).
+/// `runner_image` is the runtime override read once in `main` out of
+/// `job::RUNNER_IMAGE_ENV` and `job::RUNNER_PULL_POLICY_ENV`: an unset field is
+/// the compiled-in constant, a set one the image this cluster's nodes hold and
+/// the policy that makes it resolvable (a loaded tag must not be pulled; a
+/// `latest` tag must be).
 pub async fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
 ) {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
+    // One watch per watched namespace: `crate::scope` is the whole cluster
+    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
+    // then this reconciler runs once per namespace with an `Api::namespaced`
+    // watch, the only shape the scoped chart's RoleBindings permit.
     //
-    // The `TrustPolicy` store is built ONCE here and shared by every copy
-    // (review L3): the kind is cluster-scoped, so a reflector per namespace
-    // would be N identical cluster-wide watches.
+    // The `TrustPolicy` store is built once and shared by every copy: the kind
+    // is cluster-scoped, so a reflector per namespace would be N identical
+    // cluster-wide watches.
     let policies = crate::trust::spawn_policy_reflector(&client);
     crate::scope::run_everywhere(move |namespace| {
         controller_in(
@@ -6317,7 +5547,7 @@ pub async fn controller(
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
@@ -6333,25 +5563,23 @@ fn controller_in(
         archive,
         runner_image,
     });
-    // The ONE `TrustPolicy` store, shared by the trigger's resolutions and by
-    // every copy of this reconciler (`crate::trust::spawn_policy_reflector`).
-    // The trigger itself is a watch per copy: it maps a policy event to the
-    // objects in THIS copy's store.
+    // The one `TrustPolicy` store, shared by the trigger's resolutions and by
+    // every copy of this reconciler. The trigger itself is a watch per copy: it
+    // maps a policy event to the objects in this copy's store.
     let policies = shared.store;
     let synced = shared.synced;
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client_for_watch);
-    // ONE memory of what each policy bound last, owned by the mapper.
+    // One memory of what each policy bound last, owned by the mapper.
     let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
-        // P10: THE SAME STORE, FOR THE MANUAL-RUN POOL (`run_pool`).
+        // The same store, for the manual-run pool (`run_pool`).
         let pool_objects = controller.store();
         controller
             .owns(jobs, watcher::Config::default())
-            // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the objects
-            // this controller already holds in the namespaces that policy could
-            // govern — see `policy_targets`.
+            // The re-trust trigger: a `TrustPolicy` event maps to the objects
+            // this controller holds in the namespaces that policy could govern.
             .watches(policy_api, watcher::Config::default(), move |policy| {
                 policy_targets(&objects, &scopes, &policy)
             })
