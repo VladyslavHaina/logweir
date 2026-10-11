@@ -82,14 +82,16 @@ tracked fixtures on a slot (it refuses `LOGWEIR_SEED_REFRESH_FIXTURES=1` there).
 anything else keeps a copy of it, if the shell and the harness refuse different
 environments, if a slot switch leaves a variable behind, if a published port or
 a host-facing advertisement is a literal, if `just e2e-down` misses a profile,
-if an e2e suite or stack script spells a default-stack address (any of the 14
-ports) in code, or if a function runs `docker compose` without checking
+if an e2e suite, a `--features e2e` row under `crates/` or a stack script
+spells a default-stack address (any published port) in code, or if a function runs `docker compose` without checking
 coherence first (`stack::ensure_coherent()`).
 
-**What does not move yet.** On a non-default slot `just e2e` runs only the `e2e`
-package: the `--features e2e` rows under `crates/` still dial
-`localhost:9092` / `localhost:9000` and would reach the default stack, so they
-run on the default stack.
+**The `--features e2e` rows under `crates/`** (`logweir-kafka`'s `live`,
+`logweir-store`'s `minio_options`, `logweir`'s `catalog_minio` and the live
+rows of `check_cli`) compile the same `tests/harness/stack.rs` in, so they
+follow the slot too, and `just e2e` runs the whole workspace on any stack
+(PROD-01.5b). `LOGWEIR_TEST_BOOTSTRAP`, `LOGWEIR_TEST_SASL_BOOTSTRAP` and
+`LOGWEIR_TEST_S3_ENDPOINT` still override them.
 
 **Cluster ids.** Each Kafka cluster loads its id from
 `compose/slots/<project>/<cluster>.env`: `kafka-broker-1.env`,
