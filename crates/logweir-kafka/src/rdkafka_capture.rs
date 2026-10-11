@@ -1,14 +1,14 @@
-//! **PROD-04.1's broker glue**: one capture of the selected consumer groups
-//! ([`crate::capture`]), from PROD-04.0b's classification and descriptions,
-//! PROD-04.0a's positions, and two plain reads this module adds — a topic's
+//! **The capture's broker glue**: one capture of the selected consumer groups
+//! ([`crate::capture`]), from the group classification and descriptions, the
+//! committed positions, and two plain reads this module adds — a topic's
 //! partitions (metadata) and its partitions' marks, READ_UNCOMMITTED. No
 //! `unsafe`; every call is bounded by the reader's admin or position bound,
 //! and one pass over the marks by [`MARKS_BUDGET`] in all.
 //!
-//! **The marks are read only when a position was asked for** (PROD-04.1
-//! review L8): a capture that described no group — every group excluded, as
-//! on a broker that types none (Kafka 3.7.x), or failed — reads no partition
-//! and no mark, so an unavailable leader costs nothing there.
+//! **The marks are read only when a position was asked for**: a capture that
+//! described no group — every group excluded, as on a broker that types none
+//! (Kafka 3.7.x), or failed — reads no partition and no mark, so an unavailable
+//! leader costs nothing there.
 use crate::capture::{GroupsObservation, Marks, ObservedGroup, TopicMarks};
 use crate::groups::GroupVerdict;
 use crate::positions::{GroupListing, TopicPartition};
@@ -58,9 +58,9 @@ impl RdKafkaReader {
     }
 
     /// A handle that reads marks READ_UNCOMMITTED, so a high watermark is the
-    /// log end and never a transaction's last stable offset (PROD-01.4 §4.5,
-    /// c11): a committed position above the stable offset is not "beyond the
-    /// end". It never subscribes, assigns or commits.
+    /// log end and never a transaction's last stable offset: a committed
+    /// position above the stable offset is not "beyond the end". It never
+    /// subscribes, assigns or commits.
     fn marks_handle(&self) -> Result<BaseConsumer, String> {
         let mut cfg = self.base_config().clone();
         cfg.set("group.id", "logweir-marks-do-not-commit")
@@ -111,7 +111,7 @@ impl RdKafkaReader {
             .collect()
     }
 
-    /// **PROD-04.1.** Per named topic, its partitions and each one's marks,
+    /// Per named topic, its partitions and each one's marks,
     /// read now (`ClusterReader::partition_marks`).
     pub fn read_partition_marks(&self, topics: &[String]) -> BTreeMap<String, TopicMarks> {
         let handle = match self.marks_handle() {
@@ -130,7 +130,7 @@ impl RdKafkaReader {
             .collect()
     }
 
-    /// **PROD-04.1.** One capture of `selected` over the partitions of
+    /// One capture of `selected` over the partitions of
     /// `topics`, in `crate::capture`'s order.
     pub fn capture_consumer_groups(
         &self,

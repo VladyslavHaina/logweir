@@ -1,4 +1,4 @@
-//! The DEFAULT-SET half of Task 12: what can be checked about
+//! The DEFAULT-SET half of the demo: what can be checked about
 //! `scripts/mvp-demo.sh` by reading it.
 //!
 //! **Everything here is in-process and reads files** (GC22): one shell script,
@@ -9,10 +9,9 @@
 //! masks no exit code — be checked on every commit rather than only when
 //! somebody has the stack up.
 //!
-//! `the_exit_code_tokeniser_is_a_reusable_helper` is the test **Task 28 and
-//! Task 32 inherit rather than re-derive** (controller ruling, critique C M12).
-//! It drives `support::exit_code_lint` over inline fixtures, so a later task
-//! that changes the tokeniser sees which shape it broke.
+//! `the_exit_code_tokeniser_is_a_reusable_helper` drives
+//! `support::exit_code_lint` over inline fixtures, so a change to the
+//! tokeniser shows which shape it broke.
 
 mod support;
 
@@ -44,11 +43,8 @@ fn read(rel: &str) -> String {
 ///
 /// # Why this is not a `contains`
 ///
-/// It was, and **the mutant survived**. Step 7 of the demo prints the exact
-/// command an auditor would run, `echo`-ing the string
-/// `verify_scorecard.py --payload-type backup-receipt` — so deleting the
-/// EXECUTED Python verification left the needle in the file and the test
-/// green. Measured, in this task's own mutation round.
+/// Step 7 of the demo `echo`es the exact command an auditor would run, so a
+/// `contains` would stay green with the EXECUTED Python verification deleted.
 ///
 /// What makes it decisive is the I29 tokeniser: the needle must appear in the
 /// CODE of a logical line (comments and here-doc bodies removed, `echo`'s
@@ -113,7 +109,7 @@ fn mvp_demo_masks_no_exit_code() {
 
 /// **A script this task touches nothing of, checked anyway.**
 ///
-/// Not in the brief, and cheap: the tokeniser is a repository-wide rule, and
+/// The tokeniser is a repository-wide rule, and
 /// running it over a script that was already here proves the helper works on
 /// text nobody wrote for it. It predates I29, so a finding would be a real one
 /// — `scripts/e2e-seed.sh` pipes freely, but never on a line whose first word
@@ -126,15 +122,9 @@ fn the_existing_demo_scripts_mask_no_exit_code_either() {
 
 /// **The reusable half (I29), driven over inline fixtures.**
 ///
-/// This is the test Task 28 and Task 32 inherit rather than re-derive. Each
-/// fixture is one decision the tokeniser makes, named, with the verdict fixed
-/// beside it — so a change of mind about any of them shows up here as a
+/// Each fixture is one decision the tokeniser makes, named, with the verdict
+/// fixed beside it, so a change of mind about any of them shows up as a
 /// failing row rather than as a quietly widened lint.
-///
-/// Two of the mutants in Task 12's brief land here:
-/// * make the tokeniser flag a `|` inside single quotes → `single_quoted_pipe`
-///   fails;
-/// * make it skip here-doc detection → `pipe_inside_a_heredoc` fails.
 #[test]
 fn the_exit_code_tokeniser_is_a_reusable_helper() {
     /// One fixture: a name, the script text, and the findings it must produce
@@ -271,9 +261,8 @@ fn the_exit_code_tokeniser_is_a_reusable_helper() {
 /// **The quickstart is ONE command and both places say the same one.**
 ///
 /// `README.md`'s quickstart block and `docs/quickstart.md` are read by
-/// different people and drift apart on their own. The controller's ruling is
-/// that they say the same thing; this is the test half of it (`just links`
-/// proves the cross-links resolve, which is a different property).
+/// different people and drift apart on their own (`just links` proves the
+/// cross-links resolve, which is a different property).
 #[test]
 fn the_readme_and_the_quickstart_both_carry_the_one_command() {
     let readme = read("README.md");

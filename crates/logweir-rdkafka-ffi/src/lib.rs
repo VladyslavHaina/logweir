@@ -1,13 +1,12 @@
 //! **The `unsafe` perimeter: the one crate where Logweir calls librdkafka
-//! directly** (OD-6, decided 2026-10-05 as (a2); ADR 0004's amendment in
-//! `docs/architecture.md`; `docs/to-do/decisions/PROD-04.0-admin-path.md` §7).
+//! directly** (ADR 0004's amendment in `docs/architecture.md`).
 //!
 //! rust-rdkafka 0.36.2's safe API lacks the calls below, or offers them only
-//! unsoundly (PROD-04.0 §1.2 C1, C2, T1). This crate makes exactly those calls
-//! through `rdkafka::bindings` and hands back OWNED values: integers, `String`s,
-//! `Vec`s. It interprets nothing: what a code, a state or a clamped enum MEANS
-//! is decided in `logweir-kafka` (`groups`, `access`), which keeps
-//! `#![forbid(unsafe_code)]` and is unit-tested without a broker.
+//! unsoundly. This crate makes exactly those calls through `rdkafka::bindings`
+//! and hands back OWNED values: integers, `String`s, `Vec`s. It interprets
+//! nothing: what a code, a state or a clamped enum MEANS is decided in
+//! `logweir-kafka` (`groups`, `access`), which keeps `#![forbid(unsafe_code)]`
+//! and is unit-tested without a broker.
 //!
 //! | Call | librdkafka | Module |
 //! |---|---|---|
@@ -15,13 +14,12 @@
 //! | the name listing (every group type) | `rd_kafka_list_groups` | [`groups::list_group_names`] |
 //! | group description, and the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | [`groups::describe_consumer_groups`] |
 //! | the caller's authorized operations on the cluster | `rd_kafka_DescribeCluster` | [`cluster::describe_cluster`] |
-//! | topic IDs (KIP-516) of named topics (PROD-01.4a) | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
-//! | the client's own log lines, as events on a private queue (PROD-01.2: the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
+//! | topic IDs (KIP-516) of named topics | `rd_kafka_DescribeTopics` | [`topics::describe_topics`] |
+//! | the client's own log lines, as events on a private queue (the broker's ApiVersions answer is only there) | `rd_kafka_set_log_queue`, `rd_kafka_event_log` | [`logs::drain_logs`] |
 //!
 //! # The obligations every call keeps
 //!
-//! These are the ones PROD-04.0 §7.2 and PROD-01.4 §6.1 measured, and each
-//! `// SAFETY:` comment in this crate names the ones its block relies on.
+//! Each `// SAFETY:` comment in this crate names the ones its block relies on.
 //!
 //! 1. **Every librdkafka object is destroyed exactly once.** Options, queues,
 //!    events and the name listing are each held by one owning
@@ -56,8 +54,8 @@
 //!    because a reference to such a struct asserts its whole value is valid.
 //! 7. **Strings are copied byte for byte** ([`CText`]): NULL stays `Null`,
 //!    and bytes that are not UTF-8 stay bytes (`NotUtf8`), never a panic and
-//!    never a lossy replacement that could turn one id into another (the
-//!    T18 class: rust-rdkafka panics on such bytes).
+//!    never a lossy replacement that could turn one id into another
+//!    (rust-rdkafka panics on such bytes).
 //!
 //! # Threading model
 //!
@@ -80,15 +78,12 @@
 //!
 //! A call leaves this crate once a released rust-rdkafka offers it safely;
 //! when none is left, the crate is deleted and `check-unsafe-scope.sh` loses
-//! its perimeter lines. `rd_kafka_DescribeTopics` ([`topics`], PROD-01.4a)
-//! leaves through PROD-01.4b: rust-rdkafka PR #721 or a successor, released,
-//! with the URL-safe text form derived from the two halves. PROD-01.4b drafted
-//! that successor against 0.36.2 (`AdminClient::describe_topics`: the ID as
-//! its two halves, displayed in Kafka's text form, and a per-topic error beside
-//! each name); it is not filed upstream without the owner's go-ahead. A safe
-//! wrapper reads the per-topic code through rdkafka-sys's
-//! `rd_kafka_resp_err_t` enum, so switching to one also waits for that read to
-//! be sound for a code the enum does not list (obligation 5).
+//! its perimeter lines. `rd_kafka_DescribeTopics` ([`topics`]) leaves once
+//! rust-rdkafka releases PR #721 or a successor, with the URL-safe text form
+//! derived from the two halves. A safe wrapper reads the per-topic code
+//! through rdkafka-sys's `rd_kafka_resp_err_t` enum, so switching to one also
+//! waits for that read to be sound for a code the enum does not list
+//! (obligation 5).
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(missing_docs)]

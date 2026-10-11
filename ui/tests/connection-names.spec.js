@@ -1,17 +1,15 @@
-// connection-names.spec.js -- defect P7 (poc-install, 2026-09-24): in console
-// (shared) mode the Clusters form's "name" field was silently discarded.
+// connection-names.spec.js -- in console (shared) mode the Clusters form
+// offers no name it cannot honour.
 //
 // The product API's connection create has no name member and mints
 // `conn-<26 base32>` from the request's idempotency scope (`docs/api.md`), so
-// an operator who typed `source` got `conn-u5cb27icdjt5vdf6sc4wehb4nb` and was
-// told nothing. The console now offers no choice it cannot honour: in console
-// mode there is no name input, the form says who names the connection, and an
-// intent held in the draft is what makes a double click or a retry ONE
-// connection. Legacy (kubectl proxy) mode keeps its name field -- there the
-// typed name IS the object's name.
+// a typed name would be silently discarded. In console mode there is no name
+// input, the form says who names the connection, and an intent held in the
+// draft is what makes a double click or a retry ONE connection. Legacy
+// (kubectl proxy) mode keeps its name field -- there the typed name IS the
+// object's name.
 //
-// Every row carries its NEGATIVE CONTROL: the assertion the code before P7
-// fails.
+// Every row carries its NEGATIVE CONTROL.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

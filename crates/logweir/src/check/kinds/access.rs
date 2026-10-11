@@ -29,7 +29,7 @@
 //! # One row, one principal
 //!
 //! **`destination.evidenceWritable` is answered by the `evidenceWrite`
-//! grant and by no other** (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
+//! grant and by no other**.
 //! When the destination separates that grant from the one the plan was
 //! resolved for, the plan carries it as [`DestinationProbe::evidence_write`]
 //! and the marker handle is built with it; the row then carries the fact
@@ -41,7 +41,7 @@
 //! does not already grant that principal.
 //!
 //! **`destination.evidenceReadable` is answered by the `evidenceRead` grant
-//! and by no other** (the class sweep of the same defect). A separate grant
+//! and by no other**. A separate grant
 //! arrives as [`DestinationProbe::evidence_read`]; the read handle is built
 //! with it and used for the one `get` of an absent key. A grant no check pod
 //! holds — `ControllerIdentity`, or none configured — is answered `unknown`
@@ -51,8 +51,7 @@
 //!
 //! **`destination.archivePrefixWritable` is NEVER probed and never green**,
 //! whatever the plan asks: the one key a check may write is under the evidence
-//! root and proves nothing about the archive prefix (decision on
-//! DESTINATIONACCESS-IGNORES-WRITEPROBE, 2026-09-23).
+//! root and proves nothing about the archive prefix.
 
 use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, DestinationAccessRequest,
@@ -193,8 +192,7 @@ pub fn destination_checks(
                 );
             }
             DestinationRole::EvidenceRead => {
-                // THE PRINCIPAL IS THE EVIDENCE-READ GRANT'S (class sweep of
-                // PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A grant no pod
+                // THE PRINCIPAL IS THE EVIDENCE-READ GRANT'S. A grant no pod
                 // holds is answered here, with no request: reading as the
                 // destination grant instead is the defect.
                 let grant = probe.evidence_read;
@@ -239,7 +237,7 @@ pub fn destination_checks(
                     Err(f) => about(&f),
                     Ok(access) => {
                         let key = store::absent_probe_key(&dest.uid);
-                        // FX-31: `caps::PROBE` (0 bytes). The answer is the
+                        // `caps::PROBE` (0 bytes). The answer is the
                         // GET's status; a body is never read.
                         match access.get(&key, caps::PROBE) {
                             // A key nobody wrote: reading it is a SUCCESS.
@@ -268,8 +266,8 @@ pub fn destination_checks(
                                 dest.name,
                                 read_principal_clause(grant)
                             )),
-                            // THE KEY FAMILY, NOT THE KEY (reviewer finding
-                            // F7). `logweir/readiness/<uid>.absent-probe` is
+                            // THE KEY FAMILY, NOT THE KEY.
+                            // `logweir/readiness/<uid>.absent-probe` is
                             // one long run of the base64 alphabet — `/`, `-`
                             // and a UUID's hex all belong to it — so `redact`
                             // eats it whole and the operator loses the one fact
@@ -316,8 +314,7 @@ pub fn destination_checks(
                     continue;
                 }
                 // THE PRINCIPAL IS THE EVIDENCE-WRITE GRANT'S, and the wiring
-                // is told so rather than left to assume it (defect
-                // PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Passing `None`
+                // is told so rather than left to assume it. Passing `None`
                 // here on a plan that carries a separate grant is the defect:
                 // the row would say what the DESTINATION grant may do.
                 let grant = probe.evidence_write;
@@ -347,7 +344,7 @@ pub fn destination_checks(
                     Ok(access) => match store::put_marker(access.as_ref(), &dest.uid) {
                         Ok(outcome) => {
                             // The key FAMILY, not the key — see the
-                            // evidence-read arm above for why (finding F7).
+                            // evidence-read arm above for why.
                             ready(CheckId::DestinationEvidenceWritable, outcome.code(), now)
                                 .with_message(&format!(
                                     "the create-only readiness marker for this destination, \
@@ -356,7 +353,7 @@ pub fn destination_checks(
                                     dest.name,
                                     principal_clause(grant)
                                 ))
-                                // Reviewer question Q1: whether `PutMode::Create`
+                                // Whether `PutMode::Create`
                                 // was really enforced, or the backend declined it
                                 // and the store fell back to HEAD-then-PUT. The
                                 // grant is proved either way, so the CODE is the
@@ -386,7 +383,7 @@ pub fn destination_checks(
 /// The per-grant fact value of a grant whose binding matched.
 pub const GRANT_BOUND: &str = "bound";
 
-/// FX-20c: `destination.credentialBound` — whether EVERY Secret-backed grant
+/// `destination.credentialBound` — whether EVERY Secret-backed grant
 /// the plan lists ([`DestinationPlan::grant_bindings`]) carries the binding
 /// its destination expects, compared in the pod through
 /// [`logweir_core::credential_binding::check_grant_binding`]: the same
@@ -396,10 +393,9 @@ pub const GRANT_BOUND: &str = "bound";
 /// # Why a row of its own, and why it is blocking
 ///
 /// The per-role rows above answer "may this principal do this" with a
-/// request, and the `archiveWrite` row may not make one at all. Before this
-/// row a destination whose only grant was another destination's
-/// `archiveWrite` Secret tested READY while every backup was refused
-/// (PoC batch 4, FX-20 F6). The binding needs no request: it is a public value
+/// request, and the `archiveWrite` row may not make one at all: a destination
+/// whose only grant is another destination's `archiveWrite` Secret would test
+/// READY while every backup is refused. The binding needs no request: it is a public value
 /// beside the credential, compared here and never presented anywhere. So this
 /// row answers it for every listed grant, probed or not, and a foreign grant
 /// makes the verdict `notReady` — readiness is never READY for a destination
@@ -410,16 +406,16 @@ pub const GRANT_BOUND: &str = "bound";
 /// The message LEADS with one compact entry per refused grant — its
 /// `spec.access` field, its Secret, and whether the binding was absent or
 /// foreign — so the per-grant answer survives the 512-character cap and the
-/// facts the controller folds in after it (review LOW-1). The destination is
+/// facts the controller folds in after it. The destination is
 /// named once, by the row's scope; only a row spanning two destinations (a
 /// restore's source and evidence) names it per grant. The scope is the first
-/// REFUSED grant's destination (review LOW-3). The facts carry one
+/// REFUSED grant's destination. The facts carry one
 /// `<grant>=bound|CredentialBindingMismatch` per listed grant. Neither the
 /// projected nor the expected value is ever written, and the remedy never
-/// suggests binding a refused Secret to this destination (review LOW-2).
+/// suggests binding a refused Secret to this destination.
 ///
 /// `None` when no plan lists a grant (no Secret-backed grant, or a controller
-/// that predates FX-20c): `CheckRequest::compares_grant_bindings` is false and
+/// that predates the row): `CheckRequest::compares_grant_bindings` is false and
 /// the controller expects no such row.
 #[must_use]
 pub fn credential_bound_row(
@@ -516,7 +512,7 @@ pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadli
     let now = wiring.now();
     let mut result = CheckResult::new(CheckPlanKind::DestinationAccess);
     result.checks.push(super::runner_contract(now));
-    // FX-20c: first, and with no request — EVERY grant the destination
+    // First, and with no request — EVERY grant the destination
     // configures, whichever roles this check exercises.
     if let Some(row) = credential_bound_row(&[&req.destination], wiring) {
         result.checks.push(row);

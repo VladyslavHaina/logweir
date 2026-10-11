@@ -7,11 +7,11 @@
 // drill approve` (or `countersign`) where their private key lives, and this
 // form takes the two files it wrote -- `approval.json` and `approval.sig` --
 // as UTF-8 text, VERBATIM, and does one `create` on `approvals` with them
-// (interface I18: the document text, never base64). An encoding step between
+// (the document text, never base64). An encoding step between
 // the approver's file and the hashed bytes is the class of transformation
 // `planBytes` exists to forbid.
 //
-// THE ONE "APPROVE" BUTTON (PROD-16.2) IS A TWO-PERSON NAMESPACE'S, AND IT
+// THE ONE "APPROVE" BUTTON IS A TWO-PERSON NAMESPACE'S, AND IT
 // SIGNS NOTHING EITHER. Under a `two-person` policy a SECOND person, signed in
 // to the shared console, is shown the request -- every fact of it the
 // server's, read from bytes the console verified its own signature on -- and
@@ -31,25 +31,19 @@
 // the refused text is cleared from the field and never kept in the draft.
 // WHAT THAT DOES NOT COVER is a renamed, headerless blob, which spells nothing
 // and is named nothing: the controller refuses it as a document that is not a
-// DSSE envelope. v0.1 has no key lifecycle, and a page that "helpfully" filled
-// that gap would be inventing the most consequential missing subsystem in the
-// product inside a browser (Global Constraint 28).
+// DSSE envelope.
 //
-// THE SUBJECT IS READ FROM THE CLUSTER, NOT FROM THE ROUTE (PLAT-12.2).
-// `Approval.spec` is `{subjectRef{kind,name}, planHash, approvalBytes,
-// sidecarBytes}`, and this page is forbidden from parsing the two documents,
-// so the subject and the plan hash cannot come from them. They used to come
-// from the route, beside an EDITABLE subject field the form then ignored: the
-// page could show one subject and submit another. Now the route only names
-// which Restore; the page reads that Restore and derives every value it will
-// submit from the object itself -- the name, the UID, `spec.approvalRef.name`
-// and the sha256 of `spec.planBytes`, computed here -- shows them read-only,
-// and at submission checks that what is SHOWN is what it would SEND and that
-// the Restore is still the one it read. A route that names a different hash or
-// approval name than that Restore carries is a mismatch, and no form is
-// offered from it. The controller recomputes the hash from the referent's own
-// bytes regardless (Task 16, check 7), and the Restore controller refuses an
-// approval bound to any other subject identity.
+// THE SUBJECT IS READ FROM THE CLUSTER, NOT FROM THE ROUTE. `Approval.spec`
+// is `{subjectRef{kind,name}, planHash, approvalBytes, sidecarBytes}`, and
+// this page never parses the two documents. The route only names which
+// Restore; the page reads it and derives every value it will submit from the
+// object -- the name, the UID, `spec.approvalRef.name` and the sha256 of
+// `spec.planBytes`, computed here -- shows them read-only, and at submission
+// checks that what is SHOWN is what it would SEND and that the Restore is
+// still the one it read. A route naming a different hash or approval name is
+// a mismatch, and no form is offered. The controller recomputes the hash
+// from the referent's own bytes regardless, and the Restore controller
+// refuses an approval bound to any other subject identity.
 //
 // AN APPROVAL THAT EXISTS IS NOT AN APPROVAL. One whose status the controller
 // set to `Verified=True` is. A submission that does not verify stays in the
@@ -106,10 +100,9 @@ const RESTORES = "restores";
  *  viewer to select one before it mounts this page. */
 const DEFAULT_NAMESPACE = "";
 
-/** The one kind this form may name. `Switchover` is tag 2 and is not in the
- *  CRD's enum: the subject kind is part of the bytes an approval binds, and
- *  without it an approved restore would double as "a valid signature by a
- *  rostered key exists in this namespace". */
+/** The one kind this form may name. The subject kind is part of the bytes an
+ *  approval binds; without it an approved restore would double as "a valid
+ *  signature by a rostered key exists in this namespace". */
 export const SUBJECT_KIND = "Restore";
 
 /** The form's identity in the draft and mutation registries; each subject has
@@ -131,18 +124,14 @@ export const APPROVAL_FIELD_PATHS = Object.freeze([
  *  `#/approvals?subject=<restore>&hash=<planHash>&name=<approval>` plus the
  *  optional `ns`.
  *
- *  WHAT THEY ARE NOW. `subject` says WHICH Restore this visit is about, and
- *  nothing more. `hash` and `name` are what the link's author believed that
- *  Restore carries; the page reads the Restore and refuses the link when they
- *  disagree (see `routeMismatches`), and never submits either of them.
+ *  `subject` says WHICH Restore this visit is about, and nothing more. `hash`
+ *  and `name` are what the link's author believed that Restore carries; the
+ *  page reads the Restore and refuses the link when they disagree (see
+ *  `routeMismatches`), and never submits either of them.
  *
- *  WHY THE EXTRACTION LIVES HERE AND NOT IN THE ROUTER. `app.js` touches
- *  `window` at module scope and cannot be imported under `node --test` (it
- *  fails with `ReferenceError: window is not defined`), so an extraction
- *  written inline in the router was unreachable by construction. Swapping
- *  `subject` and `name` there left the whole suite green. A pure function of
- *  the hash string can be called from a test, so this is one, and `app.js`
- *  calls it.
+ *  Here rather than in the router: `app.js` touches `window` at module scope
+ *  and cannot be imported under `node --test`, so a pure function of the hash
+ *  string is what a test can reach.
  *
  *  An absent parameter is the empty string and never `undefined`, so a blanked
  *  value is visible to an assertion rather than merely falsy. */
@@ -269,7 +258,7 @@ export function renderApprovalList(collection, now) {
   );
 }
 
-/** THE EMPTY APPROVALS TABLE, IN THE WORDS OF THE NAMESPACE'S POLICY (MCP-31).
+/** THE EMPTY APPROVALS TABLE, IN THE WORDS OF THE NAMESPACE'S POLICY.
  *  Under an ordinary policy a Restore's approval is the console's own signed
  *  confirmation and there is nothing to record from a file; under a governed
  *  one an approver countersigns in the console; only an unbound namespace (and
@@ -316,7 +305,7 @@ function approvalTable(collection, now, policy) {
     noApprovalSentence(policy), undefined, { id: "approvals", label: "approvals" });
 }
 
-/** PROD-15.1: the approval subject a Restore NEEDS -- `originalName` for a
+/** The approval subject a Restore NEEDS -- `originalName` for a
  *  restore under the ORIGINAL topic names, else `ordinary` -- from the
  *  product API's view (`approvalSubject`) or the custom resource's
  *  declaration (`spec.target.topicNaming.originalName`). */
@@ -329,7 +318,7 @@ export function restoreApprovalSubject(restore) {
   return naming.originalName === true ? "originalName" : "ordinary";
 }
 
-/** PROD-15.1: the approval subject an Approval's SIGNED document carries --
+/** The approval subject an Approval's SIGNED document carries --
  *  the product API's `approvalSubject`, or the custom resource's own
  *  `spec.approvalBytes` (v1 `approval_subject`, v2 `approvalSubject`).
  *  `unknown` for a document this page cannot read; never guessed. */
@@ -358,7 +347,7 @@ export function approvalSubjectOf(approval) {
   return subject === "originalName" ? "originalName" : "unknown";
 }
 
-/** OD-10 (PROD-15.1): the topic names a one-person confirmation's SIGNED
+/** The topic names a one-person confirmation's SIGNED
  *  bytes carry (`originalNameConfirmation.typedTopics`), or `null` when the
  *  document carries none or cannot be read. */
 export function typedTopicsOf(approval) {
@@ -376,7 +365,7 @@ export function typedTopicsOf(approval) {
   return Array.isArray(typed) && typed.every((t) => typeof t === "string") ? typed : null;
 }
 
-/** PROD-15.1: an approval subject in words, the original-name one distinct. */
+/** An approval subject in words, the original-name one distinct. */
 export function approvalSubjectWords(subject) {
   if (subject === "originalName") {
     return "<strong class=\"subject-original-name\">originalName</strong> -- a restore under " +
@@ -385,7 +374,7 @@ export function approvalSubjectWords(subject) {
   return esc(subject === "ordinary" ? "ordinary" : "unknown (not readable on this page)");
 }
 
-/** PROD-15.1: what an approver of a restore under the original names is
+/** What an approver of a restore under the original names is
  *  told, beside the subject. */
 export const ORIGINAL_NAME_APPROVAL_SENTENCE =
   "This Restore writes under the ORIGINAL topic names, into topics that do not exist. Only an " +
@@ -419,11 +408,11 @@ export function renderApprovalStatus(object) {
       ["matched key id", cell(status.matchedKeyId)],
       ["approver", cell(status.approver)],
       ["ticket", cell(status.ticket)],
-      // PROD-15.1: what the signed document authorises.
+      // What the signed document authorises.
       ["approval subject", "<span class=\"approval-subject-value\">" +
         approvalSubjectWords(approvalSubjectOf(object)) + "</span>"],
     ].concat(typedTopicsOf(object) === null ? [] : [
-      // OD-10: how a one-person confirmation was made, from the signed bytes.
+      // How a one-person confirmation was made, from the signed bytes.
       ["confirmation", "<span class=\"approval-typed-value\">confirmed by one person with " +
         "every original topic name re-typed: " +
         typedTopicsOf(object).map((t) => "<code>" + esc(t) + "</code>").join(", ") + "</span>"],
@@ -453,8 +442,6 @@ export function renderApprovalsPage(collection, route, now) {
   const panels = itemsOf(collection).map(renderApprovalStatus).join("");
   return renderApprovalList(collection, now) + panels;
 }
-
-// ------------------------------------------------------- subject and state
 
 /** The subject an approval for `restore` must name, derived from the object
  *  itself: `{ns, kind, name, uid, planHash, approvalName}`. `hash` is
@@ -492,10 +479,10 @@ export function routeMismatches(route, subject) {
 }
 
 /** The two `Verified` reasons weirkeeper writes on a CONSUMED Approval one of
- *  whose keys was later revoked for KeyCompromise (review M1). Neither is a
- *  pass: RecordedBeforeRevocation is the ORDER of two recorded facts (the
- *  admission was observed before the revocation took effect), and D3 section
- *  7.4 renders it "with the recorded instant, never green". */
+ *  whose keys was later revoked for KeyCompromise. Neither is a pass:
+ *  RecordedBeforeRevocation is the ORDER of two recorded facts (the admission
+ *  was observed before the revocation took effect), rendered with the
+ *  recorded instant, never green. */
 export const COMPROMISE_REASONS = Object.freeze(["RecordedBeforeRevocation", "KeyRevoked"]);
 
 /** The `Consumed=True` condition -- the Restore was admitted under this
@@ -543,7 +530,7 @@ function verifiedCondition(status) {
  *                              and a key it names was LATER revoked for
  *                              KeyCompromise (RecordedBeforeRevocation or
  *                              KeyRevoked): the record is kept and it is never
- *                              green (D3 section 7.4, review M1);
+ *                              green;
  *    expired                -- refused with KeyIdExpired;
  *    refused                -- refused with any other reason;
  *    awaiting-verification  -- recorded, not yet decided.
@@ -787,14 +774,12 @@ function errorLine(error) {
  *  agrees with it.
  *
  *  AN APPROVAL THIS VIEWER MAY NOT READ IS NOT A REFUSAL TO OFFER THE FORM.
- *  An approver-only role -- `create` on approvals, no `get` -- is the reason
- *  this page exists, and withholding the form from it would make PLAT-12.2's
- *  "a standalone visit is usable" false for exactly the person the visit is
- *  for. Offering it concedes nothing: the subject still comes from the
- *  Restore, the create still names the one Approval `spec.approvalRef` names,
- *  and `createOnce` answers an existing object with the same content as that
- *  object and different content as a conflict it never overwrites. The page
- *  says the state is unknown rather than implying it is absent. */
+ *  An approver-only role -- `create` on approvals, no `get` -- is who this
+ *  page is for. Offering it concedes nothing: the subject still comes from
+ *  the Restore, the create still names the one Approval `spec.approvalRef`
+ *  names, and `createOnce` answers an existing object with the same content
+ *  as that object and different content as a conflict. The page says the
+ *  state is unknown rather than implying it is absent. */
 export function formOffered(view) {
   const v = view || {};
   if (v.restore === null || v.restore === undefined) {
@@ -874,16 +859,16 @@ export function renderApprovalSubject(view, now) {
       ["namespace", esc(ns)],
       ["plan hash", "<code>" + esc(s.planHash) + "</code>"],
       ["Approval metadata.name", "<code>" + esc(s.approvalName) + "</code>"],
-      // PROD-15.1: the subject the approval must be signed for.
+      // The subject the approval must be signed for.
       ["approval subject needed", "<span id=\"needed-approval-subject\">" +
         approvalSubjectWords(restoreApprovalSubject(v.restore)) + "</span>"],
       ["Restore phase", phaseBadge(((v.restore.status || {}).phase))],
       ["progress", restoreProgressSentence(v.restore)],
     ]) +
-    // NOT UNDER TWO-PERSON (review P2-1): this sentence names the v1
-    // `logweir drill approve` command and says the runner checks owners; for
-    // a console request the requester's own statement decides that, and the
-    // two-person panel below says so in its own words.
+    // NOT UNDER TWO-PERSON: this sentence names the v1 `logweir drill
+    // approve` command and says the runner checks owners; for a console
+    // request the requester's own statement decides that, and the two-person
+    // panel below says so in its own words.
     (restoreApprovalSubject(v.restore) === "originalName" && !twoPersonPolicy(v.policy)
       ? "<p class=\"caveat\" id=\"original-name-approval\">" +
         esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
@@ -998,7 +983,7 @@ export function renderApprovalForm(subject, view) {
  *  SUBJECT derived from the Restore and none from the route.
  *
  *  `approvalBytes` and `sidecarBytes` are the strings as they arrived --
- *  interface I18, UTF-8 document text, never base64, never parsed. */
+ *  UTF-8 document text, never base64, never parsed. */
 export function approvalBody(subject, documents) {
   const s = subject || {};
   const d = documents || {};
@@ -1094,8 +1079,6 @@ export async function submitApproval(subject, documents, deps, options) {
 
 // SUBMIT-REGION-END
 
-// --------------------------------------------------------------- private half
-
 /** The verified badge. It reads `status.verified` and nothing else: this page
  *  verified nothing, and neither did the browser. */
 function verifiedBadge(status) {
@@ -1137,8 +1120,6 @@ function ageOf(creationTimestamp, now) {
   return String(Math.floor(seconds / 86400)) + "d";
 }
 
-// --------------------------------------------------------------- mount half
-
 /** Reads what one subject's page needs: the Restore, its Approval and the
  *  hash of its plan. A missing Restore or Approval is a state, not an error. */
 export async function loadApprovalSubject(api, ns, route, lifecycle) {
@@ -1176,13 +1157,13 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
       }
     }
   }
-  // PLAT-19.2: the namespace's effective policy, and -- under an explicit
-  // Governed binding -- the console's confirmation an approver countersigns.
+  // The namespace's effective policy, and -- under an explicit Governed
+  // binding -- the console's confirmation an approver countersigns.
   // Neither read takes the page away: an unread policy is today's flow.
   const policy = await readPolicy(api, ns, lifecycle);
   let confirmation = null;
   let confirmationError = null;
-  // PROD-16.2: under a two-person policy the page reads the REQUEST AS THE
+  // Under a two-person policy the page reads the REQUEST AS THE
   // SERVER SHOWS IT, and never the stored confirmation's documents: there is
   // nothing to copy or countersign in that mode, and every fact rendered is
   // one the console verified before answering.
@@ -1230,7 +1211,7 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
   };
 }
 
-/** PROD-16.2: whether the namespace's policy takes its approval from a SECOND
+/** Whether the namespace's policy takes its approval from a SECOND
  *  PERSON IN THE CONSOLE: an explicit Governed binding whose operator mode is
  *  `two-person`. Anything else -- strict, confirm, legacy, unbound, unread, or
  *  a mode word this page does not know -- is `false`, and the page keeps the
@@ -1240,7 +1221,7 @@ export function twoPersonPolicy(policy) {
   return policyMode(policy) === "governed" && policy.operatorMode === "two-person";
 }
 
-/** PLAT-19.2: `ordinary` or `governed` for an EXPLICIT binding the console
+/** `ordinary` or `governed` for an EXPLICIT binding the console
  *  published, `null` otherwise -- legacy mode, an unbound namespace, or an
  *  unread policy all mean today's v1 approval flow. */
 export function policyMode(policy) {
@@ -1278,7 +1259,7 @@ export function countersignOffered(view) {
   if (policyMode(v.policy) !== "governed" || v.restore === null || v.restore === undefined) {
     return false;
   }
-  // PROD-16.2: a two-person namespace takes NO countersignature (the product
+  // A two-person namespace takes NO countersignature (the product
   // API refuses one), so the panel that asks for one is never offered there.
   if (twoPersonPolicy(v.policy)) {
     return false;
@@ -1293,7 +1274,7 @@ export function countersignOffered(view) {
   return ((v.found || {}).state) === "absent";
 }
 
-/** THE GOVERNED APPROVER'S PANEL (PLAT-19.2). The console's confirmation --
+/** THE GOVERNED APPROVER'S PANEL. The console's confirmation --
  *  its document and sidecar, exactly as stored -- to copy, the one command
  *  that countersigns it, and a field for the sidecar that command wrote.
  *
@@ -1340,7 +1321,7 @@ export function renderCountersignPanel(view) {
         "confirmation's documents (approvalPacketRead). Ask for them, or read them with " +
         "kubectl from Approval <code>" + esc(confirmation.metadata.name) + "</code>.</p>") +
     "<pre class=\"copy\">" + esc(COUNTERSIGN_COMMAND) + "</pre>" +
-    // A ROLE THAT CANNOT SUBMIT IS NOT OFFERED THE FORM (MCP round 2, R2-14).
+    // A role that cannot submit is not offered the form.
     (v.maySubmit === false
       ? "<p class=\"note\" id=\"countersign-read-only\">This login may read the governed " +
         "approval and not submit one: that needs the approver role, held by someone other " +
@@ -1383,9 +1364,7 @@ export async function submitCountersignature(subject, sidecarBytes, deps) {
   return { outcome: "created", object: await api.submitGovernedApproval(s.ns, s.name, text) };
 }
 
-// ---------------------------------------------- PROD-16.2: two-person approval
-
-/** The console-approval form's mutation-record key suffix (PROD-16.2). */
+/** The console-approval form's mutation-record key suffix. */
 export const CONSOLE_APPROVAL_FORM = "console-approval-form";
 
 /** The words for each state of a two-person request. A table with no
@@ -1430,11 +1409,11 @@ export function consoleApprovalOffered(view) {
   if (r.restore !== s.name || r.restoreUid !== s.uid) {
     return false;
   }
-  // WHAT IS APPROVED IS WHAT WAS SHOWN (PROD-16.2, the coordinator's
-  // addition 6). The server says whether the scope it sent is the whole of
-  // what is approved; the page draws the button only beside a scope it can
-  // render in full, every topic of it. The approve route refuses an
-  // incomplete scope on its own: this decides what is DRAWN.
+  // WHAT IS APPROVED IS WHAT WAS SHOWN. The server says whether the scope
+  // it sent is the whole of what is approved; the page draws the button
+  // only beside a scope it can render in full, every topic of it. The
+  // approve route refuses an incomplete scope on its own: this decides what
+  // is DRAWN.
   if (scopeShowable(r) === null) {
     return false;
   }
@@ -1457,8 +1436,8 @@ export function scopeShowable(request) {
   return scope;
 }
 
-/** AN END OF THE RESTORE WINDOW, TO THE MILLISECOND THE RUN USES (review
- *  P2-2). The engine applies both ends to the millisecond, inclusively, and
+/** AN END OF THE RESTORE WINDOW, TO THE MILLISECOND THE RUN USES. The
+ *  engine applies both ends to the millisecond, inclusively, and
  *  `when` shows whole seconds: a `.999` end would read as the second before
  *  it. A whole-second instant reads as `when` shows it; any other shows its
  *  milliseconds, in UTC. The exact recorded value stays in `datetime`. */
@@ -1481,18 +1460,18 @@ function scopeStorageWords(storage) {
     (st.plaintextHttp === true ? " <strong>(over plain HTTP)</strong>" : "");
 }
 
-/** PROD-16.2: what the two-person panel says about an original-name
- *  restore. NOT the v1 page's sentence: that one names a `logweir drill
- *  approve` command and says the runner refuses if a declarative owner
- *  manages a name -- which, for a console request, is decided by the
- *  requester's own statement shown below it (review S-1). */
+/** What the two-person panel says about an original-name restore. NOT the
+ *  v1 page's sentence: that one names a `logweir drill approve` command and
+ *  says the runner refuses if a declarative owner manages a name -- which,
+ *  for a console request, is decided by the requester's own statement shown
+ *  below it. */
 export const TWO_PERSON_ORIGINAL_NAME_SENTENCE =
   "This Restore writes under the ORIGINAL topic names, into topics that do not exist. The " +
   "runner refuses again if a name exists, or if the target may be the source cluster and any " +
   "broker auto-creates topics. Whether a declarative owner manages a name is decided by what " +
   "the requester states below: approving accepts that statement.";
 
-/** REVIEW S-1: the requester's owner statement, as the plan signs it, in
+/** The requester's owner statement, as the plan signs it, in
  *  plain sentences -- the three cases of `owners`, and `owner_path`. Every
  *  value is escaped text. */
 export function ownerStatementBlock(statement) {
@@ -1505,7 +1484,7 @@ export function ownerStatementBlock(statement) {
   }).join("");
   let words;
   // Not declared reads as the run acts, WHATEVER owner_path says: from the
-  // console the run has nowhere to look and refuses (review P2-4).
+  // console the run has nowhere to look and refuses.
   if (owners === null) {
     words = "The requester states nothing about declarative owners of these names. This " +
       "console gives the run nowhere else to look, so the run will refuse before it writes " +
@@ -1531,12 +1510,12 @@ export function ownerStatementBlock(statement) {
     "</p></div>";
 }
 
-/** PROD-01.1a's override, shown to the second person (integrate-10): it
- *  changes what the run writes. */
+/** The transaction-marker override, shown to the second person: it changes
+ *  what the run writes. */
 export const TRANSACTION_MARKERS_SENTENCE = "This plan restores transaction markers and the " +
   "records of aborted transactions as ordinary data (restore.allow_transaction_markers: true).";
 
-/** THE APPROVAL SCOPE, ALL OF IT (PROD-16.2). Source, recovery point, target
+/** THE APPROVAL SCOPE, ALL OF IT. Source, recovery point, target
  *  cluster, EVERY topic and the name it is restored under -- original names
  *  marked, partition subsets listed number by number -- the verification and
  *  where the evidence goes. Never a slice and never "and N more": the list
@@ -1616,7 +1595,7 @@ export function renderApprovalScope(scope) {
   );
 }
 
-/** THE SECOND PERSON'S PANEL (PROD-16.2). What is being approved -- who asked,
+/** THE SECOND PERSON'S PANEL. What is being approved -- who asked,
  *  for which Restore and plan, under which policy, with which ticket, until
  *  when, and THE WHOLE SCOPE: the source, the recovery point, the target
  *  cluster, every topic and the name it is restored under -- and ONE button,
@@ -1787,7 +1766,7 @@ export function approvalFormView(view) {
   });
 }
 
-/** The countersign form's mutation-record key suffix (PLAT-19.2). */
+/** The countersign form's mutation-record key suffix. */
 export const COUNTERSIGN_FORM = "countersign-form";
 
 /** Wires the governed countersign panel: the two confirmation documents go
@@ -1850,8 +1829,8 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
       // one of the two kinds -- an approver with `create` on approvals and no
       // `list`, the commonest shape of this role -- still gets a usable page.
       // The namespace's approval policy, read beside the lists, so the empty
-      // table says what approving means HERE (MCP-31). An unread policy is
-      // today's sentence.
+      // table says what approving means HERE. An unread policy is today's
+      // sentence.
       const lists = await Promise.all([
         listOrError(api, ns, PLURAL, lifecycle),
         listOrError(api, ns, RESTORES, lifecycle),

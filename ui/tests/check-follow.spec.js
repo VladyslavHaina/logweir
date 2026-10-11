@@ -1,21 +1,15 @@
-// check-follow.spec.js -- defect P8 (poc-install, 2026-09-24): a page that
-// starts a `Preflight` must READ it back before anything on screen is a
-// verdict.
+// check-follow.spec.js -- a page that starts a `Preflight` must READ it back
+// before anything on screen is a verdict.
 //
-// WHAT THE LIVE ROUND SAW. Destinations -> Test access created
-// `pf-nunjq5gx6ndxowp4kuklihjkgs`, which recorded `ready` in about three
-// seconds; the page kept "pending / does not apply to your current inputs /
-// compared: nothing" for four minutes, because it rendered the CREATE answer
-// and never asked again. The schedule form's "Backup readiness" re-click showed
-// a REPLAYED check as "ready / does not apply ... could not be checked: this
-// response did not recompute staleness", because its follower stopped at a
-// create answer that was already terminal. Both are one rule: the product API
-// projects a create (and a replay) without recomputing staleness, so the first
-// read is owed whatever the create said.
+// The product API projects a create (and a replay) without recomputing
+// staleness, so the first read is owed whatever the create said: a page that
+// rendered the create answer would keep "pending / does not apply to your
+// current inputs" long after the check recorded `ready`, and a follower that
+// stopped at an already-terminal replay would show "could not be checked:
+// this response did not recompute staleness".
 //
-// Every row carries its NEGATIVE CONTROL: the assertion that fails on the code
-// before this fix (no read at all, or a follower that stopped at a terminal
-// create answer).
+// Every row carries its NEGATIVE CONTROL (no read at all, or a follower that
+// stops at a terminal create answer).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -144,9 +138,9 @@ test("a_replayed_destination_test_is_read_before_it_is_believed", async () => {
 });
 
 test("two_deliberate_destination_tests_are_two_checks_not_a_replay", async () => {
-  // REVIEW F1's rule, for this control: the key was the destination and its
-  // roles alone, so a second press after fixing a Secret REPLAYED the first
-  // test's verdict. Each accepted click now carries its own attempt token.
+  // The key carries a per-click attempt token: with the destination and its
+  // roles alone, a second press after fixing a Secret would REPLAY the first
+  // test's verdict.
   const api = destinationApi({
     started: (n) => created("pf-" + n, "ready", true),
     read: (id) => read(id),
@@ -191,8 +185,8 @@ test("a_destination_test_that_never_settles_is_followed_to_its_deadline_and_the_
 });
 
 test("a_reload_renders_the_last_test_the_destination_read_carries", () => {
-  // THE RELOAD HALF OF P8: `GET .../destinations/{name}` answers `lastTest`,
-  // and the detail must render it when this page holds no test of its own.
+  // THE RELOAD HALF: `GET .../destinations/{name}` answers `lastTest`, and the
+  // detail renders it when this page holds no test of its own.
   const doc = console_("destination.json");
   doc.item.lastTest = {
     preflightId: "pf-nunjq5gx6ndxowp4kuklihjkgs", state: "ready",

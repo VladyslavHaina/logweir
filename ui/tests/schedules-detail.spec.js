@@ -1,16 +1,13 @@
-// schedules-detail.spec.js -- PLAT-10.2: one schedule's detail and its
-// recovery-point history.
+// schedules-detail.spec.js -- one schedule's detail and its recovery-point
+// history: empty history, running/failed/verified runs, a paused schedule,
+// an archived (deleted) schedule and navigation to an older backup, against
+// "actions retain schedule and recovery-point context; unavailable archives
+// and incomplete evidence are distinguishable from healthy points".
 //
-// THE TRACKER'S TESTS, ONE ROW EACH: empty history, running/failed/verified
-// runs, a paused schedule, an archived (deleted) schedule and navigation to an
-// older backup -- against the acceptance "actions retain schedule and
-// recovery-point context; unavailable archives and incomplete evidence are
-// distinguishable from healthy points".
-//
-// EVERY ROW CARRIES ITS NEGATIVE CONTROL. The two verdict columns are the ones
-// worth being careful about: a row that asserts `Available` renders green is
-// worth nothing unless the same render, with a `Missing` point, does NOT -- and
-// unless a run the catalog has never seen is distinguishable from both.
+// EVERY ROW CARRIES ITS NEGATIVE CONTROL. An `Available` point rendering
+// green is worth nothing unless the same render with a `Missing` point does
+// NOT, and unless a run the catalog has never seen is distinguishable from
+// both.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -139,10 +136,7 @@ const POINTS = Object.freeze(handedPoints([
   }),
 ]).items.map((point) => Object.freeze(point)));
 
-// ===========================================================================
-// Empty history
-// ===========================================================================
-
+// EMPTY HISTORY.
 test("a_schedule_that_has_never_fired_says_so_and_offers_no_restore", () => {
   const html = renderScheduleDetail({
     ns: NS, name: "nightly", object: schedule(), runs: { mine: [], earlier: [] }, points: [],
@@ -167,10 +161,7 @@ test("a_schedule_that_has_never_fired_says_so_and_offers_no_restore", () => {
   assert.match(withRun, /id="schedule-restore-latest"/);
 });
 
-// ===========================================================================
-// Running, failed and verified runs -- and the two verdict columns
-// ===========================================================================
-
+// RUNNING, FAILED AND VERIFIED RUNS -- and the two verdict columns.
 test("an_unavailable_archive_and_incomplete_evidence_are_not_rendered_as_healthy_points", () => {
   const runs = [
     run("nightly-healthy", "Succeeded", { backupId: "set-healthy" }),
@@ -206,12 +197,11 @@ test("an_unavailable_archive_and_incomplete_evidence_are_not_rendered_as_healthy
     "two columns per run say so by name rather than being blank");
 });
 
-// FX-17 (review M-1): THE RUN<->CATALOG JOIN IS ON THE SET ID, and a runner
-// up to v0.2.0-rc.1 published every SCHEDULED run's set id as `[redacted]`. So
-// on the PoC every nightly run here read "not in the catalog" while the catalog
-// held all of them, and a not-selectable scheduled set never withheld its
-// link. With the set id published whole (`check_contract::is_scheduled_set_id`)
-// the join finds the row: the catalog's own words, and its refusal, apply.
+// THE RUN<->CATALOG JOIN IS ON THE SET ID. Runners up to v0.2.0-rc.1
+// published every SCHEDULED run's set id as `[redacted]`, so nothing joined
+// and a not-selectable scheduled set never withheld its link. With the set id
+// published whole (`check_contract::is_scheduled_set_id`) the join finds the
+// row, and the catalog's own words and refusal apply.
 test("fx17_a_scheduled_run_joins_its_whole_catalog_row_and_a_redacted_row_does_not", () => {
   const SET = SCHEDULE_UID + "-20260920-023000";
   const RUN = "01M4CKTADX268PREVHJAAYXEMZ";
@@ -244,7 +234,7 @@ test("fx17_a_scheduled_run_joins_its_whole_catalog_row_and_a_redacted_row_does_n
 
   // NEGATIVE CONTROL: the SAME run against the rows an rc.1 runner publishes.
   // Nothing joins, both columns say "not in the catalog", and the
-  // not-selectable row cannot withhold the link -- the PoC's page today.
+  // not-selectable row cannot withhold the link.
   for (const selectable of [true, false]) {
     const redacted = page([row(true, selectable)]);
     assert.equal(pointsForRun(scheduled, [row(true, selectable)]).length, 0);
@@ -386,10 +376,7 @@ test("the_join_is_on_the_backup_set_id_and_takes_every_point_of_the_set", () => 
     "and not a restorable one, because `selectable` is false for one of its points");
 });
 
-// ===========================================================================
-// Paused schedule
-// ===========================================================================
-
+// PAUSED SCHEDULE.
 test("a_paused_schedule_says_it_is_paused_and_still_offers_its_history", () => {
   const paused = schedule({ spec: { suspend: true } });
   const runs = { mine: [run("nightly-ok", "Succeeded", { backupId: "set-healthy" })], earlier: [] };
@@ -445,10 +432,7 @@ test("a_read_only_viewer_gets_schedule_facts_without_mutation_controls", () => {
   assert.match(operator, /<form class="suspend"/);
 });
 
-// ===========================================================================
-// Archived schedule: deleted, with its history retained (PLAT-05.2)
-// ===========================================================================
-
+// ARCHIVED SCHEDULE: deleted, with its history retained.
 test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () => {
   const runs = {
     mine: [run("nightly-ok", "Succeeded", { backupId: "set-healthy", scheduleUid: "old-uid-a" })],
@@ -464,8 +448,7 @@ test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () =>
   // THE HISTORY AND THE RESTORES ARE STILL THERE.
   assert.match(html, /nightly-ok/);
   // The healthy point keeps its Restore; `nightly-gone` joins the catalog's
-  // Missing set, so the catalog rules it out and it is not offered (review
-  // MEDIUM-2) -- its row says why instead.
+  // Missing set, so the catalog rules it out and its row says why instead.
   assert.equal((html.match(/Restore this point/g) || []).length, 1);
   assert.equal((html.match(/data-restore-refused="catalog"/g) || []).length, 1);
   assert.doesNotMatch(html, /id="schedule-restore-latest"/,
@@ -493,10 +476,10 @@ test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () =>
 });
 
 test("a_recreated_schedule_does_not_inherit_the_previous_ones_runs", () => {
-  // PLAT-05.2: a schedule deleted and recreated under the same name is a
-  // DIFFERENT schedule. Its runs carry the old uid in `spec.scheduleRef.uid`,
-  // and counting them as this schedule's would attribute one policy's
-  // protection to another.
+  // A schedule deleted and recreated under the same name is a DIFFERENT
+  // schedule. Its runs carry the old uid in `spec.scheduleRef.uid`, and
+  // counting them as this schedule's would attribute one policy's protection
+  // to another.
   const backups = {
     items: [
       run("new-1", "Succeeded", { backupId: "set-healthy" }),
@@ -514,10 +497,10 @@ test("a_recreated_schedule_does_not_inherit_the_previous_ones_runs", () => {
   // NEGATIVE CONTROL 1: with no earlier runs the section is not rendered at
   // all, so its presence above means something.
   assert.equal(renderEarlierRuns(NS, []), "");
-  // A RUN WITH NO SCHEDULE UID AT ALL -- what every run created before the uid
-  // label existed looks like -- is neither this schedule's nor provably an
-  // earlier one's (review LOW-1): it is its own group, never `mine`, so it can
-  // never become this schedule's "Latest recovery point".
+  // A RUN WITH NO SCHEDULE UID AT ALL (what a run created before the uid label
+  // existed looks like) is neither this schedule's nor provably an earlier
+  // one's: it is its own group, never `mine`, so it can never become this
+  // schedule's "Latest recovery point".
   const legacy = runsOfSchedule("nightly", SCHEDULE_UID, {
     items: [
       run("legacy-1", "Succeeded", { backupId: "set-healthy", scheduleUid: "", createdAt: "2026-09-21T00:00:00Z" }),
@@ -546,16 +529,11 @@ test("a_recreated_schedule_does_not_inherit_the_previous_ones_runs", () => {
   }), /id="schedule-legacy-runs"/);
 });
 
-// ===========================================================================
-// Navigation: the deep link, and an older backup
-// ===========================================================================
-
+// NAVIGATION: the deep link, and an older backup.
 test("the_deep_link_reaches_one_schedule_and_the_old_list_link_still_reaches_the_list", () => {
-  // MIGRATION (10.2's note): "keep existing deep links working or redirect them
-  // explicitly". `#/schedules?ns=<ns>` was the only schedules link there had
-  // ever been, and the router sends a hash with no `name` to the list exactly as
-  // it did before -- so there is nothing to redirect, and this row is what says
-  // so for the next reader.
+  // "Keep existing deep links working or redirect them explicitly": the router
+  // sends a hash with no `name` to the list, so `#/schedules?ns=<ns>` needs no
+  // redirect.
   const list = parseHash("#/schedules?ns=team-a", "");
   assert.equal(list.route, "#/schedules");
   assert.equal(list.ns, "team-a");
@@ -572,10 +550,9 @@ test("the_deep_link_reaches_one_schedule_and_the_old_list_link_still_reaches_the
 });
 
 test("an_older_point_is_reachable_and_each_action_carries_its_own_point", () => {
-  // 10.2's "navigation to an older backup": the history is newest first, every
-  // row's restore is bound to THAT row, and the page-level Restore is bound to
-  // the newest -- so choosing an older one is a different link and not the same
-  // link with a different table row highlighted.
+  // The history is newest first, every row's restore is bound to THAT row, and
+  // the page-level Restore to the newest -- so choosing an older one is a
+  // different link, not the same link beside a different row.
   const newest = run("nightly-newest", "Succeeded",
     { backupId: "set-healthy", createdAt: "2026-09-20T02:30:00Z" });
   const older = run("nightly-older", "Succeeded",
@@ -605,10 +582,9 @@ test("an_older_point_is_reachable_and_each_action_carries_its_own_point", () => 
 });
 
 test("every_action_on_the_detail_names_the_schedule_it_acts_on", () => {
-  // 10.2's acceptance clause one: "actions retain schedule and recovery-point
-  // context". Each control carries the schedule's name in the attribute the
-  // wiring binds by, so a page with two schedules' panels could never wire one
-  // schedule's button to another's record.
+  // "Actions retain schedule and recovery-point context": each control carries
+  // the schedule's name in the attribute the wiring binds by, so a page with
+  // two schedules' panels could never wire one's button to another's record.
   const html = renderScheduleDetail({
     ns: NS, name: "nightly", object: schedule(),
     runs: { mine: [run("nightly-ok", "Succeeded", { backupId: "set-healthy" })], earlier: [] },
@@ -661,18 +637,15 @@ test("the_catalog_fixture_the_console_ships_renders_through_these_columns", () =
   assert.match(html, /5 points/, "and the multi-point set says how many points it holds");
 });
 
-// ===========================================================================
-// Review fix round (2026-09-22): the view's window flags, and restores the
-// catalog rules out
-// ===========================================================================
+// THE VIEW'S WINDOW FLAGS, and restores the catalog rules out.
 
 /** A cell's badge word, as rendered, so a sentence that merely MENTIONS a word
  *  (the notes do) is never mistaken for the verdict itself. */
 const cellSays = (html, word) => html.indexOf("\">" + word + "</span>") !== -1;
 
 test("an_expired_catalog_view_is_catalog_view_expired_and_never_not_in_the_catalog", async () => {
-  // REVIEW HIGH-2: `viewExpired` means the sync Job's TTL collected the pages
-  // -- "the window aged out and NOT that the archive is empty" (docs/api.md).
+  // `viewExpired` means the sync Job's TTL collected the pages -- "the window
+  // aged out and NOT that the archive is empty" (docs/api.md).
   const result = await readSchedulePoints(null, NS, null, {
     listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
     readPoints: async () => ({ items: [], page: { nextCursor: null }, truncated: false,
@@ -691,9 +664,9 @@ test("an_expired_catalog_view_is_catalog_view_expired_and_never_not_in_the_catal
 });
 
 test("a_truncated_view_calls_an_unlisted_run_outside_the_view_and_keeps_the_listed_ones", async () => {
-  // REVIEW HIGH-2: `truncated` -- the archive holds more points than the view
-  // carries, so a schedule older than the view limit has runs the view cannot
-  // list. They are outside the view, not absent from the archive.
+  // `truncated`: the archive holds more points than the view carries, so a
+  // schedule older than the view limit has runs the view cannot list. They are
+  // outside the view, not absent from the archive.
   const result = await readSchedulePoints(null, NS, null, {
     listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
     readPoints: async () => ({
@@ -749,9 +722,9 @@ test("only_a_complete_current_view_may_say_not_in_the_catalog_and_a_failed_read_
 });
 
 test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () => {
-  // REVIEW MEDIUM-2: the newest set's manifest is gone (catalog `Missing`,
-  // `selectable: false`) and an older set is healthy. The page's primary
-  // Restore must be the older one, and say why the newer is not offered.
+  // The newest set's manifest is gone (catalog `Missing`, `selectable: false`)
+  // and an older set is healthy. The page's primary Restore must be the older
+  // one, and say why the newer is not offered.
   const newest = run("newest", "Succeeded", { backupId: "set-gone", createdAt: "2026-09-21T02:30:00Z" });
   const older = run("older", "Succeeded", { backupId: "set-healthy", createdAt: "2026-09-19T02:30:00Z" });
   const runs = [newest, older];
@@ -767,8 +740,8 @@ test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () =
   assert.match(latest, /Missing/);
   // The row of the ruled-out set offers no Restore of its own either.
   const history = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
-  // The whole <tr> of the newest run: its restore cell is the FIRST cell since
-  // the review's L5 (the action leads the row), so the row is cut at its tags.
+  // The whole <tr> of the newest run: its restore cell is the FIRST cell (the
+  // action leads the row), so the row is cut at its tags.
   const newestAt = history.indexOf(">newest<");
   const newestRow = history.slice(history.lastIndexOf("<tr", newestAt),
     history.indexOf("</tr>", newestAt));
@@ -793,8 +766,8 @@ test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () =
 });
 
 test("a_failed_destinations_read_is_said_as_such_and_never_as_an_absent_destination", () => {
-  // REVIEW LOW-4: a transient failure of GET .../destinations made the facts
-  // panel assert that the destination does not exist.
+  // A transient failure of GET .../destinations must not make the facts panel
+  // assert that the destination does not exist.
   const object = schedule();
   const failed = destinationCell(object, [], true);
   assert.match(failed, /could not read the destinations/);
@@ -811,8 +784,8 @@ test("a_failed_destinations_read_is_said_as_such_and_never_as_an_absent_destinat
 });
 
 test("review_l5_a_schedule_s_run_history_leads_every_row_with_its_restore_cell", () => {
-  // MCP-25's rule on the table the first sweep missed: as the tenth column the
-  // restore link was what a 1024 px window scrolled out of the card.
+  // The action leads the row: as the tenth column the restore link was what a
+  // 1024 px window scrolled out of the card.
   const runs = [run("nightly-healthy", "Succeeded", { backupId: "set-healthy" })];
   const html = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
   const head = html.slice(html.indexOf("<thead>"), html.indexOf("</thead>"));

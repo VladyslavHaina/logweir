@@ -1,26 +1,17 @@
 // workflow.js -- the state machines, with named transitions and transition
 // errors.
 //
-// WHY NAMES. Before PLAT-18.1 the mutation record's states existed but its
-// transitions did not: a settle was `publish({phase: "succeeded", ...})` at
-// one call site, a timeout was the same call with different literals at
-// another, and "may this record settle now?" was a boolean expression spelled
-// out beside each of them. Nothing named the move, so nothing could refuse an
-// illegal one and no test could assert that the moves happened in the order
-// the contract says they do.
+// A machine is a table of states, the events each one accepts, and the state
+// each event leads to. Sending an event a state does not accept is a
+// [`TransitionError`] naming the state, the event and the events that WOULD
+// have been accepted -- never a silent no-op -- so an illegal move is refused
+// and a test can assert the order the moves happened in.
 //
-// A MACHINE HERE IS THE SMALLEST THING THAT FIXES THAT: a table of states, the
-// events each one accepts, and the state each event leads to. Sending an event
-// a state does not accept is a [`TransitionError`] naming the state, the event
-// and the events that WOULD have been accepted -- never a silent no-op, which
-// is the failure mode PLAT-18.1's acceptance calls out by name.
-//
-// WHAT A MACHINE HERE IS NOT. It holds no data, runs no side effect, starts no
-// timer and knows nothing about a request. The mutation record in
-// `lifecycle.js` owns all of that and asks this module one question --
-// "is this move legal, and where does it land?" -- for every move it makes.
-// That separation is what lets the whole transition table be read in one
-// screen and driven from `node --test` with no clock and no network.
+// A machine holds no data, runs no side effect, starts no timer and knows
+// nothing about a request. The mutation record in `lifecycle.js` owns all of
+// that and asks this module one question -- "is this move legal, and where
+// does it land?" -- so the whole table reads in one screen and runs under
+// `node --test` with no clock and no network.
 //
 // THIS MODULE ISSUES NO REQUEST AND TOUCHES NO DOM.
 
@@ -134,9 +125,7 @@ export function startMachine(machine, options) {
   };
 }
 
-// ===========================================================================
-// the mutation machine -- every write this page makes
-// ===========================================================================
+// THE MUTATION MACHINE -- every write this page makes.
 //
 // FIVE STATES. `idle` before anything is sent and after a settled record is
 // cleared; `pending` from before the executor's first await until an answer;
@@ -153,12 +142,11 @@ export function startMachine(machine, options) {
 // caller that sends it anyway gets a transition error naming the state it is
 // in.
 //
-// `unanswered` ACCEPTS EVERY ANSWER `pending` DOES, AND THAT INCLUDES
-// `abandon`. A submit that passes the timeout and then finds its route gone
-// settles as abandoned -- the wizard's `submitRestore` returns `null` for
-// exactly that, and the record must go back to `idle` where the operator left
-// it. Without this arm that late answer raised a TransitionError from inside a
-// promise nobody was awaiting, and the record stayed `unanswered` for good.
+// `unanswered` ACCEPTS EVERY ANSWER `pending` DOES, `abandon` included: a
+// submit that passes the timeout and then finds its route gone settles as
+// abandoned (the wizard's `submitRestore` returns `null`), and the record
+// must go back to `idle`, not raise a TransitionError inside a promise nobody
+// awaits and stay `unanswered` for good.
 export const MUTATION_MACHINE = defineMachine({
   name: "mutation",
   initial: "idle",
@@ -184,36 +172,25 @@ export const MUTATION_PHASES = Object.freeze({
   failed: Object.freeze({ phase: "failed", timedOut: false }),
 });
 
-// ===========================================================================
-// the restore wizard -- six steps, in one order
-// ===========================================================================
+// THE RESTORE WIZARD -- six steps, in one order.
 //
 // THE MACHINE IS THE ORDER THE SECTIONS ALREADY HAVE, WRITTEN DOWN. All six
-// sections are on the page at once, so this is not a router: it is the
-// statement that a recovery point cannot be chosen before an archive is known,
-// that a point in time is meaningless without a recovery point, and that the
-// plan is reviewable only once the five input steps are whole.
+// sections are on the page at once, so this is not a router: it states that
+// a recovery point cannot be chosen before an archive is known, that a point
+// in time is meaningless without a recovery point, and that the plan is
+// reviewable only once the five input steps are whole.
 //
-// `replayWizard` takes the wizard's OWN derived step states -- the array
-// `pages/restore-wizard.js`'s `stepStates` returns -- and walks this machine
-// through them, stopping at the first step that is not finished. THE ONE
-// INVARIANT IT HOLDS is that the step the walk stops on is the step the
-// derivation calls `current`: the stepper may not point a viewer at a place
-// the same derivation says is not reachable yet.
+// `replayWizard` walks this machine through the wizard's OWN derived step
+// states (`pages/restore-wizard.js`'s `stepStates`), stopping at the first
+// step that is not finished, and holds ONE invariant: that step is the one
+// the derivation calls `current`. It is not "no later step may be finished":
+// each section reports its own completeness, so step 5 can read `done` while
+// step 1 does not.
 //
-// IT IS NOT "NO LATER STEP MAY BE FINISHED", and an earlier draft of this
-// function said that and was wrong about the page. All six sections are on
-// screen at once and each reports its OWN completeness, so a wizard with no
-// recovery point chosen still has a reachable target cluster and step 5 reads
-// `done` while step 1 does not. Driving this over the real `stepStates` output
-// is what found that; the rule below is the one the page actually keeps.
-//
-// THIS MACHINE IS A TEST-TIME INVARIANT AND THE PAGE DOES NOT ENFORCE IT.
-// `stepStates` and `validateRestore` legitimately disagree today -- the
-// stepper wants a reachable target and the submit does not -- so wiring the
-// walk into the render path would CHANGE BEHAVIOUR, which PLAT-18.1 must not.
-// PLAT-18.2 owns the stepper and is where the two are reconciled and this is
-// enforced.
+// A TEST-TIME INVARIANT THE PAGE DOES NOT ENFORCE. `stepStates` and
+// `validateRestore` legitimately disagree (the stepper wants a reachable
+// target and the submit does not), so wiring the walk into the render path
+// would change behaviour.
 export const WIZARD_STEPS = Object.freeze([
   "archive", "recoveryPoint", "pointInTime", "target", "preflight", "plan",
 ]);
@@ -259,20 +236,17 @@ export function replayWizard(steps) {
   let blocked = -1;
   for (let i = 0; i < list.length; i += 1) {
     const step = list[i] || {};
-    // `unchecked` is step 5 with no readiness check held (MCP-27): not DONE --
-    // nothing checked it -- and not a block either, because the check is
-    // advisory and the plan may be created without one, with a warning.
-    // `approval` is step 5 owed only its draft's approval (review L1): the
-    // same passable state, since Create is what requests the approval.
+    // `unchecked` is step 5 with no readiness check held: not DONE (nothing
+    // checked it) and not a block either, because the check is advisory and the
+    // plan may be created without one, with a warning. `approval` is step 5 owed
+    // only its draft's approval: the same passable state, since Create is what
+    // requests the approval.
     const done = step.status === "done" || step.status === "ready" ||
       step.status === "unchecked" || step.status === "approval";
     if (!done) {
       blocked = i;
       break;
     }
-    // A `done` step after a step that was not done is a skip, and `send`
-    // refuses it: the machine is still standing on the blocked step and has no
-    // event that reaches this one.
     run.send(WIZARD_EVENTS[i]);
   }
   const at = blocked === -1 ? WIZARD_STEPS.length : blocked;

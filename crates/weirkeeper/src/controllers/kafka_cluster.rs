@@ -1,100 +1,70 @@
-//! The `KafkaCluster` probe reconciler — the loop that makes
-//! `status.reachable` mean something.
+//! The `KafkaCluster` probe reconciler: the loop that makes `status.reachable`
+//! mean something.
 //!
-//! # THE CONTROLLER NEVER DIALS A BROKER, AND THAT IS WHY A PROBE IS A JOB
+//! # The controller never dials a broker, so a probe is a Job
 //!
-//! Spec §9: there is **no `get` on Secrets anywhere** in the control plane. A
-//! SASL password therefore never reaches this process, so this process cannot
-//! authenticate to a cluster that requires one — and a probe that worked only
-//! for `plaintext` clusters would report `reachable: false` for every
-//! authenticated cluster in the fleet, which is worse than no probe. So the
-//! dial happens where the credential can be projected and nowhere else: in a
-//! short-lived runner Job, exactly like every other execution in this product
-//! (Global Constraint 33). The Secret is named in the Job's
-//! `valueFrom.secretKeyRef` — a reference this controller writes and a value it
-//! cannot see.
+//! The control plane holds no `get` on Secrets (spec §9), so a SASL password
+//! never reaches this process and it cannot authenticate to a cluster that
+//! requires one. The dial happens where the credential can be projected: a
+//! short-lived runner Job (Global Constraint 33), whose `valueFrom.secretKeyRef`
+//! names the Secret this controller cannot read.
 //!
-//! # The subcommand is `logweir cluster-probe`, not `logweir doctor`
-//!
-//! `doctor` takes two more MANDATORY paths, cannot be told which auth to use,
-//! refuses unless the cluster is in a restore-target allowlist AND holds a
-//! healthy marker topic — which no `role: source` cluster does — and prints the
-//! observed id only inside prose. `crates/logweir/src/probe.rs`'s module header
-//! states all four with their call sites. Interface **I14** is the contract this
-//! module reads: **exactly two stdout lines**, `cluster-id=<id>` then
-//! `reachable=true|false`.
-//!
-//! # The two lines are read BY KEY NAME from a bounded tail
-//!
-//! Plan erratum **E4**: a pod log is stdout and stderr merged in
-//! **nondeterministic order**, measured twice on the same refusal with the
-//! discriminator arriving last in one run and second-to-last in the other. No
-//! reader here may take "the last line of the pod log". [`probe_report`] scans
-//! through [`runner_log::key_values`] — the ONE key scan, shared rather than
-//! copied, so a change to [`backup::KEY_SCAN_TAIL_LINES`] reaches every scanner
-//! — and matches on the key name.
+//! The subcommand is `logweir cluster-probe`, not `logweir doctor` (see
+//! `crates/logweir/src/probe.rs`). Interface **I14** is the contract this module
+//! reads: exactly two stdout lines, `cluster-id=<id>` then
+//! `reachable=true|false`, read by key name from a bounded tail through
+//! [`runner_log::key_values`], because a pod log merges stdout and stderr in
+//! nondeterministic order.
 //!
 //! # Nothing is guessed
 //!
-//! A log body carrying neither line yields `reachable: None`, no `clusterId`,
-//! and the condition reason [`REASON_PROBE_OUTPUT_UNREADABLE`]. **The exit code
-//! alone never writes a `reachable` value**: exit 1 is Global Constraint 11's
-//! "operational error" and covers an unreachable broker, a missing runner
+//! A log carrying neither line yields `reachable: None`, no `clusterId`, and
+//! [`REASON_PROBE_OUTPUT_UNREADABLE`]. The exit code alone never writes a
+//! `reachable` value: exit 1 covers an unreachable broker, a missing runner
 //! binary, a bad flag and an unprojected credential alike, so inferring
 //! `reachable: false` from it would report a control-plane mistake as a fact
 //! about somebody's cluster.
 //!
-//! # A probe whose pod is refused at creation says so (FX-11)
+//! # A probe whose pod is refused at creation says so
 //!
 //! A `ResourceQuota`, a `LimitRange` or an admission webhook can refuse the
-//! probe Job's pod outright, and the Job controller's only trace is a
-//! `FailedCreate` Event on the Job. Once the Job has had no pod for
-//! [`check::waiting::POD_CREATE_GRACE`] (30 s, the `Preflight` grace) and that
-//! Event says why, the Job is cancelled and the status reads
-//! `Reachable=Unknown` / `PodCreationForbidden` with the admission's own
-//! words — never `ProbeRunning` for two minutes and then `NoExitCode`.
-//! `reachable` is cleared (the verdict is `Unknown`, so it vouches for no
-//! earlier reading); `clusterId` and `observedAt` keep their last values: a
-//! probe that never ran observed nothing, so the last look's record ages and
-//! goes stale exactly as it would with no probe at all. The Job then gets the usual TTL, so the next probe runs on
-//! the ordinary cadence and clears the reason once the namespace admits it.
+//! probe pod, leaving only a `FailedCreate` Event on the Job. Once the Job has
+//! had no pod for [`check::waiting::POD_CREATE_GRACE`] and that Event says why,
+//! the Job is cancelled and the status reads `Reachable=Unknown` /
+//! `PodCreationForbidden` with the admission's own words. `reachable` is
+//! cleared; `clusterId` and `observedAt` keep their last values and age exactly
+//! as they would with no probe. The Job then gets the usual TTL, so the next
+//! probe runs on the ordinary cadence.
 //!
 //! # It creates, it patches, and it deletes nothing
 //!
 //! The re-probe cadence is the Job's own [`PROBE_TTL_SECONDS`]: the API server
 //! garbage-collects the finished Job, the next reconcile finds none, and a fresh
-//! probe runs. This reconciler deletes no Job, no pod and no object — the rule
-//! [`super`]'s header states, kept by a controller whose whole purpose is a
-//! repeating observation.
+//! probe runs. This reconciler deletes no Job, no pod and no object ([`super`]'s
+//! rule).
 //!
-//! # A Job Kubernetes is collecting is not a probe (FX-19)
+//! # A Job Kubernetes is collecting is not a probe
 //!
-//! The TTL controller deletes a finished Job with FOREGROUND propagation: the
-//! Job gains a `metadata.deletionTimestamp`, its pod goes first, and the Job
-//! itself lingers until the pod is gone. Read naively, that pod-less finished
-//! Job is a crashed probe — PoC batch 2 measured `reachable` cleared for about
-//! 17 s on a healthy connection, and about twelve WARN lines per cadence for
-//! twelve connections. So, before any verdict is formed:
+//! The TTL controller deletes a finished Job with foreground propagation: the
+//! Job gains a `deletionTimestamp`, its pod goes first, and the Job lingers
+//! until the pod is gone. Read naively, that pod-less finished Job is a crashed
+//! probe. So, before any verdict is formed:
 //!
-//! * **a Job with a `deletionTimestamp` is judged not at all** — no pod read,
-//!   no status write, no TTL patch ([`Deferred::JobBeingDeleted`]); the next
-//!   probe is created once the Job is gone;
+//! * **a Job with a `deletionTimestamp` is not judged** (no pod read, no status
+//!   write, no TTL patch: [`Deferred::JobBeingDeleted`]);
 //! * **a finished Job whose verdict is already recorded is not judged again**.
-//!   The marker is the Job's own `ttlSecondsAfterFinished`: [`job::build`]
-//!   creates a probe Job without one, and this reconciler sets it only AFTER
-//!   the status write that recorded the Job's verdict returned. A pod-less Job
-//!   that carries it is a Job whose pod was collected after its reading, not a
-//!   crash ([`Deferred::VerdictRecorded`]);
-//! * **`NotFound` and `Conflict` while a Job is collected are expected**: the
-//!   pod gone between the pod list and the `pods/log` read
-//!   ([`Deferred::PodGone`]), the Job gone before its TTL patch, and a status
-//!   write that lost its `resourceVersion` precondition to a newer copy of the
-//!   object ([`Deferred::StatusSuperseded`]) are debug lines and outcomes,
-//!   never WARN and never a reconcile error.
+//!   The marker is [`VERDICT_RECORDED_ANNOTATION`], which this reconciler sets
+//!   beside the TTL only after the status write that recorded the verdict
+//!   returned ([`Deferred::VerdictRecorded`]);
+//! * **`NotFound` and `Conflict` while a Job is collected are expected**: a pod
+//!   gone before its log read ([`Deferred::PodGone`]), a Job gone before its TTL
+//!   patch, and a status write that lost its `resourceVersion` precondition
+//!   ([`Deferred::StatusSuperseded`]) are debug lines, never WARN and never a
+//!   reconcile error.
 //!
-//! The last recorded verdict therefore stands until the next probe answers,
-//! and a crash, an unreadable log or a refused pod is logged at WARN once per
-//! Job: on the pass whose status write changed the object.
+//! The last recorded verdict therefore stands until the next probe answers, and
+//! a crash, an unreadable log or a refused pod is logged at WARN once per Job:
+//! on the pass whose status write changed the object.
 
 use std::sync::Arc;
 
@@ -123,10 +93,8 @@ use crate::job::{self, RunnerJobSpec, RunnerOwner};
 use crate::runner_log;
 
 /// WARN on the pass whose status write first recorded a crash or a refusal,
-/// debug on every later pass that finds it already recorded — FX-19's "once
-/// per Job". `$first` is whether that pass's write changed the object
-/// ([`StatusWrite::Changed`]); the rest is one `tracing` event's fields and
-/// message, spelled once for both levels.
+/// debug on every later pass that finds it already recorded. `$first` is
+/// whether that pass's write changed the object ([`StatusWrite::Changed`]).
 macro_rules! warn_when_first_recorded {
     ($first:expr, $($event:tt)+) => {
         if $first {
@@ -139,58 +107,42 @@ macro_rules! warn_when_first_recorded {
 
 /// The `Job` name a `KafkaCluster` gets: `logweir-probe-<cr name>`.
 ///
-/// **PREFIXED, UNLIKE THE `Backup` AND `Restore` JOBS**, which are named after
-/// their CR verbatim. Those objects exist to be run once; a `KafkaCluster` is a
-/// long-lived connection object that other kinds reference by name, and a Job
-/// sharing its name would collide with anything else this control plane might
-/// one day create for the same cluster. The cost is thirteen characters of the
-/// 63-character `batch.kubernetes.io/job-name` label budget, which is exactly
-/// what [`name_limit_for_cluster`] is about and why a long cluster name is
-/// refused BEFORE any `POST`.
+/// Prefixed, unlike the `Backup` and `Restore` Jobs: a `KafkaCluster` is a
+/// long-lived object other kinds reference by name, and a Job sharing its name
+/// could collide with anything else created for the same cluster. The prefix
+/// costs thirteen characters of the 63-character `job-name` label budget, hence
+/// [`name_limit_for_cluster`].
 pub const PROBE_JOB_PREFIX: &str = "logweir-probe-";
 
 /// The environment variable the probe reads its SASL password from.
 ///
-/// **`LOGWEIR_SOURCE_PASSWORD`, FOR A CLUSTER IN EITHER ROLE.** The runner has
-/// two variables — one per side of a drill — and a probe has no sides: it is
-/// reading one cluster, so it reads the "source" one whatever the object's
-/// `spec.role` says. `logweir cluster-probe`'s own help text names the same
-/// variable, and the pair is asserted by
-/// `the_probe_password_variable_matches_the_subcommand`.
+/// `LOGWEIR_SOURCE_PASSWORD` for a cluster in either role: a probe reads one
+/// cluster, so it reads the "source" variable whatever `spec.role` says.
+/// `the_probe_password_variable_matches_the_subcommand` pins it against
+/// `logweir cluster-probe`'s help text.
 pub const SOURCE_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_PASSWORD";
 
 /// The key inside a `KafkaCluster`'s `auth.secretRef` Secret that holds the
-/// password.
-///
-/// The same key the `Restore` path projects
-/// ([`super::restore::TARGET_PASSWORD_SECRET_KEY`]): one convention for one
-/// kind of Secret, so an adopter who wrote a credential for a restore does not
-/// have to write a second one for the probe.
+/// password: the key the `Restore` path projects
+/// ([`super::restore::TARGET_PASSWORD_SECRET_KEY`]), so one Secret serves both.
 pub const SOURCE_PASSWORD_SECRET_KEY: &str = super::restore::TARGET_PASSWORD_SECRET_KEY;
 
-/// Interface **I14**'s first line, as a prefix. Matched BY NAME (erratum E4).
+/// Interface **I14**'s first line, as a prefix. Matched by name.
 pub const CLUSTER_ID_PREFIX: &str = "cluster-id=";
 
-/// Interface **I14**'s second line, as a prefix. Matched BY NAME (erratum E4).
+/// Interface **I14**'s second line, as a prefix. Matched by name.
 pub const REACHABLE_PREFIX: &str = "reachable=";
 
-/// The one condition type a `KafkaCluster` carries.
-///
-/// The CRD's own condition-type description names it. Declared HERE rather than
-/// in [`crate::conditions`] for the reason `super::restore`'s
-/// `REFERENT_NOT_FOUND_REASON` is: that module holds Global Constraint 11's
-/// exit-code vocabulary and the terminal states an EXECUTION can reach, and a
-/// probe's condition is neither.
+/// The one condition type a `KafkaCluster` carries. Declared here rather than in
+/// [`crate::conditions`], which holds the exit-code vocabulary and the terminal
+/// states an execution can reach; a probe's condition is neither.
 pub const CONDITION_REACHABLE: &str = "Reachable";
 
 /// `Reachable=True`. A broker answered and named its cluster id.
 pub const REASON_REACHABLE: &str = "Reachable";
 
-/// `Reachable=False`. **The probe ran and said `reachable=false` itself.**
-///
-/// NOT DERIVED FROM THE EXIT CODE. The runner prints this line; exit 1 alone
-/// could equally mean the image was wrong, so the LINE is what writes `false`
-/// and the code never does.
+/// `Reachable=False`: the probe ran and printed `reachable=false` itself. Never
+/// derived from the exit code, since exit 1 alone could mean a wrong image.
 pub const REASON_PROBE_REPORTED_UNREACHABLE: &str = "ProbeReportedUnreachable";
 
 /// `Reachable=Unknown`. The pod log carried neither contract line, so nothing
@@ -199,67 +151,48 @@ pub const REASON_PROBE_OUTPUT_UNREADABLE: &str = "ProbeOutputUnreadable";
 
 /// `Reachable=Unknown`. A probe Job exists and has not finished.
 ///
-/// WRITTEN ON THE CREATING PASS, AND NOT NOTHING. A `KafkaCluster` with an
-/// empty status is indistinguishable from one this controller has never seen —
-/// the shape review finding **MEDIUM-1** was about — and a merge patch that
-/// touches neither `reachable` nor `clusterId` leaves the LAST KNOWN values
-/// alone while a fresh probe is in flight, which is what an operator wants from
-/// a re-probe.
+/// Written on the creating pass: an empty status is indistinguishable from an
+/// object this controller has never seen. The merge patch touches neither
+/// `reachable` nor `clusterId`, so the last known values stand while a fresh
+/// probe is in flight.
 pub const REASON_PROBE_RUNNING: &str = "ProbeRunning";
 
-/// Every condition `reason` this module writes, in one list.
-///
-/// ONE LIST SO A REGEX TEST CANNOT MISS ONE:
-/// `every_probe_condition_reason_is_a_valid_metav1_reason` iterates it against
-/// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, the pattern a real
-/// `metav1.Condition` validates `reason` against and which **forbids `-`**
-/// (errata **E5b**).
+/// Every condition `reason` this module writes, in one list that
+/// `every_probe_condition_reason_is_a_valid_metav1_reason` checks against the
+/// `metav1.Condition` reason pattern, which forbids `-`.
 pub const PROBE_CONDITION_REASONS: &[&str] = &[
     REASON_REACHABLE,
     REASON_PROBE_REPORTED_UNREACHABLE,
     REASON_PROBE_OUTPUT_UNREADABLE,
     REASON_PROBE_RUNNING,
-    // FX-19 fix round: the last reading is too old to vouch for. A probe
-    // reason, not a terminal state: the next probe that answers replaces it.
+    // The last reading is too old to vouch for. A probe reason, not a terminal
+    // state: the next probe that answers replaces it.
     REASON_PROBE_STALE,
     crate::conditions::TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_REFERENCE_INVALID,
     crate::conditions::TERMINAL_STATE_CONNECTION_FIELD_UNSUPPORTED,
     crate::conditions::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
-    // PROD-01.3: the resolver's PLAIN-without-TLS refusal, and the probe's
-    // refusal of a credential whose binding names another connection.
+    // The resolver's PLAIN-without-TLS refusal, and the probe's refusal of a
+    // credential whose binding names another connection.
     crate::conditions::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
-    // FX-11: the probe Job's pod was refused at creation. The shared terminal
-    // state a `Backup`'s or a `Restore`'s runner reaches for the same refusal.
+    // The probe pod was refused at creation: the terminal state a `Backup`'s or
+    // a `Restore`'s runner reaches for the same refusal.
     crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN,
 ];
 
-/// `spec.activeDeadlineSeconds` on a probe Job.
-///
-/// `KafkaCluster.spec` carries no `deadlineSeconds` — it is a connection
-/// object, not a run — so the value is this module's. **TWO MINUTES**: the dial
-/// itself is bounded at ten seconds by the subcommand, and the rest of the
-/// budget is image start, so a deadline that fires means the pod never got
-/// going rather than that the broker was slow.
+/// `spec.activeDeadlineSeconds` on a probe Job. Two minutes: the subcommand
+/// bounds the dial at ten seconds and the rest is image start, so a deadline
+/// that fires means the pod never got going.
 pub const PROBE_DEADLINE_SECONDS: i64 = 120;
 
-/// `ttlSecondsAfterFinished` on a finished probe Job — **and therefore the
-/// re-probe interval**.
+/// `ttlSecondsAfterFinished` on a finished probe Job, and therefore the
+/// re-probe interval.
 ///
-/// # This is the schedule, and the mechanism is the point
-///
-/// The brief names no re-probe cadence, so five minutes is this task's recorded
-/// choice. It is spelled as a TTL rather than as a timer because a reconciler in
-/// this directory **deletes nothing**: the API server collects the finished Job,
-/// the next reconcile finds no Job, and a fresh probe runs. A `KafkaCluster` is
-/// not evidence, which is why this is not the `Backup` path's seven days
-/// (`backup::TTL_SECONDS_AFTER_FINISHED`) — a probe Job whose log has been read
-/// onto the status has nothing left to say.
-///
-/// Patched ONLY AFTER the status write that carries the verdict has returned
-/// 200, exactly as on the `Backup` path: pod garbage collection must never race
-/// the log read.
+/// A TTL rather than a timer because a reconciler here deletes nothing: the API
+/// server collects the finished Job, the next reconcile finds none, and a fresh
+/// probe runs. Patched only after the status write carrying the verdict
+/// returned, so pod garbage collection never races the log read.
 pub const PROBE_TTL_SECONDS: i32 = 300;
 
 /// How long before a probe Job that has not finished is looked at again.
@@ -267,23 +200,18 @@ pub const REQUEUE_SECS: u64 = 15;
 
 /// How long before a cluster whose probe has been read is probed again.
 ///
-/// [`PROBE_TTL_SECONDS`] **plus a margin**, deliberately: a requeue landing at
-/// exactly the TTL would find the Job still present about half the time, write
-/// the same verdict again and wait another full interval, turning a five-minute
-/// cadence into a ten-minute one. The Job's deletion is also a watch event
-/// (`controller().owns(jobs)`), so this timer is the backstop and not the
-/// primary path.
+/// [`PROBE_TTL_SECONDS`] plus a margin: a requeue at exactly the TTL would find
+/// the Job still present about half the time and wait another full interval.
+/// The Job's deletion is also a watch event (`controller().owns(jobs)`), so
+/// this timer is the backstop.
 pub const RE_PROBE_SECS: u64 = PROBE_TTL_SECONDS as u64 + 15;
 
 /// The longest `metadata.name` a `KafkaCluster` may have and still be probed.
 ///
-/// The Job's name is [`PROBE_JOB_PREFIX`] + the cluster's name, and the Job's
-/// pods carry that name in the `batch.kubernetes.io/job-name` LABEL, whose
-/// values stop at [`crate::slot::NAME_LIMIT`] characters. Measured on the
-/// `Backup` path (review finding **MEDIUM-1**, errata **E5d**): the API server
-/// refuses the Job outright — `spec.template.labels: Invalid value: … must be
-/// no more than 63 characters` — which a reconciler turns into a requeue, and
-/// the object then sits with `status: null` forever.
+/// The Job's pods carry [`PROBE_JOB_PREFIX`] + the cluster's name in the
+/// `batch.kubernetes.io/job-name` label, whose values stop at
+/// [`crate::slot::NAME_LIMIT`] characters; the API server refuses a longer one
+/// outright, which would leave the object with `status: null` forever.
 #[must_use]
 pub fn name_limit_for_cluster() -> usize {
     crate::slot::NAME_LIMIT.saturating_sub(PROBE_JOB_PREFIX.len())
@@ -310,33 +238,22 @@ pub struct ProbeReport {
     /// Anything else — an absent line, a truncated one, a third spelling — is
     /// `None`, and `None` is never turned into `false`.
     pub reachable: Option<bool>,
-    /// **PROD-01.3 security follow-up.** `true` when the tail carries the
-    /// probe's stderr line `refusal-reason=CredentialBindingMismatch`: the
-    /// probe refused the projected credential before dialling, because its
-    /// binding does not name this `KafkaCluster`. Read only beside
-    /// `reachable=false`; it can never make a probe read as reachable.
+    /// `true` when the tail carries the probe's stderr line
+    /// `refusal-reason=CredentialBindingMismatch`: the probe refused the
+    /// projected credential before dialling, because its binding does not name
+    /// this `KafkaCluster`. Read only beside `reachable=false`; it can never
+    /// make a probe read as reachable.
     pub credential_binding_refused: bool,
 }
 
-/// Read the two contract lines out of a pod log, **by key name, from a bounded
-/// tail**.
+/// Read the two contract lines out of a pod log, by key name, from a bounded
+/// tail ([`runner_log::key_values`], the one key scan in this crate). The last
+/// occurrence of each key wins, as in [`backup::evidence_keys`].
 ///
-/// [`runner_log::key_values`] is the ONE key scan in this crate (erratum
-/// **E4**), shared and not forked: the prefix sets differ between the three
-/// reconcilers, the definition of "the tail" must not.
-///
-/// The LAST occurrence of each key wins within that tail, matching
-/// [`backup::evidence_keys`]: a runner that printed a draft line would have the
-/// final one be the true one.
-///
-/// # Why an empty `cluster-id=` is an absence
-///
-/// Interface I14 prints `cluster-id=` with no value on the unreachable arm,
-/// deliberately, so nothing can be mistaken for an observation. Recording
-/// `Some("")` would put an empty string in `status.clusterId`, where Global
-/// Constraint 18's fourth rail later compares it against a target's id —
-/// `"" != ""` is false, and a rail that compares two absences is a rail that
-/// passes.
+/// An empty `cluster-id=` (interface I14's unreachable arm) is an absence:
+/// `Some("")` in `status.clusterId` would later be compared against a target's
+/// id by Global Constraint 18's fourth rail, and a rail that compares two
+/// absences passes.
 #[must_use]
 pub fn probe_report(log: &str) -> ProbeReport {
     let refused = format!(
@@ -369,31 +286,22 @@ pub struct Verdict {
     pub status: &'static str,
     /// The condition's `reason`, and verbatim the scalar `status.reason`.
     pub reason: String,
-    /// The value for `status.reachable`. `None` CLEARS the field
+    /// The value for `status.reachable`. `None` clears the field
     /// ([`observed_status_patch`] writes `null`): an unreadable probe vouches
-    /// for no earlier reading, and admission reads `reachable == true` alone
-    /// (PoC batch 1, O-1).
+    /// for no earlier reading, and admission reads `reachable == true` alone.
     pub reachable: Option<bool>,
     /// The value for `status.clusterId`, written only alongside
     /// `reachable: Some(true)`.
     pub cluster_id: Option<String>,
 }
 
-/// The verdict for one finished probe, **from its log alone**.
+/// The verdict for one finished probe, from its log alone.
 ///
-/// # THE TWO LINES DECIDE, AND THIS FUNCTION CANNOT SEE THE EXIT CODE
-///
-/// The signature is the property. Interface **I14** makes the two lines the
-/// machine contract and the code its summary, and exit **1** is Global
-/// Constraint 11's *operational error* — what a wrong image, a bad flag, an
-/// unprojected credential and a genuinely unreachable broker all produce alike.
-/// A controller that read `reachable: false` off the code would publish a
-/// control-plane mistake as a fact about somebody's cluster, so the code is not
-/// an argument here: it reaches the condition MESSAGE
-/// ([`verdict_message`]) — where a human reading `kubectl describe` wants it —
-/// and the classification of a run with NO code at all is
-/// [`backup::crash_terminal_state`]'s, a different function for a different
-/// observation.
+/// The signature is the property: this function cannot see the exit code.
+/// Exit 1 is what a wrong image, a bad flag, an unprojected credential and an
+/// unreachable broker all produce, so the code reaches only the condition
+/// message ([`verdict_message`]), and a run with no code at all is
+/// [`backup::crash_terminal_state`]'s to classify.
 #[must_use]
 pub fn verdict(report: &ProbeReport) -> Verdict {
     match report.reachable {
@@ -403,8 +311,8 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
             reachable: Some(true),
             cluster_id: report.cluster_id.clone(),
         },
-        // PROD-01.3 security follow-up: the probe refused the credential's
-        // binding and dialled nothing — the named reason, not "unreachable".
+        // The probe refused the credential's binding and dialled nothing: the
+        // named reason, not "unreachable".
         Some(false) if report.credential_binding_refused => Verdict {
             status: "False",
             reason: crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH.to_string(),
@@ -415,9 +323,7 @@ pub fn verdict(report: &ProbeReport) -> Verdict {
             status: "False",
             reason: REASON_PROBE_REPORTED_UNREACHABLE.to_string(),
             reachable: Some(false),
-            // NEVER CARRIED OVER. An unreachable probe observed no cluster id,
-            // and the previous pass's value is not an observation this pass
-            // made.
+            // Never carried over: an unreachable probe observed no cluster id.
             cluster_id: None,
         },
         None => Verdict {
@@ -452,20 +358,14 @@ pub fn verdict_message(v: &Verdict, exit_code: i32) -> String {
     }
 }
 
-/// The probe's argv — interface **I14**'s flag list, built from the RESOLVED
-/// connection (PLAT-07.1) plus this object's marker topic.
+/// The probe's argv (interface **I14**'s flag list), built from the resolved
+/// connection plus this object's marker topic.
 ///
-/// The connection flags are [`ResolvedConnection::probe_args`] — the same
-/// resolution the backup and restore Jobs are built from, so a probe can never
-/// dial settings those runs do not use. A connection that does not resolve has
-/// no argv at all: [`runner_job_spec`] refuses it first.
-///
-/// `--marker-topic` IS PASSED UNCONDITIONALLY WHEN THE FIELD IS SET, and the
-/// probe never asserts it: this controller does not branch on a field whose only
-/// consumer is a drill-time guard, and the subcommand refuses nothing because of
-/// it. `--tls` is emitted only when the transport really is TLS, the way
-/// `super::restore::runner_argv` emits `--approver-key-ids` only for a non-empty
-/// roster: a boolean flag has no false form.
+/// The connection flags are [`ResolvedConnection::probe_args`], the resolution
+/// the backup and restore Jobs are built from, so a probe never dials settings
+/// those runs do not use. `--marker-topic` is passed whenever the field is set,
+/// and the probe never asserts it. `--tls` is emitted only when the transport is
+/// TLS: a boolean flag has no false form.
 #[must_use]
 pub fn runner_argv(cluster: &KafkaCluster, connection: &ResolvedConnection) -> Vec<String> {
     let mut argv = vec!["cluster-probe".to_string()];
@@ -479,17 +379,15 @@ pub fn runner_argv(cluster: &KafkaCluster, connection: &ResolvedConnection) -> V
 
 /// `--auth-mode`'s value for a CRD auth mode.
 ///
-/// **THE SPELLINGS ARE BYTE-IDENTICAL TO THE CRD ENUM AND TO
-/// `logweir_core::spec::AuthSpec`** (interface I33), so this is a rename of a
-/// value and never a translation of one. Written as a `match` with no wildcard:
-/// a third mode fails to compile here rather than reaching an argv as
-/// `plaintext`.
+/// The spellings are byte-identical to the CRD enum and to
+/// `logweir_core::spec::AuthSpec` (interface I33), so this renames a value and
+/// never translates one. No wildcard arm: a new mode fails to compile here
+/// rather than reaching an argv as `plaintext`.
 #[must_use]
 pub fn auth_mode_flag(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::Plaintext => "plaintext",
         AuthMode::ScramSha512 => "scramSha512",
-        // PROD-01.3.
         AuthMode::ScramSha256 => "scramSha256",
         AuthMode::Plain => "plain",
         AuthMode::Mtls => "mtls",
@@ -500,10 +398,9 @@ pub fn auth_mode_flag(mode: AuthMode) -> &'static str {
 ///
 /// # Errors
 ///
-/// [`KafkaClusterError::NoNamespace`] / [`KafkaClusterError::NoUid`] — neither
-/// reachable from the API server, named rather than unwrapped — and
+/// [`KafkaClusterError::NoNamespace`] / [`KafkaClusterError::NoUid`], and
 /// [`KafkaClusterError::Refused`] carrying the connection's own refusal when
-/// [`connection::resolve`] refuses it (PLAT-07.1).
+/// [`connection::resolve`] refuses it.
 pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClusterError> {
     let name = cluster.name_any();
     let namespace = cluster
@@ -513,13 +410,9 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         .uid()
         .ok_or_else(|| KafkaClusterError::NoUid(name.clone()))?;
 
-    // THE ONE RESOLUTION (PLAT-07.1). The password and the CA, PROJECTED AND
-    // NEVER READ: `valueFrom.secretKeyRef` and a projected volume only — this
-    // controller holds no `get` on Secrets (spec §9), so these are references
-    // it writes into a pod spec and values it cannot see. A `scramSha512`
-    // cluster with no `secretRef` used to get a probe with no variable, which
-    // then printed `reachable=false` about a configuration mistake; the
-    // resolver refuses it before any Job exists instead.
+    // The password and the CA are projected and never read: the controller
+    // holds no `get` on Secrets (spec §9). A cluster whose auth needs a
+    // `secretRef` it lacks is refused by the resolver before any Job exists.
     let connection = connection::resolve(cluster, ConnectionUse::Probe)?;
     connection.check_job_namespace(&namespace)?;
     let projection = connection.project();
@@ -536,10 +429,9 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         args: runner_argv(cluster, &connection),
         deadline_seconds: PROBE_DEADLINE_SECONDS,
         service_account_name: connection.execution.service_account_name.clone(),
-        // NO SIGNING KEY, AND NOTHING BUT THE CONNECTION'S OWN CA. A probe
-        // signs nothing, reads no approval and writes no artifact, so the only
-        // volume it may carry besides `/work` is the private CA the connection
-        // names — projected exactly as the backup and restore Jobs project it.
+        // No signing key: a probe signs nothing, reads no approval and writes
+        // no artifact, so its only volume besides `/work` is the connection's
+        // CA.
         secret_mounts: projection.secret_mounts,
         config_map_mounts: projection.config_map_mounts,
         env_from_secret: projection.env_from_secret,
@@ -548,50 +440,34 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
             env.extend(projection.env_literal);
             env
         },
-        // NO PLAN. `logweir cluster-probe` reads no `--spec`, which is why
-        // `job::RunnerJobSpec::plan_config_map` is an `Option` at all — and a
-        // Job with an empty `/plan` mount would stall in `ContainerCreating`
-        // until its deadline fired (measured live on the `Backup` path).
+        // No plan: `logweir cluster-probe` reads no `--spec`, and a Job with an
+        // empty `/plan` mount would stall in `ContainerCreating` until its
+        // deadline fired.
         plan_config_map: None,
-        // THE SHIPPED PIN, AND THE RECONCILER OVERWRITES IT IF THIS PROCESS
-        // WAS HANDED ANOTHER IMAGE (Task 33, `job::RUNNER_IMAGE_ENV`). This
-        // function is a pure function of the custom resource and stays one:
-        // the override is a property of the PROCESS, read once in `main`.
+        // The shipped pin; the reconciler overwrites it when this process was
+        // handed another image (`job::RUNNER_IMAGE_ENV`, read once in `main`),
+        // so this stays a pure function of the custom resource.
         image: None,
-        // AND THE COMPILED-IN `job::IMAGE_PULL_POLICY`, OVERWRITTEN THE SAME
-        // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
-        // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
+        // Likewise `job::IMAGE_PULL_POLICY` (`job::RUNNER_PULL_POLICY_ENV`).
         image_pull_policy: None,
-        // `KafkaCluster` states no resources for its probe Job (FX-2's sweep).
+        // `KafkaCluster` states no resources for its probe Job.
         resources: None,
     })
 }
 
-/// When the probe this pass is reading **actually finished**.
+/// When the probe this pass is reading actually finished.
 ///
-/// # THIS IS NOT `now`, AND THE LIVE RUN IS WHY
+/// Not `now`: with `controller().owns(jobs)`, a status patch carrying a fresh
+/// `now` bumps the `resourceVersion`, the watch fires, and the reconcile
+/// re-reads the same finished Job and writes another `now`, a hot loop. An
+/// instant taken from the probe makes every re-read of the same Job produce a
+/// byte-identical patch, which the API server treats as a no-op, and it is the
+/// truer value: the CRD field says when the probe was performed.
+/// `the_observed_status_patch_is_stable_across_passes` pins it.
 ///
-/// Measured on docker-desktop with `observedAt: now`: **3,388 reconciles in
-/// ninety seconds**, a hot loop. The mechanism is `controller().owns(jobs)`
-/// plus a status field that changes on every read — a status patch carrying a
-/// fresh `now` bumps the object's `resourceVersion`, the `KafkaCluster` watch
-/// fires, the reconcile re-reads the same finished Job, writes another fresh
-/// `now`, and so on at ~2,000 passes a minute. (The TTL patch is not the
-/// culprit: a merge patch whose content is unchanged is a no-op and bumps
-/// nothing. The clock was.)
-///
-/// Taking the instant from the PROBE instead of from the controller fixes it at
-/// the root and is also the more truthful value — the CRD field says "when the
-/// probe above was performed", not "when a reconcile last looked". It is a
-/// property of the Job, so every re-read of the same Job produces a
-/// BYTE-IDENTICAL patch, the API server treats it as a no-op, and the loop has
-/// nothing to feed on. `the_observed_status_patch_is_stable_across_passes` is
-/// the regression test.
-///
-/// Four sources, in order of how close each is to the probe itself: the runner
-/// container's own `finishedAt`, the Job's `completionTime`, the Job's terminal
-/// condition's `lastTransitionTime`, and — only when the API server offered
-/// none of the three — `now`.
+/// Four sources, closest to the probe first: the runner container's
+/// `finishedAt`, the Job's `completionTime`, the Job's terminal condition's
+/// `lastTransitionTime`, and, only when none is offered, `now`.
 #[must_use]
 pub fn observed_at(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> DateTime<Utc> {
     pod.and_then(|p| p.status.as_ref())
@@ -624,18 +500,9 @@ pub fn observed_at(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> DateTime
         .unwrap_or(now)
 }
 
-// ---------------------------------------------------------------------------
-// Status patches
-// ---------------------------------------------------------------------------
-
-/// One condition, as a merge-patch fragment. **Exactly one is ever written**
-/// (errata **E5c**): a condition array is a map keyed by `type`, so two
-/// `Reachable` entries would be a malformed status whatever their statuses said.
-///
-/// `lastTransitionTime` moves only when the condition actually transitions,
-/// and the comparison that decides it is
-/// [`crate::conditions::merge_condition`] — ONE implementation for all six
-/// reconcilers (plan erratum E11(d)); this file used to carry a private copy.
+/// One condition, as a merge-patch fragment. Exactly one is ever written: a
+/// condition array is a map keyed by `type`. `lastTransitionTime` moves only on
+/// a real transition, decided by [`crate::conditions::merge_condition`].
 fn condition(
     cluster: &KafkaCluster,
     status: &str,
@@ -659,31 +526,17 @@ fn condition(
     ))
 }
 
-/// Patch `/status` — under seam **S7**'s `metadata.resourceVersion`
-/// precondition, and not at all when the patch would change nothing.
+/// Patch `/status` under seam **S7**'s `metadata.resourceVersion`
+/// precondition, and not at all when the patch would change nothing (both
+/// [`crate::conditions::patch_status_preconditioned`]'s decisions), so a
+/// verdict computed from a stale watch-cache copy cannot overwrite a newer
+/// write. No caller writes twice in a pass, so there is no `patch_status_at`.
 ///
-/// Both decisions are [`crate::conditions::patch_status_preconditioned`]'s;
-/// this exists so this reconciler's six patch sites read as one line each.
-/// Defect STATUS-PATCH-NO-RV: every write here was unconditional, and a probe
-/// verdict computed from a stale watch-cache copy could overwrite the refusal
-/// a newer build of this same controller had just written — which is exactly
-/// the rolling-upgrade case review finding L2 is about, one field over.
-///
-/// NO CALLER OF THIS RECONCILER WRITES TWICE IN A PASS, so there is no
-/// `patch_status_at` here: every site above returns immediately after its
-/// write.
-///
-/// # A 409 is an answer here, not an error (FX-19)
-///
-/// The shared helper surfaces the `409` as the API error it is, and this
-/// reconciler turns it into [`StatusWrite::Superseded`]: the precondition
-/// working, because the watch cache handed this pass an older copy of the
-/// object than the API server holds. It is a debug line, never a WARN — PoC
-/// batch 2 counted about seven a cadence, mostly the pass a new probe Job's
-/// own events start before the watch has delivered the status the creating
-/// pass wrote. Every caller returns at once on it, so a verdict that did not
-/// land is never followed by its TTL; the newer copy's watch event reconciles
-/// again and recomputes.
+/// A `409` is an answer here, not an error: it becomes
+/// [`StatusWrite::Superseded`], a debug line, because the watch cache handed
+/// this pass an older copy than the API server holds. Every caller returns at
+/// once on it, so a verdict that did not land is never followed by its TTL; the
+/// newer copy's watch event reconciles again.
 async fn patch_status_if_changed(
     api: &Api<KafkaCluster>,
     cluster: &KafkaCluster,
@@ -737,30 +590,24 @@ enum StatusWrite {
     Superseded,
 }
 
-/// The annotation this reconciler puts on a probe Job, in the SAME merge patch
-/// as its TTL, once the status write that recorded the Job's verdict returned
-/// — FX-19. Its value is the Job's own `metadata.uid`.
+/// The annotation this reconciler puts on a probe Job, in the same merge patch
+/// as its TTL, once the status write that recorded the Job's verdict returned.
+/// Its value is the Job's own `metadata.uid`.
 pub const VERDICT_RECORDED_ANNOTATION: &str = "logweir.dev/probe-verdict-recorded";
 
-/// Whether a finished probe Job's verdict is already on the status — FX-19.
-///
-/// # The marker is this reconciler's own, and never the TTL
+/// Whether a finished probe Job's verdict is already on the status.
 ///
 /// [`set_probe_ttl`] writes [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID
-/// beside the TTL, in one merge patch, and only after the status write that
-/// recorded the Job's verdict — a reading, a crash or a refused pod —
-/// returned. A finished Job that carries it has been judged; a pod it no
-/// longer has was collected after the reading, and is no reason to judge it
-/// again or to clear `reachable`.
+/// beside the TTL, in one merge patch, only after the status write that
+/// recorded the verdict (a reading, a crash or a refused pod) returned. A
+/// finished Job that carries it has been judged; a pod it no longer has was
+/// collected after the reading.
 ///
-/// The first landing read `ttlSecondsAfterFinished` itself (FX-19 review
-/// M1). That field has other writers: a mutating admission policy (Kyverno,
-/// Gatekeeper, a platform's defaulting webhook) can give every new Job a TTL
-/// at creation, and then every probe Job read as judged from birth — a real
-/// crash was never recorded and `reachable: true` stood through every failing
-/// probe, while the re-probe cadence became the foreign TTL. Nothing but this
-/// reconciler writes this annotation, and the UID makes a value copied onto
-/// another Job worthless.
+/// The marker is never `ttlSecondsAfterFinished` itself: a mutating admission
+/// policy can give every new Job a TTL at creation, and then every probe Job
+/// would read as judged from birth and a real crash would never be recorded.
+/// Nothing but this reconciler writes the annotation, and the UID makes a value
+/// copied onto another Job worthless.
 #[must_use]
 pub fn verdict_recorded(job: &Job) -> bool {
     let Some(uid) = job.metadata.uid.as_deref().filter(|u| !u.is_empty()) else {
@@ -773,7 +620,7 @@ pub fn verdict_recorded(job: &Job) -> bool {
         .is_some_and(|v| v == uid)
 }
 
-/// Whether Kubernetes is deleting this probe Job — FX-19.
+/// Whether Kubernetes is deleting this probe Job.
 ///
 /// The TTL controller deletes a finished Job with foreground propagation, so
 /// the Job is still readable, pod-less, with a `deletionTimestamp`, for as long
@@ -783,32 +630,25 @@ pub fn being_deleted(job: &Job) -> bool {
     job.metadata.deletion_timestamp.is_some()
 }
 
-/// How old the last probe reading (`status.observedAt`) may grow, with no
-/// newer probe answering, before `reachable` stops vouching for it — FX-19
-/// fix round (review M2).
+/// How old the last probe reading (`status.observedAt`) may grow, with no newer
+/// probe answering, before `reachable` stops vouching for it.
 ///
-/// **TWICE [`RE_PROBE_SECS`], 630 s: the console's own freshness budget.** A
-/// healthy connection's reading is replaced within one cadence plus the next
-/// probe's run — [`RE_PROBE_SECS`] + at most [`PROBE_DEADLINE_SECONDS`], about
-/// 315–450 s — so a healthy connection never reaches it. A probe Job whose
-/// deletion stalls (a finished pod `Terminating` on a node that went away, a
-/// foreign finalizer), or that its TTL never collects, does: the probe Job's
-/// name is fixed, so no newer probe can run while it exists, and before this
-/// bound the last reading stood for as long as that lasted. A `Restore` and a
-/// rehearsal admit a target on `reachable == true` alone, so the bound is
-/// what keeps them from admitting on a reading nobody has repeated.
+/// Twice [`RE_PROBE_SECS`] (630 s), the console's own freshness budget. A
+/// healthy reading is replaced within [`RE_PROBE_SECS`] plus at most
+/// [`PROBE_DEADLINE_SECONDS`], so it never reaches this. A probe Job whose
+/// deletion stalls (a pod `Terminating` on a lost node, a foreign finalizer)
+/// does: the Job's name is fixed, so no newer probe runs while it exists. A
+/// `Restore` and a rehearsal admit a target on `reachable == true` alone, so
+/// this bound keeps them from admitting on a reading nobody has repeated.
 pub const STALE_AFTER_SECS: i64 = 2 * RE_PROBE_SECS as i64;
 
 /// `Reachable=Unknown`: the last reading is older than [`STALE_AFTER_SECS`]
-/// and no newer probe has answered, so `reachable` is cleared — FX-19.
+/// and no newer probe has answered, so `reachable` is cleared.
 pub const REASON_PROBE_STALE: &str = "ProbeStale";
 
 /// Whether `reachable` asserts a reading older than [`STALE_AFTER_SECS`] at
-/// `now` — FX-19 fix round.
-///
-/// Only a `reachable` that is SET can be stale; a status that asserts nothing
-/// has nothing to clear. A set `reachable` with no `observedAt` beside it
-/// names no instant to vouch for, and is stale too.
+/// `now`. Only a set `reachable` can be stale; one with no `observedAt` beside
+/// it names no instant to vouch for, and is stale too.
 #[must_use]
 pub fn reachable_is_stale(cluster: &KafkaCluster, now: DateTime<Utc>) -> bool {
     let Some(status) = cluster.status.as_ref() else {
@@ -843,14 +683,12 @@ fn requeue_before_stale(
     Requeue::After(until_stale.map_or(default, |u| u.min(default)))
 }
 
-/// The `/status` merge patch for a reading that is too old to vouch for —
-/// FX-19 fix round (review M2).
+/// The `/status` merge patch for a reading too old to vouch for.
 ///
 /// `reachable` cleared, `ProbeStale` in the scalar and the condition, and
-/// `observedAt` and `clusterId` LEFT ALONE: they stay the record of the last
-/// real look, which ages on in the console. `detail` names why no newer probe
-/// has answered; it and the stored `observedAt` are the whole message, so a
-/// later pass over the same state computes the same bytes and writes nothing.
+/// `observedAt` and `clusterId` left alone as the record of the last real look.
+/// `detail` and the stored `observedAt` are the whole message, so a later pass
+/// over the same state computes the same bytes and writes nothing.
 #[must_use]
 pub fn stale_status_patch(cluster: &KafkaCluster, detail: &str, now: DateTime<Utc>) -> Value {
     let last = cluster
@@ -880,18 +718,15 @@ pub fn stale_status_patch(cluster: &KafkaCluster, detail: &str, now: DateTime<Ut
     })
 }
 
-/// The `/status` merge patch for the pass that CREATED a probe Job.
+/// The `/status` merge patch for the pass that created a probe Job.
 ///
-/// It touches neither `reachable` nor `clusterId` nor `observedAt`: a merge
-/// patch that omits a key leaves it alone, so a re-probe in flight does not
-/// erase the last thing that was actually observed. What it does write is that
-/// somebody is looking — the difference between "not probed yet" and "this
-/// controller has never seen the object".
+/// It omits `reachable`, `clusterId` and `observedAt`, so a re-probe in flight
+/// keeps the last observation, and writes that somebody is looking: the
+/// difference between "not probed yet" and "never seen".
 #[must_use]
 pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime<Utc>) -> Value {
-    // FX-19 fix round (review M2): A PROBE IN FLIGHT DOES NOT RE-VOUCH FOR A
-    // STALE READING. Normally the last observation stands while the next probe
-    // runs; once it is older than `STALE_AFTER_SECS` it is cleared here too.
+    // A probe in flight does not re-vouch for a stale reading: past
+    // `STALE_AFTER_SECS` the last observation is cleared here too.
     let stale = reachable_is_stale(cluster, now);
     let message = if stale {
         format!(
@@ -915,11 +750,9 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
     if stale {
         patch["status"]["reachable"] = Value::Null;
     }
-    // PROD-01.3 security follow-up: publish the binding the credential Secret
-    // must carry, so an operator creating it by hand can copy it. Public (a
-    // UID and an endpoint digest); written only for a connection that HAS a
-    // credential, and only once the object resolves (a refused object never
-    // reaches this pass).
+    // Publish the binding the credential Secret must carry, so an operator
+    // creating it by hand can copy it. Public (a UID and an endpoint digest);
+    // written only for a connection that has a credential and resolves.
     if let Some(binding) = credential_binding_of(cluster) {
         patch["status"]["credentialBinding"] = json!(binding);
     }
@@ -937,17 +770,13 @@ pub fn credential_binding_of(cluster: &KafkaCluster) -> Option<String> {
 
 /// The `/status` merge patch for a probe whose log has been read.
 ///
-/// `reachable` is written on EVERY verdict: `true` or `false` from the log's
-/// own line, and `null` — which removes it under a merge patch — when the log
-/// carried neither line (`ProbeOutputUnreadable`). A verdict that moves the
-/// condition to `Unknown` no longer vouches for an earlier `reachable`, and a
-/// `Restore` and a rehearsal admit a target on `reachable == true` alone
-/// (PoC batch 1, O-1). `clusterId` is written only alongside `reachable: true`
-/// and otherwise kept: it is the cluster's identity as last observed, paired
-/// with `observedAt` as the record of that look, never a verdict about now —
-/// every consumer that acts on it reads `reachable == true` first. And
-/// `observedAt` is written on every verdict, because "we looked and could not
-/// tell" is itself an observation with a time.
+/// `reachable` is written on every verdict: `true` or `false` from the log's
+/// own line, and `null` (removed under a merge patch) when the log carried
+/// neither, because a `Restore` and a rehearsal admit a target on
+/// `reachable == true` alone. `clusterId` is written only beside
+/// `reachable: true` and otherwise kept as the identity last observed.
+/// `observedAt` is written on every verdict: "we looked and could not tell" is
+/// an observation with a time.
 #[must_use]
 pub fn observed_status_patch(
     cluster: &KafkaCluster,
@@ -961,12 +790,11 @@ pub fn observed_status_patch(
     if let Some(id) = v.cluster_id.as_ref() {
         status.insert("clusterId".to_string(), json!(id));
     }
-    // THE PROBE'S OWN INSTANT, NOT THE CONTROLLER'S — see `observed_at` for the
-    // 3,388-reconciles-in-ninety-seconds measurement that made this the value.
+    // The probe's own instant, not the controller's: see `observed_at`.
     status.insert("observedAt".to_string(), json!(observed_at));
-    // The scalar the condition's reason is promoted to (review finding M2):
-    // `reachable` alone cannot distinguish `ProbeOutputUnreadable` from
-    // `NoExitCode` from a probe still in flight.
+    // The scalar the condition's reason is promoted to: `reachable` alone
+    // cannot tell `ProbeOutputUnreadable` from `NoExitCode` from a probe in
+    // flight.
     status.insert("reason".to_string(), json!(v.reason));
     status.insert(
         "conditions".to_string(),
@@ -981,19 +809,13 @@ pub fn observed_status_patch(
     json!({ "status": Value::Object(status) })
 }
 
-/// The `/status` merge patch for a probe Job that finished with **no exit code
-/// at all** — the crashed-Job case.
+/// The `/status` merge patch for a probe Job that finished with no exit code
+/// at all: the crashed-Job case.
 ///
-/// The sub-case is [`backup::crash_terminal_state`]'s, shared rather than
-/// re-derived, and the condition is `Unknown`: a pod that never ran wrote no
-/// log, so nothing about the cluster is known either way.
-///
-/// **`reachable` IS CLEARED** (PoC batch 1, O-1). This patch used to leave it
-/// alone, and a merge patch that omits a key keeps it: a connection whose
-/// probe Job lost its pod went on reading `reachable: true` beside
-/// `Reachable=Unknown/NoExitCode` — and a `Restore` admitted a target on that
-/// stale `true`. `clusterId` stays, as the identity last observed (see
-/// [`observed_status_patch`]); `observedAt` is the crashed attempt's instant.
+/// The sub-case is [`backup::crash_terminal_state`]'s and the condition is
+/// `Unknown`: a pod that never ran wrote no log. `reachable` is cleared, so a
+/// `Restore` cannot admit a target on a stale `true`; `clusterId` stays as the
+/// identity last observed, and `observedAt` is the crashed attempt's instant.
 #[must_use]
 pub fn crashed_status_patch(
     cluster: &KafkaCluster,
@@ -1023,24 +845,18 @@ pub fn crashed_status_patch(
     })
 }
 
-/// The `/status` merge patch for a probe Job whose pod the namespace REFUSED
-/// at creation — FX-11.
+/// The `/status` merge patch for a probe Job whose pod the namespace refused at
+/// creation.
 ///
 /// `PodCreationForbidden` and the admission's own words (`refusal` is
 /// [`check::waiting::pod_create_refusal`]'s, already redacted), with the
-/// condition `Unknown`: the probe never ran, so nothing about the cluster is
-/// known either way. `reachable` is cleared and `clusterId` kept, exactly as
-/// [`crashed_status_patch`] does (PoC batch 1, O-1). The difference from that
-/// patch is the whole point: the operator reads the quota, not "no exit code".
+/// condition `Unknown`. `reachable` is cleared and `clusterId` kept, as in
+/// [`crashed_status_patch`]; the operator reads the quota, not "no exit code".
 ///
-/// **NO `observedAt`, AND THAT IS THE CONTRACT** (FX-11 review M1). The field
-/// is "when the probe above was performed", and a refused probe was never
-/// performed. The refusal loop re-probes every [`RE_PROBE_SECS`]; writing the
-/// refusal's instant there would make the last real observation look fresh in
-/// the console's freshness budget for as long as the quota stands. A merge
-/// patch that omits the key leaves that observation's instant in place, so it
-/// ages and goes stale on its own. `seen_at` is the condition's
-/// `lastTransitionTime` and nothing else.
+/// No `observedAt`: a refused probe was never performed, and the refusal loop
+/// re-probes every [`RE_PROBE_SECS`], so writing its instant would keep the
+/// last real observation looking fresh for as long as the quota stands.
+/// `seen_at` is the condition's `lastTransitionTime` and nothing else.
 #[must_use]
 pub fn pod_refused_status_patch(
     cluster: &KafkaCluster,
@@ -1069,12 +885,9 @@ pub fn pod_refused_status_patch(
     })
 }
 
-/// The `/status` merge patch for a refusal this controller made ITSELF, before
-/// any `POST`.
-///
-/// `reachable` is cleared, as [`connection_refused_status_patch`] clears it: a
-/// cluster this controller refuses to probe is one no run may use on the
-/// strength of an earlier reading (PoC batch 1, O-1's class).
+/// The `/status` merge patch for a refusal this controller made itself, before
+/// any `POST`. `reachable` is cleared, as in
+/// [`connection_refused_status_patch`].
 #[must_use]
 pub fn refused_status_patch(
     cluster: &KafkaCluster,
@@ -1092,15 +905,12 @@ pub fn refused_status_patch(
 }
 
 /// The `/status` merge patch for a connection this controller refused to
-/// resolve (PLAT-07.1) — before any Job exists.
+/// resolve, before any Job exists.
 ///
-/// `reachable` IS CLEARED (`null` removes it under a merge patch) and nothing
-/// else about the last probe is. A connection that does not resolve is not one
-/// any run may use, and a `Restore` admits a target only on
-/// `reachable == true`: a stale `true` from a probe an earlier controller ran
-/// with different settings would let a restore reach Job construction on the
-/// strength of an observation this controller does not stand behind.
-/// `clusterId` and `observedAt` stay as the record of that last look.
+/// `reachable` is cleared and nothing else about the last probe is: a `Restore`
+/// admits a target only on `reachable == true`, and a stale `true` from a probe
+/// run with different settings is an observation this controller does not
+/// stand behind. `clusterId` and `observedAt` stay as the record of that look.
 #[must_use]
 pub fn connection_refused_status_patch(
     cluster: &KafkaCluster,
@@ -1117,13 +927,9 @@ pub fn connection_refused_status_patch(
     })
 }
 
-/// Whether this object already carries a TERMINAL refusal.
-///
-/// Only one refusal on this path is terminal — [`TERMINAL_STATE_NAME_TOO_LONG`]
-/// — because `metadata.name` is the one input to a probe that cannot change.
-/// Everything else about a cluster's reachability is a repeating observation,
-/// which is why this is not `status_is_terminal`-shaped on the `Backup` path's
-/// model of "a run that has finished".
+/// Whether this object already carries a terminal refusal. Only
+/// [`TERMINAL_STATE_NAME_TOO_LONG`] is terminal here, because `metadata.name`
+/// is the one input to a probe that cannot change.
 #[must_use]
 pub fn status_is_terminal(cluster: &KafkaCluster) -> bool {
     cluster
@@ -1133,18 +939,12 @@ pub fn status_is_terminal(cluster: &KafkaCluster) -> bool {
         .is_some_and(|r| r == TERMINAL_STATE_NAME_TOO_LONG)
 }
 
-// ---------------------------------------------------------------------------
-// Outcome, requeue, error
-// ---------------------------------------------------------------------------
-
 /// When to look at a cluster again.
 ///
-/// A LOCAL ENUM AND NOT `super::restore::Requeue`. The shape is deliberately
-/// identical — `Action` implements neither `PartialEq` nor a `Debug` a test can
-/// read an interval off, so the interval has to be assertable as a value — but a
-/// probe reconciler that imported the restore reconciler's type would couple two
-/// modules that share no object, and [`action_for`] is the ONE place either of
-/// them becomes an `Action`.
+/// A local enum rather than `super::restore::Requeue`, which has the same
+/// shape: the two modules share no object. `Action` cannot be compared, so the
+/// interval is a value a test asserts, and [`action_for`] is the one place it
+/// becomes an `Action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Requeue {
     /// Nothing will change until something edits this object: `NameTooLong` is
@@ -1154,7 +954,7 @@ pub enum Requeue {
     After(u64),
 }
 
-/// Why a pass formed no verdict ON PURPOSE (FX-19).
+/// Why a pass formed no verdict on purpose.
 ///
 /// Each is a state Kubernetes passes through while it collects a probe Job, or
 /// a race with a newer copy of the object, and none says anything about the
@@ -1168,9 +968,8 @@ pub enum Deferred {
     /// gone.
     JobBeingDeleted,
     /// The probe Job finished, has no terminated `runner` to read, and carries
-    /// the `ttlSecondsAfterFinished` this reconciler sets only after the
-    /// status write that recorded its verdict ([`verdict_recorded`]). Its pod
-    /// was collected after the reading; it is not re-judged as a crash.
+    /// [`VERDICT_RECORDED_ANNOTATION`] ([`verdict_recorded`]): its pod was
+    /// collected after the reading, so it is not re-judged as a crash.
     VerdictRecorded,
     /// The probe pod was listed but was gone by the `pods/log` read (`404`).
     /// The next pass sees the Job as it now stands.
@@ -1197,9 +996,8 @@ pub struct ProbeOutcome {
     pub reason: Option<String>,
     /// Whether the Job was patched with `ttlSecondsAfterFinished`.
     pub ttl_patched: bool,
-    /// When to look again.
     pub requeue: Requeue,
-    /// Why this pass formed no verdict on purpose, when it did not (FX-19).
+    /// Why this pass formed no verdict on purpose, when it did not.
     pub deferred: Option<Deferred>,
 }
 
@@ -1276,29 +1074,17 @@ impl From<kube::Error> for KafkaClusterError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The reconcile
-// ---------------------------------------------------------------------------
-
-/// Patch a FINISHED probe Job's `ttlSecondsAfterFinished` — which is also the
-/// re-probe timer ([`PROBE_TTL_SECONDS`]).
+/// Patch a finished probe Job's `ttlSecondsAfterFinished`, which is also the
+/// re-probe timer ([`PROBE_TTL_SECONDS`]), together with
+/// [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID, in one patch: the Job reads
+/// "verdict recorded" exactly when this reconciler gave it its TTL, and a TTL
+/// an admission policy set at creation is overwritten rather than trusted.
 ///
-/// EVERY CALLER SENDS THIS ONLY AFTER ITS STATUS PATCH RETURNED: a status that
-/// did not land leaves the reconcile — through `?`, or through
-/// [`StatusWrite::Superseded`] — before any TTL exists, so pod garbage
-/// collection never races the read the status records.
-///
-/// Returns whether the patch was applied. A Job that is already gone (`404`)
-/// is the state the TTL exists to reach, not an error (FX-19): there is
-/// nothing left to collect, and its deletion event starts the next probe.
-///
-/// # The TTL and this reconciler's marker travel in ONE patch (FX-19 fix round)
-///
-/// The patch carries [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID beside
-/// [`PROBE_TTL_SECONDS`], so the Job reads "verdict recorded"
-/// ([`verdict_recorded`]) exactly when this reconciler gave it its TTL — and
-/// a TTL some admission policy put on the Job at creation is overwritten with
-/// the re-probe timer rather than trusted.
+/// Every caller sends this only after its status patch returned (a status that
+/// did not land leaves through `?` or [`StatusWrite::Superseded`]), so pod
+/// garbage collection never races the read the status records. Returns whether
+/// the patch was applied; a Job already gone (`404`) is the state the TTL
+/// exists to reach, not an error.
 async fn set_probe_ttl(jobs: &Api<Job>, job: &Job) -> Result<bool, KafkaClusterError> {
     let job_name = job.name_any();
     let uid = job.metadata.uid.clone().unwrap_or_default();
@@ -1317,26 +1103,16 @@ async fn set_probe_ttl(jobs: &Api<Job>, job: &Job) -> Result<bool, KafkaClusterE
     }
 }
 
-/// The probe pod for a Job — D-SEAMS **S6**, `SEC-PODLOG`.
+/// The probe pod for a Job (seam **S6**).
 ///
-/// Found by the two labels in [`backup::pod_selectors`]'s order, and then by
-/// the one selection rule the three execution controllers and the check
-/// framework share ([`check::pod::find_owned_pod_by_selectors`]): a candidate
-/// is read only when its **controller** `ownerReference` is a `Job` carrying
-/// this probe Job's `metadata.uid`.
-///
-/// # What this used to do, and why it is gone
-///
-/// `list.items.into_iter().next()` — the first pod the label selector
-/// returned. The probe's two interface **I14** stdout lines become
-/// `status.reachable` and `status.clusterId` on the `KafkaCluster`, and
-/// `Restore` admission refuses on `reachable: false`
-/// (`TERMINAL_STATE_CLUSTER_NOT_REACHABLE` on the other side), so a pod
-/// planted with `batch.kubernetes.io/job-name=<probe job>` could assert that
-/// an unreachable cluster is reachable, or hold a reachable one shut. Zero
-/// owned pods is now "no pod yet": the crashed-probe branch below, which
-/// clears `reachable` — "nothing about this cluster is known either way" —
-/// and replaces the Job on the re-probe cadence (PoC batch 1, O-1).
+/// Found by the two labels in [`backup::pod_selectors`]'s order, then by the
+/// selection rule the execution controllers and the check framework share
+/// ([`check::pod::find_owned_pod_by_selectors`]): a candidate is read only when
+/// its controller `ownerReference` is a `Job` carrying this probe Job's
+/// `metadata.uid`. The probe's lines become `status.reachable`, which `Restore`
+/// admission reads, so a pod planted with the Job's label must not be able to
+/// assert that an unreachable cluster is reachable. Zero owned pods is "no pod
+/// yet", the crashed-probe branch.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
@@ -1359,43 +1135,24 @@ async fn find_pod(
 /// # The state machine, one pass per event
 ///
 /// 0. **The object's own name is longer than [`name_limit_for_cluster`]** → a
-///    TERMINAL status (condition `Reachable=Unknown`, reason `NameTooLong`) and
-///    **nothing is created**, before any `POST`. The Job the API server would
-///    refuse is a Job whose pods could never be labelled, and a requeue on a
-///    refusal that can never succeed leaves the object with no status at all
-///    (review **MEDIUM-1**, errata **E5d**).
+///    terminal status (`Reachable=Unknown`, `NameTooLong`) and nothing is
+///    created: the API server would refuse the Job, and a requeue on a refusal
+///    that can never succeed leaves the object with no status at all.
 /// 1. **No Job** → `POST` the probe Job; status says a probe is running, and
 ///    the last observation stands.
-/// 2. **Job exists, not finished** → the same running status. Nothing else.
-/// 3. **Job finished, `runner` terminated** → `get` the pod's log through the
-///    `pods/log` subresource, read the two contract lines BY NAME from a bounded
-///    tail, patch `/status` with `reachable`, `clusterId`, `observedAt`, the
-///    scalar `reason` and ONE condition — **and only after that patch returns
-///    200**, `PATCH` the Job with `ttlSecondsAfterFinished`, which is also the
-///    re-probe timer.
+/// 2. **Job exists, not finished** → the same running status. A Job with no
+///    pod after the grace and a `FailedCreate` Event naming it is cancelled,
+///    and `PodCreationForbidden` is written.
+/// 3. **Job finished, `runner` terminated** → read the two contract lines from
+///    the `pods/log` subresource, patch `/status` with `reachable`, `clusterId`,
+///    `observedAt`, the scalar `reason` and one condition, and only after that
+///    patch returns, `PATCH` the Job with its TTL, the re-probe timer.
 /// 4. **Job finished, no terminated state for `runner`** → the crashed-Job
 ///    case, classified by [`backup::crash_terminal_state`], with `reachable`
-///    cleared and the usual TTL, so the Job is replaced on the re-probe cadence
-///    (PoC batch 1, O-1) — or, when the Job never had a pod and its
-///    `FailedCreate` Event says why, `PodCreationForbidden` with the
-///    admission's words, `reachable` cleared and the same TTL (FX-11).
+///    cleared and the usual TTL, or, when the Job never had a pod and its
+///    `FailedCreate` Event says why, `PodCreationForbidden`.
 ///
-/// Step 2 also fails fast: a Job with no pod after 30 seconds and a
-/// `FailedCreate` Event naming it is cancelled, and the same
-/// `PodCreationForbidden` status is written then.
-///
-/// # No clock read in this function
-///
-/// `now` is an argument, as on every other path in this directory: the one clock
-/// read is in the `kube::runtime` wrapper, so every assertion below is over a
-/// value.
-///
-/// # Interface I28 is a declared late binding
-///
-/// Reading the two lines needs `get` on the `pods/log` subresource, and the
-/// ClusterRole that grants it is Task 21's. Every test of this function runs
-/// against [`crate::testing::mock_client`] and needs no RBAC; the first
-/// execution that needs the real rule is Task 24's `just k8s-demo`.
+/// `now` is an argument: the one clock read is in the `kube::runtime` wrapper.
 ///
 /// # Errors
 ///
@@ -1409,15 +1166,11 @@ pub async fn reconcile_cluster(
 }
 
 /// [`reconcile_cluster`], with the runner image and pull policy this controller
-/// process was handed — Task 33, and Task 37's policy beside it.
+/// process was handed.
 ///
-/// The probe Job runs the SAME image the backup and restore runners do
-/// (`logweir cluster-probe` is a subcommand of the one binary), so both
-/// overrides reach it too: on a cluster that did not build the pins, a probe
-/// Job naming the compile-time digest is `ErrImageNeverPull` exactly as a
-/// backup Job would be, and a probe Job naming a `latest` tag under a policy
-/// that never pulls is the same failure again. An unset field is the
-/// compiled-in constant — `job::RUNNER_IMAGE`, `job::IMAGE_PULL_POLICY`.
+/// The probe runs the same image as the backup and restore runners (one
+/// binary), so both overrides reach it too; an unset field is the compiled-in
+/// constant (`job::RUNNER_IMAGE`, `job::IMAGE_PULL_POLICY`).
 ///
 /// # Errors
 ///
@@ -1430,7 +1183,7 @@ pub async fn reconcile_cluster_with_runner_image(
 ) -> Result<ProbeOutcome, KafkaClusterError> {
     match reconcile_cluster_inner(cluster, client, now, runner).await {
         Err(KafkaClusterError::Refused(state, message)) => {
-            // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN, so it cannot be
+            // The one place a self-decided refusal is written, so it cannot be
             // forgotten at one of the refusal sites.
             let name = cluster.name_any();
             let namespace = cluster
@@ -1492,7 +1245,7 @@ async fn reconcile_cluster_inner(
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
     let clusters: Api<KafkaCluster> = Api::namespaced(client.clone(), &namespace);
 
-    // STEP 0. THE OBJECT'S OWN NAME, BEFORE ANY `POST` (errata E5d).
+    // Step 0: the object's own name, before any `POST`.
     if name.len() > name_limit_for_cluster() {
         return Err(KafkaClusterError::Refused(
             TERMINAL_STATE_NAME_TOO_LONG,
@@ -1508,12 +1261,10 @@ async fn reconcile_cluster_inner(
         ));
     }
 
-    // STEP 0b. THE CONNECTION, RESOLVED BEFORE ANY `GET` OR `POST`
-    // (PLAT-07.1). Pure, like the name check above, and NOT terminal: it is
-    // re-evaluated on every reconcile, so a controller upgrade that
-    // understands the object — or a rollback fixed by rolling forward —
-    // clears the refusal with no edit. A refusal creates no Job; it does read
-    // for one it did not create, for the reason the refusal branch states.
+    // Step 0b: the connection, resolved before any `GET` or `POST`. Not
+    // terminal: it is re-evaluated on every reconcile, so a controller that
+    // understands the object clears the refusal with no edit. A refusal creates
+    // no Job, but it does collect one it did not create.
     if let Err(refusal) = connection::resolve(cluster, ConnectionUse::Probe) {
         warn!(
             cluster = %name,
@@ -1538,30 +1289,20 @@ async fn reconcile_cluster_inner(
                 Deferred::StatusSuperseded,
             ));
         }
-        // A REFUSAL DOES NOT MAKE AN EXISTING PROBE JOB DISAPPEAR (review
-        // finding L2). Roll a controller forward while a probe is mid-flight
-        // against an object the new build refuses — the lab's
-        // `missing-reference` was exactly that during PLAT-07.1's live swap —
-        // and the earlier build's Job is still there. Returning `AwaitChange`
-        // without looking at it meant nothing ever gave it a TTL, and `spec`
-        // is immutable, so nothing would look again.
-        //
-        // WHAT IS AND IS NOT DONE WITH IT. The Job is ADOPTED for collection
-        // only: a finished one gets the same `ttlSecondsAfterFinished` STEP 3
-        // gives it, and an in-flight one holds the reconciler on the requeue
-        // clock until it finishes and a later pass can. Its LOG IS NEVER READ
-        // and `reachable` is never written from it — it dialled settings this
-        // build refuses to dial, so a verdict from it would be an observation
-        // the controller does not stand behind, which is the same reason the
-        // refusal clears `reachable` in the first place.
+        // A refusal does not make an existing probe Job disappear: one left by
+        // an earlier build would otherwise never get a TTL, and `spec` is
+        // immutable, so nothing would look again. The Job is adopted for
+        // collection only: a finished one gets the step-3 TTL, an in-flight one
+        // holds the reconciler on the requeue clock. Its log is never read and
+        // `reachable` never written from it: it dialled settings this build
+        // refuses, so its verdict is not one the controller stands behind.
         let existing = jobs
             .get_opt(&job_name)
             .await
             .map_err(KafkaClusterError::Api)?;
         let (ttl_patched, requeue) = match existing {
             None => (false, Requeue::AwaitChange),
-            // FX-19: already being collected — nothing left to do with it, and
-            // its deletion is a watch event.
+            // Already being collected; its deletion is a watch event.
             Some(job) if being_deleted(&job) => (false, Requeue::AwaitChange),
             // Already given its TTL by an earlier pass: the same.
             Some(job) if backup::job_finished(&job) && verdict_recorded(&job) => {
@@ -1617,9 +1358,8 @@ async fn reconcile_cluster_inner(
             });
         }
         let mut spec = runner_job_spec(cluster)?;
-        // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
-        // policy). `None` in either leaves the compiled-in constant in place,
-        // which is what every test that does not pass one sees.
+        // The image and pull-policy overrides; `None` leaves the compiled-in
+        // constant.
         spec.image = runner.image.clone();
         spec.image_pull_policy = runner.image_pull_policy.clone();
         jobs.create(&PostParams::default(), &job::build(&spec))
@@ -1659,17 +1399,13 @@ async fn reconcile_cluster_inner(
         });
     };
 
-    // FX-19: A JOB KUBERNETES IS DELETING IS NOT A PROBE. Its TTL (or anyone
-    // else) is collecting it, and under foreground propagation its pod goes
-    // first — so a finished Job read now is pod-less and would read as a
-    // crash, clearing a `reachable` its own reading recorded minutes ago. No
-    // pod read, no status write, no TTL patch: the last recorded verdict
-    // stands, and the Job's deletion event creates the next probe.
-    //
-    // BOUNDED (FX-19 fix round, review M2): a deletion that stalls — a pod
-    // `Terminating` on a node that went away, a foreign finalizer — keeps the
-    // fixed-name Job, so no newer probe can run; once the last reading is
-    // older than `STALE_AFTER_SECS`, `reachable` is cleared (`ProbeStale`).
+    // A Job Kubernetes is deleting is not a probe: under foreground
+    // propagation its pod goes first, so it would read as a crash and clear a
+    // `reachable` its own reading recorded. No pod read, no status write, no
+    // TTL patch; the Job's deletion event creates the next probe. Bounded: a
+    // stalled deletion keeps the fixed-name Job and so blocks the next probe,
+    // and once the last reading is older than `STALE_AFTER_SECS`, `reachable`
+    // is cleared (`ProbeStale`).
     if being_deleted(&job) {
         debug!(
             cluster = %name,
@@ -1699,12 +1435,11 @@ async fn reconcile_cluster_inner(
         .await;
     }
 
-    // STEP 2. Running.
+    // Step 2: running.
     if !backup::job_finished(&job) {
-        // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at all
-        // while the Job's own status counts a pod or the Job is younger than
-        // the 30-second grace; otherwise one pod list and, when it finds none,
-        // one events list by the Job's UID.
+        // A pod the namespace refused is failed fast. No request while the
+        // Job's status counts a pod or the Job is within the grace; otherwise
+        // one pod list and, when it finds none, one events list by the Job's UID.
         if let Some(refusal) = check::refused_pod_creation(client, &namespace, &job, now)
             .await
             .map_err(KafkaClusterError::Api)?
@@ -1779,25 +1514,19 @@ async fn reconcile_cluster_inner(
     }
 
     let found = find_pod(client, &namespace, &job_name, job.uid().as_deref()).await?;
-    // The pod and its code travel together; see the `Backup` twin for why the
-    // `pods/log` call below must hold a `&Pod` and not an `Option` (review
-    // finding R6).
+    // The pod and its code travel together, so the `pods/log` call below holds
+    // a `&Pod` and not an `Option` (as on the `Backup` path).
     let terminated = found
         .pod
         .as_ref()
         .and_then(|p| backup::terminated_exit_code(p).map(|code| (p, code)));
 
-    // STEP 4. The crashed-Job case, before the happy path, because the happy
-    // path needs a pod whose container terminated and this branch is "there is
-    // none".
+    // Step 4: the crashed-Job case, before the happy path, which needs a pod
+    // whose container terminated.
     let Some((pod, exit_code)) = terminated else {
-        // FX-19: A JOB WHOSE VERDICT IS ALREADY RECORDED IS NOT RE-JUDGED. It
-        // carries the TTL this reconciler sets only after the status write
-        // that recorded its reading, its crash or its refused pod — so a pod
-        // it no longer has was collected AFTER that verdict, and reading the
-        // absence as a crash would clear the `reachable` the reading wrote.
-        // The last recorded verdict stands until the next probe answers; the
-        // Job's deletion starts that probe.
+        // A Job whose verdict is already recorded is not re-judged: a pod it no
+        // longer has was collected after that verdict, and reading the absence
+        // as a crash would clear the `reachable` the reading wrote.
         if verdict_recorded(&job) {
             debug!(
                 cluster = %name,
@@ -1821,15 +1550,15 @@ async fn reconcile_cluster_inner(
             )
             .await;
         }
-        // FX-11: A JOB THAT NEVER HAD A POD, AND WAS TOLD WHY. Read before the
-        // crash classification, which can only say `NoExitCode` for "no pod".
+        // A Job that never had a pod and was told why. Read before the crash
+        // classification, which can only say `NoExitCode` for "no pod".
         let refusal = if found.pod.is_none() && found.contested.is_empty() {
             check::finished_without_pod(client, &namespace, &job, now).await
         } else {
             None
         };
         if let Some(refusal) = refusal {
-            // THE REFUSAL'S INSTANT, for the condition only: it is not an
+            // The refusal's instant, for the condition only: it is not an
             // observation of the cluster, so it never reaches `observedAt`.
             let seen = observed_at(&job, None, now);
             let wrote = patch_status_if_changed(
@@ -1846,8 +1575,8 @@ async fn reconcile_cluster_inner(
                     Deferred::StatusSuperseded,
                 ));
             }
-            // ONCE PER JOB (FX-19): the fail-fast pass in step 2 usually
-            // recorded this refusal already, and then this pass changes nothing.
+            // Once per Job: the fail-fast pass in step 2 usually recorded this
+            // refusal already, and then this pass changes nothing.
             warn_when_first_recorded!(
                 wrote == StatusWrite::Changed,
                 cluster = %name,
@@ -1859,12 +1588,11 @@ async fn reconcile_cluster_inner(
                  at creation; `reachable` is cleared and the Job gets the usual TTL, so the \
                  next probe runs on the ordinary cadence"
             );
-            // ONLY NOW, as on the happy path: the status that names the
-            // refusal is on the server before the Job (and the Event's
-            // subject) can be collected. The TTL is also the re-probe timer,
-            // so a quota that is lifted is noticed within one cadence, and a
-            // quota that is not costs one refused Job per cadence — never a
-            // retry storm.
+            // Only now, as on the happy path: the status naming the refusal is
+            // on the server before the Job (and the Event's subject) can be
+            // collected. The TTL is the re-probe timer, so a lifted quota is
+            // noticed within one cadence and a standing one costs one refused
+            // Job per cadence.
             let ttl_patched = set_probe_ttl(&jobs, &job).await?;
             return Ok(ProbeOutcome {
                 job_name,
@@ -1897,9 +1625,8 @@ async fn reconcile_cluster_inner(
                 Deferred::StatusSuperseded,
             ));
         }
-        // A REAL CRASH IS A WARN, ONCE PER JOB (FX-19): on the pass whose
-        // write recorded it. The TTL below then marks the verdict recorded,
-        // and every later pass over this Job takes the branch above.
+        // A real crash is a WARN once per Job, on the pass whose write recorded
+        // it; the TTL below marks the verdict recorded.
         warn_when_first_recorded!(
             wrote == StatusWrite::Changed,
             cluster = %name,
@@ -1912,13 +1639,9 @@ async fn reconcile_cluster_inner(
              Nothing about this cluster is known either way: `reachable` is cleared, and the Job \
              gets the usual TTL so the next probe runs on the ordinary cadence"
         );
-        // THE JOB IS REPLACED ON THE RE-PROBE CADENCE (PoC batch 1, O-1). This
-        // branch used to stop here: the terminal, pod-less Job was never given a
-        // TTL, every requeue re-read it, and the connection was never probed
-        // again — all twelve PoC connections sat at `NoExitCode` for a week.
-        // The TTL is the re-probe timer, exactly as on the happy path, and it is
-        // patched only after the status above landed. Bounded: one probe Job per
-        // `PROBE_TTL_SECONDS` + requeue, however long the crash cause lasts.
+        // The TTL replaces the Job on the re-probe cadence; without it the
+        // pod-less Job would be re-read on every requeue and the connection
+        // never probed again. Patched only after the status above landed.
         let ttl_patched = set_probe_ttl(&jobs, &job).await?;
         return Ok(ProbeOutcome {
             job_name,
@@ -1932,17 +1655,14 @@ async fn reconcile_cluster_inner(
         });
     };
 
-    // STEP 3. Read the two lines through the `pods/log` subresource — the only
-    // route to a runner's stdout, and the RBAC rule that grants it is Task 21's
-    // (interface I28, a declared late binding).
+    // Step 3: read the two lines through the `pods/log` subresource, the only
+    // route to a runner's stdout.
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     let log = match runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL).await {
         Ok(log) => log,
-        // FX-19: THE POD WENT BETWEEN THE LIST AND THE READ — collected with
-        // its Job, or removed by hand. Nothing was read, so nothing is
-        // written: the next pass sees the Job as it now stands (being
-        // deleted, or pod-less and judged by step 4).
+        // The pod went between the list and the read. Nothing was read, so
+        // nothing is written: the next pass sees the Job as it now stands.
         Err(kube::Error::Api(e)) if e.code == 404 => {
             debug!(
                 cluster = %name,
@@ -1958,11 +1678,9 @@ async fn reconcile_cluster_inner(
     let v = verdict(&report);
     let observed = observed_at(&job, Some(pod), now);
 
-    // FX-19 fix round (review M2): A READING TOO OLD TO VOUCH FOR IS NOT
-    // WRITTEN AS A VERDICT. It is a Job its TTL never collected, or one a
-    // controller that was down for a while finds finished long ago; either
-    // way no newer probe has run, so `reachable` is cleared (`ProbeStale`)
-    // instead of re-asserted, and the Job gets its TTL so the next probe runs.
+    // A reading too old to vouch for is not written as a verdict: no newer
+    // probe has run, so `reachable` is cleared (`ProbeStale`) and the Job gets
+    // its TTL so the next probe runs.
     if reading_is_stale(observed, now) {
         let taken = observed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let detail = format!(
@@ -2016,7 +1734,7 @@ async fn reconcile_cluster_inner(
         observed_status_patch(cluster, &v, exit_code, observed),
     )
     .await?;
-    // ONLY ONCE THE VERDICT LANDED. A superseded write ends the pass here, so
+    // Only once the verdict landed: a superseded write ends the pass here, so
     // no TTL exists for a reading the status does not hold.
     if wrote == StatusWrite::Superseded {
         return Ok(ProbeOutcome::deferred(
@@ -2039,12 +1757,9 @@ async fn reconcile_cluster_inner(
         );
     }
 
-    // ONLY NOW. The `?` and the `Superseded` return above are what make this
-    // ordering a guarantee rather than a comment: a status patch that did not
-    // land leaves this function before any TTL exists, so pod garbage
-    // collection cannot start on a probe whose log was never read. The TTL is
-    // also the re-probe timer — see `PROBE_TTL_SECONDS`. A Job that already
-    // carries it (an earlier pass recorded this verdict) is not patched again.
+    // Only now: a status patch that did not land has left this function, so pod
+    // garbage collection cannot start on a probe whose log was never read. A
+    // Job an earlier pass already marked is not patched again.
     let ttl_patched = if verdict_recorded(&job) {
         false
     } else {
@@ -2079,10 +1794,10 @@ async fn reconcile_cluster_inner(
     })
 }
 
-/// A pass that forms no verdict on purpose (FX-19) — unless the last reading
-/// has outlived [`STALE_AFTER_SECS`], in which case it is cleared
-/// ([`stale_status_patch`]) and that is logged at WARN once per state, on the
-/// write that recorded it. `detail` names why no newer probe can answer.
+/// A pass that forms no verdict on purpose, unless the last reading has
+/// outlived [`STALE_AFTER_SECS`]; then it is cleared ([`stale_status_patch`])
+/// and logged at WARN once, on the write that recorded it. `detail` names why
+/// no newer probe can answer.
 #[allow(clippy::too_many_arguments)]
 async fn defer_or_mark_stale(
     clusters: &Api<KafkaCluster>,
@@ -2135,8 +1850,8 @@ async fn defer_or_mark_stale(
     Ok(outcome)
 }
 
-/// The `kube::runtime` reconcile entry point. **THE ONE CLOCK READ IN THIS FILE
-/// IS HERE.**
+/// The `kube::runtime` reconcile entry point, and the one clock read in this
+/// file.
 async fn reconcile(
     cluster: Arc<KafkaCluster>,
     ctx: Arc<Context>,
@@ -2149,17 +1864,10 @@ async fn reconcile(
 
 /// Requeue on an error, naming it. Never a panic and never a drop.
 ///
-/// **A TRANSPORT ERROR REQUEUES; A FALSE PROBE DOES NOT REACH HERE.** `reachable:
-/// false` is an OUTCOME with a status written for it and a re-probe scheduled by
-/// the Job's TTL, not an error — the distinction interface I14 exists to make.
-///
-/// **EVERY ERROR THAT REACHES HERE IS A WARN** (FX-19 fix round, review
-/// LOW-2). The races of a Job being collected — the pod gone by the log read,
-/// the Job gone by its TTL patch, a status write that lost its precondition —
-/// are answered IN PLACE as outcomes and never get here. Anything else,
-/// including a `404` or a `409` from any other call (a `/status` subresource a
-/// bad CRD upgrade dropped, a `jobs.create` that keeps answering
-/// `AlreadyExists`), is not a known race and stays visible.
+/// `reachable: false` is an outcome, not an error, and never reaches here.
+/// Every error that does is a WARN: the races of a Job being collected are
+/// answered in place as outcomes, so anything else, including a `404` or a
+/// `409` from any other call, is not a known race and stays visible.
 fn error_policy(cluster: Arc<KafkaCluster>, err: &KafkaClusterError, _ctx: Arc<Context>) -> Action {
     log_reconcile_error(&cluster.name_any(), err);
     Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
@@ -2177,31 +1885,24 @@ pub fn log_reconcile_error(cluster: &str, err: &KafkaClusterError) {
 
 /// Run the `KafkaCluster` probe controller until the process ends.
 ///
-/// `Api::all`, and it `owns` the probe Jobs it creates, so a probe pod
-/// terminating — and the Job's own TTL collection, which is when the next probe
-/// is due — wakes this reconciler through the Job rather than only on the
-/// requeue timer.
-///
-/// It takes NO archive handle. A probe reads no archive, so this is the one
-/// controller in the crate whose `Context` needs nothing but a client, and
-/// `crates/weirkeeper/src/controllers/kafka_cluster.rs` is therefore not one of
-/// interface **I13**'s files.
+/// It `owns` the probe Jobs it creates, so a probe pod terminating and the
+/// Job's TTL collection (when the next probe is due) wake this reconciler, not
+/// only the requeue timer. It takes no archive handle: a probe reads no archive,
+/// so this file is not one of interface **I13**'s.
 pub fn controller(
     client: kube::Client,
     runner_image: job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
+    // One watch per watched namespace: the whole cluster unless
+    // `LOGWEIR_WATCH_NAMESPACES` names namespaces, and then an `Api::namespaced`
+    // watch each, the only shape the scoped chart's RoleBindings permit.
     crate::scope::run_everywhere(move |namespace| {
         controller_in(client.clone(), runner_image.clone(), namespace)
     })
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     runner_image: job::RunnerImage,
@@ -2212,9 +1913,8 @@ fn controller_in(
     let ctx = Arc::new(Context {
         client,
         archive: None,
-        // Task 33 and Task 37: this reconciler creates no BACKUP Job, but it
-        // does create the probe Job, and that Job runs the runner image under
-        // the runner pull policy.
+        // No backup Job here, but the probe Job runs the runner image under the
+        // runner pull policy.
         runner_image,
     });
     async move {

@@ -87,10 +87,9 @@ fn purge_topics_in_the_spec_exits_3_at_either_value() {
 }
 
 /// This asserts on the MESSAGE, not the code alone. `phase0_admit::run` performs
-/// the two purely-local checks first (step 5 reorders it so), but this test runs
+/// the two purely-local checks first, but this test runs
 /// with no broker up, so a bare `assert_eq!(code, 3)` would pass even if
-/// `check_topic_mapping_coverage` were deleted — a false green on the guard the
-/// task exists to prove.
+/// `check_topic_mapping_coverage` were deleted.
 #[test]
 fn an_unmapped_selected_topic_exits_3_on_the_mapping_check_not_on_a_dead_broker() {
     let spec = std::fs::read_to_string("../../examples/drill.yaml")
@@ -108,20 +107,13 @@ fn an_unmapped_selected_topic_exits_3_on_the_mapping_check_not_on_a_dead_broker(
     );
 }
 
-// ------------------------------------------------- Task 2 review carry F2
-// **G-GLOB and G-EXP at phase 0.**
+// ------------------------------------------------- G-GLOB and G-EXP at phase 0
 //
-// Both properties were already enforced by `render_restore::render`. That is
-// not where a plan gets REFUSED. A wildcard such as `orders*` in a spec was
-// admitted at phase 0 and refused only in `preflight` — at phase 5, as
-// `EngineError::Operational`, which is exit **1** with no `refusal-reason=`
-// line — where Global Constraint 11 reserves exit 3 for "refused by a guard,
-// before anything runs" and requires the reason line on every guard refusal.
-//
-// Ruling R-E (`logweir-engine-oso/src/engine.rs:243-250`) is not reopened: a
-// renderer refusal REACHED AT PHASE 5 is exit 1, because by then phases 0-5
-// have run. The defect was the missing phase-0 arm, and these two tests are
-// what stop it being deleted again.
+// `render_restore::render` enforces both, but at phase 5, as
+// `EngineError::Operational` (exit 1, no `refusal-reason=` line); Global
+// Constraint 11 reserves exit 3 for "refused by a guard, before anything
+// runs". Ruling R-E stands: a renderer refusal REACHED AT PHASE 5 is exit 1,
+// because by then phases 0-5 have run. These two tests hold the phase-0 arm.
 
 /// `(exit_code, stdout_text, stderr_text)`, with the code read from
 /// `Command::status()` and both streams captured into real FILES — no pipe
@@ -277,7 +269,7 @@ fn a_plan_that_names_a_notification_sink_exits_3_naming_notifications() {
     );
 }
 
-/// **C15 at phase 0** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
+/// **C15 at phase 0.** An `http://` archive endpoint
 /// with `allow_http: false` exits 3 with its reason line before anything runs:
 /// the pinned engine (0.22.0 and later) derives plaintext from the endpoint's
 /// scheme, so the rendered `false` would not stop a plaintext dial. The
@@ -362,8 +354,8 @@ fn a_dollar_brace_in_a_spec_topic_exits_3_at_phase_0_naming_the_expansion() {
     assert!(stderr.contains("orders${X}"), "{stderr}");
 }
 
-/// **FX-20 fix round (review F1), on the restore runner.** The reviewer's
-/// probe: keep the plan's bucket, drop its endpoint (so the region becomes the
+/// **On the restore runner.** Keep the plan's bucket, drop its endpoint (so
+/// the region becomes the
 /// host, `s3.<region>.amazonaws.com`) and set the region to `x@<sentinel>/`.
 /// An APPROVED plan of that shape exits 3 by name (`StorageRegionInvalid`,
 /// `refusal-reason=GuardRefused`) for the source archive and for the evidence

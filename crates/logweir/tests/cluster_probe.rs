@@ -30,9 +30,7 @@ use support::doubles::Reader;
 /// one-character value.
 const CLUSTER_ID: &str = "ALLOWED0000000000000000";
 
-// ---------------------------------------------------------------------------
-// The double
-// ---------------------------------------------------------------------------
+// The double.
 
 /// A `ClusterReader` that answers `cluster_id()` from a canned `Result` and
 /// reports an EMPTY topic list.
@@ -110,16 +108,14 @@ fn code_only(src: &str) -> String {
         .join("\n")
 }
 
-// ---------------------------------------------------------------------------
-// Interface I14 — the two lines and the exit map
-// ---------------------------------------------------------------------------
+// Interface I14 — the two lines and the exit map.
 
 /// **Interface I14, both arms.** A reachable cluster prints
 /// `cluster-id=<id>` then `reachable=true` and exits **0**; an unreachable one
 /// prints `cluster-id=` (EMPTY) then `reachable=false` and exits **1**.
 ///
 /// THE WHOLE STRING IS COMPARED, IN ORDER. Two `contains` calls would pass on
-/// the lines printed in the other order, which is one of this task's mutants —
+/// the lines printed in the other order,
 /// and a controller that reads by key name would survive the swap while the
 /// CONTRACT would have silently become two spellings of itself.
 ///
@@ -267,12 +263,10 @@ fn the_probe_reads_no_allowlist_and_no_approver_key() {
     // And the flags are not on the subcommand either — the other half of the
     // same claim, asserted against the parser rather than against the source.
     //
-    // THE KIND IS ASSERTED AND NOT MERELY `is_err()`, and the mutation round is
-    // why: a plant that added ONE of the two as a required flag made the whole
-    // command line fail for the OTHER one's absence, so `is_err()` was true and
-    // the row passed while `doctor`'s first mandatory path had landed on the
-    // probe. `UnknownArgument` is the claim — this parser has never heard of the
-    // flag — and nothing else satisfies it.
+    // THE KIND IS ASSERTED AND NOT MERELY `is_err()`: adding ONE of the two
+    // as a required flag makes the whole command line fail for the OTHER
+    // one's absence. `UnknownArgument` is the claim — this parser has never
+    // heard of the flag — and nothing else satisfies it.
     for flag in ["--allowed-clusters", "--approver-key"] {
         // `match` and not `expect_err`: `Cli` derives no `Debug`, so the `Ok`
         // arm has nothing to print.
@@ -296,24 +290,10 @@ fn the_probe_reads_no_allowlist_and_no_approver_key() {
     }
 }
 
-// THE ONE-CONSTRUCTION-SITE ROW THAT STOOD HERE IS GONE, AND IT IS NOT LOST.
-//
-// Task 15c wrote `probe_builds_its_auth_through_the_one_construction_site` in
-// this file because Task 6's guard iterated a FIXED three-file list and so did
-// not extend to `probe.rs` — disclosed at the time, and raised by Task 15c's
-// review as finding **M-2**. Task 16b replaced that list with a DERIVED walk
-// over `crates/logweir/src/**` and `crates/weirkeeper/src/**`:
+// The one-construction-site rule for `probe.rs` (auth through
+// `AuthConfig::from_spec`, no `AuthConfig` arm pinned in code, the dialling
+// constructor named only in `fn dial(`) is asserted by
 // `no_network_in_unit_tests.rs::the_one_construction_site_rule_is_derived_from_the_tree`.
-//
-// Every claim this row made is asserted there, for `probe.rs` among the four
-// sanctioned sites and no longer only for it: the file builds its auth through
-// `AuthConfig::from_spec`, it pins neither `AuthConfig` arm in code, and
-// EXACTLY ONE function in it names the dialling constructor — `fn dial(`, the
-// impure wrapper, not `outcome`, not `probe`, not `run`. The `fn_bodies`
-// brace-counter that made the last claim possible moved with it, verbatim.
-//
-// ONE GUARD AND ONE ALLOWLIST was the point: a tree carrying two guards for
-// one rule is a tree where the next site is added to neither.
 
 /// The dial is BOUNDED, and the bound is shorter than the reader's own.
 ///
@@ -399,14 +379,12 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
          reading the log always finds an answer"
     );
 
-    // PLAINTEXT WITH `--tls` IS REFUSED, NOT DIALLED IN THE CLEAR (PLAT-07.1).
-    // This arm used to return `AuthSpec::Plaintext` and ignore the flag, so a
-    // `KafkaCluster` whose `auth.tls` was true was probed over PLAINTEXT and
-    // reported `reachable: true` about a transport nobody asked for. TLS
-    // without SASL (`SSL`) is a mode the plan grammar cannot carry, so the
-    // saved-connection contract refuses the combination at both ends.
+    // PLAINTEXT WITH `--tls` IS REFUSED, NOT DIALLED IN THE CLEAR: a probe
+    // over PLAINTEXT would report `reachable: true` about a transport nobody
+    // asked for. TLS without SASL (`SSL`) is a mode the plan grammar cannot
+    // carry, so the saved-connection contract refuses it at both ends.
     //
-    // KILLS: restore the `tls`-ignoring plaintext arm.
+    // KILLS: a `tls`-ignoring plaintext arm.
     let err = auth_spec(AUTH_MODE_PLAINTEXT, None, true).expect_err("TLS without SASL");
     let text = err.to_string();
     assert!(
@@ -420,9 +398,8 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
         "and it is still an answer, printed at once: a refusal is not a hang"
     );
 
-    // An unknown mode: the same shape, naming the mode and the five it knows.
-    // (`mtls` was this row's example of an unknown mode until PROD-01.3 made
-    // it one of the five; OAUTHBEARER is deferred by OD-3.)
+    // An unknown mode: the same shape, naming the mode and the five it knows
+    // (OAUTHBEARER is deferred by OD-3).
     let err = auth_spec("oauthbearer", None, false).expect_err("oauthbearer is deferred");
     let text = err.to_string();
     assert!(
@@ -432,7 +409,7 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
         "the diagnostic names what it got and what it accepts; got {text}"
     );
 
-    // PROD-01.3: the three new modes map onto the spec's own spellings…
+    // The three credentialed modes map onto the spec's own spellings…
     assert_eq!(
         auth_spec("scramSha256", Some("u"), false).expect("scram-256"),
         logweir_core::spec::AuthSpec::ScramSha256 {
@@ -468,7 +445,7 @@ fn the_auth_mode_flag_maps_onto_the_spec_spellings() {
 }
 
 /// The projected private CA reaches the probe through ONE variable and no
-/// flag, exactly as the password does — PLAT-07.1.
+/// flag, exactly as the password does.
 #[test]
 fn the_ca_file_comes_from_the_environment_and_never_from_the_argv() {
     assert_eq!(

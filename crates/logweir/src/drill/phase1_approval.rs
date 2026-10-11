@@ -47,18 +47,9 @@ pub fn pinned_set_refusal(key_id: &str, pinned: &[String]) -> String {
 /// a guard, **before anything ran**", so the check has its own entry point
 /// here beside the approval logic it belongs to.
 ///
-/// **`drill::execute`, not `drill::execute_with_outcome`** (Task 22 fix round
-/// 1, MED-1): the latter takes an already-built `Ctx`, and `drill::context`
-/// constructs the rdkafka client, whose construction alone begins bootstrap
-/// connections. Called from there, this refusal arrived AFTER the target had
-/// been contacted at TCP level — measured against a closed port. Called from
-/// `execute`, beside I11's `check_projected_credentials()`, it arrives before
-/// any client exists, which is what the message claims.
-///
-/// Keeping it out of [`verify`]'s signature also keeps that signature at four
-/// arguments, which is why `crates/logweir/tests/approval.rs`'s existing suite
-/// compiles and passes **unmodified**: omitting the flag is not merely
-/// permitted, it is a zero-diff property of every existing caller.
+/// Called from `drill::execute`, beside I11's `check_projected_credentials()`,
+/// before `drill::context` constructs the rdkafka client, whose construction
+/// alone begins bootstrap connections.
 ///
 /// # What is compared
 ///
@@ -70,8 +61,7 @@ pub fn pinned_set_refusal(key_id: &str, pinned: &[String]) -> String {
 ///
 /// # Errors
 ///
-/// * `pinned` empty → `Ok(())`. **Omitting the flag preserves today's
-///   behaviour exactly.**
+/// * `pinned` empty → `Ok(())`: omitting the flag changes nothing.
 /// * The approver key cannot be read or parsed → [`DrillError::Operational`]
 ///   (exit 1), matching [`verify`]'s routing for the same failure: a broken
 ///   input to the tool is not a statement about the plan's authorisation.
@@ -118,26 +108,24 @@ pub fn admit_pinned_approver_key_bytes(
 pub struct Approved {
     pub approval: ApprovalInfo,
     pub validated_at: DateTime<Utc>,
-    /// **PROD-15.1.** The approval subject inside the VERIFIED bytes — an
+    /// The approval subject inside the VERIFIED bytes — an
     /// ordinary approval, or `originalName` — which the runner holds to the
     /// plan before phase 0 (`logweir_core::original_name::check_approval_subject`).
     pub approval_subject: ApprovalSubject,
-    /// **PROD-15.1.** Which document authorised the run, in the scorecard's
+    /// Which document authorised the run, in the scorecard's
     /// `target.original_name.approval_mode` words: `v1Approval`, `governed`,
     /// `ordinary`, or `standing` (a rehearsal, which never authorises an
     /// original-name restore).
     pub approval_mode: &'static str,
-    /// **OD-10.** The typed topic names a one-person confirmation (an
+    /// The typed topic names a one-person confirmation (an
     /// authorization document v2 under an `Ordinary` policy) carries, as
     /// signed; `None` for every other document. Held to the plan's topics by
     /// the caller (`logweir_core::original_name::check_typed_confirmation`).
     pub original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 }
 
-// THE VOCABULARY IS `logweir_core::scorecard`'s, AND ONLY ITS (PROD-16.2).
-// These are the same constants under the names this module has always used:
-// the word a scorecard signs is defined once, and the writer cannot spell a
-// member the readers do not hold.
+// The vocabulary is `logweir_core::scorecard`'s, re-exported under this
+// module's names: the writer cannot spell a member the readers do not hold.
 
 /// [`Approved::approval_mode`] for a per-run approval document v1.
 pub const APPROVAL_MODE_V1: &str = logweir_core::scorecard::APPROVAL_MODE_V1;
@@ -147,9 +135,9 @@ pub const APPROVAL_MODE_STANDING: &str = logweir_core::scorecard::APPROVAL_MODE_
 /// `Governed` policy: the console's confirmation plus an approver's key.
 pub const APPROVAL_MODE_GOVERNED: &str = logweir_core::scorecard::APPROVAL_MODE_GOVERNED;
 /// [`Approved::approval_mode`] for an authorization document v2 under an
-/// `Ordinary` policy: a one-person confirmation (OD-10).
+/// `Ordinary` policy: a one-person confirmation.
 pub const APPROVAL_MODE_ORDINARY: &str = logweir_core::scorecard::APPROVAL_MODE_ORDINARY;
-/// **PROD-16.2.** [`Approved::approval_mode`] for an authorization document
+/// [`Approved::approval_mode`] for an authorization document
 /// v2 under a `Governed` policy whose `approverSignature` is `Console`: the
 /// console's confirmation of the requester, and a SECOND PERSON who signed in
 /// and approved, named inside the bytes the console signed. Not
@@ -168,20 +156,13 @@ fn signed_subject(value: Option<&str>) -> Result<ApprovalSubject, DrillError> {
 /// because v0.1 has no ephemeral-target provisioning, so every target is a
 /// pre-existing cluster and that disjunct would be dead code (spec §9.3 p1).
 ///
-/// Exit-code routing (Task 15 fix round 1, review finding F1 — the exit-code
-/// contract is a Global Constraint and overrides the brief's frozen
-/// `Result<Approved, GuardRefusal>` signature): only a genuine refusal — the
-/// signature does not verify over the presented key, or `plan_hash` names a
-/// different plan — becomes `DrillError::Guard` (exit 3, "the plan is
-/// refused, nothing ran"). Everything where Logweir could not do its own
-/// job — the approval file or its `.sig` sidecar cannot be read or parsed,
-/// or the approver key is unreadable/malformed, or the sidecar's signature
-/// bytes are structurally corrupt (`EvidenceError::Malformed`, which that
-/// crate's own doc comment instructs callers to treat as operational, not as
-/// evidence of tampering) — becomes `DrillError::Operational` (exit 1,
-/// retry), matching the routing `crates/logweir/src/verify.rs` already uses
-/// for the same `logweir_evidence::Error` variants over the sibling
-/// scorecard-verify path.
+/// Exit-code routing: only a genuine refusal (the signature does not verify
+/// over the presented key, or `plan_hash` names a different plan) becomes
+/// `DrillError::Guard` (exit 3). Where Logweir could not do its own job (an
+/// unreadable or unparsable approval, sidecar or approver key, or a
+/// structurally corrupt signature, `EvidenceError::Malformed`) it is
+/// `DrillError::Operational` (exit 1, retry), the routing
+/// `crates/logweir/src/verify.rs` uses for the same variants.
 pub fn verify(
     spec_text: &str,
     approval_json: &Path,
@@ -259,13 +240,11 @@ pub fn verify_bytes(
     }
 
     let key_id = key.key_id();
-    // Derived from the ACTUAL approver key compared to the ACTUAL scorecard
-    // signing key — never a caller-supplied flag or a bare string a caller
-    // could get stale or wrong (Task 15 fix round 1, review finding F2). Not
-    // refused either way — LABELLED. Both verifiers and `drill show` surface
-    // it.
+    // Derived from the actual approver key compared to the actual scorecard
+    // signing key, never a caller-supplied flag. Not refused either way:
+    // labelled, and both verifiers and `drill show` surface it.
     let self_attested = key_id == signing_key.key_id();
-    // PROD-15.1: the subject inside the verified bytes; held to the plan by
+    // The subject inside the verified bytes; held to the plan by
     // the caller, which has the plan parsed.
     let approval_subject = signed_subject(doc.approval_subject.as_deref())?;
 
@@ -321,8 +300,8 @@ fn verify_under(
     }
 }
 
-/// **Authorization document v2 at the runner** — PLAT-19.2, D0: "the runner
-/// revalidates it before any data-plane work".
+/// **Authorization document v2 at the runner**: D0's "the runner revalidates
+/// it before any data-plane work".
 ///
 /// Every input is a mounted bundle member the immutable Job template pins by
 /// digest (`validate_execution_contract` has already compared all of them);
@@ -341,8 +320,8 @@ fn verify_under(
 ///    as the authoriser is not an ordinary run. `Governed`: the approver key
 ///    is a DIFFERENT key and its signature over the same bytes verifies.
 ///
-///    **PROD-16.2 — `Governed`, and the SNAPSHOT says `approverSignature:
-///    Console`:** the rule "the console key cannot be the approver" is
+///    **`Governed`, and the snapshot says `approverSignature: Console`:** the
+///    rule "the console key cannot be the approver" is
 ///    relaxed, here and only here. The mounted approver key must then BE the
 ///    console key, and the second person is inside the bytes that key signed:
 ///    step 3's [`approval_policy::check_binding`] has already required
@@ -405,7 +384,7 @@ pub fn verify_authorization_v2_bytes(
     let confirmation_id = confirmation.key_id();
     let approver_id = approver.key_id();
     let guard = |text: String| DrillError::Guard(GuardRefusal(text));
-    // **THE RUNNER DECIDES FROM THE TABLE** (PROD-16.2):
+    // The runner decides from the table:
     // `ApprovalPolicy::route` reads the snapshot's `(mode, approverSignature)`
     // pair once, and each row below says which key may be the approver, whose
     // name the evidence carries, and which instant is the approval's. A pair

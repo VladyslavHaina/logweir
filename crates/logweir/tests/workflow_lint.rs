@@ -82,18 +82,15 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
         }
     }
     // THREE: the controller, the console and the runner, each built per
-    // matrix architecture (the `logweir-ui` image was withdrawn in v1,
-    // PROD-17.1 C4). The number is asserted rather than derived because a
+    // matrix architecture. The number is asserted rather than derived because a
     // build step that stopped running is an image that stops being tested
     // while every other row here stays green.
     assert_eq!(builds, 3);
     // AND EACH COMPILING IMAGE HAS ITS FAST-FAILING IDENTITY CHECK BEFORE THE
     // LOGIN STEP. `scripts/ci-images.sh check` runs the full gates a moment
-    // later; these two exist because they fail in seconds and NAME the defect —
-    // 457f651 added the first after RET-NOIMAGE shipped a retention Job whose
-    // command resolved to nothing, and review finding L1 then established that
-    // the version STRING has to be inspected, because a COPY from the wrong
-    // source exits 0 while printing another binary's name.
+    // later; these fail in seconds and NAME the defect, and the version STRING
+    // is inspected because a COPY from the wrong source exits 0 while printing
+    // another binary's name.
     for (name, marker) in [
         (
             "retention",
@@ -150,7 +147,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
     names.sort();
     assert_eq!(
         names,
-        // compat-weekly.yml (PROD-01.2a) runs e2e rows weekly and publishes
+        // compat-weekly.yml runs e2e rows weekly and publishes
         // nothing: contents read, no secret, no registry login.
         [
             "ci.yml",
@@ -178,7 +175,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
         &|s| s["run"] == "bash scripts/ci-images.sh promote",
         "image promotion",
     );
-    // THE ACTION ON THE CREDENTIALED PATH IS PINNED BY COMMIT (review L6):
+    // THE ACTION ON THE CREDENTIALED PATH IS PINNED BY COMMIT:
     // the Helm it installs receives the Docker Hub token on stdin.
     let helm = position(
         &|s| {
@@ -220,7 +217,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
         ci["jobs"]["publish"]["with"]["tag"].as_str(),
         Some("sha-${{ github.sha }}")
     );
-    // A RELEASE publishes the chart package it LISTS (PROD-14.0): packaged once
+    // A RELEASE publishes the chart package it LISTS: packaged once
     // by `release.sh assemble`, pinned by digest, and pushed as those bytes by
     // `ci-images.sh chart-push` after the version tags exist, with the same
     // credentials and the same commit-pinned Helm as the main publication.
@@ -292,11 +289,11 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "helm pull \"$CHART_REPOSITORY/$CHART_NAME\" --version \"$version\"",
         "[[ \"$pushed\" == \"$served\" ]]",
         "docker buildx imagetools inspect \"docker.io/$NS/$product:$TAG\"",
-        // "Public" is asked anonymously (review L5).
+        // "Public" is asked anonymously.
         "DOCKER_CONFIG=\"$anonymous_docker\" docker buildx imagetools inspect",
         "DOCKER_CONFIG=\"$anonymous_docker\" HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
         "HELM_REGISTRY_CONFIG=\"$dir/login/config.json\" helm push",
-        // PROD-14.0: a release chart pins digests, and a published release
+        // A release chart pins digests, and a published release
         // version is never replaced.
         "a release chart ($TAG) pins its three images by digest",
         "  chart-push)",
@@ -304,7 +301,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "chart_publish \"$package\" \"$version\" immutable",
         "a release version is never replaced",
         // An immutable push only on the registry's own "not found" for THIS
-        // version; any other failed read refuses before the login (review M-1).
+        // version; any other failed read refuses before the login.
         "elif grep -qxF \"Error: failed to perform \\\"FetchReference\\\" on source: \
          ${CHART_REPOSITORY#oci://}/$CHART_NAME:$version: not found\"",
         "could not tell whether $CHART_NAME $version exists; nothing pushed",
@@ -379,11 +376,11 @@ fn releases_reuse_checks_and_test_packaged_binary_before_publishing() {
     );
 }
 
-/// PROD-14.0: A DISPATCH IS A DRY RUN. Every job that can write outside the
+/// A DISPATCH IS A DRY RUN. Every job that can write outside the
 /// run — ANY write scope of its token, a credential, a release, a tag push, a
 /// registry write, a GitHub API call — carries the one gate that admits a
 /// pushed `v*` tag and nothing else, so a dispatched run ends at `assemble`
-/// with workflow artifacts only. Review L-3: the classification covers every
+/// with workflow artifacts only. The classification covers every
 /// write scope (`packages`, `id-token`, …), not `contents` alone, and the
 /// scripts the ungated jobs run.
 #[test]
@@ -487,7 +484,7 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
     assert!(script.contains("tag=\"${REHEARSAL_TAG:-}\" publish=false ;;"));
 }
 
-/// PROD-14.0 (review L-5): A TAG DELETION IS A PUSH TOO, and so is a re-run
+/// A TAG DELETION IS A PUSH TOO, and so is a re-run
 /// after a tag was re-cut. `validate` is handed `github.event.deleted` and
 /// refuses unless it is `false`, then refuses a tag that origin no longer
 /// points at this run's commit (scripts/test-release.py, Validate, runs both
@@ -522,7 +519,7 @@ fn a_deleted_or_re_cut_tag_publishes_nothing() {
     }
 }
 
-/// PROD-14.0 (review M-1, swept): a GitHub Release is created only when
+/// A GitHub Release is created only when
 /// GitHub SAYS the tag has none (`release not found`); any other failed read
 /// refuses rather than being taken for an absent release.
 #[test]
@@ -548,7 +545,7 @@ fn a_release_is_created_only_when_github_says_there_is_none() {
     assert!(read < absent && absent < created && created < refused);
 }
 
-/// PROD-14.0 (review L-3): THE PUBLISHED RELEASE IS VERIFIED AGAIN AFTER
+/// THE PUBLISHED RELEASE IS VERIFIED AGAIN AFTER
 /// DOWNLOAD. github-release's LAST step downloads what GitHub serves, checks it
 /// with `release.sh verify`, compares every asset byte for byte with the one
 /// `assemble` verified, and reads the release back as published (not a
@@ -586,7 +583,7 @@ fn the_published_release_is_downloaded_and_verified_last() {
     assert!(verified < create.find("gh release create").unwrap());
 }
 
-/// PROD-14.0 (review L-7): EVERY ACTION IN A JOB THAT HOLDS A PUBLISHING
+/// EVERY ACTION IN A JOB THAT HOLDS A PUBLISHING
 /// CREDENTIAL IS PINNED BY COMMIT — publish-images (the Docker Hub token) and
 /// github-release (`contents: write`) — with the release tag that commit
 /// carried named beside it, the convention `azure/setup-helm` set.
@@ -650,9 +647,8 @@ fn credentialed_release_jobs_pin_every_action_by_commit() {
     }
 }
 
-/// PROD-14.0: the CLI is the only release archive. Every v0.1.x plan
-/// announced `weirkeeper` too, and the current graph adds `logweir-retention`;
-/// both ship in images only.
+/// The CLI is the only release archive: `weirkeeper` and `logweir-retention`
+/// ship in images only.
 #[test]
 fn the_cli_is_the_only_release_archive() {
     let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
@@ -745,7 +741,7 @@ fn release_archives_are_built_and_checked_by_one_script_before_upload() {
         .unwrap();
     assert!(linux < upload && mac < upload);
     let dockerfile = std::fs::read_to_string(root().join("Dockerfile")).unwrap();
-    // PROD-00.2: the runner's compiling stages derive from one `cross` stage
+    // The runner's compiling stages derive from one `cross` stage
     // (the toolchain for either platform), and the builder is one of them.
     assert!(
         dockerfile.lines().any(|l| l

@@ -1,28 +1,20 @@
-//! Run identity: one module that decides what a `Backup` IS, from the object
-//! alone.
+//! Run identity: what a `Backup` is, derived from the object alone.
 //!
-//! # Why this is one function and not a rule per call site
+//! Its `metadata.name`, its execution id (the archive's `backup_id`) and the
+//! `BackupSchedule` it belongs to must agree across four trigger kinds, and a
+//! second derivation anywhere is how a retry comes to be named `-r1` by the
+//! scheduler and adopted as attempt 0 by the controller. [`run_identity`]
+//! reads the object and nothing else (**no clock, no status field, no
+//! annotation**, D1 §3.1 rule 7): the scheduler mints names, and this function
+//! only checks what an object claims against what its own fields imply.
 //!
-//! Three things have to agree about a run: its `metadata.name`, its execution
-//! id (the archive's `backup_id`) and which `BackupSchedule` it belongs to.
-//! Before retries and catch-up there was one derivation and it lived where it
-//! was used. With four trigger kinds there are four, and a second
-//! implementation anywhere is how a retry comes to be named `-r1` in the
-//! scheduler and adopted as attempt 0 by the controller that reconciles it.
+//! # Every refusal is terminal
 //!
-//! [`run_identity`] is that one derivation. It reads the object and nothing
-//! else: **no clock, no status field, no annotation** (D1 §3.1 rule 7). The
-//! scheduler mints names from observed deterministic objects; this function
-//! only ever CHECKS what an object claims against what its own fields imply.
-//!
-//! # What it refuses, and why each refusal is terminal
-//!
-//! A scheduled-kind `Backup` whose name is not the name its
-//! `(scheduleRef, slot, attempt)` implies is `ScheduledIdentityMismatch` — it
-//! is never quietly re-read as a manual run, because a manual run executes
-//! under its own UID and would write a second archive of a window a scheduled
-//! run already owns. `Backup.spec` is CEL-immutable, so none of these can be
-//! fixed in place and all of them are terminal.
+//! A scheduled-kind `Backup` whose name is not the one its
+//! `(scheduleRef, slot, attempt)` implies is `ScheduledIdentityMismatch`, never
+//! re-read as a manual run: a manual run executes under its own UID and would
+//! write a second archive of a window a scheduled run owns. `Backup.spec` is
+//! CEL-immutable, so none of these can be fixed in place.
 
 use crate::crds::backup::{Backup, ScheduleRef, Trigger, TriggerKind};
 use crate::slot::{
@@ -30,7 +22,7 @@ use crate::slot::{
 };
 use kube::ResourceExt;
 
-/// The label carrying the schedule's name. A HINT, never authority.
+/// The label carrying the schedule's name: a hint, never authority.
 pub const SCHEDULE_LABEL: &str = "logweir.dev/schedule";
 /// The label carrying the schedule's UID.
 pub const SCHEDULE_UID_LABEL: &str = "logweir.dev/schedule-uid";
@@ -41,13 +33,10 @@ pub const TRIGGER_LABEL: &str = "logweir.dev/trigger";
 /// The label carrying the attempt number.
 pub const ATTEMPT_LABEL: &str = "logweir.dev/attempt";
 
-/// The annotation the PLAT-05.2 history migration writes onto a `Backup` whose
-/// controller ownerReference it removed.
-///
-/// WITHOUT IT, DETACHING HISTORY WOULD ORPHAN IT. Membership used to be read
-/// from the controller ownerReference alone; the migration removes that
-/// reference so deleting a schedule stops deleting its history, and this
-/// annotation is what still ties the run to the UID it was created under.
+/// The annotation the history migration writes onto a `Backup` whose
+/// controller ownerReference it removed (so deleting a schedule stops deleting
+/// its history); it is what still ties the run to the UID it was created
+/// under.
 pub const RETAINED_FROM_OWNER_ANNOTATION: &str = "logweir.dev/history-retained-from-owner";
 
 /// `spec.triggeredBy` for a scheduled run.
@@ -58,7 +47,6 @@ pub const TRIGGERED_BY_MANUAL: &str = "manual";
 /// What a run is, derived from the object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunIdentity {
-    /// Which kind of run.
     pub kind: TriggerKind,
     /// `0` for everything but a retry.
     pub attempt: u32,
@@ -77,7 +65,7 @@ pub struct RunIdentity {
 pub struct ScheduleIdentity {
     /// The `BackupSchedule` name.
     pub name: String,
-    /// Its UID — from `spec.scheduleRef.uid`, or from the legacy controller
+    /// Its UID, from `spec.scheduleRef.uid` or from the legacy controller
     /// ownerReference.
     pub uid: String,
     /// Whether the UID came from the ownerReference rather than the spec.
@@ -97,7 +85,7 @@ pub enum IdentityError {
         detail: String,
     },
     /// A scheduled kind whose `scheduleRef` names nothing this cluster has.
-    /// Raised by the CALLER after it looks the schedule up; carried here so
+    /// Raised by the caller after it looks the schedule up; carried here so
     /// the vocabulary lives in one enum.
     ScheduleNotFound {
         /// The name that resolved to nothing.
@@ -168,10 +156,9 @@ fn mismatch(detail: impl Into<String>) -> IdentityError {
 /// The trigger this object declares, or the one D1 §3.1 rule 4 reads from a
 /// `Backup` created before `spec.trigger` existed.
 ///
-/// RULE 4 IS THE WHOLE UPGRADE STORY. Every stored `Backup` has no `trigger`,
-/// and reading `triggeredBy: schedule` as `Scheduled`/0 and anything else as
-/// `Manual` is exactly what the controller that created them did. No object is
-/// converted and no write happens on upgrade.
+/// Rule 4 is the whole upgrade story: reading `triggeredBy: schedule` as
+/// `Scheduled`/0 and anything else as `Manual` is what the controller that
+/// created those objects did, so nothing is converted or written on upgrade.
 #[must_use]
 pub fn declared_trigger(backup: &Backup) -> (TriggerKind, u32, Option<&LocalRefLike>) {
     match backup.spec.trigger.as_ref() {
@@ -202,9 +189,9 @@ pub type LocalRefLike = crate::crds::LocalRef;
 /// [`IdentityError::ScheduledIdentityMismatch`] when the object's fields do
 /// not compose the identity it claims, and [`IdentityError::NameTooLong`] when
 /// the composed name does not fit. `ScheduleNotFound` and
-/// `RunPolicyDigestMismatch` are the caller's to raise — the first needs a
-/// cluster read and the second needs [`crate::policy::run_policy_sha256`],
-/// which [`check_run_policy_digest`] performs.
+/// `RunPolicyDigestMismatch` are the caller's to raise (the first needs a
+/// cluster read, the second [`crate::policy::run_policy_sha256`], which
+/// [`check_run_policy_digest`] performs).
 pub fn run_identity(backup: &Backup) -> Result<RunIdentity, IdentityError> {
     let name = backup.name_any();
     let uid = backup.uid().unwrap_or_default();
@@ -369,11 +356,10 @@ pub fn run_identity(backup: &Backup) -> Result<RunIdentity, IdentityError> {
 /// Rule 5: the copied policy digest must equal the one this object's own
 /// fields produce.
 ///
-/// AN INTEGRITY CHECK AGAINST BUGS, NOT A SECURITY BOUNDARY (D1 §8.7).
+/// An integrity check against bugs, not a security boundary (D1 §8.7):
 /// `Backup.spec` is CEL-immutable and the digest is recomputed from the same
-/// object, so a mismatch means the control plane copied a policy and then
-/// wrote different fields — a defect, and terminal because nothing can fix it
-/// in place.
+/// object, so a mismatch is a control-plane defect, terminal because nothing
+/// can fix it in place.
 ///
 /// # Errors
 ///
@@ -401,18 +387,16 @@ pub fn check_run_policy_digest(backup: &Backup) -> Result<(), IdentityError> {
 /// Whether `backup` is a run of the `BackupSchedule` named `name` with UID
 /// `uid`.
 ///
-/// # Three ways to be a member, and why all three are needed
+/// # Three ways to be a member
 ///
-/// 1. `spec.scheduleRef.name` and `.uid` both match — every run created since
-///    the reference grew a UID.
-/// 2. The complete `BackupSchedule` controller ownerReference matches — every
-///    run created before it did.
-/// 3. The PLAT-05.2 migration annotation carries the UID and
-///    `spec.scheduleRef.name` matches — a legacy run whose ownerReference was
-///    REMOVED so that deleting the schedule would stop deleting its history.
-///
-/// Dropping (3) would make the history-detaching migration orphan exactly the
-/// history it exists to keep.
+/// 1. `spec.scheduleRef.name` and `.uid` both match (runs created since the
+///    reference grew a UID).
+/// 2. The complete `BackupSchedule` controller ownerReference matches (runs
+///    created before).
+/// 3. The migration annotation carries the UID and `spec.scheduleRef.name`
+///    matches: a legacy run whose ownerReference was removed so that deleting
+///    the schedule stops deleting its history. Dropping this would orphan
+///    exactly that history.
 #[must_use]
 pub fn is_run_of_schedule(backup: &Backup, name: &str, uid: &str) -> bool {
     let reference = backup.spec.schedule_ref.as_ref();
@@ -420,10 +404,9 @@ pub fn is_run_of_schedule(backup: &Backup, name: &str, uid: &str) -> bool {
     if named && reference.and_then(|r| r.uid.as_deref()) == Some(uid) {
         return true;
     }
-    // The name is inside `legacy_owner_uid` now, and this call is where it
-    // always had to be: membership by ownerReference means "owned by the
-    // BackupSchedule called `name` with UID `uid`", never "owned by some
-    // BackupSchedule, and separately there is an owner called `name`".
+    // Membership by ownerReference means "owned by the BackupSchedule called
+    // `name` with UID `uid`", never "owned by some BackupSchedule, and
+    // separately there is an owner called `name`".
     if legacy_owner_uid(backup, name).as_deref() == Some(uid) {
         return true;
     }
@@ -438,19 +421,13 @@ pub fn is_run_of_schedule(backup: &Backup, name: &str, uid: &str) -> bool {
 /// The UID of the complete `BackupSchedule` controller ownerReference **naming
 /// `schedule`**, if any.
 ///
-/// # THE NAME IS PART OF THE MATCH, AND LEAVING IT OUT IS AN ARCHIVE BUG
-///
-/// The legacy identity IS this owner's UID. A `Backup` whose
-/// `spec.scheduleRef` names `a` while its controller ownerReference names `b`
-/// would, without this equality, execute under schedule `b`'s archive prefix —
-/// a run filed under a schedule that never asked for it, and two schedules'
-/// history mixed in one bucket. The controller that wrote both fields always
-/// wrote the same name in them, so requiring it refuses only objects no
-/// controller produced.
-///
-/// `schedule` is passed in rather than read here because the caller has
-/// already resolved `spec.scheduleRef`, and a second read is a second chance
-/// to read a different field.
+/// **The name is part of the match.** The legacy identity is this owner's UID;
+/// a `Backup` whose `spec.scheduleRef` names `a` while its controller
+/// ownerReference names `b` would otherwise execute under `b`'s archive prefix,
+/// mixing two schedules' history in one bucket. The controller always wrote the
+/// same name in both, so this refuses only objects no controller produced.
+/// `schedule` is passed in because the caller already resolved
+/// `spec.scheduleRef`, and a second read could read a different field.
 fn legacy_owner_uid(backup: &Backup, schedule: &str) -> Option<String> {
     backup
         .owner_references()
@@ -477,17 +454,12 @@ fn composed_len(schedule: &str, slot: &str, attempt: u32) -> usize {
 
 /// `yyyymmdd-hhmmss`, digits and one hyphen, **and a date that exists**.
 ///
-/// # THE SHAPE IS NOT THE CHECK
-///
-/// `20261309-031700` is fifteen bytes of digits with a hyphen at 8 and is not a
-/// date; so is `20260230-000000`, and so is `20260915-256100`. A slot IS a UTC
-/// instant — it is half of the run's name and half of its archive prefix — so
-/// an object named after an instant that never occurs would take a prefix no
-/// schedule can ever mint, and no later run of that slot could collide with it
-/// to reveal the mistake. The `chrono` round-trip is what makes the check about
-/// the calendar rather than about the alphabet: `parse_from_str` is lenient in
-/// places (it accepts some out-of-range fields by normalising), and formatting
-/// the parsed value back and comparing is what rejects what it normalised.
+/// **The shape is not the check.** `20261309-031700`, `20260230-000000` and
+/// `20260915-256100` have the right shape and are not dates. A slot is a UTC
+/// instant and half of the run's name and archive prefix, so one that never
+/// occurs would take a prefix no schedule can mint, and no later run could
+/// collide with it to reveal the mistake. `parse_from_str` normalises some
+/// out-of-range fields, so the parsed value is formatted back and compared.
 fn valid_slot(slot: &str) -> bool {
     const FORMAT: &str = "%Y%m%d-%H%M%S";
     slot.len() == SLOT_NAME_LEN

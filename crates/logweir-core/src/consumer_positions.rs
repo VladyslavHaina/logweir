@@ -1,4 +1,4 @@
-//! **PROD-04.1: consumer position evidence** — the backup receipt's
+//! Consumer position evidence: the backup receipt's
 //! `consumer_positions` block (format 1.7.0), the positions DOCUMENT it binds,
 //! their closed vocabularies and the pure rules both the writer and the
 //! readers decide with.
@@ -7,7 +7,7 @@
 //!
 //! The receipt is one signed document that the catalog reads whole (at most
 //! 256 KiB) and the evidence fetch relays (at most 1 MiB). Positions grow with
-//! groups × partitions, so they are NOT in it (PROD-04.1 review H1):
+//! groups × partitions, so they are NOT in it:
 //!
 //! - **The receipt's block** ([`ConsumerPositions`]) carries, per selected
 //!   group, its outcome, type, states, members, whether it was active and its
@@ -86,12 +86,12 @@
 //! A topic whose marks after the engine REGRESS against the group-capture
 //! marks (a log start or a high watermark moved backwards) is
 //! `changed_during_capture`, and no group may claim a position on it: a group
-//! holding one is `failed: GenerationChangedDuringCapture` (PROD-01.4
-//! TI-04.1-3, arm CP-9), never captured. Detection is a REGRESSION of marks
-//! only: a topic recreated and refilled past its old marks before the read
-//! after the engine is not seen, and a read after the engine that failed
-//! decides nothing. Topic identity (PROD-01.4a's `generations` block in the
-//! same receipt) records such a recreation; this module does not read it.
+//! holding one is `failed: GenerationChangedDuringCapture` (arm CP-9), never
+//! captured. Detection is a REGRESSION of marks only: a topic recreated and
+//! refilled past its old marks before the read after the engine is not seen,
+//! and a read after the engine that failed decides nothing. Topic identity
+//! (the `generations` block in the same receipt) records such a recreation;
+//! this module does not read it.
 //!
 //! # A topic whose partitions were never read
 //!
@@ -99,15 +99,14 @@
 //! engine, the archive) gave a partition for records `partitions: []`. A group
 //! cannot be captured over it — its positions there are unknown, and absence
 //! would read as "no partition" — so every group that would have been is
-//! `failed: PartitionsNotRead` (arm CP-10, PROD-04.1 review L4).
+//! `failed: PartitionsNotRead` (arm CP-10).
 //!
 //! # Generation
 //!
 //! The positions carry no topic generation token and are not bound to the
-//! receipt's topic IDs yet (PROD-02.1; the IDs themselves are PROD-01.4a's
-//! `generations` block). Until they are, every snapshot relates to "generation
-//! unknown" (PROD-01.4 TI-04.1-4): its positions are about THIS point's data
-//! only, through the marks above, and never about another point's.
+//! receipt's topic IDs (its `generations` block), so every snapshot relates to
+//! "generation unknown": its positions are about THIS point's data only,
+//! through the marks above, and never about another point's.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -123,7 +122,7 @@ pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"
 /// `GroupSnapshot::reason`'s closed set for a `failed` group (arm 33).
 ///
 /// - `NotVisibleToPrincipal`: no listing shows it and a targeted call was
-///   refused GROUP_AUTHORIZATION_FAILED; it may exist (PROD-04.0 §5, T14).
+///   refused GROUP_AUTHORIZATION_FAILED; it may exist.
 /// - `NotVisibleOrUnreachable`: a bounded call got no answer for a group no
 ///   listing shows.
 /// - `NotAuthorized`: a listed group whose description or positions this
@@ -131,14 +130,14 @@ pub const EXCLUDED_REASONS: [&str; 2] = ["GroupTypeNotCaptured", "GroupNotFound"
 /// - `PositionsUnstable`: the bounded RequireStable fetch got no answer (a
 ///   pending transactional offset commit, or the coordinator).
 /// - `ListingInconsistent`, `AbsenceUnproven`, `TypeUnproven`, `Unreachable`:
-///   PROD-04.0b's classification failures.
+///   the group classification's failures.
 /// - `DescribeFailed`, `PositionsFailed`: the description or the fetch failed
 ///   for another reason.
 /// - `GenerationChangedDuringCapture`: the group held a position on a topic
 ///   that changed during the capture (arm CP-9).
 /// - `CaptureUnavailable`: the run's reader could not read consumer groups.
 /// - `GroupVanishedDuringCapture`: its description answered `Dead` with no
-///   member — the stand-in for "no such group" (PROD-04.0 T2) — so it was
+///   member — the stand-in for "no such group" — so it was
 ///   deleted, or its offsets expired, while it was being read (arm 34).
 /// - `PartitionsNotRead`: a named topic's partitions were never read, so its
 ///   positions there are unknown (arm CP-10).
@@ -191,7 +190,7 @@ pub const GROUP_STATES: [&str; 6] = [
 ];
 
 /// The states that say a group has no member. Every other state, the unknown
-/// one included, is active (PROD-04.0 T4).
+/// one included, is active.
 pub const INACTIVE_STATES: [&str; 2] = ["Empty", "Dead"];
 
 /// The state a group being removed is described in. A captured group is never
@@ -204,7 +203,7 @@ pub const DEAD_STATE: &str = "Dead";
 pub const POSITION_STATUSES: [&str; 4] = ["captured", "excluded", "failed", "notObserved"];
 
 /// The reason an `excluded` position carries: its offset is above the
-/// partition's high watermark at capture (PROD-01.4 TI-04.1-2).
+/// partition's high watermark at capture.
 pub const POSITION_BEYOND_END: &str = "PositionBeyondEnd";
 
 /// `PositionEntry::reason`'s closed set for a `failed` position (arm CP-12).
@@ -253,8 +252,8 @@ pub const MAX_SELECTED_GROUPS: usize = 100;
 /// characters, because the bound below is over the receipt's bytes.
 pub const MAX_GROUP_ID_BYTES: usize = 255;
 
-/// **The receipt block's size cap, ENFORCED on its encoded bytes** (PROD-04.1
-/// review N1). [`refuse_selection`] measures the block a selection could
+/// **The receipt block's size cap, ENFORCED on its encoded bytes.**
+/// [`refuse_selection`] measures the block a selection could
 /// produce AFTER JSON encoding ([`worst_case_block_bytes`]: every group
 /// captured, every field at its longest) and refuses one over this, by name
 /// ([`SELECTION_TOO_LARGE`]) and before anything runs — never a truncated
@@ -277,8 +276,7 @@ const WORST_CASE_DOCUMENT_KEY_BYTES: usize = 1024;
 /// reference. A real block of the same selection is never larger: a group
 /// that is not captured carries fewer fields, and every other value is a
 /// word from a closed set or a bounded number. Measured AFTER encoding, so an
-/// id's escapes count as written — the review's N1, where `"` and `\` made
-/// the block larger than the bound it claimed.
+/// id's escapes count as written.
 #[must_use]
 pub fn worst_case_block_bytes(selected: &[String]) -> usize {
     crate::det_json::to_deterministic_json(&worst_case_block(selected))
@@ -287,9 +285,9 @@ pub fn worst_case_block_bytes(selected: &[String]) -> usize {
 
 /// The block [`worst_case_block_bytes`] measures: every selected group
 /// captured, every field at its longest. A SIZE, not a claim (its counts hold
-/// against no document). FX-33's projection of a whole receipt before the
-/// engine (`logweir::backup::document_budget`) places it where the run's own
-/// block will go.
+/// against no document). The projection of a whole receipt before the engine
+/// (`logweir::backup::document_budget`) places it where the run's own block
+/// will go.
 #[must_use]
 pub fn worst_case_block(selected: &[String]) -> ConsumerPositions {
     // 2038-01-19T03:14:07.999999999Z: a four-digit year with nine fraction
@@ -564,8 +562,8 @@ pub fn relation(position: i64, facts: &PartitionFacts) -> Relation {
 /// Whether a topic changed during the capture: some partition with both pairs
 /// of marks has a log start or a high watermark after the engine BELOW the one
 /// read at group capture. Kafka never moves either backwards on one topic
-/// generation, so a regression is a recreation or a truncation (PROD-01.4
-/// §4.4). A recreation refilled past the old marks is not a regression, and
+/// generation, so a regression is a recreation or a truncation. A recreation
+/// refilled past the old marks is not a regression, and
 /// an unread pair decides nothing (the module doc's limit).
 #[must_use]
 pub fn changed_during_capture(partitions: &[PartitionFacts]) -> bool {
@@ -583,8 +581,8 @@ pub fn active(state: &str, listed_state: &str) -> bool {
     !INACTIVE_STATES.contains(&state) || !INACTIVE_STATES.contains(&listed_state)
 }
 
-/// Whether a description answers "no such group": `Dead` with no member
-/// (PROD-04.0 T2). A group described so is never captured (arm 34).
+/// Whether a description answers "no such group": `Dead` with no member.
+/// A group described so is never captured (arm 34).
 #[must_use]
 pub fn vanished(state: &str, members: u32) -> bool {
     state == DEAD_STATE && members == 0
@@ -860,7 +858,7 @@ mod tests {
         }
     }
 
-    /// M2: `Dead` with no member is the absent stand-in; `Dead` with a member
+    /// `Dead` with no member is the absent stand-in; `Dead` with a member
     /// and `Empty` with none are not.
     #[test]
     fn only_dead_with_no_member_is_a_vanished_group() {
@@ -897,14 +895,14 @@ mod tests {
         assert!(refuse_selection(&many[..MAX_SELECTED_GROUPS]).is_none());
     }
 
-    /// **The cap is enforced on the ENCODED bytes (review N1).** Ids that need
-    /// no escape fit at the most groups and the longest ids: 100 ids of 255
-    /// bytes of four-byte characters (71,236 bytes at worst). Ids of `"` or
-    /// `\` double as JSON writes them: the review's construction (100 ids of
-    /// 255) is refused by name, and AT the cap the largest such selection (84
-    /// ids) is accepted and one more id is refused — never truncated. Raw
-    /// lengths would have admitted it. Every accepted selection's worst case
-    /// is within the cap, a third of the catalog's read cap.
+    /// **The cap is enforced on the ENCODED bytes.** Ids that need no escape
+    /// fit at the most groups and the longest ids: 100 ids of 255 bytes of
+    /// four-byte characters (71,236 bytes at worst). Ids of `"` or `\` double
+    /// as JSON writes them: 100 ids of 255 is refused by name, and AT the cap
+    /// the largest such selection (84 ids) is accepted and one more id is
+    /// refused — never truncated. Raw lengths would have admitted it. Every
+    /// accepted selection's worst case is within the cap, a third of the
+    /// catalog's read cap.
     #[test]
     fn the_cap_is_enforced_on_the_encoded_bytes_with_escape_heavy_ids_at_and_over_it() {
         let ids = |n: usize, ch: &str, per: usize| -> Vec<String> {
@@ -918,7 +916,7 @@ mod tests {
         assert!(worst_case_block_bytes(&emoji) <= MAX_BLOCK_BYTES);
         assert_eq!(refuse_selection(&emoji), None);
         for ch in ["\"", "\\"] {
-            // The review's construction: 100 ids of 255 escape-doubled bytes.
+            // 100 ids of 255 escape-doubled bytes.
             let all = ids(MAX_SELECTED_GROUPS, ch, 1);
             assert!(all.iter().all(|i| i.len() == MAX_GROUP_ID_BYTES));
             let encoded = worst_case_block_bytes(&all);

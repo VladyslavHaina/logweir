@@ -1,4 +1,4 @@
-//! Topic discoveries: bounded, honest topic inventory (PLAT-09.1).
+//! Topic discoveries: bounded, honest topic inventory.
 //!
 //! # The API reads chunks; it never reads Kafka
 //!
@@ -115,9 +115,7 @@ pub const LATEST_SCAN: u32 = 50;
 /// attestation that would justify it, and is therefore published as `unknown`.
 pub const ATTESTATION_MISSING_BASIS: &str = "attestationMissing";
 
-// ======================================================================
-// Projection
-// ======================================================================
+// PROJECTION.
 
 fn lifecycle_of(object: &TopicDiscoveryCr) -> CheckLifecycle {
     match object
@@ -288,9 +286,7 @@ pub fn project(
     }
 }
 
-// ======================================================================
-// Validation
-// ======================================================================
+// VALIDATION.
 
 /// Validate a create request.
 ///
@@ -344,9 +340,7 @@ pub fn validate_create(request: &CreateTopicDiscoveryRequest) -> Result<(), ApiE
     }
 }
 
-// ======================================================================
-// Building the stored object
-// ======================================================================
+// BUILDING THE STORED OBJECT.
 
 /// The hash of the request PARAMETERS plus the connection, as a label value.
 /// Two requests with the same parameters against the same connection share it,
@@ -416,9 +410,7 @@ pub fn build(
     }
 }
 
-// ======================================================================
-// Routes
-// ======================================================================
+// ROUTES.
 
 async fn connection_or_404(
     state: &AppState,
@@ -657,9 +649,7 @@ fn strip_latest(raw: &str) -> String {
         .join("&")
 }
 
-// ======================================================================
-// The topics page
-// ======================================================================
+// THE TOPICS PAGE.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InternalFilter {

@@ -1,39 +1,27 @@
 // pages/schedules.js -- the BackupSchedule list, the create form, the suspend
 // toggle, and the retention panel.
 //
-// THE SUSPEND TOGGLE IS THE ONE UPDATE THIS PAGE MAKES, and `api.patchSuspend`
-// is the one function that can make it: a JSON-merge patch touching
-// `spec.suspend` and nothing else. Every other field of a BackupSchedule's
-// spec is sealed by an object-level CEL rule for every subject, cluster-admin
-// included, so a generic patch helper here would not widen what the API server
-// accepts -- it would widen what this page can try, which is the half a review
-// of the page can still see. `the_suspend_toggle_is_the_only_update` asserts
-// that the api.js identifiers reachable from any page module are exactly the
-// six readers and writers this product has.
+// THE PAGE'S WRITES ARE NAMED, NARROW API CALLS: the suspend toggle is a
+// JSON-merge patch touching `spec.suspend` only (`api.patchSuspend`), and the
+// policy panel's whole-policy replace is the product API's one PUT. There is
+// no generic patch helper: `the_suspend_toggle_is_the_only_update` holds the
+// api.js identifiers a page module may reach to an allowlist.
 //
-// THE RETENTION PANEL POINTS AT A RetentionPolicy. A schedule's own retention
-// report is withdrawn (PROD-17.1 B1): `spec.retention` no longer reports, and
-// the panel says so, then what it can tell about the namespace's
-// RetentionPolicies.
+// THE RETENTION PANEL POINTS AT A RetentionPolicy: a schedule's own
+// `spec.retention` no longer reports, and the panel says so, then what it can
+// tell about the namespace's RetentionPolicies.
 //
-// BOTH WRITES SHARE ONE MUTATION STATE (PLAT-13.2). The create keeps its draft
-// through every recoverable failure and is idempotent by name; the toggle
-// refuses a second click while its patch is pending and reports a refusal in
-// the schedule's own card, leaving the rest of the page -- the create form's
+// BOTH WRITES SHARE ONE MUTATION STATE. The create keeps its draft through
+// every recoverable failure and is idempotent by name; the toggle refuses a
+// second click while its patch is pending and reports a refusal in the
+// schedule's own card, leaving the rest of the page -- the create form's
 // draft included -- where it was.
 //
-// THE SOURCE IS CHOSEN, NOT TYPED (PLAT-07.2). `spec.sourceRef.name` used to be
-// a free-text input, so a typo was a schedule the controller could not resolve
-// and a correct name was a reference that silently followed whatever object
-// held that name next. It is now `../select.js`'s searchable selector: the
-// draft keeps the chosen cluster's UID beside its name, the UID is what the
-// form is bound to, and a UID that no longer resolves is a REFUSAL naming it
-// -- including the case where a different object has since taken that name,
-// which is what a KafkaCluster deleted and recreated looks like from here. The
-// request body still spells `sourceRef.name`, because that is what the CRD
-// takes; the name it spells is the one the resolved object carries NOW, so a
-// cluster renamed since the draft was started is sent correctly rather than
-// under its old name.
+// THE SOURCE IS CHOSEN, NOT TYPED: `../select.js`'s searchable selector. The
+// draft keeps the chosen cluster's UID beside its name, the form is bound to
+// the UID, and a UID that no longer resolves (a KafkaCluster deleted and
+// recreated) is a REFUSAL naming it. The body still spells `sourceRef.name`,
+// as the CRD takes it, with the name the resolved object carries NOW.
 
 import { CONSOLE, apiClient, granted, mayOperate, mode } from "../client.js";
 import {
@@ -139,15 +127,14 @@ export const SCHEDULE_FORM = "schedule-form";
 /** The suspend toggle's identity; each schedule has its own record. */
 export const SUSPEND_FORM = "schedule-suspend";
 
-/** The fields a draft of the create form keeps (PLAT-10.1): the identity, the
- *  chosen cluster and every field of the policy the form composes. No
- *  credential -- a Secret NAME is not one, and a destination is named and never
- *  described here.
+/** The fields a draft of the create form keeps: the identity, the chosen
+ *  cluster and every field of the policy the form composes. No credential --
+ *  a Secret NAME is not one, and a destination is named and never described
+ *  here.
  *
  *  SPELLED OUT RATHER THAN DERIVED FROM `POLICY_DRAFT_FIELDS`, which is
- *  declared further down this module: a `const` read at module-evaluation time
- *  before its declaration is a temporal-dead-zone throw, and an allowlist of
- *  what a draft may hold is worth reading in one place anyway (PLAT-13.2). */
+ *  declared further down this module: reading a `const` before its
+ *  declaration at module-evaluation time is a temporal-dead-zone throw. */
 export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
   "name", "source", "sourceUid",
   "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n", "timeZone",
@@ -162,10 +149,9 @@ export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
  *
  *  TWO SPELLINGS, BECAUSE THERE ARE TWO REFUSERS. In legacy mode the API
  *  SERVER refuses and names the stored object's own paths (`spec.schedule`);
- *  in console mode the product API refuses and names the REQUEST's paths
- *  (`schedule`), which is the create DTO's spelling and, since PLAT-10.1,
- *  nearly the edit DTO's. Both are listed so the same 422 highlights the same
- *  input whichever API answered it. */
+ *  in console mode the product API names the REQUEST's paths (`schedule`).
+ *  Both are listed so the same 422 highlights the same input whichever API
+ *  answered it. */
 export const SCHEDULE_FIELD_PATHS = Object.freeze([
   ["metadata.name", "name"],
   ["spec.schedule", "cron"],
@@ -208,14 +194,9 @@ const SCHEDULE_SPEC_RULES = Object.freeze({
   ignore: ["suspend"],
 });
 
-/** THE DEEP LINK TO ONE SCHEDULE (PLAT-10.2).
- *
- *  `#/schedules?ns=<ns>&name=<name>` -- the shape every other list/detail pair
- *  in this application uses, and the reason the migration note is "existing
- *  deep links keep working" rather than "are redirected": `#/schedules?ns=<ns>`
- *  was the only schedules link there had ever been, the router sends a hash
- *  with no `name` to the list exactly as it always did, and this parameter is
- *  one the old route ignored.
+/** THE DEEP LINK TO ONE SCHEDULE: `#/schedules?ns=<ns>&name=<name>`, the
+ *  shape every list/detail pair here uses. A hash with no `name` is the list,
+ *  so `#/schedules?ns=<ns>` links keep working.
  *
  *  `null` FOR AN EMPTY NAME, so a caller cannot build a link to the list and
  *  believe it is a link to a schedule. */
@@ -239,8 +220,8 @@ export function conditionStatus(object, type) {
   const conditions = Array.isArray(status.conditions) ? status.conditions : [];
   for (const condition of conditions) {
     if (condition && condition.type === type) {
-      // A BADGE, NOT `True` (MCP-14): the words, with the recorded condition
-      // as its title.
+      // A badge, not `True`: the words, with the recorded condition as its
+      // title.
       return conditionBadge(condition, type === "Ready" ? "ready" : String(type),
         type === "Ready" ? "not ready" : "not " + String(type));
     }
@@ -269,9 +250,8 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
     const status = object.status || {};
     const meta = object.metadata || {};
     return [
-      // THE NAME IS THE WAY IN (PLAT-10.2). Until this route had a detail the
-      // name was text, because there was nowhere to go; a schedule's own page
-      // is where its history and its bound actions are.
+      // The name is the way in: a schedule's own page holds its history and its
+      // bound actions.
       detailLink("schedules", String(meta.namespace || ""), String(meta.name || "")),
       "<code>" + cell(spec.schedule) + "</code>",
       destinationCell(object, destinations, destinationsUnavailable === true),
@@ -298,17 +278,15 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
 
 /** WHERE A SCHEDULE WRITES, in one cell, and by IDENTITY where it can be.
  *
- *  A schedule that names a destination (`spec.destinationRef`, PLAT-06.2) is
- *  resolved against the destinations this page actually read, with the same
- *  rules the selector uses: a name that resolves is shown with its location, a
- *  name that resolves to nothing is a REFUSAL to claim where this schedule
- *  writes -- because a destination deleted and recreated under one name is a
- *  different archive location reached with a different credential, and a cell
- *  that printed the new one would be answering a question about the old.
+ *  A schedule that names a destination (`spec.destinationRef`) is resolved
+ *  against the destinations this page read, with the selector's rules: a name
+ *  that resolves is shown with its location, and a name that resolves to
+ *  nothing is a REFUSAL to claim where this schedule writes (a destination
+ *  deleted and recreated under one name is a different location reached with
+ *  a different credential).
  *
- *  A schedule with no `destinationRef` carries an inline archive, which is
- *  what every schedule written before PLAT-06.2 carries, and the cell says so
- *  rather than leaving a blank that reads as "none". */
+ *  A schedule with no `destinationRef` carries an inline archive, and the
+ *  cell says so rather than leaving a blank that reads as "none". */
 export function destinationCell(object, destinations, unavailable) {
   const spec = (object || {}).spec || {};
   const ref = spec.destinationRef;
@@ -320,8 +298,8 @@ export function destinationCell(object, destinations, unavailable) {
       : ABSENT;
   }
   if (unavailable === true) {
-    // THE PAGE READ NOTHING (review LOW-4), so it says that and makes no claim
-    // about whether the destination exists.
+    // THE PAGE READ NOTHING, so it says that and makes no claim about whether
+    // the destination exists.
     return badge("pending", "names " + name) +
       " <span class=\"note\">this page could not read the destinations in this namespace, so " +
       "it cannot say where this schedule writes</span>";
@@ -384,13 +362,12 @@ export function renderSuspendStatus(object, state) {
 /** THE RETENTION PANEL for one schedule: where its retention is set, and what
  *  this page can tell about the namespace's RetentionPolicies. */
 export function renderRetentionPanel(object, policy, policies) {
-  // "LOGWEIR NEVER DELETES" IS NOT PRINTED WHERE THIS PAGE CANNOT PROVE IT
-  // (console class sweep). Nothing records which RetentionPolicy covers a
-  // schedule's destination, so where a policy in this namespace is not
-  // recommendation-only the panel says that it cannot tell, names the
-  // policies, and does not print the no-deletion sentence.
-  // FX-42: a failed read of the namespace's policies is not "no policy". The
-  // panel says the read failed and prints no sentence either.
+  // "LOGWEIR NEVER DELETES" IS NOT PRINTED WHERE THIS PAGE CANNOT PROVE IT.
+  // Nothing records which RetentionPolicy covers a schedule's destination, so
+  // where a policy in this namespace is not recommendation-only the panel says
+  // that it cannot tell, names the policies, and does not print the
+  // no-deletion sentence. A failed read of the namespace's policies is not
+  // "no policy": the panel says the read failed and prints no sentence either.
   const readFailed = policies !== null && typeof policies === "object" &&
     !Array.isArray(policies);
   const unproven = policy === null || policy === undefined ? deletingPolicies(policies) : [];
@@ -409,8 +386,8 @@ export function renderRetentionPanel(object, policy, policies) {
   );
 }
 
-/** Where a schedule's retention is set, now that its own report is withdrawn
- *  (PROD-17.1 B1). */
+/** Where a schedule's retention is set, now that its own report is
+ *  withdrawn. */
 export const RETENTION_POINTER_SENTENCE =
   "Retention for this schedule's destination is reported by a RetentionPolicy. A schedule's " +
   "own spec.retention no longer reports.";
@@ -457,7 +434,7 @@ export function renderCoverageUnknown(policies) {
 }
 
 /** The sentence a schedule's retention panel carries when the namespace's
- *  RetentionPolicies could not be read (FX-42). */
+ *  RetentionPolicies could not be read. */
 export const RETENTION_POLICIES_UNREAD_SENTENCE =
   "The RetentionPolicies in this namespace could not be read, so this page cannot say " +
   "whether one deletes from this schedule's archive.";
@@ -472,21 +449,12 @@ export function renderPoliciesUnread(why) {
   );
 }
 
-// ===========================================================================
-// D3 (PLAT-16.1, PLAT-16.2): WHICH SENTENCE THIS PANEL IS ALLOWED TO PRINT
-// ===========================================================================
-//
-// THE OLD SENTENCE IS STILL TRUE, AND ONLY WHERE IT IS. "Logweir never deletes
-// from your archive" was a statement about the whole product, and PLAT-16.2
-// made it a statement about a MODE: a RetentionPolicy in `Enforce` runs an
-// isolated worker that does delete, with its own delete-capable credential.
-// Printing the old line beside a policy that is deleting nightly would be the
-// most consequential false sentence this console could render.
-//
-// SO THE PANEL READS `status.enforcement` -- WHAT IS HAPPENING -- AND NOT
-// `spec.mode`, WHICH IS WHAT WAS ASKED FOR. A policy in `mode: Enforce` whose
-// destination will not resolve reports `RecommendationOnly`, and this panel
-// says the thing that is true of it.
+// WHICH SENTENCE THIS PANEL IS ALLOWED TO PRINT. "Logweir never deletes from
+// your archive" is true only where no RetentionPolicy enforces: one in
+// `Enforce` runs an isolated worker with its own delete-capable credential.
+// So the panel reads `status.enforcement` (what is happening), not
+// `spec.mode` (what was asked for): an `Enforce` policy whose destination
+// will not resolve reports `RecommendationOnly`.
 
 /** The one sentence this panel prints about deletion, chosen by what is
  *  actually happening. `RETENTION_SENTENCE` verbatim with no policy and for
@@ -501,13 +469,9 @@ export function retentionSentenceFor(report, policy) {
 }
 
 /** WHICH RetentionPolicy COVERS THIS SCHEDULE: nothing records it, so none.
- *
- *  The covering policy was to be named by the schedule's own retention report
- *  (`supersededBy`, D3 section 6.3), which no controller wrote and which is
- *  withdrawn (PROD-17.1 B1). Matching on anything else -- a destination name,
- *  a bucket prefix -- would be this page deciding which policy governs a
- *  schedule, a decision with one authority, and the authority is not a
- *  browser. */
+ *  Matching on a destination name or a bucket prefix would be this page
+ *  deciding which policy governs a schedule, a decision whose authority is
+ *  not a browser. */
 export function policyForSchedule(object, policies) {
   return null;
 }
@@ -530,23 +494,16 @@ export function policyCondition(policy, type) {
   return null;
 }
 
-/** WHAT THE LAST EVALUATION FOUND, AS FOUR NUMBERS THAT ADD UP (FX-22).
- *
- *  Kept, in this plan, held back by the per-run ceiling -- and never "kept"
- *  for a point the ceiling held back. Before this block the panel printed one
- *  number, the plan's (`candidateCount`), and only for an enforcing policy, so
- *  "50 points it would remove" read as everything the rules remove while 311
- *  more were due; and the status the number came from counted those 311 as
- *  kept.
+/** WHAT THE LAST EVALUATION FOUND, AS FOUR NUMBERS THAT ADD UP: kept, in this
+ *  plan, held back by the per-run ceiling -- and never "kept" for a point the
+ *  ceiling held back.
  *
  *  THE SAME NUMBERS THE STATUS AND THE API CARRY, read through
  *  [`evaluationAccounting`]: where they are not recorded the two cells say
- *  [`ACCOUNTING_NOT_RECORDED`] and the sentence under them says why. In
- *  console mode "not recorded" is the product API's own word
- *  (`lastEvaluation.accounting`), not an inference from an absent count.
- *  Nothing here is counted from a list. An evaluation with no
- *  `pointsEvaluated` -- none yet, or a policy that declares a bucket rule and
- *  evaluates nothing -- renders no block at all.
+ *  [`ACCOUNTING_NOT_RECORDED`] and the sentence under them says why (in
+ *  console mode, the API's own `lastEvaluation.accounting`). Nothing here is
+ *  counted from a list. An evaluation with no `pointsEvaluated` renders no
+ *  block at all.
  *
  *  THE CATALOG VIEW HAS ITS OWN ROW, AND THREE ANSWERS ([`evaluationView`]):
  *  not the whole archive, the whole archive, or not recorded. The warning is
@@ -646,8 +603,8 @@ export function renderEnforcement(report, policy) {
           ["digest an administrator approved", cell(enforcement.approvedPlanSha256)],
           ["digest of the newest evaluation", cell(evaluation.planSha256)],
           ["that plan expires at", when(evaluation.planExpiresAt)],
-          // THIS PLAN'S points, not everything the rules remove: the block
-          // above says what the per-run ceiling held back (FX-22).
+          // THIS PLAN'S points, not everything the rules remove: the block above
+          // says what the per-run ceiling held back.
           ["points that plan would remove", cell(evaluation.candidateCount)],
         ]) +
         (enforced === null
@@ -657,12 +614,10 @@ export function renderEnforcement(report, policy) {
             "</p>") +
         "<p class=\"irreversible\">" + esc(IRREVERSIBLE_SENTENCE) + "</p>"
       : "") +
-    // FX-20c (review M-1): A POLICY ASKED TO ENFORCE THAT IS NOT ENFORCING
-    // SAYS WHY. A run refused on its credential's binding leaves the policy
-    // `RecommendationOnly` -- nothing is deleted until a human gives it its
-    // own Secret -- and the `Enforced=False` reason is the only place that
-    // says which; the approved-plan block above, where this note used to be
-    // the only one, is not rendered for it.
+    // A POLICY ASKED TO ENFORCE THAT IS NOT ENFORCING SAYS WHY. A run refused
+    // on its credential's binding leaves the policy `RecommendationOnly`, and
+    // the `Enforced=False` reason is the only place that says which; the
+    // approved-plan block above is not rendered for it.
     (state !== "LogweirWorker" && spec.mode === "Enforce" && enforced !== null &&
       String(enforced.status) === "False"
       ? "<p class=\"complaint\" data-enforced-refusal=\"" + esc(String(enforced.reason || "")) +
@@ -677,41 +632,12 @@ export function renderEnforcement(report, policy) {
   );
 }
 
-// ===========================================================================
-// D2: the destination, the coverage label, the topic picker and the readiness
-// panel
-// ===========================================================================
-//
-// WHAT LANDED HERE AND WHAT DID NOT, SAID PLAINLY AT THE TOP.
-//
-// D2 section 9 asks this form to replace the archive URL and Secret inputs with a
-// destination selector. IT CANNOT, YET, AND THE FORM SAYS SO RATHER THAN
-// PRETENDING. The product API's `CreateScheduleRequest` REQUIRES an inline
-// `archive` and has no `destinationRef` field at all: a schedule created
-// through this page has nowhere to put a destination's name until PLAT-06.2
-// adds one. The two honest options were to leave the inline fields alone with
-// a disclosure, or to DERIVE an inline archive from the chosen destination --
-// and the second is exactly the failure a destination exists to prevent. A
-// destination carries an endpoint, a region, an addressing mode and a CA
-// bundle; a legacy inline archive carries a URL and a Secret name. Deriving
-// one from the other would silently drop four of those, and a schedule that
-// quietly wrote to AWS S3 instead of the MinIO endpoint the operator chose is
-// worse than a schedule that refused.
-//
-// SO THE SELECTOR IS REAL WHERE IT WORKS. `BackupPreflightRequest` DOES take a
-// destination, so the readiness panel below is a genuine, submittable use of
-// exactly the same control: choose the destination, choose the source, name
-// the topics, and the check runs against them. When `POST /schedules` grows a
-// `destinationRef`, this selector moves into the create form unchanged.
-//
-// THE COVERAGE LABELS ARE THE CONTROLLER'S OWN WORDS, VERBATIM.
-// `weirkeeper::crds::selection::Coverage::label()` renders three strings and
-// says why there is one function for them: "a second wording somewhere else is
-// how 'visible user topics only' becomes 'all topics' in the one place an
-// auditor reads." This page is one of those surfaces, so it copies the strings
-// and `ui/tests/pages.spec.js` holds the copies against nothing -- there is no
-// JavaScript link to a Rust constant -- which is why they are in ONE exported
-// table here and asserted character for character.
+// THE COVERAGE LABELS ARE THE CONTROLLER'S OWN WORDS, VERBATIM:
+// `weirkeeper::crds::selection::Coverage::label()` is the one wording, so
+// "visible user topics only" never becomes "all topics" where an auditor
+// reads. There is no JavaScript link to a Rust constant, so they are copied
+// into ONE exported table here and `ui/tests/pages.spec.js` asserts them
+// character for character.
 
 /** The three coverage labels, VERBATIM from
  *  `weirkeeper::crds::selection::Coverage::label()`. Exactly one of them means
@@ -737,24 +663,18 @@ export const DYNAMIC_SELECTION_SENTENCE =
   "recorded on that run, with a coverage label, and only an attested one ever means everything.";
 
 /** What a schedule naming no topic and carrying no dynamic block is.
- *
- *  THIS SENTENCE GOT SHORTER WHEN `ScheduleView.allUserTopics` LANDED (D1 W6,
- *  PLAT-06.2/09.2). Before it, an empty `topics` could have been either shape
- *  and this page could not tell; now the block itself is published, so the two
- *  cases are distinguishable and only the genuinely empty one is left. */
+ *  `ScheduleView.allUserTopics` publishes the block, so only the genuinely
+ *  empty case is left. */
 export const SELECTION_UNKNOWN_SENTENCE =
   "This schedule names no topic and carries no dynamic-selection block. No run under it will " +
   "back anything up: an empty allowlist is not an allowlist. Name its topics, or all user " +
   "topics, in its policy.";
 
-/** Why no run's COVERAGE is rendered, and by whom that is owed.
+/** Why no run's COVERAGE is rendered in console mode.
  *
  *  `weirkeeper::crds::selection::Coverage::label()` renders the three strings
- *  every surface must use, and the controller records one on every run. NO API
- *  PROJECTION PUBLISHES IT: neither `status.selection` nor any `coverage` field
- *  appears anywhere in `logweir-api`'s contract, so the console has nothing to
- *  render. Saying which task owes it is the difference between a gap and an
- *  omission. */
+ *  every surface must use, and the controller records one on every run, but
+ *  no `logweir-api` projection publishes `status.selection`. */
 export const COVERAGE_NOT_PUBLISHED =
   "What each RUN actually covered is recorded on that run with a coverage label, and only an " +
   "attested one ever means everything. THE SURFACE EXISTS NOW: this page renders " +
@@ -764,17 +684,10 @@ export const COVERAGE_NOT_PUBLISHED =
   "there is nothing to read, and this page will not infer a coverage from the mode, the frozen " +
   "topic list or a successful phase.";
 
-/** What the create form says about where a NEW schedule writes.
- *
- *  THE DEBT THIS SENTENCE USED TO NAME IS PAID. Until PLAT-10.1 it read "a
- *  saved destination cannot be named on a NEW schedule from this page: POST
- *  /schedules takes an inline archive and has no destinationRef field.
- *  PLAT-06.2 owes that one" -- which was true, and was the reason the standard
- *  route made an operator retype a bucket URL and a Secret name that a saved
- *  destination already held. `CreateScheduleRequest` now carries
- *  `destinationRef`, exactly as the edit route does, and this form sends it.
- *  The inline fields remain, collapsed, because an installation that has not
- *  created a destination yet still has to be able to create a schedule. */
+/** What the create form says about where a NEW schedule writes:
+ *  `CreateScheduleRequest` carries `destinationRef` and this form sends it.
+ *  The inline fields remain, collapsed, because an installation with no
+ *  destination yet still has to be able to create a schedule. */
 export const CREATE_TAKES_A_DESTINATION =
   "Choose a saved destination and this form sends destinationRef -- the endpoint, region, " +
   "addressing mode and CA bundle stay in the destination, where they are named once and " +
@@ -783,18 +696,10 @@ export const CREATE_TAKES_A_DESTINATION =
   "Secret name and none of those four things, so this page will never derive one from the " +
   "other.";
 
-/** Why this page cannot CHANGE an existing schedule's destination either, and
- *  the reason is this page's own contract rather than a missing field.
- *
- *  `PUT .../schedules/{name}` LANDED WITH D1 W6 and does take a
- *  `destinationRef` under `expectedGeneration`. This page still cannot send
- *  it: `ui/api.js` exports `create` plus exactly ONE narrow update -- a
- *  JSON-merge patch touching `spec.suspend` -- and
- *  `ui_lint::the_api_module_offers_no_delete_and_no_put` fails on the bare
- *  token for a replace anywhere in that module. That is a deliberate boundary
- *  and widening it is not this task's to decide. The route is a WHOLE-POLICY
- *  replace in which an omitted field is REMOVED, so the form that owns it is
- *  the one that owns every field of that policy: D1 W7's. */
+/** Where an EXISTING schedule's destination is changed: the policy panel on
+ *  its card, which sends the whole-policy `PUT .../schedules/{name}` under
+ *  `expectedGeneration`. An omitted field is REMOVED, so the form that sends
+ *  it owns every field of the policy. */
 export const EDIT_IS_A_REPLACE =
   "An EXISTING schedule can be pointed at a saved destination, and the Future policy panel on " +
   "that schedule's card is where: it sends PUT .../schedules/{name} under expectedGeneration. " +
@@ -943,8 +848,6 @@ export function renderCoverageLine(object) {
   return "";
 }
 
-// ------------------------------------------------------- the destination selector
-
 /** The option a destination selector with nothing chosen opens on. */
 export const DESTINATION_EMPTY_OPTION =
   "<option value=\"\" selected data-name=\"\">choose a saved destination</option>";
@@ -1069,8 +972,6 @@ export function renderDestinationRefusal(id, resolved) {
   );
 }
 
-// --------------------------------------------------------- the topic picker
-
 /** What a topic picker offers, and where the offer came from.
  *
  *  THE PICKER NEVER REPLACES THE TEXT FIELD. A discovery is an observation
@@ -1122,8 +1023,6 @@ export function renderTopicPicker(view) {
   );
 }
 
-// ------------------------------------------------------- the readiness panel
-
 /** The identity of the readiness form in the draft and mutation registries. */
 export const READINESS_FORM = "backup-readiness";
 
@@ -1137,16 +1036,12 @@ export const READINESS_SENTENCE =
 /** The readiness panel: choose a destination, a source and the topics, start a
  *  `Preflight` of operation `backup`, and render what it recorded.
  *
- *  `v.input` IS WHAT THE READER HAS PUT ON THE FORM (P13, poc-upgrade-2): the
- *  source `{uid, name}`, the source search, the destination `{uid, name}` and
- *  the topics exactly as typed. The panel repaints when an ASYNC READ lands --
- *  the discovery a source change starts, a followed check's next read, the
- *  mutation's own state -- and a repaint that rendered from the mount's view
- *  alone emptied the topics, moved the source back to the preferred one and
- *  the destination back to the default: typing the topics first and then
- *  choosing the source sent `topics: []`, refused `422`. Every repaint now
- *  reads the live form into `input` first (`readReadinessInput`), and this
- *  renders it. An absent `input` is a panel nobody has touched. */
+ *  `v.input` IS WHAT THE READER HAS PUT ON THE FORM: the source `{uid, name}`,
+ *  the source search, the destination `{uid, name}` and the topics as typed.
+ *  The panel repaints when an async read lands, and a repaint from the mount's
+ *  view alone would empty the topics and reset the source and destination, so
+ *  every repaint reads the live form into `input` first
+ *  (`readReadinessInput`). An absent `input` is a panel nobody has touched. */
 export function renderReadinessPanel(view) {
   const v = view || {};
   const state = v.state || {};
@@ -1204,15 +1099,11 @@ export function renderReadinessPanel(view) {
   );
 }
 
-/** THE DRAFT A GUIDED CREATE OPENS ON (PLAT-10.1).
- *
- *  A CADENCE PRESET AND NOT A CRON LINE. The old default was the literal
- *  `0 * * * *`, which is an expression an operator had to read before they
- *  could trust it; the default now is "every day, at a fixed time", 02:00, and
- *  the canonical expression it compiles to comes back from the API's own
- *  preview before this form will submit. Everything else starts EMPTY, because
- *  an absent policy field means the documented default and a prefilled one
- *  would write that default into the object explicitly.
+/** THE DRAFT A GUIDED CREATE OPENS ON: a cadence preset, every day at 02:00,
+ *  whose canonical expression comes back from the API's own preview before
+ *  this form will submit. Everything else starts EMPTY, because an absent
+ *  policy field means the documented default and a prefilled one would write
+ *  that default into the object explicitly.
  *
  *  `archiveSecret` keeps its `logweir-s3` suggestion: it is the name the
  *  install guide creates and it is a NAME, not a credential. */
@@ -1240,12 +1131,10 @@ const SCHEME_SEPARATOR = ":" + "//";
 /** A guided draft with its two MODE fields resolved.
  *
  *  A VALUES OBJECT WITH NO `mode` IS AN ADVANCED CRON, and one with no
- *  `selection` is a named allowlist. Those are not defaults chosen here for
- *  convenience: they are what a set of values carrying a cron line and a topic
- *  list IS, and every caller that builds values by hand -- a test, a draft
- *  written before PLAT-10.1 gave this form a cadence selector -- describes
- *  exactly that schedule. The form's own `readScheduleValues` always reads both
- *  from a select and never reaches this. */
+ *  `selection` is a named allowlist: that is what a set of values carrying a
+ *  cron line and a topic list IS, and every caller that builds values by hand
+ *  (a test, an older draft) describes exactly that schedule. The form's own
+ *  `readScheduleValues` always reads both and never reaches this. */
 export function guidedValues(values) {
   const v = Object.assign({}, values || {});
   if (typeof v.mode !== "string" || v.mode.length === 0) {
@@ -1259,20 +1148,14 @@ export function guidedValues(values) {
 
 /** The page's own checks over a guided create, by field.
  *
- *  A CONVENIENCE AND NOT THE GATE, and PLAT-10.1 narrowed it deliberately.
- *  The CADENCE and the ZONE are not refused here: 10.1's acceptance is that an
- *  invalid field is refused by the API's own words with the draft retained, and
- *  a page that pre-empted the cron parser would answer in words of its own that
- *  the controller never said. What this checks is what the page can be sure of
- *  -- an object name, a connection that was actually chosen, a selection with
- *  something in it, a location named exactly once, and numbers inside the
- *  cadence engine's published ranges -- which is exactly `validatePolicy`'s
- *  set, because the two forms are one form.
- *
- *  THE ADVANCED-CRON SHAPE CHECK SURVIVES, in `validatePolicy`, and it is a
- *  SHAPE check: five whitespace-separated fields of cron characters, or a
- *  macro. `61 * * * *` passes it and is refused by the API, which is the
- *  behaviour 10.1's "invalid cron" test measures.
+ *  A CONVENIENCE AND NOT THE GATE. The cadence and the zone are not refused
+ *  here: an invalid one is refused in the API's own words with the draft
+ *  retained. What this checks is what the page can be sure of -- an object
+ *  name, a connection actually chosen, a non-empty selection, a location named
+ *  exactly once, numbers inside the cadence engine's published ranges --
+ *  which is `validatePolicy`'s set, because the two forms are one form.
+ *  `validatePolicy` keeps an Advanced cron SHAPE check only: `61 * * * *`
+ *  passes it and the API refuses it.
  */
 export function validateSchedule(values) {
   const v = guidedValues(values);
@@ -1281,10 +1164,10 @@ export function validateSchedule(values) {
     problems.name = "a BackupSchedule name is lowercase letters, digits, '-' and '.', starting " +
       "and ending with a letter or digit";
   }
-  // THE EMPTY SELECTION IS ITS OWN REFUSAL (review finding F1). A refused
-  // selector opens on `<option value="" selected>`, so a Create click that did
-  // not choose anything arrives here with both halves empty -- and is refused
-  // by name rather than by the DNS-1123 check happening to reject "".
+  // THE EMPTY SELECTION IS ITS OWN REFUSAL. A refused selector opens on
+  // `<option value="" selected>`, so a Create click that chose nothing arrives
+  // here with both halves empty, and is refused by name rather than by the
+  // DNS-1123 check happening to reject "".
   const uid = String(v.sourceUid === undefined || v.sourceUid === null ? "" : v.sourceUid).trim();
   if (String(v.source || "").trim().length === 0 && uid.length === 0) {
     problems.source = "choose a saved connection: nothing is selected, so there is no cluster " +
@@ -1296,37 +1179,31 @@ export function validateSchedule(values) {
 }
 
 
-/** THE GUIDED CREATE FORM (PLAT-10.1): one short form, composed from the
- *  controls the earlier tasks landed, with the advanced options collapsed.
+/** THE GUIDED CREATE FORM: one short form with the advanced options collapsed.
  *
- *  IT IS THE POLICY FORM PLUS AN IDENTITY. `renderCadenceFields`,
- *  `renderSelectionFields`, `renderPolicyLocation` and `renderPolicyFields` are
- *  the same four renderers the Future policy panel uses, under the same field
- *  names, so a person who creates a schedule here and edits it there is looking
- *  at one form twice -- and a rule that holds on one holds on both because
- *  there is one implementation of it. What creation adds is the object's name
- *  and the source connection, which the edit route cannot reach
+ *  IT IS THE POLICY FORM PLUS AN IDENTITY: the same four renderers
+ *  (`renderCadenceFields`, `renderSelectionFields`, `renderPolicyLocation`,
+ *  `renderPolicyFields`) the Future policy panel uses, under the same field
+ *  names, so a rule that holds on one holds on both. Creation adds the
+ *  object's name and the source connection, which the edit route cannot reach
  *  (`sourceRef: field_immutable`).
  *
- *  THE STANDARD PATH TOUCHES NO YAML, NO ENDPOINT AND NO SIGNATURE. Cadence is
- *  a preset with the API's own next-run preview beside it; coverage is a choice
- *  between a named allowlist and all user topics with exclusions; the location
- *  is a saved destination by name. The inline archive URL, the deadlines, the
- *  catch-up policy, the retries and the concurrency policy are all inside
- *  collapsed `<details>` -- present, reachable, and off the standard route.
+ *  THE STANDARD PATH TOUCHES NO YAML, NO ENDPOINT AND NO SIGNATURE: a cadence
+ *  preset with the API's next-run preview, a named allowlist or all user
+ *  topics with exclusions, and a saved destination by name. The inline
+ *  archive, the deadlines, catch-up, retries and concurrency sit in collapsed
+ *  `<details>`.
  *
- *  THE PREVIEW IS THE ONE GATE THIS PAGE ENFORCES, and for the same reason the
- *  edit panel enforces it: a preset has no expression until the API compiles
- *  one, so there is literally nothing to submit until it has. An Advanced cron
- *  is submitted as typed and refused, if it is wrong, by the API's words. */
+ *  THE PREVIEW IS THE ONE GATE THIS PAGE ENFORCES: a preset has no expression
+ *  until the API compiles one. An Advanced cron is submitted as typed and
+ *  refused, if it is wrong, in the API's words. */
 export function renderScheduleForm(view) {
   const v = view || {};
   const d = Object.assign({}, SCHEDULE_DEFAULTS, v.draft || {});
-  // THE NAMESPACE DEFAULT DESTINATION IS INHERITED (PLAT-08.2, D2 section 9)
-  // by a form nobody has chosen a location on yet -- and ONLY then. A draft
-  // that holds `destination: ""` is an operator who chose the inline archive,
-  // and that choice is theirs. Two defaults are no default
-  // (`defaultDestination`), so nothing is preselected for them.
+  // THE NAMESPACE DEFAULT DESTINATION IS INHERITED by a form nobody has
+  // chosen a location on yet, and ONLY then. A draft that holds
+  // `destination: ""` is an operator who chose the inline archive, and that
+  // choice is theirs. Two defaults are no default (`defaultDestination`).
   if (v.draft === null || v.draft === undefined || !("destination" in v.draft)) {
     const inherited = defaultDestination(v.destinations);
     if (inherited !== null) {
@@ -1350,9 +1227,8 @@ export function renderScheduleForm(view) {
     "<form id=\"schedule-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     (v.minted === true
-      // REVIEW L5 (P7's class): NO FIELD FOR A CHOICE THE SERVER DOES NOT
-      // HONOUR. The console names the schedule, and the draft's intent is the
-      // idempotency seed that used to be this field's value.
+      // No field for a choice the server does not honour: the console names the
+      // schedule, and the draft's intent is the idempotency seed.
       ? "<div class=\"field\" id=\"schedule-name-minted\"><p class=\"label\">name</p>" +
         "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_MINTED_SENTENCE) +
         "</p>" + fieldErrorLine("schedule-name", errors.name) + "</div>"
@@ -1411,17 +1287,15 @@ export function renderScheduleForm(view) {
   );
 }
 
-/** Beside the name field (review LOW-5): in console mode the product API names
+/** Beside the name field: in console mode the product API names
  *  the object itself, so the typed name is not the object's name there. */
 export const SCHEDULE_NAME_HELP =
   "The BackupSchedule's object name, which kubectl proxy's API server stores as typed. The " +
   "page opens the created schedule by the name the server gave it.";
 
-/** What the form says where the name field would be, in console mode (review
- *  L5). The product API has no name member on a schedule create and names it
- *  `sch-<26 base32>` from the request's idempotency scope, so a field there
- *  was a choice the server discarded -- and, since its value WAS the key seed,
- *  two different schedules typed with one name collided as a 409. */
+/** What the form says where the name field would be, in console mode: the
+ *  product API has no name member on a schedule create and names it
+ *  `sch-<26 base32>` from the request's idempotency scope. */
 export const SCHEDULE_NAME_MINTED_SENTENCE =
   "Through the product API (console mode) the server names the schedule: sch- followed by 26 " +
   "characters, derived from this request's idempotency key. There is no name to choose here; " +
@@ -1432,8 +1306,8 @@ export function scheduleNamesMinted() {
   return mode() === CONSOLE;
 }
 
-/** A fresh idempotency intent for one schedule draft (review L5): random,
- *  never a counter, refused rather than weakened without a random source --
+/** A fresh idempotency intent for one schedule draft: random, never a
+ *  counter, refused rather than weakened without a random source --
  *  `mintIntent`'s rules for the same reason. */
 export function mintScheduleIntent() {
   const source = globalThis.crypto;
@@ -1464,21 +1338,19 @@ function withScheduleIntent(values, draft) {
  *  policy panel is on screen. */
 export const CREATE_PANEL = "create";
 
-/** READINESS, INSIDE THE FORM AND FROM THE READINESS ROUTE (PLAT-10.1).
+/** READINESS, INSIDE THE FORM AND FROM THE READINESS ROUTE.
  *
  *  It starts the same `Preflight` of operation `backup` the standalone panel
- *  starts, against THIS form's source, destination and topics rather than a
- *  second set of inputs -- so what is checked is what is about to be created.
- *  The verdict is the check's own recorded result, rendered by
- *  `renderPreflight`: nothing on this page decides ready or not ready
- *  (UI-FAKEPREFLIGHT), and a verdict that has not arrived is `pending` and
- *  never `ready`.
+ *  starts, against THIS form's source, destination and topics, so what is
+ *  checked is what is about to be created. The verdict is the check's own
+ *  recorded result, rendered by `renderPreflight`: nothing on this page
+ *  decides ready or not ready, and a verdict that has not arrived is
+ *  `pending`, never `ready`.
  *
- *  IT DOES NOT BLOCK THE CREATE, and that is deliberate. A readiness check is a
- *  statement about the minute it ran in -- a credential can be rotated and an
- *  ACL changed in the next one -- so gating creation on it would be a promise
- *  this product does not make. The schedule's own `Ready` condition and the
- *  run's preflight are the gate. */
+ *  IT DOES NOT BLOCK THE CREATE, deliberately: a readiness check is a
+ *  statement about the minute it ran in, so gating creation on it would be a
+ *  promise this product does not make. The schedule's own `Ready` condition
+ *  and the run's preflight are the gate. */
 function renderCreateReadiness(view) {
   const v = view || {};
   const result = v.readiness || null;
@@ -1498,16 +1370,13 @@ function renderCreateReadiness(view) {
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
         : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\"" +
-          // DISABLED WHILE ITS REQUEST IS IN FLIGHT, in the markup and not only
-          // on the element (review L4): a repaint for another answer -- a
-          // preview landing -- re-enabled it, and two overlapping clicks
-          // could each renew the intent and create a Preflight.
+          // Disabled while its request is in flight, in the markup and not only on
+          // the element: a repaint for another answer would re-enable it, and two
+          // overlapping clicks could each create a Preflight.
           (v.readinessInFlight === true ? " disabled aria-busy=\"true\"" : "") + ">" +
           "Check readiness</button></div>"))) +
-    // THE VERDICT'S REGION TAKES FOCUS (P16's sweep): Check readiness is
-    // disabled while its request is in flight, and the form's own status --
-    // the create's, empty then, so not rendered -- could not take the focus
-    // it gave up. Focus moves here, where the answer is written.
+    // The verdict's region takes focus: Check readiness gives focus up while
+    // its request is in flight, and the answer is written here.
     "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\" tabindex=\"-1\">" +
     renderReadinessVerdict(v) +
     "</div></fieldset>"
@@ -1516,9 +1385,8 @@ function renderCreateReadiness(view) {
 
 /** The readiness verdict slot: unchecked, the recorded verdict, a refused
  *  start, or STALE -- a verdict about a source, destination or topic set the
- *  form no longer describes (review MEDIUM-3). A stale verdict is not shown as
- *  a verdict at all: a green `ready` beside inputs it was not about is the
- *  PLAT-13.2 stale-answer defect. */
+ *  form no longer describes. A stale verdict is not shown as a verdict at
+ *  all: a green `ready` beside inputs it was not about is a false answer. */
 export function renderReadinessVerdict(view) {
   const v = view || {};
   const result = v.readiness || null;
@@ -1631,8 +1499,8 @@ export function scheduleBody(values, canonicalSchedule) {
   if (whole("activeDeadlineSeconds") !== null) {
     spec.activeDeadlineSeconds = whole("activeDeadlineSeconds");
   }
-  // `spec.retention` IS WITHDRAWN (PROD-17.1 B1) and this form never writes it:
-  // a schedule created with it is born carrying `RetentionReportWithdrawn`.
+  // `spec.retention` IS WITHDRAWN and this form never writes it: a schedule
+  // created with it is born carrying `RetentionReportWithdrawn`.
   return {
     apiVersion: "logweir.dev/v1alpha1",
     kind: "BackupSchedule",
@@ -1671,14 +1539,13 @@ export function sourceRefusal(resolved) {
  *  the resolved object carries at this moment, so a rename between opening the
  *  form and submitting it is followed rather than fought.
  *
- *  Called without `clusters` -- which is what a caller that has not read them
- *  looks like -- it falls back to the typed values, which is the pre-PLAT-07.2
- *  behaviour and is what keeps an existing draft usable. */
+ *  Called without `clusters` (a caller that has not read them) it falls back
+ *  to the typed values, which keeps an older draft usable. */
 export async function submitSchedule(ns, values, deps, clusters, preview) {
-  // REVIEW L5: IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no
-  // name to check, and `metadata.name` carries the draft's INTENT -- the one
-  // value `ui/client.js` composes the idempotency key from. `requestBody`
-  // never sends it: the schedule create has no name member.
+  // IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no name to
+  // check, and `metadata.name` carries the draft's INTENT -- the one value
+  // `ui/client.js` composes the idempotency key from. `requestBody` never
+  // sends it: the schedule create has no name member.
   const minted = scheduleNamesMinted();
   const problems = validateSchedule(minted ? Object.assign({}, values, { name: "minted" }) : values);
   if (minted && !(typeof (values || {}).intent === "string" && values.intent.length >= 8)) {
@@ -1762,7 +1629,7 @@ export const NO_POINTS_SENTENCE =
   "from until one reaches phase Succeeded.";
 
 /** THE RECOVERY POINTS ONE SCHEDULE HAS PRODUCED, each with the link that
- *  opens the restore wizard ON IT (PLAT-11.1).
+ *  opens the restore wizard ON IT.
  *
  *  The rows are `Backup` objects whose `spec.scheduleRef.name` is this
  *  schedule -- the field `weirkeeper` writes when the cron reconciler creates
@@ -1786,11 +1653,11 @@ export function renderRecoveryPoints(ns, object, backups) {
     const status = point.status || {};
     const covered = status.windowCovered || {};
     return [
-      // The action first (MCP-25's rule), so a wide row never hides it -- and
-      // for a role that cannot restore, who can (MCP round 3, R3-2).
+      // The action first, so a wide row never hides it, and for a role that
+      // cannot restore, who can.
       restorePointLink(restorePointRoute(ns, point), granted(ns, "restoreCreate")),
-      // THE SLOT UNDER THE NAME AND THE WINDOW IN ONE CELL (R2-3): nine
-      // columns were 270 px wider than the card at 1440.
+      // The slot under the name and the window in one cell, so the table fits
+      // its card.
       cell(meta.name) + (typeof spec.slot === "string" && spec.slot.length > 0
         ? "<span class=\"cell-sub\">slot " + esc(spec.slot) + "</span>" : ""),
       triggerBadge(spec.trigger, ((object || {}).spec || {}).retry === undefined
@@ -1805,8 +1672,7 @@ export function renderRecoveryPoints(ns, object, backups) {
   const running = mine.filter((backup) => !isRecoveryPoint(backup)).length;
   return (
     "<section class=\"retention\"><h3>Recovery points</h3>" +
-    // A PAGE OF POINTS, NOT ALL OF THEM (MCP-26): 258 points were 258 rows on
-    // every schedule card, a 20,000 px table.
+    // A page of points, not all of them.
     table(
       ["", "BACKUP", "TRIGGER", "COVERAGE", "BACKUP SET", "COVERED", "RECORDS"],
       rows,
@@ -1899,11 +1765,9 @@ export function renderScheduleRevision(object) {
   const behind = typeof meta.generation === "number" &&
     typeof status.observedGeneration === "number" &&
     status.observedGeneration < meta.generation;
-  // THE REVISION, THE INSTANT AND THE ZONE IN THE SENTENCE; THE DIGEST AND THE
-  // tz DATABASE ONE DISCLOSURE AWAY (MCP-13). Both are still printed -- a
-  // suspend flip moves the generation and leaves the digest, which is why the
-  // digest is here at all -- but a `sha256:` and a library version were the
-  // first thing an operator read on every schedule card.
+  // The revision, the instant and the zone in the sentence; the digest and
+  // the tz database one disclosure away. The digest stays because a suspend
+  // flip moves the generation and leaves the digest.
   return (
     "<p class=\"revision\" data-generation=\"" +
     (typeof meta.generation === "number" ? String(meta.generation) : "") + "\">" +
@@ -1953,7 +1817,7 @@ export function policyFormView(ns, object, own, destinations, may) {
     destinations: destinations,
     mayOperate: may,
     // WHERE THE STORED SCHEDULE WRITES NOW, so the panel can say whether an
-    // edit moves the archive (PLAT-08.2 migration).
+    // edit moves the archive.
     current: {
       destination: String((((object || {}).spec || {}).destinationRef || {}).name || ""),
       archive: String((((object || {}).spec || {}).archive || {}).url || ""),
@@ -1986,8 +1850,6 @@ export const POLICY_FIELD_PATHS = Object.freeze([
   ["expectedGeneration", "cron"],
 ]);
 
-// --------------------------------------------------------------- mount half
-
 /** The destinations the readiness panel offers, or the reason there are none.
  *  Never throws for anything but a cancellation: a console that cannot serve
  *  destinations is a panel with a sentence, not a page with an error box. */
@@ -2009,8 +1871,8 @@ async function readReadiness(api, ns, lifecycle, clusters) {
 }
 
 /** Every RetentionPolicy in `ns`. A failed read (a refusal, a 5xx, an answer
- *  the decoder rejects) is not an empty list (FX-42): it is
- *  `{readFailed: <why>}`, and the retention panel then says so. */
+ *  the decoder rejects) is not an empty list: it is `{readFailed: <why>}`,
+ *  and the retention panel then says so. */
 export async function readRetentionPolicies(ns, lifecycle, readers) {
   const listRetention = ((readers || {}).listRetention) ||
     (() => listD3("retention", ns, readOptions(lifecycle)));
@@ -2028,13 +1890,6 @@ function readinessView(ns, readiness) {
   return Object.assign({ state: mutationFor(formKey(ns, READINESS_FORM)).state }, readiness || {});
 }
 
-/** The readiness panel's controls: start a `Preflight` of operation `backup`
- *  against the chosen connection, destination and topics, and offer the names
- *  the newest inventory for that connection observed.
- *
- *  THE TOPIC OFFER IS READ WHEN THE CONNECTION IS CHOSEN, and not before: a
- *  discovery is about ONE connection, and offering the names observed against
- *  a different one would be worse than offering none. */
 // THE PANEL'S LATEST VIEW, per namespace, so the follower below repaints the
 // panel as it is NOW -- with the source, destination and topic offer the
 // reader chose since the check started -- and knows when a newer check has
@@ -2045,17 +1900,15 @@ const readinessPanels = new Map();
  *  sourceQuery, destination, topics}` for `renderReadinessPanel`'s `input` --
  *  or `null` when no form is on screen.
  *
- *  READ FROM THE LIVE CONTROLS, NOT FROM A DRAFT: the panel keeps no draft
- *  (a readiness check is a question, not an object in the making), so what is
- *  on screen is the only record of what was typed, and it is read at the one
- *  moment it can be lost -- just before a repaint replaces those controls.
+ *  READ FROM THE LIVE CONTROLS: the panel keeps no draft (a readiness check is
+ *  a question, not an object in the making), so what is on screen is the only
+ *  record of what was typed, read just before a repaint replaces it.
  *
- *  NAMES COME FROM THE LISTS THIS MOUNT READ, BY UID. The select carries the
- *  uid; the hidden `-name` input beside the destination select is written at
- *  render time and never again, so a submit that read it sent the DEFAULT
- *  destination whatever was chosen (found with P13). A destination equal to
- *  the one the renderer would preselect is left `null`, so the panel says
- *  "Preselected: the namespace default" exactly as before anyone touched it. */
+ *  NAMES COME FROM THE LISTS THIS MOUNT READ, BY UID: the hidden `-name`
+ *  input beside the destination select is written at render time only, so
+ *  reading it would send the default destination. A destination equal to the
+ *  one the renderer would preselect is left `null`, so the panel still says
+ *  "Preselected: the namespace default". */
 export function readReadinessInput(node, view) {
   const form = node.querySelector("#readiness-form");
   if (form === null) {
@@ -2098,8 +1951,8 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
   if (slot === null) {
     return;
   }
-  // WHAT IS TYPED SURVIVES THE REPAINT (P13): read off the controls about to
-  // be replaced, and carried in the view the next repaint starts from.
+  // What is typed survives the repaint: read off the controls about to be
+  // replaced, and carried in the view the next repaint starts from.
   const typed = readReadinessInput(node, merged);
   const next = typed === null ? merged : Object.assign({}, merged, { input: typed });
   replaceInPlace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
@@ -2107,13 +1960,10 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
 }
 
 /** Re-reads the check the readiness panel started until a READ answers
- *  terminal, or the longest time a check may take has passed -- defect P8's
- *  class, and poc-upgrade-3's P15: a 40 s budget left a 64 s check reading
- *  "this page reads it again until then" for good. Before P8 the panel
- *  rendered the create answer and nothing else: a check that had not run yet,
- *  or a replayed one whose staleness the create answer never recomputed.
- *  A failed re-read is not a verdict: the panel keeps what the check last
- *  recorded, and says so when it stops (`lifecycle.js`'s `followCheck`). */
+ *  terminal, or the longest time a check may take has passed; the create
+ *  answer is not a read. A failed re-read is not a verdict: the panel keeps
+ *  what the check last recorded, and says so when it stops (`lifecycle.js`'s
+ *  `followCheck`). */
 function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
   const key = formKey(ns, READINESS_FORM);
   const mine = () => (((readinessPanels.get(key) || {}).preflight) || {}).id === (first || {}).id;
@@ -2133,6 +1983,13 @@ function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
   });
 }
 
+/** The readiness panel's controls: start a `Preflight` of operation `backup`
+ *  against the chosen connection, destination and topics, and offer the names
+ *  the newest inventory for that connection observed.
+ *
+ *  THE TOPIC OFFER IS READ WHEN THE CONNECTION IS CHOSEN, and not before: a
+ *  discovery is about ONE connection, and offering the names observed against
+ *  a different one would be worse than offering none. */
 function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
   const key = formKey(ns, READINESS_FORM);
   readinessPanels.set(key, readiness);
@@ -2163,7 +2020,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
   const search = node.querySelector("#readiness-source-search");
   if (source !== null && search !== null) {
     // THE SEARCH FILTERS THE OPTIONS AND NOTHING ELSE, as the create form's
-    // does (`wireSourceSelector`). It was rendered here and never wired.
+    // does (`wireSourceSelector`).
     const note = node.querySelector("#readiness-source-no-match");
     const filter = () => {
       const visible = filterSelectorOptions(source, search.value);
@@ -2262,9 +2119,9 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     if (chosen.length > 0) {
       request.backup.destination = chosen;
     }
-    // ASKED AGAIN, NOT REPLAYED, once the check these inputs made is spent
-    // (P14): `askReadiness` keeps the key while that check can still be the
-    // answer and mints a new one when it cannot.
+    // ASKED AGAIN, NOT REPLAYED, once the check these inputs made is spent:
+    // `askReadiness` keeps the key while that check can still be the answer and
+    // mints a new one when it cannot.
     mutation.run(() => askReadiness(api, ns, READINESS_FORM, request,
       ((latest() || {}).preflight) || null));
   };
@@ -2297,13 +2154,10 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
 export async function mountSchedules(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
   try {
-    // The schedules AND the runs they produced: a schedule card's recovery
-    // points are `Backup` objects naming it, and there is no field on the
-    // schedule that carries them.
-    // THE SCHEDULES, THE RUNS THEY PRODUCED, AND THE SAVED CONNECTIONS. The
-    // third read is the source selector's list: the form offers a choice among
-    // objects that exist, and the submit resolves the chosen UID against this
-    // same list rather than against a name typed some time ago.
+    // THE SCHEDULES, THE RUNS THEY PRODUCED (a card's recovery points are
+    // `Backup` objects naming it) AND THE SAVED CONNECTIONS: the source
+    // selector's list, which the submit resolves the chosen UID against rather
+    // than a name typed some time ago.
     const collections = await Promise.all([
       api.list(ns, PLURAL, readOptions(lifecycle)),
       api.list(ns, BACKUPS, readOptions(lifecycle)),
@@ -2342,9 +2196,9 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
       cards[((object.metadata || {}).name) || ""] = {};
     }
     // THE RETENTION POLICIES ARE A FIFTH READ AND ITS FAILURE IS NOT THE
-    // PAGE'S EITHER. A build whose API has no retention route yet, or an
-    // identity with no grant on the kind, must not take the schedules page
-    // down with it: the panel then says the read failed (FX-42).
+    // PAGE'S EITHER. A build whose API has no retention route, or an identity
+    // with no grant on the kind, must not take the schedules page down: the
+    // panel then says the read failed.
     const extra = {
       cards: cards,
       destinations: readiness.destinations,
@@ -2357,9 +2211,9 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     }
     const panels = objects
       .map((object) => renderScheduleCard(ns, object, backups, extra)).join("");
-    // THE GUIDED FORM'S OWN SESSION (PLAT-10.1): the destinations it offers,
-    // whether this login may start a readiness check, and the two answers this
-    // reader may ask for while the form is open.
+    // THE GUIDED FORM'S OWN SESSION: the destinations it offers, whether this
+    // login may start a readiness check, and the two answers this reader may
+    // ask for while the form is open.
     const creating = {
       destinations: readiness.destinations,
       mayOperate: extra.mayOperate,
@@ -2405,7 +2259,7 @@ export function readScheduleValues(form) {
   const e = form.elements;
   const source = readClusterSelection(form, "schedule-source");
   const values = {
-    // ABSENT IN CONSOLE MODE (review L5): the server names the schedule.
+    // ABSENT IN CONSOLE MODE: the server names the schedule.
     name: e.name === undefined ? "" : String(e.name.value).trim(),
     source: source.name,
     sourceUid: source.uid,
@@ -2424,11 +2278,8 @@ function wire(node, ns, parse, lifecycle, api, objects, clusters, creating) {
 }
 
 /** `remount` is how a SUCCESS re-reads: the list passes nothing and gets the
- *  list; the schedule detail passes its own mount (review HIGH-1). Re-mounting
- *  the namespace list into a detail whose route still names one schedule threw
- *  the operator off the page their action was about, with its history, facts
- *  and Restore actions gone -- the opposite of "actions retain schedule and
- *  recovery-point context". */
+ *  list; the schedule detail passes its own mount, so an action keeps the
+ *  operator on the schedule it was about, with its history and actions. */
 function wireToggle(node, ns, parse, lifecycle, api, objects, toggle, remount) {
   const name = toggle.getAttribute("data-name");
   const key = formKey(ns, SUSPEND_FORM, name);
@@ -2500,7 +2351,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (!active(lifecycle)) {
       return;
     }
-    // THE INTENT SURVIVES EVERY KEYSTROKE (review L5).
+    // THE INTENT SURVIVES EVERY KEYSTROKE.
     const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
     // AN EDIT THAT CHANGES WHAT A CHECK WOULD ASK MAKES ITS VERDICT STALE AT
@@ -2541,9 +2392,9 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       }, lifecycle);
     }
   }
-  // THE DESTINATION IS CHOSEN BY IDENTITY, and what it hands down is shown
-  // (PLAT-08.2): a change pins the uid of the name just chosen, from the list
-  // this mount read, and repaints the inherited settings beside it.
+  // THE DESTINATION IS CHOSEN BY IDENTITY, and what it hands down is shown:
+  // a change pins the uid of the name just chosen, from the list this mount
+  // read, and repaints the inherited settings beside it.
   wireDestinationChoice(form, held.destinations, () => {
     remember();
     repaint();
@@ -2552,12 +2403,11 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       dropDraft(key);
-      // FIRST-RUN REDIRECT (PLAT-10.1). The schedule exists; the next thing a
-      // person wants is its detail, where "Run first backup now" is -- and the
-      // route carries the name the SERVER gave the object, which in console
-      // mode is minted from the idempotency scope and is not the name typed
-      // into the form. A created object with no name in its answer is not
-      // navigated to: the list below is already re-read and shows it.
+      // FIRST-RUN REDIRECT. The schedule exists; the next thing a person wants
+      // is its detail, where "Run first backup now" is, and the route carries
+      // the name the SERVER gave the object (minted in console mode, not the
+      // typed one). A created object with no name in its answer is not navigated
+      // to: the list below is already re-read and shows it.
       const created = ((state.result || {}).object || {}).metadata || {};
       const route = scheduleDetailRoute(ns, String(created.name || ""));
       if (route !== null && typeof window !== "undefined") {
@@ -2627,9 +2477,9 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     }
     disableKeepingFocus(check, true, node.querySelector("#schedule-readiness-verdict"));
     held.readinessInFlight = true;
-    // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
-    // it is shown as current only while the form still describes that
-    // request, and marked stale the moment it does not.
+    // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT: it is shown as
+    // current only while the form still describes that request, and marked
+    // stale the moment it does not.
     const asked = readinessKey(request);
     const shown = held.readinessRequest === asked ? held.readiness : null;
     held.readinessRequest = asked;
@@ -2671,18 +2521,15 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     }
     const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
-    // THE CONNECTIONS ARE READ AGAIN, HERE, BEFORE THE CREATE. Resolving the
-    // chosen uid against the list this view read at mount would only catch a
-    // connection that was already gone when the form opened; the window that
-    // matters is the one between opening the form and submitting it, which is
-    // exactly when somebody rebuilds a cluster. The read carries NO ROUTE
-    // SIGNAL: a submit in flight is a durable operation and navigation must
-    // not cancel it (PLAT-13.2), and this read is part of that operation.
+    // THE CONNECTIONS ARE READ AGAIN, HERE, BEFORE THE CREATE: the window that
+    // matters is between opening the form and submitting it, which is exactly
+    // when somebody rebuilds a cluster. The read carries NO ROUTE SIGNAL: a
+    // submit in flight is a durable operation and navigation must not cancel
+    // it, and this read is part of that operation.
     mutation.run(async () => {
-      // MINTED INSIDE THE EXECUTOR, once per draft (review L5): a double
-      // click, a retry after a timeout and a resend after a refusal all carry
-      // the same one, and a platform with no random source is a refusal in
-      // this form's status region.
+      // MINTED INSIDE THE EXECUTOR, once per draft: a double click, a retry
+      // after a timeout and a resend after a refusal all carry the same one, and
+      // a platform with no random source is a refusal in this form's status.
       if (scheduleNamesMinted() && !values.intent) {
         values.intent = mintScheduleIntent();
         keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
@@ -2723,17 +2570,14 @@ export function readinessRequestFor(values) {
   return request;
 }
 
-/** Asks a backup readiness question from the form `form` in `ns` (P14).
+/** Asks a backup readiness question from the form `form` in `ns`.
  *
  *  THE SAME QUESTION REPLAYS ONLY WHILE ITS CHECK CAN STILL BE THE ANSWER. The
  *  key is the request's content plus the form's intent token
  *  (`lifecycle.js`'s `askCheck`): a retry after a lost response, or a second
  *  click while the check runs or is current, is the same key and the same
- *  check; once that check is spent -- `held` read expired, inapplicable,
- *  failed or cancelled, or a replay that answers already expired -- the token
- *  is renewed and this is a new check. Before this the key was the content
- *  alone, and a check clicked again after its ten minutes came back
- *  `replayed: true` for as long as the controller kept the old object. */
+ *  check; once that check is spent (expired, inapplicable, failed or
+ *  cancelled) the token is renewed and this is a new check. */
 export function askReadiness(api, ns, form, request, held) {
   return askCheck({
     intent: formKey(ns, form),
@@ -2750,7 +2594,7 @@ export function askReadiness(api, ns, form, request, held) {
  *  by the route, the follow ends at the check's own deadline and says so, and
  *  a failed re-read is not a verdict -- the verdict on screen stays what the
  *  check last recorded. A REPLAYED CHECK IS TERMINAL ON ARRIVAL AND STILL OWES
- *  A READ (P8): the create answer says "this response did not recompute
+ *  A READ: the create answer says "this response did not recompute
  *  staleness". A newer check on this form ends the follow of an older one. */
 function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) {
   const first = held.readiness;
@@ -2846,32 +2690,17 @@ export function wireSourceSelector(node, form, remember, lifecycle) {
   }
 }
 
-// ===========================================================================
-// D1 W7: the future policy, its preview, and Back up now
-// ===========================================================================
+// THE POLICY ROUTE IS A REPLACE: `PUT .../schedules/{name}` under an
+// `expectedGeneration` precondition REMOVES a field the request omits, so
+// every field of the policy is on screen, seeded from the object this page
+// read, and every one is sent. The panel says so above its button.
+// `sourceRef` stays immutable.
 //
-// WHAT CHANGED UNDER THIS PAGE. Until PLAT-05.1 a BackupSchedule's spec was
-// SEALED: an object-level CEL rule refused every update but `spec.suspend`,
-// for every subject, cluster-admin included. That is why this page's one
-// update is the suspend toggle and why `ui/api.js` exports no replace. D1 W2
-// replaced that rule with three narrower ones -- `sourceRef` is immutable, a
-// dynamic selection needs an empty `topics`, a retrying schedule needs a short
-// name -- and D1 W6 added the route that edits everything else:
-// `PUT .../schedules/{name}`, under an `expectedGeneration` precondition.
-//
-// IT IS A REPLACE AND THE FORM IS BUILT AROUND THAT. A field omitted from the
-// request is REMOVED from the schedule, so a panel that showed three fields
-// and sent three fields would silently clear the other nine. Every field of
-// the policy is therefore on screen, seeded from the object this page read,
-// and every one of them is sent. The panel says so above its button.
-//
-// AND THE BROWSER STILL NEVER EVALUATES CRON. A preset is compiled to its
-// canonical expression by `GET /api/v1/cadence-previews`, which is the
-// controller's own engine and its own tz database; the form sends the preset's
-// parameters, receives the canonical `schedule` string, and SAVES THAT STRING.
-// A preset whose parameters have changed since the last preview cannot be
-// saved until it is previewed again -- not as a nag, but because this page has
-// no expression to save until the server has produced one.
+// THE BROWSER NEVER EVALUATES CRON. A preset is compiled to its canonical
+// expression by `GET /api/v1/cadence-previews` (the controller's engine and
+// tz database), and the form SAVES THAT STRING. A preset changed since its
+// last preview cannot be saved until previewed again: this page has no
+// expression to save until the server has produced one.
 
 /** The identity of one schedule's policy form in the draft and mutation
  *  registries. Each schedule has its own record, exactly as the toggle does. */
@@ -2886,9 +2715,9 @@ export const POLICY_DRAFT_FIELDS = Object.freeze([
   "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n",
   "timeZone", "topics", "selection", "incompleteDiscovery", "excludeTopics",
   "excludePrefixes", "archive", "archiveSecret", "destination",
-  // PLAT-08.2: the destination is chosen BY IDENTITY -- the uid the chosen
-  // name resolved to when it was chosen -- and a policy edit that moves the
-  // archive location says so with its own explicit box.
+  // The destination is chosen BY IDENTITY (the uid the chosen name resolved
+  // to when it was chosen), and a policy edit that moves the archive
+  // location says so with its own explicit box.
   "destinationUid", "moveLocation",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
@@ -2900,11 +2729,10 @@ export const POLICY_DRAFT_FIELDS = Object.freeze([
  *  `weirkeeper::cadence::presets` is the single catalogue and it emits
  *  `ui/tests/fixtures/cadence-presets.json`; `ui/tests/d1.spec.js` compares
  *  the kinds and the parameter bounds below with that file, so this table
- *  cannot drift from Rust without a red row. What is deliberately NOT here is
- *  the `cronTemplate`: filling it in would be this page compiling a preset,
- *  which is the second implementation D1 section 4.2 forbids. The templates stay in
- *  the fixture as evidence of what the server will produce, and the server
- *  produces it. */
+ *  cannot drift from Rust without a red row. The `cronTemplate` is
+ *  deliberately NOT here: filling it in would be this page compiling a
+ *  preset, a second implementation. The templates stay in the fixture as
+ *  evidence of what the server will produce, and the server produces it. */
 export const CADENCE_PRESETS = Object.freeze([
   Object.freeze({
     kind: "hourly",
@@ -2948,7 +2776,7 @@ export const CADENCE_PRESETS = Object.freeze([
 ]);
 
 /** The cadence mode a form opens on when the saved expression is not one of
- *  the five. Everything else is "Advanced cron" -- D1 section 4.2's own phrase. */
+ *  the five. Everything else is "Advanced cron". */
 export const ADVANCED_CRON = "advanced";
 
 /** What an interval preset counts from, said because the obvious reading is
@@ -2958,8 +2786,8 @@ export const EVERY_N_HOURS_SENTENCE =
   "NOT N hours after the schedule was created. Across a daylight-saving transition the UTC " +
   "cadence is kept, so an interval schedule neither doubles up nor skips an interval.";
 
-/** The defaults the controller applies to an omitted policy field
- *  (D1 section 4.1), as the words the form shows beside each input.
+/** The defaults the controller applies to an omitted policy field, as the
+ *  words the form shows beside each input.
  *
  *  THEY ARE NOT PREFILLED INTO THE INPUTS, and that is the point. This route
  *  REMOVES a field the request omits, so an input left blank means "do not set
@@ -3145,11 +2973,10 @@ export function validatePolicy(values) {
       }
     }
   }
-  // THE SELECTION'S TWO SHAPES, AND NOTHING BETWEEN THEM. The CRD's own rule
-  // R2 refuses `allUserTopics` beside a non-empty `topics`, and an empty
-  // allowlist with no dynamic block is a schedule that backs nothing up; both
-  // are refused here so neither reaches the API as a 422 a reader has to
-  // decode.
+  // THE SELECTION'S TWO SHAPES, AND NOTHING BETWEEN THEM. The CRD refuses
+  // `allUserTopics` beside a non-empty `topics`, and an empty allowlist with
+  // no dynamic block is a schedule that backs nothing up; both are refused
+  // here so neither reaches the API as a 422 a reader has to decode.
   if (v.selection === "dynamic") {
     if (INCOMPLETE_DISCOVERY_POLICIES.indexOf(String(v.incompleteDiscovery || "")) === -1) {
       problems.incompleteDiscovery = "choose what a run does when discovery cannot prove it saw " +
@@ -3270,8 +3097,6 @@ export function policyBody(values, generation, canonicalSchedule) {
   // omits, so saving clears one a schedule still carries.
   return body;
 }
-
-// ------------------------------------------------------ the policy form
 
 function policyId(name, field) {
   return "policy-" + name + "-" + field;
@@ -3440,16 +3265,7 @@ function renderPolicyFields(name, values, errors) {
   );
 }
 
-/** Where the runs are written, and what a saved destination costs to change.
- *
- *  `collapseInline` PUTS THE HAND-TYPED HALF BEHIND A DISCLOSURE (PLAT-10.1).
- *  The guided create form passes it, because 10.1's acceptance is that the
- *  standard route needs no raw endpoint reconstruction, and an URL input in front
- *  of the person is an invitation to reconstruct one. The edit panel does not:
- *  it is a whole-policy replace, every field it holds is a field it SENDS, and
- *  a field being cleared inside a closed `<details>` is exactly the surprise
- *  that panel's own sentence exists to prevent. */
-/** FX-20: what an inline archive's Secret must carry. The runner refuses it
+/** What an inline archive's Secret must carry. The runner refuses it
  *  otherwise, before any request is signed; this service never reads a Secret,
  *  so it says so here rather than discovering it on the first run. */
 export const INLINE_ARCHIVE_BINDING_HELP =
@@ -3458,6 +3274,14 @@ export const INLINE_ARCHIVE_BINDING_HELP =
   "anything is sent. A saved destination avoids this: its credential is entered once and bound " +
   "to it.";
 
+/** Where the runs are written, and what a saved destination costs to change.
+ *
+ *  `collapseInline` PUTS THE HAND-TYPED HALF BEHIND A DISCLOSURE. The guided
+ *  create form passes it: the standard route needs no raw endpoint, and a URL
+ *  input in front of the person invites one. The edit panel does not: it is a
+ *  whole-policy replace, every field it holds is a field it SENDS, and a field
+ *  cleared inside a closed `<details>` is the surprise that panel's own
+ *  sentence exists to prevent. */
 function renderPolicyLocation(name, values, errors, destinations, collapseInline, current) {
   const all = Array.isArray(destinations) ? destinations : [];
   const inline =
@@ -3487,7 +3311,7 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
     // THE IDENTITY THE CHOSEN NAME RESOLVED TO WHEN IT WAS CHOSEN. The API
     // takes a name; this page keeps the uid beside it, so a destination deleted
     // and recreated under that name while the form is open is refused at
-    // submit rather than followed (the source connection's rule, PLAT-07.2).
+    // submit rather than followed (the source connection's rule).
     "<input type=\"hidden\" id=\"" + esc(policyId(name, "destination-uid")) +
     "\" name=\"destinationUid\" value=\"" +
     esc(pin.state === "selected" || pin.state === "recreated" || pin.state === "missing"
@@ -3549,11 +3373,11 @@ export const INHERITED_DESTINATION_SENTENCE =
   "grant it will use -- so an access rotation or CA change on the destination reaches the next " +
   "run and never one already created. Location and transport cannot be changed in place.";
 
-/** WHAT A SCHEDULE INHERITS FROM ITS DESTINATION (PLAT-08.2): the public
- *  storage and transport settings the chosen destination publishes, as facts
- *  -- never as inputs -- with its verdict and the revision this page read. A
- *  selection whose uid stopped answering is a refusal, in the connection
- *  selector's words. */
+/** WHAT A SCHEDULE INHERITS FROM ITS DESTINATION: the public storage and
+ *  transport settings the chosen destination publishes, as facts -- never as
+ *  inputs -- with its verdict and the revision this page read. A selection
+ *  whose uid stopped answering is a refusal, in the connection selector's
+ *  words. */
 export function renderInheritedDestination(name, pin) {
   const p = pin || {};
   if (p.state === "none") {
@@ -3564,10 +3388,10 @@ export function renderInheritedDestination(name, pin) {
   }
   const d = p.item || {};
   // TWO SHAPES, ONE FACT SET. The list this form reads is `DestinationSummary`
-  // -- `endpoint`, `addressing` and `transport` flat, no region, no CA -- and a
+  // (`endpoint`, `addressing` and `transport` flat, no region, no CA), and a
   // full `Destination` nests them. Both are read; a fact the summary does not
   // publish is SAID to be on the destination's own page, never shown as a
-  // default (the first live run showed "AWS S3" for an http endpoint here).
+  // default.
   const storage = d.storage || {};
   const transport = typeof d.transport === "string" ? { security: d.transport } : (d.transport || {});
   const endpoint = typeof storage.endpoint === "string" ? storage.endpoint
@@ -3622,8 +3446,7 @@ function canonicalLocation(url) {
   return rest.length === 0 ? null : "s3" + SCHEME_SEPARATOR + rest;
 }
 
-/** WHETHER A POLICY EDIT MOVES THE ARCHIVE (PLAT-08.2 migration: "convert
- *  inline archive configuration without changing ... archive location").
+/** WHETHER A POLICY EDIT MOVES THE ARCHIVE.
  *
  *  `current` is the stored schedule's own location fields; `values` is the
  *  form. The same spelling (the same destination, or the same inline URL) is
@@ -3697,7 +3520,7 @@ export const LOCATION_MOVE_REFUSAL =
   "sent. Tick it to write new runs to the new location, or keep the current one";
 
 /** Re-reads the destinations at submit and confirms the chosen one is still
- *  the object that was chosen (PLAT-08.2, "destination edit during a draft").
+ *  the object that was chosen.
  *
  *  An EDIT -- an access rotation, a CA change -- keeps the uid and the
  *  location, and is not a refusal: the next run simply resolves the edited
@@ -3837,48 +3660,24 @@ export function renderPolicyPreview(preview, values) {
   );
 }
 
-// ------------------------------------------------------- Back up now
-
 // THE INTENT IS A FIELD OF THE DRAFT, AND ITS LIFETIME IS THE DRAFT'S.
 //
-// A manual run has NO NAME UNTIL THE SERVER DERIVES ONE, so the trick every
-// other create on this page uses -- creating the same name twice is
-// `AlreadyExists`, which IS the idempotence -- is not available. What replaces
-// it is the product API's `Idempotency-Key`: the same key returns the same
-// run, with `replayed: true`, however many times it is sent.
+// A manual run has NO NAME UNTIL THE SERVER DERIVES ONE, so idempotence is
+// the product API's `Idempotency-Key`: the same key returns the same run,
+// with `replayed: true`.
 //
-// THE FIRST CUT OF THIS COMPOSED THE KEY FROM A MODULE-LEVEL COUNTER, and that
-// was a defect a live review caught (review F3). `intentCounter` resets on
-// every page load, so the FIRST intent minted after a reload reproduced the
-// first intent minted before it, byte for byte -- and the second one did not.
-// A click after a reload was therefore sometimes a replay of the earlier run,
-// sometimes a `409 idempotency_conflict`, and sometimes a new run, decided by
-// the order the previous page load happened to mint intents in. The page's own
-// sentence, `ui/README.md` and `docs/kubernetes.md` section 16 all said the
-// opposite, and the row that "held" it asserted only that the sentence was ON
-// SCREEN, never that it was true.
+//   * ONE INTENT PER DRAFT, keyed by `formKey(ns, RUN_NOW_FORM, schedule)`:
+//     a double click, a retry after a timeout and a "Check status" all send
+//     the same key and get the same run.
+//   * A RELOAD LOSES IT. The draft registry is module state and nothing in
+//     this tree uses browser storage, and the body is RANDOM, so a new page
+//     load cannot reproduce an old key: a click after a reload is a
+//     deliberate NEW run.
+//   * A DURABLE RUN ENDS THE DRAFT: "Back up again" drops it and mints a new
+//     intent, so a deliberate later backup creates another.
 //
-// SO THE KEY IS NOW A DRAFT FIELD, WITH A RANDOM BODY.
-//
-//   * ONE INTENT PER DRAFT. `lifecycle.js`'s draft registry is keyed by
-//     `formKey(ns, RUN_NOW_FORM, schedule)`, which is exactly the scope an
-//     intent has. Every resend of that intent -- a double click, a retry after
-//     a timeout, a "Check status" on an unknown outcome -- reads the same
-//     field and sends the same key, and the API answers with the same run.
-//   * A RELOAD LOSES IT, GENUINELY. The draft registry is module state and
-//     there is no browser storage anywhere in this tree
-//     (`scripts/check-ui-offline.sh` fails the build over the byte sequences
-//     that would introduce one), so the draft and the key go together -- and
-//     because the body is RANDOM rather than a counter, a new page load cannot
-//     reproduce an old key even by accident. The sentence "a click after a
-//     reload is a deliberate NEW run" is now true.
-//   * A DURABLE RUN ENDS THE DRAFT. Once a run exists the panel offers "Back
-//     up again", which drops the draft and therefore mints a new intent --
-//     PLAT-06.2's second acceptance clause, "a deliberate later backup creates
-//     another", which was unreachable before (review F2).
-//
-// PLAT-13.2's draft rules apply unchanged: the field is a declared one, it is
-// a string, and it is no more a credential than a Secret's name is.
+// The field is declared, a string, and no more a credential than a Secret's
+// name is.
 
 /** The one field a manual-run draft keeps: the idempotency intent. */
 export const RUN_NOW_DRAFT_FIELDS = Object.freeze(["intent"]);
@@ -3886,18 +3685,13 @@ export const RUN_NOW_DRAFT_FIELDS = Object.freeze(["intent"]);
 /** A fresh intent. `logweir-ui.manual.` plus 32 random hex characters -- 50
  *  characters, well inside the product API's 8-to-128 budget.
  *
- *  RANDOM, NOT ORDERED AND NOT TIMED. A counter collides across page loads
- *  (review F3) and a clock collides between two tabs opened in the same
- *  millisecond; `getRandomValues` does neither, and it is available in an
- *  insecure context, unlike `randomUUID`, so this does not narrow where the
- *  page can be served from.
+ *  RANDOM, NOT ORDERED AND NOT TIMED: a counter collides across page loads and
+ *  a clock between two tabs; `getRandomValues` does neither and, unlike
+ *  `randomUUID`, works in an insecure context.
  *
- *  A BROWSER WITH NO `crypto` GETS A REFUSAL AND NOT A WEAKER KEY. There is no
- *  fallback here on purpose: a key this page could not make unique is a key
- *  that could silently replay somebody else's run, and refusing to mint one is
- *  the only honest answer. Nothing in this tree can reach that branch --
- *  `ui/plan.js` already refuses to load outside a secure context -- and it is
- *  written down rather than assumed. */
+ *  A BROWSER WITH NO `crypto` GETS A REFUSAL AND NOT A WEAKER KEY: a key this
+ *  page could not make unique could silently replay somebody else's run.
+ *  (`ui/plan.js` already refuses to load outside a secure context.) */
 export function mintIntent() {
   const source = globalThis.crypto;
   if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
@@ -3989,7 +3783,7 @@ export const RUN_AGAIN_SENTENCE =
   "revision; this mints a new idempotency intent, so the API treats the next click as the new " +
   "request it is rather than as a repeat of the one that made that run.";
 
-/** What a `409 policy_changed` means here, in the words D1 section 8.5 uses. */
+/** What a `409 policy_changed` means here. */
 export const POLICY_CHANGED_SENTENCE =
   "The schedule's policy moved after the revision this panel was rendered at, so nothing was " +
   "created: a manual run copies the revision it names, and running a revision you have not seen " +
@@ -4010,14 +3804,11 @@ export const NAME_TAKEN_SENTENCE =
   "adopted: a run is only ever answered as yours when it carries this request's own hash. " +
   "Back up again mints a new intent, which derives a different name.";
 
-/** THE REFUSAL THAT CARRIES A FACT, RENDERED (review F2).
- *
- *  `ui/client.js` decodes the `policy` extension member of a
- *  `409 policy_changed` onto the error -- the only extension member this API
- *  defines -- and until this existed no page read it. The revision that is in
- *  force NOW is the one thing a person needs in order to decide what to do
- *  next, so it is on screen, and both 409s are followed by the control that
- *  makes the next click a new request. */
+/** THE REFUSAL THAT CARRIES A FACT, RENDERED. `ui/client.js` decodes the
+ *  `policy` extension member of a `409 policy_changed` onto the error; the
+ *  revision in force NOW is what a person needs to decide what to do next,
+ *  so it is on screen, and both 409s are followed by the control that makes
+ *  the next click a new request. */
 export function renderRunNowConflict(state) {
   const s = state || {};
   if (s.phase !== "failed") {
@@ -4044,13 +3835,10 @@ export function renderRunNowConflict(state) {
       badge("unverified", "intent already used") + " " + esc(INTENT_USED_SENTENCE) + "</p>"
     );
   }
-  // AND THE THIRD 409, WHICH IS ABOUT SOMEBODY ELSE'S OBJECT (review F5).
-  // `state_conflict` means the name this request derives is taken by an object
-  // THIS SCOPE DID NOT CREATE -- a `kubectl` run, an operator's, another
-  // console's -- and it is never adopted. Printing INTENT_USED_SENTENCE for it
-  // said "the intent this panel is holding already created a DIFFERENT
-  // request's run", which is a false statement about a stranger's run and
-  // sends a reader looking for a click nobody made.
+  // AND THE THIRD 409, WHICH IS ABOUT SOMEBODY ELSE'S OBJECT: `state_conflict`
+  // means the derived name is taken by an object THIS SCOPE DID NOT CREATE,
+  // and it is never adopted. INTENT_USED_SENTENCE would be a false statement
+  // about a stranger's run.
   if (error.reason === "state_conflict") {
     return (
       "<p class=\"note\" data-run-now-conflict=\"state_conflict\">" +
@@ -4069,10 +3857,10 @@ export function offersAnotherRun(view) {
   }
   const state = v.state || {};
   const reason = (state.error || {}).reason;
-  // `state_conflict` JOINS THE TWO (review F5): its only answer is a new
-  // intent, because the derived name is taken and a new intent derives a
-  // different one. A 403 or a 422 is still not answered by spending a fresh
-  // key on the same refused request.
+  // `state_conflict` JOINS THE TWO: its only answer is a new intent, because
+  // the derived name is taken and a new intent derives a different one. A
+  // 403 or a 422 is still not answered by spending a fresh key on the same
+  // refused request.
   return state.phase === "failed" &&
     (reason === "policy_changed" || reason === "idempotency_conflict" ||
       reason === "state_conflict");
@@ -4148,12 +3936,7 @@ export function renderRunNowPanel(view) {
         "<div class=\"actions\"><button type=\"submit\"" +
         (pending || (mustConfirm && !acknowledged) ? " disabled" : "") + ">" +
         (first ? "Run first backup now" : "Back up now") + "</button>" +
-        // THE SECOND RUN'S CONTROL, AND THE ONLY THING THAT MINTS A NEW INTENT
-        // (review F2). PLAT-06.2's acceptance is "repeated clicks create one
-        // requested run; a DELIBERATE LATER BACKUP CREATES ANOTHER", and until
-        // this button existed the second clause had no route at all: every
-        // click on a schedule resent the one intent that schedule ever had, so
-        // a console could take exactly one manual backup of it, ever.
+        // The second run's control, and the only thing that mints a new intent.
         (another
           ? "<button type=\"button\" data-run-again=\"" + esc(name) + "\"" +
             (pending ? " disabled" : "") + ">Back up again</button>"
@@ -4161,9 +3944,8 @@ export function renderRunNowPanel(view) {
         "</div>" +
         (another ? "<p class=\"help\">" + esc(RUN_AGAIN_SENTENCE) + "</p>" : "") +
         "<div class=\"form-status\" data-run-now-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
-        // `idempotencyKey: true` PICKS THE SENTENCE THAT IS TRUE OF THIS ROUTE
-        // (review F4): what makes a resend safe here is the key this click
-        // holds, not a name -- there is no name until the server derives one.
+        // `idempotencyKey: true` PICKS THE SENTENCE THAT IS TRUE OF THIS ROUTE:
+        // what makes a resend safe here is the key this click holds, not a name.
         mutationStatus(state, { kind: "Backup", name: "", idempotencyKey: true }, null) +
         renderRunNowConflict(state) +
         "</div>" +
@@ -4195,10 +3977,9 @@ export function renderRunNowResult(ns, result) {
         "the first time rather than starting a second one. "
       : badge("green", "started") + " ") +
     detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) + " " +
-    // WHERE ONE CLICK'S DURABLE PROGRESS IS (PLAT-12.1). The run exists; this
-    // is the view that follows it to a terminal state without a reload, and
-    // the link carries the uid so a name reused later lands on a refusal
-    // rather than on a different run.
+    // WHERE ONE CLICK'S DURABLE PROGRESS IS: the view that follows the run to a
+    // terminal state without a reload. The link carries the uid, so a name
+    // reused later lands on a refusal rather than on a different run.
     "<a href=\"" +
     esc(operationRoute(String(ns || meta.namespace || ""), "backup", String(meta.name || ""),
       String(meta.uid || ""))) +
@@ -4227,8 +4008,7 @@ export function renderManualRuns(ns, runs, spec, schedule) {
       when(meta.creationTimestamp),
     ];
   });
-  // A page of them (MCP-26): a schedule with hundreds of manual runs listed
-  // every one of them under "Back up now".
+  // A page of them.
   return table(
     ["RUN", "TRIGGER", "REVISION", "PHASE", "CREATED"],
     rows,
@@ -4237,8 +4017,6 @@ export function renderManualRuns(ns, runs, spec, schedule) {
     { id: "schedule-manual-runs", label: "manual runs", scope: String(schedule || "") },
   );
 }
-
-// ------------------------------------------- what the schedule last decided
 
 /** What happened to the most recent slot, from `status.lastSlot`, or the
  *  sentence that says this build does not publish it.
@@ -4296,8 +4074,8 @@ export const LAST_SLOT_NOT_PUBLISHED =
  *  A RUNNING RUN KEEPS SHOWING ITS OWN REVISION. Saving a new policy moves the
  *  schedule's generation; it does not touch a Backup that already exists, its
  *  frozen inputs or its Job. So this table reads the runs and not the
- *  schedule, and the two numbers being different on screen is the invariant
- *  PLAT-05.1 is about rather than a rendering mistake. */
+ *  schedule, and the two numbers being different on screen is an invariant
+ *  rather than a rendering mistake. */
 export function renderActiveRuns(ns, object, backups) {
   const status = (object || {}).status || {};
   const spec = (object || {}).spec || {};
@@ -4331,8 +4109,6 @@ export function renderActiveRuns(ns, object, backups) {
       "no run of this schedule is active") + "</div>"
   );
 }
-
-// ---------------------------------------------------- the wiring, one card
 
 /** Repaints ONE card in place, so a preview taken on one schedule does not
  *  discard a draft being typed into another. */
@@ -4405,19 +4181,12 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
   const remember = () => keepDraft(key, readPolicyValues(form), POLICY_DRAFT_FIELDS);
 
   watchMutation(node, key, mutation, (state) => {
-    // A SUCCESSFUL SAVE RE-READS, EXACTLY AS THE SUSPEND TOGGLE DOES
-    // (review F1). `repaintCard` renders from `object`, which is the copy this
-    // mount captured BEFORE the edit, so repainting on success showed the
-    // operator the policy they had just replaced, at a revision that no longer
-    // existed, with nothing saying so -- and a second save from that screen
-    // resent the pre-edit policy under a stale `expectedGeneration` and was
-    // refused `412` for a reason the reader could not see. The answer is not a
-    // cleverer repaint: it is to read the object the API server now holds. The
-    // record is cleared first so the remount does not re-enter this arm.
-    //
-    // THE RE-READ IS THE CALLER'S OWN VIEW (review HIGH-1): `extra.remount`
-    // is the schedule detail's mount when this form is on the detail, and the
-    // list otherwise.
+    // A SUCCESSFUL SAVE RE-READS, as the suspend toggle does: `repaintCard`
+    // renders from the object captured BEFORE the edit, which would show the
+    // replaced policy at a dead revision, and a second save would resend it
+    // under a stale `expectedGeneration`. The record is cleared first so the
+    // remount does not re-enter this arm. The re-read is the caller's own view
+    // (`extra.remount`: the detail's mount on the detail, the list otherwise).
     if (state.phase === "succeeded") {
       mutation.clear();
       if (typeof extra.remount === "function") {
@@ -4539,16 +4308,11 @@ export async function submitPolicy(ns, object, values, preview, api, destination
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
-  // A LOCATION MOVE IS SAID, AND SAID ON PURPOSE (PLAT-08.2 migration). D1
-  // section 5.1 makes the destination mutable, and it should be; what this
-  // refuses is a move nobody acknowledged -- the inline-to-destination
-  // conversion that was meant to keep the archive where it is and did not.
-  // Whenever the page READ a destination list -- an EMPTY one included
-  // (PLAT-08.2 review L5): an inline-to-inline URL edit in a namespace with no
-  // destinations moves the archive exactly as it does beside one, and the box
-  // must not depend on a neighbour's existence. With no list at all (never
-  // read, or the read failed) it cannot compare, and legacy mode keeps its
-  // behaviour.
+  // A LOCATION MOVE IS SAID, AND ONLY WITH ITS BOX: the destination is
+  // mutable, and what this refuses is a move nobody acknowledged. It applies
+  // whenever the page READ a destination list, an EMPTY one included (an
+  // inline URL edit moves the archive whether or not a destination exists).
+  // With no list at all (never read, or the read failed) it cannot compare.
   if (Array.isArray(destinations)) {
     const spec = (object || {}).spec || {};
     const change = locationChange({
@@ -4591,10 +4355,10 @@ function wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra) {
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       own.result = state.result;
-      // ON THE DETAIL, A NEW RUN IS NEW HISTORY (review LOW-5): the detail
-      // re-reads itself once per result, carrying this panel's state across
-      // the remount so "Follow this run" stays on screen. The carried
-      // `reread` marker is what stops the re-mounted panel re-entering here.
+      // ON THE DETAIL, A NEW RUN IS NEW HISTORY: the detail re-reads itself once
+      // per result, carrying this panel's state across the remount so "Follow
+      // this run" stays on screen. The carried `reread` marker is what stops the
+      // re-mounted panel re-entering here.
       if (typeof extra.remount === "function" && own.reread !== state.result) {
         own.reread = state.result;
         extra.remount();
@@ -4641,15 +4405,14 @@ function wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra) {
 
 /** Creates one manual run of `object` under the idempotency intent `key`.
  *
- *  THE BODY IS BODY A AND NOTHING ELSE: the schedule's name, and the revision
- *  this card was rendered from. The API copies the source, the selection, the
- *  archive and the deadline off the schedule at that generation, which is what
- *  makes "the copied schedule revision" a fact about the run rather than a
- *  form's guess -- a policy field in the body is a 422 by design.
+ *  THE BODY IS THE SCHEDULE'S NAME AND THE REVISION this card was rendered
+ *  from. The API copies the source, the selection, the archive and the
+ *  deadline off the schedule at that generation, so the copied revision is a
+ *  fact about the run; a policy field in the body is a 422 by design.
  *
- *  `expectedGeneration` IS SENT WHEN THERE IS ONE. It turns a stale card into
- *  a `409 policy_changed` naming the revision that is in force, instead of a
- *  run quietly taken under a policy the person never saw. */
+ *  `expectedGeneration` IS SENT WHEN THERE IS ONE: a stale card becomes a
+ *  `409 policy_changed` naming the revision in force, instead of a run taken
+ *  under a policy the person never saw. */
 export async function submitRunNow(ns, object, own, api, key) {
   const name = ((object || {}).metadata || {}).name || "";
   const generation = ((object || {}).metadata || {}).generation;
@@ -4665,41 +4428,25 @@ export async function submitRunNow(ns, object, own, api, key) {
   return api.runBackupNow(ns, body, key);
 }
 
-// ===========================================================================
-// PLAT-10.2: ONE SCHEDULE'S DETAIL, AND ITS RECOVERY-POINT HISTORY
-// ===========================================================================
+// ONE SCHEDULE'S DETAIL: the schedule, its whole history, and every action
+// on the page bound to it.
 //
-// WHY A DETAIL VIEW EXISTS AT ALL. Everything on a schedule's card was already
-// there -- the revision, the next runs, the manual-run panel, the policy form,
-// the recovery points -- and all of it was stacked below every OTHER schedule's
-// card on one list. 10.2's acceptance is not "show more"; it is "actions retain
-// schedule and recovery-point context, and an unavailable archive or incomplete
-// evidence is visibly distinct from a healthy point". Neither clause is about a
-// field that was missing. Both are about a PLACE: one schedule, its whole
-// history, and every action on that page already bound to it.
+// TWO AXES, NEVER ONE, AND NEITHER IS COMPUTED HERE. A run's row carries
+// AVAILABILITY (can these bytes still be read) and VERIFICATION (does the
+// evidence verify under a key this installation accepts) as two columns,
+// each the catalog's own word, and the green badge comes from the catalog's
+// `selectable`, never from this page recomputing it. `Missing` is an outage
+// and `UntrustedSigner` a stranger's signature; one column would conflate
+// them.
 //
-// TWO AXES, NEVER ONE, AND NEITHER IS COMPUTED HERE (D3 section 5.4). A run's row
-// carries AVAILABILITY -- can these bytes still be read -- and VERIFICATION --
-// does the evidence verify under a key this installation accepts -- as two
-// columns, each rendered verbatim from the catalog's own word, and the green
-// badge comes from the catalog's materialised `selectable` and never from this
-// page recomputing `Available AND (Verified or VerifiedHistorical)`. A page that
-// collapsed them would have to decide whether `Missing` and `UntrustedSigner`
-// are the same kind of bad; one is an outage and one is a stranger's signature.
+// A RUN WITH NO CATALOG POINT IS NOT AN AVAILABLE ONE: it says `not in the
+// catalog` and is never badged green, because nobody has looked.
 //
-// A RUN WITH NO CATALOG POINT IS NOT AN AVAILABLE ONE. PLAT-11.1's own
-// limitation was that "archive availability reflects what the run recorded, not
-// the bucket", and PLAT-15.1's catalog is the fix. So a row this page cannot
-// find in the catalog says exactly that -- `not in the catalog` -- and is never
-// badged green: the honest answer to "is it still there" when nothing has
-// looked is "nobody has looked".
-//
-// THE DELETED SCHEDULE IS A STATE AND NOT AN ERROR (PLAT-05.2, D1 W4). Deleting
-// a schedule cascades to nothing: every run it created, every plan and every
-// archive object outlives it, and the runs keep naming it in
-// `spec.scheduleRef`. So a detail route whose schedule is gone renders the
-// history it left behind, says the schedule is gone, and offers the per-point
-// restores -- which are the only actions that still mean anything.
+// THE DELETED SCHEDULE IS A STATE AND NOT AN ERROR. Deleting a schedule
+// cascades to nothing: its runs, plans and archive objects outlive it, and
+// the runs keep naming it in `spec.scheduleRef`. So a detail route whose
+// schedule is gone renders the history, says the schedule is gone, and
+// offers the per-point restores.
 
 /** What the history says when the schedule has produced no run at all. */
 export const NO_HISTORY_SENTENCE =
@@ -4715,7 +4462,7 @@ export const NO_HISTORY_SENTENCE =
 export const NOT_IN_CATALOG = "not in the catalog";
 
 /** What a row the view does not list says when the view has AGED OUT
- *  (`viewExpired`, review HIGH-2): the sync Job's pages were collected, which
+ *  (`viewExpired`): the sync Job's pages were collected, which
  *  is a statement about the view and never about the archive. */
 export const CATALOG_VIEW_EXPIRED = "catalog view expired";
 
@@ -4759,10 +4506,9 @@ export const ARCHIVED_SCHEDULE_SENTENCE =
 /** The runs one schedule produced, newest first, with the identity that decides
  *  whether a run belongs to THIS schedule or to a previous one of the same name.
  *
- *  THE UID DECIDES, AND THE NAME ONLY GROUPS. PLAT-05.2 proved that a schedule
- *  deleted and recreated under the same name is a different schedule "down to
- *  `NameUnavailable`", and its runs carry the OLD uid in `spec.scheduleRef.uid`
- *  and the old uid's label. Listing them together without saying so would
+ *  THE UID DECIDES, AND THE NAME ONLY GROUPS. A schedule deleted and
+ *  recreated under the same name is a different schedule, and its runs carry
+ *  the OLD uid in `spec.scheduleRef.uid`. Listing them together would
  *  attribute one cluster's protection to another's policy. `mine` is this
  *  schedule's; `earlier` is every run that named this name under a different
  *  identity. */
@@ -4785,12 +4531,9 @@ export function runsOfSchedule(name, uid, backups) {
   }
   const uidOf = (backup) =>
     String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "");
-  // A RUN WITH NO SCHEDULE UID IS NEITHER MINE NOR PROVABLY ANOTHER'S (review
-  // LOW-1). Every run created before the uid was recorded looks like this, and
-  // so does a run of an earlier same-name schedule from that era; the name
-  // alone cannot tell them apart. Counting it as this schedule's let it become
-  // the "Latest recovery point"; it is shown in its own group instead, as the
-  // archived view already does.
+  // A RUN WITH NO SCHEDULE UID IS NEITHER MINE NOR PROVABLY ANOTHER'S: the
+  // name alone cannot tell, so it is shown in its own group and never becomes
+  // the "Latest recovery point".
   return {
     mine: newestFirst.filter((backup) => uidOf(backup) === identity),
     earlier: newestFirst.filter((backup) => uidOf(backup).length > 0 &&
@@ -4841,11 +4584,11 @@ function distinctWords(points, field) {
  *  never published, so a set whose points disagree shows EVERY word it carries
  *  and a reader sees the disagreement instead of a summary of it.
  *
- *  GREEN COMES FROM `selectable`, WHICH IS THE CATALOG'S OWN CONJUNCTION of
- *  D3 section 5.4's rule -- and from EVERY point of the set, because a set with one
- *  unrestorable point is not a set a restore can be planned from. Recomputing
- *  `Available AND (Verified or VerifiedHistorical)` here would be a second
- *  answer to a question the controller has already answered.
+ *  GREEN COMES FROM `selectable`, WHICH IS THE CATALOG'S OWN CONJUNCTION, and
+ *  from EVERY point of the set, because a set with one unrestorable point is
+ *  not a set a restore can be planned from. Recomputing `Available AND
+ *  (Verified or VerifiedHistorical)` here would be a second answer to a
+ *  question the controller has already answered.
  *
  *  Availability keeps its own green: it is a different fact with a different
  *  repair, and a point whose bytes are readable but whose signer is a stranger
@@ -4895,7 +4638,7 @@ export function catalogCoverage(catalogError, catalogWindow) {
     : null;
 }
 
-/** Whether the catalog RULES OUT restoring from this run (review MEDIUM-2):
+/** Whether the catalog RULES OUT restoring from this run:
  *  the catalog lists the run's set and at least one of its points is not
  *  `selectable`. A run the view does not list is not ruled out by it -- the
  *  catalog has said nothing -- and a row still says which of the four
@@ -4922,8 +4665,7 @@ function catalogWordsFor(run, points, coverage) {
  *  going and a run that produced a recovery point are all part of what this
  *  schedule has done, and a table of only the good ones would agree with itself
  *  and disagree with the cluster. What changes per row is what is OFFERED: a
- *  restore link only where a plan can be built, which is `isRecoveryPoint`'s
- *  question and PLAT-11.1's answer. */
+ *  restore link only where a plan can be built (`isRecoveryPoint`). */
 export function renderScheduleHistory(ns, object, runs, points, catalogError, sectionId,
   catalogWindow) {
   const spec = (object || {}).spec || {};
@@ -4936,8 +4678,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
     const found = pointsForRun(run, points);
     const verdicts = verdictCells(found, coverage);
     return [
-      // THE ACTION FIRST (MCP-25's rule; review L5): as the tenth column the
-      // restore link was the one a 1024 px window scrolled out of the card.
+      // The action first, where a narrow window cannot scroll it out of the
+      // card.
       restoreCell(ns, run, points),
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) +
         (typeof (run.spec || {}).slot === "string" && run.spec.slot.length > 0
@@ -4983,18 +4725,17 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
 
 /** A row's restore action. A run a plan can be built from gets its own link,
  *  bound to it by UID -- UNLESS the catalog lists its set as not selectable
- *  (review MEDIUM-2), in which case the cell says the catalog rules it out and
+ *  in which case the cell says the catalog rules it out and
  *  offers nothing. */
 export function restoreCell(ns, run, points) {
   if (!isRecoveryPoint(run)) {
-    // CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW (PLAT-15.2). A destination-backed
-    // run the controller could not verify itself -- no evidence grant, or an
-    // identity the administrator did not allowlist -- is `Succeeded` with
-    // verdict `NotAttempted` and NO window, while the durable catalog lists its
-    // receipt `Available/Verified`. The catalog may then answer for it, and
-    // only then: the run's own verdict must be absent or NotAttempted, never a
-    // reached refusal. The link opens the wizard on the CATALOG POINT, so the
-    // plan is bound to that receipt and the runner re-verifies it.
+    // A destination-backed run the controller could not verify itself (no
+    // evidence grant, or an identity the administrator did not allowlist) is
+    // `Succeeded` with verdict `NotAttempted` and NO window, while the catalog
+    // lists its receipt `Available/Verified`. The catalog may then answer for
+    // it, and only then: the run's own verdict must be absent or NotAttempted.
+    // The link opens the wizard on the CATALOG POINT, so the plan is bound to
+    // that receipt and the runner re-verifies it.
     const offer = backupCatalogOfferFrom(run, points);
     if (offer.offer) {
       return restorePointLink(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId, run),
@@ -5049,7 +4790,7 @@ export function renderEarlierRuns(ns, earlier, points) {
   );
 }
 
-/** THE RUNS THAT NAME THIS SCHEDULE AND CARRY NO SCHEDULE UID (review LOW-1),
+/** THE RUNS THAT NAME THIS SCHEDULE AND CARRY NO SCHEDULE UID,
  *  shown apart: nothing can say whether this schedule or an earlier one of
  *  the same name made them, so they are never this schedule's latest point. */
 export function renderLegacyRuns(ns, legacy, points, catalogError, catalogWindow) {
@@ -5072,7 +4813,7 @@ export function renderLegacyRuns(ns, legacy, points, catalogError, catalogWindow
 }
 
 /** The newest recovery point this schedule produced, and the restore bound to
- *  it -- the "Restore" action 10.2 asks the detail to carry.
+ *  it.
  *
  *  IT IS THE SAME LINK THE ROW CARRIES, built by the same helper, so "restore
  *  the latest" and "restore this one" cannot disagree about what the latest is.
@@ -5096,9 +4837,9 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
     );
   }
   const meta = choice.point.metadata || {};
-  // A RUN OFFERED FROM ITS CATALOG ROW (PLAT-15.2) OPENS THE WIZARD ON THAT ROW,
-  // so the plan carries the point binding; a run with its own window opens it
-  // on the Backup, exactly as before.
+  // A run offered from its catalog row opens the wizard on that row, so the
+  // plan carries the point binding; a run with its own window opens it on the
+  // Backup.
   const fromCatalog = isRecoveryPoint(choice.point)
     ? null
     : backupCatalogOfferFrom(choice.point, points);
@@ -5109,7 +4850,7 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
     "<p class=\"note\" id=\"schedule-latest-point\">Latest recovery point: " +
     cell(meta.name) + ", backup set " + cell((choice.point.status || {}).backupId) +
     " (catalog: " + esc(catalogWordsFor(choice.point, points, coverage)) + "). " +
-    // A ROLE THAT CANNOT RESTORE READS WHO CAN (MCP round 3, R3-2's sweep).
+    // A role that cannot restore reads who can.
     (granted(ns, "restoreCreate")
       ? "<a href=\"" + esc(route) + "\" id=\"schedule-restore-latest\"" +
         (fromCatalog === null ? "" : " data-restore-from=\"catalog\"") + ">" +
@@ -5119,14 +4860,14 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
   );
 }
 
-/** THE LATEST POINT THE CATALOG DOES NOT RULE OUT (review MEDIUM-2): newest
+/** THE LATEST POINT THE CATALOG DOES NOT RULE OUT: newest
  *  completion first, skipping every set the catalog lists as not selectable.
  *  `all` is every recovery point, `skipped` the newer ones the catalog ruled
  *  out, and `point` the one offered (or `null`). */
 export function latestRestorablePoint(runs, points) {
-  // A run the catalog may answer for (PLAT-15.2) is a recovery point here too,
-  // in the same newest-completion order; `backupCatalogOfferFrom` offers one
-  // only over a complete, current, selectable row and never over a verdict the
+  // A run the catalog may answer for is a recovery point here too, in the
+  // same newest-completion order; `backupCatalogOfferFrom` offers one only
+  // over a complete, current, selectable row and never over a verdict the
   // controller reached.
   const all = recoveryPoints(runs, (run) =>
     isRecoveryPoint(run) || backupCatalogOfferFrom(run, points).offer);
@@ -5149,16 +4890,14 @@ export function latestRestorablePoint(runs, points) {
 export function renderScheduleFacts(object, runs, destinations, now, points, destinationsUnavailable) {
   const spec = (object || {}).spec || {};
   const status = (object || {}).status || {};
-  // THE SAME CHOICE THE PAGE-LEVEL RESTORE MAKES (review MEDIUM-2), so the
-  // protection age is never the age of a set the catalog says is gone.
+  // THE SAME CHOICE THE PAGE-LEVEL RESTORE MAKES, so the protection age is
+  // never the age of a set the catalog says is gone.
   const latest = latestRestorablePoint((runs || {}).mine || [], points).point;
   const latestMeta = (latest || {}).metadata || {};
   const latestStatus = (latest || {}).status || {};
-  // WHEN THE POINT COMPLETED IS RECORDED ON ITS `Complete` CONDITION, WHICH A
-  // SHARED-CONSOLE LIST DOES NOT CARRY (console class sweep). The product API's
-  // Backup list publishes no conditions, so this row used to fall back to the
-  // run's creation instant and print it as "completed". The fallback stays --
-  // an age from creation is the conservative direction -- and now says what it is.
+  // When the point completed is recorded on its `Complete` condition, which
+  // a shared-console list does not carry. The fallback to the creation
+  // instant is the conservative direction, and says what it is.
   const recordedComplete = latestStatus.completedAt ||
     (((latestStatus.conditions || []).find((c) => c.type === "Complete" && c.status === "True") || {})
       .lastTransitionTime) || "";
@@ -5228,7 +4967,7 @@ export function renderScheduleDetail(view) {
   );
 }
 
-/** THE DELETED SCHEDULE WITH RETAINED HISTORY (PLAT-05.2's D1 W4 contract).
+/** THE DELETED SCHEDULE WITH RETAINED HISTORY.
  *
  *  Not a 404 page: the object is gone and everything it produced is not, so
  *  what this renders is the history, the reason the schedule is missing, and
@@ -5299,19 +5038,17 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
   }
   const points = [];
   let failure = null;
-  // THE VIEW'S TWO WINDOW FLAGS (review HIGH-2), which say what an ABSENT
-  // entry means. `viewExpired` is the sync Job's TTL having collected the
-  // pages: the window aged out, "not that the archive is empty" (docs/api.md).
-  // `truncated` is an archive holding more points than the view carries: the
-  // view is the newest `sync.viewLimit`. Under either, a run the view does not
-  // list may be in the archive, so the history must not say "not in the
-  // catalog" for it.
+  // THE VIEW'S TWO WINDOW FLAGS say what an ABSENT entry means. `viewExpired`:
+  // the sync Job's TTL collected the pages, not that the archive is empty.
+  // `truncated`: the archive holds more points than the view carries (the
+  // newest `sync.viewLimit`). Under either, a run the view does not list may
+  // be in the archive, so the history must not say "not in the catalog".
   let expired = false;
   let truncated = false;
   for (const catalog of catalogs) {
     const catalogName = ((catalog || {}).metadata || {}).name || "";
-    // The destination this catalog reads (PLAT-15.2 review L-1): a row is
-    // offered for a run only by a catalog over that run's own destination.
+    // The destination this catalog reads: a row is offered for a run only by a
+    // catalog over that run's own destination.
     const catalogDestination = String((((catalog || {}).spec || {}).destinationRef || {}).name || "");
     if (catalogName.length === 0) {
       continue;
@@ -5326,10 +5063,9 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
         }
         const page = await readPoints(catalogName, query);
         for (const point of (page.items || [])) {
-          // THE ROW'S SOURCE, KEPT BESIDE IT (PLAT-15.2): the catalog it came
-          // from, the destination that catalog reads, and this page's flags,
-          // which a restore offered from the catalog's window needs and the
-          // row itself does not carry.
+          // THE ROW'S SOURCE, KEPT BESIDE IT: the catalog it came from, the
+          // destination that catalog reads, and this page's flags, which a restore
+          // offered from the catalog's window needs and the row does not carry.
           points.push(noteCatalogSource(point, catalogName, page, catalogDestination));
         }
         if (page.viewExpired === true) {
@@ -5378,8 +5114,8 @@ export const CATALOG_WINDOW_EXPIRED = "expired";
 export const CATALOG_WINDOW_TRUNCATED = "truncated";
 
 /** How many points one catalog page contributes to a schedule's history. The
- *  catalog view is itself a window over the archive (D3 section 5.6); this is a
- *  window over that, and the history table says which runs it could not place. */
+ *  catalog view is itself a window over the archive; this is a window over
+ *  that, and the history table says which runs it could not place. */
 export const DETAIL_POINT_PAGE = 200;
 
 /** The bounded number of cursor pages a detail can read before it names the
@@ -5428,9 +5164,9 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
     }
     const uid = ((schedule || {}).metadata || {}).uid;
     const runs = runsOfSchedule(name, uid, backups);
-    // PLAT-15.2: A RUN OFFERED FROM ITS CATALOG ROW NEEDS ITS OWN VERDICT, and a
+    // A RUN OFFERED FROM ITS CATALOG ROW NEEDS ITS OWN VERDICT, and a
     // console-mode list does not publish one. Read it for the runs a row could
-    // answer for, and only those; a run whose read fails is simply not offered.
+    // answer for, and only those; a run whose read fails is not offered.
     await readOwnVerdicts(
       [].concat(runs.mine, runs.earlier, runs.legacy),
       catalog.points,
@@ -5452,9 +5188,9 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
       destinationsUnavailable: readiness.unavailable === true,
       mayOperate: mayOperate(ns),
       retentionPolicies: await readRetentionPolicies(ns, lifecycle, readers),
-      // EVERY SUCCESSFUL ACTION ON THIS PAGE RE-READS THIS PAGE (review
-      // HIGH-1): the toggle, the policy save and Back up now re-mount the
-      // detail with the facts the API server now holds.
+      // EVERY SUCCESSFUL ACTION ON THIS PAGE RE-READS THIS PAGE: the toggle, the
+      // policy save and Back up now re-mount the detail with the facts the API
+      // server now holds.
       remount: () => mountScheduleDetail(node, ns, name, parse, lifecycle, api,
         { cards: cards }),
     };

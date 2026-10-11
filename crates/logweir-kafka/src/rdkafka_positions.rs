@@ -1,5 +1,5 @@
-//! **PROD-04.0a's broker glue: a consumer bound to ONE group id that can
-//! only read and commit that group's positions** (PROD-04.0 §4.3). The
+//! **The positions' broker glue: a consumer bound to ONE group id that can
+//! only read and commit that group's positions.** The
 //! decisions live in [`crate::positions`]; this module only moves values
 //! between them and rust-rdkafka 0.36.2's safe consumer API. No `unsafe`.
 //!
@@ -41,7 +41,7 @@ pub(crate) const POSITIONS_CLIENT_ID: &str = "logweir-positions";
 /// | key | value | why |
 /// |---|---|---|
 /// | `group.id` | the group | OffsetFetch and OffsetCommit name it |
-/// | `group.protocol` | `classic` | pinned: librdkafka says its default "will change to `consumer`", and a commit's non-member shape (generation −1, empty member id, K3) and the bounds below are the classic protocol's |
+/// | `group.protocol` | `classic` | pinned: librdkafka says its default "will change to `consumer`", and a commit's non-member shape (generation −1, empty member id) and the bounds below are the classic protocol's |
 /// | `enable.auto.commit` | `false` | the handle commits only what it is asked to |
 /// | `enable.auto.offset.store` | `false` | nothing is ever stored implicitly |
 /// | `isolation.level` | `read_committed` | pinned: it is what makes librdkafka send RequireStable (`rdkafka.c:3655-3656`); without it a pending transactional commit reads as the pre-transaction position (§3.4, T8) |
@@ -226,7 +226,7 @@ impl GroupHandle {
         let entries = commit_request(positions)?;
         let mut tpl = TopicPartitionList::with_capacity(entries.len());
         for e in &entries {
-            // This route cannot set a leader epoch (C3): librdkafka sends the
+            // This route cannot set a leader epoch: librdkafka sends the
             // element's default, −1. Refuse an entry that asks for anything
             // else rather than send −1 in its name.
             if e.leader_epoch != COMMIT_LEADER_EPOCH {
@@ -277,7 +277,7 @@ mod tests {
     /// **Every key that makes the handle a non-member reading STABLE
     /// positions is pinned.** No socket: `ClientConfig` is a map until
     /// `create()`. Each assertion is a mutant's failure: `read_uncommitted`
-    /// would read a pending transaction's pre-transaction position (§3.4),
+    /// would read a pending transaction's pre-transaction position,
     /// `consumer` would change the commit's non-member shape and make
     /// librdkafka refuse `session.timeout.ms`, and auto-commit would write
     /// positions nobody asked for.
@@ -414,14 +414,13 @@ mod tests {
     /// The bound the bound rows use: librdkafka's minimum this crate accepts.
     const UNIT_BOUND: Duration = crate::positions::MIN_POSITION_BOUND;
     /// What an unanswered call may take beyond its bound. Measured on the
-    /// development host (2026-10-08, five runs, other builds running): a fetch
-    /// returned 2000.9–2003.3 ms after a 2 s bound and a commit 2001.8–2007.1 ms
-    /// (`artifacts/prod-04-0a/fix-bound-measure.log`). The commit can also wait
-    /// up to one more second for librdkafka's timeout scan, which runs once a
-    /// second (`rdkafka_cgrp.c:5809-5830`). So the margins are 1.5 s over the
-    /// fetch's bound and 2.5 s over the commit's: room for a loaded CI runner,
-    /// and far below what a dropped bound costs (no fetch deadline at all, or
-    /// librdkafka's 45 s `session.timeout.ms`).
+    /// development host (five runs, other builds running): a fetch returned
+    /// 2000.9–2003.3 ms after a 2 s bound and a commit 2001.8–2007.1 ms. The
+    /// commit can also wait up to one more second for librdkafka's timeout
+    /// scan, which runs once a second (`rdkafka_cgrp.c:5809-5830`). So the
+    /// margins are 1.5 s over the fetch's bound and 2.5 s over the commit's:
+    /// room for a loaded CI runner, and far below what a dropped bound costs
+    /// (no fetch deadline at all, or librdkafka's 45 s `session.timeout.ms`).
     const FETCH_MARGIN: Duration = Duration::from_millis(1500);
     const COMMIT_MARGIN: Duration = Duration::from_millis(2500);
 

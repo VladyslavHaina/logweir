@@ -21,9 +21,8 @@ use std::time::{Duration, Instant};
 ///
 /// `--offline --no-deps` is a manifest read, but it still takes the package
 /// cache lock, and several workers build in this checkout at once. A lock this
-/// test cannot get is a failure to report, never a wait to sit in: see the
-/// module documentation of `tests/local_admin.rs` for what an unbounded child
-/// cost here once.
+/// test cannot get is a failure to report, never a wait to sit in (see the
+/// module documentation of `tests/local_admin.rs`).
 const METADATA_LIMIT: Duration = Duration::from_secs(120);
 
 fn workspace_root() -> PathBuf {
@@ -134,7 +133,7 @@ fn reaches(graph: &BTreeMap<String, BTreeSet<String>>, root: &str) -> BTreeSet<S
 fn the_api_links_the_crds_the_verifier_and_the_console_signer_and_never_the_engine() {
     let graph = workspace_graph();
     let reach = reaches(&graph, "logweir-api");
-    // PLAT-19.2: `logweir-evidence` is REQUIRED now — the console signs its
+    // `logweir-evidence` is REQUIRED -- the console signs its
     // own ConsoleConfirmation documents (D0), through the shared signer. The
     // engine wrapper and the broker client stay forbidden.
     for required in [
@@ -183,7 +182,7 @@ fn the_signer_gate_lists_this_crate_where_the_graph_puts_it() {
     // it is on those two allowlists...
     assert!(value("ALLOWED_VERIFY_LINK").contains(&"logweir-api"));
     assert!(value("ALLOWED_PRIMITIVE").contains(&"logweir-api"));
-    // ...and, since PLAT-19.2, on both signing allowlists: it signs console
+    // ...and on both signing allowlists: it signs console
     // confirmations with its own ConsoleConfirmation key (D0), for the reason
     // recorded above `ALLOWED_LINK` in the script.
     assert!(value("ALLOWED_LINK").contains(&"logweir-api"));
@@ -244,13 +243,12 @@ fn no_source_here_names_a_forbidden_kubernetes_api() {
         "Api::all_with",
         ".delete(",
         ".delete_collection(",
-        // The PUT verbs, in the shapes `kube::Api` actually offers them. The
-        // first spelling here used to be `".replace(&"`, which matches NOTHING:
-        // the call is `api.replace(name, &params, object)`, so the `&` belongs
-        // to the SECOND argument. A compiling PUT in the sealed adapter passed
-        // this test. `str::replace` is why the plain method needs the `api.`
-        // prefix, and `the_adapter_calls_only_the_four_permitted_kubernetes_verbs`
-        // below is what makes that prefix trustworthy.
+        // The PUT verbs, in the shapes `kube::Api` actually offers them. The call is
+        // `api.replace(name, &params, object)`, so a pattern like `".replace(&"`
+        // matches NOTHING (the `&` belongs to the SECOND argument). `str::replace` is
+        // why the plain method needs the `api.` prefix, and
+        // `the_adapter_calls_only_the_four_permitted_kubernetes_verbs` below is what
+        // makes that prefix trustworthy.
         "api.replace(",
         ".replace_status(",
         ".patch_status(",
@@ -355,14 +353,12 @@ fn api_binding_names(text: &str) -> BTreeSet<String> {
 
 /// **The D-SEAMS S7 guard: no PUT, on the object or on its status.**
 ///
-/// AN ALLOWLIST, BECAUSE A DENYLIST IS ALWAYS ONE SPELLING BEHIND. The guard
-/// above used to be the only enforcement of S7 in this crate, and it could not
-/// fail: it listed `".replace(&"`, which is not how `kube::Api::replace` is
-/// called, and it did not mention `replace_status` at all. An independent
-/// reviewer planted a compiling `api.replace(name, &params, object)` in the
-/// sealed adapter and the whole linkage suite passed. A guard that cannot fail
-/// is worse than no guard, because the next person to touch `kube.rs` will
-/// reasonably trust it.
+/// AN ALLOWLIST, BECAUSE A DENYLIST IS ALWAYS ONE SPELLING BEHIND: a denylist
+/// of `".replace(&"` misses how `kube::Api::replace` is called and does not
+/// mention `replace_status` at all, so a compiling
+/// `api.replace(name, &params, object)` in the sealed adapter would pass. A
+/// guard that cannot fail is worse than no guard, because the next person to
+/// touch `kube.rs` will reasonably trust it.
 ///
 /// So this test does not enumerate what is forbidden. It pins the exact set of
 /// `kube` verbs the adapter calls, and every other method `kube::Api` offers —
@@ -394,8 +390,7 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
     // A TURBOFISH IS THE ONE SPELLING THE BINDING SCAN CANNOT SEE. `let handle =
     // Api::<T>::namespaced(…)` builds a handle with no `: Api<T>` annotation, so
     // `api_binding_names` never learns the name `handle` and the verb allowlist
-    // below scans nothing for it. An independent reviewer planted exactly that
-    // and the suite stayed green; refusing the spelling closes it.
+    // below scans nothing for it; refusing the spelling closes that.
     assert!(
         !code_lines(&text).any(|(_, line)| line.contains("Api::<")),
         "{}: build every handle as `let api: Api<T> = Api::namespaced(…)`, never \
@@ -446,9 +441,9 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
 /// **Which Kubernetes RESOURCE each verb is spent on, pinned.**
 ///
 /// The verb allowlist above says the adapter calls `list`, `get`, `create` and
-/// `patch`. It does NOT say on what: D2 W12 added two CORE objects to the
-/// adapter — `configmaps` (a check's own stored result) and `secrets` (a
-/// write-only credential) — and a `get` on `secrets` would have passed the verb
+/// `patch`. It does NOT say on what: the adapter also reaches two CORE
+/// objects -- `configmaps` (a check's own stored result) and `secrets` (a
+/// write-only credential) -- and a `get` on `secrets` would pass the verb
 /// scan unchanged while being exactly the permission this service must never
 /// hold.
 ///
@@ -506,7 +501,7 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "patch backupschedules",
         "patch backupdestinations",
         // THE ONE CLUSTER-SCOPED OBJECT OUTSIDE THE SEALS: `TrustRoster/default`,
-        // `get` by that fixed name (PREFLIGHT-TRUSTROSTER-STALE). No list.
+        // `get` by that fixed name. No list.
         "get trustrosters",
         // THE TWO CORE OBJECTS, one verb each.
         "get configmaps",
@@ -656,11 +651,11 @@ fn the_manifest_pins_the_one_new_dependency() {
             "{forbidden} must not be a dependency of this crate"
         );
     }
-    // PLAT-19.2: the console-confirmation signer, by path, with its reason.
+    // The console-confirmation signer, by path, with its reason.
     assert!(manifest.contains(r#"logweir-evidence = { path = "../logweir-evidence" }"#));
     assert!(manifest.contains("PLAT-19.2 — THE CONSOLE CONFIRMATION SIGNER"));
 
-    // THE TRANSPORT-LIMIT DEPENDENCIES ADD NO PACKAGE (review finding R4). The
+    // THE TRANSPORT-LIMIT DEPENDENCIES ADD NO PACKAGE. The
     // accept loop in `src/main.rs` needs hyper's http1 builder, which
     // `axum::serve` does not expose. Both crates were ALREADY in the resolved
     // graph — axum is built on them, and `kube-client` pulls `hyper-util` —
@@ -791,9 +786,9 @@ fn the_cluster_scoped_read_is_one_sealed_kind_and_two_read_verbs() {
 
 /// **The roster read is ONE object, by a name no caller supplies.**
 ///
-/// PREFLIGHT-TRUSTROSTER-STALE gave the adapter a `get` on
-/// `trustrosters/default` so the preflight staleness recomputation can compare
-/// the roster the controller recorded. The grant is `get` with
+/// The adapter has a `get` on `trustrosters/default` so the preflight
+/// staleness recomputation can compare the roster the controller recorded.
+/// The grant is `get` with
 /// `resourceNames: ["default"]`, and the adapter must not be able to spend
 /// anything wider: this pins that `TrustRoster` is named by exactly one
 /// `Api<…>` handle, in exactly one function, which takes no argument but

@@ -1,19 +1,11 @@
-//! Pure classification of pod, Job and event state — D2 §4.3's waiting table.
+//! Pure classification of pod, Job and event state (D2 §4.3's waiting table).
 //!
-//! # Why this is a table and not a message scan at the call site
-//!
-//! Everything below is something the kubelet or the Job controller says about
-//! a pod that has not run yet. Each row has a distinct remedy — project the
-//! Secret, add the key, load the image, create the ServiceAccount, make room on
-//! a node — and reporting them all as "the check timed out" is the defect the
-//! whole check framework exists to remove. A pure function over the objects is
-//! what lets every row have a test with a real fixture.
-//!
-//! # Nothing here reads a clock
-//!
-//! Three rows are "for longer than N seconds". `now` is an argument, as on
-//! every other path in this crate, so the boundary is assertable rather than
-//! observable only by waiting.
+//! Each row is something the kubelet or the Job controller says about a pod
+//! that has not run yet, and each has a distinct remedy (project the Secret,
+//! add the key, load the image, create the ServiceAccount, make room on a
+//! node); reporting them all as "the check timed out" is what the check
+//! framework exists to avoid. Nothing here reads a clock: `now` is an argument,
+//! so the three "longer than N seconds" boundaries are assertable.
 
 use std::time::Duration;
 
@@ -24,31 +16,26 @@ use kube::ResourceExt as _;
 
 use logweir_core::check_contract::{redact, CheckCode};
 
-/// How long a pod may sit unschedulable before it is reported — D2 §4.3.
+/// How long a pod may sit unschedulable before it is reported (D2 §4.3).
 pub const UNSCHEDULABLE_GRACE: Duration = Duration::from_secs(60);
 /// How long a pod may sit in `ContainerCreating` before a `FailedMount` event
-/// is believed — D2 §4.3.
+/// is believed (D2 §4.3).
 pub const MOUNT_GRACE: Duration = Duration::from_secs(60);
 /// How long a Job may exist with no pod before a `FailedCreate` event is
-/// believed — D2 §4.3.
+/// believed (D2 §4.3).
 pub const POD_CREATE_GRACE: Duration = Duration::from_secs(30);
 
 /// The volume name whose `FailedMount` means the signing key, not just "a
-/// volume" — [`crate::controllers::backup::SIGNING_VOLUME`].
+/// volume" ([`crate::controllers::backup::SIGNING_VOLUME`]).
 pub const SIGNING_VOLUME: &str = crate::controllers::backup::SIGNING_VOLUME;
 
 /// One classified waiting state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Waiting {
-    /// The closed code.
     pub code: CheckCode,
-    /// The Secret the kubelet named, when the row has one.
     pub secret: Option<String>,
-    /// The key within it, when the row has one.
     pub key: Option<String>,
-    /// The `ConfigMap` the kubelet named, when the row has one.
     pub config_map: Option<String>,
-    /// The volume, when the row has one.
     pub volume: Option<String>,
     /// A redacted explanation. A kubelet message is not a secret, but a
     /// `PodCreateRejected` message carries an admission webhook's prose, which
@@ -68,15 +55,13 @@ impl Waiting {
         }
     }
 
-    /// Whether this state can only get worse by waiting, so the Job should be
-    /// cancelled now rather than at its `activeDeadlineSeconds` — D2 §4.3's
-    /// "early cancel".
+    /// Whether this state can only get worse by waiting, so the Job is
+    /// cancelled now rather than at its `activeDeadlineSeconds` (D2 §4.3's
+    /// "early cancel").
     ///
-    /// `PodUnschedulable` is deliberately NOT in this set: a node can join a
-    /// cluster, a pod can be preempted, and a cluster autoscaler exists. It is
-    /// reported and left to the deadline. Everything else here is a reference
-    /// to an object that does not exist, or an image this node will not get,
-    /// and no amount of waiting fixes either.
+    /// `PodUnschedulable` is not in this set: a node can join, a pod can be
+    /// preempted, an autoscaler can act. Everything else here references an
+    /// object that does not exist or an image this node will not get.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -95,19 +80,15 @@ impl Waiting {
 
 /// One cluster Event, reduced to the four fields the table reads.
 ///
-/// A SEPARATE TYPE, so this classifier stays pure: it takes the facts as a
-/// VALUE and never builds an `Api<Event>`. The read is the callers' — the
-/// `weirkeeper` `ClusterRole` grants `list` on `events` (D2 §7.1), and every
-/// Job-owning controller reads them, by `involvedObject.uid`, through
-/// [`crate::check::job_events`] or its own equivalent (`Preflight`, evidence
-/// fetch and the `Backup`/`Restore` diagnostics predate it; FX-11 wired the
-/// rest). [`EventFact::from_event`] is the converter, and it names the
-/// `k8s_openapi` type without ever building an `Api` for it.
+/// A separate value type so the classifier stays pure and never builds an
+/// `Api<Event>`; callers read Events by `involvedObject.uid` (through
+/// [`crate::check::job_events`] or their own equivalent) and convert them with
+/// [`EventFact::from_event`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventFact {
-    /// `reason` — `FailedMount`, `FailedCreate`, …
+    /// `reason`: `FailedMount`, `FailedCreate`, …
     pub reason: String,
-    /// `message`, verbatim as the API server holds it.
+    /// `message`, verbatim.
     pub message: String,
     /// `involvedObject.kind`.
     pub involved_kind: String,
@@ -132,21 +113,20 @@ impl EventFact {
 /// Everything [`classify`] looks at.
 #[derive(Clone, Copy, Debug)]
 pub struct Observed<'a> {
-    /// The check Job. Always present: this is only called for a Job that
-    /// exists.
+    /// The check Job (this is only called for a Job that exists).
     pub job: &'a Job,
     /// Its owned pod, when [`super::pod::find_owned_pod`] found one.
     pub pod: Option<&'a Pod>,
     /// The events for the Job and the pod, in any order.
     pub events: &'a [EventFact],
-    /// The instant this pass runs at. An argument, never a clock read.
+    /// The instant this pass runs at.
     pub now: DateTime<Utc>,
 }
 
 /// The waiting state of a check that has not produced a result, or `None` when
 /// nothing is wrong yet.
 ///
-/// # The order of the rows IS the classification
+/// # The order of the rows is the classification
 ///
 /// 1. **A disrupted pod first.** `DisruptionTarget=True` can coexist with
 ///    `Pending` and with a container still `waiting`, and "the node went away"
@@ -176,10 +156,10 @@ pub fn classify(observed: &Observed<'_>) -> Option<Waiting> {
         if unschedulable_for(pod, observed.now) >= Some(UNSCHEDULABLE_GRACE) {
             return Some(Waiting::of(
                 CheckCode::PodUnschedulable,
-                // "THE JOB'S POD", NOT "THE CHECK POD": this classifier also
+                // "The Job's pod", not "the check pod": this classifier also
                 // explains a `Backup`'s and a `Restore`'s runner Job
                 // (`diagnostics::derive`), whose diagnostic carries this
-                // sentence verbatim (FX-2 review nit).
+                // sentence verbatim.
                 format!(
                     "the Job's pod has been unschedulable for more than {} seconds",
                     UNSCHEDULABLE_GRACE.as_secs()
@@ -206,14 +186,13 @@ pub fn classify(observed: &Observed<'_>) -> Option<Waiting> {
 }
 
 /// Whether [`classify`] could read an Event at all for this Job and pod at
-/// `now` — **the bound on every events list** (FX-11).
+/// `now`: the bound on every events list.
 ///
-/// Exactly the two rows that read `events`, with their grace periods: NO POD
-/// once the Job is [`POD_CREATE_GRACE`] old (the `FailedCreate` row), and a
-/// `runner` container still `ContainerCreating` after [`MOUNT_GRACE`] (the
-/// `FailedMount` row). Everywhere else the classifier never looks at an Event,
-/// so a list made then is a request whose answer cannot change the verdict —
-/// and a healthy Job, whose pod exists and runs, never pays for one.
+/// Exactly the two rows that read Events, with their grace periods: no pod once
+/// the Job is [`POD_CREATE_GRACE`] old (`FailedCreate`), and a `runner`
+/// container still `ContainerCreating` after [`MOUNT_GRACE`] (`FailedMount`).
+/// Anywhere else a list could not change the verdict, so a healthy Job never
+/// pays for one.
 #[must_use]
 pub fn reads_events(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> bool {
     match pod {
@@ -223,19 +202,15 @@ pub fn reads_events(job: &Job, pod: Option<&Pod>, now: DateTime<Utc>) -> bool {
 }
 
 /// Whether a Job has had no pod for [`POD_CREATE_GRACE`] **by its own
-/// status** — the pre-filter that lets a runner kind with no pod read of its
-/// own (the `KafkaCluster` probe, a `ProtectionPolicy` delivery, a retention
-/// run) look for a refused pod without paying a pod list on every pass of a
-/// healthy run (FX-11).
+/// status**: the pre-filter that lets a runner kind with no pod read of its own
+/// look for a refused pod without a pod list on every pass of a healthy run.
 ///
-/// The Job controller counts every pod it created in `status.active`,
-/// `status.succeeded` and `status.failed`. While all three are zero (or
-/// absent), the Job may have no pod — a quota-refused one stays here for its
-/// whole life — and the caller proves it with a pod list. The moment the Job
-/// controller counts one, nothing a `FailedCreate` says can be this Job's
-/// answer, and no request is made. The counts can lag a just-created pod, in
-/// which case the pod list finds it: the filter only ever SAVES calls, never
-/// decides.
+/// While `status.active`, `succeeded` and `failed` are all zero or absent, the
+/// Job may have no pod (a quota-refused one stays here for its whole life) and
+/// the caller proves it with a pod list. Once the Job controller counts one, no
+/// `FailedCreate` can be this Job's answer and no request is made. The counts
+/// can lag a just-created pod, in which case the pod list finds it: the filter
+/// only saves calls, never decides.
 #[must_use]
 pub fn no_pod_counted(job: &Job, now: DateTime<Utc>) -> bool {
     let status = job.status.as_ref();
@@ -246,20 +221,19 @@ pub fn no_pod_counted(job: &Job, now: DateTime<Utc>) -> bool {
         && !counted(status.and_then(|s| s.failed))
 }
 
-/// The `FailedCreate` row ALONE, for the runner kinds whose outcome vocabulary
+/// The `FailedCreate` row alone, for the runner kinds whose outcome vocabulary
 /// has no waiting table: the Job has had no pod for [`POD_CREATE_GRACE`] and
-/// the Job controller said why (FX-11).
+/// the Job controller said why.
 ///
-/// The SAME row [`classify`] uses — one matcher, so a `KafkaCluster` probe, a
-/// delivery and a retention run name exactly the refusal a `Preflight` would,
-/// with the same involved-object rule (a `FailedCreate` naming another Job is
-/// never this one's). `None` while the Job has a pod, inside the grace period,
-/// or with no matching Event: those keep the kind's own path.
+/// The same matcher [`classify`] uses, so a runner Job names exactly the
+/// refusal a `Preflight` would, with the same involved-object rule. `None`
+/// while the Job has a pod, inside the grace period, or with no matching
+/// Event.
 ///
 /// The code is [`CheckCode::PodCreateRejected`], or
 /// [`CheckCode::RunnerServiceAccountMissing`] when the ServiceAccount is the
-/// cause; a runner kind projects either onto its own
-/// `PodCreationForbidden` (`crate::diagnostics::Code::runner_ready_reason`).
+/// cause; a runner kind projects either onto its own `PodCreationForbidden`
+/// (`crate::diagnostics::Code::runner_ready_reason`).
 #[must_use]
 pub fn pod_create_refusal(
     job: &Job,
@@ -273,11 +247,7 @@ pub fn pod_create_refusal(
     from_failed_create(events, &job.name_any())
 }
 
-// ---------------------------------------------------------------------------
-// Rows
-// ---------------------------------------------------------------------------
-
-/// The `waiting.reason` rows — D2 §4.3's first six.
+/// The `waiting.reason` rows (D2 §4.3's first six).
 fn from_container_waiting(pod: &Pod) -> Option<Waiting> {
     let waiting = pod
         .status
@@ -314,13 +284,11 @@ fn from_container_waiting(pod: &Pod) -> Option<Waiting> {
 /// `CreateContainerConfigError`'s three sub-cases, told apart by the kubelet's
 /// own message forms.
 ///
-/// The forms are the kubelet's, quoted in D2 §4.3:
-/// `secret "X" not found`, `couldn't find key K in Secret NS/X`,
-/// `configmap "X" not found`. A message that matches none of them is still a
-/// `CredentialSecretNotFound`-shaped failure — the container's configuration
-/// names something that is not there — but it names nothing, so the generic
-/// code is [`CheckCode::PodCreateRejected`] rather than a guess at which
-/// reference it was.
+/// The forms are the kubelet's, quoted in D2 §4.3: `secret "X" not found`,
+/// `couldn't find key K in Secret NS/X`, `configmap "X" not found`. A message
+/// that matches none of them names nothing, so the code is
+/// [`CheckCode::PodCreateRejected`] rather than a guess at which reference it
+/// was.
 fn from_config_error(message: &str) -> Waiting {
     if let Some((secret, key)) = key_missing(message) {
         return Waiting {
@@ -407,13 +375,10 @@ fn from_failed_mount(events: &[EventFact], pod_name: &str) -> Option<Waiting> {
 
 /// The `FailedCreate` row, split on whether the ServiceAccount is the cause.
 ///
-/// **It must name THIS Job.** `FailedCreate` is a common event in a namespace
-/// with a `ResourceQuota` or a restrictive PodSecurity level, and a controller
-/// that took the first one it saw would report an unrelated workload's quota
-/// failure as this check's — and `PodCreateRejected` is in
-/// [`Waiting::is_terminal`], so it would CANCEL a healthy check Job because of
-/// somebody else's event. `from_failed_mount` already matched on the involved
-/// object; this row did not.
+/// **It must name this Job.** `FailedCreate` is common in a namespace with a
+/// `ResourceQuota` or a restrictive PodSecurity level, and `PodCreateRejected`
+/// is in [`Waiting::is_terminal`], so taking the first one seen would cancel a
+/// healthy check Job over somebody else's event.
 fn from_failed_create(events: &[EventFact], job_name: &str) -> Option<Waiting> {
     let e = events.iter().find(|e| {
         e.reason == "FailedCreate" && e.involved_kind == "Job" && e.involved_name == job_name
@@ -436,10 +401,6 @@ fn from_failed_create(events: &[EventFact], job_name: &str) -> Option<Waiting> {
         ),
     ))
 }
-
-// ---------------------------------------------------------------------------
-// Small readers over the objects
-// ---------------------------------------------------------------------------
 
 /// A pod condition's `status`, by type.
 #[must_use]

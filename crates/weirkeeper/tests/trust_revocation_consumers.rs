@@ -1,41 +1,37 @@
-//! `TRUSTPOLICY-DELETE-DROPS-REVOCATION` — the reproduction, one row per
-//! consumer of a trust decision.
+//! A compromise revocation outlives the `TrustPolicy` that recorded it: one
+//! row per consumer of a trust decision.
 //!
-//! # The observation (PoC round, rehearsal R2)
+//! # The failure these rows hold off
 //!
-//! A `TrustPolicy` revoked the installation signer for `KeyCompromise`; every
-//! backup it had signed turned `Untrusted` with basis
-//! `RecordedBeforeRevocation`. The policy was then deleted, the namespace fell
-//! back to `legacy-roster-v1`, synthesised from a `TrustRoster/default` that
-//! still listed the key as an ordinary signing key — and all six backups
-//! re-verified `Valid`. The revocation had lived only on the object that was
-//! removed.
+//! A `TrustPolicy` revokes the installation signer for `KeyCompromise`; every
+//! backup it signed turns `Untrusted` with basis `RecordedBeforeRevocation`.
+//! If the policy is then deleted, the namespace falls back to
+//! `legacy-roster-v1`, synthesised from a `TrustRoster/default` that still
+//! lists the key as an ordinary signing key, and every backup would re-verify
+//! `Valid`: the revocation lived only on the object that was removed.
 //!
-//! # How each row is built, and why it compiles against the base commit
+//! # How each row is built
 //!
-//! Every row drives ONLY interfaces that existed before the fix (`resolve_in`,
+//! Every row drives only the consumers' own interfaces (`resolve_in`,
 //! `retrust`, the catalog view, the preflight signer row, the runner keyring,
 //! the approval seam, the policy status, and `reconcile_policy` over a route
-//! table). So this file was run unchanged at `02dc44b6` to record what each
-//! consumer said there (the result file quotes the failures), and it is the
-//! regression suite now. Nothing here assumes HOW the fix works: the
-//! "deletion" row asks the reconciler what it did to the policy, and models
-//! `kubectl delete` from that — an object the reconciler put a finalizer on
-//! survives the delete with a `deletionTimestamp`, an object it did not is
+//! table) and assumes nothing about HOW the revocation is kept: the "deletion"
+//! row asks the reconciler what it did to the policy, and models
+//! `kubectl delete` from that. An object the reconciler put a finalizer on
+//! survives the delete with a `deletionTimestamp`; an object it did not is
 //! gone.
 //!
-//! Two ways a namespace stops resolving through the recording policy, both
-//! observed or one edit away:
+//! Two ways a namespace stops resolving through the recording policy:
 //!
-//! * **deleted** — `kubectl delete trustpolicy <name>` (R2's rollback step, and
-//!   the delete-and-re-create remedy for a policy applied with a wrong
-//!   immutable field);
-//! * **re-bound** — the namespace removed from `spec.namespaces`, so it falls
+//! * **deleted**: `kubectl delete trustpolicy <name>` (a rollback, or the
+//!   delete-and-re-create remedy for a policy applied with a wrong immutable
+//!   field);
+//! * **re-bound**: the namespace removed from `spec.namespaces`, so it falls
 //!   to the roster. No finalizer can see this one.
 //!
 //! and one way a key the cluster knows is compromised is listed as trusted
-//! somewhere else: **another policy** — a successor applied from an export
-//! taken before the revocation — listing it `Active`.
+//! somewhere else: **another policy** (a successor applied from an export
+//! taken before the revocation) listing it `Active`.
 
 mod support;
 use support::at;
@@ -57,12 +53,10 @@ use weirkeeper::testing::Route;
 use weirkeeper::trust::{resolve_in, Resolution};
 use weirkeeper::verification::{backup_badge, restore_badge, retrust};
 
-// ---------------------------------------------------------------------------
-// Public material. The same two PUBLIC halves `trust_policy_controller.rs`
-// uses; no private half is written down anywhere (`check-one-signer.sh`).
-// ---------------------------------------------------------------------------
+// Public material: the same two PUBLIC halves `trust_policy_controller.rs`
+// uses (`check-one-signer.sh`).
 
-/// The installation signer — the key R2 revoked. Ed25519, SPKI PEM.
+/// The installation signer, the key revoked here. Ed25519, SPKI PEM.
 const SIGNER_PEM: &str =
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n";
 /// `sha256(SIGNER_PEM's SPKI DER)`.
@@ -89,9 +83,7 @@ fn now() -> DateTime<Utc> {
 /// The compromise revocation's instants.
 const REVOKED_AT: &str = "2026-09-10T12:00:00Z";
 
-// ---------------------------------------------------------------------------
 // Builders
-// ---------------------------------------------------------------------------
 
 fn active(key_id: &str, pem: &str, usage: SpecUsage) -> TrustedKey {
     TrustedKey {
@@ -156,8 +148,8 @@ fn recorder() -> TrustPolicy {
     )
 }
 
-/// `TrustRoster/default` as R2 had it: the signer and the approver listed as
-/// ordinary keys, because the roster has no lifecycle to say otherwise.
+/// `TrustRoster/default` with the signer and the approver listed as ordinary
+/// keys, because the roster has no lifecycle to say otherwise.
 fn roster() -> TrustRosterSpec {
     let entry = |key_id: &str, pem: &str| KeyEntry {
         key_id: key_id.to_string(),
@@ -172,9 +164,9 @@ fn roster() -> TrustRosterSpec {
     }
 }
 
-/// A Backup verified by an earlier reconcile at 10:05, BEFORE the
-/// revocation took effect at 12:00 — the controller-written observation D3
-/// §7.4's `RecordedBeforeRevocation` row reads.
+/// A Backup verified by an earlier reconcile at 10:05, BEFORE the revocation
+/// took effect at 12:00: the controller-written observation the
+/// `RecordedBeforeRevocation` basis reads.
 fn verified_backup() -> Value {
     json!({
         "phase": "Succeeded",
@@ -313,8 +305,8 @@ fn rebound() -> Vec<TrustPolicy> {
 
 /// Both at once: the namespace re-bound away first, then `kubectl delete` on
 /// the recording policy. Whatever the delete leaves behind no longer governs
-/// [`NS`], so the namespace resolves through the roster — and a record that
-/// is only honoured while it GOVERNS would be lost here even with the object
+/// [`NS`], so the namespace resolves through the roster, and a record that is
+/// only honoured while it GOVERNS would be lost here even with the object
 /// held.
 async fn rebound_then_deleted() -> Vec<TrustPolicy> {
     list_after_kubectl_delete()
@@ -327,12 +319,10 @@ async fn rebound_then_deleted() -> Vec<TrustPolicy> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // The baseline: while the recording policy governs, every consumer refuses
-// ---------------------------------------------------------------------------
 
-/// The state R2 recorded before the deletion, reproduced: `Untrusted`,
-/// `RecordedBeforeRevocation`, never green. Every other row starts here.
+/// The state before the deletion: `Untrusted`, `RecordedBeforeRevocation`,
+/// never green. Every other row starts here.
 #[test]
 fn baseline_while_the_recording_policy_governs_the_key_is_refused() {
     let res = resolve_in(NS, &[recorder()], Some(&roster()));
@@ -345,12 +335,10 @@ fn baseline_while_the_recording_policy_governs_the_key_is_refused() {
     assert!(!backup_badge(&backup).green);
 }
 
-// ---------------------------------------------------------------------------
-// The rows. Each asserts the FIXED behaviour: nothing the compromised key
-// signed or authorises reads as trusted. At the base commit each failed.
-// ---------------------------------------------------------------------------
+// The rows. Each asserts that nothing the compromised key signed or
+// authorises reads as trusted.
 
-/// **Evidence re-trust, Backup** — the row R2 observed: the six backups.
+/// **Evidence re-trust, Backup**: the six backups.
 #[tokio::test]
 async fn a_backup_verdict_stays_refused_after_the_recording_policy_is_deleted() {
     let before = resolve_in(NS, &[recorder()], Some(&roster()));
@@ -399,7 +387,7 @@ async fn a_restore_verdict_stays_refused_after_the_recording_policy_is_deleted()
     }
 }
 
-/// **Fresh evidence** — a document signed AFTER the deletion (a forged
+/// **Fresh evidence**: a document signed AFTER the deletion (a forged
 /// receipt, or a run still using the compromised key) verified by a new
 /// evidence fetch: the verdict `verify_fetched` reaches is this seam's.
 #[tokio::test]
@@ -453,7 +441,7 @@ async fn the_catalog_never_lists_the_keys_points_verified_after_deletion() {
     }
 }
 
-/// **Rehearsal / restore runner** — the evidence keyring the runner verifies
+/// **Rehearsal / restore runner**: the evidence keyring the runner verifies
 /// a bound point's receipt against. A key RENDERED there must carry its
 /// revocation, or the runner accepts a point the controller refuses.
 #[tokio::test]
@@ -535,7 +523,7 @@ async fn the_signer_readiness_row_refuses_the_key_after_deletion() {
     }
 }
 
-/// **Keys view / API `trust-policies`** — a SECOND policy (a successor applied
+/// **Keys view / API `trust-policies`**: a SECOND policy (a successor applied
 /// from an export taken before the revocation) lists the key `Active`. Its
 /// own status is what the keys page's `EVALUATION` column and the API's
 /// `effectiveState` render; `Active` there is a green badge over a key this
@@ -611,12 +599,11 @@ fn a_key_nobody_revoked_still_verifies_everywhere() {
     }
 }
 
-/// **Review finding M1, the reviewer's probe as a row.** A compromise newly
-/// recorded on a policy that governs [`NS`] changes the stored verdict of a
-/// terminal Restore in [`OTHER_NS`] (which resolves through a policy listing
-/// the key `Active`), so the `TrustPolicy` watch mapper — the one every
-/// re-trust trigger shares — must enqueue it. At `9c97f979` the mapper
-/// enqueued only [`NS`] and the Restore kept a green badge until a restart.
+/// A compromise newly recorded on a policy that governs [`NS`] changes the
+/// stored verdict of a terminal Restore in [`OTHER_NS`] (which resolves
+/// through a policy listing the key `Active`), so the `TrustPolicy` watch
+/// mapper, the one every re-trust trigger shares, must enqueue it, or the
+/// Restore keeps a green badge until a restart.
 #[test]
 fn a_new_compromise_record_wakes_every_namespace_it_reaches() {
     use std::sync::Arc;

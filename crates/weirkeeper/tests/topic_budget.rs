@@ -1,11 +1,10 @@
-//! **FX-33 — the shared controller reads a backup of many topics, and stays
-//! bounded while it does.**
+//! **The shared controller reads a backup of many topics, and stays bounded
+//! while it does.**
 //!
-//! A backup's receipt carries blocks for every topic, about 3 KB each. The
-//! controller read one under the 1 MiB cap it reads a scorecard under, so a
-//! backup of about 300 topics was `NotAttempted` for ever — and it PARSED what
-//! it read into a `serde_json::Value`, many times the bytes, in the one
-//! process that serves every namespace. Since FX-33:
+//! A backup's receipt carries blocks for every topic, about 3 KB each, so it
+//! outgrows the 1 MiB cap a scorecard is read under at about 300 topics, and a
+//! `serde_json::Value` of it is many times its bytes, in the one process that
+//! serves every namespace. So:
 //!
 //! - a backup receipt has its own cap, `caps::CONTROLLER_RECEIPT`, the largest
 //!   receipt Logweir writes (`logweir_core::topic_budget::MAX_RECEIPT_BYTES`);
@@ -83,8 +82,8 @@ fn trust() -> ResolvedTrust {
     })
 }
 
-/// One of `topic_budget::REFERENCE_SET`'s receipts — the bytes `backup run`
-/// would sign — and the committed sidecar over them
+/// One of `topic_budget::REFERENCE_SET`'s receipts (the bytes `backup run`
+/// would sign) and the committed sidecar over them
 /// (`crates/logweir/tests/topic_budget.rs` holds each sidecar to the signer).
 fn reference(label: &str) -> (usize, Vec<u8>, Vec<u8>) {
     let (_, topics, shape) = REFERENCE_SET
@@ -168,22 +167,19 @@ fn expectations() -> FrameExpectations {
     }
 }
 
-// ===========================================================================
 // 1. The cap is one of two rows, chosen by what the document IS
-// ===========================================================================
 
 /// **The cap the controller reads a signed document under is one of two rows
 /// of the caps table, and which one is decided by the document's kind.** A
-/// backup receipt — any version of its media type — is read under
+/// backup receipt (any version of its media type) is read under
 /// `caps::CONTROLLER_RECEIPT`; everything else, including a type that only
 /// looks like a receipt's and a type nobody defined, under
 /// `caps::CONTROLLER_DOCUMENT`. The store's source-scan guard
 /// (`every_production_read_names_a_cap_from_the_table`) admits
 /// `controller_cap_for(` as a cap on the strength of this row.
 ///
-/// It also holds the arithmetic the read budget's table states: what each
-/// read reserves, and that the budget is a quarter of the chart's controller
-/// memory limit.
+/// It also holds the read budget table's arithmetic: what each read reserves,
+/// and that the budget is a quarter of the chart's controller memory limit.
 ///
 /// KILLS: `controller_cap_for` answering a third number, or the receipt cap
 /// for a document that is not a receipt (a scorecard read and parsed at 5 MB).
@@ -228,20 +224,16 @@ fn the_controllers_document_cap_is_one_of_its_two_rows() {
     assert_eq!(request(SCORECARD).payload_cap(), caps::CONTROLLER_DOCUMENT);
 }
 
-// ===========================================================================
 // 2. A backup of many topics is verified
-// ===========================================================================
 
-/// **FX-33's acceptance, at the controller: the receipt of a backup of 70,
-/// 105, 113, 300, 500 or 1,000 topics with full recorded configuration — and
-/// the largest receipt Logweir writes — is VERIFIED `Valid`**, by the same
-/// `verify_evidence` every `Backup` goes through, and `observe_archive` and
-/// the signing-time re-read take their facts from it.
+/// **The receipt of a backup of 70, 105, 113, 300, 500 or 1,000 topics with
+/// full recorded configuration, and the largest receipt Logweir writes, is
+/// VERIFIED `Valid`** by the same `verify_evidence` every `Backup` goes
+/// through, and `observe_archive` and the signing-time re-read take their
+/// facts from it.
 ///
-/// Before FX-33 every one of these over 1 MiB (300 topics and up, here) was
-/// `NotAttempted` for ever. The row says which are over the old cap so that
-/// is visible, and its controls hold the verdict to the bytes: one changed
-/// byte is `Invalid`.
+/// The row says which are over the 1 MiB document cap (300 topics and up), and
+/// its controls hold the verdict to the bytes: one changed byte is `Invalid`.
 ///
 /// KILLS: the receipt read under the document cap again (`NotAttempted`
 /// from 300 topics); the fold disagreeing with the document (a wrong record
@@ -337,12 +329,11 @@ fn a_backup_of_many_topics_is_verified_by_the_controller() {
 /// a real broker, signed with the fixture key this file's roster carries.
 ///
 /// `#[ignore]`: it needs those two files, named by `FX33_LIVE_RECEIPT_DIR`.
-/// It is a row about a REAL document; the rows above hold the same code to
-/// generated ones at every size on every run.
+/// The rows above hold the same code to generated documents at every size on
+/// every run.
 ///
-/// NEGATIVE CONTROLS: the same bytes under the 1 MiB document cap, which is
-/// how the controller read a receipt before FX-33, are `NotAttempted`; and one
-/// changed byte is `Invalid`.
+/// NEGATIVE CONTROLS: the same bytes under the 1 MiB document cap are
+/// `NotAttempted`; one changed byte is `Invalid`.
 #[test]
 #[ignore = "live: needs FX33_LIVE_RECEIPT_DIR, where e2e/tests/topic_budget.rs wrote receipt.json and receipt.sig"]
 fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller() {
@@ -417,7 +408,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
         FIXTURE_KEY_ID
     );
 
-    // CONTROL: what the controller answered for these bytes before FX-33.
+    // CONTROL: the same bytes under the document cap.
     if len > caps::CONTROLLER_DOCUMENT {
         let old = verify_fetched(
             &receipt,
@@ -460,7 +451,7 @@ fn the_receipt_a_real_backup_of_many_topics_signed_is_verified_by_the_controller
     assert_eq!(r.result, VerificationVerdict::Invalid, "{r:?}");
 }
 
-/// **A receipt over the bound — one an older runner wrote, 5,000 topics — is
+/// **A receipt over the bound (one an older runner wrote, 5,000 topics) is
 /// `NotAttempted` NAMING THE RECEIPT CAP, final, and is not read.** It is
 /// present, and nothing is taken from it.
 ///
@@ -506,9 +497,7 @@ fn a_receipt_over_the_bound_is_not_attempted_naming_the_receipt_cap() {
     );
 }
 
-// ===========================================================================
 // 3. The cap is the consumer's, never the request's
-// ===========================================================================
 
 /// **A document is capped by what it IS, where its bytes are consumed.** The
 /// same 1 MiB + 1 bytes are refused as a scorecard and read as a receipt, at
@@ -634,10 +623,9 @@ fn a_document_is_capped_by_what_it_is_where_it_is_consumed() {
 /// decode under its decoder budget; one byte more of payload is refused by
 /// the receipt's own stream cap, not by the relay giving out.
 ///
-/// This is the constraint that binds the budget: a relay goes through ONE
-/// pod log, read under `RELAY_LIMIT_BYTES` (8 MiB, below the kubelet's 10 MiB
-/// rotation), and base64 in 4 KiB lines costs about 1.36 bytes of log a byte
-/// of document.
+/// This constraint binds the budget: a relay goes through ONE pod log, read
+/// under `RELAY_LIMIT_BYTES` (8 MiB, below the kubelet's 10 MiB rotation), and
+/// base64 in 4 KiB lines costs about 1.36 bytes of log per byte of document.
 ///
 /// KILLS: a receipt cap raised past what a relay carries (the log is cut and
 /// the relay never verifies).
@@ -689,18 +677,16 @@ fn the_largest_receipt_fits_the_relay() {
     }
 }
 
-// ===========================================================================
 // 4. The fold answers what the parse answered
-// ===========================================================================
 
 /// **The receipt fold answers what the three rule functions answer over a
-/// parsed document** — `records_from_receipt`, `covered_from_receipt` and
-/// `capture_from_receipt`, which were the controller's readers until FX-33
-/// and remain as the statement of the rule. Over every reference receipt, the
-/// signed fixture, and bodies that break each rule one way.
+/// parsed document**: `records_from_receipt`, `covered_from_receipt` and
+/// `capture_from_receipt`, which remain as the statement of the rule. Over
+/// every reference receipt, the signed fixture, and bodies that break each
+/// rule one way.
 ///
-/// (`logweir-core/tests/receipt_facts.rs` holds the fold to a `Value` walk
-/// over 59 bodies; this row holds it to the CONTROLLER's own three functions.)
+/// (`logweir-core/tests/receipt_facts.rs` holds the fold to a `Value` walk;
+/// this row holds it to the CONTROLLER's own three functions.)
 ///
 /// KILLS: the fold summing differently, reading half a window, or taking the
 /// first of a duplicated key where `serde_json` takes the last.
@@ -792,16 +778,16 @@ fn the_receipt_fold_answers_what_these_functions_answer() {
 /// A `serde_json::Value` of a document is many times its bytes (37 times for
 /// a document of tiny values), and this process serves every namespace. So
 /// every place `crates/weirkeeper/src` builds a `Value` out of bytes or text
-/// is on the list below with what the bytes are and what bounds them. A new
-/// one fails this row until it is classified — which is the question "can a
-/// backup receipt reach this parse?" asked of whoever adds it.
+/// is listed below with what the bytes are and what bounds them. A new one
+/// fails this row until it is classified, which asks "can a backup receipt
+/// reach this parse?" of whoever adds it.
 ///
-/// The scan is of the sources' production code: a file is read up to its
-/// first `#[cfg(test)]`, and `testing.rs` (test support) is not read. The
-/// tokens are assembled so this file does not match itself.
+/// The scan reads each source file up to its first `#[cfg(test)]`, skips
+/// `testing.rs` (test support), and assembles its tokens so this file does not
+/// match itself.
 ///
 /// KILLS: the receipt fold replaced by a whole parse anywhere in the
-/// controller — in `claim_of`, in `observe_archive`, in the relayed-receipt
+/// controller: in `claim_of`, in `observe_archive`, in the relayed-receipt
 /// path, or in a new error or logging path.
 #[test]
 fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
@@ -931,9 +917,7 @@ fn the_controller_builds_no_tree_of_a_receipt_on_any_path() {
     );
 }
 
-// ===========================================================================
 // 5. Peak resident memory, measured in child processes
-// ===========================================================================
 
 const TEST_NAME: &str = "a_receipt_read_and_a_receipt_relay_stay_bounded";
 const CHILD_ENV: &str = "FX33_MEM_CHILD";
@@ -967,8 +951,8 @@ fn plant(root: &Path, receipt: &[u8], sidecar: &[u8]) {
 /// One relay, as `evidence_fetch` and the `Backup` reconciler hold it: the
 /// pod log read into a string and decoded; the relay read into the two
 /// documents; the receipt verified and its facts folded. With `as_value`, the
-/// receipt is ALSO parsed into a `serde_json::Value` — what the relay path
-/// did before FX-33 — and held beside the rest.
+/// receipt is ALSO parsed into a `serde_json::Value` and held beside the rest
+/// (the control).
 fn one_relay(root: &Path, kind: &'static str, as_value: bool) {
     let request = request(kind);
     let digest = std::fs::read_to_string(root.join("digest")).unwrap();
@@ -1027,8 +1011,7 @@ fn run_child(mode: &str, root: &Path) {
                 SigningTime::Recovered(_)
             ));
             if mode == "read-value" {
-                // The control: the same bytes as a tree, which is what the
-                // controller built of every receipt before FX-33.
+                // The control: the same bytes as a tree.
                 let (bytes, _) = store
                     .get_capped(PAYLOAD_KEY, caps::CONTROLLER_RECEIPT)
                     .expect("within the cap");
@@ -1050,7 +1033,7 @@ fn child_peak(mode: &str, root: &Path) -> u64 {
         .env(CHILD_ENV, mode)
         .env(ROOT_ENV, root)
         // The meter measures live memory, not an allocator's cache of freed
-        // blocks (`tests/read_caps.rs`, review F2).
+        // blocks (as `tests/read_caps.rs` does).
         .env("MallocLargeCache", "0")
         .env("MALLOC_MMAP_THRESHOLD_", "131072")
         .output()
@@ -1083,8 +1066,8 @@ fn scratch(what: &str) -> PathBuf {
     ))
 }
 
-/// **One receipt read, and one receipt relay, stay bounded — with a receipt
-/// at the bound.**
+/// **One receipt read, and one receipt relay, stay bounded, with a receipt at
+/// the bound.**
 ///
 /// In child processes, each against a baseline child doing the same work
 /// over the 1 KB signed fixture:
@@ -1093,13 +1076,12 @@ fn scratch(what: &str) -> PathBuf {
 ///   (`verify_evidence`, `observe_archive`, `read_signing_time`) add less
 ///   than the `DOCUMENT_READ_COST_BYTES` each reserves: the bytes and the
 ///   signature's pre-authentication copy of them, and nothing per topic;
-/// - one RELAY of it — the pod log read into a string, decoded, read,
-///   verified, folded — adds less than [`RELAY_BOUND_BYTES`].
+/// - one RELAY of it (the pod log read into a string, decoded, read,
+///   verified, folded) adds less than [`RELAY_BOUND_BYTES`].
 ///
-/// The control parses the receipt into a `serde_json::Value` beside the
-/// three reads — what the controller did before FX-33 — and must add at least
-/// twice the document on top, which shows the meter sees a tree. (The relay's
-/// own `Value` figure is printed beside it.)
+/// The control parses the receipt into a `serde_json::Value` beside the three
+/// reads and must add at least twice the document on top, which shows the
+/// meter sees a tree. (The relay's own `Value` figure is printed beside it.)
 ///
 /// KILLS: the fold replaced by a whole parse in `claim_of`, `observe_archive`
 /// or the relay path (the read or the relay child holds the control's

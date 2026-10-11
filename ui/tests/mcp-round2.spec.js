@@ -1,5 +1,5 @@
-// mcp-round2.spec.js -- the human-like MCP pass's round 2 (2026-09-25), each
-// finding a row with the behaviour it replaced as its NEGATIVE CONTROL.
+// mcp-round2.spec.js -- console findings from a human-like pass, each a row
+// with the behaviour it replaced as its NEGATIVE CONTROL.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -25,7 +25,7 @@ const UI = fileURLToPath(new URL("../", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const con = (name) => JSON.parse(readFileSync(FIXTURES + "console/" + name, "utf8"));
 
-// ------------------------------------------------ R2-11: a check still running
+// A check still running.
 
 test("r2_11_a_running_check_says_checking_not_does_not_apply", () => {
   const pending = { id: "pf-1", state: "pending", terminal: false, applicable: false,
@@ -44,12 +44,12 @@ test("r2_11_a_running_check_says_checking_not_does_not_apply", () => {
   assert.match(applicabilityLine(done), /does not apply to your current inputs/);
 });
 
-// ------------------------------------------- R2-12: the readiness headline
+// The readiness headline.
 
 const row = (id, gating, state, code) => ({ id: id, gating: gating, state: state, code: code });
 
-/** The PoC's step-5 shape (pf-xq5feiegyugdzwo6yqkzly2ey4): every blocking row
- *  ready but the draft's approval, three execution-only rows unknown. */
+/** A step-5 shape: every blocking row ready but the draft's approval, three
+ *  execution-only rows unknown. */
 function pocRestoreCheck(over) {
   return Object.assign({
     id: "pf-x", operation: "restore", state: "unknown", terminal: true, applicable: true,
@@ -66,10 +66,9 @@ function pocRestoreCheck(over) {
 }
 
 test("r2_12_a_check_unknown_only_for_its_drafts_approval_headlines_needs_approval", () => {
-  // REVIEW L1: the first cut read "ready -- 4 items are confirmed when the
-  // restore runs", counting the BLOCKING approval row among the items the run
-  // confirms. Only execution-only rows may be summarised that way; the
-  // approval row is named for what it is, and the badge is never green.
+  // Only execution-only rows may be summarised as "confirmed when the restore
+  // runs"; the BLOCKING approval row is named for what it is, and the badge is
+  // never green.
   const html = readinessHeadline(pocRestoreCheck());
   assert.doesNotMatch(html, /badge-green/,
     "NEGATIVE CONTROL: never ready over an unresolved blocking row (the approval included)");
@@ -100,9 +99,8 @@ test("r2_12_a_check_unknown_only_for_its_drafts_approval_headlines_needs_approva
 });
 
 test("r2_12_a_gating_this_build_does_not_recognise_is_blocking_and_unresolved", () => {
-  // REVIEW L2: only `gating === "blocking"` counted as blocking, so a row the
-  // API mapped to `null` (a gating it did not recognise) could not stop the
-  // headline -- or the Create gate -- from passing. Fail closed.
+  // A row whose gating the API mapped to `null` (one it did not recognise)
+  // must stop the headline -- and the Create gate -- from passing. Fail closed.
   for (const gating of [null, undefined, "blockingV2"]) {
     const skew = pocRestoreCheck();
     skew.checks.push(row("future.check", gating, "notReady", "FutureRefusal"));
@@ -127,8 +125,7 @@ test("r2_12_a_gating_this_build_does_not_recognise_is_blocking_and_unresolved", 
 
 test("r2_12_the_stepper_and_the_create_gate_read_the_same_rule_as_the_headline", () => {
   // CREATE IS ALLOWED EXACTLY WHEN THE HEADLINE IS `ready` OR `needs approval`,
-  // and step 5 says the same word (review L1: it read "done" under a check
-  // still owed an approval).
+  // and step 5 says the same word.
   const shapes = [pocRestoreCheck()];
   const real = pocRestoreCheck();
   real.checks[1] = row("archive.segments", "blocking", "unknown", "SegmentsUnreadable");
@@ -148,7 +145,7 @@ test("r2_12_the_stepper_and_the_create_gate_read_the_same_rule_as_the_headline",
   assert.match(wizard, /if \(step\.status === "approval"\) \{\n {4}return "needs approval";/);
 });
 
-// ------------------------------------ R2-14: a role that cannot use a route
+// A role that cannot use a route.
 
 test("r2_14_a_route_the_session_cannot_use_says_so_instead_of_rendering", () => {
   const restore = NAV_ROUTES.find((r) => r.hash === "#/restore");
@@ -182,8 +179,8 @@ test("r2_14_a_route_the_session_cannot_use_says_so_instead_of_rendering", () => 
 });
 
 test("r2_14_a_route_needing_any_of_its_flags_is_allowed_with_one_of_them", () => {
-  // REVIEW L6 (mutant UM5, `some` -> `every`): History needs backupsRead OR
-  // restoresRead, and a session holding only one of them may use it.
+  // History needs backupsRead OR restoresRead, and a session holding only one
+  // of them may use it (`some`, not `every`).
   const history = NAV_ROUTES.find((r) => r.hash === "#/history");
   assert.deepEqual(history.needs, ["backupsRead", "restoresRead"]);
   assert.equal(routeAllowed(history, "team-a", (flag) => flag === "restoresRead"), true,
@@ -193,8 +190,8 @@ test("r2_14_a_route_needing_any_of_its_flags_is_allowed_with_one_of_them", () =>
 });
 
 test("r2_14_the_route_gate_asks_the_chosen_namespace_and_not_the_union", async () => {
-  // REVIEW L5: an operator in team-b who is a viewer in team-a got the whole
-  // wizard in team-a, because the gate asked "in any namespace".
+  // The gate asks per namespace: an operator in team-b who is a viewer in
+  // team-a is not given the wizard in team-a.
   const session = con("session-viewer.json");
   const viewer = session.namespaces[0];
   const full = con("session.json");
@@ -235,7 +232,7 @@ test("r2_14_the_catalog_connect_form_and_the_governed_submit_follow_the_grant", 
   assert.match(reader, /id="countersign-read-only"/);
 });
 
-// --------------------------------------------- R2-14b: sign out forgets the page
+// Sign out forgets the page.
 
 test("r2_14b_sign_out_leaves_the_browser_on_the_console_with_no_route", () => {
   assert.equal(signedOutAddress({ pathname: "/ui/", search: "",
@@ -248,7 +245,7 @@ test("r2_14b_sign_out_leaves_the_browser_on_the_console_with_no_route", () => {
     "NEGATIVE CONTROL: a reload kept the hash, so the next user signed in to this user's deep link");
 });
 
-// ------------------------------------------------ R2-16: a user with no role
+// A user with no role.
 
 test("r2_16_a_session_with_no_role_anywhere_lands_on_a_sentence_that_says_so", async () => {
   const session = con("session-viewer.json");
@@ -278,7 +275,7 @@ test("r2_16_a_session_with_no_role_anywhere_lands_on_a_sentence_that_says_so", a
   assert.ok(landing > 0 && landing < body.indexOf("namespacePrompt(context.allowed)"));
 });
 
-// ------------------------------- R2-2 / R2-3 / R2-4 / R2-17: tables that fit their card
+// Tables that fit their card.
 
 import { renderClusterList } from "../pages/clusters.js";
 import { renderRecoveryPoints, renderScheduleHistory, renderScheduleList } from "../pages/schedules.js";
@@ -369,7 +366,7 @@ test("r2_3_a_table_that_still_scrolls_shows_it_and_a_laptop_table_is_tighter", (
   assert.match(css, /@media \(max-width: 1279\.98px\) \{\n {4}\.grid th,\n {4}\.grid td \{\n {6}padding-left: var\(--cds-global-space-5\);/);
 });
 
-// ----------------------------------------- R2-4 / R2-6: tokens that never break
+// Tokens that never break.
 
 test("r2_4_r2_6_names_urls_and_short_labels_stay_on_one_line", () => {
   const css = CSS();
@@ -395,7 +392,7 @@ test("r2_4_r2_6_names_urls_and_short_labels_stay_on_one_line", () => {
   assert.equal(SHORT_CHIP_CHARS, 16);
 });
 
-// ------------------------------------------------ R2-10: the words of step 5
+// The words of step 5.
 
 test("r2_10_backticked_spans_are_code_and_one_topic_is_one_topic", () => {
   assert.equal(messageText("the archive prefix `poc` on destination `primary` is listable"),
@@ -407,7 +404,7 @@ test("r2_10_backticked_spans_are_code_and_one_topic_is_one_topic", () => {
   assert.match(preflightSentence(2), /create 2 topics with/);
 });
 
-// --------------------------------------------- R2-15: the picker does not move
+// The picker does not move.
 
 test("r2_15_the_namespace_picker_sits_in_one_place_for_every_role", () => {
   const css = CSS();
@@ -417,7 +414,7 @@ test("r2_15_the_namespace_picker_sits_in_one_place_for_every_role", () => {
   assert.match(css, /@media \(max-width: 1199\.98px\) \{\n {2}\.ns-form \{\n {4}flex-basis: 100%;/);
 });
 
-// --------------------------------------------------- R2-1 / R2-8: the frame
+// The frame.
 
 test("r2_1_the_console_footer_names_no_repository_path", () => {
   const segments = MODE_COPY[CONSOLE].colophon.map((s) => (Array.isArray(s) ? s[1] : s)).join("");

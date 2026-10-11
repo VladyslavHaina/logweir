@@ -1,4 +1,4 @@
-// backups-page-binding.spec.js -- FX-35: a restore started from a Backup (the
+// backups-page-binding.spec.js -- a restore started from a Backup (the
 // Backups, History and Schedules pages open the wizard on
 // `#/restore?ns=..&backup=..&uid=..`) is bound to that Backup's recovery point
 // exactly as the catalog flow binds one, and says so when it cannot be.
@@ -7,12 +7,11 @@
 // mode with the real client (`ui/client.js`) and the real D3 readers
 // (`ui/operation-watch.js`): the transport answers with the product API's
 // documents, so a field `ui/contract.js` does not declare is dropped before the
-// page sees it, and the row fails (R2).
+// page sees it, and the row fails.
 //
-// THE POINT IS THE POC'S. `lwp1-ee285127...` is the 1.3.0 point PoC batch 5
-// restored both ways (`poc-batch-5/fx21/catalog/api-0.json`): unbound from a
-// Backup (time basis NOT RECORDED, `configuration (unknown)`) and bound from
-// the catalog (both recorded).
+// THE POINT IS A RECORDED ONE: `lwp1-ee285127...`, a 1.3.0 point restored
+// both ways -- unbound from a Backup (time basis NOT RECORDED,
+// `configuration (unknown)`) and bound from the catalog (both recorded).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -38,7 +37,7 @@ const NS = "team-a";
 const DESTINATION_DOC = con("destination.json");
 const DESTINATION = DESTINATION_DOC.item;
 
-/** The 1.3.0 point, as the PoC's API served it (ids kept, namespace moved). */
+/** The 1.3.0 point, as an API served it (ids kept, namespace moved). */
 const OLD = {
   name: "logweir-manual-xta3lxnm7kejxzuytlrpe45qnw",
   uid: "6c9b9b35-b9ce-4104-a8fd-7347bd40b49f",

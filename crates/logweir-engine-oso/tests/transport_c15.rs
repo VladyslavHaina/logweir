@@ -1,5 +1,4 @@
-//! **C15** (`docs/to-do/decisions/PROD-00-engine-route.md` 3.15, acceptance
-//! row A-C15-1; PROD-00.3f).
+//! **A plaintext endpoint without `allow_http`.**
 //!
 //! From engine 0.22.0 on, and so on the 0.23.3 pin, the engine's YAML path ORs
 //! `storage.allow_http` with the endpoint's scheme (`implied_allow_http`,
@@ -205,9 +204,9 @@ fn the_refusal_names_the_rule_and_not_the_endpoint() {
     );
 }
 
-/// **FX-20 fix round (review F1)**, the renderer's backstop: a region that is
-/// not a region name never reaches an engine document, in any of the three;
-/// a real region and no region render (the negative control).
+/// The renderer's backstop: a region that is not a region name never reaches an
+/// engine document, in any of the three; a real region and no region render
+/// (the negative control).
 #[test]
 fn fx20_every_document_refuses_a_region_that_is_not_a_region_name() {
     let with_region = |region: Option<&str>| StorageUrl::S3 {

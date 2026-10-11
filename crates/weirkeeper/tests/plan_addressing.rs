@@ -1,29 +1,25 @@
-//! **The rendered `backup.yaml`'s archive addressing** — Task 24 fix round 1,
-//! closing review finding 2's `endpoint`/`region` half.
+//! **The rendered `backup.yaml`'s archive addressing.**
 //!
 //! # Why this is a test binary of its own, and why its rows take a lock
 //!
 //! `retention::storage_url_for` reads `AWS_ENDPOINT_URL` and `AWS_REGION` from
 //! the PROCESS environment, and the property under test is what it renders
 //! with and without them. `std::env::set_var` mutates state shared by every
-//! thread in the binary, and `cargo test` runs a binary's rows in parallel by
-//! default — so a row that set those variables inside
-//! `tests/backup_controller.rs` would be a race against every other row there
-//! that renders a plan. A separate integration test is a separate PROCESS with
-//! its own environment, and one row in it cannot race itself.
+//! thread in the binary, and `cargo test` runs a binary's rows in parallel, so
+//! a row that set those variables inside `tests/backup_controller.rs` would
+//! race every other row there that renders a plan. A separate integration
+//! test is a separate PROCESS with its own environment.
 //!
-//! D2 W10 adds the second half of the same property, and it belongs in the same
-//! binary for the same reason: **a planted `AWS_ENDPOINT_URL` or
-//! `AWS_ALLOW_HTTP` in the CONTROLLER's environment must reach a legacy run's
-//! Job (that is how every existing install points its runners at a non-AWS
-//! store) and must reach a destination-backed one NOWHERE AT ALL** — defect
-//! SEC-ENVHTTP's controller half. Both arms mutate the process environment, so
-//! both live here, in ONE test, in a binary of its own.
+//! The second half of the same property belongs here for the same reason:
+//! **a planted `AWS_ENDPOINT_URL` or `AWS_ALLOW_HTTP` in the CONTROLLER's
+//! environment must reach a legacy run's Job (that is how every existing
+//! install points its runners at a non-AWS store) and must reach a
+//! destination-backed one NOWHERE AT ALL.**
 //!
-//! Every row here therefore takes [`ENVIRONMENT`] for its whole body and
-//! restores the variables it set before releasing it. That is not decoration:
-//! the second row was added with no lock and the first row failed IMMEDIATELY,
-//! reading `endpoint: http://planted.invalid:9000` where it asserts `null`.
+//! Every row therefore takes [`ENVIRONMENT`] for its whole body and restores
+//! the variables it set before releasing it. Without the lock, the first row
+//! reads the second row's `endpoint: http://planted.invalid:9000` where it
+//! asserts `null`.
 //!
 //! No socket, no cluster, no daemon: calls to pure renderers.
 
@@ -38,16 +34,12 @@ use weirkeeper::crds::kafka_cluster::KafkaCluster;
 
 /// The process environment, held for the length of one row.
 ///
-/// `std::env::set_var` mutates state shared by every thread in this binary, and
-/// the rows here are ABOUT that state. A `Mutex` is what makes "one row at a
-/// time" true rather than "one row exists, so far".
-///
 /// POISONING IS IGNORED (`unwrap_or_else(PoisonError::into_inner)`): a row that
-/// panicked while holding it has already failed, and turning that into a
-/// cascade of poisoned-lock panics in every other row hides which one broke.
+/// panicked while holding it has already failed, and a cascade of
+/// poisoned-lock panics in every other row would hide which one broke.
 static ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Take [`ENVIRONMENT`], and restore the four variables when the row ends —
+/// Take [`ENVIRONMENT`], and restore the four variables when the row ends,
 /// including when it ends by panicking, which is when a leaked value would do
 /// the most damage to the next row.
 struct EnvironmentGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
@@ -132,41 +124,29 @@ fn key(m: &serde_yaml::Mapping, k: &str) -> Option<serde_yaml::Value> {
     m.get(serde_yaml::Value::String(k.to_string())).cloned()
 }
 
-/// **THE RENDERED PLAN CARRIES THE ARCHIVE'S ENDPOINT AND REGION WHEN THEY ARE
-/// CONFIGURED, AND OMITS THEM WHEN THEY ARE NOT.**
-///
-/// # The defect, measured
+/// **The rendered plan carries the archive's endpoint and region when they
+/// are configured, and omits them when they are not.**
 ///
 /// `controllers::backup::plan_backup_spec` builds the `storage` block the
 /// RUNNER mounts and the pinned engine parses. The engine reads that
-/// document's own `endpoint` and `region` keys; **it has never read
-/// `AWS_ENDPOINT_URL`**. `storage_url_for` returned `endpoint: None`
-/// unconditionally, so a controller configured for MinIO rendered
-/// `endpoint: null` into the plan and the engine dialled Amazon — the `Backup`
-/// came back `exitCode: 1` with nothing in the bucket, measured on the first
-/// Phase B run of Task 24. `path_style` and `allow_http` were already read
-/// from the environment here for exactly this reason; these two were the ones
-/// that were missing.
+/// document's own `endpoint` and `region` keys and has never read
+/// `AWS_ENDPOINT_URL`, so a plan with `endpoint: null` from a controller
+/// configured for MinIO dials Amazon and leaves nothing in the bucket.
 ///
-/// # What a reviewer should read twice
-///
-/// The mutant that put this row here was "revert `endpoint`/`region` to
-/// `None`", and it **survived the entire workspace suite**: every other
-/// assertion about the rendered plan compares it against
-/// `storage_url_for`'s own output, which moves with the mutant. This row
+/// Every other assertion about the rendered plan compares it against
+/// `storage_url_for`'s own output, which moves with a mutant there. This row
 /// compares it against the ENVIRONMENT instead, which does not.
 ///
 /// KILLS: `region: env_value("AWS_REGION")` → `region: None`, and the same for
-/// `endpoint` — the rendered document then names the bucket and nothing about
-/// where the bucket IS, and no other row in the tree notices.
+/// `endpoint` (the rendered document then names the bucket and nothing about
+/// where the bucket IS).
 #[test]
 fn the_rendered_plan_carries_the_configured_endpoint_and_region() {
     let _environment = EnvironmentGuard::take();
     // ---- ARM 1: nothing configured -------------------------------------
     //
-    // `remove_var`/`set_var` are `unsafe` from the 2024 edition; this crate is
-    // 2021, and this binary holds ONE test, so the mutation races nothing.
-    // The same decision `crates/logweir/tests/auth_binding.rs` records.
+    // `remove_var`/`set_var` are `unsafe` from the 2024 edition; this crate
+    // is 2021, and the lock above serialises the rows.
     std::env::remove_var("AWS_ENDPOINT_URL");
     std::env::remove_var("AWS_REGION");
     let storage = rendered_storage();
@@ -188,8 +168,8 @@ fn the_rendered_plan_carries_the_configured_endpoint_and_region() {
 
     // ---- ARM 2: configured, and the VALUES reach the document ----------
     //
-    // The demo's own addressing, verbatim: docker-desktop pods reach the
-    // compose stack's MinIO only as `host.docker.internal:9000`.
+    // docker-desktop pods reach the compose stack's MinIO only as
+    // `host.docker.internal:9000`.
     std::env::set_var("AWS_ENDPOINT_URL", "http://host.docker.internal:9000");
     std::env::set_var("AWS_REGION", "us-east-1");
     let storage = rendered_storage();
@@ -211,9 +191,9 @@ fn the_rendered_plan_carries_the_configured_endpoint_and_region() {
         "and the region with it: got {storage:?}"
     );
 
-    // …AND THE DOCUMENT IS STILL ONE THE CLI PARSES. A `storage` block that
-    // gained a key the runner's own type does not know is a plan that fails to
-    // load, which is worse than the endpoint it fixed.
+    // …and the document is still one the CLI parses. A `storage` block that
+    // gained a key the runner's own type does not know is a plan that fails
+    // to load.
     let cm = {
         std::env::set_var("AWS_ENDPOINT_URL", "http://host.docker.internal:9000");
         let cm = plan_config_map(&backup(), &cluster()).expect("the plan renders");
@@ -243,7 +223,7 @@ fn the_rendered_plan_carries_the_configured_endpoint_and_region() {
         ref other => panic!("`s3://…` renders the S3 variant; got {other:?}"),
     }
 
-    // NO CREDENTIAL REACHED THE DOCUMENT. `AWS_ACCESS_KEY_ID` and
+    // No credential reached the document. `AWS_ACCESS_KEY_ID` and
     // `AWS_SECRET_ACCESS_KEY` are deliberately not read here: the runner's
     // archive credential is a `secretKeyRef` on the Job, and a ConfigMap has
     // no encryption at rest.
@@ -303,27 +283,20 @@ fn destination_backed() -> Backup {
     serde_json::from_value(value).expect("the mutated fixture is a Backup")
 }
 
-/// **A PLANTED `AWS_*` IN THE CONTROLLER'S OWN ENVIRONMENT REACHES A LEGACY
-/// JOB AND NEVER A DESTINATION-BACKED ONE.**
-///
-/// # The defect, exactly (SEC-ENVHTTP)
+/// **A planted `AWS_*` in the controller's own environment reaches a legacy
+/// Job and never a destination-backed one.**
 ///
 /// `controllers::backup::archive_addressing_env` forwards this process's
 /// `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and
-/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into every runner Job, and the engine's
-/// `AmazonS3Builder::from_env()` honours every `AWS_*` it finds. A controller
-/// started with `AWS_ALLOW_HTTP=true` therefore enables plaintext transport in
-/// a runner **whose approved plan says `allow_http: false`** — a global setting
-/// overriding approved execution inputs.
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` into a runner Job, and the engine's
+/// `AmazonS3Builder::from_env()` honours every `AWS_*` it finds. Forwarded to
+/// a destination-backed run, `AWS_ALLOW_HTTP=true` would enable plaintext
+/// transport in a runner whose approved plan says `allow_http: false`.
 ///
-/// # BOTH HALVES ARE THE ASSERTION, AND THE FIRST ONE IS NOT AN OVERSIGHT
-///
-/// The legacy arm asserts the forwarding STILL HAPPENS. Those four variables
-/// are how every existing installation points its runners at MinIO or Ceph;
-/// removing them would break every upgrade at the moment of the upgrade. The
-/// route out is an explicitly created `BackupDestination`, not a silent
-/// behaviour change — so the legacy decision is pinned here rather than left
-/// implicit.
+/// The legacy arm asserts the forwarding STILL HAPPENS: those four variables
+/// are how every existing installation points its runners at MinIO or Ceph,
+/// and the route out is an explicitly created `BackupDestination`, not a
+/// silent change at upgrade.
 ///
 /// KILLS: `resolve_inputs` forwarding `addressing_env` for a destination-backed
 /// run (the planted endpoint then reaches the Job beside the destination's own

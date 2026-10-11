@@ -22,8 +22,8 @@ fn main() {
         // "1.0.0", NOT `logweir_core::FORMAT_VERSION`: the committed signed
         // fixture this reproduces byte for byte
         // (`tests/fixture_regen.rs::emit_fixture_reproduces_the_committed_scorecard_bytes`)
-        // is a 1.0.0 document, and FX-4's 1.1.0 bump leaves it one — old
-        // evidence verifies unchanged, and ruling R-G reserves the re-mint. A
+        // is a 1.0.0 document, and the 1.1.0 bump leaves it one: old evidence
+        // verifies unchanged, and the signed fixtures are never re-minted. A
         // 1.0.0 document has no `topic_parity.not_assessed`, hence `None`.
         format_version: "1.0.0".to_string(),
         run_id: "01J9X2QK7C4V0R8YB3ZP6MTS5A".into(),
@@ -57,7 +57,7 @@ fn main() {
             manifest_version_id: None,
             captured_by_logweir: false,
             // Absent, which `skip_serializing_if` keeps OUT of the bytes: the
-            // signed 1.0.0 fixtures this example reproduces predate FX-8.
+            // signed 1.0.0 fixtures this example reproduces predate format 1.3.0.
             time_basis: None,
             selection: None,
         },
@@ -76,12 +76,10 @@ fn main() {
             // ABSENT, which is what every scorecard this tree has written
             // says — and what `#[serde(skip_serializing_if)]` keeps out of
             // the bytes, so this fixture is byte-identical to the SIGNED one
-            // under e2e/fixtures/signed/ and needs no re-mint (ruling R-G).
-            // Task 6 fills the live field; the fixture's own value is a
-            // separate decision and stays `None` until a task changes it
-            // deliberately.
+            // under e2e/fixtures/signed/ and needs no re-mint. The runner fills
+            // the live field; the fixture's own value stays `None`.
             auth: None,
-            // PROD-15.1: absent, as on every document that is not an
+            // Absent, as on every document that is not an
             // original-name restore.
             original_name: None,
         },
@@ -103,8 +101,8 @@ fn main() {
             // Empty, not `vec!["...".into()]`: this field is
             // `skip_serializing_if`-omitted when empty specifically so this
             // checked-in, signed fixture's bytes (and therefore its
-            // signature) are unaffected by the field's addition in Task 17
-            // fix round 1 — see `PhaseRecord::notes`'s doc comment.
+            // signature) are unaffected by the field — see
+            // `PhaseRecord::notes`'s doc comment.
             notes: vec![],
         }],
         measured: Measured {
@@ -138,12 +136,12 @@ fn main() {
             // Empty, not `vec!["drill-orders".into()]`: this field is
             // `skip_serializing_if`-omitted when empty specifically so this
             // checked-in, signed fixture's bytes (and therefore its
-            // signature) are unaffected by the field's addition in Task 16
-            // fix round 1 — see `TargetDiffSummary::absent`'s doc comment.
+            // signature) are unaffected by the field — see
+            // `TargetDiffSummary::absent`'s doc comment.
             absent: vec![],
             would_create: vec![("drill-orders".to_string(), 3)],
             level: "full".into(),
-            // FX-4's 1.1.0 field stays absent: this fixture is the frozen
+            // The 1.1.0 field stays absent: this fixture is the frozen
             // 1.0.0 document.
             not_assessed: None,
         },
@@ -162,7 +160,7 @@ fn main() {
             intentionally_deviated: vec!["cleanup.policy".into(), "retention.ms".into()],
             unexpected_divergence: vec![],
             not_assessed: None,
-            // FX-3's 1.2.0 field stays absent too: the frozen 1.0.0 document,
+            // The 1.2.0 field stays absent too: the frozen 1.0.0 document,
             // a scratch drill, whose deviations are intended.
             not_reconstructed: None,
         },
@@ -185,7 +183,7 @@ fn main() {
             retain_until: None,
             immutable: false,
             create_only_enforced: false,
-            // Task 9b's two nested optional fields, ABSENT — which is what
+            // The two nested optional fields, ABSENT — which is what
             // keeps this fixture byte-identical (both carry
             // `skip_serializing_if = "Option::is_none"`). The three signed
             // fixtures under e2e/fixtures/signed/ are never re-minted (GC12's

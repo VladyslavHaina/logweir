@@ -1,10 +1,10 @@
 // api.spec.js -- the behaviour arm of the UI's mechanical claim that every
 // identifier `api.js` builds is relative.
 //
-// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`. Node is a test runner here
-// and nothing else: it builds no asset, it fetches no package, and there is no
-// `package.json` for it to read. From Task 26 onward `just lint` runs this
-// directory through `scripts/check-ui-behaviour.sh`.
+// Run with `node --test 'ui/tests/*.spec.js'` from `logweir/` (as `just lint`
+// does through `scripts/check-ui-behaviour.sh`). Node is a test runner here
+// and nothing else: it builds no asset, fetches no package, and there is no
+// `package.json` for it to read.
 //
 // THIS DIRECTORY IS OUTSIDE `check-ui-offline.sh`'s SCOPE, on purpose. A test
 // that proves `path(...)` refuses an absolute URL has to contain one, and a

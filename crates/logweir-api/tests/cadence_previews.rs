@@ -1,7 +1,7 @@
-//! `GET /api/v1/cadence-previews` (PLAT-04.2, D1 §4.4).
+//! `GET /api/v1/cadence-previews` (D1 §4.4).
 //!
-//! WHAT THESE TESTS ARE FOR. The cadence engine's own DST behaviour is W1's
-//! (`crates/weirkeeper/tests/cadence.rs`); this file asserts that the ROUTE
+//! WHAT THESE TESTS ARE FOR. The cadence engine's own DST behaviour is tested
+//! in `crates/weirkeeper/tests/cadence.rs`; this file asserts that the ROUTE
 //! hands the engine the right question and publishes its answer unaltered —
 //! the preset really compiles, the zone really reaches the evaluator, the
 //! markers really survive the DTO, the bounds are the engine's bounds, and no

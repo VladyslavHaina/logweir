@@ -1,29 +1,29 @@
-//! The controller's liveness and readiness, for the kubelet (chart gap G5).
+//! The controller's liveness and readiness, for the kubelet.
 //!
-//! THE PROBLEM. The `weirkeeper` Deployment had no probes and the controller
-//! served no health endpoint, so a controller whose runtime was wedged — a
-//! reconciler blocked in a synchronous call on the one runtime thread, a
-//! deadlock — was never restarted, and a controller task that had ENDED left a
-//! kind nobody reconciles behind a pod that still read Running.
+//! Without probes, a controller whose runtime was wedged (a reconciler blocked
+//! in a synchronous call on the one runtime thread, a deadlock) is never
+//! restarted, and a controller task that ended leaves a kind nobody reconciles
+//! behind a pod that still reads Running.
 //!
-//! THE SHAPE: A LOOPBACK LISTENER AND AN EXEC PROBE. The process serves two
-//! paths on [`DEFAULT_ADDR`] (`LOGWEIR_HEALTH_ADDR` overrides it), and the
-//! kubelet runs `weirkeeper --probe live|ready` INSIDE the container, which
-//! connects to that loopback address. It is loopback because nothing outside
-//! the pod has any business asking, and because a kubelet `httpGet` probe
-//! would come from the node to the pod IP — a listener the NetworkPolicy and
+//! # A loopback listener and an exec probe
+//!
+//! The process serves two paths on [`DEFAULT_ADDR`] (`LOGWEIR_HEALTH_ADDR`
+//! overrides it), and the kubelet runs `weirkeeper --probe live|ready` inside
+//! the container against that loopback address. Loopback because nothing
+//! outside the pod has any business asking, and a kubelet `httpGet` probe
+//! would come from the node to the pod IP, a listener the NetworkPolicy and
 //! the Service graph would then have to reason about. [`configured_addr`]
-//! refuses a non-loopback address, so a typo cannot publish it. No request is
-//! parsed beyond its first line, no header is read, and no answer carries
-//! anything but `ok` or the reason it is not: no secret, no object, no
-//! configuration.
+//! refuses a non-loopback address. No request is parsed beyond its first line,
+//! no header is read, and no answer carries anything but `ok` or the reason it
+//! is not.
 //!
-//! WHAT EACH ANSWER MEANS.
-//! - `/livez` — the runtime answered (the listener runs on the SAME
+//! # What each answer means
+//!
+//! - `/livez`: the runtime answered (the listener runs on the same
 //!   current-thread runtime as every reconciler, so a thread blocked by one of
-//!   them cannot accept, the probe times out, and the kubelet restarts the pod),
+//!   them cannot accept, the probe times out and the kubelet restarts the pod),
 //!   and no controller task has ended.
-//! - `/readyz` — live, and the Kubernetes client was built and every controller
+//! - `/readyz`: live, and the Kubernetes client was built and every controller
 //!   registered.
 //!
 //! What it does not claim: that the API server is reachable right now (a
@@ -48,8 +48,8 @@ pub const IO_DEADLINE: Duration = Duration::from_secs(2);
 /// The listener address from the environment variable's read.
 ///
 /// Unset or empty is [`DEFAULT_ADDR`]. Anything else must parse as a socket
-/// address on a LOOPBACK interface; port 0 is accepted (an ephemeral port,
-/// for tests that run several controllers on one host).
+/// address on a loopback interface; port 0 is accepted (an ephemeral port, for
+/// tests that run several controllers on one host).
 ///
 /// # Errors
 ///
@@ -78,14 +78,14 @@ pub fn configured_addr(read: Result<String, std::env::VarError>) -> Result<Socke
     Ok(addr)
 }
 
-/// Bind the health listener — the ONE way `main` binds it.
+/// Bind the health listener: the one way `main` binds it.
 ///
-/// The address was already refused by [`configured_addr`] if it was not
-/// loopback; this checks again at the bind site, and checks what the kernel
-/// actually bound, because a listener on `0.0.0.0` would let any pod in the
-/// cluster hold its connections (`serve` answers one at a time, two seconds
-/// each) and starve the kubelet's exec probe into a restart loop.
-/// `tests/health.rs` pins both halves and that `main.rs` binds through here.
+/// [`configured_addr`] already refused a non-loopback address; this checks
+/// again at the bind site, and checks what the kernel actually bound, because
+/// a listener on `0.0.0.0` would let any pod hold its connections (`serve`
+/// answers one at a time, two seconds each) and starve the exec probe into a
+/// restart loop. `tests/health.rs` pins both halves and that `main.rs` binds
+/// through here.
 ///
 /// # Errors
 ///
@@ -190,9 +190,9 @@ impl Health {
     }
 }
 
-/// Run one controller task and, if it ever RETURNS, record it so `/livez`
-/// fails. Each controller runs until the process stops; one that returned
-/// leaves its kind unreconciled behind a pod that still reads Running.
+/// Run one controller task and, if it ever returns, record it so `/livez`
+/// fails: one that returned leaves its kind unreconciled behind a pod that
+/// still reads Running.
 pub async fn watched<F>(which: String, task: F, health: Arc<Health>)
 where
     F: std::future::Future<Output = ()>,

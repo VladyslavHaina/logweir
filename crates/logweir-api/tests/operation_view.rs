@@ -78,9 +78,7 @@ fn remove(value: &mut Value, pointer: &str) {
     }
 }
 
-// ======================================================================
-// The stage table
-// ======================================================================
+// THE STAGE TABLE.
 
 /// **D3 §2.5's stage rows, each from the live object with one fact changed.**
 #[test]
@@ -271,9 +269,7 @@ fn a_stale_observation_and_a_never_reconciled_object_are_both_unknown() {
     assert_eq!(view.operation.state, OperationState::Succeeded);
 }
 
-// ======================================================================
-// Trust, result and verification: three columns, never one
-// ======================================================================
+// TRUST, RESULT AND VERIFICATION: three columns, never one.
 
 /// **§12: an absent `trust` block is `basis: none`, never a flattering
 /// default.**
@@ -314,7 +310,7 @@ fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
     assert_eq!(view.trust.state, TrustState::VerifiedHistorical);
     assert_eq!(view.trust.key_state.as_deref(), Some("Retired"));
 
-    // TRUST-UPGRADE-SIGNEDAT's shape: a status written before `signedAt`
+    // A status written before `signedAt`
     // existed carries `basis: Unverified` beside `result: NotAttempted`, and
     // it is NOT green on any column.
     let mut unverified = base.clone();
@@ -433,17 +429,16 @@ fn valid_with_trust(trust: Option<Value>) -> OperationView {
     view_of(&object)
 }
 
-/// **TRUST-STATE-RBR-VERIFIED: a `Valid` verdict is verified exactly where the
-/// green rule admits its basis.**
+/// **A `Valid` verdict is verified exactly where the green rule admits its
+/// basis.**
 ///
-/// REGRESSION REASON. `trust_of` mapped `Valid` + `RecordedBeforeRevocation`
-/// to `verified`, and every basis it did not name — a `trust` block carrying
-/// `None`, no basis at all, or a word a later build invents — to `verified`
-/// too. D3 §7.4: a verdict recorded before its key's compromise revocation is
+/// D3 §7.4: a verdict recorded before its key's compromise revocation is
 /// "`Untrusted`, reason `RecordedBeforeRevocation` (rendered with the recorded
 /// instant, never green)", and `logweir_core::trust::Verdict::may_render_green`
-/// admits `Current` and `Historical` and nothing else. A client reading
-/// `trust.state` alone saw a compromise-revoked key as trusted.
+/// admits `Current` and `Historical` and nothing else. A `trust_of` that
+/// mapped `RecordedBeforeRevocation`, a `None` basis, no basis or an unknown
+/// word to `verified` would show a client reading `trust.state` alone a
+/// compromise-revoked key as trusted.
 ///
 /// EVERY ROW IS ALSO HELD TO THE CONTROLLER'S BADGE. The run succeeded, so
 /// `verifiedSuccess` — computed from `weirkeeper::verification::backup_badge`
@@ -569,15 +564,14 @@ type NotValidRow = (
 
 /// **Every result that is not `Valid`, by the word D3 §2.5 gives it.**
 ///
-/// REGRESSION REASON. `Untrusted` IS a `result` the controller writes
+/// `Untrusted` IS a `result` the controller writes
 /// (`weirkeeper::verification::VerificationVerdict::Untrusted`, every
-/// `Untrusted` row of D3 §7.4). The projection used to say it was not and
-/// decided such a verdict by the key state alone, so a `KeyUsageMismatch` on
-/// an `Active` key and a `SignedOutsideValidity` on a `Retired` one were
-/// published as `notAttempted` — "no verdict was reached" — about a verdict
-/// the controller reached. And an `Unverified` basis, which
-/// `logweir_core::trust::TrustBasis` defines as NO verdict, was published as
-/// `untrusted` beside a revoked key.
+/// `Untrusted` row of D3 §7.4). Deciding it by the key state alone would
+/// publish a `KeyUsageMismatch` on an `Active` key and a
+/// `SignedOutsideValidity` on a `Retired` one as `notAttempted` -- "no verdict
+/// was reached" -- about a verdict the controller reached. And an
+/// `Unverified` basis, which `logweir_core::trust::TrustBasis` defines as NO
+/// verdict, must not be published as `untrusted` beside a revoked key.
 #[test]
 fn each_result_that_is_not_valid_projects_its_own_word() {
     let rows: [NotValidRow; 14] = [
@@ -716,9 +710,8 @@ fn a_backup_scope_is_none_with_no_counts_and_a_restore_maps_its_integrity_level(
     // The count the VERIFIED receipt attested, beside the window it covers.
     assert_eq!(capture.records, Some(10));
 
-    // AND ITS ABSENCE IS A FACT ABOUT THE RUN. `status.records` was declared
-    // and written by nothing until D3 W2 (`STATUS-RECORDS`), so every older
-    // object has it absent — and a zero here would say the run captured
+    // AND ITS ABSENCE IS A FACT ABOUT THE RUN. An older object has
+    // `status.records` absent, and a zero here would say the run captured
     // nothing, which is a different claim from "no receipt has been verified".
     let mut older = fixture("backup-succeeded-verified.json");
     remove(&mut older, "/status/records");
@@ -824,16 +817,14 @@ fn a_restore_waiting_for_a_person_is_pending_and_awaiting_approval() {
     assert!(!view.awaiting_approval);
 }
 
-// ======================================================================
-// Diagnostics
-// ======================================================================
+// DIAGNOSTICS.
 
 /// **The diagnosis list is published, and the runner's own identifiers are
 /// not.**
 ///
 /// The live fixture carries a `PodCreateRejected` diagnostic AND a
 /// `progress.runner` block naming the Job and the pod. The first is what
-/// PLAT-14.1 asks for in as many words ("pod mount and scheduling failures as
+/// the normalized status asks for ("pod mount and scheduling failures as
 /// useful resource-scoped errors"); the second is the infrastructure handle
 /// `no_infrastructure_detail_is_frozen_into_the_operation_contract` keeps out
 /// of the contract. This asserts the projection takes one and not the other.

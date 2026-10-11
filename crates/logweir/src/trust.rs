@@ -1,5 +1,5 @@
 //! `logweir trust export` and `logweir trust migrate-roster` — the two
-//! operator commands of PLAT-19.1 (decision D3 §7.1 and §7.5).
+//! operator commands of decision D3 §7.1 and §7.5.
 //!
 //! # Both of them are pure text transforms, and that is deliberate
 //!
@@ -86,16 +86,11 @@ pub const TRUST_ROSTER_KIND: &str = "TrustRoster";
 
 /// The substring that decides. **THE CHECK IS THIS, AND NOT THE LIST BELOW.**
 ///
-/// Review finding F5: the first version of this guard enumerated four PEM
-/// spellings — PKCS#8, PKCS#1, SEC1 and the encrypted form — and an enumeration
-/// is a list somebody has to keep complete. `BEGIN OPENSSH PRIVATE KEY`,
-/// `BEGIN DSA PRIVATE KEY`, `BEGIN PGP PRIVATE KEY BLOCK` and
-/// `BEGIN SSH2 ENCRYPTED PRIVATE KEY` all walked straight past it.
-///
-/// Every one of those — and every one of the original four — contains the two
-/// words below, because that is what the PEM label grammar makes them contain.
-/// So the check is the substring, and it can only be widened by a format that
-/// stops saying "private key" at all.
+/// An enumeration of PEM labels is a list somebody has to keep complete
+/// (`BEGIN OPENSSH PRIVATE KEY`, `BEGIN DSA PRIVATE KEY`, `BEGIN PGP PRIVATE
+/// KEY BLOCK`, `BEGIN SSH2 ENCRYPTED PRIVATE KEY`, ...). Every private-key
+/// label contains these two words, because the PEM label grammar makes it, so
+/// the check can only be widened by a format that stops saying "private key".
 pub const PRIVATE_PEM_SUBSTRING: &str = "PRIVATE KEY";
 
 /// The spellings [`refuse_private_material`] can NAME when it refuses.
@@ -361,23 +356,12 @@ pub fn migrate_roster(args: &MigrateArgs) -> Result<String, TrustError> {
                 .to_string();
             match merged.get_mut(&key_id) {
                 Some((_, usages)) => {
-                    // ONE KEY, ONE USAGE — CRD rule G8, and this is where an
-                    // operator finds out. `spec.keys` is an associative list
-                    // keyed by `keyId`, so a key on BOTH roster lists cannot be
-                    // emitted twice, and emitting it once with both usages is a
-                    // document the API server now refuses (D3 §7.3: the usage
-                    // separation is ENFORCED for policy-backed namespaces).
-                    //
-                    // REFUSING HERE RATHER THAN AT `kubectl apply` is the whole
-                    // value: the operator learns which key ids overlap and what
-                    // to do about them while reading a migration plan, not from
-                    // an admission error against a file they had already
-                    // reviewed. The roster keeps working unchanged in the
-                    // meantime — `weirkeeper::trust::synthesize_legacy` still
-                    // merges the two lists in memory, which is what keeps an
-                    // unmigrated cluster running and is exactly the
-                    // `selfAttestedRisk` LABEL §7.3 preserves for legacy
-                    // namespaces.
+                    // One key, one usage (CRD rule G8): `spec.keys` is keyed by
+                    // `keyId`, so a key on both roster lists cannot be emitted
+                    // twice, and once with both usages the API server refuses
+                    // (D3 §7.3). Refused here, while the operator reads a
+                    // migration plan, not at `kubectl apply`; the roster keeps
+                    // working meanwhile (`weirkeeper::trust::synthesize_legacy`).
                     if !usages.contains(&usage) {
                         return Err(TrustError::UsageOverlap(key_id));
                     }

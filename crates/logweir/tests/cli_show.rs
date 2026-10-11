@@ -1,9 +1,7 @@
 //! `logweir drill show`, exercised through the COMPILED BINARY.
 //!
-//! Task 22, carried obligation 1. Every other test of the renderer calls
-//! `logweir::show::render_table` or `show::run` from the library. Those all
-//! passed while `main.rs`'s `_ =>` arm swallowed `DrillCmd::Show` and printed
-//! "not yet implemented in this task" — a subcommand can be fully implemented,
+//! Every other test of the renderer calls `logweir::show::render_table` or
+//! `show::run` from the library, and a subcommand can be fully implemented,
 //! fully golden-tested, and still absent from the artifact users install.
 //!
 //! So these tests spawn `CARGO_BIN_EXE_logweir` and assert on the process's

@@ -95,13 +95,10 @@ fn a_null_value_and_an_empty_value_fingerprint_differently() {
     );
 }
 
-/// Not in the brief's own test list, added per the task's scope note: "a
-/// truncated segment, a wrong magic value, a bad length prefix and an
-/// unsupported version must each fail with a distinguishable error." The
-/// brief's `header_magic_and_version_are_checked` only exercises the magic
-/// check (bytes that are not "KBAK" never reach the version branch at all),
-/// so it does not actually cover an unsupported *version* on an otherwise
-/// well-formed header. This constructs one directly.
+/// An unsupported version fails distinguishably from a bad magic.
+/// `header_magic_and_version_are_checked` only exercises the magic check
+/// (bytes that are not "KBAK" never reach the version branch at all), so this
+/// constructs an unsupported *version* on an otherwise well-formed header.
 #[test]
 fn an_unsupported_version_is_rejected_distinctly_from_a_bad_magic() {
     let mut bytes = vec![0u8; 40]; // HEADER_SIZE (32) + FOOTER_SIZE (8), the minimum decode_segment will look at.
@@ -149,11 +146,11 @@ fn a_corrupted_key_length_prefix_fails_in_record_parsing_not_as_a_crc_mismatch()
     );
 }
 
-/// FIX 1 (review of Task 9): `record_count` is read from a CRC-covered
-/// header, but CRC32 is unkeyed — anyone able to write into the archive
-/// bucket can produce a CRC-valid header naming any `record_count`.
-/// `u64::MAX` used to panic `Vec::with_capacity` with "capacity overflow";
-/// this must now fail cleanly with a distinguishable error instead.
+/// `record_count` is read from a CRC-covered header, but CRC32 is unkeyed —
+/// anyone able to write into the archive bucket can produce a CRC-valid header
+/// naming any `record_count`. `u64::MAX` must fail cleanly with a
+/// distinguishable error, never reach `Vec::with_capacity` ("capacity
+/// overflow").
 #[test]
 fn a_record_count_far_exceeding_the_body_size_is_rejected_not_allocated() {
     let mut bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
@@ -170,7 +167,7 @@ fn a_record_count_far_exceeding_the_body_size_is_rejected_not_allocated() {
 
 /// The same class of bug as above, at a plausible-but-still-impossible scale:
 /// a `record_count` that would need far more decompressed bytes than the
-/// segment actually decompresses to (previously ~9 GiB for ~10^8 records).
+/// segment actually decompresses to (~9 GiB for ~10^8 records).
 #[test]
 fn a_plausible_but_impossible_record_count_is_rejected() {
     let mut bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
@@ -181,7 +178,7 @@ fn a_plausible_but_impossible_record_count_is_rejected() {
     assert!(format!("{e}").contains("record_count"));
 }
 
-/// FIX 1, the lz4 half: `lz4_flex::block::decompress_size_prepended` reads
+/// The lz4 half: `lz4_flex::block::decompress_size_prepended` reads
 /// its own 4-byte declared output size and allocates a buffer of exactly that
 /// size before decompressing into it. An attacker-controlled prefix here is a
 /// multi-gigabyte allocation paid for by four bytes of input; it must be
@@ -202,7 +199,7 @@ fn an_oversized_lz4_declared_size_is_rejected_not_allocated() {
     );
 }
 
-/// FIX 2 (review of Task 9): `total_len` is each record's own authoritative
+/// `total_len` is each record's own authoritative
 /// frame boundary (format.rs:27-42), not just a number to skip past. A record
 /// whose declared `total_len` disagrees with what its fields actually consume
 /// must fail AT that record, distinguishably, rather than silently
@@ -231,13 +228,13 @@ fn a_total_len_that_disagrees_with_its_record_content_is_rejected() {
     );
 }
 
-/// FIX 3 (review of Task 9): upstream picks the legacy-JSON codec from the
-/// object KEY's extension (restore/helpers.rs:22-38), which decode_segment
-/// never receives — but the zstd frame magic (28 b5 2f fd) is unambiguous on
-/// its own, so a whole-object zstd-compressed legacy segment must be reported
-/// as its own distinguishable outcome rather than "bad magic: not a KBAK
-/// segment" (which reads as corruption, the wrong diagnosis for a segment
-/// that is merely in an older format).
+/// Upstream picks the legacy-JSON codec from the object KEY's extension
+/// (restore/helpers.rs:22-38), which decode_segment never receives — but the
+/// zstd frame magic (28 b5 2f fd) is unambiguous on its own, so a whole-object
+/// zstd-compressed legacy segment must be reported as its own distinguishable
+/// outcome rather than "bad magic: not a KBAK segment" (which reads as
+/// corruption, the wrong diagnosis for a segment that is merely in an older
+/// format).
 #[test]
 fn a_zstd_compressed_legacy_segment_is_distinguished_from_a_corrupt_one() {
     let mut bytes = vec![0x28, 0xB5, 0x2F, 0xFD];
@@ -266,12 +263,11 @@ fn the_generic_bad_magic_message_names_the_lz4_legacy_possibility() {
     );
 }
 
-/// FIX 4 (review of Task 9): the null-vs-empty distinction the fingerprint
-/// layer already guarantees (see `a_null_value_and_an_empty_value_fingerprint_differently`)
-/// must actually reach the decoder. Record 3 in every fixture (added by this
-/// fix) carries a null key, a null value, and a header whose value is null —
-/// upstream tracks this as issue #155 with its own dedicated round-trip
-/// assertion.
+/// The null-vs-empty distinction the fingerprint layer guarantees (see
+/// `a_null_value_and_an_empty_value_fingerprint_differently`) must reach the
+/// decoder. Record 3 in every fixture carries a null key, a null value, and a
+/// header whose value is null — upstream tracks this as issue #155 with its
+/// own dedicated round-trip assertion.
 #[test]
 fn a_null_key_a_null_value_and_a_null_header_value_all_decode_as_none() {
     let bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
@@ -292,14 +288,13 @@ fn a_null_key_a_null_value_and_a_null_header_value_all_decode_as_none() {
     assert!(recs[0].value.is_some());
 }
 
-/// The other half of FIX 4 (second review round): the null case above must
-/// also be contrasted against its EMPTY counterpart, not only against a real
-/// non-empty value — `key_len = 0` and `key_len = -1` are different bytes on
-/// the wire, and conflating "absent" with "empty" is exactly the property
-/// upstream regressed on in issue #155. Record 4 (added alongside record 3,
-/// not replacing it) carries a zero-length but PRESENT key, value, and
-/// header value. This asserts, at each of the three positions, that record 3
-/// decodes as `None` while record 4 decodes as `Some` of an empty `Vec`.
+/// The other half: the null case above is also contrasted against its EMPTY
+/// counterpart, not only against a real non-empty value — `key_len = 0` and
+/// `key_len = -1` are different bytes on the wire, and conflating "absent"
+/// with "empty" is exactly the property upstream regressed on in issue #155.
+/// Record 4 carries a zero-length but PRESENT key, value, and header value.
+/// This asserts, at each of the three positions, that record 3 decodes as
+/// `None` while record 4 decodes as `Some` of an empty `Vec`.
 #[test]
 fn a_null_field_and_its_empty_counterpart_decode_distinctly_at_every_position() {
     let bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
@@ -339,12 +334,12 @@ fn a_null_field_and_its_empty_counterpart_decode_distinctly_at_every_position() 
     );
 }
 
-/// FIX 5 (review of Task 9): upstream writes `x-original-offset` and
-/// `x-original-timestamp` as little-endian i64 — each record's OWN offset and
-/// timestamp, not a shared ASCII constant [VERIFIED offset_headers.rs:19-22,
-/// config.rs:447-448, backup/engine.rs:2140-2147]. decode_segment treats
-/// header values as opaque bytes either way, but the fixture must match the
-/// real engine's encoding for Task 12 to be able to parse it.
+/// Upstream writes `x-original-offset` and `x-original-timestamp` as
+/// little-endian i64 — each record's OWN offset and timestamp, not a shared
+/// ASCII constant [VERIFIED offset_headers.rs:19-22, config.rs:447-448,
+/// backup/engine.rs:2140-2147]. decode_segment treats header values as opaque
+/// bytes either way, but the fixture must match the real engine's encoding for
+/// the header reader to parse it.
 #[test]
 fn x_original_offset_and_timestamp_headers_are_little_endian_i64_matching_the_record() {
     let bytes = std::fs::read("../../e2e/fixtures/segments/none.kbak").unwrap();
@@ -368,7 +363,6 @@ fn x_original_offset_and_timestamp_headers_are_little_endian_i64_matching_the_re
     }
 }
 
-// ---------------------------------------------------------------------------
 // The upstream fixture pair. `e2e/fixtures/segments/upstream-0.21.0.kbak` and
 // `e2e/fixtures/manifests/0.21.json` are the only fixtures in this repo that
 // are BYTES THE PINNED UPSTREAM ENGINE ACTUALLY WROTE, refreshed by
@@ -392,8 +386,7 @@ const UPSTREAM_MANIFEST: &str = "../../e2e/fixtures/manifests/0.21.json";
 /// a 3-partition topic and copies the sorted-first segment, which is always
 /// `orders/partition=0`. Kafka's default partitioner is murmur2 over the key
 /// bytes, so that partition's membership — and therefore this count — is stable
-/// across runs. Two independent seeds (implementer and reviewer) both produced
-/// 338.
+/// across runs. Two independent seeds both produced 338.
 const UPSTREAM_RECORDS: usize = 338;
 
 #[test]

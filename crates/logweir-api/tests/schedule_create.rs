@@ -1,13 +1,8 @@
-//! `POST /api/v1/namespaces/{ns}/schedules` after PLAT-10.1.
-//!
-//! WHAT CHANGED AND WHY THERE IS A FILE FOR IT. The create route used to take
-//! seven fields while the edit route took thirteen, so the console's guided form
-//! could edit a policy it had no way to create: a saved destination, a dynamic
-//! selection, a zone, a catch-up policy and retries all had to be bolted on
-//! afterwards, by a second request, against an object that was already
-//! admitting slots under a policy nobody had asked for. D2 W13's record listed
-//! `CreateScheduleRequest.destinationRef` under *owed by the API before these
-//! pages are complete*; `ui/pages/schedules.js` printed the debt on screen.
+//! `POST /api/v1/namespaces/{ns}/schedules`: the create route takes the whole
+//! future policy the edit route takes, so the console's guided form never has
+//! to create a policy and then patch a saved destination, a dynamic
+//! selection, a zone, a catch-up policy or retries onto an object that is
+//! already admitting slots under a policy nobody asked for.
 //!
 //! THE FOUR PROPERTIES THESE ROWS EXIST FOR:
 //!
@@ -18,7 +13,7 @@
 //! 3. **The cadence is parsed in the zone it will be stored with**, so an
 //!    unknown zone is a field error and never `Ready=False` on a created
 //!    object.
-//! 4. **A pre-PLAT-10.1 body creates exactly what it created before**, key for
+//! 4. **An older, five-field body creates exactly what it created before**, key for
 //!    key — the compatibility clause the DTO's documentation promises.
 
 mod support;
@@ -54,11 +49,11 @@ fn guided() -> Value {
 
 /// **One create writes the whole policy the edit route can write.**
 ///
-/// KILLS: dropping any of the new fields on the floor (the pre-PLAT-10.1
-/// `build` wrote `None` for every one of them and returned 201, so a form that
-/// asked for Berlin, retries and a destination got UTC, no retries and an empty
-/// archive URL with a 201 to say it had worked); writing the destination as an
-/// inline archive; storing the preset instead of the expression.
+/// KILLS: dropping any of the newer fields on the floor (writing `None` for
+/// each and returning 201, so a form that asked for Berlin, retries and a
+/// destination gets UTC, no retries and an empty archive URL); writing the
+/// destination as an inline archive; storing the preset instead of the
+/// expression.
 #[tokio::test]
 async fn one_create_writes_the_whole_policy() {
     let app = TestApp::new();
@@ -287,11 +282,11 @@ async fn an_invalid_cadence_or_range_is_refused_before_any_write() {
     app.fake.assert_strict();
 }
 
-/// **A pre-PLAT-10.1 body creates exactly the object it created before.**
+/// **An older, five-field body creates exactly the object it created before.**
 ///
 /// The DTO's compatibility clause, asserted rather than asserted-about: the
 /// five-field body names an inline archive and a named allowlist, and every
-/// field PLAT-10.1 added is ABSENT from the stored spec — not `null`, not a
+/// field added since is ABSENT from the stored spec -- not `null`, not a
 /// default this route invented.
 ///
 /// KILLS: writing `timeZone: "UTC"`, `catchUpPolicy: "None"` or
@@ -338,7 +333,7 @@ async fn a_pre_plat_10_1_body_creates_what_it_always_created() {
     app.fake.assert_strict();
 }
 
-/// **A pre-PLAT-10.1 body hashes to the bytes it hashed to before the upgrade.**
+/// **An older, five-field body hashes to the bytes it hashed to before.**
 ///
 /// The idempotency request hash is taken over `serde_json::to_vec` of the
 /// validated DTO (`routes::create_idempotent`). A script that creates its
@@ -346,13 +341,12 @@ async fn a_pre_plat_10_1_body_creates_what_it_always_created() {
 /// get the replay, not `409 idempotency_conflict`, so the canonical bytes of an
 /// old-shape body must not change.
 ///
-/// THE EXPECTED STRINGS ARE THE PRE-UPGRADE DTO'S OWN OUTPUT, captured by
-/// deserialising these two bodies into main `454cd6b`'s `CreateScheduleRequest`
+/// THE EXPECTED STRINGS ARE THE OLDER DTO'S OWN OUTPUT for these two bodies
 /// (schedule, sourceRef, topics, archive, concurrencyPolicy, retention,
-/// suspended) and serialising them. `concurrencyPolicy` and `retention`
-/// predate PLAT-10.1 and always serialised, `null` included.
+/// suspended). `concurrencyPolicy` and `retention` always serialised, `null`
+/// included.
 ///
-/// MUTANT: drop `skip_serializing_if` from any PLAT-10.1 member (for example
+/// MUTANT: drop `skip_serializing_if` from any newer member (for example
 /// `time_zone`). The output gains `"timeZone":null` and this row fails.
 #[test]
 fn a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes() {
@@ -440,8 +434,8 @@ async fn an_old_shape_create_retried_under_its_key_replays() {
     assert_eq!(app.fake.count("backupschedules", NS_A), 1);
 }
 
-/// **Create and replace validate the future policy through ONE path** (review
-/// LOW-3), so the same faults answer the same field errors on both routes.
+/// **Create and replace validate the future policy through ONE path**, so
+/// the same faults answer the same field errors on both routes.
 ///
 /// MUTANT: widen `validate_policy_fields`' retry bound for one caller only (or
 /// reintroduce a create-side copy that checks `activeDeadlineSeconds` against a

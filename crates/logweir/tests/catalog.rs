@@ -1,4 +1,4 @@
-//! **The recovery catalog's named tests (PLAT-15.1, decision D3 §5).**
+//! **The recovery catalog's named tests (decision D3 §5).**
 //!
 //! Every test runs in process against `Store::in_memory` or a tempdir
 //! filesystem store — no broker, no bucket, no subprocess — for the reason
@@ -18,7 +18,7 @@
 //!
 //! | claim | test |
 //! |---|---|
-//! | identity is the receipt's digest, and two receipts under one `backup_id` are two points (defect RECEIPT-DUP) | `the_point_id_is_derived_from_the_receipt_bytes`, `two_receipts_for_one_backup_id_are_two_points` |
+//! | identity is the receipt's digest, and two receipts under one `backup_id` are two points | `the_point_id_is_derived_from_the_receipt_bytes`, `two_receipts_for_one_backup_id_are_two_points` |
 //! | the record's bytes are deterministic and are what gets signed | `the_record_bytes_are_deterministic_and_are_what_is_signed` |
 //! | reader rule 1 — a higher major is per-entry, never fatal | `a_record_from_a_future_major_is_unsupported_not_corrupt` |
 //! | reader rule 2 — unknown fields ignored, absent optional fields are UNKNOWN | `an_unknown_field_inside_major_1_is_ignored`, `absent_optional_fields_read_as_unknown_never_zero` |
@@ -44,9 +44,7 @@ use logweir_evidence::keys::SigningKey;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+// Fixtures.
 
 fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
@@ -135,9 +133,7 @@ fn signer_in(dir: &Path) -> (logweir::signer::ValidatedSigner, SigningKey, PathB
     (validated, key, path)
 }
 
-// ---------------------------------------------------------------------------
-// §5.1 — identity
-// ---------------------------------------------------------------------------
+// §5.1 — identity.
 
 #[test]
 fn the_point_id_is_derived_from_the_receipt_bytes() {
@@ -163,10 +159,9 @@ fn the_point_id_is_derived_from_the_receipt_bytes() {
     // what makes repeated import idempotent (D3 §5.5 step 2).
     assert_eq!(id, point_id(&bytes));
 
-    // …and one flipped byte is a different point. The mutant this kills is an
-    // id taken over the MANIFEST digest (tracker defect RECEIPT-DUP): the
-    // manifest is identical across the two runs below, so such an id would be
-    // stable here and would collapse them.
+    // …and one flipped byte is a different point. An id taken over the
+    // MANIFEST digest would be stable here (the manifest is identical across
+    // the two runs below) and would collapse them.
     let mut flipped = bytes.clone();
     let at = flipped.iter().position(|b| *b == b'0').unwrap();
     flipped[at] = b'9';
@@ -175,13 +170,12 @@ fn the_point_id_is_derived_from_the_receipt_bytes() {
 
 #[test]
 fn two_receipts_for_one_backup_id_are_two_points() {
-    // **Tracker defect RECEIPT-DUP, and the reason identity is content-derived.**
-    // A Backup Job re-created from its frozen inputs writes a SECOND run-id
-    // receipt under the same execution id while overwriting the manifest at
-    // the same key. Run identity is idempotent; signed evidence is not. Both
-    // receipts below name the same `backup_id` AND the same manifest key and
-    // digest — so an identity derived from either of those would make one run
-    // disappear.
+    // **Identity is content-derived.** A Backup Job re-created from its frozen
+    // inputs writes a SECOND run-id receipt under the same execution id while
+    // overwriting the manifest at the same key. Run identity is idempotent;
+    // signed evidence is not. Both receipts below name the same `backup_id`
+    // AND the same manifest key and digest, so an identity derived from either
+    // would make one run disappear.
     let a = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
     let b = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5B");
     assert_eq!(a.backup_id, b.backup_id);
@@ -208,9 +202,7 @@ fn two_receipts_for_one_backup_id_are_two_points() {
     assert_ne!(pa.log_key(), pb.log_key());
 }
 
-// ---------------------------------------------------------------------------
-// The record document
-// ---------------------------------------------------------------------------
+// The record document.
 
 #[test]
 fn the_record_bytes_are_deterministic_and_are_what_is_signed() {
@@ -421,9 +413,7 @@ fn the_location_id_is_bucket_and_prefix_and_nothing_else() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// §5.2 reading rules
-// ---------------------------------------------------------------------------
+// §5.2 reading rules.
 
 fn sample_point() -> CatalogPoint {
     let dir = tempfile::tempdir().unwrap();
@@ -523,7 +513,7 @@ fn absent_optional_fields_read_as_unknown_never_zero() {
     );
 
     // **The `execution` block carries exactly what the writer had in hand**
-    // (review finding F4). The Backup Job's argv passes the runner no
+    // The Backup Job's argv passes the runner no
     // namespace, name, UID or `inputsSha256`, so those stay UNKNOWN — but
     // `triggered_by` is in the receipt and dropping it was discarding
     // provenance the writer held.
@@ -691,9 +681,7 @@ fn two_records_that_disagree_for_one_identity_are_a_conflict() {
     assert_eq!(reader::reconcile(&a, &c), Duplicate::DifferentPoints);
 }
 
-// ---------------------------------------------------------------------------
-// §5.2 rule 4 — create-only
-// ---------------------------------------------------------------------------
+// §5.2 rule 4 — create-only.
 
 #[test]
 fn the_three_catalog_objects_are_create_only() {
@@ -845,9 +833,7 @@ fn a_record_whose_id_is_not_its_digest_is_never_signed() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The fifth put, in `backup run`
-// ---------------------------------------------------------------------------
+// The fifth put, in `backup run`.
 
 mod backup_seam;
 
@@ -941,16 +927,12 @@ fn a_successful_backup_writes_its_catalog_point() {
 #[test]
 fn the_catalog_key_line_comes_before_interface_i7s_pair() {
     // **Interface I7 is `receipt-key=` then `sidecar-key=` as the FINAL two
-    // stdout lines, with nothing after them.** Two landed tests read it that
-    // way (`backup_run.rs`'s I7 row takes the last two lines,
-    // `e2e/tests/backup_argv.rs` asserts the final line is `sidecar-key=`), so
-    // the optional catalog line goes in FRONT of them. A reader finds it by
-    // prefix, which is how every controller reads these lines.
-    //
-    // Asserted on the SOURCE because the printing happens in `exiting`, which
-    // is private and prints to the process's own stdout; the behavioural half
-    // is `e2e/tests/backup_argv.rs`'s existing final-line assertion, which
-    // this ordering is what keeps green.
+    // stdout lines, with nothing after them**, so the optional catalog line
+    // goes in FRONT of them; a reader finds it by prefix, as every controller
+    // reads these lines. Asserted on the SOURCE because the printing happens
+    // in `exiting`, which is private and prints to the process's own stdout;
+    // `e2e/tests/backup_argv.rs`'s final-line assertion is the behavioural
+    // half.
     let src =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backup/mod.rs"))
             .unwrap();
@@ -1056,9 +1038,7 @@ fn the_catalog_write_cannot_become_a_failure_by_one_question_mark() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `logweir catalog sync`
-// ---------------------------------------------------------------------------
+// `logweir catalog sync`.
 
 /// Put a receipt and its sidecar into `store` exactly as `backup run` does.
 fn seed_receipt(store: &Store, r: &BackupReceipt, key: &SigningKey) -> (String, Vec<u8>) {
@@ -1452,9 +1432,7 @@ fn list_returns_the_newest_points_first() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The URL guard and the CLI's exit codes
-// ---------------------------------------------------------------------------
+// The URL guard and the CLI's exit codes.
 
 /// `ListArgs` over the in-memory fixture store, with the full default window.
 fn list_args(max: usize, since: Option<&str>) -> ListArgs {
@@ -1624,14 +1602,12 @@ fn the_catalog_commands_exit_with_the_existing_contract_and_no_new_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The published schema
-// ---------------------------------------------------------------------------
+// The published schema.
 
-/// **The 1.0.0 catalog-point schema is FROZEN** (FX-4, and FX-7's fix round,
-/// review M-2) beside the newer ones and still describes every record written
-/// before FX-4: it names itself 1.0.0, its `RecordTopic` has no
-/// `config_coverage`, and its `RecordArchive` has no `manifest_version_id`.
+/// **The 1.0.0 catalog-point schema is FROZEN** beside the newer ones and
+/// still describes every 1.0.0 record: it names itself 1.0.0, its
+/// `RecordTopic` has no `config_coverage`, and its `RecordArchive` has no
+/// `manifest_version_id`.
 #[test]
 fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1664,12 +1640,9 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The drift arm, IN PROCESS, so the gate holds with no subprocess — the
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
-    // The CURRENT file is the newest MINOR's, named by the writer's constant
-    // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
-    // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency, 1.6.0
-    // since PROD-01.4a's topic IDs, 1.7.0 since PROD-04.1's consumer
-    // positions), so a renumber moves the constant and the justfile, not this
-    // test; the 1.0.0 to 1.6.0 files are frozen beside it.
+    // The CURRENT file is the newest MINOR's, named by the writer's constant,
+    // so a renumber moves the constant and the justfile, not this test; the
+    // 1.0.0 to 1.6.0 files are frozen beside it.
     let version = logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
@@ -1701,26 +1674,19 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Review fix round (2026-09-16)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_store_failure_on_the_first_point_is_operational_and_never_signing() {
-    // **Review finding F1.** Global Constraint 11's exit 4 means "signing or
-    // lock-proof failed — and NOTHING was uploaded". A denied PUT under
-    // `logweir/catalog/*`, or a 503 on the first point of a walk, is neither:
-    // the record was signed before any put was attempted, and part of the
-    // point may already be in the bucket. Reporting 4 sends an operator to
-    // rotate signing material over a bucket policy.
+    // Global Constraint 11's exit 4 means "signing or lock-proof failed — and
+    // NOTHING was uploaded". A denied PUT under `logweir/catalog/*`, or a 503
+    // on the first point of a walk, is neither: the record was signed before
+    // any put, and part of the point may already be in the bucket. Reporting 4
+    // sends an operator to rotate signing material over a bucket policy.
     //
-    // THE INJECTION IS THE REVIEWER'S OWN WORST SUB-CASE, one object further
-    // along: the record and its sidecar land and the INDEX ENTRY is refused. A
-    // regular FILE is planted where the day shard's directory would go, so the
-    // first two create-only puts succeed and the third fails with a store error
-    // that is not `AlreadyExists`. The bucket really does end up holding two of
-    // this point's three objects — exactly the state exit 4's "nothing was
-    // uploaded" would have denied.
+    // THE INJECTION: the record and its sidecar land and the INDEX ENTRY is
+    // refused. A regular FILE is planted where the day shard's directory would
+    // go, so the first two create-only puts succeed and the third fails with a
+    // store error that is not `AlreadyExists`, leaving two of this point's
+    // three objects in the bucket.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("archive");
     // `LocalFileSystem` canonicalises its root, so the directory has to exist
@@ -1792,9 +1758,8 @@ fn a_store_failure_on_the_first_point_is_operational_and_never_signing() {
 
 #[test]
 fn a_put_error_knows_whether_anything_was_uploaded() {
-    // The predicate the exit-code decision is made on, in isolation. The
-    // mutant it kills is `nothing_was_uploaded()` returning `true` for
-    // `Store`, which puts the old defect straight back.
+    // The predicate the exit-code decision is made on, in isolation:
+    // `nothing_was_uploaded()` must not answer `true` for `Store`.
     use logweir::catalog::writer::PutError;
     assert!(PutError::Signing("x".into()).nothing_was_uploaded());
     assert!(PutError::SelfContradicting("x".into()).nothing_was_uploaded());
@@ -1811,11 +1776,9 @@ fn a_put_error_knows_whether_anything_was_uploaded() {
 
 #[test]
 fn the_published_schema_carries_the_algorithm_vocabulary_as_an_enum() {
-    // **Review finding F2.** The checked-in schema is the one artifact that
-    // exists to publish this vocabulary, and it documented `p256` — the
-    // spelling this record deliberately rejects — with no `enum` or `pattern`
-    // for anything mechanical to catch the drift. A consumer generating its
-    // type from it would have matched on a value no record carries.
+    // The checked-in schema publishes this vocabulary, so it carries an `enum`
+    // or `pattern` a consumer generating its type from it can rely on, and
+    // never `p256`, the spelling this record deliberately rejects.
     let schema: serde_json::Value =
         serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
     let algorithm = &schema["definitions"]["RecordSigning"]["properties"]["algorithm"];
@@ -1863,11 +1826,9 @@ fn seed_index_entry(store: &Store, day: &str, ms: i64, body: &[u8]) -> String {
 
 #[test]
 fn one_bad_index_entry_is_skipped_and_counted_never_fatal_to_the_listing() {
-    // **Review finding F3.** `docs/formats/catalog-point.md` promises
-    // "refusal is per entry, not per catalog". That was implemented for
-    // `record.json` and NOT for the day-sharded index, where one unreadable
-    // object aborted the whole listing with exit 1 — exactly the wholesale
-    // failure the promise rules out.
+    // `docs/formats/catalog-point.md` promises "refusal is per entry, not per
+    // catalog", for the day-sharded index as for `record.json`: one unreadable
+    // object must not abort the whole listing.
     let dir = tempfile::tempdir().unwrap();
     let (signer, key, _) = signer_in(dir.path());
     let store = Store::in_memory("logweir/");
@@ -1899,7 +1860,7 @@ fn one_bad_index_entry_is_skipped_and_counted_never_fatal_to_the_listing() {
         1_757_980_800_003,
         br#"{"format_version":"1.0.0"}"#,
     );
-    // **Review finding F6**: a well-formed entry whose `record_key` is not the
+    // A well-formed entry whose `record_key` is not the
     // one its own `point_id` implies. The log prefix is create-only but not
     // append-restricted, so anyone who can write a NEW key there could publish
     // a row attributing an arbitrary record to a chosen identity.
@@ -1955,7 +1916,7 @@ fn one_bad_index_entry_is_skipped_and_counted_never_fatal_to_the_listing() {
 
 #[test]
 fn a_malformed_point_id_in_an_index_entry_is_refused() {
-    // The other half of F6: `record_key` and `point_id` can also be made to
+    // The other half: `record_key` and `point_id` can also be made to
     // agree on a value that is not an identity at all.
     let entry = serde_json::json!({
         "format_version": "1.0.0",
@@ -1984,14 +1945,10 @@ fn a_malformed_point_id_in_an_index_entry_is_refused() {
 
 #[test]
 fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
-    // **Review finding F5.** The first version paged forward over the whole
-    // log prefix keeping a ring of the newest keys — correct, and O(n²/page)
-    // object-metadata reads, which also made the day shard buy nothing. This
-    // walks days newest-first and stops the moment `--max` is held, so the
-    // shard structure is what bounds the work.
-    //
-    // Measured as OBSERVABLE work: with three days seeded and `--max 1`, the
-    // listing must report having searched exactly ONE day.
+    // The listing walks days newest-first and stops the moment `--max` is
+    // held, so the shard structure is what bounds the work, measured as
+    // OBSERVABLE work: with three days seeded and `--max 1`, the listing must
+    // report having searched exactly ONE day.
     let dir = tempfile::tempdir().unwrap();
     let (signer, key, _) = signer_in(dir.path());
     let store = Store::in_memory("logweir/");
@@ -2063,11 +2020,11 @@ fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
     );
 }
 
-/// **FX-4's 1.1.0 catalog-point schema is FROZEN** beside the 1.2.0 one (FX-7
-/// merged after FX-4 and took the next MINOR). It still describes every record
-/// this build writes WITHOUT a pin — the `record::FORMAT_VERSION` document: it
-/// names itself 1.1.0, its `RecordTopic` carries `config_coverage`, and its
-/// `RecordArchive` has no `manifest_version_id`.
+/// **The 1.1.0 catalog-point schema is FROZEN** beside the 1.2.0 one. It still
+/// describes every record this build writes WITHOUT a pin — the
+/// `record::FORMAT_VERSION` document: it names itself 1.1.0, its `RecordTopic`
+/// carries `config_coverage`, and its `RecordArchive` has no
+/// `manifest_version_id`.
 #[test]
 fn the_frozen_1_1_0_catalog_point_schema_is_still_fx4s() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2104,9 +2061,7 @@ fn the_frozen_1_1_0_catalog_point_schema_is_still_fx4s() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-4: `topics[].config_coverage`, catalog point 1.1.0
-// ---------------------------------------------------------------------------
+// `topics[].config_coverage`, catalog point 1.1.0.
 
 /// The same receipt at 1.1.0, carrying `orders`' capture coverage.
 fn receipt_1_1(coverage: &str) -> BackupReceipt {
@@ -2253,12 +2208,9 @@ fn a_1_0_0_record_reads_with_its_coverage_unknown() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-05.1: `topics[].configuration` and `topics[].partitions`, catalog
-// point 1.3.0
-// ---------------------------------------------------------------------------
+// `topics[].configuration` and `topics[].partitions`, catalog point 1.3.0.
 
-/// **FX-7's 1.2.0 catalog-point schema is FROZEN** beside PROD-05.1's 1.3.0
+/// **The 1.2.0 catalog-point schema is FROZEN** beside the 1.3.0
 /// one: it names itself 1.2.0, carries `archive.manifest_version_id` and
 /// `topics[].config_coverage`, and does NOT describe `topics[].configuration`.
 #[test]
@@ -2430,7 +2382,7 @@ fn a_record_claiming_a_configuration_its_receipt_does_not_back_is_a_record_misma
         }
         other => panic!("a model the receipt cannot hold must not agree: {other:?}"),
     }
-    // M2 (fix round): a record that claims the run looked for owners it did
+    // A record that claims the run looked for owners it did
     // not look for would turn "owner not checked" into "applied through the
     // admin API" — refused, against a 1.3.0 receipt and against an older one.
     let mut widened = honest.clone();
@@ -2503,7 +2455,7 @@ fn two_records_conflict_on_configuration_only_where_both_carry_it() {
         }
         other => panic!("two copies disagreeing on the model are a conflict: {other:?}"),
     }
-    // M2 (fix round): and on where the run looked for owners.
+    // And on where the run looked for owners.
     let mut d = a.clone();
     d.archive.location_id = "s3://dr-copy/prod".into();
     d.owner_detection = Some(Vec::new());
@@ -2516,7 +2468,7 @@ fn two_records_conflict_on_configuration_only_where_both_carry_it() {
     }
 }
 
-/// **L6 (PROD-05.1 fix round).** The point id the console derives from a
+/// The point id the console derives from a
 /// Backup's receipt digest (`ui/pages/restore-wizard.js`
 /// `pointIdOfReceiptDigest`) is the one this catalog writes: ONE fixture,
 /// `ui/tests/fixtures/point-id.json`, read here and by
@@ -2542,9 +2494,7 @@ fn the_point_id_fixture_is_the_catalogs() {
     );
 }
 
-// ===========================================================================
-// PROD-03.0: record format 1.5.0, `topics[].schema_dependency`
-// ===========================================================================
+// Record format 1.5.0, `topics[].schema_dependency`.
 
 /// A 1.5.0 receipt whose one topic, `orders`, has `verdict` (judged over all
 /// its 1 234 records, values framed with ids 3 and 4 when dependent).
@@ -2723,11 +2673,9 @@ fn the_frozen_1_4_0_catalog_point_schema_is_still_prod_01_3s() {
     assert!(current["definitions"]["RecordTopic"]["properties"]["schema_dependency"].is_object());
 }
 
-// ---------------------------------------------------------------------------
-// PROD-01.4a: `topics[].identity`, catalog point 1.6.0
-// ---------------------------------------------------------------------------
+// `topics[].identity`, catalog point 1.6.0.
 
-/// **PROD-03.0's 1.5.0 catalog-point schema is FROZEN** beside PROD-01.4a's
+/// **The 1.5.0 catalog-point schema is FROZEN** beside the
 /// 1.6.0 one: it names itself 1.5.0, carries `topics[].configuration` and
 /// `topics[].schema_dependency`, and does NOT describe `topics[].identity`.
 #[test]
@@ -2765,7 +2713,7 @@ fn the_frozen_1_5_0_catalog_point_schema_is_still_prod_03_0s() {
     );
 }
 
-/// **PROD-01.4a's 1.6.0 catalog-point schema is FROZEN** beside PROD-04.1's
+/// **The 1.6.0 catalog-point schema is FROZEN** beside the
 /// 1.7.0 one: it names itself 1.6.0, carries `topics[].identity`, and does NOT
 /// describe the record's `consumer_positions` summary.
 #[test]
@@ -2914,7 +2862,7 @@ fn two_records_conflict_on_topic_ids_only_where_both_carry_them() {
     }
 }
 
-// ===================================================================== PROD-04.1
+// Consumer positions, catalog point 1.7.0.
 
 /// A 1.7.0 receipt: `receipt_1_3` plus a consumer position block over its one
 /// topic — `billing` captured (one related position, at `position`, and one
@@ -3071,7 +3019,7 @@ fn a_consumer_positions_summary_the_receipt_does_not_back_is_a_record_mismatch()
     );
 }
 
-/// **The review's A8: the digest binds the positions themselves.** Two
+/// **The digest binds the positions themselves.** Two
 /// receipts whose documents differ in ONE position — the same coverage, so the
 /// same counts — carry different blocks and different digests, and a record
 /// carrying the other's digest is refused by the cross-check; nothing but the
@@ -3131,7 +3079,7 @@ fn two_records_conflict_on_consumer_positions_only_where_both_carry_them() {
     }
 }
 
-/// **PROD-02.1.** An EMPTY CAPTURE (receipt 1.8.0): no record, every
+/// An EMPTY CAPTURE (receipt 1.8.0): no record, every
 /// partition `low == high`, the empty window `[t, t)`.
 fn empty_capture_receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
     let mut r = receipt(backup_id, run_id);
@@ -3163,7 +3111,7 @@ fn sync_once(
     .unwrap()
 }
 
-/// **PROD-02.1 (security review).** A signed empty capture gets no record and
+/// A signed empty capture gets no record and
 /// is counted `empty-capture` — it is not a recovery point. The claim is read
 /// only from bytes whose signature verified: an empty capture signed by a key
 /// no one configured, or whose bytes were altered after signing, is

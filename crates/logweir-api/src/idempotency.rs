@@ -164,26 +164,22 @@ pub fn identity(
     push_field(&mut scope, &key.0);
     let scope_digest = Sha256::digest(&scope);
 
-    // NO SECRET ENTERS THESE BYTES, AND THAT — NOT THE SCOPE — IS WHAT KEEPS
-    // THE PUBLISHED HASH FROM BEING AN ORACLE (PROD-01.3 fix round, review
-    // F1). This hash is written onto the object as
-    // `api.logweir.dev/request-sha256` and into the audit record, readable by
-    // anyone who may `get` the object (the chart's `logweir-viewer` included).
-    // An earlier version of this comment claimed the scope digest, derived
-    // from the never-published `Idempotency-Key`, made the hash unrecomputable;
-    // it does not, because the scope digest itself is published as
-    // `api.logweir.dev/idempotency-scope-sha256`, so a reader holding the
-    // public spec could rebuild the request with a guessed credential, hash
-    // and compare. The fix is at the source: the write-only credential DTOs
+    // NO SECRET ENTERS THESE BYTES, AND THAT -- NOT THE SCOPE -- IS WHAT KEEPS
+    // THE PUBLISHED HASH FROM BEING AN ORACLE. This hash is written onto the
+    // object as `api.logweir.dev/request-sha256` and into the audit record,
+    // readable by anyone who may `get` the object (the chart's `logweir-viewer`
+    // included), and the scope digest is published too
+    // (`api.logweir.dev/idempotency-scope-sha256`), so a reader holding the
+    // public spec could rebuild a request with a guessed credential, hash and
+    // compare. So the write-only credential DTOs
     // (`crate::contract::NewConnectionCredentialRequest`,
     // `crate::contract::NewCredentialRequest`) serialize every value as
-    // `crate::contract::WRITE_ONLY_PLACEHOLDER`, so `canonical_request` never
-    // holds one, and two requests that differ only in a credential value hash
-    // identically. A keyed MAC was the alternative and was not chosen: it
-    // needs a key shared by every replica and stable across restarts, i.e. a
-    // Secret this service would have to READ (it holds `create` on Secrets and
-    // nothing else), and a leaked key would reopen the oracle for every object
-    // ever written.
+    // `crate::contract::WRITE_ONLY_PLACEHOLDER`: `canonical_request` never holds
+    // one, and two requests that differ only in a credential value hash
+    // identically. A keyed MAC would need a key shared by every replica and
+    // stable across restarts -- a Secret this service would have to READ (it
+    // holds `create` on Secrets and nothing else) -- and a leaked key would
+    // reopen the oracle for every object ever written.
     //
     // THE CONSEQUENCE, stated: a credential value is not part of a create's
     // identity. A retry under the same key that changes ONLY the value replays

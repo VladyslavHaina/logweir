@@ -1,17 +1,12 @@
-//! T0-11 — a drill that leaves scratch topics on the operator's cluster must
+//! A drill that leaves scratch topics on the operator's cluster must
 //! SAY SO, on every channel an operator actually watches, on the exact run that
 //! left them, and without changing the exit code.
 //!
-//! Phase 9's attestation has always been honest: `phase9_teardown::run` puts
-//! every topic the broker refused into `topics_failed` and never lists it in
-//! `topics_deleted`, so the signed teardown document cannot assert a clean
-//! state the cluster is not in. What did not hold was anything an operator can
-//! SEE. Before this file existed, `grep -rn "topics_failed" crates/logweir/src`
-//! found five hits — three doc comments, the struct field and its construction
-//! — and zero in a `tracing::` call, zero in `metrics.rs`, zero in
-//! `summary_line()`. A drill that left five scratch topics on a production
-//! broker printed the same stdout line, wrote the same Prometheus textfile and
-//! exited 0 as one that cleaned up.
+//! Phase 9's attestation is honest: `phase9_teardown::run` puts every topic
+//! the broker refused into `topics_failed` and never lists it in
+//! `topics_deleted`. This file holds what an operator can SEE: a drill that
+//! left scratch topics on a production broker must not print the same stdout
+//! line or write the same Prometheus textfile as one that cleaned up.
 //!
 //! The three channels are one test each, plus the two that hold the boundary:
 //! a clean run's console line stays byte-identical, and the exit code does not
@@ -36,24 +31,14 @@ const REFUSAL: &str = "BROKER: TOPIC_DELETION_DISABLED";
 // Where the rendered JSON goes, per THREAD. `None` on a thread that is not
 // capturing, and every line written there is discarded.
 //
-// This is one half of the answer to a real defect, and the reason it is not
-// the obvious `tracing::subscriber::with_default` the sibling test files use.
-// `with_default` installs a THREAD-LOCAL dispatcher, but `tracing` caches two
-// things PROCESS-wide: each callsite's `Interest`, and the global maximum
-// level. A callsite first reached on a thread where no dispatcher exists at
-// all caches `Interest::never`, and from then on the macro skips the event
-// before it ever consults the current thread's dispatcher. This binary runs
-// seven tests in parallel and six of them drive a whole drill with no
-// subscriber, so they reach `drill::teardown`'s `warn!` first and poison it.
-// MEASURED on the inherited code: `teardown_failure_names_the_topics` passed
-// alone and under `--test-threads=1`, and failed under a plain `cargo test`
-// with a captured stream that held the phase lines and not one `WARN`.
-//
-// So the subscriber is installed ONCE, GLOBALLY (below), which is what fixes
-// the interest cache — `set_global_default` rebuilds it — and the per-thread
-// routing here is what keeps the six other tests' events out of this one's
-// buffer. It is also closer to production: `drill::run` installs a global
-// subscriber too, and never a scoped one.
+// Not `tracing::subscriber::with_default`: that installs a THREAD-LOCAL
+// dispatcher, but `tracing` caches each callsite's `Interest` and the global
+// maximum level PROCESS-wide, so a callsite first reached on a thread with no
+// dispatcher caches `Interest::never` and the parallel drills in this binary
+// poison it. So the subscriber is installed ONCE, GLOBALLY (below; that
+// rebuilds the interest cache), and the per-thread routing here keeps the
+// other tests' events out of this one's buffer. `drill::run` installs a
+// global subscriber too.
 thread_local! {
     static SINK: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
         const { std::cell::RefCell::new(None) };
@@ -91,8 +76,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
 ///
 /// `info` is what `DEFAULT_LOG_DIRECTIVE` pins Logweir's own targets at, so a
 /// line visible here is a line visible to an operator who set no `RUST_LOG` at
-/// all. That is the property T0-11 is about: the warning must not need a raised
-/// level to be seen.
+/// all: the warning must not need a raised level to be seen.
 fn under_a_capturing_subscriber(body: impl FnOnce()) -> Vec<serde_json::Value> {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
@@ -216,7 +200,7 @@ fn teardown_failure_names_the_topics() {
          message: {warning}"
     );
 
-    // Task 12's property, on this line too: the run id is on the EVENT, not
+    // The run id is on the EVENT, not
     // only on the entered span. A warning an operator cannot correlate to a
     // run is a warning nobody can act on, and a single-line consumer
     // (`jq '.fields.run_id'`) never reads the span object.
@@ -226,10 +210,8 @@ fn teardown_failure_names_the_topics() {
         "the leftover warning must carry the run id as a FIELD on the event: {warning}"
     );
 
-    // The count travels as a FIELD too (`fields.count`), and it is asserted
-    // here because the review found that deleting the `count = …` field from
-    // the `warn!` left every test green: a claimed field nobody asserts is a
-    // field that can vanish. One refused topic ⇒ count 1.
+    // The count travels as a FIELD too (`fields.count`): a claimed field
+    // nobody asserts is a field that can vanish. One refused topic ⇒ count 1.
     assert_eq!(
         warning["fields"]["count"].as_u64(),
         Some(1),
@@ -305,14 +287,10 @@ fn summary_line_is_unchanged_when_teardown_is_clean() {
 /// > change after phase 8 has signed and uploaded; it is **deferred pending a
 /// > ruling** and no task may make it. Task 13.
 ///
-/// So the exit code must not move in EITHER direction, and this fails if it
-/// does. `report` is private (`fn report`, not `pub fn`) and widening a private
-/// function's visibility for a test is a change a reviewer cannot distinguish
-/// from the behaviour change R-C forbids — so the code is asserted through the
-/// one public path that carries it: `execute_with` returning `Ok`, which is
-/// what `report`'s `Ok(_) => ExitCode::Ok` arm turns into exit 0, and
-/// `DrillError::exit_code` (which `impl From<DrillError> for ExitCode`
-/// delegates to) never being reached at all.
+/// So the exit code must not move in EITHER direction. `report` is private,
+/// so the code is asserted through the one public path that carries it:
+/// `execute_with` returning `Ok`, which `report`'s `Ok(_) => ExitCode::Ok` arm
+/// turns into exit 0, and `DrillError::exit_code` never being reached.
 #[test]
 fn teardown_failure_does_not_change_the_exit_code() {
     let f = fixtures::orchestrator_fixture(Drill::LeavesATopicBehind);
@@ -340,9 +318,9 @@ fn teardown_failure_does_not_change_the_exit_code() {
         "R-C: the drill itself passed; a residue on the cluster is not a drill result"
     );
 
-    // (c) …and the failure was RECORDED rather than escalated. Both halves
-    //     matter: an "ok" phase record with empty notes is the silence T0-11
-    //     is about, and a non-"ok" one is the escalation R-C forbids.
+    // (c) …and the failure was RECORDED rather than escalated: an "ok" phase
+    //     record with empty notes is silence, and a non-"ok" one is the
+    //     escalation R-C forbids.
     let p9 = sc
         .phases
         .iter()
@@ -359,11 +337,9 @@ fn teardown_failure_does_not_change_the_exit_code() {
     );
 }
 
-/// R-C in its OTHER direction, and the reason it is a separate test: mutant M8
-/// is "make `phase9_teardown::persist`'s `Err` at the call site propagate
-/// instead of warning", and on a fixture where `persist` SUCCEEDS that mutant
-/// changes nothing and survives. The brief says to strengthen the test rather
-/// than accept the survivor, so this one makes `persist` actually fail.
+/// R-C in its OTHER direction: propagating `phase9_teardown::persist`'s `Err`
+/// at the call site changes nothing on a fixture where `persist` SUCCEEDS, so
+/// this one makes `persist` actually fail.
 ///
 /// It fails the way it would in production: the evidence store's puts are
 /// create-only (Global Constraint 6's segregation), so an object already
@@ -432,13 +408,9 @@ fn a_teardown_attestation_that_cannot_be_persisted_does_not_change_the_exit_code
 /// finished` pair, and that pair is the whole of it: without it a clean phase 9
 /// would be indistinguishable in the log from a phase 9 that never ran.
 ///
-/// Which makes this the test that keeps `PhaseObserver::phase_started` /
-/// `phase_finished` wired. Before Task 13 they were live code with no caller
-/// from the orchestrator — `PhaseLogger` implemented them and only a test in
-/// `logging.rs` invoked them directly, so what the pair proves about a
-/// production run was nothing at all. Deleting the two calls from `record` is
-/// the mutant; the closed arithmetic below (EVERY phase record has a pair, not
-/// just phase 9) is what fails.
+/// It keeps `PhaseObserver::phase_started` / `phase_finished` wired from the
+/// orchestrator: deleting the two calls from `record` fails the closed
+/// arithmetic below (EVERY phase record has a pair, not just phase 9).
 #[test]
 fn every_phase_the_orchestrator_runs_says_so_including_a_clean_teardown() {
     let f = fixtures::orchestrator_fixture(Drill::Passes);
@@ -513,9 +485,8 @@ fn teardown_docs_do_not_promise_a_false_exit_code() {
 /// The panel exists, and nothing that existed before this task disappeared.
 #[test]
 fn dashboard_has_a_teardown_panel() {
-    // Captured after rebasing on Task 11/12, RAN:
+    // The panel ids that must not disappear, from:
     //   python3 -c "import json;print(sorted(p['id'] for p in json.load(open('dashboards/logweir.json'))['panels']))"
-    // These ids existed before this task ran; none of them may disappear.
     const IDS_BEFORE_TASK_13: &[i64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
     let text = std::fs::read_to_string(concat!(
@@ -555,7 +526,7 @@ fn dashboard_has_a_teardown_panel() {
     );
 }
 
-// ---------------------------------------------------------------- FX-44
+// ---------------------------------------------------------------- a failed run's leftovers
 
 /// The broker's per-topic answer to a delete the principal may not make.
 const AUTHZ: &str = "TopicAuthorizationFailed (Broker: Topic authorization failed)";
@@ -573,10 +544,10 @@ impl TopicDeleter for Recording {
     }
 }
 
-/// **FX-44, R1 (unit).** A run that fails after its creation step created
+/// A run that fails after its creation step created
 /// `drill-orders` (the engine's restore fails, exit 1, nothing signed) removes
 /// the topic and says so. Control: a passing drill deletes it in phase 9, once,
-/// exactly as before. KILLS: the failure-path teardown skipped.
+/// as a pass does. KILLS: the failure-path teardown skipped.
 #[test]
 fn a_run_that_fails_after_creating_its_topic_removes_it_and_says_so() {
     let f = fixtures::orchestrator_fixture(Drill::FailsAfterCreation);
@@ -607,7 +578,7 @@ fn a_run_that_fails_after_creating_its_topic_removes_it_and_says_so() {
     assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
 }
 
-/// **FX-44, at phase 7.** The restore ran and phase 7 cannot read the
+/// **At phase 7.** The restore ran and phase 7 cannot read the
 /// target back: exit 1, nothing signed, and the topic is removed. KILLS: the
 /// phase-7 error return not reaching the failure teardown.
 #[test]
@@ -622,7 +593,7 @@ fn a_run_that_fails_at_verify_removes_its_topic() {
     assert_eq!(*f.deleted_topics.lock().unwrap(), vec![SCRATCH_TOPIC]);
 }
 
-/// **FX-44, R2 (unit).** The same failed run, and the broker refuses the
+/// The same failed run, and the broker refuses the
 /// deletion for authorization: the WARN names the topic AND the grant. KILLS:
 /// the leftover not named; the grant not named.
 #[test]
@@ -647,7 +618,7 @@ fn a_failed_run_that_cannot_delete_names_the_topic_and_the_grant() {
     assert_eq!(warning["fields"]["run_id"], f.run_id.as_str());
 }
 
-/// **FX-44, R5 (unit).** Only the topics THIS run created are handed to the
+/// Only the topics THIS run created are handed to the
 /// deleter: a mapped name it did not create (one that existed before it,
 /// which phase 0 refuses today) is never deleted. With nothing created,
 /// nothing is attempted. KILLS: tearing down a topic the run did not create.
@@ -688,7 +659,7 @@ fn a_failed_run_deletes_only_the_topics_it_created() {
     assert!(deleted.is_empty() && failed.is_empty());
 }
 
-/// **FX-44: a failed run's leftover is printed as the `teardown-failed=`
+/// **A failed run's leftover is printed as the `teardown-failed=`
 /// line** the controller copies to `Restore.status.teardown.failed`, with the
 /// grant. Control: the run in the row above, which removed its topic, wrote
 /// no line. KILLS: the line not printed on the failure path.
@@ -716,7 +687,7 @@ fn a_failed_run_prints_what_it_left_for_the_controller() {
     );
 }
 
-/// **FX-44, R4 (unit).** A failed `newTopic` restore, or a scratch one under
+/// A failed `newTopic` restore, or a scratch one under
 /// `teardown: keep`, deletes nothing it created, at any policy. Control: the
 /// same call in scratch mode under `delete` deletes.
 #[test]
@@ -753,7 +724,7 @@ fn a_failed_new_topic_restore_deletes_nothing() {
     assert_eq!(*deleter.0.lock().unwrap(), vec!["restored-orders"]);
 }
 
-/// **FX-44, the grant.** An authorization refusal is named as the missing
+/// **The grant.** An authorization refusal is named as the missing
 /// `Delete` grant, in the warning and in what the `teardown-failed=` line
 /// carries; any other refusal is not. A pass's warning reads the same.
 #[test]

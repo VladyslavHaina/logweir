@@ -1,4 +1,4 @@
-//! PROD-01.2 — the ApiVersions observation, against a REAL librdkafka
+//! The ApiVersions observation, against a REAL librdkafka
 //! connection and no external broker.
 //!
 //! `logweir_kafka::api_versions` reads two line shapes out of librdkafka's
@@ -9,7 +9,7 @@
 //! cluster (a loopback listener inside this process: no compose stack, no
 //! external address).
 //!
-//! They also hold the observation to a WHOLE VIEW (review, M3): on a mock
+//! They also hold the observation to a WHOLE VIEW: on a mock
 //! cluster of three brokers it answers only when all three did, from one
 //! bootstrap address as from three, and a broker that stays silent, or one
 //! the cluster has dropped while its address is still named, makes it NOT
@@ -128,7 +128,7 @@ fn an_endpoint_that_never_answers_is_not_observed() {
     );
 }
 
-/// With no budget left the endpoint is not dialled at all (review L9): the
+/// With no budget left the endpoint is not dialled at all: the
 /// refusal is immediate and says so.
 #[test]
 fn an_observation_with_no_budget_left_does_not_dial() {
@@ -144,12 +144,12 @@ fn an_observation_with_no_budget_left_does_not_dial() {
     );
 }
 
-/// **Review M3: a cluster of three is three answers, every time.** From all
-/// three bootstrap addresses and from ONE, the observation counts three
-/// distinct brokers; the first version counted connections and saw one, two
-/// or three brokers from run to run (measured on the compose stack).
+/// **A cluster of three is three answers, every time.** From all three
+/// bootstrap addresses and from ONE, the observation counts three distinct
+/// brokers; counting connections would see one, two or three brokers from run
+/// to run (measured on the compose stack).
 ///
-/// Repeated, because the defect was a race: which brokers the client had
+/// Repeated, because that failure is a race: which brokers the client
 /// happened to dial.
 #[test]
 fn every_broker_of_a_three_broker_cluster_answers_from_one_address_or_three() {

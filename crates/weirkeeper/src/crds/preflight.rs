@@ -1,26 +1,24 @@
-//! `Preflight` — one bounded readiness observation for an operation that has
+//! `Preflight`: one bounded readiness observation for an operation that has
 //! not run yet.
 //!
 //! # A check Job, not a controller that reads Secrets (ADR 0008 Amendment F)
 //!
-//! The controller holds no verb on `secrets` and that invariant is a test
-//! (G8). More importantly, only the real execution pod shape proves the real
-//! prerequisites: an image pull on a schedulable node, a ServiceAccount that
-//! exists, a Secret and key the kubelet can project, CA trust, egress, SASL, an
-//! S3 signature and a loadable signer. A controller reading a Secret would
-//! prove that bytes exist and nothing else.
+//! The controller holds no verb on `secrets`, and only the real execution pod
+//! shape proves the real prerequisites: an image pull on a schedulable node, a
+//! ServiceAccount that exists, a Secret and key the kubelet can project, CA
+//! trust, egress, SASL, an S3 signature and a loadable signer. A controller
+//! reading a Secret would prove only that bytes exist.
 //!
-//! The cost is accepted and named: one pod per preflight, namespace quota, and
-//! a missing Secret blocking the whole pod — in which case dependent checks are
-//! reported `BlockedByPrerequisite` with the exact cause rather than silently
-//! passing.
+//! The cost is one pod per preflight within the namespace quota, and a missing
+//! Secret blocks the whole pod; dependent checks are then reported
+//! `BlockedByPrerequisite` with the exact cause rather than silently passing.
 //!
 //! # `Completed/notReady` is not `Failed`
 //!
 //! `phase: Failed` means the check could not produce a result at all
 //! (`ResultUnreadable`, `RunnerContractUnsupported`, `Stalled`). A finished
 //! check that found the operation not ready is `phase: Completed` with
-//! `result.state: notReady` — a real answer, and the one an operator acts on.
+//! `result.state: notReady`: a real answer, and the one an operator acts on.
 //!
 //! # Advisory, always
 //!

@@ -7,7 +7,7 @@
 //! WARNING, and the reason this document is golden-tested per engine tag:
 //! `validation run` parses with a bare serde_yaml::from_str::<ValidationConfig>
 //! and produces NO unknown-key warning list, so a key we get wrong here is
-//! dropped SILENTLY (spec §7.2(b)). The stdout+stderr readback of Task 12 does not
+//! dropped SILENTLY. The engine adapter's stdout+stderr readback does not
 //! cover this document.
 use crate::render_backup::RenderError;
 use crate::render_restore::render_storage_block;
@@ -17,15 +17,13 @@ use logweir_core::engine::RestorePlan;
 /// The rendered validation document and the SHA-256 of the EXACT bytes a
 /// caller will write to disk.
 ///
-/// # This function did not exist before Task 3, and its absence was the hole
+/// # Why it exists
 ///
-/// `render_restore` and `render_backup` both had a `render_and_digest`; this
-/// renderer had only `render`. So the post-render **G-EXP** sweep, which lives
-/// in `render_and_digest` by design (a digest may only ever be taken over a
-/// document that passed), would have covered two of the three documents and
-/// missed a third of the surface — critique A F11. The body is deliberately
-/// the same shape as `render_restore::render_and_digest`'s, in the same order:
-/// render, sweep, hash.
+/// The post-render **G-EXP** sweep lives in `render_and_digest` by design (a
+/// digest may only ever be taken over a document that passed), so without
+/// this function it would cover two of the three documents. The body is
+/// deliberately the same shape as `render_restore::render_and_digest`'s, in
+/// the same order: render, sweep, hash.
 ///
 /// `render` remains `pub` because its callers are this crate's test files
 /// (`tests/render.rs`, `tests/render_equality.rs`), which pin the document's
@@ -67,16 +65,9 @@ pub fn render(
     for b in &plan.target_bootstrap {
         s.push_str(&format!("    - {}\n", yaml_scalar_checked(b)?));
     }
-    // THE SASL BLOCK (Task 6, interface **I1**) — and it belongs HERE too,
-    // though Task 6's Files block names only the other two renderers. The
-    // brief's own mutant census settles it: flipping the `Plaintext` arm to
-    // emit `security_protocol: "PLAINTEXT"` is predicted to diff "the four
-    // `restore_yaml*` and two `validation_yaml*` goldens plus Task 2's two
-    // backup goldens", i.e. the validation document is expected to carry a
-    // `target:` auth block.
-    //
-    // And it must, on the merits: `ValidationConfig.target` is the SAME
-    // `KafkaConfig` type the restore document's `target:` is
+    // THE SASL BLOCK (interface **I1**) belongs HERE too:
+    // `ValidationConfig.target` is the SAME `KafkaConfig` type the restore
+    // document's `target:` is
     // [U:crates/kafka-backup-core/src/config.rs:173-189], and `validation run`
     // dials the target cluster to count messages and read offset ranges. Left
     // out, a SCRAM drill would render an authenticating `restore.yaml` and an
@@ -100,16 +91,16 @@ pub fn render(
     // :225-233 EvidenceStorageConfig { prefix, retention_days }. Logweir sets
     // `storage.prefix` EXPLICITLY rather than by default, because listing this
     // per-run prefix is the ONLY specified way to retrieve the report: the run
-    // mints its report id internally and never prints it machine-readably
-    // (spec §6 C4). `run_id` is escaped as part of the WHOLE composed value —
-    // not interpolated raw into an otherwise-unescaped line — so a `run_id`
+    // mints its report id internally and never prints it machine-readably.
+    // `run_id` is escaped as part of the WHOLE composed value — not
+    // interpolated raw into an otherwise-unescaped line — so a `run_id`
     // containing a newline or colon cannot split this into two lines either.
     // CARRIED DEFECT, LATENT AND NAMED HERE SO IT CANNOT LAND SILENTLY.
     //
     // This prefix is relative to the storage block of THIS document — the
     // ARCHIVE — while `logweir::drill::phase8_score::run` lists the identical
     // string on the EVIDENCE store. `DrillSpec`'s own doc comment says the two
-    // are a different bucket and a different principal by default (spec §7.1),
+    // are a different bucket and a different principal by default,
     // so as written they can never meet, and phase 8's retrieval would find
     // nothing however well the engine behaved.
     //

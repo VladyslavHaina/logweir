@@ -1,14 +1,13 @@
-//! `logweir trust export` and `logweir trust migrate-roster` (PLAT-19.1,
-//! decision D3 §7.1 and §7.5).
+//! `logweir trust export` and `logweir trust migrate-roster` (decision D3
+//! §7.1 and §7.5).
 //!
 //! # Two levels, deliberately
 //!
 //! The transforms are asserted against the LIBRARY, because the property is a
 //! mapping from one document to another and a subprocess adds nothing to it.
 //! The argv surface is asserted against the COMPILED BINARY, because the
-//! failure this repository has actually shipped is a subcommand that exists in
-//! `cli.rs` and is unreachable from `main` (Task 22's carried obligation: the
-//! shipped binary silently had no `drill show`).
+//! failure that matters there is a subcommand that exists in `cli.rs` and is
+//! unreachable from `main`.
 //!
 //! # No key material here is private
 //!
@@ -123,9 +122,7 @@ fn temp(body: &str, name: &str) -> std::path::PathBuf {
     path
 }
 
-// ---------------------------------------------------------------------------
-// migrate-roster — D3 §7.5
-// ---------------------------------------------------------------------------
+// migrate-roster — D3 §7.5.
 
 /// The translation, field by field, as a reviewable document.
 #[test]
@@ -321,9 +318,7 @@ fn migrate_roster_refuses_the_wrong_kind() {
     assert!(err.to_string().contains("TrustRoster"), "{err}");
 }
 
-// ---------------------------------------------------------------------------
-// export — D3 §7.1
-// ---------------------------------------------------------------------------
+// export — D3 §7.1.
 
 /// The export carries the spec and nothing the server owns, and re-applies.
 #[test]
@@ -399,7 +394,7 @@ fn export_does_not_forward_a_field_this_build_does_not_know() {
     );
 }
 
-/// **MUTANT 4 — private material in export.**
+/// **Private material in export.**
 ///
 /// The planted mutation is dropping [`refuse_private_material`] and letting the
 /// rebuild forward `spkiPem` verbatim. The object below carries a private-key
@@ -436,13 +431,9 @@ fn mutant_export_refuses_an_object_carrying_private_material() {
     assert!(refuse_private_material("-----BEGIN EC PRIVATE KEY-----").is_err());
 }
 
-/// **The SUBSTRING decides, not the list** (review finding F5).
-///
-/// The first version enumerated four PEM spellings, and
-/// `BEGIN OPENSSH PRIVATE KEY`, `BEGIN DSA PRIVATE KEY`,
-/// `BEGIN PGP PRIVATE KEY BLOCK` and `BEGIN SSH2 ENCRYPTED PRIVATE KEY` all
-/// walked past it. This asserts the PROPERTY — every one of them refuses,
-/// including a label nobody has written down — and then, separately, that the
+/// **The SUBSTRING decides, not the list.** `BEGIN OPENSSH PRIVATE KEY`,
+/// `BEGIN DSA PRIVATE KEY`, `BEGIN PGP PRIVATE KEY BLOCK`, `BEGIN SSH2
+/// ENCRYPTED PRIVATE KEY` and a label nobody has written down all refuse; the
 /// list only NAMES what was found.
 #[test]
 fn every_private_pem_spelling_is_refused_including_ones_the_list_does_not_name() {
@@ -484,9 +475,7 @@ fn every_private_pem_spelling_is_refused_including_ones_the_list_does_not_name()
     }
 }
 
-// ---------------------------------------------------------------------------
-// The argv surface, against the COMPILED BINARY
-// ---------------------------------------------------------------------------
+// The argv surface, against the COMPILED BINARY.
 
 /// Run the binary with `stdin_body` on standard input.
 fn run(args: &[&str], stdin_body: &str) -> (Option<i32>, String, String) {

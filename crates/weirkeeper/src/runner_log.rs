@@ -3,7 +3,7 @@
 //! [`RELAY`]), one key scanner, and one TTL patch for the finished Job.
 //!
 //! Only the plumbing is shared. What a reader may take from the log stays
-//! with that reader: FX-34's line token ([`crate::refusal`]), the place rule
+//! with that reader: the line token ([`crate::refusal`]), the place rule
 //! ([`crate::controllers::restore::creation_stop_state`]), the check frames
 //! ([`crate::check::relay`]) and each kind's own keys.
 
@@ -16,11 +16,11 @@ use serde_json::json;
 
 use crate::controllers::backup::KEY_SCAN_TAIL_LINES;
 
-/// What one `pods/log` read asks for. `lines` (`tailLines`) asks the API
-/// server for the log's TAIL; every bound but [`RELAY`] sets it. `bytes`
-/// (`limitBytes`) counts from the START of those lines, so a body that
-/// reaches it was cut before the log's last lines; [`read`] also stops taking
-/// bytes one past it, whatever the server sends.
+/// What one `pods/log` read asks for. `lines` (`tailLines`) asks for the log's
+/// tail; every bound but [`RELAY`] sets it. `bytes` (`limitBytes`) counts from
+/// the start of those lines, so a body that reaches it was cut before the
+/// log's last lines; [`read`] also stops taking bytes one past it, whatever
+/// the server sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bound {
     pub lines: Option<i64>,
@@ -53,7 +53,7 @@ pub const TERMINAL: Bound = Bound {
     runner_container: false,
 };
 
-/// FX-34's exit-3 read ([`crate::refusal::read`]).
+/// The exit-3 read ([`crate::refusal::read`]).
 pub const REFUSAL: Bound = Bound {
     lines: Some(crate::refusal::REFUSAL_LOG_TAIL_LINES),
     bytes: Some(crate::refusal::REFUSAL_LOG_LIMIT_BYTES),
@@ -67,15 +67,14 @@ pub const PROGRESS: Bound = Bound {
     runner_container: false,
 };
 
-/// A check's relay and a retention Job's lines: the log's HEAD, its first
+/// A check's relay and a retention Job's lines: the log's head, its first
 /// [`RELAY_LIMIT_BYTES`](crate::check::relay::RELAY_LIMIT_BYTES), and no
 /// `tailLines`.
 ///
-/// THE ONE READ THAT IS NOT A TAIL, ON PURPOSE. The frames are one document,
-/// read from the start and verified whole, and a frame after the end frame is
-/// refused. A tail window would let text printed after the genuine end frame
-/// push it out of the read, and a second self-consistent relay printed there
-/// would then verify.
+/// The one read that is not a tail: the frames are one document, read from the
+/// start and verified whole, and a frame after the end frame is refused. A tail
+/// window would let text printed after the genuine end frame push it out of the
+/// read, and a second self-consistent relay printed there would then verify.
 pub const RELAY: Bound = Bound {
     lines: None,
     bytes: Some(crate::check::relay::RELAY_LIMIT_BYTES),
@@ -99,10 +98,10 @@ pub async fn read(pods: &Api<Pod>, pod_name: &str, bound: &Bound) -> Result<Vec<
 /// At most `bound.bytes` plus one bytes off `reader` (the one is how a caller
 /// sees the bound was reached); all of it when the bound has no bytes.
 ///
-/// THE SECOND BOUND, AND THE ONE THIS PROCESS ENFORCES ITSELF. `limitBytes` is
-/// a request; this is what stops a server that ignored it, or a stream that
-/// never ends, from growing a buffer in a controller that serves every
-/// namespace. The rest of the stream is dropped unread.
+/// The second bound, the one this process enforces itself: `limitBytes` is a
+/// request, and this stops a server that ignored it, or a stream that never
+/// ends, from growing a buffer in a controller serving every namespace. The
+/// rest of the stream is dropped unread.
 ///
 /// # Errors
 ///
@@ -134,9 +133,9 @@ pub async fn read_text(
 
 /// The final [`KEY_SCAN_TAIL_LINES`] non-empty lines, trimmed of `\r`.
 ///
-/// Plan erratum **E4**: a pod log is stdout and stderr merged in
-/// nondeterministic order, so every key is read from this bounded tail BY
-/// NAME ([`key_values`]), never as "the last line".
+/// A pod log is stdout and stderr merged in nondeterministic order, so every
+/// key is read from this bounded tail by name ([`key_values`]), never as "the
+/// last line".
 #[must_use]
 pub fn tail_lines(log: &str) -> Vec<&str> {
     let all: Vec<&str> = log
@@ -149,7 +148,7 @@ pub fn tail_lines(log: &str) -> Vec<&str> {
 }
 
 /// The key scanner: the value of every [`tail_lines`] line that starts with
-/// `key`, oldest first. A reader that takes one value takes the LAST: a runner
+/// `key`, oldest first. A reader that takes one value takes the last: a runner
 /// that printed an earlier draft of a line has the final one be the true one.
 #[must_use]
 pub fn key_values<'a>(log: &'a str, key: &str) -> Vec<&'a str> {
@@ -159,11 +158,11 @@ pub fn key_values<'a>(log: &'a str, key: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Patch a FINISHED runner Job's `ttlSecondsAfterFinished`, with `marker`
-/// (an annotation name and value) in the same merge patch when there is one.
+/// Patch a finished runner Job's `ttlSecondsAfterFinished`, with `marker` (an
+/// annotation name and value) in the same merge patch when there is one.
 ///
-/// ONLY AFTER THE CALLER'S STATUS WRITE RETURNED: the TTL deletes the pod,
-/// and with it the log the status was read from.
+/// Only after the caller's status write returned: the TTL deletes the pod, and
+/// with it the log the status was read from.
 ///
 /// # Errors
 ///

@@ -3,11 +3,10 @@
 //! Every fixture in this file dials `kafka-broker-1:9094` and
 //! `http://minio:9000` — the CONTAINER-side names — and never a dial token
 //! (`crates/logweir/tests/no_network_in_unit_tests.rs`'s `DIAL_TOKENS`). This
-//! file constructs no client of any kind, so it is deliberately not a member
-//! of chain N and belongs in no `ALLOWED` entry (STANDING RULE 18). The
-//! host-side spelling is asserted ABSENT below by looking for the substring
-//! `localhost`, rather than by writing the endpoint out, for exactly that
-//! reason.
+//! file constructs no client of any kind, so it belongs in no `ALLOWED`
+//! entry. The host-side spelling is asserted ABSENT below by looking for the
+//! substring `localhost`, rather than by writing the endpoint out, for exactly
+//! that reason.
 use logweir_core::engine::{AuthRender, BackupPlan, StorageUrl};
 use logweir_engine_oso::render_backup::{self, RenderError};
 
@@ -44,7 +43,7 @@ const GLOBBED: [&str; 6] = ["orders*", "orders?", "events[1]", "a]b", "x{1}", "y
 const PLAIN: [&str; 4] = ["orders", "payments", "orders.v2", "a-b_c"];
 
 /// **G-GLOB** — GC18(c) rail 1, "a mandatory named-topic allowlist with no
-/// wildcard". *No wildcard is not enforced by not writing one* (spec §5 M4):
+/// wildcard". *No wildcard is not enforced by not writing one*:
 /// upstream's `TopicSelection.include` "supports glob patterns"
 /// [U/kafka-backup/crates/kafka-backup-core/src/config.rs:334-343], and this
 /// renderer puts `plan.topics` straight into `source.topics.include`, so a
@@ -145,7 +144,7 @@ fn backup_document_names_no_write_key() {
     assert!(!doc.contains("consumer-group"), "{doc}");
 }
 
-/// Spec §6.1 M5/N1: `include_offset_headers: true` is rendered EXPLICITLY,
+/// `include_offset_headers: true` is rendered EXPLICITLY,
 /// never inherited. It stamps `x-original-offset`/`x-original-timestamp` on
 /// every archived record, and that header is the ONLY key phase 7 reconciles
 /// on (`crates/logweir/src/drill/phase7_verify.rs:243-265`); an archive
@@ -154,17 +153,6 @@ fn backup_document_names_no_write_key() {
 ///
 /// The EXACT line, indentation included, so a key emitted at the wrong nesting
 /// level fails too.
-///
-/// **RENAMED, Task 12 closeout carry (c).** Task 4's fix round 1 (review
-/// finding F-1) removed `backup.strip_offset_headers` from this document — it
-/// is a RESTORE key the pinned engine drops as unknown, see
-/// `the_backup_document_names_no_restore_side_offset_key` below — and the row
-/// kept the name it had been landed under, `backup_document_renders_strip_offset_headers_false`,
-/// because the test-name gate is additions-only against the base commit. That
-/// name described a key this document no longer emits, at a value it no longer
-/// has: a reader looking for the `strip_offset_headers` behaviour would have
-/// found a test asserting `include_offset_headers`. The closeout ruled the
-/// rename in; the assertions are unchanged.
 #[test]
 fn backup_document_renders_include_offset_headers_true() {
     let doc = render_backup::render(&plan()).expect("the fixture renders");
@@ -186,7 +174,7 @@ fn backup_document_renders_include_offset_headers_true() {
     );
 }
 
-/// **Task 4 review, F-1 — the key this document must NOT carry.**
+/// **The key this document must NOT carry.**
 ///
 /// `strip_offset_headers` is a field of `RestoreOptions`
 /// [U:crates/kafka-backup-core/src/config.rs:793-801] and of nothing else.
@@ -196,11 +184,10 @@ fn backup_document_renders_include_offset_headers_true() {
 /// `third_party/kafka-backup-binary.digest`) reads `backup.strip_offset_headers`
 /// as an unknown key and drops it with *"Ignoring unknown config key"*
 /// [U:crates/kafka-backup-cli/src/commands/config.rs:46] — whereupon
-/// `OsoCliEngine`'s `assert_no_dropped_logweir_key` correctly aborts, and
-/// `logweir backup run` exited **1 after a complete archive had been
-/// written**. Spec §6.1's "kept in both modes" is about the RESTORE document,
-/// which still renders it (`render_restore.rs:131-143`) at a key the engine
-/// accepts.
+/// `OsoCliEngine`'s `assert_no_dropped_logweir_key` aborts, and `logweir
+/// backup run` exits **1 after a complete archive has been written**. The
+/// RESTORE document still renders it (`render_restore.rs:131-143`) at a key
+/// the engine accepts.
 ///
 /// Asserted over the KEY at any nesting and any value, because the failure was
 /// never about the value. The end-to-end half — the real, digest-pinned engine
@@ -230,12 +217,11 @@ fn the_backup_document_names_no_restore_side_offset_key() {
 /// **GC18(c) rail 3** — `purge_topics` and `dry_run` refused IN the rendered
 /// `backup.yaml`, at any value (Global Constraint 4).
 ///
-/// Global ruling GR7's shape, and the only shape available: there is no
-/// `LOGWEIR_TEST_INJECT_DRY_RUN` and no code path capable of emitting one of
-/// the three keys, so the backstop is exercised by handing the post-render
-/// scan a CONSTRUCTED document as input. Proving it through `render` is
-/// impossible by construction — which is the point, and also why the scan is
-/// a separately callable function rather than an inlined block.
+/// There is no `LOGWEIR_TEST_INJECT_DRY_RUN` and no code path capable of
+/// emitting one of the three keys, so the backstop is exercised by handing the
+/// post-render scan a CONSTRUCTED document as input. Proving it through
+/// `render` is impossible by construction — which is the point, and also why
+/// the scan is a separately callable function rather than an inlined block.
 #[test]
 fn a_forbidden_key_in_a_constructed_backup_document_is_refused() {
     let constructed = "\
@@ -280,7 +266,7 @@ dry_run: true
     assert_eq!(render_backup::scan_rendered_document(&doc), Ok(()));
 
     // THE RAIL IS "inside `render_and_digest`", and that half cannot be
-    // reached from a value: GR7 forbids an injection hook, and no `BackupPlan`
+    // reached from a value: there is no injection hook, and no `BackupPlan`
     // can make `render` emit one of the three keys, so every behavioural probe
     // of `render_and_digest`'s scan returns `Ok` whether the call is there or
     // not. Deleting the call would therefore pass every assertion above. The
@@ -302,12 +288,10 @@ dry_run: true
     );
 }
 
-/// **One escaper, one place to fix it.** `yaml_scalar` moved out of
-/// `render_restore.rs` into `src/yaml.rs`; the failure mode this pins is not a
-/// missing function but a THIRD copy — the path of least resistance for a new
-/// renderer is to paste the sixteen-line escaper rather than import it, and
-/// the copy then does not receive the fix the original gets (Task 3 adds
-/// `yaml_scalar_checked` beside the original).
+/// **One escaper, one place to fix it.** `yaml_scalar` lives in `src/yaml.rs`;
+/// the failure mode this pins is a second copy — the path of least resistance
+/// for a new renderer is to paste the sixteen-line escaper rather than import
+/// it, and the copy then does not receive the fix the original gets.
 ///
 /// Source-reading, deliberately: nothing about a *call* can distinguish one
 /// definition from three identical ones.
@@ -319,17 +303,13 @@ fn there_is_exactly_one_yaml_escaper() {
     /// comment a failure would be paid for by deleting the explanation, which
     /// is the opposite of what this pins.
     ///
-    /// The token is `fn yaml_scalar(`, WITH the opening parenthesis, and Task
-    /// 3 sharpened it from the bare `fn yaml_scalar` for a reason worth
-    /// stating: Task 3 added `yaml_scalar_checked` in `src/yaml.rs`, which the
-    /// looser token counted as a second escaper. It is not one — it is a
-    /// **G-EXP** pre-check that delegates to the single escaper below, and
-    /// `tests/expansion.rs::every_renderer_calls_the_checked_escaper` is what
-    /// pins the other half (no renderer may call the unchecked
-    /// `yaml_scalar(` any more). Widening the expected count to 2 was the
-    /// alternative and was rejected: the number would then no longer mean
-    /// "there is one escaper", and a genuine copy of `yaml_scalar` would be
-    /// absorbed by the allowance.
+    /// The token is `fn yaml_scalar(`, WITH the opening parenthesis, so
+    /// `yaml_scalar_checked` in `src/yaml.rs` is not counted: it is a **G-EXP**
+    /// pre-check that delegates to the single escaper, and
+    /// `tests/expansion.rs::every_renderer_calls_the_checked_escaper` pins the
+    /// other half (no renderer may call the unchecked `yaml_scalar(`). The
+    /// expected count stays 1, so a genuine copy of `yaml_scalar` is never
+    /// absorbed by an allowance.
     fn definitions(body: &str) -> usize {
         body.lines()
             .filter(|l| {
@@ -384,25 +364,24 @@ fn there_is_exactly_one_yaml_escaper() {
 ///
 /// `logweir` and the engine both run on the HOST in the drill path, so the
 /// host-side spelling of this same archive is what `examples/backup.yaml`
-/// ships (Task 4) — `examples/drill.yaml:17` and `:71` already use a host-side
-/// MinIO endpoint for exactly that reason. Confusing the two is the defect
-/// `e2e/compose/config/backup-drill.yaml:6-13` documents at length: a
-/// container resolving the host-side name reaches itself and never the broker.
+/// ships. Confusing the two is the failure
+/// `e2e/compose/config/backup-drill.yaml:6-13` documents: a container resolving
+/// the host-side name reaches itself and never the broker.
 ///
 /// The absence half is asserted as "no `localhost` anywhere" rather than by
-/// writing the host-side endpoint out: that literal is a dial token
-/// (STANDING RULE 18) and this file may not name one.
+/// writing the host-side endpoint out: that literal is a dial token and this
+/// file may not name one.
 ///
-/// # It asserts the FIXTURE as well as the FILE, and that is not belt-and-braces
+/// # It asserts the FIXTURE as well as the FILE, and that is not
+/// belt-and-braces
 ///
-/// Measured while applying this task's mutants: with the fixture changed to
-/// the host-side endpoint and `just golden` (`INSTA_UPDATE=always`) run, the
-/// whole binary went GREEN — insta rewrites `render_backup__backup_s3.snap`
+/// With the fixture changed to the host-side endpoint and `just golden`
+/// (`INSTA_UPDATE=always`) run, insta rewrites `render_backup__backup_s3.snap`
 /// in place, and within one `cargo test` process this test can read the file
-/// before the golden test has written it. The mutant was caught only on the
-/// NEXT run. An order-dependent kill is the shape STANDING RULE 21 calls worse
-/// than no guard, so the same property is asserted over the freshly rendered
-/// document, which no snapshot-acceptance ordering can move.
+/// before the golden test has written it: the mutant is caught only on the
+/// NEXT run. An order-dependent kill is worse than no guard, so the same
+/// property is asserted over the freshly rendered document, which no
+/// snapshot-acceptance ordering can move.
 #[test]
 fn the_backup_golden_is_the_container_side_shape() {
     // (a) The FIXTURE — order-independent, and what an accepted golden is
@@ -496,13 +475,11 @@ fn backup_render_and_digest_is_over_the_rendered_bytes() {
     assert!(digest.starts_with("sha256:"));
 }
 
-/// Every free-text value reaches the document through `crate::yaml::
-/// yaml_scalar` (Task 3 swaps these sites to `yaml_scalar_checked`). The
-/// adversarial payload is a raw newline followed by text that reads as a
-/// `dry_run: true` key-line at column 0 — the exact shape that produced a
-/// physical forbidden-key line in the restore renderer before it was escaped.
-/// One interpolation site at a time, so a regression is individually
-/// attributable.
+/// Every free-text value reaches the document through
+/// `crate::yaml:: yaml_scalar_checked`. The adversarial payload is a raw
+/// newline followed by text that reads as a `dry_run: true` key-line at column
+/// 0 — a physical forbidden-key line if it were not escaped. One interpolation
+/// site at a time, so a regression is individually attributable.
 #[test]
 fn every_interpolated_backup_value_is_escaped() {
     const PAYLOAD: &str = "a\ndry_run: true";
@@ -526,8 +503,8 @@ fn every_interpolated_backup_value_is_escaped() {
     p.compression = PAYLOAD.into();
     cases.push(("compression", p));
 
-    // The REGION is refused before rendering when it is not a region name
-    // (FX-20 fix round, review F1), which is stronger than escaping it.
+    // The REGION is refused before rendering when it is not a region name,
+    // which is stronger than escaping it.
     let mut p = plan();
     p.storage = StorageUrl::S3 {
         bucket: PAYLOAD.into(),
@@ -568,7 +545,7 @@ fn every_interpolated_backup_value_is_escaped() {
     }
 }
 
-/// **PROD-04.1: Logweir's own backups never write the engine's consumer-group
+/// **Logweir's own backups never write the engine's consumer-group
 /// snapshot.** The rendered document leaves `consumer_group_snapshot` at the
 /// engine's default, `false` (`kafka-backup-core/src/config.rs`, 0.23.3), by
 /// never naming it: a selected group's positions are recorded natively in the
@@ -583,7 +560,7 @@ fn a_logweir_backup_never_asks_the_engine_for_a_consumer_group_snapshot() {
     );
 }
 
-/// **FX-27.** The engine's Prometheus server defaults on, unauthenticated, at
+/// The engine's Prometheus server defaults on, unauthenticated, at
 /// `0.0.0.0:8080`; the backup document turns it off with a top-level
 /// `metrics:` block (column 0, so not nested under `backup:`), exactly once.
 #[test]

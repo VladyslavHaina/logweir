@@ -1,4 +1,4 @@
-//! **FX-7 — reading an object BY VERSION.**
+//! **Reading an object BY VERSION.**
 //!
 //! A backup receipt taken on a versioned bucket pins the version id of the
 //! manifest it attests, and the readers that check a point against the archive
@@ -16,7 +16,7 @@
 //!
 //! In process, no endpoint: the S3 half (the `?versionId=` query and the
 //! `x-amz-version-id` header) is `object_store`'s own and is exercised live on
-//! SeaweedFS (`docs/formats/backup-receipt.md`, FX-7).
+//! SeaweedFS (`docs/formats/backup-receipt.md`).
 use logweir_store::{Store, StoreError};
 
 const KEY: &str = "logweir/archive/set-1/manifest.json";

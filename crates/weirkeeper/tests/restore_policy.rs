@@ -1,7 +1,8 @@
-//! PLAT-19.2 at the `Restore` controller: admission re-checks the approval
-//! policy against the namespace's CURRENT binding, and a v2-authorised run
-//! freezes the policy snapshot and the console key into its bundle, its
-//! environment and its argv. A v1 Restore's Job is byte-for-byte unchanged.
+//! The approval policy at the `Restore` controller: admission re-checks the
+//! approval policy against the namespace's CURRENT binding, and a
+//! v2-authorised run freezes the policy snapshot and the console key into its
+//! bundle, its environment and its argv. A v1 Restore's Job is byte-for-byte
+//! unchanged.
 //!
 //! Admission reads no signature (the Approval controller and the runner do),
 //! so the v2 documents below are built from the core type and carry an empty
@@ -268,9 +269,7 @@ fn admit_under(approval: &Approval, policy: &str) -> RestoreAdmission {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Admission
-// ---------------------------------------------------------------------------
 
 #[test]
 fn both_modes_admit_a_verified_document_naming_the_current_binding() {
@@ -297,7 +296,7 @@ fn an_unbound_namespace_admits_todays_approval_unchanged() {
 
 /// The binding decides, never what the document says: a v1 approval under
 /// an explicit binding, and a v2 document in an unbound namespace, are both
-/// refused before any Job — even with a (stale or forged) `verified: true`.
+/// refused before any Job, even with a (stale or forged) `verified: true`.
 #[test]
 fn the_format_must_match_the_binding() {
     for (approval, policy) in [
@@ -435,9 +434,7 @@ fn a_changed_plan_or_a_recreated_subject_is_refused_from_the_signed_bytes() {
     assert_eq!(admission.reason(), "ApprovalSubjectMismatch", "{admission}");
 }
 
-// ---------------------------------------------------------------------------
 // The frozen execution inputs
-// ---------------------------------------------------------------------------
 
 fn key(key_id: &str, pem: &str, usage: SpecUsage, principal: &str) -> SpecKey {
     SpecKey {
@@ -686,10 +683,10 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
         "the authorising key must hold the bound mode's usage"
     );
 
-    // UNDER GOVERNED, THE CONSOLE KEY IS THE SECOND FROZEN KEY and is
+    // Under `Governed`, the console key is the second frozen key and is
     // re-checked on its own: a valid approver does not carry a console key
-    // retired since the confirmation was signed. The negative control is the
-    // same approval under the unchanged trust, which mounts.
+    // retired since the confirmation was signed. The negative control is
+    // the same approval under the unchanged trust, which mounts.
     let governed = effective("prod-governed");
     approval_bundle_config_map_with_policy(
         &restore(),
@@ -726,9 +723,7 @@ fn revoked_console() -> Vec<SpecKey> {
     keys
 }
 
-// ---------------------------------------------------------------------------
 // The reconciler: direct-resource admission
-// ---------------------------------------------------------------------------
 
 fn not_found(kind: &str, name: &str) -> String {
     format!(
@@ -888,10 +883,8 @@ async fn an_ordinary_confirmation_creates_a_job_that_pins_the_frozen_policy() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// P10 review M2 — an approval's deadline, while its restore waits in the
-// manual-restore pool
-// ---------------------------------------------------------------------------
+// An approval's deadline, while its restore waits in the manual-restore
+// pool
 
 /// A manual restore peer in this namespace, running (it holds a slot).
 fn running_peer(name: &str, uid: &str) -> Restore {
@@ -947,14 +940,14 @@ fn status_patches(bodies: &[SeenBody]) -> Vec<Value> {
         .collect()
 }
 
-/// **A queued restore states its approval's deadline** (review M2). An
-/// Ordinary confirmation expires five minutes after issue; queued behind two
-/// running restores, the object says so — `status.queue.authorizationExpiresAt`
-/// is the signed `expires_at`, and the `Admitted=False` message names the
-/// instant and that the queue does not extend it. Nothing is created.
+/// **A queued restore states its approval's deadline.** An `Ordinary`
+/// confirmation expires five minutes after issue; queued behind two running
+/// restores, the object says so: `status.queue.authorizationExpiresAt` is the
+/// signed `expires_at`, and the `Admitted=False` message names the instant and
+/// that the queue does not extend it. Nothing is created.
 ///
-/// KILLS: a queued status with no deadline (the defect: the approval expired
-/// in the queue with no earlier word on the object).
+/// KILLS: a queued status with no deadline (the approval would expire in the
+/// queue with no earlier word on the object).
 #[tokio::test]
 async fn a_queued_restore_states_its_approvals_deadline() {
     let doc = document("team-ordinary", ApprovalMode::Ordinary);
@@ -994,10 +987,10 @@ async fn a_queued_restore_states_its_approvals_deadline() {
     );
 }
 
-/// **An approval that expires while its restore is queued says so** (review
-/// M2): the refusal is the admission's own `AuthorizationExpired` — the queue
-/// does not extend an approval's maximum age, the safe default — and its
-/// sentence names the wait: "expired while this Restore was queued behind 2".
+/// **An approval that expires while its restore is queued says so**: the
+/// refusal is the admission's own `AuthorizationExpired` (the queue does not
+/// extend an approval's maximum age, the safe default), and its sentence
+/// names the wait: "expired while this Restore was queued behind 2".
 /// NEGATIVE CONTROL: the same expired approval on a restore that never queued
 /// is refused with the admission's plain sentence.
 #[tokio::test]
@@ -1045,9 +1038,7 @@ async fn an_approval_that_expires_in_the_queue_is_refused_saying_so() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-15.1 review M1, OD-10: the typed confirmation, at admission
-// ---------------------------------------------------------------------------
+// The typed confirmation of an original-name restore, at admission
 
 const ORIGINAL_NAME: &str = "rst-original-1";
 const ORIGINAL_UID: &str = "5c2e7b91-0000-4000-8000-00000000151a";
@@ -1144,9 +1135,9 @@ fn admit_original(approval: &Approval, policy: &str) -> RestoreAdmission {
     )
 }
 
-/// **OD-10 at admission.** On a one-person-confirmation (`Ordinary`)
-/// namespace an original-name Restore is admitted only when its signed
-/// confirmation carries every original topic name re-typed, exactly; a
+/// **The typed confirmation, at admission.** On a one-person-confirmation
+/// (`Ordinary`) namespace an original-name Restore is admitted only when its
+/// signed confirmation carries every original topic name re-typed, exactly; a
 /// missing or wrong list is refused terminally, by name, before any Job.
 /// KILLS: admitting a one-person confirmation without the typed names, or
 /// with names that are not the plan's.
@@ -1218,11 +1209,11 @@ fn the_original_name_subject_under_format_2_0_0_is_refused_at_admission() {
     }
 }
 
-/// **OD-10: two-person and strict still need the second person.** Under a
+/// **Two-person and strict still need the second person.** Under a
 /// `Governed` binding the requester's own confirmation (console key only)
-/// admits nothing — typed names or not — and the countersigned document
-/// admits the original-name Restore without typed names. KILLS: letting typed
-/// names stand in for the second person.
+/// admits nothing, typed names or not, and the countersigned document admits
+/// the original-name Restore without typed names. KILLS: letting typed names
+/// stand in for the second person.
 #[test]
 fn a_governed_namespace_still_needs_the_second_person_for_an_original_name_restore() {
     // The requester's confirmation alone, even with the names typed: refused.

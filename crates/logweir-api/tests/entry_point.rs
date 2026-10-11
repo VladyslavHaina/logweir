@@ -1,4 +1,4 @@
-//! The trusted-proxy contract at the shared entry point (PLAT-17.2).
+//! The trusted-proxy contract at the shared entry point.
 //!
 //! D0 §"Identity, session, proxy, and browser trust boundary" fixes three
 //! things, and this file holds all three against the real router:
@@ -13,10 +13,10 @@
 //!    is refused `421 misdirected_request` before routing — audit code
 //!    `untrusted_entry_point` — while the two kubelet probes stay reachable.
 //!
-//! And one thing D0's 2026-10-07 amendment adds (FX-13), at the end of this
-//! file: the sign-in limiter counts a request against the forwarded client
-//! only when the peer is a trusted proxy under that same decision, and
-//! against the peer otherwise. A bucket refuses; it is never an identity.
+//! And at the end of this file: the sign-in limiter counts a request against
+//! the forwarded client only when the peer is a trusted proxy under that same
+//! decision, and against the peer otherwise. A bucket refuses; it is never an
+//! identity.
 
 mod support;
 
@@ -303,7 +303,7 @@ async fn without_the_flag_the_entry_point_is_unchanged() {
 }
 
 /// **The audited client is the rightmost hop the trusted proxies did not add**
-/// (review L4). A client that sends its own `X-Forwarded-For: 198.51.100.66`
+/// A client that sends its own `X-Forwarded-For: 198.51.100.66`
 /// ahead of the ingress's appended entry is recorded as the address the
 /// ingress saw, not as the one it invented.
 #[tokio::test]
@@ -329,7 +329,7 @@ async fn the_audited_client_is_the_rightmost_untrusted_hop() {
     assert_eq!(record["forwardedFor"], "203.0.113.50");
 }
 
-/// **`/readyz` is exempt too** (review L7): a kubelet dialling the Pod IP from
+/// **`/readyz` is exempt too**: a kubelet dialling the Pod IP from
 /// outside every trusted range reaches the readiness handler, whatever it then
 /// answers — never the entry point's 421.
 #[tokio::test]
@@ -345,9 +345,7 @@ async fn the_readiness_probe_is_exempt() {
     );
 }
 
-// ------------------------------------------------------------------------
-// Chart gap G6: the ingress controller trusted BY ITS SERVICE, not by a /32.
-// ------------------------------------------------------------------------
+// THE INGRESS CONTROLLER TRUSTED BY ITS SERVICE, not by a /32.
 
 const PROXY_NS: &str = "traefik";
 const PROXY_SERVICE: &str = "traefik";
@@ -526,7 +524,7 @@ fn proxy_service() -> Option<logweir_api::config::ServiceRef> {
 /// **The refresh LOOP, driven through failures, lets the set age out.** The
 /// loop reads the Service once, then every read fails: past the staleness
 /// window the Service source trusts nobody and is not ready. A loop that
-/// re-stamped the last set on a failed refresh (the review's mutant m3b) keeps
+/// re-stamped the last set on a failed refresh keeps
 /// trusting a departed address forever and fails here. NEGATIVE CONTROL: the
 /// same loop over a healthy API keeps the set fresh for the same span.
 #[tokio::test]
@@ -579,8 +577,7 @@ async fn a_loop_whose_reads_fail_ages_the_set_out() {
     }
 }
 
-/// **A list that does not fit one page is refused, not trusted half-read**
-/// (the review's mutant m1c).
+/// **A list that does not fit one page is refused, not trusted half-read.**
 #[tokio::test]
 async fn a_proxy_service_with_more_slices_than_one_page_is_refused() {
     let (_log, _guard) = capture();
@@ -608,8 +605,8 @@ async fn a_proxy_service_with_more_slices_than_one_page_is_refused() {
     );
 }
 
-/// **The audited client skips every trusted proxy, the Service's included**
-/// (the review's mutant m6). Two chained ingress hops, both endpoints of the
+/// **The audited client skips every trusted proxy, the Service's
+/// included.** Two chained ingress hops, both endpoints of the
 /// Service and neither in a CIDR: the recorded client is the hop before them.
 #[tokio::test]
 async fn the_audited_client_skips_proxies_trusted_through_the_service() {
@@ -652,12 +649,10 @@ async fn the_audited_client_skips_proxies_trusted_through_the_service() {
     assert_eq!(record["forwardedFor"], "203.0.113.50");
 }
 
-// ------------------------------------------------------------------------
-// FX-13: the sign-in limiter's key, through the real router. Behind one
-// ingress every request has the ingress as its peer, so a peer key is one
-// global budget. These rows use a limiter of three per minute, so a budget is
-// spent in four requests; `/auth/login` answers 303 while one lasts.
-// ------------------------------------------------------------------------
+// THE SIGN-IN LIMITER'S KEY, through the real router. Behind one ingress
+// every request has the ingress as its peer, so a peer key is one global
+// budget. These rows use a limiter of three per minute, so a budget is spent
+// in four requests; `/auth/login` answers 303 while one lasts.
 
 const PER_WINDOW: u32 = 3;
 const SECOND_INGRESS: &str = "10.42.0.18";
@@ -895,7 +890,7 @@ async fn a_chain_with_no_client_hop_falls_back_to_the_peer() {
 
     let client = sign_in(&app, INGRESS, Some("203.0.113.81")).await;
     assert_eq!(client.status, 303, "{}", client.text());
-    // A proxy that appends `ip:port` (review L2) names a client too, not the
+    // A proxy that appends `ip:port` names a client too, not the
     // fallback: served while the peer's budget is spent.
     let with_port = sign_in(&app, INGRESS, Some("203.0.113.82:4711")).await;
     assert_eq!(with_port.status, 303, "{}", with_port.text());
@@ -953,8 +948,8 @@ fn sprayed(i: usize) -> String {
     format!("198.18.{hi}.{lo}")
 }
 
-/// **There is no global bucket** (the FX-13 security reviews: a ceiling over
-/// all clients is the original lockout at a higher threshold). Forty distinct
+/// **There is no global bucket**: a ceiling over all clients is a lockout at
+/// a higher threshold. Forty distinct
 /// clients through the trusted ingress, each spending exactly its own twenty
 /// sign-in requests in one window — 800, more than the 600 a minute the
 /// withdrawn ceiling admitted — are every one served by the shipped login
@@ -984,7 +979,7 @@ async fn no_global_bucket_exists_behind_the_trusted_ingress() {
 }
 
 /// **A client rotating IPv6 addresses inside its `/64` spends one budget**
-/// (the FX-13 security review). Three sign-ins from three addresses of one
+/// Three sign-ins from three addresses of one
 /// `/64`, through the trusted ingress, spend it; a fourth, fresh address of
 /// the same `/64` is refused by the KEY. NEGATIVE CONTROL: a client in the
 /// next `/64` over is served, so the refusal is the `/64`'s and not a global
@@ -1012,10 +1007,10 @@ async fn a_client_rotating_ipv6_addresses_in_its_64_spends_one_budget() {
     assert_eq!(neighbour.status, 303, "{}", neighbour.text());
 }
 
-/// **IPv4 clients behind a NAT64 translator get their own budgets** (review
-/// L1). A server-side NAT64 or SIIT translator presents every IPv4 client in
-/// the well-known prefix `64:ff9b::/96`; folded to its `/64` they would all
-/// share one budget, the pre-FX-13 defect for every IPv4 user. NEGATIVE
+/// **IPv4 clients behind a NAT64 translator get their own budgets.** A
+/// server-side NAT64 or SIIT translator presents every IPv4 client in the
+/// well-known prefix `64:ff9b::/96`; folded to its `/64` they would all share
+/// one budget. NEGATIVE
 /// CONTROL: the same client's fourth request is refused, so the key is the
 /// embedded IPv4 address, not the full IPv6 one.
 #[tokio::test]
@@ -1029,9 +1024,9 @@ async fn ipv4_clients_behind_a_nat64_translator_get_their_own_budgets() {
 }
 
 /// **A refused code exchange names the provider's HTTP status in the console
-/// log** (review M1: an operator must be able to alert on the provider
-/// throttling this client, which reads as `code_exchange_failed` in the audit
-/// whether the code was junk or the provider answered 429). A callback with
+/// log**: an operator must be able to alert on the provider throttling this
+/// client, which reads as `code_exchange_failed` in the audit whether the
+/// code was junk or the provider answered 429. A callback with
 /// a valid login cookie and a code the provider refuses is `401`, the audit
 /// failure stays `code_exchange_failed`, and the WARN line carries
 /// `the provider answered HTTP 400` (the mock's answer to an unknown code).

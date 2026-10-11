@@ -1,4 +1,4 @@
-//! **FX-33 — how many topics one backup may name, and what its signed
+//! **How many topics one backup may name, and what its signed
 //! documents may weigh.** One place: every reader's cap and every refusal is
 //! derived from the numbers here.
 //!
@@ -8,11 +8,8 @@
 //! the configuration capture coverage, the configuration model, the schema
 //! dependency, the topic IDs), and the catalog point record copies them. So
 //! both documents grow with the topic count, about 3 KB a topic. Every reader
-//! holds a document under a cap, and before this module the caps were chosen
-//! one by one: the catalog walk read 256 KiB and the shared controller 1 MiB,
-//! while a dynamic selection admitted 5,000 topics. A backup of about 80
-//! topics was listed by no catalog entry, and one of about 300 was never
-//! verified by the controller.
+//! holds a document under a cap, so a topic count the caps do not bound makes
+//! backups some reader can never list or verify.
 //!
 //! # What sets the limit
 //!
@@ -35,7 +32,7 @@
 //! |---|---|---|
 //! | [`MAX_BACKUP_TOPICS`] | 1,000 | the most topics one backup may name |
 //! | [`RECEIPT_TOPIC_BUDGET_BYTES`] | 5,000 | what ONE topic may cost in a receipt |
-//! | [`RECEIPT_BASE_BUDGET_BYTES`] | 131,072 | everything in a receipt that is not per topic, PROD-04.1's 80 KiB consumer summary included |
+//! | [`RECEIPT_BASE_BUDGET_BYTES`] | 131,072 | everything in a receipt that is not per topic, the 80 KiB consumer summary included |
 //! | [`MAX_RECEIPT_BYTES`] | 5,131,072 | base + maximum × per topic |
 //! | [`RECORD_TOPIC_BUDGET_BYTES`] | 6,000 | what one topic may cost in the catalog point record, which re-indents the receipt's blocks |
 //! | [`MAX_RECORD_BYTES`] | 6,131,072 | the same sum for the record |
@@ -57,7 +54,7 @@
 //!
 //! "Broker defaults" is the 13 semantic configuration entries a 4.x broker
 //! reports, the capture coverage, the schema dependency and both topic IDs.
-//! The fixed part of a receipt is at most 77,683 bytes with PROD-04.1's
+//! The fixed part of a receipt is at most 77,683 bytes with the
 //! largest consumer summary. The first two shapes are the ones the budget
 //! PROMISES the full count of; a selection of the other two is refused by its
 //! bytes above the count shown.
@@ -97,7 +94,7 @@ pub const RECEIPT_TOPIC_BUDGET_BYTES: u64 = 5_000;
 
 /// **What a receipt may spend on everything that is not per topic**: its
 /// header, source, engine and archive blocks (about 1 KB; keys and a version
-/// id can add 3 KB), and PROD-04.1's consumer position summary, which
+/// id can add 3 KB), and the consumer position summary, which
 /// `consumer_positions::MAX_BLOCK_BYTES` holds to 80 KiB.
 pub const RECEIPT_BASE_BUDGET_BYTES: u64 = 128 * 1024;
 
@@ -188,9 +185,7 @@ pub fn refuse_document_bytes(
     })
 }
 
-// ---------------------------------------------------------------------------
-// The reference topic: what the budget is stated FOR
-// ---------------------------------------------------------------------------
+// The reference topic: what the budget is stated FOR.
 
 /// The shape of the topics a [`reference_receipt`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,7 +197,7 @@ pub struct ReferenceShape {
     /// its value, on top of the 13 semantic entries; at most 22.
     pub overrides: usize,
     /// How many consumer groups the backup selected, each with a 255-byte id
-    /// and captured: 100 is PROD-04.1's largest summary. 0 selects none, and
+    /// and captured: 100 is the largest summary. 0 selects none, and
     /// the receipt then carries no `consumer_positions`.
     pub consumer_groups: usize,
 }
@@ -216,8 +211,8 @@ impl ReferenceShape {
         consumer_groups: 0,
     };
 
-    /// [`Self::DEFAULTS`] with PROD-04.1's largest consumer position summary:
-    /// "a topic with full recorded configuration" in FX-33's acceptance.
+    /// [`Self::DEFAULTS`] with the largest consumer position summary: "a topic
+    /// with full recorded configuration".
     pub const FULL: Self = Self {
         name_bytes: 50,
         overrides: 0,
@@ -242,7 +237,7 @@ impl ReferenceShape {
 pub const REFERENCE_AT_THE_BOUND: usize = 1_000;
 
 /// **The reference receipts other crates hold signatures over**: a label, a
-/// topic count and a shape each. FX-33's acceptance sizes in the
+/// topic count and a shape each. The budget's sizes in the
 /// [`ReferenceShape::FULL`] shape, and the receipt at the bound.
 ///
 /// `weirkeeper` cannot link the signer, so its tests verify committed
@@ -519,7 +514,7 @@ pub fn reference_receipt(
                 .collect(),
         ),
         consumer_positions,
-        // PROD-02.1's block is not per topic: the writer caps it at
+        // The source watermarks block is not per topic: the writer caps it at
         // `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` inside the base
         // budget, and it is only from 1.8.0, which this reference is not.
         source_watermarks: None,

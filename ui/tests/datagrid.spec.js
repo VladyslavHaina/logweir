@@ -1,14 +1,12 @@
-// datagrid.spec.js -- PLAT-18.2: the datagrid's arithmetic, the lists that
-// declare one, and focus surviving a re-render.
+// datagrid.spec.js -- the datagrid's arithmetic, the lists that declare one,
+// and focus surviving a re-render.
 //
-// WHAT IS HERE AND WHAT IS NOT. `render.js`'s datagrid is two halves: a pure
-// function from rows and a state to the rows one page shows
-// (`datagridView`), and the DOM enhancement that puts Clarity's filter, sort
-// buttons and pager around a parsed table (`enhanceDatagrids`). Node has no
-// DOM, so the first half, the strings every list page emits, and the focus
-// bookkeeping of `replace` (driven through a small fake document) are
-// asserted here; the enhancement itself was driven in Chromium by a one-off
-// harness (now in git history), keyboard only, against the live API.
+// `render.js`'s datagrid is two halves: a pure function from rows and a state
+// to the rows one page shows (`datagridView`), and the DOM enhancement that
+// puts Clarity's filter, sort buttons and pager around a parsed table
+// (`enhanceDatagrids`). Node has no DOM, so the first half, the strings every
+// list page emits, the focus bookkeeping of `replace` and the enhancement in
+// a fake document are asserted here; keyboard use in a real browser is not.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -51,8 +49,6 @@ function fixture(name) {
 function rows(texts) {
   return texts.map((cells) => ({ text: cells.join(" "), cells: cells }));
 }
-
-// ------------------------------------------------------------ the arithmetic
 
 test("a_filter_keeps_rows_holding_every_term_case_insensitively", () => {
   assert.deepEqual(datagridTerms("  Orders   DLQ "), ["orders", "dlq"]);
@@ -126,8 +122,6 @@ test("a_grid_state_is_kept_per_id_for_the_life_of_the_page", () => {
   assert.equal(datagridState("spec-grid-b").query, "");
 });
 
-// --------------------------------------------------------------- the strings
-
 test("a_declared_datagrid_gains_one_wrapper_and_an_undeclared_table_is_unchanged", () => {
   const plain = table(["A", "B"], [["1", "2"]], "none");
   assert.equal(
@@ -186,8 +180,6 @@ test("the_wizard_topic_subset_is_a_list_datagrid_and_keeps_every_box", () => {
   // The mapping table beneath is a datagrid too.
   assert.ok(html.includes("data-datagrid=\"topic-mapping\""), "the mapping table is a datagrid");
 });
-
-// ------------------------------------------------------ focus across replace
 
 /** A document just large enough for `replace`'s focus bookkeeping. */
 function fakeDocument() {
@@ -335,8 +327,8 @@ test("replace_without_a_document_is_the_plain_replace", () => {
 
 test("a_success_line_never_prints_an_empty_name_or_uid", async () => {
   const { mutationStatus } = await import("../render.js");
-  // The manual-backup answer carries no metadata (the PLAT-18.2 live pass saw
-  // "Created Backup  (uid )."). The line now says only what it knows.
+  // The manual-backup answer carries no metadata, so the line says only what
+  // it knows (never "Created Backup  (uid ).").
   const bare = mutationStatus({ phase: "succeeded", result: { object: {} } },
     { kind: "Backup", name: "", idempotencyKey: true }, null);
   assert.ok(bare.includes("<p>Created Backup.</p>"), bare);
@@ -396,10 +388,10 @@ test("an_operation_announces_its_state_stage_and_reason_in_one_sentence", async 
 });
 
 test("a_control_disabled_by_a_pending_fieldset_hands_focus_to_its_form_status", () => {
-  // Found by the PLAT-18.2 live pass: a form going pending re-renders with its
-  // controls inside a disabled fieldset; the button there has `disabled ===
-  // false` and still refuses focus, so focus fell to the body. It must land on
-  // the form's status region, where the outcome is announced.
+  // A form going pending re-renders with its controls inside a disabled
+  // fieldset; the button there has `disabled === false` and still refuses
+  // focus, so focus must land on the form's status region, where the outcome
+  // is announced, not fall to the body.
   const doc = { activeElement: null, body: null };
   const FOCUSABLE_TAGS = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY"];
   class El {
@@ -494,13 +486,11 @@ test("disabling_the_focused_control_in_place_moves_focus_to_the_status_first", a
   assert.equal(doc.activeElement, bare, "the old way: focus left on the disabled control");
 });
 
-// ------------------------------------- the enhancement, in a fake document
-//
-// Review HIGH-1: a filter kept per grid id and applied to every list of that
-// id -- with the box only rendered over ten rows -- hid all five runs of the
-// next namespace, a Missing archive among them, behind a filter nobody could
-// see or clear. These rows drive `enhanceDatagrids` itself.
-
+// THE ENHANCEMENT, IN A FAKE DOCUMENT. A filter kept per grid id and applied
+// to every list of that id -- with the box only rendered over ten rows --
+// would hide the next namespace's runs, a Missing archive among them, behind
+// a filter nobody could see or clear. These rows drive `enhanceDatagrids`
+// itself.
 
 function historyGrid(doc, count, missingAt) {
   const rows = [];

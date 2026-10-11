@@ -1,11 +1,9 @@
-//! The pure destination model (decision D2 §3.1-§3.4), rule by rule.
+//! The pure destination model, rule by rule.
 //!
 //! Every rule here is asserted in BOTH directions — a violating value is
 //! refused AND a neighbouring legal value is accepted. A one-directional test
-//! is satisfied by a rule that always fails, which is the shape of guard this
-//! repository has already been bitten by ("a guard without a mutant is not a
-//! guard"): each `…_mutant` test below states the planted regression the
-//! positive half kills.
+//! is satisfied by a rule that always fails; a MUTANT note states the planted
+//! regression the positive half kills.
 
 use logweir_core::destination::{
     engine_compatible, validate, validate_ca_bundle, validate_transition, Addressing,
@@ -47,8 +45,6 @@ fn fields(loc: &DestinationLocation) -> Vec<String> {
     }
 }
 
-// ------------------------------------------------------------------ R3 / S5
-
 /// R3, both halves, plus the property the whole rule exists for: the
 /// ADDRESSING field does not appear in the transport decision at all.
 #[test]
@@ -78,13 +74,11 @@ fn transport_must_match_the_endpoint_scheme() {
     assert_eq!(fields(&bad), vec!["R3:spec.transport.security"]);
 }
 
-/// D-SEAMS S5 and tracker defect UI-HTTPDOWNGRADE, as a property rather than
-/// a code reading: flipping ONLY the addressing style changes neither the
-/// validity of a location nor `allow_http`.
+/// Flipping ONLY the addressing style changes neither the validity of a
+/// location nor `allow_http`.
 ///
 /// MUTANT: making `archive_storage_url`'s `allow_http` read
-/// `self.addressing.is_path_style()` — the exact shape of
-/// `ui/pages/restore-wizard.js:1148` — turns the second assertion red.
+/// `self.addressing.is_path_style()` turns the second assertion red.
 #[test]
 fn addressing_never_changes_transport_or_allow_http() {
     for transport in [TransportSecurity::Tls, TransportSecurity::InsecureHttp] {
@@ -114,8 +108,6 @@ fn addressing_never_changes_transport_or_allow_http() {
         }
     }
 }
-
-// ------------------------------------------------------------------ R5
 
 /// R5: the endpoint is an ORIGIN. The eight refusals are the ones an operator
 /// actually types; the three acceptances are the forms the chart documents.
@@ -159,8 +151,6 @@ fn endpoint_must_be_an_origin() {
     }
 }
 
-// ------------------------------------------------------------------ R6
-
 /// R6: the prefix is relative, has no empty/`.`/`..` segment, and may never be
 /// Global Constraint 6's evidence root.
 #[test]
@@ -195,8 +185,6 @@ fn prefix_is_relative_and_never_the_evidence_root() {
         );
     }
 }
-
-// --------------------------------------------------------- bucket and region
 
 #[test]
 fn bucket_and_region_patterns() {
@@ -244,8 +232,6 @@ fn validation_reports_every_failure_at_once() {
     assert_eq!(got.len(), 5, "{got:?}");
 }
 
-// ------------------------------------------------------------------ R4
-
 #[test]
 fn a_ca_bundle_requires_tls() {
     assert!(validate_ca_bundle(TransportSecurity::Tls, true).is_ok());
@@ -254,8 +240,6 @@ fn a_ca_bundle_requires_tls() {
     assert_eq!(err.rule, "R4");
     assert_eq!(err.field, "spec.transport.caBundle");
 }
-
-// ------------------------------------------------------------- R1 / R2
 
 /// R1 and R2. Transport immutability is asserted in BOTH directions: an
 /// "upgrade" is refused too, because it would silently change what an already
@@ -310,20 +294,17 @@ fn location_and_transport_are_immutable() {
     );
 }
 
-// ------------------------------------------------------------------ G4
-
-/// D2 G4 / tracker defect ENGINE-PATHSTYLE: the pinned engine forces
-/// path-style whenever an endpoint is set (0.21.0 ignored `path_style`; 0.22.0
-/// and the 0.23.3 pin honour `path_style: true` but still force path-style
-/// with an endpoint), so virtual-hosted WITH an endpoint is refused rather
-/// than advertised.
+/// The pinned engine forces path-style whenever an endpoint is set (the 0.23.3
+/// pin honours `path_style: true` but still forces path-style with an
+/// endpoint), so virtual-hosted WITH an endpoint is refused rather than
+/// advertised.
 #[test]
 fn custom_endpoint_requires_path_style_for_engine() {
     let mut loc = tls_minio();
     loc.addressing = Addressing::VirtualHosted;
     let message = engine_compatible(&loc).expect_err("refused on the 0.23.3 pin too");
-    // A-C16-1 (PROD-00.3f): the message names the behaviour and NO engine
-    // version, so it does not go stale at the next bump.
+    // The message names the behaviour and NO engine version, so it does not
+    // go stale at the next bump.
     assert!(
         message.contains("path-style") && message.contains("endpoint"),
         "{message}"
@@ -340,17 +321,15 @@ fn custom_endpoint_requires_path_style_for_engine() {
     assert!(engine_compatible(&aws_plain()).is_ok());
 
     // It is an ENGINE compatibility question, not a validity question: the
-    // object is well-formed and CEL admits it (D2 §3.3 makes it a controller
-    // condition, not a CEL rule, because the engine version can change it).
+    // object is well-formed and CEL admits it (a controller condition, not a
+    // CEL rule, because the engine version can change it).
     let mut loc = tls_minio();
     loc.addressing = Addressing::VirtualHosted;
     assert!(validate(&loc).is_ok());
 }
 
-// -------------------------------------------------- urls, digests, evidence
-
-/// PLAT-08.1's "two destinations with different settings work without global
-/// configuration leakage", at the layer that renders the settings.
+/// Two destinations with different settings work without global
+/// configuration leakage, at the layer that renders the settings.
 #[test]
 fn two_locations_render_distinct_storage_urls_and_digests() {
     let a = tls_minio();
@@ -433,8 +412,8 @@ fn the_location_digest_covers_place_and_not_route() {
     assert_eq!(aws_a.host_identity(), "aws/eu-west-1");
 }
 
-/// The digest is a value other tasks freeze into recovery points (D2 §3.7) and
-/// compare on restore (§3.12), so its bytes are pinned here. A change to the
+/// The digest is a value other tasks freeze into recovery points and
+/// compare on restore, so its bytes are pinned here. A change to the
 /// preimage is a change to that contract and must be a reviewed diff.
 #[test]
 fn the_location_digest_preimage_is_pinned() {
@@ -446,7 +425,7 @@ fn the_location_digest_preimage_is_pinned() {
     assert!(d.starts_with("sha256:") && d.len() == 71);
 }
 
-/// D2 §3.4 / G7: evidence lives at the bucket root under `logweir/`, on the
+/// Evidence lives at the bucket root under `logweir/`, on the
 /// same route as the archive. This is the prefix `Store::from_url` demands.
 #[test]
 fn evidence_url_is_bucket_root_logweir() {
@@ -477,7 +456,7 @@ fn evidence_url_is_bucket_root_logweir() {
     assert_eq!(prefix, "team-a/prod");
 }
 
-/// PLAT-08.2's "HTTPS with path-style": the one combination operators most
+/// HTTPS with path-style: the one combination operators most
 /// often believe implies HTTP.
 #[test]
 fn https_path_style_renders_allow_http_false() {
@@ -495,7 +474,7 @@ fn https_path_style_renders_allow_http_false() {
     assert!(!allow_http);
 }
 
-/// PLAT-08.2's "explicitly configured local HTTP": nothing but an explicit
+/// Explicitly configured local HTTP: nothing but an explicit
 /// `http://` endpoint plus an explicit `InsecureHTTP` gets it.
 #[test]
 fn insecure_http_requires_explicit_http_endpoint() {

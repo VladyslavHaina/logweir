@@ -1,7 +1,7 @@
-//! **PROD-01.4a: what a DescribeTopics answer MEANS.**
+//! **What a DescribeTopics answer MEANS.**
 //!
 //! `logweir-rdkafka-ffi::topics::describe_topics` hands back owned values and
-//! interprets nothing (OD-6 (a2)). This module is where they become a
+//! interprets nothing. This module is where they become a
 //! decision, pure and unit-tested with no broker, and available under
 //! `--no-default-features`:
 //!
@@ -44,7 +44,7 @@ pub enum TopicIdRead {
     /// The broker answered with the all-zero ID: it has no IDs to give.
     NoId,
     /// The broker answered with Kafka's reserved `(0, 1)` ID, which no topic
-    /// is ever given (review M1): a sentinel, never an identity.
+    /// is ever given: a sentinel, never an identity.
     Reserved,
     /// The broker does not hold the topic.
     NotFound,
@@ -174,7 +174,7 @@ mod tests {
         }
     }
 
-    /// PROD-01.4's measured pair: librdkafka's halves and the broker CLI's text.
+    /// A measured pair: librdkafka's halves and the broker CLI's text.
     const HALVES: (i64, i64) = (720_210_146_497_416_400, -6_285_085_649_756_852_793);
     const TEXT: &str = "Cf6zT_mcTNCoxuPmv1Ztxw";
 
@@ -188,7 +188,7 @@ mod tests {
             classify(&answer("t", Some((0, 0)), None)),
             TopicIdRead::NoId
         );
-        // Kafka's reserved ONE_UUID / METADATA_TOPIC_ID (review M1).
+        // Kafka's reserved ONE_UUID / METADATA_TOPIC_ID.
         assert_eq!(
             classify(&answer("t", Some((0, 1)), None)),
             TopicIdRead::Reserved
@@ -278,7 +278,7 @@ mod tests {
         ));
     }
 
-    /// Review L1: the codes are pinned as LITERALS here, from `rdkafka.h`
+    /// The codes are pinned as LITERALS here, from `rdkafka.h`
     /// (`_TIMED_OUT` -185, `_TRANSPORT` -195, `_ALL_BROKERS_DOWN` -187,
     /// `_TIMED_OUT_QUEUE` -166, `_RESOLVE` -193), so a wrong constant fails.
     #[test]

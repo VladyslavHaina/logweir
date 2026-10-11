@@ -1,4 +1,4 @@
-//! FX-20: the CHECK runner (destination access, readiness, evidence fetch,
+//! The CHECK runner (destination access, readiness, evidence fetch,
 //! catalog sync) refuses to build ANY object store while the pod carries an
 //! object-store credential whose Secret's `logweir-binding` does not equal the
 //! controller's expectation — `CredentialBindingMismatch`, before a request is

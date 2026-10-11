@@ -1,5 +1,4 @@
-//! The installation's approval-policy document, as this controller reads it —
-//! PLAT-19.2.
+//! The installation's approval-policy document, as this controller reads it.
 //!
 //! The document itself, its validation and every check made over it are
 //! `logweir_core::approval_policy`'s. This module is only the READ: one
@@ -11,10 +10,9 @@
 //!
 //! # Absent is legacy, and bad is a refusal to start
 //!
-//! No variable (or an empty one) is an installation that configured no
-//! policy: every namespace resolves to `legacy-governed-v1`, which is exactly
-//! the pre-PLAT-19.2 behaviour — D0's "existing installations retain their
-//! approval requirement until explicitly changed".
+//! No variable (or an empty one) is an installation that configured no policy:
+//! every namespace resolves to `legacy-governed-v1`, so existing installations
+//! keep their approval requirement until explicitly changed (D0).
 //!
 //! A variable that names a file this process cannot read, or a document that
 //! does not validate, is NOT that: the operator asked for a policy and would
@@ -48,12 +46,12 @@ use crate::crds::trust_policy::{KeyUsage, TrustPolicy};
 /// The environment variable naming the mounted approval-policy document.
 pub const APPROVAL_POLICY_FILE_ENV: &str = "LOGWEIR_APPROVAL_POLICY_FILE";
 
-/// PROD-16.1: the environment variable naming the installation's PUBLIC
-/// identity ConfigMap (`identity.publicConfigMapName`) in the release
-/// namespace ([`crate::check::policy::INSTALLATION_NAMESPACE_ENV`]), on which
-/// the identity hook writes the fresh-install marker. Absent: this controller
-/// never reads a marker, and every unbound namespace without a `defaultMode`
-/// stays `legacy-governed-v1`.
+/// The environment variable naming the installation's public identity
+/// ConfigMap (`identity.publicConfigMapName`) in the release namespace
+/// ([`crate::check::policy::INSTALLATION_NAMESPACE_ENV`]), on which the
+/// identity hook writes the fresh-install marker. Absent: no marker is read,
+/// and every unbound namespace without a `defaultMode` stays
+/// `legacy-governed-v1`.
 pub const IDENTITY_PUBLIC_CONFIGMAP_ENV: &str = "LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP";
 
 /// How often the marker is read again. It is written once, at install, by a
@@ -62,10 +60,10 @@ pub const IDENTITY_PUBLIC_CONFIGMAP_ENV: &str = "LOGWEIR_IDENTITY_PUBLIC_CONFIGM
 /// controller agrees with the console.
 pub const MARKER_POLL_SECONDS: u64 = 15;
 
-/// PROD-16.1 — the fresh-install marker as this process last read it. Starts
+/// The fresh-install marker as this process last read it. Starts
 /// [`InstallationMarker::Unmarked`] (strict); a failed read keeps the last
-/// value read, because the marker is create-once and an API-server blip is
-/// not an uninstall.
+/// value, because the marker is create-once and an API-server blip is not an
+/// uninstall.
 #[derive(Clone, Debug, Default)]
 pub struct MarkerHandle(Arc<RwLock<InstallationMarker>>);
 
@@ -118,10 +116,10 @@ pub fn trust_policy_facts(policy: &TrustPolicy) -> TrustPolicyFacts {
     }
 }
 
-/// THE ONE VERDICT the controller and the console both reach over the
-/// fresh-install marker (PROD-16.1 security review): the annotation and
-/// `key-id` of the public identity ConfigMap in `namespace`, and the
-/// `TrustPolicy` the annotation's claim names as the reader found it.
+/// The one verdict the controller and the console both reach over the
+/// fresh-install marker: the annotation and `key-id` of the public identity
+/// ConfigMap in `namespace`, and the `TrustPolicy` the annotation's claim names
+/// as the reader found it.
 ///
 /// # Errors
 ///
@@ -197,12 +195,11 @@ pub enum MarkerRead<E> {
     Failed(E),
 }
 
-/// THE CONTROLLER'S LAST MILE (PROD-16.1 fix round, review M1): one read's
-/// effect on the handle. An honoured marker is `FreshInstallConfirm`; a
-/// REFUSED marker is `Unmarked` — never anything else — and a failed read
-/// keeps the last verdict (the marker is create-once, so an API-server blip
-/// must not flip an honoured install back to strict, and a handle that was
-/// never set is `Unmarked`).
+/// One read's effect on the handle. An honoured marker is
+/// `FreshInstallConfirm`; a refused marker is `Unmarked`, never anything else;
+/// a failed read keeps the last verdict (the marker is create-once, so a blip
+/// must not flip an honoured install back to strict), and a handle never set
+/// is `Unmarked`.
 pub fn apply_marker_read<E>(
     handle: &MarkerHandle,
     last: &mut Option<Result<InstallationMarker, MarkerRefusal>>,
@@ -261,8 +258,8 @@ pub async fn poll_marker(
     }
 }
 
-/// PROD-16.1 — what the Approval and Restore reconcilers resolve against: the
-/// installation document read at startup, and the marker as last read.
+/// What the Approval and Restore reconcilers resolve against: the installation
+/// document read at startup, and the marker as last read.
 #[derive(Clone, Debug, Default)]
 pub struct PolicySource {
     base: Arc<ApprovalPolicySet>,
@@ -469,8 +466,8 @@ mod tests {
         assert_eq!(set.resolve("team-a").mode(), ApprovalMode::Ordinary);
     }
 
-    /// THE CONTROLLER'S LAST MILE (PROD-16.1 fix round, review M1, whose
-    /// mutant R3 — `unwrap_or(FreshInstallConfirm)` — survived every suite).
+    /// One read's effect on the handle; `unwrap_or(FreshInstallConfirm)` is the
+    /// mutant this kills.
     #[test]
     fn a_refused_marker_is_unmarked_and_a_failed_read_keeps_the_last_verdict() {
         let handle = MarkerHandle::default();

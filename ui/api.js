@@ -5,7 +5,7 @@
 // `application/problem+json`, requires `Idempotency-Key` on a durable create
 // and pages with opaque cursors. Nothing below builds a header carrying a
 // credential: the page has none to carry. (The legacy `kubectl proxy` half was
-// withdrawn in v1, PROD-17.1 C4.)
+// withdrawn in v1.)
 //
 // RULE 1 -- NO EXTERNAL RESOURCE. Every identifier this module builds is
 // relative to the serving origin. `path(...)` is the only place a URL is
@@ -32,21 +32,11 @@
 // caller may hand a write is the synchroniser token the product API's own
 // `/session` response carries, which `ui/client.js` holds in memory for the
 // life of the loaded page and never anywhere else.
-//
-// THE ONE NETWORK CALL SITE. There is exactly one call to the browser's fetch
-// API in all of `ui/`, on one line inside `request` below, and every caller
-// hands it an identifier that `path(...)` produced. A reviewer can check both
-// properties with a grep, which is the point: the same-origin claim is
-// mechanically checkable rather than asserted.
 
 // The scheme separator -- a colon followed by two slashes -- spelled as a
-// concatenation rather than as a literal. `every_api_path_is_relative` asserts
-// this file contains no occurrence of that three-character sequence at all, so
-// that a reviewer grepping the module for one gets an empty result and learns
-// something true. Building it here keeps that assertion honest and keeps this
-// file plain ASCII: an earlier draft of the plan reached for an invisible
-// character to the same end, and invisible characters are what
-// `the_ui_sources_are_ascii_only` exists to forbid.
+// concatenation: `every_api_path_is_relative` asserts this file contains no
+// occurrence of that three-character sequence, and the file stays plain
+// ASCII (`the_ui_sources_are_ascii_only`).
 const SCHEME_SEPARATOR = ":" + "//";
 
 /** Builds a same-origin, RELATIVE identifier from path segments:
@@ -113,10 +103,8 @@ export function apiError(response, text) {
       if (status.details !== null && typeof status.details === "object") {
         details = status.details;
       }
-      // A PROBLEM DOCUMENT IS READ AS ONE, NOT DUMPED (MCP-4): it carries
-      // `detail` and a string `code` rather than `message` and `reason`. The
-      // page used to print the whole document as the message:
-      // `404 {"type":...,"title":...}`.
+      // A PROBLEM DOCUMENT IS READ AS ONE, NOT DUMPED: it carries `detail` and
+      // a string `code` rather than `message` and `reason`.
       if (message.length === 0 && typeof status.detail === "string") {
         message = status.detail;
       }
@@ -156,36 +144,32 @@ export function apiError(response, text) {
 }
 
 /** The console mode's own writable set: the collection routes the product API
- *  has a POST for today. `approvals` is not a plural here: an Approval is
- *  created by the product API itself (an ordinary confirmation) or through the
- *  named governed-submission action `restores:approval` (PLAT-19.2), never by a
- *  page POSTing an Approval object, so a page that reached for it gets a
- *  RangeError here rather than a 404 from a route that does not exist.
+ *  has a POST for. `approvals` is not a plural here: an Approval is created by
+ *  the product API itself (an ordinary confirmation) or through the named
+ *  action `restores:approval`, never by a page POSTing an Approval object.
  *
- *  `destinations` and `preflights` joined it with D2 W12. `topic-discoveries`
- *  did NOT: a discovery is created under the connection it is about
- *  (`/connections/{name}/topic-discoveries`), which is a sub-collection and is
- *  reached through [`consoleAction`] and its own bounded table -- not by
- *  POSTing to a top-level plural that has no create route at all. */
+ *  `topic-discoveries` is not one either: a discovery is created under the
+ *  connection it is about (`/connections/{name}/topic-discoveries`), a
+ *  sub-collection reached through [`consoleAction`] and its own bounded
+ *  table. */
 export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
   "connections",
   "schedules",
   "restores",
   "destinations",
   "preflights",
-  // D1 W7 (PLAT-06.2). `POST .../backups` is "Back up now": a durable create
-  // with a required `Idempotency-Key`, which is the whole of what makes a
-  // double click, a lost response and a reload one run.
+  // `POST .../backups` is "Back up now": a durable create with a required
+  // `Idempotency-Key`, which is the whole of what makes a double click, a
+  // lost response and a reload one run.
   "backups",
-  // D3 W12 (PLAT-15.2). `POST .../catalogs` is "connect an existing archive":
-  // the operator names a destination they already hold a read-only credential
-  // for, and the controller discovers what is in it. It is a DURABLE CREATE
-  // with a required `Idempotency-Key` (D3 section 5.5 step 1: "repeating it returns
-  // the same object"), which is exactly why it is here and not an action: a
-  // lost response, a double click and a reload must all resolve to the one
-  // RecoveryCatalog the first request made, and two catalogs for one
-  // destination are refused by the server as a duplicate.
-  //
+  // `POST .../catalogs` is "connect an existing archive": the operator names
+  // a destination they already hold a read-only credential for, and the
+  // controller discovers what is in it. It is a DURABLE CREATE with a
+  // required `Idempotency-Key` ("repeating it returns the same object"),
+  // which is why it is here and not an action: a lost response, a double
+  // click and a reload must all resolve to the one RecoveryCatalog the first
+  // request made, and two catalogs for one destination are refused by the
+  // server as a duplicate.
   "catalogs",
 ]);
 
@@ -209,7 +193,7 @@ export async function session(options) {
   return { ok: response.ok, status: response.status, body: body };
 }
 
-/** SIGN OUT (MCP-5): `POST /api/v1/session/logout`. An unsafe method, so it is
+/** SIGN OUT: `POST /api/v1/session/logout`. An unsafe method, so it is
  *  a write like every other and carries the session's synchroniser token
  *  (`docs/api.md`, *The session and the CSRF token*); the body is the empty
  *  JSON object, because the route requires `application/json` and reads
@@ -270,7 +254,7 @@ export async function consoleSub(ns, plural, name, sub, options) {
 /** Reads one operation's normalized status. `kind` is the closed set the
  *  product API declares; anything else is refused here, before the network.
  *
- *  FOUR KINDS, TWO SHAPES. `backup` and `restore` answer `OperationResponse`;
+ *  FOUR KINDS, TWO SHAPES. `backup` and `restore` answer `OperationViewResponse`;
  *  `discovery` and `preflight` answer `CheckOperationResponse`, which carries
  *  no result, no evidence and no verification -- a transient check has none of
  *  those facts. This module only builds the identifier; `ui/contract.js`
@@ -291,13 +275,13 @@ export async function consoleOperation(ns, kind, name, options) {
 }
 
 /** Lists one CLUSTER-SCOPED product kind. The product API serves exactly one
- *  (`GET /api/v1/trust-policies`, D3 section 10, installation-admin read), and the
- *  frozen list below is what bounds that: a page that reached for a second
+ *  (`GET /api/v1/trust-policies`, an installation-admin read), and the frozen
+ *  list below is what bounds that: a page that reached for a second
  *  cluster-scoped plural is refused here, before the network.
  *
- *  A CLUSTER-SCOPED READ AND NOTHING MORE. D3 section 10 keeps trust WRITES off the
- *  API in v1 (`capabilities.trustAdministration: false`); the supported path
- *  is `kubectl apply` plus the `logweir trust` helpers. There is no cluster
+ *  A CLUSTER-SCOPED READ AND NOTHING MORE. Trust WRITES stay off the API in v1
+ *  (`capabilities.trustAdministration: false`); the supported path is
+ *  `kubectl apply` plus the `logweir trust` helpers. There is no cluster
  *  plural in [`CONSOLE_WRITABLE_PLURALS`] and this module offers no writer
  *  that takes one. */
 export async function consoleClusterList(plural, options) {
@@ -319,8 +303,8 @@ export async function consoleClusterGet(plural, name, options) {
   return problemBody(response);
 }
 
-/** THE ONE STREAM THIS PAGE OPENS, AND THE SECOND REQUEST SITE IN ALL OF `ui/`
- *  (D3 section 2.6).
+/** THE ONE STREAM THIS PAGE OPENS, AND THE SECOND REQUEST SITE IN ALL OF
+ *  `ui/`.
  *
  *  `EventSource` IS A REQUEST, SO IT LIVES HERE. Every rule the one `fetch`
  *  obeys, this obeys: the identifier is built by `path(...)` on the line of
@@ -422,7 +406,7 @@ export async function consoleAction(ns, action, name, body, options) {
   return problemBody(response);
 }
 
-/** PLAT-19.2: reads a namespace's effective approval policy, `GET
+/** Reads a namespace's effective approval policy, `GET
  *  /api/v1/namespaces/{ns}/approval-policy`. A read; no body, no query. */
 export async function consoleApprovalPolicy(ns, options) {
   const response = await request(
@@ -432,7 +416,7 @@ export async function consoleApprovalPolicy(ns, options) {
   return problemBody(response);
 }
 
-/** PROD-16.2: reads one Restore's two-person request as the approver is shown
+/** Reads one Restore's two-person request as the approver is shown
  *  it, `GET /api/v1/namespaces/{ns}/restores/{name}/approval-request`. A read;
  *  no body, no query. */
 export async function consoleApprovalRequest(ns, name, options) {
@@ -519,7 +503,7 @@ export async function consoleSchedulePolicy(ns, name, body, options) {
   return problemBody(response);
 }
 
-/** THE ONE CLOCK THIS PAGE IS ALLOWED TO JUDGE FRESHNESS BY (D3 section 7.7).
+/** THE ONE CLOCK THIS PAGE IS ALLOWED TO JUDGE FRESHNESS BY.
  *
  *  The instant of the most recent answer, as the SERVER dated it -- the
  *  `logweir-api` process, through HTTP's own `Date` header: a clock the
@@ -535,15 +519,15 @@ export async function consoleSchedulePolicy(ns, name, body, options) {
  *
  *  `null` UNTIL AN ANSWER HAS ARRIVED, and `null` if a proxy strips the
  *  header. A caller with no server instant has not established freshness, and
- *  D3 section 7.7's answer to "not established" is `unknown` -- never `valid`.
+ *  "not established" is `unknown` -- never `valid`.
  *
  *  AND `null` ONCE IT IS TOO OLD TO BE "NOW". A recorded instant that never
  *  expired would be a clock that stops: a route whose answers carry no `Date`
  *  would leave the keys view comparing an evaluation against an instant from
  *  minutes ago, and an instant in the past SHRINKS the measured age -- which
- *  is the direction that reads FRESH. Section 7.7's rule is fail-closed, so
- *  the instant is carried forward by the elapsed time since it was recorded
- *  and dropped altogether past [`SERVER_TIME_MAX_AGE_MS`].
+ *  is the direction that reads FRESH. The rule is fail-closed, so the instant
+ *  is carried forward by the elapsed time since it was recorded and dropped
+ *  altogether past [`SERVER_TIME_MAX_AGE_MS`].
  *
  *  THE ELAPSED TIME IS A DURATION AND NEVER AN ABSOLUTE READING. It comes from
  *  the monotonic clock where there is one (`performance.now()`), and from
@@ -650,22 +634,13 @@ export function problemError(response, text) {
   error.code = document.code;
   error.problem = document;
   // THE PER-FIELD CAUSES A 422 CARRIES, IN THE SHAPE A FORM ALREADY READS.
-  //
-  // THE LIVE RUN FOUND THIS ONE. `Problem.errors[]` is `{field, code,
-  // message}` and `lifecycle.js::fieldErrors` reads `details.causes[]` as
-  // `{field, message, reason}`; only four call sites in `ui/client.js` bridged
-  // the two, and the D3 creates do not go through any of them. So a real 422
-  // from `POST .../catalogs` -- "a catalog name is a DNS-1123 subdomain",
-  // against the field `name` -- reached the connect form with NO field
-  // errors at all, and the form still printed "fix the fields marked below"
-  // with nothing marked. A page that names a repair it does not point at is
-  // worse than one that says only what went wrong.
-  //
-  // Bridged HERE, at the one place every product-API error is built, rather
-  // than at each caller: the per-caller `withCauses` still runs afterwards
-  // where it exists and still wins, because it canonicalises the path into the
-  // custom resource's vocabulary and this cannot -- it does not know the
-  // plural. The messages are the server's own either way, verbatim.
+  // `Problem.errors[]` is `{field, code, message}` and `lifecycle.js`'s
+  // `fieldErrors` reads `details.causes[]` as `{field, message, reason}`, so
+  // they are bridged HERE, where every product-API error is built, and every
+  // create's field errors reach its form. A caller's `withCauses` still runs
+  // afterwards where it exists and wins, because it canonicalises the path
+  // into the custom resource's vocabulary, which this cannot (it does not
+  // know the plural). The messages are the server's own either way.
   if (Array.isArray(document.errors) && document.errors.length > 0) {
     error.details = {
       causes: document.errors.map((cause) => {
@@ -683,8 +658,6 @@ export function problemError(response, text) {
   }
   return error;
 }
-
-// --------------------------------------------------------------- private half
 
 // THE ONE NETWORK CALL SITE IN ALL OF `ui/`. Every caller above passes an
 // identifier `path(...)` returned, so every request this page makes is
@@ -782,13 +755,13 @@ const CONSOLE_ACTIONS = Object.freeze({
   "preflights:cancel": Object.freeze({
     plural: "preflights", named: true, suffix: ":cancel", key: false,
   }),
-  // PLAT-19.2: a governed approver submits the countersigned sidecar for ONE
+  // A governed approver submits the countersigned sidecar for ONE
   // Restore. No key: the Approval it creates is named by the Restore's own
   // immutable approvalRef, so a replay targets the same object by name.
   "restores:approval": Object.freeze({
     plural: "restores", named: true, suffix: "/approval", key: false,
   }),
-  // PROD-16.2: a second person approves ONE Restore's request in the console.
+  // A second person approves ONE Restore's request in the console.
   // No key, for the same reason: the Approval it creates is named by the
   // Restore's own immutable approvalRef, and the same approver's second click
   // is answered as a replay of the first.
@@ -818,12 +791,8 @@ const SUB_FILTERS = Object.freeze([
   "selectable",
 ]);
 
-// The header name that carries the product API's synchroniser token on an
-// unsafe request. PLAT-17.2 owns the final spelling -- today's localAdmin mode
-// returns `null` for the token and relies on the loopback listener and an
-// exact Origin check, so nothing is sent and this line is not yet exercised
-// against a server. It is ONE line on purpose: when the identity stage names
-// the header, this is the only place that changes.
+// The header that carries the product API's synchroniser token on an unsafe
+// request. One line, so a change of spelling is one change.
 const TOKEN_HEADER = "X-CSRF-Token";
 
 // The product API's paging parameters, as a query string. A cursor is opaque:

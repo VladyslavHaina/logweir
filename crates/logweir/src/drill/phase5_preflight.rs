@@ -1,8 +1,6 @@
 //! Phase 5 — Logweir adjudicates the engine's preflight report locally.
 //!
-//! CONTRACT FOR THE CALLER (implemented by the orchestrator in
-//! `crate::drill::run`, Task 21a step 4b — deliberately NOT implemented here,
-//! because that function does not exist yet at this point in the task order):
+//! Contract for the caller, implemented in `crate::drill::execute_with`:
 //! on `Verdict::Block` the orchestrator sets `sc.outcome =
 //! Outcome::PreflightFailed`, `sc.integrity.level = IntegrityLevel::NotAttempted`,
 //! `sc.integrity.result = IntegrityResult::Fail`, `sc.measured.rto_seconds =
@@ -12,23 +10,12 @@
 //! It never reaches phase 6. Exit 1 here would produce no artifact, and this
 //! signed document is the NIS2 IR 4.2.3 evidence (spec §11, Global Constraint 11).
 //!
-//! `PhaseRecord.notes: Vec<String>` (`logweir_core::scorecard::PhaseRecord`)
-//! is what the paragraph above writes `Finding`s into. It did not exist when
-//! this module was first shipped — Task 17 fix round 1 added it, reversing
-//! `task-3-addendum.md` A2 on controller authority, specifically so this
-//! contract would be true rather than aspirational. If you are reading this
-//! and the field is gone again, this contract is broken; do not re-route
-//! findings into `phases[5].outcome` without updating this comment.
+//! The `Finding`s go into `PhaseRecord.notes`
+//! (`logweir_core::scorecard::PhaseRecord`), never into `phases[5].outcome`.
 //!
-//! On `Verdict::Block` the `warnings` vector is DISCARDED, not carried
-//! anywhere — `adjudicate` returns `Block { findings }` only, so any
-//! header-coverage advisories collected before a blocking finding fired never
-//! reach the caller, and therefore never reach the signed scorecard. This is
-//! as specified (the brief's Step 3 body, verbatim) and is not a bug: it
-//! means a blocking run's `notes` never mention `Partial`/`Missing` header
-//! coverage, only the grounds that actually blocked it. A caller wanting
-//! warnings preserved on a blocking run would need `adjudicate`'s signature
-//! changed; Task 17 does not do that.
+//! On `Verdict::Block` the `warnings` are discarded: `adjudicate` returns
+//! `Block { findings }` only, so a blocking run's notes name only the grounds
+//! that blocked it, never `Partial`/`Missing` header coverage.
 
 use crate::drill::DrillError;
 use logweir_core::engine::{BackupSetFacts, CoverageState, PreflightReport, RestorePlan};
@@ -38,7 +25,7 @@ use std::collections::BTreeSet;
 /// The exact prefix of the rendered `restore.yaml` line this guard reads. Two
 /// spaces, because `time_window_start` is a key of the `restore:` block
 /// (`logweir_engine_oso::render_restore::render`); the golden carries the same
-/// indentation, and indentation is part of the contract (plan errata E2/E3).
+/// indentation, and indentation is part of the contract.
 const RENDERED_WINDOW_START_PREFIX: &str = "  time_window_start: ";
 
 /// **GUARD G-WIN, the refusing half.** Refuses, exit 3, when the RENDERED
@@ -54,16 +41,12 @@ const RENDERED_WINDOW_START_PREFIX: &str = "  time_window_start: ";
 /// `  time_window_start: ` line, and compares THAT against a floor it
 /// re-derives from the manifest it already holds.
 ///
-/// # Why exit 3, and not ruling R-E's exit 1
+/// # Why exit 3, not ruling R-E's exit 1
 ///
-/// Ruling R-E makes the phase-5/phase-6 render mismatch exit **1**,
-/// operational, no artifact — by that point the guards have run and
-/// `validate-restore` has already executed. This check is a different animal:
-/// it runs **before** the document is written and before the engine is
-/// invoked at all, so "refused by a guard, before anything runs" (Global
-/// Constraint 11, `crate::exit`) is exactly what describes it. It therefore
-/// returns `DrillError::Guard`, which `DrillError::exit_code` maps to
-/// `ExitCode::GuardRefused` (3).
+/// R-E's phase-5/phase-6 render mismatch is exit 1 because by then
+/// `validate-restore` has executed; this check runs before the document is
+/// written and before the engine is invoked, so it is a guard refusal
+/// (`DrillError::Guard`, exit 3).
 pub fn check_rendered_window_floor(
     plan: &RestorePlan,
     facts: &BackupSetFacts,
@@ -71,7 +54,7 @@ pub fn check_rendered_window_floor(
     check_rendered_selection(plan, facts, &StatedSelection::default())
 }
 
-/// What the APPROVED SPEC states about the replay selection (PROD-11.1), as
+/// What the APPROVED SPEC states about the replay selection, as
 /// phase 5 reads it: never from the plan, whose claim it checks.
 #[derive(Debug, Clone, Default)]
 pub struct StatedSelection {
@@ -92,7 +75,7 @@ impl StatedSelection {
     }
 }
 
-/// **GUARD G-WIN, the refusing half, as amended by PROD-11.1**
+/// **GUARD G-WIN, the refusing half, with the replay selection**
 /// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §2).
 ///
 /// For every engine run the plan renders, it reads the RENDERED document and
@@ -120,7 +103,7 @@ pub fn check_rendered_selection(
     // from `plan.time_window.0` would make this check compare the plan with
     // itself.
     //
-    // Over the topics THIS RESTORE NAMES (plan erratum E7(b)) — the keys of
+    // Over the topics THIS RESTORE NAMES: the keys of
     // the plan's own topic mapping, which is the same set `build_plan` reduced
     // the manifest by, so the independent reading is of the same fact and not
     // of a wider one. `plan.topic_mapping` and not the spec: the plan is what
@@ -136,7 +119,7 @@ pub fn check_rendered_selection(
                 plan.set.backup_id
             )))
         })?;
-    // PROD-11.1: the stated start, from the SPEC. Never earlier than the
+    // The stated start, from the SPEC. Never earlier than the
     // floor: refused here as at plan construction, whatever the plan says.
     if let Some(start_ms) = stated.window_start_ms {
         if start_ms < floor {

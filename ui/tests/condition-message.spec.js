@@ -1,12 +1,12 @@
-// condition-message.spec.js -- FX-34: a message the controller wrote is shown
+// condition-message.spec.js -- a message the controller wrote is shown
 // as TEXT, whatever it holds.
 //
-// WHY THIS ROW EXISTS. A refused Restore's or Backup's terminal condition now
-// carries the runner's own reason, and that sentence interpolates what a plan,
-// a broker and an archive said: a tenant can put text in it. weirkeeper cleans
-// it before it is stored (`crates/weirkeeper/tests/restore_controller.rs`,
-// over the SAME fixture this suite reads), and this suite holds the second
-// lock: every page that shows a controller's message shows it inert.
+// A refused Restore's or Backup's terminal condition carries the runner's
+// own reason, and that sentence interpolates what a plan, a broker and an
+// archive said: a tenant can put text in it. weirkeeper cleans it before it
+// is stored (`crates/weirkeeper/tests/restore_controller.rs`, over the SAME
+// fixture this suite reads), and this suite holds the second lock: every
+// page that shows a controller's message shows it inert.
 //
 // THREE THINGS A MESSAGE MAY HOLD, AND WHAT EACH BECOMES ON SCREEN.
 //   * markup (`<script>`, `<img onerror>`): escaped text, never an element;

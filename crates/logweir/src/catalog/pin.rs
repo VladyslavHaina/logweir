@@ -1,11 +1,10 @@
-//! **FX-7 — what a receipt's manifest-version pin proves IN THE BUCKET BEING
-//! READ**, decided once for every reader that acts on it: the drill's point
-//! binding ([`crate::drill::binding::verify_point_binding`]), the
-//! `catalogSync` deep check ([`crate::check::kinds::catalog_sync`]) and, since
-//! FX-14, the restore preflight of a plan bound to a point
-//! ([`crate::check::kinds::restore`]), which answers `ManifestSuperseded`,
-//! the store's code with [`UNREADABLE_REMEDY`], or `ready` with
-//! [`UNCHECKED_NOTE`] for the three rows of the table below.
+//! **What a receipt's manifest-version pin proves IN THE BUCKET BEING READ**,
+//! decided once for every reader that acts on it: the drill's point binding
+//! ([`crate::drill::binding::verify_point_binding`]), the `catalogSync` deep
+//! check ([`crate::check::kinds::catalog_sync`]) and the restore preflight of
+//! a plan bound to a point ([`crate::check::kinds::restore`]), which answers
+//! `ManifestSuperseded`, the store's code with [`UNREADABLE_REMEDY`], or
+//! `ready` with [`UNCHECKED_NOTE`] for the three rows of the table below.
 //!
 //! # A version id belongs to one object in ONE bucket
 //!
@@ -35,7 +34,7 @@
 //! The pin is checked only where the bucket being read still HOLDS the pinned
 //! version and SERVES it by id. "Not this bucket's history" and "this bucket's
 //! history, gone" are ONE answer to a reader, so a REAL rewrite reaches
-//! [`PinVerdict::Unchecked`] by three routes (FX-7 re-check, R-L1):
+//! [`PinVerdict::Unchecked`] by three routes:
 //!
 //! 1. the pinned version is gone from the bucket that signed the point — a
 //!    lifecycle rule expired it, or a principal holding `s3:DeleteObjectVersion`
@@ -56,17 +55,17 @@
 //! of the pin. Object Lock retention covering a point's lifetime keeps its
 //! pinned version against routes 1's deletion and expiry; a bucket whose
 //! noncurrent versions must outlive its points is the operator's rule to keep.
-//! The alternative the review named — recording the SIGNING bucket in the
-//! receipt and enforcing the pin only there — is a format change, and it would
-//! not help route 1 either. Only a segment-digest reader closes all three
-//! (`SegmentSample`, declared and not implemented by this build).
+//! Recording the SIGNING bucket in the receipt and enforcing the pin only
+//! there is a format change, and would not help route 1 either. Only a
+//! segment-digest reader closes all three (`SegmentSample`, declared and not
+//! implemented by this build).
 //!
 //! # The texts live here, once
 //!
 //! "The pinned version is superseded" widens `availability: Conflict` and
-//! exit 3 inside major 1. The owner ruled that MINOR on 2026-10-07 (FX-7
-//! review, V3): it can only move a point toward not restorable
-//! (`docs/stability.md`). [`judge`]'s `Superseded` arm and
+//! exit 3 inside major 1, and it is MINOR because it can only move a point
+//! toward not restorable (`docs/stability.md`). [`judge`]'s `Superseded` arm
+//! and
 //! [`SUPERSEDED_CAUSE`] are the whole of that cause in both readers.
 
 use logweir_core::backup_receipt::pinnable_version_id;
@@ -107,7 +106,7 @@ pub const UNCHECKED_NOTE: &str = "The pin could not be checked in this bucket: t
      checked by its digest alone, which cannot see segments rewritten under an identical \
      manifest.";
 
-/// **The deep check's remedy when the pinned version could not be READ** (FX-7
+/// **The deep check's remedy when the pinned version could not be READ**
 /// re-check, nit 1): "could not tell", and the one grant the generic
 /// `Unreadable` remedy does not name. A fixed sentence, like every remedy.
 pub const UNREADABLE_REMEDY: &str = "The manifest's pinned version could not be read — this \
@@ -120,8 +119,8 @@ pub const UNREADABLE_REMEDY: &str = "The manifest's pinned version could not be 
 #[derive(Debug)]
 pub enum PinVerdict {
     /// The receipt pins nothing [`pinnable_version_id`] accepts: a receipt
-    /// without the field (every `1.0.0` and `1.1.0` one — an unversioned
-    /// bucket's, or one written before FX-7), or a blank or `"null"` pin no
+    /// without the field (every `1.0.0` and `1.1.0` one, and an unversioned
+    /// bucket's), or a blank or `"null"` pin no
     /// writer produces (a pin is what that function says it is, on the writing
     /// side and on the reading side). The digest is the whole check, as it
     /// always was.
@@ -275,8 +274,7 @@ mod tests {
 
     /// A pin is what `pinnable_version_id` says it is, on both sides: a
     /// receipt carrying a blank or `"null"` pin pins nothing, so no by-id read
-    /// is made and the digest decides (review nit: it used to be enforced as a
-    /// pin that could never match).
+    /// is made and the digest decides.
     #[test]
     fn a_pin_no_writer_produces_is_no_pin() {
         for pin in [None, Some(""), Some("  "), Some("null")] {
@@ -300,7 +298,7 @@ mod tests {
         assert!(UNCHECKED_NOTE.contains("could not be checked in this bucket"));
     }
 
-    /// FX-7 re-check R-L1: the note names every way a bucket can stop holding
+    /// The note names every way a bucket can stop holding
     /// the pinned version — DELETED included, which an operator may well have
     /// done on purpose — and says what the digest then cannot see.
     #[test]
@@ -319,7 +317,7 @@ mod tests {
         );
     }
 
-    /// FX-7 re-check, nit 1: the deep check's remedy for an unreadable pinned
+    /// The deep check's remedy for an unreadable pinned
     /// version names the one grant the generic `Unreadable` remedy does not,
     /// and is neither the superseded cause nor the "could not be checked" note.
     #[test]

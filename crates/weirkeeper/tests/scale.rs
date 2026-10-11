@@ -1,5 +1,5 @@
-//! PLAT-20.2: what the controller's half of a topic discovery costs at the
-//! sizes the contract admits — a MEASUREMENT, not a check.
+//! What the controller's half of a topic discovery costs at the sizes the
+//! contract admits: a MEASUREMENT, not a check.
 //!
 //! One discovery's inventory reaches the controller as a relay of topic frames
 //! on the check pod's stdout. The controller decodes and verifies the frames,

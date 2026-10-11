@@ -1,27 +1,17 @@
-// shared-console.spec.js -- the PoC round's shared-console defects and the
-// class sweep behind them: console code written for the legacy direct-CR mode
-// (the page behind `kubectl proxy`, reading custom resources) that is wrong
-// when the same files are served by `logweir-api` (the shared console,
-// reading the product API's projections).
-//
-//   * POC-P4  -- "Connect an existing archive" was refused 403 because the
-//                request carried no `X-CSRF-Token`;
-//   * POC-P2  -- the restore wizard's recovery points read "signed:
-//                unverified" and "no manifest recorded" beside an API that
-//                said `verificationState: valid, verifiedSuccess: true`;
-//   * POC-P1  -- the shared console printed the legacy page's "runs with the
-//                authority of the kubeconfig that started the proxy";
-//   * CONSOLE-COMPLETION-HEADING-ON-FAILED -- a failed Restore showed "What
-//                this restore produced";
-//   * the class sweep's other rows (see each test's comment).
+// shared-console.spec.js -- console code written for the legacy direct-CR
+// mode (the page behind `kubectl proxy`, reading custom resources) that is
+// wrong when the same files are served by `logweir-api` (the shared console,
+// reading the product API's projections): the connect-archive write's CSRF
+// token, the recovery point's verdict and receipt, the masthead's authority
+// sentence, a failed Restore's completion heading, and the class sweep's
+// other rows.
 //
 // EVERY ROW DRIVES THE CODE A BROWSER RUNS. The console rows go through
 // `ui/client.js` and `ui/api.js` with only `fetch` replaced, so the headers
-// asserted are the headers `api.js` set and the objects rendered are the
+// asserted are the ones `api.js` set and the objects rendered are the
 // projections `client.js` built from the API's own bytes -- two of them
-// captured live on the PoC install (`fixtures/console/backup-poc.json`,
-// `fixtures/backup-poc-cr.json`; see `fixtures/README.md`). Each row fails on
-// the code before its fix; the report records which assertion does.
+// captured live (`fixtures/console/backup-poc.json`,
+// `fixtures/backup-poc-cr.json`; see `fixtures/README.md`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -115,10 +105,7 @@ function listOf(items) {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// ===========================================================================
-// POC-P4: the connect-archive write carries the SESSION's synchroniser token
-// ===========================================================================
-
+// THE CONNECT-ARCHIVE WRITE CARRIES THE SESSION'S SYNCHRONISER TOKEN.
 const CONNECT_BODY = Object.freeze({
   name: "primary", destinationRef: { name: "dest-a" }, syncMode: "full",
 });
@@ -203,11 +190,10 @@ function fakeForm(values) {
 }
 
 test("poc_p4_the_catalog_page_mounted_as_the_shell_mounts_it_sends_the_token", async () => {
-  // THE WHOLE PATH THE POC DROVE: `app.js` mounts the catalog route as
-  // `mount(main, ns, parseFragment, lifecycle)` -- no `deps` -- and the form's
-  // submit reaches the product API through `connectArchive`.
-  // IN A NAMESPACE THE SESSION GRANTS `catalogConnect` (team-a): since MCP
-  // round 2's R2-14 a namespace the session does not grant renders no form.
+  // THE WHOLE PATH: `app.js` mounts the catalog route as `mount(main, ns,
+  // parseFragment, lifecycle)` -- no `deps` -- and the form's submit reaches
+  // the product API through `connectArchive`. In a namespace the session
+  // grants `catalogConnect` (team-a); one it does not grant renders no form.
   await sharedConsole("poc-session-token-3");
   const wire = transport((u, init) => {
     if (init.method === "POST") {
@@ -237,11 +223,11 @@ test("poc_p4_the_catalog_page_mounted_as_the_shell_mounts_it_sends_the_token", a
 });
 
 test("class_a_every_product_api_write_in_ui_takes_its_token_from_the_session", () => {
-  // THE CLASS GUARD (sweep item a). Every call of the four product-API write
-  // functions outside `ui/api.js` must pass the session's token -- `tokenNow()`
-  // or `sessionToken()` in `ui/client.js`'s module memory -- and nothing a
-  // caller could hand in. Found by scanning, so a fifth write added later
-  // without a token fails here rather than as a 403 in front of an operator.
+  // THE CLASS GUARD. Every call of the product-API write functions outside
+  // `ui/api.js` must pass the session's token -- `tokenNow()` or
+  // `sessionToken()` in `ui/client.js`'s module memory -- and nothing a caller
+  // could hand in, so a write added later without a token fails here rather
+  // than as a 403 in front of an operator.
   const WRITES = /\b(consoleCreate|consoleAction|consoleSetSuspension|consoleSchedulePolicy|consoleLogout)\)?\(/g;
   const SESSION_TOKEN = /\btoken:\s*(tokenNow\(\)|sessionToken\(\)|decided === null \? null : decided\.token)/;
   // EVERY MODULE THE PAGE LOADS, read off the directory so a new one is in
@@ -294,10 +280,7 @@ function argumentsAt(text, open) {
   return text.slice(open);
 }
 
-// ===========================================================================
-// POC-P2: the recovery point reads the API's verdict and its receipt
-// ===========================================================================
-
+// THE RECOVERY POINT READS THE API'S VERDICT AND ITS RECEIPT.
 /** The live PoC Backup, as the shared console lists it: the product API's
  *  bytes, projected by `ui/client.js`. */
 async function pocPointsFromTheApi(mutate) {
@@ -378,12 +361,10 @@ test("poc_p2_a_shared_console_point_the_api_did_not_verify_is_never_green", asyn
 });
 
 test("poc_p2_legacy_mode_reads_the_real_custom_resource_by_the_same_rule", () => {
-  // LEGACY MODE KEEPS WORKING, and now reads the real object correctly as
-  // well: `backup-poc-cr.json` is the Backup the PoC's controller wrote, with
-  // `status.evidence.verification.result: Valid` on basis `Current`, exit 0
-  // and -- like every Backup a controller in this tree writes -- no
-  // `status.manifestKey`. The old column read `Valid` as a bare word and
-  // "no manifest recorded".
+  // LEGACY MODE reads the real object by the same rule: `backup-poc-cr.json`
+  // is a Backup a controller wrote, with `status.evidence.verification.result:
+  // Valid` on basis `Current`, exit 0 and -- like every Backup a controller in
+  // this tree writes -- no `status.manifestKey`.
   const cr = fixture("backup-poc-cr.json");
   assert.equal(cr.status.manifestKey, undefined, "the real controller wrote no manifestKey");
   const backups = { items: [cr] };
@@ -417,10 +398,7 @@ test("poc_p2_legacy_mode_reads_the_real_custom_resource_by_the_same_rule", () =>
   assert.equal(archiveAvailability(recorded), "manifest recorded");
 });
 
-// ===========================================================================
-// POC-P1: the masthead says whose authority the page carries, per mode
-// ===========================================================================
-
+// THE MASTHEAD SAYS WHOSE AUTHORITY THE PAGE CARRIES, per mode.
 test("poc_p1_the_static_page_prints_no_legacy_authority_sentence", () => {
   const html = readFileSync(UI + "index.html", "utf8").replace(/<!--[\s\S]*?-->/g, "");
   const body = html.slice(html.indexOf("<body>"));
@@ -473,10 +451,7 @@ test("poc_p1_the_shell_writes_the_decided_mode_s_sentence_when_the_probe_answers
   assert.equal(renders, 1, "and its grants replaced the namespace list, one more render");
 });
 
-// ===========================================================================
-// CONSOLE-COMPLETION-HEADING-ON-FAILED
-// ===========================================================================
-
+// A FAILED RESTORE HAS NO COMPLETION HEADING.
 test("a_failed_restore_has_no_completion_section_in_either_mode", () => {
   const HEADING = "What this restore produced";
   // Console: the operation view's own document for a run that ended failed --
@@ -513,20 +488,15 @@ test("a_failed_restore_has_no_completion_section_in_either_mode", () => {
     /data-completion="unverified"/, "and a succeeded run without one says it is not yet verified");
 });
 
-// ===========================================================================
-// the class sweep's other rows (item b)
-// ===========================================================================
-
+// THE CLASS SWEEP'S OTHER ROWS.
 /** The name `restore.json`'s Restore answers to. */
 const RESTORE_NAME = decoded("restore.json").item.name;
 
 test("sweep_a_shared_console_restore_detail_shows_the_scope_the_api_published", async () => {
   // `history.js` `scopeOf` reads `status.verificationScope`, else the custom
-  // resource's `status.integrity`. The console detail carried neither --
-  // `decodeOperation` kept the frozen sixteen fields and dropped D3's
-  // `verificationScope` -- so the page said "No verification scope was
-  // recorded" about a run the API had scoped. (Since FX-48 the detail decode
-  // reads the whole published view, and the scope is one member of it.)
+  // resource's `status.integrity`, so the console detail must carry the
+  // published `verificationScope` or the page says "No verification scope was
+  // recorded" about a run the API scoped.
   await sharedConsole();
   const wire = transport((u) => {
     if (u.indexOf("/api/v1/namespaces/team-a/operations/restore/") === 0) {
@@ -580,11 +550,10 @@ async function consoleSchedule() {
 }
 
 test("sweep_no_deletion_is_never_claimed_beside_a_policy_that_deletes", async () => {
-  // `policyForSchedule` reads `status.retentionReport.supersededBy`, which no
-  // BackupSchedule CRD in this tree has, no controller writes and the API does
-  // not project. So the panel printed "Logweir never deletes from your
-  // archive" beside a namespace whose RetentionPolicy deletes (both modes; the
-  // shared console reaches the policies through the product API).
+  // The no-deletion sentence must not rest on a field no CRD, controller or
+  // projection carries: "Logweir never deletes from your archive" beside a
+  // namespace whose RetentionPolicy deletes is the claim this row forbids, in
+  // both modes.
   await sharedConsole();
   const schedule = await consoleSchedule();
   const wire = transport((u) =>
@@ -620,10 +589,10 @@ test("sweep_no_deletion_is_never_claimed_beside_a_policy_that_deletes", async ()
 });
 
 test("fx42_a_failed_retention_policy_read_says_so_and_never_claims_no_deletion", async () => {
-  // FX-42: `readRetentionPolicies` turned ANY failed read into an empty list,
-  // and under an empty list the panel printed "Logweir never deletes from your
-  // archive" beside a namespace whose policy may delete nightly. Each answer
-  // goes through the page's own reader, `listD3` and the contract decoder.
+  // A FAILED READ IS NOT AN EMPTY LIST: under an empty list the panel prints
+  // "Logweir never deletes from your archive", beside a namespace whose policy
+  // may delete nightly. Each answer goes through the page's own reader,
+  // `listD3` and the contract decoder.
   await sharedConsole();
   const schedule = await consoleSchedule();
   const problem = (status, code, detail) => ({ status: status, body: {
@@ -665,7 +634,7 @@ test("fx42_a_failed_retention_policy_read_says_so_and_never_claims_no_deletion",
 test("sweep_the_latest_point_s_completion_instant_says_when_it_is_the_creation_instant",
   async () => {
     // A shared-console Backup list carries no conditions, so "Latest point
-    // completed" printed the run's CREATION instant as its completion.
+    // completed" must not print the run's CREATION instant as its completion.
     await sharedConsole();
     const backups = await pocPointsFromTheApi();
     const schedule = await consoleSchedule();

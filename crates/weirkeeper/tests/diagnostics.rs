@@ -1,5 +1,5 @@
-//! D3 §2.3 / §2.4 (PLAT-14.1) — the one diagnosis derivation, its closed
-//! vocabulary, its sanitizer, the fail-fast rule and the progress grammar.
+//! The one diagnosis derivation, its closed vocabulary, its sanitizer, the
+//! fail-fast rule and the progress grammar.
 //!
 //! Pure rows only. The reconciler rows that put these through a route table
 //! live in `backup_controller.rs` and `restore_controller.rs`.
@@ -101,12 +101,10 @@ fn facts<'a>(pod: Option<&'a Pod>, events: &'a [EventFact], now: DateTime<Utc>) 
     }
 }
 
-// ===========================================================================
-// The closed vocabulary — D3 §2.3, exhaustive
-// ===========================================================================
+// The closed vocabulary, exhaustive
 
-/// Every member of the closed enum has all three of D3 §2.3's columns, and the
-/// spellings are `metav1` reasons.
+/// Every member of the closed enum has all three columns (severity,
+/// transience, projection), and the spellings are `metav1` reasons.
 #[test]
 fn the_diagnosis_table_is_exhaustive_over_its_closed_enum() {
     assert_eq!(
@@ -149,8 +147,8 @@ fn the_diagnosis_table_is_exhaustive_over_its_closed_enum() {
     );
 }
 
-/// The vocabulary is D2's, reached through the one door, and nothing else
-/// crosses it.
+/// The vocabulary is the check framework's waiting table, reached through the
+/// one door, and nothing else crosses it.
 ///
 /// MUTANT: adding a fourteenth code, or mapping a non-waiting `CheckCode`,
 /// fails here.
@@ -174,7 +172,7 @@ fn the_codes_are_exactly_d2s_waiting_table_plus_one() {
             ("VolumeMountFailed", "VolumeMountFailed"),
             ("RunnerServiceAccountMissing", "RunnerServiceAccountMissing"),
             ("PodCreateRejected", "PodCreateRejected"),
-            // THE ONE RENAME, and it is D3 §2.3's own: a Backup is not a check.
+            // THE ONE RENAME: a Backup is not a check.
             ("DisruptedMidCheck", "DisruptedMidRun"),
         ],
         "D-SEAMS S1: ONE classification table. Every diagnostic code but \
@@ -195,10 +193,10 @@ fn the_codes_are_exactly_d2s_waiting_table_plus_one() {
     );
 }
 
-/// D3 §2.3's severity and transience columns, row by row.
+/// The severity and transience columns, row by row.
 ///
-/// MUTANT: making `PodUnschedulable` non-transient makes D3 §15's L2 false —
-/// the scenario asserts NO fail-fast patch is issued for it.
+/// MUTANT: making `PodUnschedulable` non-transient would issue a fail-fast
+/// patch for an unschedulable pod.
 #[test]
 fn the_severity_and_transience_columns_are_d3s() {
     // "never starts without a change" — Error, not transient, ever.
@@ -240,7 +238,7 @@ fn the_severity_and_transience_columns_are_d3s() {
     );
 }
 
-/// The one row whose class changes with time — D3 §2.3's "first 180 s".
+/// The one row whose class changes with time: the first 180 s.
 #[test]
 fn a_volume_that_has_not_mounted_in_three_minutes_is_not_mounting() {
     assert!(
@@ -255,8 +253,8 @@ fn a_volume_that_has_not_mounted_in_three_minutes_is_not_mounting() {
     assert_eq!(MOUNT_TRANSIENT_FOR, Duration::from_secs(180));
 }
 
-/// The projection lands on D3 §2.2's six reasons and nothing else, and four of
-/// them are terminal states.
+/// The projection lands on the six closed `RunnerReady` reasons and nothing
+/// else, and four of them are terminal states.
 #[test]
 fn the_runner_ready_projection_is_onto_the_six_closed_reasons() {
     let mut reasons: Vec<&str> = Code::ALL
@@ -306,11 +304,9 @@ fn the_runner_ready_projection_is_onto_the_six_closed_reasons() {
     );
 }
 
-// ===========================================================================
-// Sanitization — D3 §2.3
-// ===========================================================================
+// Sanitization
 
-/// Every rule in D3 §2.3's sanitizer, and the mutant for each.
+/// Every sanitizer rule, and the mutant for each.
 #[test]
 fn sanitize_removes_what_a_status_must_not_carry_and_keeps_what_it_must() {
     // A newline is how a reader is fooled into thinking two facts are one, and
@@ -360,9 +356,7 @@ fn sanitize_removes_what_a_status_must_not_carry_and_keeps_what_it_must() {
     assert_eq!(MESSAGE_MAX_BYTES, 512, "D3 §2.2's `maxLength`");
 }
 
-// ===========================================================================
-// The progress channel — D3 §2.4 as ratified
-// ===========================================================================
+// The progress channel
 
 #[test]
 fn the_progress_grammar_is_read_by_key_name_and_the_last_line_wins() {
@@ -381,7 +375,7 @@ fn the_progress_grammar_is_read_by_key_name_and_the_last_line_wins() {
     assert_eq!(p.ignored, 0);
 }
 
-/// D3 §2.4's five failure modes, each an ABSENCE and never an error.
+/// The five failure modes, each an ABSENCE and never an error.
 #[test]
 fn an_unknown_overlong_or_absent_progress_line_is_ignored_and_never_a_failure() {
     // 1. An old runner: no contract line at all.
@@ -486,7 +480,7 @@ fn both_runners_closed_vocabularies_parse_and_nothing_else_does() {
     );
 }
 
-/// D3 §2.5's verifying row, off the runner's own phase.
+/// The verifying stage, off the runner's own phase.
 #[test]
 fn the_verifying_stage_comes_from_the_runners_phase() {
     let running = pod(json!({
@@ -552,12 +546,10 @@ fn the_verifying_stage_comes_from_the_runners_phase() {
     );
 }
 
-// ===========================================================================
-// The derivation — D3 §13's PLAT-14.1 unit rows
-// ===========================================================================
+// The derivation
 
-/// **D3 §13's "Mount failure" unit row.** A `FailedMount` event plus
-/// `ContainerCreating` is `VolumeMountFailed`.
+/// **Mount failure.** A `FailedMount` event plus `ContainerCreating` is
+/// `VolumeMountFailed`.
 #[test]
 fn a_failed_mount_event_with_container_creating_is_a_volume_mount_failure() {
     let p = waiting_pod("Pending", "True", "ContainerCreating", "");
@@ -591,8 +583,7 @@ fn a_failed_mount_event_with_container_creating_is_a_volume_mount_failure() {
     );
 }
 
-/// **D3 §13's "Unschedulable pod" unit row.** Reported after the grace, and
-/// never fail-fast.
+/// **Unschedulable pod.** Reported after the grace, and never fail-fast.
 #[test]
 fn an_unschedulable_pod_is_reported_after_the_grace_and_never_failed_fast() {
     let p = waiting_pod("Pending", "False", "ContainerCreating", "");
@@ -622,7 +613,7 @@ fn an_unschedulable_pod_is_reported_after_the_grace_and_never_failed_fast() {
     );
 }
 
-/// D3 §2.3's one addition to D2's table.
+/// The one addition to the check framework's table.
 #[test]
 fn a_job_with_no_pod_and_no_event_is_waiting_for_pod_after_sixty_seconds() {
     assert!(
@@ -748,9 +739,7 @@ fn a_disrupted_pod_is_disrupted_mid_run_and_is_not_a_runner_ready_reason() {
     );
 }
 
-// ===========================================================================
-// The diagnostics list — D3 §2.3's dedup, order and bound
-// ===========================================================================
+// The diagnostics list: dedup, order and bound
 
 fn diagnosis(code: Code, name: &str) -> Diagnosis {
     Diagnosis {
@@ -882,14 +871,13 @@ fn the_recorded_diagnostic_names_the_terminal_state() {
     );
 }
 
-/// Defect WARNING-DIAGNOSTICS-NOEXITCODE (PLAT-14.1), the two live rows.
+/// A WARNING that ended the run is its terminal reason.
 ///
 /// A projected ConfigMap that never mounted (fail-fast fired, deadline
 /// 900 → 1) and a pod no node would take (the Job's own deadline) are both
 /// WARNING-class, and in both the Job controller deletes the pod when the
-/// deadline passes — so `crash_terminal_state` has no pod to read, and the
-/// recorded diagnostic is the only witness. harness-rows-11 measured both
-/// ending `NoExitCode` while the diagnostic named the cause.
+/// deadline passes, so `crash_terminal_state` has no pod to read and the
+/// recorded diagnostic is the only witness.
 ///
 /// The pass after fail-fast deletes the pod records `WaitingForPod` on top;
 /// it is newer, it is not a verdict, and the cause beneath it still wins.
@@ -926,9 +914,8 @@ fn a_warning_that_ended_the_run_is_its_terminal_reason() {
     );
 }
 
-/// NEGATIVE CONTROL: the Secret-mount row, which passed live before the fix,
-/// is unchanged — an `Error`-class code is read however long ago it was last
-/// seen, exactly as before.
+/// NEGATIVE CONTROL: the Secret-mount row is unchanged: an `Error`-class code
+/// is read however long ago it was last seen.
 #[test]
 fn an_error_class_mount_failure_is_read_as_before() {
     assert_eq!(
@@ -1046,9 +1033,7 @@ fn a_jobs_end_is_its_terminal_condition() {
     );
 }
 
-// ===========================================================================
-// Fail fast — D3 §2.3
-// ===========================================================================
+// Fail fast
 
 #[test]
 fn fail_fast_needs_all_four_of_its_conditions() {
@@ -1153,9 +1138,7 @@ fn the_configured_bounds_clamp_rather_than_refuse() {
     assert_eq!(FAIL_FAST_SECONDS_MIN, 60);
 }
 
-// ===========================================================================
-// The TTL repair — D3 §2.7
-// ===========================================================================
+// The TTL repair
 
 /// A finished Job with `ttl` and `owners` as given.
 fn finished_job(ttl: Option<i32>, owners: Value) -> Job {
@@ -1181,12 +1164,12 @@ fn owned() -> Value {
             "uid": OWNER_UID, "controller": true, "blockOwnerDeletion": true}])
 }
 
-/// D3 §2.7's three conditions, each one on its own.
+/// The TTL repair's three conditions, each one on its own.
 ///
-/// MUTANT (M8): dropping the owner check. On the reconcile path the
-/// compatibility guard refuses a foreign Job BEFORE the repair is reached, so
-/// a route-table row alone cannot tell whether this check exists — the belt
-/// hides the braces. This is the braces.
+/// MUTANT: dropping the owner check. On the reconcile path the compatibility
+/// guard refuses a foreign Job BEFORE the repair is reached, so a route-table
+/// row alone cannot tell whether this check exists: the belt hides the
+/// braces. This is the braces.
 #[test]
 fn the_ttl_repair_needs_all_three_of_its_conditions() {
     assert!(
@@ -1203,8 +1186,7 @@ fn the_ttl_repair_needs_all_three_of_its_conditions() {
     );
     // AN UNFINISHED JOB THAT IS OTHERWISE PERFECT. The fixture has to be owned
     // and TTL-less, or the owner check stops it first and this assertion is
-    // about the wrong condition — which is exactly how the mutant "drop the
-    // finished check" survived its first run.
+    // about the wrong condition.
     let unfinished = {
         let mut v = serde_json::to_value(finished_job(None, owned())).expect("a Job");
         v["status"] = json!({"active": 1});
@@ -1257,9 +1239,7 @@ fn the_ttl_repair_needs_all_three_of_its_conditions() {
     );
 }
 
-// ===========================================================================
-// The status write — D3 §2.2
-// ===========================================================================
+// The status write
 
 fn write_for<'a>(
     derived: &'a weirkeeper::diagnostics::Derived,
@@ -1476,12 +1456,12 @@ fn a_terminal_patch_finishes_the_progress_block_and_clears_the_heartbeat() {
         "the progress block cannot disagree with the condition it is about: the reason is read \
          out of the patch's own terminal condition"
     );
-    // AN EXPLICIT null, NOT AN OMISSION — and the assertion has to say so by
-    // looking the key UP, because `value["absent"]` is itself `Null` in
-    // `serde_json` and an `is_null()` check alone passes for a key that was
-    // never written. A merge patch that omitted this key would leave `last
-    // observed at 03:02` on a run that is over, and D3 §2.5's staleness row
-    // would then call a finished run `unknown` five minutes later.
+    // AN EXPLICIT null, NOT AN OMISSION, and the assertion looks the key UP,
+    // because `value["absent"]` is itself `Null` in `serde_json` and an
+    // `is_null()` check alone passes for a key that was never written. A merge
+    // patch that omitted this key would leave `last observed at 03:02` on a run
+    // that is over, and the staleness rule would then call a finished run
+    // `unknown` five minutes later.
     let block = out["status"]["progress"]
         .as_object()
         .expect("the progress block is an object");
@@ -1628,18 +1608,15 @@ fn the_written_progress_block_is_the_crd_type() {
     );
 }
 
-// ===========================================================================
-// Review round 1 — the findings, each with the mutant it exists to kill
-// ===========================================================================
+// The progress gate's memory, the read throttle, and the line bound
 
-/// **F2: the gate has a memory, so it outlives its own 50-line window.**
+/// **The gate has a memory, so it outlives its own 50-line window.**
 ///
 /// `progress-contract=` is printed ONCE at the top of the run and the
-/// controller reads the last fifty lines. A gate with no memory therefore
-/// decides "there is no channel" the moment a chatty run scrolls the
-/// announcement away — writing `runnerPhase: null` over a phase it had already
-/// recorded and making D3 §2.5's `Verifying` row unreachable for the rest of
-/// the run.
+/// controller reads the last fifty lines. A gate with no memory would decide
+/// "there is no channel" the moment a chatty run scrolls the announcement
+/// away, writing `runnerPhase: null` over a phase it had already recorded and
+/// making the `Verifying` stage unreachable for the rest of the run.
 ///
 /// MUTANT: dropping `&& !announced` from the gate.
 #[test]
@@ -1647,9 +1624,8 @@ fn a_run_whose_contract_line_scrolled_out_of_the_tail_keeps_its_phase() {
     // The window a long run's tail actually looks like: no announcement.
     let late_window = "progress-phase=7:verify\nconsuming partition 3\n";
 
-    // With no memory the channel is closed and the phase is dropped — this is
-    // the old behaviour, and it is still right for a runner that never
-    // announced anything at all.
+    // With no memory the channel is closed and the phase is dropped, which is
+    // right for a runner that never announced anything at all.
     assert!(
         parse_progress_after(late_window, false).phase.is_none(),
         "an OLD runner prints phase lines with no announcement, and D3 §2.4 says that yields no \
@@ -1671,8 +1647,7 @@ fn a_run_whose_contract_line_scrolled_out_of_the_tail_keeps_its_phase() {
     );
 }
 
-/// …and the consequence the finding is really about: `Verifying` stays
-/// reachable.
+/// …and the consequence: `Verifying` stays reachable.
 #[test]
 fn the_verifying_stage_survives_a_tail_that_no_longer_carries_the_announcement() {
     let running = pod(json!({
@@ -1706,12 +1681,11 @@ fn the_verifying_stage_survives_a_tail_that_no_longer_carries_the_announcement()
     );
 }
 
-/// **F3: the throttle is the rate its own doc claims.**
+/// **The throttle is the rate its own doc claims.**
 ///
-/// The stored clock moves once per minute (E11(d)); comparing it against a
-/// thirty-second bound made the predicate true at +30 s, +45 s **and** +60 s
-/// of every cycle — three 64 KiB `pods/log` GETs a minute where §2.4 allows
-/// two.
+/// The stored clock moves once per minute; compared against a thirty-second
+/// bound the predicate would be true at +30 s, +45 s **and** +60 s of every
+/// cycle: three 64 KiB `pods/log` GETs a minute where two are allowed.
 ///
 /// MUTANT: comparing against `PROGRESS_READ_INTERVAL` instead of
 /// `OBSERVED_HEARTBEAT`.
@@ -1753,14 +1727,13 @@ fn the_progress_read_happens_once_per_heartbeat_and_not_three_times() {
     assert_eq!(OBSERVED_HEARTBEAT, Duration::from_secs(60));
 }
 
-/// **F5: the 96-byte bound has its own mutant.**
+/// **The 96-byte bound has its own mutant.**
 ///
-/// The original case padded the phase NAME, so the closed vocabulary rejected
-/// it whether or not the byte bound existed — the length rule was never the
-/// reason the line was ignored. The bound is genuinely load-bearing for the
-/// **contract** line, which has no vocabulary check at all: without it a
-/// 200-byte `progress-contract=` line from anything that can write to the
-/// runner's stdout opens the channel, and with F2's memory would keep it open.
+/// Padding the phase NAME proves nothing about the bound: the closed
+/// vocabulary rejects it either way. The bound is load-bearing for the
+/// **contract** line, which has no vocabulary check: without it a 200-byte
+/// `progress-contract=` line from anything that can write to the runner's
+/// stdout opens the channel, and the gate's memory would keep it open.
 ///
 /// MUTANT: `if line.len() > PROGRESS_LINE_MAX_BYTES` → `if false`.
 #[test]
@@ -1798,10 +1771,9 @@ fn an_overlong_contract_line_does_not_open_the_channel() {
     );
 }
 
-/// **F11: the `WaitingForPod` message must not deny pods that plainly exist.**
-///
-/// A contested Job gets `pod: None` from the owner-verified seam — the right
-/// access decision — and "no pod it controls has appeared" is then the
+/// **The `WaitingForPod` message must not deny pods that plainly exist.** A
+/// contested Job gets `pod: None` from the owner-verified seam (the right
+/// access decision), and "no pod it controls has appeared" would then be the
 /// opposite of what an operator is looking at.
 #[test]
 fn a_contested_job_says_so_rather_than_claiming_no_pod_appeared() {
@@ -1841,7 +1813,7 @@ fn a_contested_job_says_so_rather_than_claiming_no_pod_appeared() {
     );
 }
 
-/// **F10: `held_for` matches the whole dedup key.**
+/// **`held_for` matches the whole dedup key.**
 ///
 /// MUTANT: dropping `object.kind` from the comparison.
 #[test]
@@ -1880,9 +1852,7 @@ fn held_for_matches_the_kind_as_well_as_the_code_and_the_name() {
     );
 }
 
-/// **F8's third step: `failFastSeconds: 0` means never.**
-///
-/// The controller half, ready for the chart value W13 owes (report gap G3).
+/// **`failFastSeconds: 0` means never.**
 #[test]
 fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
     assert_eq!(
@@ -1906,9 +1876,8 @@ fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
          answer"
     );
 
-    // THE DECISION ITSELF, which is what the assertions above are only about
-    // indirectly. MUTANT: comparing the raw value against anything but
-    // `FAIL_FAST_NEVER` — including applying the floor first.
+    // THE DECISION ITSELF. MUTANT: comparing the raw value against anything but
+    // `FAIL_FAST_NEVER`, including applying the floor first.
     assert_eq!(
         fail_fast_window(Some("0")),
         None,
@@ -1946,18 +1915,16 @@ fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
     );
 }
 
-/// **`apply` ITSELF CARRIES WHAT THE BASE BUILDER DID NOT** — defect
-/// RESTORE-ADMITTED-DROPPED, at the function it lived in.
+/// **`apply` ITSELF CARRIES WHAT THE BASE BUILDER DID NOT.**
 ///
-/// The two production callers now upsert inside their own builders, so a base
-/// reaching here already carries. That makes this the only row that can fail
-/// when `apply`'s carry is removed — and it must exist, because `apply` is the
-/// one place the guarantee is stated for every builder that will ever be
-/// written: a merge PATCH REPLACES `status.conditions`, so the array this
-/// function emits is the whole of it.
+/// The two production callers upsert inside their own builders, so a base
+/// reaching here already carries; this is the only row that fails when
+/// `apply`'s carry is removed, and `apply` is the one place the guarantee is
+/// stated for every builder that will ever be written: a merge PATCH REPLACES
+/// `status.conditions`, so the array this function emits is the whole of it.
 ///
 /// KILLS: `status.insert("conditions", Value::Array(owned))` in
-/// `diagnostics::apply` — writing the base's array plus `RunnerReady` and
+/// `diagnostics::apply`, writing the base's array plus `RunnerReady` and
 /// dropping everything the object already held.
 #[test]
 fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
@@ -1986,9 +1953,8 @@ fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
             message: Some("the runner Job exists".to_string()),
         },
     ];
-    // A BASE THAT NAMES ONLY ITS OWN CONDITION — the shape every builder had
-    // before this branch, and the shape the next one will have until it knows
-    // better.
+    // A BASE THAT NAMES ONLY ITS OWN CONDITION, the shape a new builder has
+    // until it knows better.
     let base = json!({"status": {
         "phase": "Running",
         "conditions": [{"type": "JobCreated", "status": "True", "reason": "JobCreated"}],
@@ -2033,11 +1999,10 @@ fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
     );
 }
 
-/// Review M3: "the runner started" is STICKY. A pass that finds no pod — the
-/// Job controller deleted it at a deadline, before the Job reads `Failed` —
-/// keeps the recorded `startedAt`, so the terminal pass cannot mistake a
-/// runner that ran for one that never started and name an old warning as the
-/// cause.
+/// "The runner started" is STICKY. A pass that finds no pod (the Job
+/// controller deleted it at a deadline, before the Job reads `Failed`) keeps
+/// the recorded `startedAt`, so the terminal pass cannot mistake a runner that
+/// ran for one that never started and name an old warning as the cause.
 ///
 /// MUTANT: write this pass's derived `runner` block as-is. `startedAt` is
 /// absent from the patch and this row fails.
@@ -2088,11 +2053,10 @@ fn a_runner_first_seen_terminated_has_started() {
     assert_eq!(d.runner.started_at, Some(at(19, 40)));
 }
 
-/// Review L6: an ERROR-class code outranks a NEWER qualifying warning, as it
-/// did before the warning path existed.
+/// An ERROR-class code outranks a NEWER qualifying warning.
 ///
-/// MUTANT: one newest-first scan over both classes (the first fix). The
-/// warning wins and this row fails.
+/// MUTANT: one newest-first scan over both classes. The warning wins and this
+/// row fails.
 #[test]
 fn an_error_class_code_outranks_a_newer_warning() {
     assert_eq!(
@@ -2107,9 +2071,9 @@ fn an_error_class_code_outranks_a_newer_warning() {
     );
 }
 
-/// Re-check RL3: a runner first seen CRASH-LOOPING — state `waiting`, the
-/// previous run in `lastState.terminated` — has started, and the start is
-/// recorded, so a later pod-less pass cannot make it read as never-started.
+/// A runner first seen CRASH-LOOPING (state `waiting`, the previous run in
+/// `lastState.terminated`) has started, and the start is recorded, so a later
+/// pod-less pass cannot make it read as never-started.
 ///
 /// MUTANT: drop the `lastState` arms from `runner_facts`. `startedAt` is
 /// absent and this row fails.

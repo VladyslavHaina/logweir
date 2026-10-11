@@ -1,37 +1,28 @@
-//! **FX-29.** A `BackupSchedule` whose latest slot was `Missed` rewrote its
-//! status on every reconcile, and every write woke the next reconcile.
-//!
-//! # What the PoC showed
-//!
-//! PoC batch 4 (2026-10-09, `claude/artifacts/poc-batch-4/findings/`): both
-//! PoC schedules' `resourceVersion` rose ~120 a second each from the moment
-//! they were resumed, with `status.lastSlot.decidedAt` and
-//! `status.policy.evaluatedAt` restamped to the read time on every pass — 323 MB
-//! of controller log in 67 minutes and API-server 429s on a shared cluster. The
-//! old controller did the same. `fixtures/fx-29/poc-schedule.json` is one of
-//! those two objects as the API server held it (annotations dropped).
+//! A settled `BackupSchedule` writes its status once and then nothing: a
+//! write on every reconcile woke the next reconcile, and on a live install
+//! drove each schedule's `resourceVersion` up ~120 a second, with hundreds of
+//! megabytes of controller log and API-server 429s on a shared cluster.
+//! `fixtures/fx-29/poc-schedule.json` is one such object as the API server held
+//! it (annotations dropped).
 //!
 //! # The two causes, and the row each has here
 //!
 //! 1. **A merge patch cannot clear a field that became `None`.** The 10-08 slot
 //!    was `Admitted` with a `Backup`; the 10-09 slot was `Missed` with none.
 //!    `lastSlot.backupRef: None` serialises as an absent key, so the stored
-//!    10-08 reference stayed on the 10-09 record; the typed "same decision?"
-//!    comparison saw stored `Some` against computed `None`, stamped
-//!    `decidedAt: now`, and the write that followed could never make the two
-//!    agree. Rows: `the_poc_schedule_settles_after_one_write`,
+//!    10-08 reference stays on the 10-09 record; a typed "same decision?"
+//!    comparison sees stored `Some` against computed `None`, stamps
+//!    `decidedAt: now`, and no write can make the two agree. Rows:
+//!    `the_poc_schedule_settles_after_one_write`,
 //!    `a_missed_slot_after_an_admitted_one_settles_and_names_no_backup`, and
 //!    the twin of the same class in `history`.
-//! 2. **The reconciler woke on its own `/status` writes.** `Controller::new`
-//!    triggers on every event of the object. Row:
+//! 2. **The reconciler must not wake on its own `/status` writes.**
+//!    `Controller::new` triggers on every event of the object. Row:
 //!    `the_watch_triggers_on_identity_and_spec_revision_only`.
-//!
-//! Each row's control is stated beside it: the pre-fix code fails the
-//! assertion it names.
 //!
 //! The fake API is `weirkeeper::testing::ObjectStore`: it applies each `/status`
 //! merge patch exactly as RFC 7386 says, enforces the `resourceVersion`
-//! precondition, bumps the version and records every write — so "how many
+//! precondition, bumps the version and records every write, so "how many
 //! times did the schedule's status change" is a count, and each pass is handed
 //! the object as a watch would hand it.
 
@@ -47,9 +38,7 @@ use weirkeeper::crds::backup_schedule::BackupSchedule;
 use weirkeeper::slot::{scheduled_backup_name, slot_name};
 use weirkeeper::testing::{mock_client_with_store, ObjectStore, Route, SharedStore};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /// The PoC object, as `kubectl get -o json` returned it at 13:15:56Z on
 /// 2026-10-09, mid-loop.
@@ -187,7 +176,7 @@ async fn pass(
 }
 
 /// Fire the 2026-10-08 00:00 slot of `nightly` and let its run succeed: the
-/// state the PoC's schedules were in on the morning of 10-08.
+/// state the captured schedule was in on the morning of 10-08.
 async fn admitted_yesterday(store: &SharedStore) -> String {
     let fire = utc(2026, 10, 8, 0, 0, 0);
     let key = run_key("nightly", &slot_name(fire));
@@ -207,18 +196,15 @@ async fn admitted_yesterday(store: &SharedStore) -> String {
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
 // The rows
-// ---------------------------------------------------------------------------
 
-/// **The PoC object itself, reconciled forty times in 0.4 s** — the cadence of
-/// the loop the PoC measured. It is written ONCE, and that write is the
+/// **The captured object itself, reconciled forty times in 0.4 s** (the
+/// cadence of the measured loop). It is written ONCE, and that write is the
 /// correction: the 10-08 `backupRef` leaves the 10-09 `Missed` record.
 ///
-/// CONTROL: at `main` `a8a30428` (before this fix) the count is 40 — every pass
-/// stamps `decidedAt: now`, which is the loop. Mutants: dropping `replacing`
-/// keeps the stale reference (the `backupRef` assertion fails); comparing the
-/// block including its instant, or always writing, makes the count 40.
+/// Mutants: dropping `replacing` keeps the stale reference (the `backupRef`
+/// assertion fails); comparing the block including its instant, or always
+/// writing, makes the count 40.
 #[tokio::test]
 async fn the_poc_schedule_settles_after_one_write() {
     let poc: serde_json::Value = serde_json::from_str(POC_SCHEDULE).expect("the fixture is JSON");
@@ -288,14 +274,14 @@ async fn the_poc_schedule_settles_after_one_write() {
     }
 }
 
-/// **A fresh controller, the PoC's sequence from the start.** The 10-08 slot
+/// **A fresh controller, the same sequence from the start.** The 10-08 slot
 /// is admitted and succeeds; the controller is away at 10-09 00:00 and comes
 /// back at 02:00, past the one-hour deadline. The `Missed` decision is written
-/// once — without a `backupRef` — and then nothing, for twenty passes.
+/// once, without a `backupRef`, and then nothing for twenty passes.
 ///
-/// CONTROL: before this fix the first `Missed` write could not remove the
-/// 10-08 `backupRef` (absent key in a merge patch), so the record was wrong
-/// from its first write and every later pass wrote again: 20 writes.
+/// CONTROL: a `Missed` write that cannot remove the 10-08 `backupRef` (absent
+/// key in a merge patch) is wrong from its first write, and every later pass
+/// writes again: 20 writes.
 #[tokio::test]
 async fn a_missed_slot_after_an_admitted_one_settles_and_names_no_backup() {
     let store = store_with(SCHEDULE_KEY, nightly(false, 4));
@@ -343,7 +329,7 @@ async fn a_missed_slot_after_an_admitted_one_settles_and_names_no_backup() {
     );
 }
 
-/// **A real new slot still fires, writes and decides** — the control that the
+/// **A real new slot still fires, writes and decides**: the control that the
 /// rows above did not get their quiet by deciding nothing. From the settled
 /// `Missed` state, 10-10 00:00 comes due: one `Backup` is created, the status
 /// is written, and `lastSlot` is the new decision with its own `decidedAt`.
@@ -398,7 +384,7 @@ async fn a_new_slot_after_a_settled_missed_slot_still_writes_and_decides() {
 
 /// **A spec change still writes.** `suspend` flips on the settled `Missed`
 /// schedule (generation 4 → 5): one write, the `Ready` condition says
-/// `Suspended` with a new transition time, `policy.generation` follows — and
+/// `Suspended` with a new transition time, `policy.generation` follows, and
 /// the pass after it writes nothing.
 #[tokio::test]
 async fn a_spec_change_on_a_settled_schedule_still_writes_once() {
@@ -527,7 +513,7 @@ fn controller_source(file: &str) -> String {
 
 /// The body of the `fn` whose signature contains `needle`, from its opening
 /// brace to the matching one, with every comment line dropped and all
-/// whitespace removed — so a row can assert the CODE's shape, and a comment
+/// whitespace removed, so a row can assert the CODE's shape and a comment
 /// that quotes a call cannot satisfy it.
 fn code_of_fn(source: &str, needle: &str) -> String {
     let at = source
@@ -566,13 +552,13 @@ fn code_only(text: &str) -> String {
 /// **The controller is built on that filter, and on nothing else.** A
 /// source-shape row, because the `Controller` itself needs a cluster to run.
 ///
-/// The call shape is asserted, not the presence of two names (FX-29 review
-/// L-1): `controller_in` hands `Controller::for_stream` the result of
-/// `schedule_trigger_stream(…)` directly, and that function's body is the one
-/// expression `schedule_triggers(watcher(api, …)…)`. Mutants that fail here:
-/// reverting to `Controller::new` (the "requeue on own status" mutant), and
-/// keeping a dead `schedule_triggers(…)` call while handing the UNFILTERED
-/// stream to the controller (the reviewer's R3c).
+/// The call shape is asserted, not the presence of two names: `controller_in`
+/// hands `Controller::for_stream` the result of `schedule_trigger_stream(…)`
+/// directly, and that function's body is the one expression
+/// `schedule_triggers(watcher(api, …)…)`. Mutants that fail here: reverting to
+/// `Controller::new` (requeue on own status), and keeping a dead
+/// `schedule_triggers(…)` call while handing the UNFILTERED stream to the
+/// controller.
 #[test]
 fn the_schedule_controller_is_built_on_the_filtered_trigger() {
     let source = controller_source("backup_schedule.rs");
@@ -595,14 +581,14 @@ fn the_schedule_controller_is_built_on_the_filtered_trigger() {
     );
 }
 
-/// **Every reconcile path returns a timed requeue — the schedule's only clock**
-/// (FX-29 review M-1). Since the watch stopped delivering the schedule's own
-/// status writes, a pass that returned `await_change()` would leave a steady
-/// schedule asleep until somebody edited it. A source-shape row over the four
-/// controllers whose time-based work rides on the requeue: each `reconcile`
-/// returns its named action function, each `error_policy` its error action,
-/// and no code line in the file says `await_change`. The behaviour of each
-/// action is pinned by its own row.
+/// **Every reconcile path returns a timed requeue, the schedule's only
+/// clock.** The watch does not deliver the schedule's own status writes, so a
+/// pass that returned `await_change()` would leave a steady schedule asleep
+/// until somebody edited it. A source-shape row over the four controllers
+/// whose time-based work rides on the requeue: each `reconcile` returns its
+/// named action function, each `error_policy` its error action, and no code
+/// line in the file says `await_change`. Each action's behaviour is pinned by
+/// its own row.
 #[test]
 fn every_timed_controller_returns_its_requeue_on_every_path() {
     for (file, reconcile_returns, error_returns) in [
@@ -661,8 +647,7 @@ fn every_timed_controller_returns_its_requeue_on_every_path() {
 /// not compile until it is added here), plus the error path.
 ///
 /// Mutants that fail here: `schedule_action` returning `await_change()`
-/// (the reviewer's R5b, wherever it is put), and a poll longer than
-/// `REQUEUE_SECS` (R5c).
+/// (wherever it is put), and a poll longer than `REQUEUE_SECS`.
 #[test]
 fn every_reconcile_exit_requeues_within_the_poll() {
     use weirkeeper::cadence::MissedReason;
@@ -934,17 +919,17 @@ async fn the_reconcile_exit_paths_return_the_timed_requeue() {
     assert_eq!(error_action(), poll, "error");
 }
 
-/// **A slot that comes due with NO watch event still fires, within the poll**
-/// (FX-29 review M-1). The controller is driven exactly as kube drives it with
-/// no event: reconcile, wait the requeue the pass returned, reconcile again.
-/// It starts at 23:58:47 the day after an admitted slot; the first pass
-/// records the missed 10-09 slot, and from then on the schedule is in the
-/// settled state the watch filter leaves completely quiet. The 10-10 00:00
-/// slot must fire on the first pass at or after it, and that pass may be at
-/// most one poll (plus one second of slack) late.
+/// **A slot that comes due with NO watch event still fires, within the
+/// poll.** The controller is driven exactly as kube drives it with no event:
+/// reconcile, wait the requeue the pass returned, reconcile again. It starts
+/// at 23:58:47 the day after an admitted slot; the first pass records the
+/// missed 10-09 slot, and from then on the schedule is in the settled state
+/// the watch filter leaves completely quiet. The 10-10 00:00 slot must fire on
+/// the first pass at or after it, at most one poll (plus one second of slack)
+/// late.
 ///
 /// Mutants that fail here: `await_change()` (no requeue to wait), and an
-/// hourly poll (the slot fires an hour late — or, past the starting deadline,
+/// hourly poll (the slot fires an hour late, or, past the starting deadline,
 /// never).
 #[tokio::test]
 async fn a_due_slot_fires_from_the_requeue_alone() {
@@ -995,10 +980,10 @@ async fn a_due_slot_fires_from_the_requeue_alone() {
     );
 }
 
-/// **PROD-17.1 B1: a schedule that still sets the withdrawn `spec.retention`
-/// keeps backing up, and says so once.** Its 10-08 slot fires; the status
-/// carries `RetentionReportWithdrawn=True` with the message naming the field,
-/// and no `retentionReport`; and twenty settled passes write nothing more.
+/// **A schedule that still sets the withdrawn `spec.retention` keeps backing
+/// up, and says so once.** Its 10-08 slot fires; the status carries
+/// `RetentionReportWithdrawn=True` with the message naming the field, and no
+/// `retentionReport`; and twenty settled passes write nothing more.
 ///
 /// CONTROL: the same schedule without `spec.retention` fires the same slot and
 /// carries no such condition. Mutants: the condition written unconditionally
@@ -1091,13 +1076,12 @@ async fn a_schedule_that_still_sets_retention_backs_up_and_names_the_withdrawal(
 
 /// **The same class in `history`.** A migration that WAS blocked and no longer
 /// is: the inventory finds nothing blocked, so `migrationBlocked` must leave
-/// the object — or the `HistoryRetained` condition, computed from the stored
+/// the object, or the `HistoryRetained` condition, computed from the stored
 /// block on every pass that takes no inventory, goes back to
 /// `MigrationBlocked` on the very next pass.
 ///
-/// CONTROL: before this fix the inventory pass's patch omitted the key, the
-/// stale sample stayed, and the second pass below wrote
-/// `HistoryRetained=False/MigrationBlocked`.
+/// CONTROL: an inventory patch that omits the key leaves the stale sample, and
+/// the second pass below writes `HistoryRetained=False/MigrationBlocked`.
 #[tokio::test]
 async fn a_cleared_migration_block_is_cleared_on_the_object() {
     let mut schedule = nightly(true, 4);
@@ -1162,9 +1146,7 @@ async fn a_cleared_migration_block_is_cleared_on_the_object() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The two helpers, as pure functions
-// ---------------------------------------------------------------------------
 
 #[test]
 fn replacing_sends_null_for_every_key_the_stored_block_has_and_the_new_one_lacks() {

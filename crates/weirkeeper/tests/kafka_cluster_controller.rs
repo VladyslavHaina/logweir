@@ -1,25 +1,17 @@
 //! The `KafkaCluster` probe reconciler: one Job, two stdout lines read by key
 //! name, and a `status.reachable` that is never a guess.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST, A `mock_client` TEST OR A
-//! SOURCE-READING TEST. Nothing dials a socket, nothing waits on a Job, nothing
-//! runs `kubectl`. The double PANICS on a request it was not given a route for,
-//! which is what makes a ZERO COUNT — no `pods/exec`, no `pods/attach`, no
-//! `POST` at all on the refused path — mean "the reconciler did not ask" rather
-//! than "the table forgot a route".
+//! Every test here is a pure-function, `mock_client` or source-reading test.
+//! The double PANICS on an unrouted request, which is what makes a ZERO COUNT
+//! (no `pods/exec`, no `pods/attach`, no `POST` at all on the refused path)
+//! mean "the reconciler did not ask" rather than "the table forgot a route".
 //!
-//! READ `a_probe_log_with_no_contract_lines_is_not_a_guess` FIRST. It is the
-//! property the whole module exists for: the probe's two lines are the contract,
-//! and a log that carries neither leaves `reachable` UNSET. Global Constraint
-//! 11's exit 1 covers an unreachable broker, a wrong image, a bad flag and an
-//! unprojected credential alike, so a controller that inferred `false` from the
-//! code would publish a control-plane mistake as a fact about somebody's
-//! cluster.
-//!
-//! **Interface I28 is a declared late binding.** Reading the two lines needs
-//! `get` on the `pods/log` subresource, and the ClusterRole that grants it is
-//! Task 21's. Every test here runs against `testing::mock_client` and needs no
-//! RBAC at all.
+//! READ `a_probe_log_with_no_contract_lines_is_not_a_guess` FIRST: the probe's
+//! two lines are the contract, and a log that carries neither leaves
+//! `reachable` UNSET. Exit 1 covers an unreachable broker, a wrong image, a
+//! bad flag and an unprojected credential alike, so a controller that
+//! inferred `false` from the code would publish a control-plane mistake as a
+//! fact about somebody's cluster.
 
 mod support;
 use support::{conditions_of, not_found_body, patched_statuses, path, posted_job, utc};
@@ -49,17 +41,13 @@ use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster, KafkaClusterStatus
 use weirkeeper::job;
 use weirkeeper::testing::{mock_client_recording_bodies, CapturedLog, Route, SeenBody};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
-/// The task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-t15c";
 
-/// The `KafkaCluster`'s name. Deliberately well inside
-/// `name_limit_for_cluster()` — see
-/// `a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post` for the
-/// other side.
+/// The `KafkaCluster`'s name, well inside `name_limit_for_cluster()` (see
+/// `a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post`).
 const NAME: &str = "orders-prod";
 /// The probe Job's name, spelled out rather than composed, so a change to
 /// `probe_job_name` has to be argued for here as well as asserted there.
@@ -68,15 +56,12 @@ const JOB: &str = "logweir-probe-orders-prod";
 const POD: &str = "logweir-probe-orders-prod-abcde";
 
 /// The probe Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
-/// this probe's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// this probe's pod.
 const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b3";
 
-/// The `metadata.resourceVersion` every fixture object carries — the thing a
-/// watch always delivers and a hand-built fixture used not to.
-///
-/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
-/// this value, so a fixture without one is not an object this controller could
-/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+/// The `metadata.resourceVersion` every fixture object carries, as a watch
+/// always delivers: every `/status` write is a merge PATCH preconditioned on
+/// this value.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
 /// A pod's `ownerReferences` naming `job_uid` as its **controller**.
@@ -84,12 +69,9 @@ fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
     pod_owner_json_in("batch/v1", kind, job_uid, controller)
 }
 
-/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
-///
-/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
-/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
-/// reference naming another group's `Job` must be refused like any other
-/// stranger.
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter. The group
+/// is part of the check: `volcano.sh/v1alpha1` also ships a `Job`, and a
+/// reference naming another group's `Job` must be refused.
 fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
         r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{JOB}","uid":"{job_uid}",
@@ -165,19 +147,16 @@ fn running_job_body() -> String {
 }
 
 /// A pod list holding one pod whose `runner` container terminated with
-/// `exit_code`, preceded by an unrelated sidecar at index 0.
-///
-/// THE SIDECAR IS AT INDEX 0 ON PURPOSE. A suite whose happy path has `runner`
-/// at index 0 cannot tell a by-name reader from a by-index one.
+/// `exit_code`, preceded by an unrelated sidecar at index 0 so a by-index
+/// reader cannot pass for a by-name one.
 fn pod_list_terminated(exit_code: i32) -> String {
     pod_list_terminated_owned_by(exit_code, &owned_by_job())
 }
 
-/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
-///
-/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY (D-SEAMS
-/// **S6**): a probe's two stdout lines become `status.reachable` and
-/// `status.clusterId`, which `Restore` admission then refuses or allows on.
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter,
+/// because the owner is the security boundary: a probe's two stdout lines
+/// become `status.reachable` and `status.clusterId`, which `Restore` admission
+/// refuses or allows on.
 fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
@@ -301,9 +280,7 @@ fn mentioning(bodies: &[SeenBody], needle: &str) -> usize {
         .count()
 }
 
-// ---------------------------------------------------------------------------
 // The reconcile, over the double
-// ---------------------------------------------------------------------------
 
 /// **The acceptance row.** One `POST …/jobs` whose body carries
 /// `restartPolicy: "Never"`, `backoffLimit: 0`,
@@ -312,12 +289,9 @@ fn mentioning(bodies: &[SeenBody], needle: &str) -> usize {
 /// `PATCH …/kafkaclusters/<name>/status` carrying `reachable: true` and
 /// `clusterId`. Zero requests name `pods/exec` or `pods/attach`.
 ///
-/// TWO PASSES, AND THAT IS THE SHAPE OF THE PROPERTY RATHER THAN A CONCESSION.
-/// A reconciler cannot create a Job and read its finished pod's log in the same
-/// pass — the pod does not exist yet — so the sequence the acceptance names is
-/// one pass that creates and one pass that reads, each with its OWN recorder and
-/// each with **exactly one** status `PATCH`. Asserting it over a single merged
-/// recorder would be asserting a sequence no reconciler can produce.
+/// TWO PASSES: a reconciler cannot create a Job and read its finished pod's
+/// log in the same pass, so one pass creates and one reads, each with its OWN
+/// recorder and **exactly one** status `PATCH`.
 #[tokio::test]
 async fn kafka_cluster_reconcile_creates_a_probe_job_and_writes_status() {
     // ---- PASS 1: no Job -> POST, and a status that says a probe is running.
@@ -474,11 +448,9 @@ async fn kafka_cluster_reconcile_creates_a_probe_job_and_writes_status() {
 /// status carries no `clusterId`, `reachable` is ABSENT, and the condition
 /// reason is `ProbeOutputUnreadable`.
 ///
-/// THE EXIT CODE IS 1 IN THIS ARM, DELIBERATELY. Exit 1 is the code a genuinely
-/// unreachable broker produces — so a reconciler that derived `reachable: false`
-/// from the code would pass every other row in this file and fail only here.
-/// Global Constraint 11 gives 1 to a wrong image, a bad flag and an unprojected
-/// credential as well, and none of those is a fact about somebody's cluster.
+/// THE EXIT CODE IS 1 IN THIS ARM, DELIBERATELY: the code a genuinely
+/// unreachable broker produces, so a reconciler that derived `reachable:
+/// false` from the code would pass every other row and fail only here.
 #[tokio::test]
 async fn a_probe_log_with_no_contract_lines_is_not_a_guess() {
     let (client, _rec, bodies) =
@@ -614,12 +586,8 @@ async fn the_probe_job_is_named_from_the_cr() {
 }
 
 /// A `KafkaCluster` whose name is too long for its probe Job's pod label is
-/// refused TERMINALLY, **before any `POST`** — errata **E5d**, review finding
-/// MEDIUM-1.
-///
-/// THE ROUTE TABLE HAS THE `POST` PRESENT. The double panics on an unrouted
-/// request, so "zero POSTs" is only assertable against a table that could have
-/// answered one.
+/// refused TERMINALLY, **before any `POST`**. The route table has the `POST`
+/// present, so "zero POSTs" is an assertion and not the double's panic.
 #[tokio::test]
 async fn a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post() {
     let limit = name_limit_for_cluster();
@@ -706,14 +674,10 @@ async fn a_kafka_cluster_whose_name_is_too_long_is_refused_before_any_post() {
 }
 
 /// A `KafkaCluster` whose saved connection does not resolve is refused BEFORE
-/// any Job is looked for or created, and the refusal CLEARS `reachable` —
-/// PLAT-07.1.
-///
-/// `reachable` is cleared because a `Restore` admits a target on
-/// `status.reachable == true`: a stale `true`, written by an earlier controller
-/// that dialled the same object with different settings, would otherwise let a
-/// restore reach Job construction on an observation this controller does not
-/// stand behind.
+/// any Job is looked for or created, and the refusal CLEARS `reachable`: a
+/// `Restore` admits a target on `status.reachable == true`, and a stale `true`
+/// written by an earlier controller with different settings would be an
+/// observation this controller does not stand behind.
 ///
 /// KILLS: resolve the connection after the Job `GET`, or leave `reachable`
 /// standing on a refusal.
@@ -801,15 +765,10 @@ async fn a_connection_that_does_not_resolve_is_refused_before_any_job() {
 }
 
 /// **A REFUSED CONNECTION STILL ADOPTS THE PROBE JOB AN EARLIER BUILD LEFT
-/// BEHIND** — PLAT-07.1 review finding L2.
-///
-/// Rolling a controller forward while a probe is in flight against an object
-/// the new build refuses is not hypothetical: PLAT-07.1's own live swap moved
-/// the lab's `missing-reference` from `ProbeReportedUnreachable` to
-/// `CredentialNotRenderable` with its Job already created. Before this fix the
-/// refusal `return`ed before the Job was even looked for, so a FINISHED one
-/// never got the `ttlSecondsAfterFinished` that collects it and, with
-/// `Requeue::AwaitChange` over a CEL-immutable `spec`, nothing ever looked
+/// BEHIND.** A controller rolled forward while a probe is in flight against
+/// an object the new build refuses must not strand the Job: a finished one
+/// that never got its `ttlSecondsAfterFinished` would never be collected, and
+/// with `Requeue::AwaitChange` over a CEL-immutable `spec` nothing would look
 /// again.
 ///
 /// TWO SHAPES, TWO ANSWERS, AND A THIRD THING THAT MUST NOT HAPPEN:
@@ -817,9 +776,7 @@ async fn a_connection_that_does_not_resolve_is_refused_before_any_job() {
 /// * in flight → left alone, but the reconciler comes back on the requeue
 ///   clock so a later pass can collect it once it finishes;
 /// * neither → its LOG IS NEVER READ and `reachable` is never written from
-///   it. The Job dialled settings this build refuses to dial, so a verdict
-///   from it would be an observation the controller does not stand behind —
-///   which is the same reason the refusal clears `reachable`.
+///   it: the Job dialled settings this build refuses to dial.
 #[tokio::test]
 async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() {
     // `scramSha512` with no `secretRef` — the lab's `missing-reference` shape.
@@ -843,8 +800,8 @@ async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() 
             false,
             Requeue::After(REQUEUE_SECS),
         ),
-        // FX-19: a Job already being collected, or already given its TTL by
-        // an earlier pass, is left alone — nothing to collect twice.
+        // A Job already being collected, or already given its TTL by an earlier
+        // pass, is left alone: nothing to collect twice.
         (
             "a Job being collected",
             reaping_job(true, true, true),
@@ -946,21 +903,17 @@ async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() 
 }
 
 /// A pod wearing this probe Job's name label but not owned by it is NEVER
-/// read — D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// read.
 ///
-/// This reconciler used to take `list.items.into_iter().next()`: the first pod
-/// the label selector returned, with no owner check.
 /// `batch.kubernetes.io/job-name` is a plain label, so a pod planted by
-/// anything with pod-create in the namespace could assert interface **I14**'s
-/// two lines — and those become `status.reachable` and `status.clusterId`,
-/// which `Restore` admission then refuses or allows on
-/// (`ClusterNotReachable`), and which Global Constraint 18's fourth rail
-/// compares a target's id against.
+/// anything with pod-create in the namespace could print the probe's two
+/// lines, which become `status.reachable` and `status.clusterId`: what
+/// `Restore` admission refuses or allows on (`ClusterNotReachable`) and what a
+/// target's id is compared against.
 ///
 /// Every impostor reports `reachable=true` and a cluster id in a terminated
-/// `runner`, so a reconciler that read one would write BOTH fields. The
-/// expected answer is the crashed-probe branch: no `/log` request, `reachable`
-/// and `clusterId` absent, and nothing claimed about the cluster.
+/// `runner`. The expected answer is the crashed-probe branch: no `/log`
+/// request, `reachable` and `clusterId` absent.
 ///
 /// KILLS: `list.items.into_iter().next()`; an ownerless-pod fallback; matching
 /// an owner reference without `controller: true`; matching an owner reference
@@ -1003,9 +956,8 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
                 status: 200,
                 body: pod_list_terminated_owned_by(0, &owners),
             },
-            // ROUTED AND EXPECTED TO GO UNUSED: the double panics on an
-            // unrouted request, so without this route "it did not read the
-            // log" would be an inability rather than an assertion.
+            // ROUTED AND EXPECTED TO GO UNUSED, so "it did not read the log" is an
+            // assertion rather than the double's panic.
             Route {
                 method: "GET",
                 path_suffix: "/pods/logweir-probe-orders-prod-abcde/log",
@@ -1063,15 +1015,13 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
 }
 
 /// The positive control, and the contest: an OWNED pod IS read, and two pods
-/// claiming one probe Job are BOTH refused — review finding **R1**.
+/// claiming one probe Job are BOTH refused.
 ///
-/// An `ownerReference` is ordinary metadata its author writes and the API
-/// server does not validate, so a tenant who can read the probe Job's
-/// `metadata.uid` can mint a second claimant that prints interface **I14**'s
-/// two lines — and it is the newer pod by construction. Ranking would let it
-/// assert `status.reachable` and `status.clusterId`, the fields `Restore`
-/// admission refuses or allows on. Nothing is read instead, and `reachable`
-/// stays unset.
+/// An `ownerReference` is ordinary metadata the API server does not validate,
+/// so whoever can read the probe Job's `metadata.uid` can mint a second
+/// claimant that prints the two lines, and it is the newer pod by
+/// construction. Ranking would let it set `status.reachable` and
+/// `status.clusterId`; nothing is read instead, and `reachable` stays unset.
 ///
 /// KILLS: refusing every pod; newest-wins over a contested Job; oldest-wins;
 /// writing `reachable` off a contested probe.
@@ -1092,9 +1042,9 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     let seen = bodies.lock().expect("the recorder is readable").clone();
     assert_eq!(count(&seen, "GET", "/log"), 1, "exactly one log read");
 
-    // ARM 2 — a forged second claimant, in both listing orders. BOTH pods'
-    // logs are routed and both answer the two contract lines, so "nothing was
-    // read" is a decision and not an inability.
+    // ARM 2: a forged second claimant, in both listing orders. BOTH pods' logs
+    // are routed and both answer the two contract lines, so "nothing was read"
+    // is a decision and not an inability.
     let owners = owned_by_job();
     let claimant = |suffix: &str, created: &str| {
         format!(
@@ -1189,15 +1139,14 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     }
 }
 
-/// **PoC batch 1, O-1: a crashed probe CLEARS `reachable` and is REPLACED on the
-/// re-probe cadence.** A cluster that read `reachable: true`, whose probe Job
-/// then finished with no terminated `runner` container, used to keep that
-/// `true` beside `Reachable=Unknown/NoExitCode` — a merge patch that omits a key
-/// keeps it, and a `Restore` admits a target on it — and the terminal Job was
-/// re-read on every requeue and never replaced, so the connection was never
-/// probed again (all twelve PoC connections, for a week).
+/// **A crashed probe CLEARS `reachable` and is REPLACED on the re-probe
+/// cadence.** A probe Job that finished with no terminated `runner` container
+/// must not leave an earlier `reachable: true` beside
+/// `Reachable=Unknown/NoExitCode` (a merge patch that omits a key keeps it, and
+/// a `Restore` admits a target on it), and must not be re-read forever instead
+/// of replaced.
 ///
-/// Now: the status writes `reachable: null` (cleared), keeps `clusterId` (the
+/// The status writes `reachable: null` (cleared), keeps `clusterId` (the
 /// identity last observed) and names the sub-case; THEN the Job gets the usual
 /// TTL, which is the re-probe timer; and the pass after the TTL controller has
 /// collected it creates a fresh probe Job.
@@ -1371,16 +1320,12 @@ async fn a_running_probe_job_writes_only_that_a_probe_is_running() {
     assert!(!outcome.created && !outcome.ttl_patched);
 }
 
-// ---------------------------------------------------------------------------
-// The key scan — by name, from a bounded tail (erratum E4)
-// ---------------------------------------------------------------------------
+// The key scan: by name, from a bounded tail
 
 /// The two lines are read **by key name**, wherever they sit in the tail.
-///
-/// FOUR SHAPES, AND THE FOURTH IS THE ONE THE SUITE USED TO MISS (Task 17
-/// review, Probe F): a diagnostic sentence arriving AFTER the contract lines,
-/// which is what a merged pod log does in nondeterministic order (erratum E4).
-/// "The last line of the pod log" is not a reader any controller here may be.
+/// The fourth shape is a diagnostic sentence arriving AFTER the contract
+/// lines, which a merged pod log does in nondeterministic order: "the last
+/// line of the pod log" is not a reader any controller here may be.
 #[test]
 fn the_two_lines_are_read_by_name_from_a_bounded_tail() {
     let expected = ProbeReport {
@@ -1499,12 +1444,10 @@ fn the_verdict_is_a_function_of_the_log_alone() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The Job spec and the argv
-// ---------------------------------------------------------------------------
 
-/// Interface **I14**'s argv, built from the RESOLVED connection (PLAT-07.1) —
-/// and `--marker-topic` passed through UNCONDITIONALLY.
+/// The probe argv, built from the RESOLVED connection, with `--marker-topic`
+/// passed through UNCONDITIONALLY.
 #[test]
 fn the_argv_is_interface_i14s_flag_list() {
     let plaintext =
@@ -1581,9 +1524,9 @@ fn the_password_is_projected_as_a_secret_key_ref_and_never_read() {
         "a probe signs nothing and reads no approval, so it mounts no Secret at all unless the \
          connection names a private CA (PLAT-07.1)"
     );
-    // The password, and (PROD-01.3 security follow-up) the same Secret's
-    // `logweir-binding` key, OPTIONAL, which the runner compares with the
-    // expected binding the controller writes as a literal.
+    // The password, and the same Secret's `logweir-binding` key, OPTIONAL,
+    // which the runner compares with the expected binding the controller
+    // writes as a literal.
     assert_eq!(spec.env_from_secret.len(), 2);
     let e = &spec.env_from_secret[0];
     assert_eq!(e.name, SOURCE_PASSWORD_ENV);
@@ -1620,9 +1563,8 @@ fn the_password_is_projected_as_a_secret_key_ref_and_never_read() {
     assert!(spec.env_from_secret.is_empty());
 
     // ...and a `scramSha512` cluster with NO `secretRef` is REFUSED before a
-    // Job exists (PLAT-07.1). It used to get a probe with no variable, which
-    // then printed `reachable=false` about a configuration mistake — a fact
-    // about this control plane reported as a fact about somebody's cluster.
+    // Job exists: a probe with no password variable would print
+    // `reachable=false` about a configuration mistake.
     let no_secret: KafkaCluster = serde_json::from_str(&cluster_json(
         NAME,
         r#"{ "mode": "scramSha512", "username": "logweir", "tls": true }"#,
@@ -1665,13 +1607,11 @@ fn the_job_is_built_through_job_build() {
     );
 }
 
-/// The env variable the controller projects is the one the subcommand reads.
-///
-/// ASSERTED ACROSS THE CRATE BOUNDARY BY SOURCE SCAN, NOT BY LINKAGE. Global
-/// Constraint 27 keeps `weirkeeper` linking `logweir-verify` and `logweir-core`
-/// only — it does not link `logweir`, so the constant cannot be imported — and
-/// two spellings of one variable name is a probe that dials unauthenticated
-/// while the Job spec looks correct.
+/// The env variable the controller projects is the one the subcommand reads,
+/// asserted ACROSS THE CRATE BOUNDARY BY SOURCE SCAN: `weirkeeper` does not
+/// link `logweir`, so the constant cannot be imported, and two spellings of
+/// one variable name is a probe that dials unauthenticated while the Job spec
+/// looks correct.
 #[test]
 fn the_probe_password_variable_matches_the_subcommand() {
     let probe_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../logweir/src/probe.rs");
@@ -1700,18 +1640,12 @@ fn the_probe_password_variable_matches_the_subcommand() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Status-shape invariants
-// ---------------------------------------------------------------------------
 
 /// Every patch this module builds writes **exactly one** condition and a scalar
-/// `reason` equal to it.
-///
-/// ERRATA **E5c**: a condition array is a map keyed by `type`, so two
-/// `Reachable` entries would be malformed however their statuses read — and the
-/// day any task gives the array `x-kubernetes-list-type: map` the API server
-/// would reject the patch. Review finding **M2**: the scalar exists so the state
-/// is readable without parsing the condition array.
+/// `reason` equal to it. A condition array is a map keyed by `type`, so two
+/// `Reachable` entries would be malformed; the scalar makes the state
+/// readable without parsing the condition array.
 #[test]
 fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
     let c = cluster();
@@ -1730,7 +1664,7 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
         observed_status_patch(&c, &verdict(&ProbeReport::default()), 1, now()),
         crashed_status_patch(&c, "NoExitCode", JOB, now()),
         refused_status_patch(&c, TERMINAL_STATE_NAME_TOO_LONG, "too long", now()),
-        // FX-19 fix round: a reading too old to vouch for.
+        // A reading too old to vouch for.
         stale_status_patch(&c, "its probe Job has been in deletion since then", now()),
     ];
     for p in &patches {
@@ -1772,15 +1706,11 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
          patch builder added with `conditions` and no `reason` lands here as {conditions_keys} \
          conditions against {reason_keys} reasons."
     );
-    // THE COUNT USED TO BE `conditions_keys + 1`, and the `+ 1` was the
-    // `"reason"` STRING KEY inside this file's own `condition` builder. Task
-    // 16b replaced that hand-built `json!({…})` with the serialised
-    // `crds::Condition` the shared `conditions::merge_condition` returns — one
-    // transition-time comparison for all six reconcilers, plan erratum
-    // E11(d) — so the builder no longer spells the key and the counts are now
-    // equal. Asserted rather than left implicit: if the builder ever stops
-    // going through the shared merge, the equality above would silently start
-    // meaning something else.
+    // THE COUNTS ARE EQUAL because the builder returns the serialised
+    // `crds::Condition` from the shared `conditions::merge_condition` and no
+    // longer spells the `"reason"` key itself. Asserted rather than left
+    // implicit: if the builder ever stops going through the shared merge, the
+    // equality above would silently start meaning something else.
     assert!(
         src.contains("json!(merge_condition("),
         "the condition builder goes through `conditions::merge_condition`, which is why the \
@@ -1793,8 +1723,7 @@ fn every_status_write_is_one_condition_and_a_matching_scalar_reason() {
 #[test]
 fn every_probe_condition_reason_is_a_valid_metav1_reason() {
     // `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, hand-checked rather than
-    // regexed: Global Constraint 38 closes the workspace graph and this crate
-    // takes no regex dependency.
+    // regexed: this crate takes no regex dependency.
     fn valid(r: &str) -> bool {
         let b = r.as_bytes();
         if b.is_empty() || !b[0].is_ascii_alphabetic() {
@@ -1902,34 +1831,24 @@ fn the_requeue_maps_onto_the_action_the_runtime_gets() {
     }
 }
 
-/// **The hot loop, and its regression test.** Two reconciles over the SAME
-/// finished probe Job write BYTE-IDENTICAL status patches.
+/// **Two reconciles over the SAME finished probe Job write BYTE-IDENTICAL
+/// status patches.**
 ///
-/// # What went wrong live, and what it cost
-///
-/// With `observedAt` taken from the controller's clock, the shipped reconciler
-/// did **3,388 reconciles in ninety seconds** on docker-desktop against three
-/// `KafkaCluster` objects. `controller().owns(jobs)` is half the mechanism and a
-/// status field that changes on every read is the other: a patch carrying a
-/// fresh `now` bumps `resourceVersion`, the object's own watch fires, the
-/// reconcile re-reads the same finished Job, writes another fresh `now`, and the
-/// loop feeds itself at ~2,000 passes a minute. (The TTL patch is innocent: a
-/// merge patch whose content is unchanged bumps nothing.)
-///
-/// The fix is `observed_at`, which takes the instant from the PROBE — the
-/// runner container's `finishedAt`, the Job's `completionTime`, or its terminal
-/// condition — so the whole patch is a function of the Job and a re-read is a
-/// no-op at the API server. This row is what stops the clock creeping back in:
-/// it drives the real reconcile twice over one route table and compares the two
-/// patches as bytes, with two DIFFERENT `now` values to make the point that the
-/// controller's clock must not appear in the result at all.
+/// `controller().owns(jobs)` plus a status field that changes on every read
+/// is a hot loop: a patch carrying a fresh `now` bumps `resourceVersion`, the
+/// object's own watch fires, and the reconcile re-reads the same finished Job
+/// and writes another fresh `now`. `observed_at` takes the instant from the
+/// PROBE (the runner container's `finishedAt`, the Job's `completionTime`, or
+/// its terminal condition), so the whole patch is a function of the Job. This
+/// row drives the real reconcile twice with two DIFFERENT `now` values and
+/// compares the patches as bytes.
 #[tokio::test]
 async fn the_observed_status_patch_is_stable_across_passes() {
     // A finished Job whose pod's `runner` reports a fixed `finishedAt`, which is
     // what the fixtures above already carry.
     let mut patches = Vec::new();
-    // Nine minutes apart, both inside the FX-19 staleness bound: past it the
-    // reading is no longer written as a verdict at all (the `fx19_*` stale rows).
+    // Nine minutes apart, both inside the staleness bound: past it the reading
+    // is no longer written as a verdict at all (the `fx19_*` stale rows).
     for clock in [now(), utc(2026, 9, 10, 12, 9)] {
         let (client, _rec, bodies) =
             mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
@@ -1983,28 +1902,18 @@ async fn the_observed_status_patch_is_stable_across_passes() {
     );
 }
 
-// ===========================================================================
-// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
-// ===========================================================================
+// The steady-object row
 
 /// A steady `KafkaCluster` is patched ONCE and then never again.
 ///
-/// # Why this row exists on a reconciler that was already measured QUIET
+/// [`the_observed_status_patch_is_stable_across_passes`] asserts the two
+/// patches are the same BYTES; identical bytes still travel as a `PATCH` on
+/// every pass. A reconcile whose computed status equals the stored one sends
+/// nothing at all, and only a route-table count can see the difference.
 ///
-/// Task 15c fixed this kind's instance of the family by taking the instant
-/// from the PROBE rather than the clock — see
-/// [`the_observed_status_patch_is_stable_across_passes`], which asserts the two
-/// patches are the same BYTES. Quiet at the API server is not the same claim as
-/// *silent*: identical bytes still travel as a `PATCH` on every pass, and the
-/// API server's "this changed nothing" is what made it invisible. Task 16b's
-/// third rule is that a reconcile whose computed status equals the stored one
-/// sends nothing at all, and THIS is the row that can see the difference — a
-/// route-table count, not a byte comparison.
-///
-/// The second object is not hand-written: it is the first pass's own patch,
-/// applied to the first object exactly as the API server would apply it
-/// (`conditions::apply_merge_patch`, RFC 7386), so the test cannot pass by
-/// asserting over a status the reconciler would never have produced.
+/// The second object is the first pass's own patch applied to the first
+/// object as the API server would apply it (`conditions::apply_merge_patch`,
+/// RFC 7386).
 #[tokio::test]
 async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
     let (client, _rec, bodies) =
@@ -2027,9 +1936,9 @@ async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
             .expect("the patched status is a KafkaClusterStatus — the API server stores it"),
     );
 
-    // A DIFFERENT CLOCK, nine minutes later (inside the FX-19 staleness bound,
-    // past which the reading is not re-asserted), over the same finished
-    // Job and the same log.
+    // A DIFFERENT CLOCK, nine minutes later (inside the staleness bound, past
+    // which the reading is not re-asserted), over the same finished Job and
+    // the same log.
     let (client, _rec, bodies) =
         mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
     reconcile_cluster(&steady, &client, utc(2026, 9, 10, 12, 9))
@@ -2046,20 +1955,12 @@ async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
     );
 }
 
-// ===========================================================================
-// SEAM S7 — every `/status` write is a resourceVersion-preconditioned merge
-// PATCH (defect STATUS-PATCH-NO-RV)
-// ===========================================================================
+// Every `/status` write is a resourceVersion-preconditioned merge PATCH
 
-/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**.
-///
-/// This reconciler's six writes went out with no `metadata` at all, so a
-/// verdict computed from a stale watch-cache copy could overwrite the refusal a
-/// NEWER build of this same controller had just written — which is review
-/// finding L2's rolling-upgrade case, one field over.
-///
-/// Both of this kind's branches are asserted: the pass that creates a probe Job
-/// and the pass that reads a finished one.
+/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION**, so a verdict computed from
+/// a stale watch-cache copy cannot overwrite the refusal a NEWER build of
+/// this controller has just written. Both branches are asserted: the pass
+/// that creates a probe Job and the pass that reads a finished one.
 ///
 /// KILLS: dropping the `metadata` insert in
 /// `conditions::patch_status_preconditioned`; naming a different object.
@@ -2108,15 +2009,14 @@ const CONFLICT_BODY: &str = r#"{"kind":"Status","apiVersion":"v1","status":"Fail
                              "message":"the object has been modified","reason":"Conflict",
                              "code":409}"#;
 
-/// **A `409` ON THE STATUS WRITE IS AN OUTCOME, AND IT NEVER PRECEDES A TTL**
-/// (FX-19). The shared helper still surfaces the conflict as the API error it
-/// is; this reconciler answers it as [`Deferred::StatusSuperseded`] — the
-/// watch cache handed the pass an older copy, the newer copy's own event
-/// reconciles again — at debug, never at WARN and never as a reconcile error.
-/// PoC batch 2 counted about seven of these WARN lines a cadence.
+/// **A `409` ON THE STATUS WRITE IS AN OUTCOME, AND IT NEVER PRECEDES A TTL.**
+/// The shared helper surfaces the conflict as the API error it is; this
+/// reconciler answers it as [`Deferred::StatusSuperseded`] (the watch cache
+/// handed the pass an older copy, and the newer copy's own event reconciles
+/// again) at debug, never at WARN and never as a reconcile error.
 ///
 /// Both passes that write: the creating pass (the new Job's own events race
-/// the status it just wrote — the common case) and the verdict pass, where the
+/// the status it just wrote, the common case) and the verdict pass, where the
 /// ordering is the property: a verdict that did not land is NOT followed by
 /// the TTL, which would let pod garbage collection take a log nobody recorded.
 ///
@@ -2197,7 +2097,7 @@ async fn a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_t
     }
 
     // ---- the two refusal writes: a connection that does not resolve, and a
-    // name too long — the 409 is the same outcome, looked at again on the
+    // name too long. The 409 is the same outcome, looked at again on the
     // short clock rather than waited out as `AwaitChange` --------------------
     let unresolved: KafkaCluster = serde_json::from_str(&cluster_json(
         NAME,
@@ -2236,9 +2136,7 @@ async fn a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_t
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-11 — a probe pod the namespace refuses at creation
-// ---------------------------------------------------------------------------
+// A probe pod the namespace refuses at creation
 
 /// The admission's words for a quota-refused probe pod.
 const QUOTA_REFUSAL: &str = "Error creating: pods \\\"logweir-probe-orders-prod-x2b9c\\\" is \
@@ -2324,14 +2222,13 @@ fn job_patches(bodies: &[SeenBody]) -> Vec<Value> {
         .collect()
 }
 
-/// **FX-11: A QUOTA-REFUSED PROBE IS `PodCreationForbidden` 30 SECONDS AFTER
-/// THE JOB, NAMING THE QUOTA, WITH `reachable` CLEARED (O-1).** Before FX-11 the
-/// cluster read `ProbeRunning` for the probe's whole 120-second deadline and
-/// then `NoExitCode`.
+/// **A QUOTA-REFUSED PROBE IS `PodCreationForbidden` 30 SECONDS AFTER THE JOB,
+/// NAMING THE QUOTA, WITH `reachable` CLEARED**, rather than `ProbeRunning` for
+/// the probe's whole 120-second deadline and then `NoExitCode`.
 ///
 /// Pass 1: the running Job is 45 s old, counts no pod and has a `FailedCreate`
-/// Event — it is cancelled, and the status names the refusal. Pass 2: the
-/// cancelled Job has failed — the same status, and NOW the TTL, which is the
+/// Event: it is cancelled, and the status names the refusal. Pass 2: the
+/// cancelled Job has failed: the same status, and NOW the TTL, which is the
 /// re-probe timer: one refused Job per cadence, never a retry storm.
 ///
 /// KILLS: the Events read dropped at either step; the message not propagated;
@@ -2441,13 +2338,10 @@ async fn fx11_a_probe_pod_the_quota_refuses_names_the_quota_and_clears_reachable
     assert!(status_at < ttl_at, "the status lands before the TTL");
 }
 
-/// **FX-11 NEGATIVE CONTROL.** The same podless probe with no `FailedCreate`
-/// Event is not a refusal: `ProbeRunning` and no cancel while it runs,
-/// `NoExitCode` once it has failed.
-///
-/// THE SECOND HALF IS EXACTLY THE POC'S SHAPE (PoC batch 1, O-1): a finished
-/// probe Job with no pod and no Event, which the twelve PoC connections sat
-/// behind for a week. It now clears `reachable` and gets the re-probe TTL.
+/// **NEGATIVE CONTROL.** The same podless probe with no `FailedCreate` Event
+/// is not a refusal: `ProbeRunning` and no cancel while it runs, `NoExitCode`
+/// once it has failed. The second half is a finished probe Job with no pod
+/// and no Event: it clears `reachable` and gets the re-probe TTL.
 #[tokio::test]
 async fn fx11_control_a_podless_probe_with_no_event_keeps_no_exit_code() {
     let (client, _rec, bodies) = mock_client_recording_bodies(podless_probe_routes(
@@ -2495,10 +2389,10 @@ async fn fx11_control_a_podless_probe_with_no_event_keeps_no_exit_code() {
     );
 }
 
-/// **FX-11, THE GRACE AND THE COST BOUND.** A podless probe Job 15 s old is
-/// not judged even with a refusal on record — the 30 s `Preflight` grace — and
-/// neither a pod list nor an events list is made. A Job whose own status counts
-/// a pod (`active: 1`) costs nothing either, however old.
+/// **THE GRACE AND THE COST BOUND.** A podless probe Job 15 s old is not
+/// judged even with a refusal on record (the 30 s grace), and neither a pod
+/// list nor an events list is made. A Job whose own status counts a pod
+/// (`active: 1`) costs nothing either, however old.
 ///
 /// KILLS: the grace period ignored; a pod or events list on every pass of a
 /// healthy probe.
@@ -2532,19 +2426,18 @@ async fn fx11_a_young_or_counted_probe_job_costs_no_read() {
     }
 }
 
-/// **FX-11 review M1: A REFUSED PROBE NEVER REFRESHES `observedAt`.** The field
-/// is "when the probe above was performed", and the console's freshness budget
-/// (630 s) reads it. (Since O-1 the refusal also clears `reachable`, so no
-/// stale `true` survives either way; `observedAt` stays the last real look.) A cluster probed `reachable: true` last week, whose
-/// namespace now refuses every probe pod, is re-probed every cadence; had each
-/// refusal written its instant there, last week's reading would show as fresh
-/// for as long as the quota stood. Both refused passes — the fail-fast one and
-/// the finished one — leave `observedAt` (and `reachable`, `clusterId`) where
-/// the last real observation put it.
+/// **A REFUSED PROBE NEVER REFRESHES `observedAt`.** The field is "when the
+/// probe above was performed", and the console's freshness budget (630 s)
+/// reads it. A cluster whose namespace now refuses every probe pod is
+/// re-probed every cadence; had each refusal written its instant there, an
+/// old reading would show as fresh for as long as the quota stood. Both
+/// refused passes, the fail-fast one and the finished one, leave
+/// `observedAt` and `clusterId` where the last real observation put it
+/// (`reachable` is cleared).
 ///
 /// NEGATIVE CONTROL: the same finished, podless Job with NO `FailedCreate`
 /// Event takes the crashed-Job path, which does write `observedAt` (its own
-/// finish) — so the assertion reads a key the harness can see.
+/// finish), so the assertion reads a key the harness can see.
 ///
 /// KILLS: `pod_refused_status_patch` writing `observedAt` again.
 #[tokio::test]
@@ -2618,20 +2511,17 @@ async fn fx11_a_refused_probe_never_refreshes_observed_at() {
     );
 }
 
-// ===========================================================================
-// FX-19 — a probe Job Kubernetes is collecting is not a crash
-// ===========================================================================
+// A probe Job Kubernetes is collecting is not a crash.
 //
-// PoC batch 2 (`claude/poc-batch-2.result.md` F-1): the TTL controller deletes
-// a finished probe Job with FOREGROUND propagation, so the Job lingers,
-// pod-less, with a `deletionTimestamp`, while its pod goes first. STEP 4 read
-// that as a crashed probe and cleared `reachable` (about 17 s on a healthy
-// connection, until the next probe answered), and the `NotFound` / `Conflict`
-// races around it logged about twelve WARN lines a cadence for twelve
-// connections. Every row below runs the real reconcile over the double, with
-// EVERY route a crash classification would need present — so a reconciler
-// that judged the Job would write, not panic — and reads the log it emitted
-// through `testing::CapturedLog`.
+// The TTL controller deletes a finished probe Job with FOREGROUND
+// propagation, so the Job lingers, pod-less, with a `deletionTimestamp`,
+// while its pod goes first. Read as a crashed probe, that would clear
+// `reachable` on a healthy connection until the next probe answered, and the
+// `NotFound` / `Conflict` races around it would log at WARN. Every row below
+// runs the real reconcile over the double, with EVERY route a crash
+// classification would need present (so a reconciler that judged the Job
+// would write, not panic), and reads the log it emitted through
+// `testing::CapturedLog`.
 
 /// No pod at all: what a probe Job's pod list holds once the TTL controller's
 /// foreground delete has taken the pod.
@@ -2661,8 +2551,8 @@ fn reaping_job(finished: bool, recorded: bool, deleting: bool) -> String {
 }
 
 /// A probe Job carrying a TTL that something OTHER than this reconciler put
-/// there at creation — a mutating admission policy, a defaulting webhook
-/// (FX-19 review M1) — and no marker. `None` is no TTL at all.
+/// there at creation (a mutating admission policy, a defaulting webhook) and
+/// no marker. `None` is no TTL at all.
 fn job_with_ttl(finished: bool, ttl: Option<i32>) -> String {
     let ttl = ttl.map_or_else(String::new, |t| {
         format!(r#","ttlSecondsAfterFinished":{t}"#)
@@ -2684,8 +2574,7 @@ fn job_with_ttl(finished: bool, ttl: Option<i32>) -> String {
 /// EVERY route any branch of the reconcile could take for `job` and `pods`:
 /// the pod list, the log, the Events, the status write, the TTL patch and a
 /// fresh `POST`. A reconciler that judged a Job it should not have would
-/// therefore WRITE — which the rows assert against — rather than panic in the
-/// double, which would prove nothing about the property.
+/// therefore WRITE, which the rows assert against, rather than panic.
 fn every_route(job: String, pods: String) -> Vec<Route> {
     vec![
         Route {
@@ -2751,9 +2640,9 @@ fn answering(
     routes
 }
 
-/// The connection as the last probe left it: `reachable: true`, read at 11:59
-/// — EXACTLY what the verdict pass writes, folded the way the API server
-/// folds it, so a pass that re-reads the same Job changes nothing.
+/// The connection as the last probe left it: `reachable: true`, read at 11:59,
+/// EXACTLY what the verdict pass writes, folded as the API server folds it, so
+/// a pass that re-reads the same Job changes nothing.
 async fn reachable_cluster() -> KafkaCluster {
     let (client, _rec, bodies) =
         mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
@@ -2777,17 +2666,17 @@ fn reachable_of(cluster: &KafkaCluster) -> Option<bool> {
     cluster.status.as_ref().and_then(|s| s.reachable)
 }
 
-/// **FX-19 ROW 1: A PROBE JOB WITH A `deletionTimestamp` IS NEITHER A CRASH
-/// NOR A REASON TO CLEAR `reachable`.** Four shapes of a Job being deleted —
-/// the TTL'd one with its pod gone (the PoC's), the TTL'd one whose pod is
-/// still terminating, one deleted before any TTL (by hand, or by an owner
-/// cascade), and one still running — and in every one: one Job `GET` and
-/// nothing else, no status write, `reachable` as it was, no WARN, and a debug
-/// line that says the state was noticed.
+/// **A PROBE JOB WITH A `deletionTimestamp` IS NEITHER A CRASH NOR A REASON TO
+/// CLEAR `reachable`.** Four shapes of a Job being deleted (the TTL'd one
+/// with its pod gone, the TTL'd one whose pod is still terminating, one
+/// deleted before any TTL, by hand or by an owner cascade, and one still
+/// running), and in every one: one Job `GET` and nothing else, no status
+/// write, `reachable` as it was, no WARN, and a debug line that says the state
+/// was noticed.
 ///
-/// NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`
-/// — the same pod-less finished Job WITHOUT the `deletionTimestamp` (and
-/// without the TTL) does clear `reachable` and WARNs.
+/// NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`:
+/// the same pod-less finished Job WITHOUT the `deletionTimestamp` (and without
+/// the TTL) does clear `reachable` and WARNs.
 ///
 /// KILLS: deletion treated as a crash (the TTL-less shape takes the crash
 /// write; the running one writes `ProbeRunning`); the check placed after the
@@ -2863,11 +2752,11 @@ async fn fx19_a_probe_job_being_deleted_is_not_a_crash_and_clears_nothing() {
     }
 }
 
-/// **FX-19 ROW 2: A JOB WHOSE VERDICT IS ALREADY RECORDED IS NOT RE-JUDGED.**
-/// A finished probe Job that carries its TTL — set only after the status
-/// write that recorded its verdict — and has no terminated `runner` left to
-/// read (pod collected, or a pod that never terminated whose crash is already
-/// on the status): no Events read, no status write, no TTL re-patch, no WARN.
+/// **A JOB WHOSE VERDICT IS ALREADY RECORDED IS NOT RE-JUDGED.** A finished
+/// probe Job that carries its TTL (set only after the status write that
+/// recorded its verdict) and has no terminated `runner` left to read (pod
+/// collected, or a pod that never terminated whose crash is already on the
+/// status): no Events read, no status write, no TTL re-patch, no WARN.
 /// `reachable` stays `true` until the next probe answers.
 ///
 /// NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`'s
@@ -2925,15 +2814,15 @@ async fn fx19_a_recorded_verdict_whose_pod_was_collected_is_not_a_crash() {
     }
 }
 
-/// **FX-19 NEGATIVE CONTROL: A REAL CRASH STILL CLEARS `reachable` AND WARNS —
-/// ONCE.** The same pod-less finished Job with no TTL and no
-/// `deletionTimestamp` is a probe that produced nothing: pass 1 clears
-/// `reachable`, writes `NoExitCode`, patches the TTL and logs exactly one
-/// WARN. Pass 2 sees that Job as the TTL patch left it (and the status as the
-/// write left it): nothing written, nothing logged above debug. Pass 3 is the
-/// TTL controller deleting it: the same. One WARN for one crashed Job.
+/// **NEGATIVE CONTROL: A REAL CRASH STILL CLEARS `reachable` AND WARNS, ONCE.**
+/// The same pod-less finished Job with no TTL and no `deletionTimestamp` is a
+/// probe that produced nothing: pass 1 clears `reachable`, writes
+/// `NoExitCode`, patches the TTL and logs exactly one WARN. Pass 2 sees that
+/// Job as the TTL patch left it (and the status as the write left it):
+/// nothing written, nothing logged above debug. Pass 3 is the TTL controller
+/// deleting it: the same. One WARN for one crashed Job.
 ///
-/// KILLS (with rows 1 and 2): a fix that never clears (pass 1 would keep
+/// KILLS (with the two rows above): a fix that never clears (pass 1 would keep
 /// `true`); a WARN demoted for real crashes too (pass 1 would log none); a
 /// WARN per pass (passes 2 and 3 would log more).
 #[tokio::test]
@@ -2995,19 +2884,18 @@ async fn fx19_control_a_real_crash_clears_reachable_and_warns_once() {
     assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
 }
 
-/// **FX-19 ROW 3: `NotFound` WHILE A JOB IS COLLECTED IS NOT A RECONCILE
-/// ERROR.** The two `404`s PoC batch 2 logged at WARN, each from a race with
-/// the TTL controller:
+/// **`NotFound` WHILE A JOB IS COLLECTED IS NOT A RECONCILE ERROR.** Two
+/// `404`s, each a race with the TTL controller:
 ///
 /// * the pod listed, then gone by the `pods/log` read
 ///   (`pods "logweir-probe-…" not found`): [`Deferred::PodGone`], nothing
-///   written — nothing was read;
+///   written, since nothing was read;
 /// * the Job gone by the TTL patch that follows the verdict
 ///   (`jobs.batch "logweir-probe-…" not found`): the verdict landed, so the
 ///   pass is an ordinary outcome with `ttl_patched: false`.
 ///
 /// Neither logs above debug. NEGATIVE CONTROL: a `500` on the same log read
-/// is still a reconcile error — the `404` arm is not a catch-all.
+/// is still a reconcile error: the `404` arm is not a catch-all.
 ///
 /// KILLS: WARN on `NotFound`; a `404` propagated with `?`; any status written
 /// from a pod whose log was never read.
@@ -3096,11 +2984,11 @@ async fn fx19_not_found_while_a_job_is_collected_is_not_a_reconcile_error() {
     assert_eq!(log.at("WARN").len(), 1, "and it is still a WARN: {error}");
 }
 
-/// **FX-19 FIX ROUND (review LOW-2): ONLY THE COLLECTION RACES ARE DEMOTED,
-/// AND THEY NEVER REACH `error_policy`.** A `404` or a `409` from any other
-/// call is not a known race: a `jobs.create` that keeps answering
-/// `AlreadyExists` (a Job the GET did not see) is a reconcile error and a
-/// WARN, and so is every code `error_policy` is handed.
+/// **ONLY THE COLLECTION RACES ARE DEMOTED, AND THEY NEVER REACH
+/// `error_policy`.** A `404` or a `409` from any other call is not a known
+/// race: a `jobs.create` that keeps answering `AlreadyExists` (a Job the GET
+/// did not see) is a reconcile error and a WARN, and so is every code
+/// `error_policy` is handed.
 ///
 /// KILLS: any demotion in `error_policy` by status code (the 404 and 409 rows);
 /// a 409 on the probe Job's `POST` answered as an outcome.
@@ -3144,11 +3032,11 @@ async fn fx19_error_policy_warns_on_every_error_it_is_handed() {
     assert_eq!(log.at("WARN").len(), 1, "{error}");
 }
 
-/// **FX-19: A REFUSED PROBE POD IS ONE WARN PER JOB, TOO.** FX-11's fail-fast
-/// pass cancels the Job and records `PodCreationForbidden` (one WARN); the
-/// pass that then sees the cancelled Job finished writes the same status —
-/// unchanged, so nothing is sent — and logs it at debug; a third pass over the
-/// Job as its TTL patch left it is a recorded verdict.
+/// **A REFUSED PROBE POD IS ONE WARN PER JOB, TOO.** The fail-fast pass
+/// cancels the Job and records `PodCreationForbidden` (one WARN); the pass
+/// that then sees the cancelled Job finished writes the same status
+/// (unchanged, so nothing is sent) and logs it at debug; a third pass over
+/// the Job as its TTL patch left it is a recorded verdict.
 ///
 /// KILLS: a refusal WARN on every pass (`warn_when_first_recorded!` taking the
 /// WARN arm whatever the write did).
@@ -3235,26 +3123,25 @@ async fn fx19_a_refused_probe_pod_warns_once_per_job() {
     assert_eq!(warns.len(), 1, "one refused Job, one WARN: {warns:?}");
 }
 
-/// **FX-19 ROW 4, THE POC'S SEQUENCE: OVER ONE WHOLE PROBE CYCLE `reachable`
-/// NEVER FLAPS AND NOTHING IS LOGGED AT WARN.** One pass per state the API
-/// server walks a healthy connection through, each over a fresh double, each
-/// status write folded onto the object the way the API server folds it:
+/// **OVER ONE WHOLE PROBE CYCLE `reachable` NEVER FLAPS AND NOTHING IS LOGGED
+/// AT WARN.** One pass per state the API server walks a healthy connection
+/// through, each over a fresh double, each status write folded onto the
+/// object as the API server folds it:
 ///
 /// 1. the next pass over the read, TTL'd Job (its own watch event): nothing;
 /// 2. the TTL controller's delete, pod still terminating;
-/// 3. the same, pod collected — PoC batch 2's 17-second flap;
+/// 3. the same, pod collected;
 /// 4. a stale read of the TTL'd Job with no `deletionTimestamp` yet, pod gone;
 /// 5. the Job gone: the next probe is `POST`ed and `ProbeRunning` written;
 /// 6. the new Job's own event, handed the PRE-step-5 copy of the object by the
-///    watch cache: the write answers `409` — the Conflict WARN PoC batch 2
-///    counted about seven times a cadence;
+///    watch cache: the write answers `409`;
 /// 7. the new probe running, read with the fresh copy: nothing new;
 /// 8. the new probe finished and read: `reachable: true` again.
 ///
 /// After every pass the stored `reachable` is `true`, and the whole cycle logs
-/// no WARN. NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`
-/// — the step-3 Job without its TTL and deletion does clear it, so this
-/// row's assertion can fail.
+/// no WARN. NEGATIVE CONTROL: `fx19_control_a_real_crash_clears_reachable_and_warns_once`:
+/// the step-3 Job without its TTL and deletion does clear it, so this row's
+/// assertion can fail.
 #[tokio::test]
 async fn fx19_one_probe_cycle_never_flaps_reachable_and_logs_no_warn() {
     let mut stored = reachable_cluster().await;
@@ -3387,13 +3274,13 @@ async fn fx19_one_probe_cycle_never_flaps_reachable_and_logs_no_warn() {
     );
 }
 
-/// **FX-19: A SUPERSEDED WRITE ENDS EVERY JUDGING PASS, AND NO TTL FOLLOWS
-/// IT.** The verdict pass and the creating pass are pinned above
+/// **A SUPERSEDED WRITE ENDS EVERY JUDGING PASS, AND NO TTL FOLLOWS IT.** The
+/// verdict pass and the creating pass are pinned above
 /// (`a_conflicting_cluster_status_write_is_an_outcome_and_never_precedes_a_ttl`);
 /// these are the other four writes a pass makes about a Job: the crash, the
 /// refusal of a finished pod-less Job, the fail-fast refusal of a running one,
 /// and `ProbeRunning`. Each answers `409` as [`Deferred::StatusSuperseded`],
-/// patches no TTL, and logs no WARN — the crash or refusal is logged when a
+/// patches no TTL, and logs no WARN; the crash or refusal is logged when a
 /// later pass's write records it.
 ///
 /// KILLS: a superseded crash or refusal write followed by its TTL (the Job and
@@ -3445,7 +3332,7 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
             now(),
             superseded(every_route(running_job_body(), NO_PODS.to_string())),
         ),
-        // FX-19 fix round: the two `ProbeStale` writes.
+        // The two `ProbeStale` writes.
         (
             "ProbeStale for a stalled deletion",
             reachable.clone(),
@@ -3493,9 +3380,7 @@ async fn fx19_a_superseded_write_ends_every_judging_pass_before_any_ttl() {
     }
 }
 
-// ===========================================================================
-// FX-19 FIX ROUND (2026-10-09) — the review's two MEDIUMs and LOW-1
-// ===========================================================================
+// The verdict marker, stale readings and one WARN per Job
 
 /// `job` with one more annotation.
 fn annotated(job: &str, key: &str, value: &str) -> String {
@@ -3510,13 +3395,12 @@ fn past_the_bound() -> DateTime<Utc> {
     utc(2026, 9, 10, 11, 59) + chrono::Duration::seconds(STALE_AFTER_SECS + 1)
 }
 
-/// **FX-19 FIX ROUND, review M1: A TTL SOMETHING ELSE PUT ON THE JOB IS NOT
-/// THIS RECONCILER'S MARKER.** A mutating admission policy can give every new
-/// Job a `ttlSecondsAfterFinished` at creation; the first landing read that
-/// as "verdict recorded" from birth, so a real crash was never recorded and
-/// `reachable: true` stood. Now only `logweir.dev/probe-verdict-recorded` =
-/// the Job's own UID, which this reconciler sends in the same patch as the
-/// TTL, counts:
+/// **A TTL SOMETHING ELSE PUT ON THE JOB IS NOT THIS RECONCILER'S MARKER.** A
+/// mutating admission policy can give every new Job a
+/// `ttlSecondsAfterFinished` at creation; read as "verdict recorded", a real
+/// crash would never be recorded and `reachable: true` would stand. Only
+/// `logweir.dev/probe-verdict-recorded` = the Job's own UID, which this
+/// reconciler sends in the same patch as the TTL, counts:
 ///
 /// * a crashed probe Job created with a foreign TTL is judged: `reachable`
 ///   cleared, `NoExitCode`, one WARN, and the TTL patch carries 300 s and
@@ -3524,8 +3408,7 @@ fn past_the_bound() -> DateTime<Utc> {
 /// * a reading under a foreign day-long TTL is written, and the TTL is
 ///   overwritten with the re-probe timer and the marker (the cadence stays
 ///   five minutes);
-/// * a marker naming another UID — copied from another Job — is not this
-///   Job's;
+/// * a marker naming another UID (copied from another Job) is not this Job's;
 /// * CONTROL: the Job carrying this reconciler's marker is not re-read as a
 ///   crash.
 ///
@@ -3638,15 +3521,14 @@ async fn fx19_a_foreign_ttl_is_not_this_reconcilers_marker() {
     assert_eq!(count(&seen, "PATCH", "/status"), 0, "{seen:?}");
 }
 
-/// **FX-19 FIX ROUND, review M2: A STALLED DELETION CANNOT KEEP AN OLD
-/// `reachable: true` STANDING.** The probe Job's name is fixed, so while it is
-/// mid-deletion no newer probe can run. Inside the bound (the reading at 11:59,
-/// the pass at 12:00) the deletion is deferred as before and nothing is
-/// written; once the reading is older than `STALE_AFTER_SECS` (630 s, twice
-/// the re-probe interval) `reachable` is cleared with `ProbeStale` — and
-/// `observedAt`/`clusterId` stay — logged at WARN once over three passes: the
-/// stale pass, the same state again, and the Job still stuck but no longer
-/// marked deleting (a stale read).
+/// **A STALLED DELETION CANNOT KEEP AN OLD `reachable: true` STANDING.** The
+/// probe Job's name is fixed, so while it is mid-deletion no newer probe can
+/// run. Inside the bound (the reading at 11:59, the pass at 12:00) the
+/// deletion is deferred and nothing is written; once the reading is older than
+/// `STALE_AFTER_SECS` (630 s, twice the re-probe interval) `reachable` is
+/// cleared with `ProbeStale`, and `observedAt`/`clusterId` stay, logged at
+/// WARN once over three passes: the stale pass, the same state again, and the
+/// Job still stuck but no longer marked deleting (a stale read).
 ///
 /// KILLS: the bound removed (the deferral stands forever); the stale write's
 /// WARN on every pass; `observedAt` refreshed by a pass that observed nothing.
@@ -3748,11 +3630,10 @@ async fn fx19_a_stalled_deletion_clears_reachable_once_the_reading_is_stale() {
     assert_eq!(warns.len(), 1, "one stale reading, one WARN: {warns:?}");
 }
 
-/// **FX-19 FIX ROUND, review M2: A JUDGED JOB ITS TTL NEVER COLLECTS IS
-/// BOUNDED THE SAME WAY, AND NO DEFERRAL SLEEPS PAST THE BOUND.** The
-/// recorded-verdict deferral normally waits a re-probe interval; it now
-/// returns before the reading would turn stale, and past the bound it clears
-/// `reachable` (`ProbeStale`).
+/// **A JUDGED JOB ITS TTL NEVER COLLECTS IS BOUNDED THE SAME WAY, AND NO
+/// DEFERRAL SLEEPS PAST THE BOUND.** The recorded-verdict deferral normally
+/// waits a re-probe interval; it returns before the reading would turn stale,
+/// and past the bound it clears `reachable` (`ProbeStale`).
 ///
 /// KILLS: the bound removed from the recorded-verdict deferral; a deferral
 /// that sleeps a full `RE_PROBE_SECS` past the bound.
@@ -3796,13 +3677,13 @@ async fn fx19_a_judged_job_its_ttl_never_collects_cannot_keep_a_stale_reading() 
     assert_eq!(log.messages_at("WARN").len(), 1);
 }
 
-/// **FX-19 FIX ROUND, review M2: A READING OLDER THAN THE BOUND IS NOT WRITTEN
-/// AS A VERDICT.** A finished probe Job read for the first time long after it
-/// finished (its TTL never collected it, or the controller was down) carries a
-/// reading nobody has repeated: `ProbeStale`, `reachable` cleared, no
-/// `clusterId` and no `observedAt` from it — and the Job still gets its TTL and
-/// marker, so the next probe runs. CONTROL: the same Job read inside the bound
-/// writes the `Reachable` verdict.
+/// **A READING OLDER THAN THE BOUND IS NOT WRITTEN AS A VERDICT.** A finished
+/// probe Job read for the first time long after it finished (its TTL never
+/// collected it, or the controller was down) carries a reading nobody has
+/// repeated: `ProbeStale`, `reachable` cleared, no `clusterId` and no
+/// `observedAt` from it, and the Job still gets its TTL and marker, so the
+/// next probe runs. CONTROL: the same Job read inside the bound writes the
+/// `Reachable` verdict.
 ///
 /// KILLS: the STEP-3 staleness check removed.
 #[tokio::test]
@@ -3861,10 +3742,10 @@ async fn fx19_a_stale_reading_is_not_written_as_a_verdict() {
     assert_eq!(outcome.reason.as_deref(), Some(REASON_REACHABLE));
 }
 
-/// **FX-19 FIX ROUND, review M2: A PROBE IN FLIGHT DOES NOT RE-VOUCH FOR A
-/// STALE READING.** Normally a running probe leaves the last observation
-/// standing; past the bound its `ProbeRunning` write clears `reachable` too.
-/// CONTROL: inside the bound the running write carries no `reachable` key.
+/// **A PROBE IN FLIGHT DOES NOT RE-VOUCH FOR A STALE READING.** Normally a
+/// running probe leaves the last observation standing; past the bound its
+/// `ProbeRunning` write clears `reachable` too. CONTROL: inside the bound the
+/// running write carries no `reachable` key.
 ///
 /// KILLS: the staleness check removed from `probe_started_patch`.
 #[tokio::test]
@@ -3886,11 +3767,10 @@ async fn fx19_a_probe_in_flight_does_not_re_vouch_for_a_stale_reading() {
     }
 }
 
-/// **FX-19 FIX ROUND, review LOW-1: AN UNREADABLE LOG IS ONE WARN PER JOB.**
-/// Pass 1 reads a log with no contract line: `ProbeOutputUnreadable`, one
-/// WARN, the TTL and marker. Pass 2 is the same Job (pod still there, now
-/// marked) over the status pass 1 left: the re-read changes nothing and logs
-/// at debug.
+/// **AN UNREADABLE LOG IS ONE WARN PER JOB.** Pass 1 reads a log with no
+/// contract line: `ProbeOutputUnreadable`, one WARN, the TTL and marker. Pass
+/// 2 is the same Job (pod still there, now marked) over the status pass 1
+/// left: the re-read changes nothing and logs at debug.
 ///
 /// KILLS: the unreadable-log WARN on every pass that is not superseded.
 #[tokio::test]
@@ -3931,11 +3811,11 @@ async fn fx19_an_unreadable_log_warns_once_per_job() {
     assert_eq!(warns.len(), 1, "one unreadable Job, one WARN: {warns:?}");
 }
 
-/// **FX-19 FIX ROUND, review LOW-1: A CRASH WHOSE TTL PATCH FAILED IS STILL
-/// ONE WARN.** Pass 1 records the crash and WARNs, then its TTL patch answers
-/// `500` (a reconcile error, so the Job keeps no marker). Pass 2 re-judges the
-/// same unmarked Job over the crash status pass 1 left: nothing changes, so it
-/// logs at debug and patches the TTL.
+/// **A CRASH WHOSE TTL PATCH FAILED IS STILL ONE WARN.** Pass 1 records the
+/// crash and WARNs, then its TTL patch answers `500` (a reconcile error, so
+/// the Job keeps no marker). Pass 2 re-judges the same unmarked Job over the
+/// crash status pass 1 left: nothing changes, so it logs at debug and patches
+/// the TTL.
 ///
 /// KILLS: the crash WARN on every pass that is not superseded.
 #[tokio::test]
@@ -3977,10 +3857,10 @@ async fn fx19_a_crash_whose_ttl_patch_failed_warns_once() {
     assert_eq!(warns.len(), 1, "one crashed Job, one WARN: {warns:?}");
 }
 
-/// **PROD-17.1 B4: the probe's log read is a bounded tail.** It asks for the
-/// last `TERMINAL_LOG_TAIL_LINES` lines and nothing else, the read a `Restore`
-/// makes at every exit but 3; before the fold it asked for the whole log. The
-/// two contract lines are last, so the verdict is the one the whole log gave.
+/// **The probe's log read is a bounded tail**: it asks for the last
+/// `TERMINAL_LOG_TAIL_LINES` lines and nothing else, the read a `Restore`
+/// makes at every exit but 3. The two contract lines are last, so the verdict
+/// is the one the whole log gives.
 ///
 /// KILLS: the unbounded read (an empty query).
 #[tokio::test]

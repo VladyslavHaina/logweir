@@ -1,27 +1,18 @@
 //! The properties of every kind, read off the CHECKED-IN CRD YAML.
 //!
-//! WHY THESE READ FILES RATHER THAN CALL CODE. What ships is `charts/logweir/crds/*.yaml`
-//! — that is what `kubectl apply` consumes, what the UI's forms are written
-//! against, and what Tasks 16–24 read. A test over the Rust types would pass
-//! while the checked-in YAML said something else, which is exactly the failure
-//! the drift gate exists to remove. So the assertions are made against the
-//! files, and `the_checked_in_crds_are_what_the_emitter_renders` is what ties
-//! the files back to the types.
+//! What ships is `charts/logweir/crds/*.yaml`: what `kubectl apply` consumes
+//! and what the console's forms are written against. A test over the Rust
+//! types would pass while the checked-in YAML said something else, so the
+//! assertions are made against the files, and
+//! `the_checked_in_crds_are_what_the_emitter_renders` ties the files back to
+//! the types.
 //!
-//! NONE OF THESE DIALS, WAITS ON A JOB, OR RUNS `kubectl`. Every test here
-//! parses a checked-in YAML file or reads a source file; the CEL evaluation in
-//! `an_absent_optional_field_cannot_be_added_on_update` is a table against the
-//! rule string, so it runs in `cargo test` with no API server (Global
-//! Constraint 22's 15 s per-test bound, Standing Rule 22).
+//! Every test here parses a checked-in YAML file or reads a source file; the
+//! CEL rules are evaluated by a table against the rule string, so nothing
+//! needs an API server.
 //!
-//! THIS FILE IS HOSTED HERE AND NOT OWNED HERE, IN PART. Two late-binding
-//! agreement tests are appended by later slots and are NOT written, stubbed or
-//! anticipated by Task 15b: `the_crd_auth_mode_enum_and_auth_spec_agree`
-//! (Task 6, slot 7) and `the_crd_mode_enum_and_target_mode_agree` (Task 9b,
-//! slot 10). The section at the bottom of this file is where they go, and
-//! [`enum_values`] is the helper they need — the CRD side of both agreements
-//! is already asserted here, so those tests only have to compare the Rust side
-//! against it.
+//! The agreement tests at the bottom compare the Rust `AuthSpec` and
+//! `TargetMode` against the CRD enums, with [`enum_values`] as the CRD half.
 
 mod support;
 use support::repo_root;
@@ -30,9 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// The directory the checked-in CRDs live in.
 fn crd_dir() -> PathBuf {
@@ -100,10 +89,9 @@ fn status_schema(crd: &Value) -> &Value {
     at(root_schema(crd), &["properties", "status"])
 }
 
-/// The `enum` values at a schema node, as strings, IN FILE ORDER.
-///
-/// The helper the two late-binding agreement tests need: both compare a Rust
-/// type's serde spellings against the CRD's enum, and the CRD half is this.
+/// The `enum` values at a schema node, as strings, IN FILE ORDER: the CRD half
+/// of the agreement tests that compare a Rust type's serde spellings against
+/// the CRD's enum.
 fn enum_values(node: &Value) -> Vec<String> {
     node.get("enum")
         .unwrap_or_else(|| panic!("this schema node declares no `enum`: {node:?}"))
@@ -118,14 +106,9 @@ fn enum_values(node: &Value) -> Vec<String> {
         .collect()
 }
 
-/// `required`, as strings, sorted.
-///
-/// SORTED, AND WHY. `schemars` builds `required` from a `BTreeSet`, so the
-/// emitted order is lexicographic and not declaration order. The property the
-/// plan states — "`.spec.required` is exactly these four" — is a property of
-/// the SET, so the comparison is made against a sorted expectation. Asserting
-/// declaration order would be asserting a `schemars` implementation detail,
-/// and a fifth required field or a dropped one still fails this either way.
+/// `required`, as strings, sorted: `schemars` builds `required` from a
+/// `BTreeSet`, so the emitted order is lexicographic, and "`.spec.required`
+/// is exactly these" is a property of the SET.
 fn required(node: &Value) -> Vec<String> {
     let mut out: Vec<String> = node
         .get("required")
@@ -172,13 +155,12 @@ fn files_under(dir: &Path) -> Vec<(PathBuf, String)> {
     out
 }
 
-/// The body of a `just` recipe, by name.
-///
-/// The `just_lint_runs_the_one_signer_gate` pattern
-/// (`crates/logweir/tests/one_signer_gate.rs`): collect the lines after the
-/// recipe header until the next line that starts at column 0 with a lowercase
-/// letter, and assert membership only — never the recipe's length, its line
-/// numbers, or the absence of other lines.
+/// The body of a `just` recipe, by name: the lines after the recipe header
+/// until the next line that starts at column 0 with a lowercase letter.
+/// Assert membership only, never the recipe's length, its line numbers, or the
+/// absence of other lines (the pattern of
+/// `crates/logweir/tests/one_signer_gate.rs`'s
+/// `just_lint_runs_the_one_signer_gate`).
 fn just_recipe(justfile: &str, name: &str) -> Option<String> {
     let mut body = String::new();
     let mut inside = false;
@@ -199,12 +181,9 @@ fn just_recipe(justfile: &str, name: &str) -> Option<String> {
     inside.then_some(body)
 }
 
-// ---------------------------------------------------------------------------
 // The group, the version, and the kind list
-// ---------------------------------------------------------------------------
 
-/// Global Constraint 14: Logweir owns `logweir.dev/v1alpha1`, now, not
-/// deferred.
+/// Logweir owns `logweir.dev/v1alpha1`.
 #[test]
 fn the_group_is_logweir_dev_v1alpha1() {
     for file in FILES {
@@ -231,20 +210,14 @@ fn the_group_is_logweir_dev_v1alpha1() {
     }
 }
 
-/// Exactly the kinds ADR 0008 records, and no others.
-///
-/// Global Constraint 34 amended the roadmap's list to Amendment A's six,
-/// `RestoreDrill` retired for `Restore` and `MetadataSnapshot` merely
-/// reserved; **Amendment F** adds `BackupDestination`, `TopicDiscovery` and
-/// `Preflight`. The count below is the ADR's, written down, so a kind that
-/// arrives without an amendment is a red test rather than a new CRD file.
+/// Exactly the kinds ADR 0008 records, and no others: the count below is the
+/// ADR's, written down, so a kind that arrives without an amendment is a red
+/// test rather than a new CRD file.
 #[test]
 fn the_kind_list_is_exactly_the_adr() {
-    // READ EVERY FILE IN `charts/logweir/crds/`, NOT THE SIX THIS TEST NAMES.
-    // A list built from `FILES` could not see an UNLISTED kind at all — the
-    // emitted set would be compared against itself and the forbidden-name loop
-    // below would have nothing to look at. Reading the directory is what makes
-    // a `Drill` CRD someone added and emitted fail on its own name.
+    // READ EVERY FILE IN `charts/logweir/crds/`, NOT THE ONES THIS TEST NAMES:
+    // a list built from `FILES` could not see an UNLISTED kind, so a `Drill`
+    // CRD someone added and emitted fails on its own name only this way.
     let is_crd_file = |p: &PathBuf| -> bool { p.extension().is_some_and(|x| x == "yaml") };
     let dir = crd_dir();
     let mut yaml_files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -350,14 +323,12 @@ fn the_kind_list_is_exactly_the_adr() {
     );
 }
 
-/// Global Constraints 5 and 14: `weirkeeper` reads no vendor custom resource
-/// and creates none.
+/// `weirkeeper` reads no vendor custom resource and creates none.
 ///
 /// A SOURCE-AND-YAML READING TEST, over the three directories where a vendor
 /// group would have to appear to matter: the controller's own source, the
-/// emitter, and the shipped CRDs. This file is deliberately NOT in that set —
-/// a guard that scanned itself would report itself, which is the same hazard
-/// `scripts/check-dod.sh`'s header records.
+/// emitter, and the shipped CRDs. This file is NOT in that set: a guard that
+/// scanned itself would report itself.
 #[test]
 fn no_vendor_crd_group_is_named_anywhere() {
     let root = repo_root();
@@ -393,30 +364,22 @@ fn no_vendor_crd_group_is_named_anywhere() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The CRD ENVELOPE — printer columns, the status subresource, the scope
-// ---------------------------------------------------------------------------
+// The CRD ENVELOPE: printer columns, the status subresource, the scope.
 //
-// FIX ROUND 1, FINDINGS 1, 2 AND 3. Every test above this section reads the
-// CHECKED-IN files, which is right for the field schemas and WRONG for the
-// three properties below. Both medium findings were found the same way: mutate
-// the EMITTER, then run `just crds`. That moves the checked-in bytes with the
-// mutant, so every file-reading test and all six CI `diff -u`s stay green, and
-// a dropped printer column or a dropped `subresources.status` ships silently.
-//
-// So these three read `render_all()` — the renderer's own output, independent
-// of `charts/logweir/crds/` — and compare it against a LITERAL copied from
-// `task-15b-brief.md`'s Produces table. The two halves are complementary and
-// both are needed: the drift gate
+// The field-schema tests above read the CHECKED-IN files, which is wrong for
+// these three properties: mutate the EMITTER and run `just crds`, and the
+// checked-in bytes move with the mutant, so every file-reading test and the
+// CI diffs stay green while a dropped printer column or a dropped
+// `subresources.status` ships. These read `render_all()` and compare it
+// against a LITERAL. The drift gate
 // (`the_checked_in_crds_are_what_the_emitter_renders`) catches a hand edit to
-// `charts/logweir/crds/` with no re-render, and these catch an emitter edit WITH one.
+// `charts/logweir/crds/` with no re-render, and these catch an emitter edit
+// WITH one.
 
 /// Every kind as the RENDERER produces it, parsed: `(kind, file_name, doc)`.
-///
-/// `render_all` is the single renderer the `emit_crds` example and the drift
-/// test both go through, so this is exactly the document that would be written
-/// to `charts/logweir/crds/` by the next `just crds` — which is the point: a test that
-/// re-read the files after that command could not see the change.
+/// `render_all` is the renderer the `emit_crds` example and the drift test
+/// both use, so this is exactly what the next `just crds` would write; a test
+/// that re-read the files after that command could not see the change.
 fn rendered() -> Vec<(&'static str, &'static str, Value)> {
     weirkeeper::crds::render_all()
         .into_iter()
@@ -428,11 +391,8 @@ fn rendered() -> Vec<(&'static str, &'static str, Value)> {
         .collect()
 }
 
-/// The sole served version of a rendered CRD.
-///
-/// One version, asserted rather than indexed blindly: `versions[0]` on a
-/// two-version CRD would silently check half of it, and a second version is a
-/// conversion-webhook decision this tag has not taken.
+/// The sole served version of a rendered CRD, asserted rather than indexed
+/// blindly: `versions[0]` on a two-version CRD would check half of it.
 fn sole_version<'a>(kind: &str, doc: &'a Value) -> &'a Value {
     let versions = at(doc, &["spec", "versions"])
         .as_sequence()
@@ -449,36 +409,20 @@ fn sole_version<'a>(kind: &str, doc: &'a Value) -> &'a Value {
 /// One printer column, as `kubectl get` reads it: `(NAME, jsonPath, type)`.
 type Column = (&'static str, &'static str, &'static str);
 
-/// The brief's Produces table, per kind, IN ORDER.
+/// The printer columns, per kind, IN ORDER.
 ///
-/// A LITERAL, AND DELIBERATELY NOT DERIVED FROM ANYTHING. The column NAMES and
-/// their ORDER are copied verbatim from `task-15b-brief.md`'s Produces table
-/// (`KafkaCluster` ROLE/REACHABLE/CLUSTER-ID/AGE, `BackupSchedule`
-/// SCHEDULE/SUSPEND/LAST/NEXT/READY/AGE, `Backup` PHASE/EXIT/RECORDS/SIGNED/AGE,
-/// `Restore` MODE/PHASE/EXIT/REASON/OUTCOME/INTEGRITY/RTO/SIGNED/AGE (plus
-/// PROD-08.1a's COVERAGE after INTEGRITY), `Approval`
-/// SUBJECT/VERIFIED/APPROVER/KEY-ID/AGE, `TrustRoster` KEYS/LOADED/EXPIRED/AGE);
-/// the `jsonPath` and `type` beside each name are the declarations those names
-/// are required to keep, so a column that survives a RENAME of the field it
-/// reads fails here too.
+/// A LITERAL, AND DELIBERATELY NOT DERIVED FROM ANYTHING: read back out of
+/// `charts/logweir/crds/` or the derive, the expectation would be a copy of
+/// the thing under test, and a column dropped from the emitter and
+/// re-rendered would pass. The `jsonPath` and `type` beside each name are part
+/// of the contract, so a column that survives a RENAME of the field it reads
+/// fails too. `kubectl get` is the operator's whole view of a run and the
+/// console reads these columns.
 ///
-/// Reading these back out of `charts/logweir/crds/` — or out of the derive — would make
-/// the expectation a copy of the thing under test, which is exactly the hole
-/// mutant MA walked through: it dropped `REASON` from `Restore`, ran
-/// `just crds`, and 16 of 16 tests passed with all six CI diffs green.
-/// `kubectl get restore` is the operator's whole view of a run and Task 26's UI
-/// reads these columns, so the table is an interface and not decoration.
-///
-/// `Restore`'s `REASON` READS `.status.reason`, NOT `.status.exitReason`, since
-/// Task 20 fix round 1 (review finding M2). `exitReason` is written from an
-/// exit code, and a refusal the CONTROLLER makes before any `POST` has no code
-/// — so all four admission refusals and `NameTooLong` printed the identical
-/// `operational` in this column, measured live on two objects. `status.reason`
-/// is the condition's own reason promoted to a scalar; the field's doc comment
-/// in `crds/restore.rs` carries the measurement.
-/// **`Backup`'s table is unchanged and was never affected: it has no `REASON`
-/// column at all** (PHASE/EXIT/RECORDS/SIGNED/AGE), so there was nothing
-/// reading `.status.exitReason` on that kind to repoint.
+/// `Restore`'s `REASON` READS `.status.reason`, NOT `.status.exitReason`:
+/// `exitReason` is written from an exit code, and a refusal the CONTROLLER
+/// makes before any `POST` has none, so every admission refusal would print
+/// `operational`. `Backup` has no `REASON` column.
 const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
     (
         "KafkaCluster",
@@ -523,13 +467,13 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
             ("REASON", ".status.reason", "string"),
             ("OUTCOME", ".status.outcome", "string"),
             ("INTEGRITY", ".status.integrity.result", "string"),
-            // PROD-08.1a: what the signed scorecard verified.
+            // What the signed scorecard verified.
             ("COVERAGE", ".status.integrity.coverage", "string"),
             ("RTO", ".status.measured.rtoSeconds", "integer"),
             ("SIGNED", ".status.evidence.verification.result", "string"),
             ("AGE", ".metadata.creationTimestamp", "date"),
-            // PROD-11.1b: `partial` for a narrowed restore, appended so no
-            // column before it moves.
+            // `partial` for a narrowed restore, appended so no column before it
+            // moves.
             ("SELECTION", ".status.integrity.selection.scope", "string"),
         ],
     ),
@@ -633,10 +577,9 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
                 ".status.lastEvaluation.candidateCount",
                 "integer",
             ),
-            // FX-22: CANDIDATES is THIS plan, cut at the per-run ceiling. On
-            // its own it read "50 is all there is" while 311 more points were
-            // due; the count the ceiling held back stands beside it, as
-            // `RecoveryCatalog`'s TRUNCATED stands beside POINTS.
+            // CANDIDATES is THIS plan, cut at the per-run ceiling; the count the
+            // ceiling held back stands beside it, as `RecoveryCatalog`'s TRUNCATED
+            // stands beside POINTS.
             (
                 "HELD-BACK",
                 ".status.lastEvaluation.truncatedByCap",
@@ -648,18 +591,16 @@ const PRINTER_COLUMNS: [(&str, &[Column]); 13] = [
     ),
 ];
 
-/// The brief's Scope column: five workload kinds Namespaced, the roster
-/// Cluster.
+/// The scope of each kind: the trust kinds Cluster, every other kind
+/// Namespaced.
 ///
-/// A LITERAL for the same reason [`PRINTER_COLUMNS`] is. `TrustRoster` and its
-/// replacement `TrustPolicy` are Cluster-scoped because the allowed target
-/// cluster ids must not sit where a namespace tenant can widen their own
-/// allowlist — "a roster whose name the subject supplies is a roster the
-/// subject can choose"; every other kind is Namespaced because
-/// [`weirkeeper::crds::LocalRef`] carries no namespace and a cross-namespace
-/// reference is a privilege-escalation surface. A kind that quietly became
-/// Cluster-scoped would move its objects out of every namespaced RBAC rule
-/// Task 21 writes.
+/// A LITERAL for the same reason [`PRINTER_COLUMNS`] is. `TrustRoster` and
+/// `TrustPolicy` are Cluster-scoped because the allowed target cluster ids
+/// must not sit where a namespace tenant can widen their own allowlist; every
+/// other kind is Namespaced because [`weirkeeper::crds::LocalRef`] carries no
+/// namespace and a cross-namespace reference is a privilege-escalation
+/// surface. A kind that became Cluster-scoped would move its objects out of
+/// every namespaced RBAC rule.
 const SCOPES: [(&str, &str); 13] = [
     ("KafkaCluster", "Namespaced"),
     ("BackupSchedule", "Namespaced"),
@@ -676,8 +617,8 @@ const SCOPES: [(&str, &str); 13] = [
     ("RetentionPolicy", "Namespaced"),
 ];
 
-/// FIX ROUND 1, FINDING 1: every kind's printer columns are exactly the
-/// brief's table — name, `jsonPath` and `type`, in order.
+/// Every kind's printer columns are exactly the table: name, `jsonPath` and
+/// `type`, in order.
 #[test]
 fn the_printer_columns_are_exactly_the_briefs_table() {
     let docs = rendered();
@@ -705,9 +646,8 @@ fn the_printer_columns_are_exactly_the_briefs_table() {
             .collect();
 
         // An ABSENT block is the empty list and not a panic, so the count
-        // assertion below is what reports it: `additionalPrinterColumns`
-        // deleted wholesale is the same defect as one column dropped, only
-        // larger.
+        // assertion below reports it: `additionalPrinterColumns` deleted wholesale
+        // is the same defect as one column dropped.
         let empty: Vec<Value> = Vec::new();
         let cols: &Vec<Value> = sole_version(kind, doc)
             .get("additionalPrinterColumns")
@@ -752,21 +692,17 @@ fn the_printer_columns_are_exactly_the_briefs_table() {
     }
 }
 
-/// FIX ROUND 1, FINDING 2: every kind declares `subresources.status`, and
-/// losing it is otherwise silent.
+/// Every kind declares `subresources.status`, and losing it is otherwise
+/// silent.
 ///
-/// MEASURED CONSEQUENCE, not a style rule. With `subresources` dropped from
-/// `Restore` and the CRD applied to a live 1.34 API server,
-/// `kubectl --context docker-desktop patch restore <name> --subresource=status`
-/// returns
-/// `Error from server (NotFound)` while `get restore <name>` still shows the
-/// object. Tasks 16-20 write every `.status` through that subresource
-/// (kube-rs `patch_status` / `replace_status`), so the loss lands as a runtime
-/// failure in a later slot with no gate pointing at the cause — and the CRD
-/// still applies, so nothing upstream of the controller complains either.
+/// Without it, `kubectl patch … --subresource=status` returns
+/// `Error from server (NotFound)` while `get` still shows the object, and
+/// every controller writes `.status` through that subresource (kube-rs
+/// `patch_status`), so the loss lands as a runtime failure while the CRD still
+/// applies.
 ///
-/// `status: {}` is the whole declaration: an EMPTY mapping is what enables the
-/// subresource, and a non-empty one would be a shape this tag has not chosen.
+/// `status: {}` is the whole declaration: an EMPTY mapping enables the
+/// subresource.
 #[test]
 fn every_kind_declares_the_status_subresource() {
     let docs = rendered();
@@ -798,16 +734,11 @@ fn every_kind_declares_the_status_subresource() {
     );
 }
 
-/// FIX ROUND 1, FINDING 3: the scope of EVERY kind, not only the roster's.
-///
-/// `the_roster_carries_key_material_for_both_lists` asserts
-/// `TrustRoster.scope == Cluster` and nothing asserted the others, so a kind
-/// that silently became Cluster-scoped passed every gate — and would then sit
-/// outside every namespaced RBAC rule Task 21 writes. A kind that became
-/// Cluster-scoped the other way round is worse: `BackupDestination` names
-/// namespace-local Secrets, so a cluster-scoped one would be a reference out
-/// of its own namespace, which [`weirkeeper::crds::LocalRef`] exists to make
-/// impossible.
+/// The scope of EVERY kind, not only the roster's. A kind that became
+/// Cluster-scoped would sit outside every namespaced RBAC rule; a
+/// `BackupDestination` that did would reference namespace-local Secrets from
+/// outside their namespace, which [`weirkeeper::crds::LocalRef`] exists to
+/// make impossible.
 #[test]
 fn only_the_trust_kinds_are_cluster_scoped() {
     let got: Vec<(&str, String)> = rendered()
@@ -831,9 +762,7 @@ fn only_the_trust_kinds_are_cluster_scoped() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The CEL seals
-// ---------------------------------------------------------------------------
 
 /// One CEL rule as the API server sees it: the schema path it is attached to,
 /// its text and its message.
@@ -887,13 +816,8 @@ fn collect_rules(node: &Value, path: &mut Vec<String>, out: &mut Vec<Attached>) 
 }
 
 /// The `.spec` rules the emitter injects, per file, taken from the emitter's
-/// own constants.
-///
-/// READ FROM THE CONSTANTS, COMPARED AGAINST THE FILE. The property is "the
-/// checked-in YAML carries exactly the rules the emitter injects, in order",
-/// which is only worth asserting if the two sides come from different places:
-/// the left is `crds::*::SPEC_RULES`, the right is the bytes `kubectl apply`
-/// will read.
+/// own constants (`crds::*::SPEC_RULES`) and compared against the bytes
+/// `kubectl apply` will read, so the two sides come from different places.
 fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
     use weirkeeper::crds;
     let rules: &[crds::SpecRule] = match file {
@@ -917,11 +841,9 @@ fn expected_spec_rules(file: &str) -> Vec<(String, String)> {
 }
 
 /// Every rule attached BELOW `.spec`, per file, as `(path, rule, message)`.
-///
-/// A LITERAL TABLE, and deliberately not derived from the emitter's loops. It
-/// is the placement that matters — a cross-field rule one node too high is
-/// evaluated when it has nothing to say, and one node too low is never
-/// evaluated at all — so the expectation names the path.
+/// A LITERAL TABLE: the placement matters (a cross-field rule one node too
+/// high is evaluated when it has nothing to say, one node too low is never
+/// evaluated), so the expectation names the path.
 fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
     use weirkeeper::crds;
     let mut out: Vec<(Vec<String>, String, String)> = Vec::new();
@@ -978,17 +900,12 @@ fn expected_nested_rules(file: &str) -> Vec<(Vec<String>, String, String)> {
 /// Every `.spec` carries exactly the rules its kind declares, in order, and
 /// nothing is attached to `spec.suspend`.
 ///
-/// # What changed when the group grew past six kinds
-///
-/// The original form of this test asserted ONE rule per `.spec` and one
-/// author of deeper rules. Both were true and neither was the property. A
-/// kind's `.spec` may now carry several rules — `BackupDestination` carries
-/// four, two of them transition rules — because a seal and a cross-field
+/// A kind's `.spec` may carry several rules (`BackupDestination` carries four,
+/// two of them transition rules), because a seal and a cross-field
 /// validation are different questions and a validation rule has to run on
-/// CREATE, where a transition rule is skipped. So the assertion is now
-/// equality against the kind's own declared list, which fails on a dropped
-/// rule, an added one, a reordered one and a message that travelled with the
-/// wrong rule.
+/// CREATE, where a transition rule is skipped. Equality against the kind's
+/// declared list fails on a dropped rule, an added one, a reordered one and a
+/// message that travelled with the wrong rule.
 #[test]
 fn every_spec_carries_exactly_its_declared_rules() {
     for file in FILES {
@@ -1014,11 +931,9 @@ fn every_spec_carries_exactly_its_declared_rules() {
              result an edit could rewrite. Every other kind seals something."
         );
 
-        // SORTED, AND WHY. `JSONSchemaProps::properties` is a `BTreeMap`, so
-        // the rendered file walks the schema alphabetically and not in
-        // injection order. The property asserted is the SET of (path, rule,
-        // message) triples; a dropped rule, an added one, a rule at the wrong
-        // path and a mispaired message all still fail.
+        // SORTED: `JSONSchemaProps::properties` is a `BTreeMap`, so the rendered
+        // file walks the schema alphabetically. The property asserted is the SET of
+        // (path, rule, message) triples.
         let mut deeper: Vec<(Vec<String>, String, String)> = rules
             .iter()
             .filter(|r| r.path != ["spec"])
@@ -1036,9 +951,8 @@ fn every_spec_carries_exactly_its_declared_rules() {
 
     // Stated separately, because it is the mutant's target: the BackupSchedule
     // seal names `sourceRef` AND NOTHING ELSE, and no rule is attached to any
-    // editable field. PLAT-05.1 inverted this kind's mutability — a rule
-    // attached below `.spec` here would be evaluated on a field an operator is
-    // now told they may change.
+    // editable field, where it would be evaluated on a field an operator may
+    // change.
     let schedule = crd("backupschedules.yaml");
     let below_spec: Vec<Attached> = attached_rules(&schedule)
         .into_iter()
@@ -1064,11 +978,9 @@ fn every_spec_carries_exactly_its_declared_rules() {
         rule.contains("self.sourceRef == oldSelf.sourceRef"),
         "backupschedules.yaml: `sourceRef` must be compared against oldSelf; rule was:\n{rule}"
     );
-    // EVERY OTHER FIELD IS EDITABLE, AND THE SEAL MUST NOT NAME IT. This is
-    // the mutant that matters now: re-adding a clause for `schedule`, `topics`,
-    // `archive`, `timeZone`, `retry` or any other field would silently restore
-    // the pre-PLAT-05.1 behaviour, and the operator role's `patch` would then
-    // be a grant nobody can use.
+    // EVERY OTHER FIELD IS EDITABLE, AND THE SEAL MUST NOT NAME IT: a clause for
+    // `schedule`, `topics`, `archive`, `timeZone`, `retry` or any other field
+    // would make the operator role's `patch` a grant nobody can use.
     let editable: Vec<String> = spec_schema(&schedule)["properties"]
         .as_mapping()
         .expect("BackupSchedule.spec has properties")
@@ -1091,29 +1003,19 @@ fn every_spec_carries_exactly_its_declared_rules() {
     }
 }
 
-/// Every CEL rule the three decisions name is PRESENT in the shipped CRD, by
-/// its own constant and by its message text in the file's bytes.
-///
-/// # The hole this closes, which was reproduced twice
+/// Every CEL rule the decisions name is PRESENT in the shipped CRD, by its own
+/// constant and by its message text in the file's bytes.
 ///
 /// `every_spec_carries_exactly_its_declared_rules` compares the shipped YAML
-/// against each kind's `SPEC_RULES` array — so when a rule is deleted from that
-/// array, BOTH SIDES MOVE TOGETHER and the comparison still holds. The
-/// semantic tests beside it read the rule CONSTANT and evaluate its text, which
-/// says what the rule means and nothing about whether it ships.
+/// against each kind's `SPEC_RULES` array, so a rule deleted from that array
+/// moves BOTH SIDES and the comparison still holds; the semantic tests read
+/// the rule CONSTANT. Deleting `restore::EXACTLY_ONE_AUTHORIZATION_RULE` (the
+/// only thing making an unauthorised `Restore` unrepresentable) or
+/// `backup::DESTINATION_SENTINEL_RULE` that way would pass both.
 ///
-/// Review finding F1 planted two mutants through that hole. Deleting
-/// `restore::EXACTLY_ONE_AUTHORIZATION_RULE` from `restore::SPEC_RULES` and
-/// running `just crds` left all forty `crd_shape` tests green with
-/// `charts/logweir/crds/restores.yaml` no longer carrying the rule — and that rule is
-/// the ONLY thing making an unauthorised `Restore` unrepresentable, in the same
-/// change that made `approvalRef` optional. Deleting
-/// `backup::DESTINATION_SENTINEL_RULE` survived the whole 424-test suite.
-///
-/// So this table is a LITERAL, deliberately not derived from any array the
-/// emitter reads. Each row names a kind, the constant, and the message; the
-/// assertions are made against the parsed schema AND against the file's raw
-/// bytes, so neither a dropped array entry nor a schema-walk that stopped
+/// So this table is a LITERAL, not derived from any array the emitter reads,
+/// and the assertions are made against the parsed schema AND the file's raw
+/// bytes, so neither a dropped array entry nor a schema walk that stopped
 /// looking can hide a missing rule.
 const NAMED_RULES: &[(&str, &str, &str)] = &[
     (
@@ -1181,9 +1083,9 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::SPEC_IMMUTABLE_RULE,
         weirkeeper::crds::SPEC_IMMUTABLE_MESSAGE,
     ),
-    // D2 §3.2, R0-R9. R0 sits on the schema ROOT and is checked beside the
-    // others below, because that is the one node a rule may read
-    // `self.metadata.name` from.
+    // R0 sits on the schema ROOT and is checked beside the others below,
+    // because that is the one node a rule may read `self.metadata.name`
+    // from.
     (
         "backupdestinations.yaml",
         weirkeeper::crds::backup_destination::R1_STORAGE_IMMUTABLE_RULE,
@@ -1229,7 +1131,7 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::backup_destination::R9_ARCHIVE_READ_GRANT_RULE,
         weirkeeper::crds::backup_destination::R9_ARCHIVE_READ_GRANT_MESSAGE,
     ),
-    // D2 §5.1 T1/T2 and §6.2 P1-P9.
+    // The `TopicDiscovery` and `Preflight` rules.
     (
         "topicdiscoveries.yaml",
         weirkeeper::crds::topic_discovery::T1_REQUEST_IMMUTABLE_RULE,
@@ -1285,13 +1187,13 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::preflight::P9_PLAN_HASH_RULE,
         weirkeeper::crds::preflight::P9_PLAN_HASH_MESSAGE,
     ),
-    // PLAT-15.2: one recovery point per restore check.
+    // One recovery point per restore check.
     (
         "preflights.yaml",
         weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_RULE,
         weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_MESSAGE,
     ),
-    // D3 §7.1 G1-G7.
+    // The `TrustPolicy` rules.
     (
         "trustpolicies.yaml",
         weirkeeper::crds::trust_policy::G1_KEYS_ARE_APPEND_ONLY_RULE,
@@ -1328,12 +1230,11 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_RULE,
         weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_MESSAGE,
     ),
-    // PLAT-19.1 / D3 §7.3, added at the W1 review round. The window to add it
-    // closes the first time a policy object is applied: G7 makes `usages`
-    // immutable and G1 makes `spec.keys` append-only, so a dual-usage key
-    // created before the rule can never be narrowed or removed — and adding
-    // the rule afterwards makes that object un-updatable, so its keys could
-    // never be retired or revoked either.
+    // The window to add this rule closes the first time a policy object is
+    // applied: `usages` is immutable and `spec.keys` append-only, so a
+    // dual-usage key created before the rule could never be narrowed or
+    // removed, and adding the rule afterwards would make that object
+    // un-updatable.
     (
         "trustpolicies.yaml",
         weirkeeper::crds::trust_policy::G8_ONE_USAGE_PER_KEY_RULE,
@@ -1344,7 +1245,7 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::trust_policy::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
         weirkeeper::crds::trust_policy::G7_KEY_MATERIAL_IS_IMMUTABLE_MESSAGE,
     ),
-    // D3 §3.1, §4.1, §5.3, §6.2.
+    // The `ProtectionPolicy` rules.
     (
         "protectionpolicies.yaml",
         weirkeeper::crds::protection_policy::H1_DESTINATION_XOR_RULE,
@@ -1455,16 +1356,11 @@ fn every_named_cel_rule_ships_in_its_crd() {
 /// A transition rule below `.spec` is sound ONLY on a required sub-object, and
 /// every one this group ships sits on one.
 ///
-/// # The hole this closes
-///
-/// `seal_spec`'s module note is about optional fields: a transition rule is
-/// evaluated only when `oldSelf` HAS the field, so a rule on an optional one
-/// never fires on the absent → present transition and seals nothing. The two
-/// check kinds deliberately put `self == oldSelf` on `spec.request` instead of
-/// on `.spec`, which is sound **because `request` is required** — and would
-/// silently stop being sound the moment somebody made it optional. That edit
-/// is a one-word diff in `crds/topic_discovery.rs`; this test is what turns it
-/// red.
+/// A transition rule is evaluated only when `oldSelf` HAS the field, so a rule
+/// on an optional field never fires on the absent → present transition and
+/// seals nothing. The two check kinds put `self == oldSelf` on `spec.request`,
+/// which is sound **because `request` is required**; making it optional is a
+/// one-word diff in `crds/topic_discovery.rs`, and this test turns it red.
 #[test]
 fn a_transition_rule_below_spec_sits_on_a_required_property() {
     for file in FILES {
@@ -1484,16 +1380,14 @@ fn a_transition_rule_below_spec_sits_on_a_required_property() {
                 };
             }
             if last == "[]" {
-                // A LIST ITEM IS THE SECOND SOUND PLACE, and only when the
-                // list is an ASSOCIATIVE list. The API server correlates
-                // `oldSelf` with the entry that has the same key, so the rule
-                // is evaluated once per existing item and simply not evaluated
-                // for a newly added one — which is what makes
-                // `TrustPolicy`'s per-key immutability append-only rather than
-                // a bar on adding keys. On a PLAIN list the correlation is by
-                // INDEX, so inserting an entry at the front would compare
-                // every later item against its neighbour's old value, and the
-                // rule would mean something nobody wrote.
+                // A LIST ITEM IS THE SECOND SOUND PLACE, and only when the list is an
+                // ASSOCIATIVE list. The API server correlates `oldSelf` with the entry
+                // that has the same key, so the rule is evaluated once per existing
+                // item and not for a newly added one, which is what makes
+                // `TrustPolicy`'s per-key immutability append-only rather than a bar
+                // on adding keys. On a PLAIN list the correlation is by INDEX, so an
+                // entry inserted at the front would compare every later item against
+                // its neighbour's old value.
                 assert_eq!(
                     node.get("x-kubernetes-list-type").and_then(Value::as_str),
                     Some("map"),
@@ -1523,8 +1417,8 @@ fn a_transition_rule_below_spec_sits_on_a_required_property() {
 // A tiny recursive-descent evaluator over the fragment of CEL these rules use:
 // `&&`, `||`, `!`, parentheses, `==`, `has(path)` and dotted paths rooted at
 // `self` / `oldSelf`. It PANICS on anything it does not recognise rather than
-// returning a default, because an evaluator that silently answers `true` for
-// an expression it did not understand is a test that cannot fail.
+// returning a default: an evaluator that answers `true` for an expression it
+// did not understand is a test that cannot fail.
 //
 // `&&` binds tighter than `||`, as in CEL.
 
@@ -1560,11 +1454,10 @@ struct Cursor<'a> {
     ///
     /// CEL EVALUATES ONE BRANCH, AND SO MUST THIS. The sentinel rule's `else`
     /// arm reads `self.archive.url.startsWith(...)`, and its `then` arm reads
-    /// `self.destinationRef.name`; evaluating both would make one of them
-    /// touch a field that is absent by construction and turn a correct rule
-    /// into a panic. While this is set the parser still CONSUMES the branch —
-    /// so a malformed expression in it is still caught — but every operation
-    /// that would inspect a value answers a placeholder instead.
+    /// `self.destinationRef.name`; evaluating both would touch a field that is
+    /// absent by construction. While this is set the parser still CONSUMES the
+    /// branch, so a malformed expression in it is still caught, but every
+    /// operation that would inspect a value answers a placeholder instead.
     skip: bool,
     /// The comprehension variables bound by `all()` / `exists()`, innermost
     /// last. A stack, because `TrustPolicy`'s append-only rule nests one
@@ -1904,11 +1797,10 @@ impl<'a> Cursor<'a> {
                     self.expect(")");
                     return Cel::Bool(!self.skip && acc);
                 }
-                // An ordinary method. `startsWith` is the only one this
-                // fragment evaluates; `matches` is regex and is deliberately
-                // NOT evaluated here (see `is_regex_only`), because a second
-                // regex engine in a test would be a second answer to the
-                // question the API server already answers.
+                // An ordinary method. `startsWith` is the only one this fragment
+                // evaluates; `matches` is regex and is NOT evaluated here (see
+                // `is_regex_only`): a second regex engine would be a second answer to
+                // the question the API server answers.
                 let arg = self.expr();
                 self.expect(")");
                 assert_eq!(
@@ -1942,14 +1834,11 @@ impl<'a> Cursor<'a> {
     /// An orderable rendering of a value, for `<` and `<=`.
     ///
     /// A NUMBER OR AN RFC 3339 INSTANT, AND NOTHING ELSE. The API server maps
-    /// `type: string, format: date-time` to CEL's `timestamp` and compares
-    /// those properly; this evaluator compares their TEXT, which agrees for
-    /// every value this group's schemas can hold — `date-time` in a structural
-    /// schema is RFC 3339, the fields are written by controllers that emit
-    /// `Z`, and equal-length `Z`-normalised timestamps order lexicographically
-    /// exactly as instants do. A value that is neither is a panic rather than
-    /// a guess, because a comparison this evaluator got quietly wrong would be
-    /// a green test for a rule that does not hold.
+    /// `type: string, format: date-time` to CEL's `timestamp`; this evaluator
+    /// compares their TEXT, which agrees for every value this group's schemas can
+    /// hold (RFC 3339 written with `Z`, and equal-length `Z`-normalised
+    /// timestamps order lexicographically as instants do). Anything else is a
+    /// panic rather than a guess.
     fn ordered(&self, v: &Cel) -> String {
         match v {
             Cel::Field(Some(Value::Number(n))) => {
@@ -1989,13 +1878,10 @@ fn eval(rule: &str, new: &Value, old: &Value) -> bool {
 }
 
 /// The rules this evaluator deliberately does not evaluate: the regex-only
-/// ones.
-///
-/// EVALUATING THEM HERE WOULD BE A SECOND ANSWER. `matches()` is RE2 inside
-/// the API server; a Rust `regex` here would agree most of the time and
-/// disagree exactly where a subtle pattern matters. These are asserted by TEXT
-/// in `the_destination_rules_are_the_decisions_text` and exercised for real by
-/// the live CEL probe recorded in the task report.
+/// ones. `matches()` is RE2 inside the API server; a Rust `regex` here would
+/// agree most of the time and disagree exactly where a subtle pattern
+/// matters. These are asserted by TEXT in
+/// `the_destination_rules_are_the_decisions_text`.
 fn is_regex_only(rule: &str) -> bool {
     rule.contains(".matches(")
 }
@@ -2003,12 +1889,12 @@ fn is_regex_only(rule: &str) -> bool {
 /// Evaluate every rule the CHECKED-IN CRD attaches, under the API server's
 /// transition semantics, and AND the results.
 ///
-/// THE SEMANTICS ARE THE POINT, and they are what kills the "put the rule on
-/// each field instead" mutant. A transition rule — one that mentions `oldSelf`
-/// — is evaluated only when `oldSelf` EXISTS at the rule's path. An
-/// object-level rule on `.spec` therefore runs on every update; a per-field
-/// rule on `.spec.retention` does not run at all when the old object had no
-/// `retention`, and its clause contributes a vacuous `true`.
+/// A transition rule (one that mentions `oldSelf`) is evaluated only when
+/// `oldSelf` EXISTS at the rule's path. An object-level rule on `.spec`
+/// therefore runs on every update; a per-field rule on `.spec.retention` does
+/// not run at all when the old object had no `retention`, and contributes a
+/// vacuous `true`. That is what kills the "put the rule on each field
+/// instead" mutant.
 fn eval_attached(crd: &Value, new_spec: &Value, old_spec: &Value) -> bool {
     let rules = attached_rules(crd);
     assert!(
@@ -2044,28 +1930,18 @@ fn yaml(text: &str) -> Value {
     serde_yaml::from_str(text).expect("the fixture is YAML")
 }
 
-/// D1 §5.2's rules R1, R2 and R3 accept and refuse exactly the table the
-/// decision states.
+/// The `BackupSchedule` rules R1, R2 and R3 accept and refuse exactly the
+/// table.
 ///
-/// # What replaced what, and why the property is different now
+/// Every field but `sourceRef` is editable. R1 refuses a `sourceRef` change in
+/// BOTH directions (changed value, and the absent → present transition a
+/// per-field rule would miss), R2 refuses the two-answers shape on create as
+/// well as on update, and R3 refuses a retrying schedule whose name cannot
+/// hold a `-r<N>` suffix. Everything else is accepted, and each accepted row
+/// is a mutant target: a clause for `schedule`, `topics` or `archive` turns
+/// that row red.
 ///
-/// This test used to be `an_absent_optional_field_cannot_be_added_on_update`,
-/// and it asserted the opposite of what the product now promises: that adding
-/// an optional field to a stored `BackupSchedule` was refused. PLAT-05.1 makes
-/// **every field but `sourceRef` editable**, so those rows are now the
-/// behaviour rather than the defect, and asserting them would pin a seal the
-/// decision deliberately removed.
-///
-/// The property that survives is narrower and sharper: R1 refuses a `sourceRef`
-/// change in BOTH directions (changed value, and the absent → present
-/// transition a per-field rule would miss), R2 refuses the two-answers shape on
-/// create as well as on update, and R3 refuses a retrying schedule whose name
-/// cannot hold a `-r<N>` suffix. Everything else is accepted, and each accepted
-/// row is a mutant target: re-adding a clause for `schedule`, `topics` or
-/// `archive` turns that row red.
-///
-/// The evaluator is the same fragment the rest of this file uses; R3 is
-/// evaluated against the schema ROOT, which is the one node a rule may read
+/// R3 is evaluated against the schema ROOT, the one node a rule may read
 /// `self.metadata.name` from.
 #[test]
 fn crd_rules_r1_r2_r3_accept_and_refuse_the_table() {
@@ -2112,7 +1988,7 @@ suspend: false
             yaml(base),
             true,
         ),
-        // --- every other field is EDITABLE (D1 §5.1) --------------------
+        // --- every other field is EDITABLE ------------------------------
         (
             "the cron expression changes",
             yaml(base),
@@ -2285,19 +2161,14 @@ suspend: false
     assert_eq!(weirkeeper::slot::max_schedule_name_len(false), 32);
 }
 
-// ---------------------------------------------------------------------------
-// The field shapes later tasks read by name
-// ---------------------------------------------------------------------------
+// The field shapes other components read by name
 
-/// Interface **I17**: `signingKeys[]` carries key material, exactly as
-/// `approverKeys[]` does.
+/// `signingKeys[]` carries key material, exactly as `approverKeys[]` does.
 ///
 /// A `signingKeyIds: [string]` shape is a CRD SCHEMA ERROR, not a degraded
-/// mode: Task 24's `verify_evidence` resolves a runner's signing key from this
-/// roster and calls `verify_detached`, and an id alone gives it nothing to
-/// verify against — every verification would return `NotAttempted`,
-/// `status.evidence.verification.result` could never be `Valid`, and Phase B's
-/// exit criterion would be unreachable.
+/// mode: `verify_evidence` resolves a runner's signing key from this roster
+/// and calls `verify_detached`, and an id alone gives it nothing to verify
+/// against, so no verification could ever be `Valid`.
 #[test]
 fn the_roster_carries_key_material_for_both_lists() {
     let doc = crd("trustrosters.yaml");
@@ -2346,7 +2217,7 @@ fn the_roster_carries_key_material_for_both_lists() {
     }
 
     // Declared here so no consumer derives expiry from a clock the controller
-    // does not share with it (critique C L4).
+    // does not share with it.
     let status = status_schema(&doc);
     let expired = at(status, &["properties", "expiredKeyIds"]);
     assert_eq!(expired.get("type").and_then(Value::as_str), Some("array"));
@@ -2448,12 +2319,11 @@ fn approval_status_subject_provenance_is_complete() {
 }
 
 /// The subject kind enum is exactly the three kinds an `Approval` may be
-/// about. `Switchover` is tag 2 and an `Approval` cannot name one.
+/// about. `Switchover` is not one.
 ///
-/// `RehearsalSchedule` joined it with ADR 0008 Amendment G, for a standing
-/// rehearsal authorization. It is additive: no existing spelling changed, and
-/// the kind is still part of the bytes the approval binds, so an approval that
-/// matches a `Restore`'s plan hash is not accepted for a schedule.
+/// `RehearsalSchedule` is additive: no existing spelling changed, and the
+/// kind is part of the bytes the approval binds, so an approval that matches
+/// a `Restore`'s plan hash is not accepted for a schedule.
 #[test]
 fn the_subject_kind_enum_has_no_switchover() {
     let doc = crd("approvals.yaml");
@@ -2474,8 +2344,8 @@ fn the_subject_kind_enum_has_no_switchover() {
     );
 }
 
-/// `target.mode`'s enum, byte for byte. Task 9b's late-binding test compares
-/// the Rust `TargetMode` against exactly this.
+/// `target.mode`'s enum, byte for byte; `the_crd_mode_enum_and_target_mode_agree`
+/// compares the Rust `TargetMode` against exactly this.
 #[test]
 fn restore_target_mode_accepts_only_scratch_or_new_topic() {
     let doc = crd("restores.yaml");
@@ -2501,9 +2371,10 @@ fn restore_target_mode_accepts_only_scratch_or_new_topic() {
     );
 }
 
-/// The auth mode enum, byte for byte. Task 6's late-binding test compares the
-/// Rust `AuthSpec` against exactly this. PROD-01.3 APPENDED three modes, so
-/// every value an earlier object could carry keeps its position.
+/// The auth mode enum, byte for byte; `the_crd_auth_mode_enum_and_auth_spec_agree`
+/// compares the Rust `AuthSpec` against exactly this. The three newer modes
+/// were APPENDED, so every value an earlier object could carry keeps its
+/// position.
 #[test]
 fn kafka_cluster_auth_mode_accepts_only_the_five_modes() {
     let doc = crd("kafkaclusters.yaml");
@@ -2645,12 +2516,10 @@ fn receipt_digest_description_names_its_real_trust_boundary() {
     );
 }
 
-/// Interface **I34**: `Restore.status.objectives{rtoSeconds, rpoSeconds,
-/// passRate, met}` and `Restore.status.integrity.partialReason`.
-///
-/// Declared here, produced by Task 20, read by Task 26's UI — by these exact
-/// names. Spec §8 requires the UI to render both, and no other status field
-/// carries them.
+/// `Restore.status.objectives{rtoSeconds, rpoSeconds, passRate, met}` and
+/// `Restore.status.integrity.partialReason`, by these exact names: the
+/// controller writes them and the console renders both, and no other status
+/// field carries them.
 #[test]
 fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
     let doc = crd("restores.yaml");
@@ -2707,7 +2576,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
          signed `coverage`, a complete verification's `complete` block and FX-23's \
          `unsampledTopics`, and since PROD-11.1b the signed replay `selection`"
     );
-    // PROD-11.1b: the selection's marker and its bounded rows.
+    // The selection's marker and its bounded rows.
     let selection = at(integrity, &["properties", "selection"]);
     let mut snames: Vec<&str> = selection
         .get("properties")
@@ -2761,8 +2630,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
     mnames.sort();
     assert_eq!(mnames, vec!["rpoSeconds", "rtoSeconds"]);
 
-    // Critique C M4: both offset-report keys are declared here so no consumer
-    // has to guess.
+    // Both offset-report keys are declared here so no consumer has to guess.
     let evidence = at(status, &["properties", "evidence"]);
     for field in [
         "scorecardKey",
@@ -2782,9 +2650,7 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ADR 0008 Amendment F: BackupDestination, TopicDiscovery, Preflight
-// ---------------------------------------------------------------------------
+// BackupDestination, TopicDiscovery, Preflight
 
 /// `BackupDestination.spec` is the decision's table: the required set, the
 /// enum spellings, the defaults, and the two immutables.
@@ -2941,14 +2807,13 @@ fn the_destination_spec_is_the_decisions_table() {
     );
 }
 
-/// **NO CREDENTIAL VALUE, ANYWHERE, IN ANY OF THE THREE NEW SPECS.**
+/// **NO CREDENTIAL VALUE, ANYWHERE, IN ANY OF THE NEWER KINDS.**
 ///
-/// A SOURCE-SHAPED PROPERTY ASSERTED OVER THE SHIPPED SCHEMA, because the
-/// shipped schema is what an API server will store. A destination holds
-/// REFERENCES: Secret names and key names, which are public. A field named
-/// `password`, `secret` with a string type, `accessKey`, `token` or
-/// `credential` carrying a scalar would be a place an operator could paste a
-/// key and a place `kubectl get -o yaml` would then print it.
+/// Asserted over the shipped schema, which is what an API server will store.
+/// A destination holds REFERENCES: Secret names and key names, which are
+/// public. A field named `password`, `secret` with a string type,
+/// `accessKey`, `token` or `credential` carrying a scalar would be a place an
+/// operator could paste a key and `kubectl get -o yaml` would then print it.
 #[test]
 fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
     const FORBIDDEN: [&str; 12] = [
@@ -2959,10 +2824,9 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
         "sessiontoken",
         "credential",
         "privatekey",
-        // Review finding F5 widened both lists. These four are the shapes the
-        // D3 kinds could plausibly have grown: a routing key, a bearer token,
-        // an API key, and a Slack webhook URL — which is a bearer token with a
-        // hostname on the front.
+        // The shapes the newer kinds could plausibly grow: a routing key, a bearer
+        // token, an API key, and a Slack webhook URL, which is a bearer token with
+        // a hostname on the front.
         "token",
         "bearertoken",
         "apikey",
@@ -2975,11 +2839,9 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
     // incoming-webhook URL is a bearer token with a hostname on the front —
     // the one URL in this group that is a secret.
     let mut found: Vec<String> = Vec::new();
-    // EVERY NEW KIND, spec AND status. The narrow three-kind form was finding
-    // F5: a `smtp.password` added to `ProtectionPolicy.spec.notifications` —
-    // the one kind in the group that carries delivery channels — would have
-    // shipped unguarded under a test whose name claims it covers "no new
-    // kind".
+    // EVERY NEW KIND, spec AND status: `ProtectionPolicy.spec.notifications`
+    // carries delivery channels, so an `smtp.password` there must be caught
+    // too.
     for file in [
         "backupdestinations.yaml",
         "topicdiscoveries.yaml",
@@ -3018,9 +2880,9 @@ fn no_new_kind_declares_a_field_that_could_hold_a_credential() {
     );
 
     // THE SCAN IS NOT VACUOUS. `spkiPem` is a string field on `TrustPolicy`
-    // whose whole purpose is to carry key material, so the walk really does
-    // reach the deepest list-item properties of the widest kind. Without this
-    // line a walk that stopped at the first level would pass silently.
+    // whose purpose is to carry key material, so the walk reaches the deepest
+    // list-item properties of the widest kind; a walk that stopped at the
+    // first level would fail here.
     let policy = crd("trustpolicies.yaml");
     assert!(
         at(
@@ -3062,9 +2924,9 @@ fn the_destination_rules_are_the_decisions_text() {
         );
     }
 
-    // R0 sits on the ROOT, which is the one node a rule may read
-    // `self.metadata.name` from — `attached_rules` walks `.spec` and downward,
-    // so it is read separately here.
+    // R0 sits on the ROOT, the one node a rule may read `self.metadata.name`
+    // from; `attached_rules` walks `.spec` and downward, so it is read
+    // separately here.
     let root_rules = root_schema(&doc)
         .get("x-kubernetes-validations")
         .and_then(Value::as_sequence)
@@ -3081,9 +2943,8 @@ fn the_destination_rules_are_the_decisions_text() {
          root; anywhere else it would not compile"
     );
 
-    // R3 NEVER MENTIONS ADDRESSING, in either direction. This is defect G5 —
-    // the UI turning path-style addressing into plaintext HTTP — written into
-    // the schema so it cannot come back through the API server either.
+    // R3 NEVER MENTIONS ADDRESSING, in either direction: path-style addressing
+    // must never turn into plaintext HTTP through the API server.
     assert!(
         !d::R3_TRANSPORT_SCHEME_RULE.contains("addressing"),
         "R3 couples the endpoint SCHEME to the transport and nothing else. Naming \
@@ -3110,10 +2971,10 @@ fn the_destination_rules_are_the_decisions_text() {
 
 /// The sentinel is a pair, and half of it is refused.
 ///
-/// A TABLE OVER THE RULE THE CRD ACTUALLY CARRIES, evaluated with the API
-/// server's semantics. The rule is a VALIDATION rule (no `oldSelf`), so unlike
-/// the seal beside it, it runs on CREATE — which is the only moment that
-/// matters, because `Backup.spec` is immutable afterwards.
+/// A TABLE OVER THE RULE THE CRD CARRIES, evaluated with the API server's
+/// semantics. It is a VALIDATION rule (no `oldSelf`), so it runs on CREATE,
+/// the only moment that matters, because `Backup.spec` is immutable
+/// afterwards.
 #[test]
 fn the_destination_sentinel_binds_the_ref_to_the_url() {
     let rule = weirkeeper::crds::backup::DESTINATION_SENTINEL_RULE;
@@ -3326,12 +3187,12 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
             yaml("operation: Backup\n"),
             false,
         ),
-        // D2-SOURCECHECK's fourth operation, and the pair that proves P3's
-        // last arm is a real arm and not the fall-through it used to be: the
-        // rule ended `: (has(self.destinationAccess) && …)`, so ANY value the
-        // enum grew would have demanded the destination block. A
-        // `SourceConnection` request carrying `sourceConnection` has to be
-        // admitted and one carrying `destinationAccess` refused.
+        // The fourth operation, and the pair that proves P3's last arm is a real
+        // arm and not a fall-through: a rule ending
+        // `: (has(self.destinationAccess) && …)` would demand the destination block
+        // for ANY value the enum grew. A `SourceConnection` request carrying
+        // `sourceConnection` is admitted and one carrying `destinationAccess`
+        // refused.
         (
             "SourceConnection with sourceConnection",
             req("SourceConnection", "sourceConnection"),
@@ -3374,25 +3235,18 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ADR 0008 Amendment G: the five operational recovery kinds
-// ---------------------------------------------------------------------------
+// The operational recovery kinds
 
 /// A `TrustPolicy` key list is append-only and its lifecycle is one-way.
 ///
-/// # Two rule shapes, because one of them could not be installed
-///
-/// G1 — "every keyId that existed still exists" — is object-level, because a
+/// G1, "every keyId that existed still exists", is object-level, because a
 /// REMOVED key has no `self` to attach a rule to. Everything else is a
 /// TRANSITION RULE ON ONE ITEM of an associative list, which the API server
-/// correlates by `keyId`.
-///
-/// That split is not a preference. The first shape put every comparison inside
-/// the quadratic walk and a live API server refused the whole CRD for
-/// exceeding the CEL cost budget by more than 100x; the measurement is quoted
-/// at `trust_policy::G1_KEYS_ARE_APPEND_ONLY_RULE`. This test therefore
-/// evaluates each rule with the operands the API server would give it: the
-/// whole `.spec` for G1, and one key entry for the rest.
+/// correlates by `keyId`: with every comparison inside the quadratic walk, a
+/// live API server refuses the whole CRD for exceeding the CEL cost budget
+/// (the measurement is quoted at `trust_policy::G1_KEYS_ARE_APPEND_ONLY_RULE`).
+/// This test evaluates each rule with the operands the API server would give
+/// it: the whole `.spec` for G1, and one key entry for the rest.
 #[test]
 fn a_trust_policy_key_is_append_only_and_its_state_is_one_way() {
     use weirkeeper::crds::trust_policy as tp;
@@ -3955,9 +3809,7 @@ fn a_restore_carries_exactly_one_authorization_and_additive_status_is_optional()
     );
 }
 
-// ---------------------------------------------------------------------------
-// D1 W3a: the run contract on `Backup`
-// ---------------------------------------------------------------------------
+// The run contract on `Backup`
 
 /// `Backup.spec` carries the trigger, the schedule revision and the selection,
 /// and **every one of them is optional or unchanged**.
@@ -4047,12 +3899,10 @@ fn the_selection_shape_is_declared_and_incomplete_discovery_has_no_default() {
          be able to ship either answer by omission."
     );
 
-    // AND ADMISSION REFUSES THE THIRD SHAPE. Review finding F2: without this
-    // rule a `Backup` naming two topics AND `allUserTopics` was accepted live,
-    // and today's controller ignores `allUserTopics` — so the operator who
-    // asked for whole-cluster coverage would have got a two-topic run and no
-    // signal. `crate::policy::validate_topic_selection` says the same thing in
-    // the reconciler, for objects admitted by an older CRD revision.
+    // AND ADMISSION REFUSES THE THIRD SHAPE: a `Backup` naming two topics AND
+    // `allUserTopics` would give the operator who asked for whole-cluster
+    // coverage a two-topic run. `crate::policy::validate_topic_selection` says
+    // the same in the reconciler, for objects admitted by an older CRD.
     let shape = weirkeeper::crds::backup::SELECTION_SHAPE_RULE;
     for (name, value, expected) in [
         (
@@ -4138,13 +3988,9 @@ fn the_selection_shape_is_declared_and_incomplete_discovery_has_no_default() {
     );
 }
 
-/// The `Backup.spec` seal still covers every field, including the new ones.
-///
-/// THE MUTANT THIS KILLS is adding a field to `BackupSpec` and forgetting that
-/// `self == oldSelf` is what makes a run's inputs the run. It cannot be
-/// forgotten here — the seal is object-level and covers the whole spec — so
-/// this asserts the seal is still the WHOLE-spec one and not a narrowed
-/// enumeration somebody wrote while adding `trigger`.
+/// The `Backup.spec` seal still covers every field, including the new ones:
+/// `self == oldSelf` is what makes a run's inputs the run, so this asserts the
+/// seal is the WHOLE-spec one and not a narrowed enumeration.
 #[test]
 fn the_backup_spec_is_still_sealed_whole() {
     let doc = crd("backups.yaml");
@@ -4161,21 +4007,13 @@ fn the_backup_spec_is_still_sealed_whole() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The runner image, the recipe, and the drift gate
-// ---------------------------------------------------------------------------
 
-/// Interface **I15**: the runner image is named in exactly one place under
-/// `crates/`.
+/// The runner image is named in exactly one place under `crates/`.
 ///
-/// THE NEEDLE IS BUILT FROM TWO PIECES ON PURPOSE. This file lives under
-/// `crates/`, so a literal here would be a second occurrence and this test
-/// would fail on itself. Splitting the string keeps the source bytes clean
-/// while the needle at run time is the whole path.
-///
-/// Task 23 tightens this to the digest form; until then the tag is what is
-/// checked in, and `job.rs`'s own comment records why (Global Constraint 37 —
-/// nothing has been published, so no published digest exists to pin).
+/// THE NEEDLE IS BUILT FROM TWO PIECES ON PURPOSE: this file lives under
+/// `crates/`, so a literal here would be a second occurrence and the test
+/// would fail on itself.
 #[test]
 fn the_runner_image_is_named_once() {
     let needle = format!("{}{}", "docker.io/vladyslavhaina/", "logweir");
@@ -4210,22 +4048,17 @@ fn the_runner_image_is_named_once() {
     );
 }
 
-/// Interface **I15**'s runtime half: `main` reads
-/// `job::RUNNER_IMAGE_ENV` **once**, and through the predicate — Task 33.
-///
-/// THREE PROPERTIES, AND EACH IS A DEFECT THAT HAS HAPPENED IN THIS TREE.
+/// `main` reads `job::RUNNER_IMAGE_ENV` **once**, and through the predicate.
 ///
 /// 1. **One read.** A second `std::env::var` of the same variable is a second
-///    decision, and the two can disagree — the `Backup` reconciler and the
-///    probe reconciler would then create Jobs naming different images in the
-///    same cluster. The value is read here and threaded, exactly as the
-///    archive handle is (interface I13).
+///    decision, and the two can disagree: the `Backup` reconciler and the
+///    probe reconciler would create Jobs naming different images in the same
+///    cluster. The value is read here and threaded, as the archive handle is.
 /// 2. **Through `job::configured_runner_image`.** A decision behind `fn main`
-///    is reachable from no test at all, which is precisely how plan erratum
-///    **E19(e)**'s wrong ERROR line on the empty archive URL survived to Task
-///    24. The predicate takes the `Result` so a test can hand it `Ok("")`.
+///    is reachable from no test at all; the predicate takes the `Result` so a
+///    test can hand it `Ok("")`.
 /// 3. **The variable's NAME is spelt in `job.rs` and nowhere else under
-///    `crates/weirkeeper/src`.** The same argument
+///    `crates/weirkeeper/src`**, the argument
 ///    [`the_runner_image_is_named_once`] makes about the reference: a second
 ///    spelling is how a rename updates one site and misses another.
 #[test]
@@ -4296,28 +4129,22 @@ fn main_reads_the_runner_image_override_once() {
     );
 }
 
-/// Task 37's half of interface **I15**'s runtime shape: `main` reads
-/// `job::RUNNER_PULL_POLICY_ENV` **once**, through the predicate, logs it once,
-/// and **refuses to start** when the predicate refuses.
-///
-/// FOUR PROPERTIES, AND THE FOURTH IS THE ONE THIS VARIABLE ADDS.
+/// `main` reads `job::RUNNER_PULL_POLICY_ENV` **once**, through the
+/// predicate, logs it once, and **refuses to start** when the predicate
+/// refuses.
 ///
 /// 1. **One read.** A second `std::env::var` of the same variable is a second
-///    decision, and the two can disagree — the `Backup` reconciler and the
-///    probe reconciler would then create Jobs under different pull policies in
-///    one cluster. Exactly the argument
-///    [`main_reads_the_runner_image_override_once`] makes for the image.
+///    decision, and the two can disagree (the argument
+///    [`main_reads_the_runner_image_override_once`] makes for the image).
 /// 2. **Through `job::configured_runner_pull_policy`.** A decision behind
-///    `fn main` is reachable from no test at all — which is how plan erratum
-///    **E19(e)**'s wrong ERROR line survived to Task 24.
+///    `fn main` is reachable from no test at all.
 /// 3. **One `info!`, naming the policy AND its source.** A controller silently
 ///    running under a policy the operator did not set is the failure this
-///    variable exists to fix, not to create.
+///    variable exists to fix.
 /// 4. **A refusal EXITS.** `imagePullPolicy` is a closed set the API server
 ///    validates at Job CREATE, so a controller that started under `always`
-///    would turn every `Backup` and every `Restore` into a rejected Job with
-///    nothing but an API error per object to say why. The `Err` arm must
-///    `return ExitCode::FAILURE`, not log and continue.
+///    would turn every `Backup` and every `Restore` into a rejected Job. The
+///    `Err` arm must `return ExitCode::FAILURE`, not log and continue.
 #[test]
 fn main_reads_the_runner_pull_policy_once() {
     let root = repo_root();
@@ -4403,11 +4230,8 @@ fn main_reads_the_runner_pull_policy_once() {
     );
 }
 
-/// `just crds` regenerates the checked-in CRDs.
-///
-/// Membership only — not the recipe's length, not its line numbers, not the
-/// absence of other recipes — so a later task appending to the justfile cannot
-/// turn this red (the `just_lint_runs_the_one_signer_gate` pattern).
+/// `just crds` regenerates the checked-in CRDs. Membership only, so appending
+/// to the justfile cannot turn this red.
 #[test]
 fn the_crds_recipe_is_in_the_justfile() {
     let justfile =
@@ -4450,13 +4274,10 @@ fn the_ci_workflow_carries_the_crd_drift_arm() {
 }
 
 /// THE DRIFT GATE, LOCALLY AND IN-PROCESS: the checked-in files are exactly
-/// what the renderer produces.
-///
-/// The CI arm re-renders with `cargo run` and `diff -u`s the files, which is
-/// the shipped gate. This test asserts the same property with no subprocess
-/// and no shell, so a hand edit to `charts/logweir/crds/` fails `cargo test` on a
-/// laptop too — `ci.yml` mirrors `just gate` (green since 2026-09-12), and a
-/// gate that lives only there runs only on a push; this one runs everywhere.
+/// what the renderer produces. The CI arm re-renders with `cargo run` and
+/// `diff -u`s the files; this asserts the same property with no subprocess,
+/// so a hand edit to `charts/logweir/crds/` fails `cargo test` on a laptop
+/// too.
 #[test]
 fn the_checked_in_crds_are_what_the_emitter_renders() {
     let rendered = weirkeeper::crds::render_all();
@@ -4476,11 +4297,8 @@ fn the_checked_in_crds_are_what_the_emitter_renders() {
         let path = crd_dir().join(r.file_name);
         let on_disk = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        // FIX ROUND 1, FINDING 5: REPORT THE FIRST DIFFERING LINE, NOT TWO
-        // BLOBS. An `assert_eq!` of two ~10 KB YAML documents prints ~20 KB of
-        // near-identical text and hides the one line that moved, which is the
-        // whole information the failure carries. CI's arm is a `diff -u` and
-        // reads well; the local half of the same gate now does too.
+        // REPORT THE FIRST DIFFERING LINE, NOT TWO BLOBS: an `assert_eq!` of two
+        // ~10 KB YAML documents hides the one line that moved.
         if on_disk != r.yaml {
             let (line, want, got) = first_difference(&on_disk, &r.yaml);
             panic!(
@@ -4520,49 +4338,24 @@ fn first_difference(left: &str, right: &str) -> (usize, String, String) {
     }
 }
 
-// ===========================================================================
-// LATE-BINDING AGREEMENT TESTS — hosted here, NOT owned here
-// ===========================================================================
-//
-// Task 15b writes neither of the two tests below and consumes nothing from
-// either task (critique B H21(b), interface I33). The `auth` block and
-// `target.mode` are declared in this repository as CRD FIELD SHAPES only; the
-// Rust `AuthSpec` (Task 6, interface I1) and `TargetMode` / `TopicNaming` /
-// `WindowFloorSource` (Task 9b, interface I33) land in later slots and MUST
-// match what is already here.
-//
-//   - `the_crd_auth_mode_enum_and_auth_spec_agree`  — Task 6,  slot 7
-//   - `the_crd_mode_enum_and_target_mode_agree`     — Task 9b, slot 10
-//
-// Both assert BYTE equality, so the spellings this file already pins —
-// `["plaintext", "scramSha512"]` and `["scratch", "newTopic"]`, in those
-// orders, asserted by
-// `kafka_cluster_auth_mode_accepts_only_plaintext_or_scram_sha512` and
-// `restore_target_mode_accepts_only_scratch_or_new_topic` — are the contract.
-// `enum_values` is the helper each of them needs for the CRD half.
+// The Rust types the CRD enums must match. Both compare BYTE spellings and
+// order against what this file already pins, with `enum_values` as the CRD
+// half.
 
-/// **I33, Task 6's half.** `AuthSpec`'s serde tag values are exactly the
-/// `KafkaCluster` CRD's `auth.mode` enum, in that order.
+/// `AuthSpec`'s serde tag values are exactly the `KafkaCluster` CRD's
+/// `auth.mode` enum, in that order.
 ///
 /// Three surfaces name this mode and all three have to agree: the YAML an
 /// adopter writes into a `DrillSpec`/`BackupSpec` (`AuthSpec`, serde), the
 /// custom resource an adopter applies (this CRD's enum), and the signed
-/// documents a reader parses (`ReceiptAuth.mode`, and Task 5b's
-/// `AuthSummary.mode`). A `kubectl apply` that succeeds and a `drill run` that
-/// then refuses to parse the same string is the failure this closes — and it
-/// was not hypothetical: until Task 5b's fix round the receipt's own field doc
-/// described the value as `"scram-sha-512"`, a spelling nothing emitted.
+/// documents a reader parses (`ReceiptAuth.mode`, `AuthSummary.mode`). A
+/// `kubectl apply` that succeeds followed by a `drill run` that refuses the
+/// same string is the failure this closes. The order is asserted too, as
+/// `kubectl explain` prints it.
 ///
-/// The order is asserted too, not just the set: `enum_values` returns the
-/// declaration order, the CRD's enum is what `kubectl explain` prints in that
-/// order, and an adopter reading the two lists side by side should not have to
-/// wonder whether they are the same list.
-///
-/// The mutant this exists for: spell `AuthSpec::mode_str()` as
-/// `"scram-sha-512"` and this fails at assertion time, together with
-/// `crates/logweir/tests/auth_binding.rs::
-/// the_scorecard_auth_block_and_auth_spec_agree`. That is the whole point of a
-/// same-slot late binding having a test rather than a comment.
+/// The mutant: spell `AuthSpec::mode_str()` as `"scram-sha-512"`. This fails,
+/// together with `crates/logweir/tests/auth_binding.rs::
+/// the_scorecard_auth_block_and_auth_spec_agree`.
 #[test]
 fn the_crd_auth_mode_enum_and_auth_spec_agree() {
     let doc = crd("kafkaclusters.yaml");
@@ -4631,9 +4424,8 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
         crd_enum[1]
     );
 
-    // NO SIXTH MODE. PROD-01.3 added `scramSha256`, `plain` and `mtls`;
-    // `gssapi`, `oauthbearer` and MSK IAM are deferred (OD-3), and the Rust
-    // enum must not have quietly grown one either.
+    // NO SIXTH MODE: `gssapi`, `oauthbearer` and MSK IAM are deferred, and the
+    // Rust enum must not have quietly grown one either.
     assert_eq!(rust_tags.len(), 5, "{rust_tags:?}");
     for (i, spec) in [
         logweir_core::spec::AuthSpec::ScramSha256 {
@@ -4653,28 +4445,22 @@ fn the_crd_auth_mode_enum_and_auth_spec_agree() {
     }
 }
 
-/// **I33, Task 9b's half.** `TargetMode`'s serde names are exactly the
-/// `Restore` CRD's `target.mode` enum, in that order.
+/// `TargetMode`'s serde names are exactly the `Restore` CRD's `target.mode`
+/// enum, in that order.
 ///
-/// Two surfaces name this mode and both have to agree: the custom resource an
-/// adopter applies (this CRD's enum, pinned independently by
-/// `restore_target_mode_accepts_only_scratch_or_new_topic`) and the YAML an
-/// adopter writes into a `RestoreSpec` (`TargetMode`, serde). Task 20 renders
-/// `Restore.spec.planBytes` from the former into the latter, so a spelling
-/// that differs between them is a `kubectl apply` that succeeds followed by a
-/// `restore run` that cannot parse its own plan.
+/// The custom resource an adopter applies (this CRD's enum, pinned by
+/// `restore_target_mode_accepts_only_scratch_or_new_topic`) and the YAML in a
+/// `RestoreSpec` (`TargetMode`, serde) must agree: the controller renders
+/// `Restore.spec.planBytes` from the former into the latter, so a different
+/// spelling is a `kubectl apply` that succeeds followed by a `restore run`
+/// that cannot parse its own plan.
 ///
-/// **BY VALUE, out of serde itself, not retyped.** Each variant is serialised
-/// and the resulting string read back, so this cannot pass against a type
-/// whose wire spelling has drifted from its variant name. The ORDER is
-/// asserted too, not just the set: `enum_values` returns the CRD's declaration
-/// order, which is the order `kubectl explain` prints, and an adopter reading
-/// the two lists side by side should not have to wonder whether they are the
-/// same list.
+/// **BY VALUE, out of serde itself, not retyped**, and in the CRD's
+/// declaration order.
 ///
-/// The mutant this exists for: spell the CRD-facing mode `new-topic` instead of
-/// `newTopic` — drop `#[serde(rename_all = "camelCase")]` from `TargetMode`, or
-/// rename the variant. Either fails HERE, at assertion time.
+/// The mutant: spell the CRD-facing mode `new-topic` instead of `newTopic`
+/// (drop `#[serde(rename_all = "camelCase")]` from `TargetMode`, or rename
+/// the variant).
 #[test]
 fn the_crd_mode_enum_and_target_mode_agree() {
     let doc = crd("restores.yaml");
@@ -4728,9 +4514,9 @@ fn the_crd_mode_enum_and_target_mode_agree() {
     );
 
     // `target.topicNaming.prefix` is the CRD's name for the block
-    // `RestoreSpec`'s `target.topic_naming` carries — camelCase on the custom
-    // resource, snake_case in the plan document, exactly like every other
-    // field of this grammar. The TYPE is what both sides have to agree on.
+    // `RestoreSpec`'s `target.topic_naming` carries: camelCase on the custom
+    // resource, snake_case in the plan document. The TYPE is what both sides
+    // have to agree on.
     let naming = at(
         spec_schema(&doc),
         &["properties", "target", "properties", "topicNaming"],
@@ -4745,9 +4531,7 @@ fn the_crd_mode_enum_and_target_mode_agree() {
     assert_eq!(round_tripped.prefix, "restore-20260907T140500Z-");
 }
 
-// ---------------------------------------------------------------------------
 // The schedule status's two word lists, as the controller writes them
-// ---------------------------------------------------------------------------
 
 /// The values of the `&str` constants named `<prefix>…` in a Rust source, in
 /// file order. Read from the text so the controller's private constants can be
@@ -4787,19 +4571,11 @@ fn listed_words(description: &str) -> std::collections::BTreeSet<String> {
 }
 
 /// `status.lastSlot.disposition` AND `status.missedSlots.recent[].reason` LIST
-/// EXACTLY THE WORDS THE CONTROLLER WRITES — in the CRD a `kubectl explain`
+/// EXACTLY THE WORDS THE CONTROLLER WRITES, in the CRD a `kubectl explain`
 /// reader sees and in the product API's `LastSlotView` / `MissedSlotView` the
-/// console renders from.
-///
-/// # The drift this exists to catch happened
-///
-/// Both CRD descriptions named `Superseded`, which no path of
-/// `controllers::backup_schedule` writes, and the missed-slot list omitted
-/// `PastStartingDeadline` and `NameUnavailable`, which it does. The API's
-/// descriptions inherited the error until console-ux-1's review (L3) fixed
-/// them and left the CRD's standing. The words are the controller's
-/// `DISPOSITION_*` and `MISSED_*` constants, read out of its source, so a new
-/// word added on either side alone is red here.
+/// console renders from. The words are the controller's `DISPOSITION_*` and
+/// `MISSED_*` constants, read out of its source, so a word added or dropped
+/// on one side alone is red here.
 #[test]
 fn the_schedule_status_word_lists_are_the_controllers_own() {
     let source = std::fs::read_to_string(

@@ -2,22 +2,15 @@
 //!
 //! READ `retention_reconciler_holds_no_writable_archive_handle` FIRST. It is
 //! the guard: the handle the controller builds refuses to put. Everything else
-//! in this file exists to make that meaningful — that the gate has teeth and no
-//! exemptions, and that no store call escapes `spawn_blocking`. The
-//! per-schedule retention report this file also tested is withdrawn
-//! (PROD-17.1 B1).
+//! in this file makes that meaningful: the gate has teeth and no exemptions,
+//! and no store call escapes `spawn_blocking`.
 //!
-//! NOTHING HERE DIALS ANYTHING. Every handle is
-//! `Store::read_only_from_url` over a **filesystem** URL — the checked-in
-//! `tests/fixtures/retention-archive/` tree copied into a scratch directory
-//! under `std::env::temp_dir()`. No socket, no Job, no `kubectl`, and nothing
-//! near Global Constraint 22's 15 s per-test bound.
+//! Nothing here dials anything. Every handle is `Store::read_only_from_url`
+//! over a **filesystem** URL: the checked-in `tests/fixtures/retention-archive/`
+//! tree copied into a scratch directory under `std::env::temp_dir()`.
 //! `crates/logweir/tests/no_network_in_unit_tests.rs` carries this file's
-//! allow-list entry with that reason.
-//!
-//! `tempfile` IS NOT ADDED TO THIS CRATE'S MANIFEST. Global Constraint 38
-//! closes the workspace graph, and `std::env::temp_dir()` plus a removal
-//! guard is the same test.
+//! allow-list entry with that reason. `tempfile` is not a dependency:
+//! `std::env::temp_dir()` plus a removal guard is the same test.
 
 mod support;
 use support::repo_root;
@@ -28,9 +21,7 @@ use logweir_core::engine::StorageUrl;
 use logweir_store::{Store, StoreError};
 use weirkeeper::retention::ARCHIVE_URL_ENV;
 
-// ---------------------------------------------------------------------------
 // The fixture archive
-// ---------------------------------------------------------------------------
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retention-archive")
@@ -38,11 +29,9 @@ fn fixture_dir() -> PathBuf {
 
 /// A scratch copy of the checked-in archive, removed when it drops.
 ///
-/// NAMED FROM `std::process::id()` PLUS A PER-TEST TAG. The pid alone is not
-/// unique inside one test binary: `cargo test` runs these tests as threads of
-/// a single process, so two tests sharing a pid-only directory would race —
-/// one removing the tree the other was walking. `Drop` removes it whether the
-/// test passed, failed or panicked.
+/// NAMED FROM `std::process::id()` PLUS A PER-TEST TAG: `cargo test` runs these
+/// tests as threads of one process, so two tests sharing a pid-only directory
+/// would race. `Drop` removes it whether the test passed, failed or panicked.
 struct Scratch {
     root: PathBuf,
 }
@@ -72,9 +61,9 @@ impl Scratch {
     /// The handle the reconciler builds: read-only, over this tree.
     ///
     /// `read_only_from_url` AND NEVER `from_url`. The write-path constructor's
-    /// `LOGWEIR_ROOT` guard refuses any prefix that is not exactly `logweir/`,
-    /// and an archive is never under `logweir/` — which is the whole reason
-    /// the read-only constructor exists (Global Constraint 6).
+    /// `LOGWEIR_ROOT` guard refuses any prefix that is not exactly `logweir/`, and
+    /// an archive is never under `logweir/`, which is why the read-only
+    /// constructor exists.
     fn read_only_handle(&self) -> Store {
         Store::read_only_from_url(&StorageUrl::Filesystem {
             path: self.root.clone(),
@@ -102,9 +91,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Source-reading helpers
-// ---------------------------------------------------------------------------
 
 fn source(relative: &str) -> Option<String> {
     std::fs::read_to_string(repo_root().join(relative)).ok()
@@ -118,28 +105,16 @@ fn required_source(relative: &str) -> String {
 /// `src` with every comment, string and character literal replaced by spaces,
 /// positions and line structure preserved. **LIFETIMES ARE LEFT ALONE.**
 ///
-/// WHY SANITISE AT ALL. Two of the assertions below are about where a token
-/// appears in CODE, and this file's own subjects are files whose doc comments
-/// discuss exactly those tokens at length. Brace matching has the same
-/// problem from the other end: `format!("{a}")` would unbalance any counter
-/// that did not know it was inside a string.
+/// Two of the assertions below are about where a token appears in CODE, and
+/// the files they read discuss those tokens at length in doc comments. Brace
+/// matching has the same problem from the other end: `format!("{a}")` would
+/// unbalance any counter that did not know it was inside a string.
 ///
-/// # A `'` IS NOT ALWAYS A CHARACTER LITERAL, AND THAT WAS A REAL BLINDNESS
-///
-/// This function used to treat every `'` as the opener of a character literal
-/// and blank forward to the next one. Rust spells LIFETIMES with the same
-/// byte, so a signature like `-> BoxFuture<'static, …>` blanked every byte
-/// from that tick to the following tick anywhere later in the file —
-/// including, in `controllers/backup.rs`, the whole `reconcile` closure that
-/// clones the archive handle. **Measured** (Task 17 re-review, concern 1): a
-/// planted `store.get("logweir/probe")` outside `spawn_blocking` in
-/// `controllers/backup.rs` left [`no_store_call_is_made_outside_spawn_blocking`]
-/// green at 32 passed / 0 failed and the whole `weirkeeper` suite green at
-/// 143 passed / 0 failed, while the same plant in
-/// `controllers/backup_schedule.rs` — a file with no lifetime before the
-/// planted line — failed at 30/2. A guard that is blind wherever a lifetime
-/// appears is worse than no guard, because the ledger records it as closed
-/// (STANDING RULE 21).
+/// A `'` IS NOT ALWAYS A CHARACTER LITERAL. Rust spells LIFETIMES with the
+/// same byte, so treating every `'` as an opener would blank every byte from
+/// `-> BoxFuture<'static, …>` to the next tick anywhere later in the file,
+/// including a whole `reconcile` closure that clones the archive handle, and
+/// the guard would be blind wherever a lifetime appears.
 ///
 /// THE RULE, at a `'`: if the next byte is a backslash, or the byte two on is
 /// a closing `'`, it is a character literal and the literal is consumed.
@@ -310,23 +285,17 @@ fn line_of(text: &str, index: usize) -> usize {
 /// Whether `token`'s occurrence at `at` starts a NEW identifier rather than
 /// ending a longer one.
 ///
-/// # `store.` IS A SUBSTRING OF `restore.spec`, AND THAT MADE THE GUARD LIE
-///
-/// [`STORE_CALL_TOKENS`] holds bare substrings, and [`occurrences`] finds them
-/// anywhere. Every reconciler until Task 20 named its object `backup` or
-/// `schedule`, so nothing collided; `controllers/restore.rs` names its object
-/// `restore`, and the very first run of the guard against it reported **eight
-/// offences on lines that touch no `Store` at all** — `restore.spec`,
-/// `restore.status`, `restore.name_any()`. A guard whose failure mode is a
-/// false positive is a guard the next implementer edits the token list to
-/// silence, and then it is blind for real.
+/// [`STORE_CALL_TOKENS`] holds bare substrings, and `store.` is a substring of
+/// `restore.spec`: without this check `controllers/restore.rs` reports
+/// offences on lines that touch no `Store` at all. A guard whose failure mode
+/// is a false positive is a guard the next implementer edits the token list
+/// to silence.
 ///
 /// THE RULE: when a token begins with an identifier byte, the byte before its
-/// occurrence must not be one. `.` IS DELIBERATELY ALLOWED — `self.store.get(…)`
-/// and `ctx.store.get(…)` are exactly the calls this scan exists to catch, so
-/// treating a leading `.` as "part of a longer name" would trade a false
-/// positive for a false negative. Tokens that themselves begin with `.`
-/// (`.manifest_facts(`) are unaffected: their own first byte is the boundary.
+/// occurrence must not be one. `.` IS DELIBERATELY ALLOWED: `self.store.get(…)`
+/// and `ctx.store.get(…)` are exactly the calls this scan exists to catch.
+/// Tokens that themselves begin with `.` (`.manifest_facts(`) are unaffected:
+/// their own first byte is the boundary.
 fn token_at_word_boundary(text: &str, at: usize, token: &str) -> bool {
     let first = token.as_bytes()[0];
     if !(first.is_ascii_alphanumeric() || first == b'_') {
@@ -338,20 +307,14 @@ fn token_at_word_boundary(text: &str, at: usize, token: &str) -> bool {
     }
 }
 
-/// [`sanitize`] is TESTED BEFORE IT IS TRUSTED, and the case it is here for is
-/// the first one.
-///
-/// **Task 20, ruling 1.** Every source-reading assertion in this file is only
-/// as good as this function, and its previous `'`-handling made
-/// [`no_store_call_is_made_outside_spawn_blocking`] blind to any code that
-/// followed a lifetime — measured on a real plant in
-/// `controllers/backup.rs`, which stayed green at 32 passed / 0 failed while
-/// the identical plant in a lifetime-free file failed at 30/2. A sanitizer
-/// with no test of its own is how a guard comes to assert nothing while the
-/// ledger records it as closed (STANDING RULE 21).
+/// [`sanitize`] is TESTED BEFORE IT IS TRUSTED, and the lifetime case is the
+/// first one: every source-reading assertion in this file is only as good as
+/// this function, and a sanitizer that swallowed the code after a lifetime
+/// would make [`no_store_call_is_made_outside_spawn_blocking`] assert nothing
+/// in exactly the files with async oracles.
 #[test]
 fn the_sanitizer_knows_a_lifetime_from_a_character_literal() {
-    // THE REGRESSION, exactly. `'static` must not swallow the code after it.
+    // `'static` must not swallow the code after it.
     let lifetime = "fn f() -> BoxFuture<'static, u8> { let store = store.clone(); }";
     assert!(
         sanitize(lifetime).contains("store.clone()"),
@@ -384,7 +347,7 @@ fn the_sanitizer_knows_a_lifetime_from_a_character_literal() {
         "an escaped-QUOTE character literal must not swallow the rest of the line"
     );
 
-    // The three cases that were already right, kept as a floor.
+    // The ordinary cases, kept as a floor.
     assert!(
         !sanitize("let s = \"store.get(\";").contains("store.get("),
         "a string literal IS blanked"
@@ -410,14 +373,10 @@ fn the_sanitizer_knows_a_lifetime_from_a_character_literal() {
 }
 
 /// [`token_at_word_boundary`] is tested before the scan trusts it, in BOTH
-/// directions.
-///
-/// **Task 20, ruling 1.** The false positive it exists for is real and was
-/// measured: `restore.spec` contains `store.`, and the scan reported eight
-/// offences against `controllers/restore.rs` on lines that touch no `Store`.
-/// The false NEGATIVE it must not introduce is `self.store.get(…)`, which is
-/// exactly the call the scan exists to catch — so `.` before the token is
-/// allowed and an identifier byte is not.
+/// directions: the false positive (`restore.spec` contains `store.`) and the
+/// false NEGATIVE it must not introduce, `self.store.get(…)`, which is exactly
+/// the call the scan exists to catch, so `.` before the token is allowed and
+/// an identifier byte is not.
 #[test]
 fn the_store_token_scan_tells_a_call_from_a_longer_identifier() {
     let at = |text: &str, token: &str| {
@@ -444,17 +403,11 @@ fn the_store_token_scan_tells_a_call_from_a_longer_identifier() {
     assert_eq!(at("handle.manifest_facts(key)", ".manifest_facts("), 1);
 }
 
-// ===========================================================================
-// G-RET — the guard
-// ===========================================================================
+// G-RET: the guard
 
-/// **G-RET.** The retention reconciler holds no writable archive handle.
-///
-/// Its arm is also a `#[test]` of its own, so a failure names the property that
-/// broke; this one runs it under the guard's name, so the ledger entry and the
-/// test name are the same string. The other two arms (a reporting run writes
-/// nothing; the report carries its command as a string) went with the
-/// per-schedule retention report (PROD-17.1 B1).
+/// **G-RET.** The retention reconciler holds no writable archive handle. Its
+/// arm is also a `#[test]` of its own, so a failure names the property that
+/// broke; this one runs it under the guard's name.
 #[test]
 fn retention_reconciler_holds_no_writable_archive_handle() {
     arm_the_handle_refuses_to_put("guard-put");
@@ -471,12 +424,11 @@ fn arm_the_handle_refuses_to_put(tag: &str) {
     let scratch = Scratch::of(tag, "");
     let store = scratch.read_only_handle();
 
-    // `logweir/…` is the ONE key a writable handle would accept, so refusing
-    // it proves the refusal is the read-only flag and not the LOGWEIR_ROOT
-    // assertion firing on an archive-shaped key. That ordering is the point:
-    // `put_create_only` checks `read_only` FIRST, before the assertion, so a
-    // read-only handle built over an archive prefix can never reach a
-    // codepath that writes.
+    // `logweir/…` is the ONE key a writable handle would accept, so refusing it
+    // proves the refusal is the read-only flag and not the LOGWEIR_ROOT
+    // assertion firing on an archive-shaped key: `put_create_only` checks
+    // `read_only` FIRST, so a read-only handle built over an archive prefix can
+    // never reach a codepath that writes.
     match store.put_create_only("logweir/drills/should-never-exist.json", b"{}") {
         Err(StoreError::ReadOnly(key)) => assert!(
             key.contains("should-never-exist.json"),
@@ -500,24 +452,17 @@ fn arm_the_handle_refuses_to_put(tag: &str) {
     );
 }
 
-// ===========================================================================
-// Interface I13 — `Store` is blocking
-// ===========================================================================
+// `Store` is blocking
 
-/// Every source file that touches the archive from a reconciler, and the two
-/// properties interface **I13** is.
-///
-/// SIX FILES ARE NAMED; the ones that do not exist at this slot are skipped
+/// Every source file that touches the archive from a reconciler, scanned for
+/// the two blocking-store properties. A file that does not exist is skipped
 /// and counted, so the scan cannot silently shrink to nothing.
 ///
-/// # `evidence_store.rs` IS THE SIXTH, AND IT IS THE ONE THAT CONSTRUCTS
-///
-/// D2 §3.10's amendment. `crate::evidence_store::StoreCache::get_or_build`
-/// builds a read-only handle per allowlisted `ControllerIdentity` destination,
-/// which makes it the SECOND `Store` construction site in this crate after
-/// `main.rs` — and a constructor is exactly where `Store` builds and drives its
-/// own current-thread runtime, so it is the shape this guard exists for. It is
-/// named here so the async-region walk covers the file, and
+/// `evidence_store.rs` is the one that CONSTRUCTS:
+/// `crate::evidence_store::StoreCache::get_or_build` builds a read-only handle
+/// per allowlisted `ControllerIdentity` destination, the second `Store`
+/// construction site in this crate after `main.rs`, and a constructor is where
+/// `Store` builds and drives its own current-thread runtime.
 /// [`no_store_call_is_made_outside_spawn_blocking`]'s second assertion admits
 /// EXACTLY ONE `Store::read_only_with(` site, in this file, beside the one
 /// `Store::read_only_from_url(` site in `main.rs`.
@@ -532,44 +477,15 @@ const I13_FILES: [&str; 6] = [
 
 /// Tokens that mean "this line calls into `Store`".
 ///
-/// `observe_archive(` NAMES NO `Store` AT ALL, AND THAT IS WHY IT IS HERE.
-/// `controllers::backup::observe_archive` is the single non-async function
-/// holding a reconciler's two `store.get` calls, so its CALL SITE is where
-/// I13 is kept or broken while the site itself mentions neither `Store` nor
-/// `store.`. Added at Task 20 (ruling 1): `tests/backup_controller.rs`'s
-/// module-local twin already had it, and a token list two guards disagree
-/// about is a token list one of them is blind through.
-///
-/// `observe_scorecard(` IS THE `Restore` TWIN, AND ITS ABSENCE MADE THIS
-/// GUARD BLIND TO THIS TASK'S OWN FILE. `controllers::restore::observe_scorecard`
-/// holds the single `Store::get` on the `Restore` path, and its call site —
-/// inside `reconcile`'s `async move` oracle — names neither `Store` nor
-/// `store.` either. Added at Task 20 fix round 1 (review H1), MEASURED BOTH
-/// WAYS on the review's own plant: `observe_scorecard(&handle, &key)` called
-/// directly in that oracle, outside `spawn_blocking`, left
-/// [`no_store_call_is_made_outside_spawn_blocking`] GREEN at **34 passed / 0
-/// failed** against the seven-token list, and FAILS at **33 passed / 1
-/// failed** naming `crates/weirkeeper/src/controllers/restore.rs:2336` with
-/// this eighth token in place; the unplanted tree is **34 / 0** either way.
-/// The shipped call IS inside `spawn_blocking` — this was a guard-coverage
-/// defect, and the task-20 report's M6/P4 claim that the fixed guard already
-/// caught this plant was FALSE as measured (STANDING RULE 21: a guard the
-/// ledger records as closed while it asserts nothing is worse than none).
-///
-/// The re-plant of `observe_archive(` in `controllers/backup.rs` was measured
-/// in the same round and still dies: **33 passed / 1 failed** naming
-/// `crates/weirkeeper/src/controllers/backup.rs`, so the seventh token's own
-/// coverage is intact and the eighth is additive.
-///
-/// `verify_evidence(` IS THE TASK-24 TWIN OF THE TWO ABOVE, AND IT IS ADDED
-/// WITH THE FILE IT GUARDS. `verification::verify_evidence` holds the two
-/// `store.get` calls of the verification path and its call site —
-/// `verification::verify_oracle`'s `async move` block — names neither `Store`
-/// nor `store.`, so without this ninth token a mutant that called it directly
-/// from that block would leave this guard green and panic with *Cannot start
-/// a runtime from within a runtime* at the first verification. Same defect
-/// class as `observe_scorecard(`'s, same fix, and measured the same way (see
-/// the task-24 report).
+/// Some name no `Store` at all, and that is why they are here: each is the
+/// single non-async function holding a path's `Store` reads, so its CALL SITE
+/// is where the blocking rule is kept or broken while the site itself
+/// mentions neither `Store` nor `store.`. `observe_archive(` holds the
+/// `Backup` path's two `store.get` calls, `observe_scorecard(` the `Restore`
+/// path's one, and `verify_evidence(` the verification path's two. Without
+/// them, a mutant that called one directly from an `async move` oracle would
+/// leave this guard green and panic with *Cannot start a runtime from within
+/// a runtime* at the first reconcile.
 const STORE_CALL_TOKENS: [&str; 12] = [
     "Store::",
     "store.",
@@ -577,7 +493,7 @@ const STORE_CALL_TOKENS: [&str; 12] = [
     ".list_manifests(",
     ".list_manifest_keys(",
     "retention::evaluate(",
-    // FX-31 review F2: the budgeted twins, which hold the same reads.
+    // The budgeted twins, which hold the same reads.
     "evaluate_within(",
     "observe_archive(",
     "observe_scorecard(",
@@ -591,45 +507,35 @@ const STORE_CALL_TOKENS: [&str; 12] = [
 /// Every marker that opens an ASYNC REGION, as this scan understands one.
 ///
 /// AN `async fn` BODY IS NOT THE ONLY PLACE A NESTED RUNTIME PANICS. A future
-/// built by an `async move { … }` block — which is exactly the shape
-/// `controllers::backup::reconcile`'s archive oracle takes, and the shape
-/// `controllers::restore`'s takes — is polled on the reconciler's runtime
-/// wherever it was written, so a `Store` call inside one is the same fatal
-/// call whether or not the enclosing `fn` is `async`. The original walk saw
-/// only `async fn `, which meant an oracle closure declared inside a
-/// SYNCHRONOUS `fn` was invisible to it. Added at Task 20 (ruling 1).
+/// built by an `async move { … }` block (the shape the `Backup` and `Restore`
+/// archive oracles take) is polled on the reconciler's runtime wherever it was
+/// written, so a `Store` call inside one is fatal whether or not the
+/// enclosing `fn` is `async`.
 const ASYNC_REGION_MARKERS: [&str; 3] = ["async fn ", "async move {", "async {"];
 
-/// **Interface I13.** No `Store` call is made outside `spawn_blocking`, and
-/// the handle is constructed exactly once, in `main.rs`.
+/// No `Store` call is made outside `spawn_blocking`, and the handle is
+/// constructed exactly once, in `main.rs`.
 ///
-/// WHY THIS IS A TEST AND NOT A COMMENT. Every `Store` method drives its own
-/// current-thread runtime, and `Runtime::block_on` from a thread already
-/// driving one panics with *Cannot start a runtime from within a runtime*;
-/// `kube`'s `Controller` drives every reconciler ON a runtime. A direct call
-/// therefore COMPILES CLEANLY and dies at the first retention reconcile — the
-/// one failure mode a type checker cannot see and a green unit suite does not
-/// reach.
+/// Every `Store` method drives its own current-thread runtime, and
+/// `Runtime::block_on` from a thread already driving one panics with *Cannot
+/// start a runtime from within a runtime*; `kube`'s `Controller` drives every
+/// reconciler ON a runtime. A direct call therefore COMPILES CLEANLY and dies
+/// at the first reconcile: the failure mode a type checker cannot see and a
+/// green unit suite does not reach.
 ///
-/// # WHAT TASK 20 FIXED HERE, AND WHY IT WAS NOT COSMETIC
-///
-/// Three defects, all found by planting a mutant and watching it survive
-/// (Task 17 re-review, concern 1 — accepted, and routed to this task):
-/// [`sanitize`] blanked everything after a LIFETIME tick, the region walk saw
-/// only `async fn ` and not `async move {`, and [`STORE_CALL_TOKENS`] did not
-/// name `observe_archive(` — the one call whose site holds two `store.get`s
-/// while mentioning no `Store`. Each is fixed at its own declaration, with
-/// the measurement in that declaration's doc comment, and
+/// The scan rests on three parts, each with its own declaration: [`sanitize`]
+/// (which must not blank code after a lifetime), the region walk (which must
+/// see `async move {`, not only `async fn `), and [`STORE_CALL_TOKENS`]
+/// (which must name the call sites that hold the reads).
 /// [`the_sanitizer_knows_a_lifetime_from_a_character_literal`] tests the
 /// sanitizer before this scan trusts it.
 #[test]
 fn no_store_call_is_made_outside_spawn_blocking() {
     let mut scanned = 0;
     let mut offences: Vec<String> = Vec::new();
-    // Counted so a walk that stopped finding regions cannot pass silently:
-    // this scan's whole verdict is "the token is inside an async region and
-    // outside every `spawn_blocking`", and a region list that came back empty
-    // makes every token unreachable and the assertion vacuous.
+    // Counted so a walk that stopped finding regions cannot pass silently: a
+    // region list that came back empty makes every token unreachable and the
+    // assertion vacuous.
     let mut regions_seen = 0usize;
 
     for relative in I13_FILES {
@@ -639,9 +545,8 @@ fn no_store_call_is_made_outside_spawn_blocking() {
         scanned += 1;
         let text = sanitize(&raw);
 
-        // Every ASYNC REGION in the file, as a byte span: `async fn ` bodies
-        // AND `async move {` / `async {` blocks. See
-        // `ASYNC_REGION_MARKERS` for why the blocks are not optional.
+        // Every ASYNC REGION in the file, as a byte span: `async fn ` bodies AND
+        // `async move {` / `async {` blocks (see `ASYNC_REGION_MARKERS`).
         let mut async_bodies: Vec<(usize, usize)> = Vec::new();
         for marker in ASYNC_REGION_MARKERS {
             for start in occurrences(&text, marker) {
@@ -659,9 +564,7 @@ fn no_store_call_is_made_outside_spawn_blocking() {
 
         for token in STORE_CALL_TOKENS {
             for at in occurrences(&text, token) {
-                // `store.` is a substring of `restore.spec` — see
-                // `token_at_word_boundary` for the eight false positives that
-                // made this check necessary.
+                // `store.` is a substring of `restore.spec`; see `token_at_word_boundary`.
                 if !token_at_word_boundary(&text, at, token) {
                     continue;
                 }
@@ -690,15 +593,10 @@ fn no_store_call_is_made_outside_spawn_blocking() {
          this guard at 32 passed / 0 failed."
     );
 
-    // EVERY NAMED FILE, NOT "AT LEAST TWO" — Task 24.
-    //
-    // `I13_FILES` named `crates/weirkeeper/src/verification.rs` from the slot
-    // it was written, against a file that did not exist yet, and the walk
-    // `continue`s past a file it cannot read. With a floor of two, that entry
-    // asserted NOTHING while reading as coverage — the shape STANDING RULE 21
-    // calls worse than no guard, because the ledger records it as closed. All
-    // five exist as of this task, so the floor is all five and a file deleted
-    // or renamed out from under this list fails here instead of going quiet.
+    // EVERY NAMED FILE, NOT "AT LEAST TWO": the walk `continue`s past a file it
+    // cannot read, so with a lower floor an entry for a missing file would
+    // assert NOTHING while reading as coverage. A file deleted or renamed out
+    // from under this list fails here instead of going quiet.
     assert_eq!(
         scanned,
         I13_FILES.len(),
@@ -730,10 +628,9 @@ fn no_store_call_is_made_outside_spawn_blocking() {
         for at in occurrences(&text, "Store::read_only_from_url(") {
             construction_sites.push(format!("{relative}:{}", line_of(&text, at)));
         }
-        // D2 §3.10's amendment: the EXPLICIT read-only constructor, which the
-        // `ControllerIdentity` evidence cache needs because its whole point is
-        // that neither addressing nor transport nor credentials come from this
-        // process's environment.
+        // The EXPLICIT read-only constructor, which the `ControllerIdentity`
+        // evidence cache needs because neither addressing nor transport nor
+        // credentials may come from this process's environment.
         for at in occurrences(&text, "Store::read_only_with(") {
             sanctioned_sites.push(format!("{relative}:{}", line_of(&text, at)));
         }
@@ -756,14 +653,14 @@ fn no_store_call_is_made_outside_spawn_blocking() {
         "the one construction site must be `main.rs` — a handle built anywhere else is a \
          handle built per reconcile. Found: {construction_sites:?}"
     );
-    // ---- THE ONE SANCTIONED SECOND SITE (D2 §3.10, W7) --------------------
+    // ---- THE ONE SANCTIONED SECOND SITE ------------------------------------
     //
     // `main.rs` builds the global handle before the runtime exists. The
     // evidence cache cannot: its handles are per-DESTINATION, and a destination
     // is an object that arrives long after `main` returned. So it constructs
-    // inside `spawn_blocking`, which the FIRST assertion above already
-    // requires of it (the file is in `I13_FILES`), and this assertion pins the
-    // site to exactly one function in exactly one file.
+    // inside `spawn_blocking`, which the FIRST assertion above already requires
+    // of it, and this assertion pins the site to exactly one function in
+    // exactly one file.
     //
     // A SECOND ENTRY HERE IS A REVIEWABLE EVENT AND NOT A CONVENIENCE. Every
     // such site is a tokio runtime and a connection pool built per call unless
@@ -829,9 +726,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-// ===========================================================================
 // The gate
-// ===========================================================================
 
 const GATE: &str = "scripts/check-no-archive-write.sh";
 
@@ -841,11 +736,11 @@ fn gate_source() -> String {
 
 /// One of the gate's two token lists, read out of its own heredoc.
 ///
-/// TWO LISTS, BECAUSE THERE ARE TWO ROOTS (Task 19 review, G-RET (c)).
-/// `TOKENS_CONTROL_PLANE` covers `crates/weirkeeper/src`, where a Kubernetes
-/// `api.delete(` is legitimate and the delete token must therefore be
-/// receiver-anchored; `TOKENS_STORE` covers `crates/logweir-store/src`, which
-/// holds no Kubernetes client and where an unanchored `.delete(` is correct.
+/// Two lists, because there are two roots. `TOKENS_CONTROL_PLANE` covers
+/// `crates/weirkeeper/src`, where a Kubernetes `api.delete(` is legitimate and
+/// the delete token must therefore be receiver-anchored; `TOKENS_STORE` covers
+/// `crates/logweir-store/src`, which holds no Kubernetes client and where an
+/// unanchored `.delete(` is correct.
 fn gate_tokens(list: &str) -> Vec<String> {
     let src = gate_source();
     let opener = format!("{list}=\"$(cat <<'EOF'");
@@ -870,8 +765,7 @@ fn gate_tokens(list: &str) -> Vec<String> {
 }
 
 /// Membership in `just lint` is what makes this a gate on a laptop before a
-/// push: `ci.yml` mirrors `just gate` (green since 2026-09-12). Same shape as
-/// `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
+/// push. Same shape as `one_signer_gate.rs::just_lint_runs_the_one_signer_gate`.
 #[test]
 fn the_no_archive_write_gate_is_in_just_lint() {
     let justfile = required_source("justfile");
@@ -920,20 +814,15 @@ fn the_gate_has_no_path_exemptions() {
         }
         if let Some((lhs, _)) = trimmed.split_once('=') {
             let name = lhs.trim().trim_start_matches("export ").trim();
-            // A CRATE ALLOWLIST IS NOT A PATH EXEMPTION, and D3 W9's check 3
-            // needs one. `ALLOWED_REAPER_LINK` names the workspace crates that
-            // may LINK `logweir-reaper` — it cannot make the greps above skip a
-            // file, it is compared in BOTH directions so a stale name fails the
-            // gate too, and `retention_policy_controller.rs::
-            // the_reaper_allowlist_holds_exactly_one_binary` pins it to exactly
-            // one name.
+            // A CRATE ALLOWLIST IS NOT A PATH EXEMPTION. `ALLOWED_REAPER_LINK` names
+            // the workspace crates that may LINK `logweir-reaper`: it cannot make the
+            // greps above skip a file, it is compared in BOTH directions so a stale
+            // name fails the gate too, and `retention_policy_controller.rs::
+            // the_reaper_allowlist_holds_exactly_one_binary` pins it to one name.
             //
-            // **ONE LITERAL NAME, NEVER A SUFFIX CLASS** (review `d3w9` L2).
-            // The first version of this skip matched `*_LINK`, which is the
-            // pattern-versus-literal mistake `check-withdrawn-claim.sh`'s own
-            // header refuses in terms ("EXACTLY TWO EXEMPT PATHS, AS LITERALS —
-            // NEVER A PATTERN"): a future `ALLOWED_ANYTHING_LINK` would have
-            // been excused without review. String equality and nothing else.
+            // **ONE LITERAL NAME, NEVER A SUFFIX CLASS**: a pattern such as `*_LINK`
+            // would excuse a future `ALLOWED_ANYTHING_LINK` without review. String
+            // equality and nothing else.
             let is_the_reaper_allowlist = name == "ALLOWED_REAPER_LINK";
             let looks_like_an_exemption = !is_the_reaper_allowlist
                 && name
@@ -1036,11 +925,9 @@ fn the_gate_has_no_path_exemptions() {
     // The STORE crate's list is deliberately unanchored, and has no puts.
     // ------------------------------------------------------------------
     //
-    // `crates/logweir-store/src` is the crate that HOLDS the object-store
-    // handle and the crate where a delete method would be added — the
-    // review's plant of `.delete(` there left the first version of this gate
-    // at rc 0, because its root was `crates/weirkeeper/src` alone. There is no
-    // Kubernetes client in that crate, so no anchor is needed or wanted.
+    // `crates/logweir-store/src` HOLDS the object-store handle and is where a
+    // delete method would be added. There is no Kubernetes client in that
+    // crate, so no anchor is needed or wanted.
     let store_tokens = gate_tokens("TOKENS_STORE");
     assert!(
         store_tokens.iter().any(|t| t == "\\.delete\\("),
@@ -1081,14 +968,11 @@ fn the_gate_has_no_path_exemptions() {
 }
 
 /// The DEFAULT, argument-free run scans the store crate too.
-/// **Task 19 review, G-RET (c).**
 ///
-/// WHY THIS PLANTS IN THE REAL TREE. The reviewer's finding was not that the
-/// gate's regexes were weak — it was that its ROOT was `crates/weirkeeper/src`
-/// alone, so a `.delete(` added to `crates/logweir-store/src` (the crate that
-/// actually holds the `Arc<dyn ObjectStore>`) left `just lint` green. A test
-/// over a scratch fixture cannot observe that: the property is about which
-/// directories the no-argument invocation walks. So this writes one file into
+/// A gate rooted at `crates/weirkeeper/src` alone would leave `just lint`
+/// green on a `.delete(` added to `crates/logweir-store/src`, the crate that
+/// holds the `Arc<dyn ObjectStore>`. A scratch fixture cannot observe which
+/// directories the no-argument invocation walks, so this writes one file into
 /// the real store crate's `src/`, runs the gate with **no arguments**, and
 /// removes the file in a `Drop` guard that runs on a panic too.
 ///
@@ -1212,18 +1096,16 @@ fn the_gate_passes_a_doc_comment_that_says_delete() {
     );
 }
 
-/// Run the gate against `root`, returning `(exit code, stdout+stderr)`.
+/// Run the gate against a fixture CONTROL-PLANE root, returning
+/// `(exit code, stdout+stderr)`. The status comes from `Output::status`, never
+/// through a pipe.
 ///
-/// The status comes from `Output::status`, never through a pipe (STANDING
-/// RULE 20).
-/// Run the gate against a fixture CONTROL-PLANE root.
-///
-/// THE STORE ROOT IS A SCRATCH DIRECTORY TOO, and it has to be: this binary's
+/// THE STORE ROOT IS A SCRATCH DIRECTORY TOO:
 /// `the_gate_scans_the_store_crate_by_default` plants a file in the real
-/// `crates/logweir-store/src` and `cargo test` runs these tests as threads of
-/// one process, so a fixture run that let the store root default would
-/// intermittently see that plant. Both roots are therefore explicit and
-/// hermetic, and the DEFAULT roots are exercised by `run_gate_default` alone.
+/// `crates/logweir-store/src`, and these tests run as threads of one process,
+/// so a fixture run that let the store root default would intermittently see
+/// that plant. Both roots are explicit and hermetic, and the DEFAULT roots are
+/// exercised by `run_gate_default` alone.
 fn run_gate(root: &Path) -> (Option<i32>, String) {
     let store = root.join("store-root");
     std::fs::create_dir_all(&store).expect("the fixture store root is creatable");
@@ -1252,15 +1134,10 @@ fn finish_gate(mut cmd: std::process::Command) -> (Option<i32>, String) {
     (out.status.code(), text)
 }
 
-// ===========================================================================
 // The archive location, and what the shipped document says
-// ===========================================================================
 
 /// The environment variable naming the controller's archive is documented and
 /// is the one `main.rs` reads.
-///
-/// A controller whose archive is configured by an environment variable nobody
-/// documents is a controller whose retention report is silently absent.
 #[test]
 fn the_archive_url_environment_variable_is_the_one_main_reads() {
     assert_eq!(ARCHIVE_URL_ENV, "LOGWEIR_ARCHIVE_URL");
@@ -1278,24 +1155,14 @@ fn the_archive_url_environment_variable_is_the_one_main_reads() {
     );
 }
 
-/// **`LOGWEIR_ARCHIVE_URL=""` IS UNSET, NOT A MISCONFIGURATION** — plan
-/// erratum **E19(e)**, Task 24, and the row review finding 2 says was missing.
-///
-/// # The measurement
+/// **`LOGWEIR_ARCHIVE_URL=""` IS UNSET, NOT A MISCONFIGURATION.**
 ///
 /// The shipped `config/manager/deployment.yaml` carries
-/// `LOGWEIR_ARCHIVE_URL: ""` — the default install, retention and verification
-/// display switched off. `std::env::var` returns **`Ok("")`** for a Kubernetes
-/// `env:` entry with an empty `value:`, never `Err(NotPresent)`, so the empty
-/// string used to reach `storage_url_for`, which correctly refused a URL with
-/// no `://`, and the controller logged an **ERROR** naming an unreadable
-/// archive URL on every clean start of the default install. Nothing was wrong
-/// with the install.
-///
-/// It was invisible for as long as it was there because the same Deployment
-/// pinned no `RUST_LOG` — see
-/// `tests/verification.rs::the_deployment_sets_a_log_level`, its twin. Both
-/// halves of defect 3 are one Deployment.
+/// `LOGWEIR_ARCHIVE_URL: ""` (the default install, retention and verification
+/// display switched off). `std::env::var` returns **`Ok("")`** for a
+/// Kubernetes `env:` entry with an empty `value:`, never `Err(NotPresent)`, so
+/// an empty string read as configured would reach `storage_url_for`, be
+/// refused, and log an ERROR on every clean start of the default install.
 ///
 /// KILLS: reading the variable with a bare `std::env::var(...).ok()`, or with
 /// any predicate that treats `Ok("")` as a configured archive. The `Err` arm
@@ -1329,8 +1196,8 @@ fn an_empty_archive_url_is_unset_and_not_an_error() {
     );
 
     // AND THE TWO ARMS DIVERGE WHERE IT MATTERS: the value that means "no
-    // archive" is not one `storage_url_for` is ever asked about, and the one
-    // that does reach it parses.
+    // archive" is never passed to `storage_url_for`, and the one that is
+    // parses.
     assert!(
         weirkeeper::retention::storage_url_for("").is_err(),
         "the empty string IS refused by `storage_url_for` — which is correct, and is exactly why \
@@ -1339,8 +1206,7 @@ fn an_empty_archive_url_is_unset_and_not_an_error() {
     assert!(weirkeeper::retention::storage_url_for("s3://kafka-backups/k8s-demo").is_ok());
 
     // …AND `main.rs` DECIDES THROUGH THIS FUNCTION, not through a second copy
-    // of the predicate. The extraction is the whole point: a decision behind
-    // `fn main` is reachable from no test.
+    // of the predicate: a decision behind `fn main` is reachable from no test.
     let main = sanitize(&required_source("crates/weirkeeper/src/main.rs"));
     assert!(
         main.contains("configured_archive_url("),
@@ -1349,14 +1215,12 @@ fn an_empty_archive_url_is_unset_and_not_an_error() {
     );
 }
 
-/// The retention report never claims anything was deleted, and the shipped
-/// document says who does the deleting.
+/// The shipped document says who does the deleting.
 #[test]
 fn the_shipped_document_states_that_logweir_deletes_nothing() {
     let docs = required_source("docs/kubernetes.md");
-    // WHITESPACE-COLLAPSED, because the sentence this asserts is one a
-    // Markdown document line-wraps and a reader must never have to keep a
-    // shipped sentence on one physical line to keep a test green.
+    // WHITESPACE-COLLAPSED, because a Markdown document line-wraps the
+    // sentence this asserts.
     let flat = docs.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains(
@@ -1377,9 +1241,7 @@ fn the_shipped_document_states_that_logweir_deletes_nothing() {
     );
 }
 
-// ===========================================================================
-// A two-slash `file://` URL is refused — Task 19 review, finding F-7
-// ===========================================================================
+// A two-slash `file://` URL is refused
 
 /// `file://relative/x` is an error, not `/relative/x`.
 #[test]
@@ -1400,17 +1262,13 @@ fn a_two_slash_file_url_is_refused_rather_than_reinterpreted_as_a_root() {
     }
 }
 
-/// Every delete spelling the review planted, and every legitimate one it
-/// showed must keep passing. **Task 19 review, G-RET (c).**
+/// Every delete spelling the gate must catch, and every legitimate one it must
+/// keep passing.
 ///
-/// WHY A MATRIX AND NOT A SENTENCE. The reviewer's finding was a table of
-/// eighteen plants, of which eight passed a gate that claimed to catch them.
-/// STANDING RULE 21 says a guard whose mutant passes is worse than no guard,
-/// so the widened token list and the `cargo fmt` chain join both need a test
-/// that dies when they are narrowed back. The left column is what must FAIL
-/// the gate; the right column is what must still pass, and it is the half that
-/// keeps the gate from being edited into uselessness the first time it fires
-/// on a correct Kubernetes delete.
+/// The left column is what must FAIL the gate (the widened token list and the
+/// `cargo fmt` chain join both die here if narrowed back); the right column is
+/// what must still pass, the half that keeps the gate from being edited into
+/// uselessness the first time it fires on a correct Kubernetes delete.
 #[test]
 fn the_gate_catches_every_delete_spelling_the_review_planted() {
     let scratch = std::env::temp_dir().join(format!("logweir-t19-{}-plants", std::process::id()));
@@ -1535,30 +1393,25 @@ fn the_gate_catches_every_delete_spelling_the_review_planted() {
     }
 }
 
-// ===========================================================================
-// The listing prefix agrees with the handle's root — plan erratum E13(d)
-// ===========================================================================
+// The listing prefix agrees with the handle's root
 
-/// The invariant the defect broke, stated directly: **the listing prefix and
-/// the handle's own root come from the same URL and must agree.**
+/// **The listing prefix and the handle's own root come from the same URL and
+/// must agree.**
 ///
-/// `Store::read_only_from_url` roots the backend per
-/// `StorageUrl`, and `StorageUrl::prefix()` is what is left over for the
-/// listing — the bucket for `s3`/`gs`, and for `Filesystem` the WHOLE path
-/// with `prefix()` returning `""`. `bucket_and_prefix(url).1` is what the
-/// reconciler actually lists under. If those two ever disagree the report is
-/// silently wrong, so this row compares them per scheme rather than pinning a
-/// literal.
+/// `Store::read_only_from_url` roots the backend per `StorageUrl`, and
+/// `StorageUrl::prefix()` is what is left over for the listing: the bucket for
+/// `s3`/`gs`, and for `Filesystem` the WHOLE path with `prefix()` returning
+/// `""`. `bucket_and_prefix(url).1` is what the reconciler lists under. If
+/// those two ever disagree the listing is silently wrong, so this row compares
+/// them per scheme rather than pinning a literal.
 #[test]
 fn the_listing_prefix_agrees_with_the_root_the_handle_is_built_from() {
     for url in [
         "s3://kafka-backups/mvp-demo",
         "s3://kafka-backups",
         "gs://kafka-backups/mvp-demo",
-        // ALL FOUR SUPPORTED SCHEMES, since Global Constraint 9 fixes the set
-        // at `s3`, `gs`, `az` and `file` and the defect was on whichever one
-        // this row did not enumerate. The `az` rows were excluded while the
-        // split disagreed with the handle; they are the fix round's own gate.
+        // ALL FOUR SUPPORTED SCHEMES (`s3`, `gs`, `az` and `file`): a split that
+        // disagrees with the handle on any one of them lists the wrong place.
         "az://acct/container/pfx",
         "az://acct/container",
         "az://acct/container/a/b",
@@ -1617,10 +1470,9 @@ fn the_gs_split_is_the_bucket_and_the_remainder() {
         ("kafka-backups".to_string(), "mvp-demo".to_string())
     );
     // THE THREE-SEGMENT CASE IS WHAT GIVES THIS ROW TEETH. A two-segment URL
-    // splits the same way whether the split is taken at the FIRST `/` or the
-    // LAST, so a row spelling only `gs://bucket/prefix` survives a
-    // `rsplit_once` mutant. Measured: with `split_once` -> `rsplit_once` this
-    // row is GREEN without the line below and RED with it.
+    // splits the same way at the FIRST `/` and at the LAST, so a row spelling
+    // only `gs://bucket/prefix` survives a `split_once` -> `rsplit_once`
+    // mutant.
     assert_eq!(
         weirkeeper::retention::bucket_and_prefix("gs://kafka-backups/a/b"),
         ("kafka-backups".to_string(), "a/b".to_string())
@@ -1631,21 +1483,13 @@ fn the_gs_split_is_the_bucket_and_the_remainder() {
     );
 }
 
-/// **`az://` — the CONTAINER is the root, and the remainder is the prefix.**
-///
-/// THIS ROW REPLACES `the_az_split_is_unchanged_and_still_disagrees_with_the_handle`,
-/// whose own doc comment instructed exactly that once the controller ruled:
-/// "fix `bucket_and_prefix` and DELETE THIS ASSERTION rather than inverting
-/// it". The assertion it carried — that the split and the handle DISAGREE —
-/// is now false by construction, and the agreement is asserted for all three
-/// `az://` shapes by
-/// `the_listing_prefix_agrees_with_the_root_the_handle_is_built_from` above.
+/// **`az://`: the CONTAINER is the root, and the remainder is the prefix.**
 ///
 /// `MicrosoftAzureBuilder::with_container_name` roots the backend at the
-/// CONTAINER, two segments in, so the scheme-blind `("acct", "container/pfx")`
-/// listed `container/pfx` INSIDE the container and reported nothing — the
-/// same silent empty report E13(d) named for `file://`, on a supported
-/// backend.
+/// CONTAINER, two segments in, so a scheme-blind `("acct", "container/pfx")`
+/// split would list `container/pfx` INSIDE the container and find nothing.
+/// The agreement for all three `az://` shapes is asserted by
+/// `the_listing_prefix_agrees_with_the_root_the_handle_is_built_from` above.
 #[test]
 fn the_az_split_is_the_container_and_the_remainder() {
     assert_eq!(
@@ -1654,10 +1498,8 @@ fn the_az_split_is_the_container_and_the_remainder() {
         "the ACCOUNT is not part of either half: the handle is rooted at the container, and \
          an `mc` alias for Azure IS the account endpoint"
     );
-    // THE THREE-SEGMENT CASE IS WHAT GIVES THIS ROW TEETH, for the same
-    // reason the `gs://` row spells one: a two-segment tail splits the same
-    // way at the FIRST `/` and at the LAST, so `az://acct/container/pfx`
-    // alone survives a `split_once` -> `rsplit_once` mutant.
+    // THE THREE-SEGMENT CASE, for the same reason as the `gs://` row: a
+    // two-segment tail splits the same way at the FIRST `/` and at the LAST.
     assert_eq!(
         weirkeeper::retention::bucket_and_prefix("az://acct/container/a/b"),
         ("container".to_string(), "a/b".to_string()),
@@ -1673,10 +1515,9 @@ fn the_az_split_is_the_container_and_the_remainder() {
         ("container".to_string(), "pfx".to_string()),
         "a trailing slash is not a path segment"
     );
-    // AN ACCOUNT WITH NO CONTAINER IS LEFT ON THE GENERIC SPLIT, exactly as
-    // the refused two-slash `file://` form is: `storage_url_for` refuses it,
-    // so no handle is ever built over it and no report is ever rendered from
-    // it. There is nothing for this function to be right about.
+    // AN ACCOUNT WITH NO CONTAINER IS LEFT ON THE GENERIC SPLIT, as the refused
+    // two-slash `file://` form is: `storage_url_for` refuses it, so no handle
+    // is ever built over it.
     assert!(
         weirkeeper::retention::storage_url_for("az://acct").is_err(),
         "`az://acct` names no container, and the handle builder says so"

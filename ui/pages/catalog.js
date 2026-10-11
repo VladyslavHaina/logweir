@@ -1,50 +1,41 @@
-// pages/catalog.js -- THE DURABLE RECOVERY CATALOG (PLAT-15.1, PLAT-15.2).
+// pages/catalog.js -- the durable recovery catalog.
 //
-// WHAT THIS PAGE IS FOR: the archive is the truth, and this is the view of it.
-// A recovery point exists because a signed receipt exists in object storage,
-// not because a Backup custom resource does -- so a cluster rebuilt from
-// nothing, or an archive written by another installation entirely, still has
-// every point it ever had, and connecting it here is how you see them.
+// The archive is the truth, and this is the view of it. A recovery point
+// exists because a signed receipt exists in object storage, not because a
+// Backup custom resource does -- so a cluster rebuilt from nothing, or an
+// archive written by another installation, still has every point it ever had.
 //
-// ===========================================================================
-// THE FOUR RULES THIS PAGE WILL NOT BEND
-// ===========================================================================
+// FOUR RULES THIS PAGE WILL NOT BEND
 //
 // 1. AVAILABILITY AND VERIFICATION ARE TWO COLUMNS, NEVER ONE. "The archive
 //    can still serve this point" and "its receipt verifies under a key this
-//    installation accepts" are different facts with different repairs, and D3
-//    section 5.4 keeps them as separate axes for exactly that reason. Whether a point
-//    may be restored from is the catalog's OWN materialised `selectable`
-//    field; this page reads it and never recomputes `Available AND (Verified
-//    or VerifiedHistorical)` from the two enums beside it.
+//    installation accepts" are different facts with different repairs (D3
+//    section 5.4). Whether a point may be restored from is the catalog's own
+//    materialised `selectable` field; this page never recomputes it from the
+//    two enums beside it.
 //
-// 2. THERE IS NO ONE-CLICK TRUST, AND THERE WILL NOT BE ONE HERE. A point
-//    signed by a key this installation does not list comes back
-//    `UntrustedSigner`. The honest surface for that is the key id -- the
-//    SHA-256 of the DER SPKI, the same number `openssl` prints -- and the
-//    command to compute it from the public half its holder gives you, out of
-//    band. A button that added the key would turn "this archive says it is
-//    signed by X" into "this installation trusts X" on the strength of the
-//    archive's own claim, which is precisely what D3 section 5.5 step 3 and
-//    `docs/keys.md` forbid: a key arriving beside an archive is never trusted
-//    by proximity.
+// 2. NO ONE-CLICK TRUST. A point signed by a key this installation does not
+//    list comes back `UntrustedSigner`; the page shows the key id (the
+//    SHA-256 of the DER SPKI, as `openssl` prints it) and the command to
+//    compute it from the public half its holder gives you out of band. A
+//    button that added the key would trust X on the strength of the archive's
+//    own claim to be signed by X, which D3 section 5.5 step 3 and
+//    `docs/keys.md` forbid.
 //
 // 3. NOTHING IS HIDDEN. Every entry is listed with its exact state and its
-//    remedy sentence. A `Missing` point is shown as missing; a `Conflict` is
-//    shown as a conflict. Dropping the rows that are not green would make the
+//    remedy sentence; dropping the rows that are not green would make the
 //    inventory agree with itself and disagree with the bucket.
 //
 // 4. THE VIEW IS A WINDOW AND SAYS SO. The Kubernetes side materialises the
-//    newest `viewLimit` points into page ConfigMaps whose lifetime is the sync
-//    Job's TTL. When it expires, THE VIEW is gone and the archive is untouched
-//    -- and this page says that, because "the catalog is empty" and "this
-//    cluster has forgotten how to list the catalog" look identical in a table
-//    and could not be more different in an incident.
+//    newest `viewLimit` points into page ConfigMaps that live as long as the
+//    sync Job's TTL. When it expires the VIEW is gone and the archive is
+//    untouched, and the page says so: "the catalog is empty" and "this
+//    cluster has forgotten how to list the catalog" look identical in a table.
 //
-// IT SUBMITS EXACTLY ONE THING: the connect-archive create. That is a durable
-// create with an `Idempotency-Key` (D3 section 5.5 step 1), and it creates a
-// RecoveryCatalog -- a read-only view over a bucket. It grants no trust, moves
-// no object and deletes nothing.
+// IT SUBMITS EXACTLY ONE THING: the connect-archive create, a durable create
+// with an `Idempotency-Key` (D3 section 5.5 step 1). It creates a
+// RecoveryCatalog -- a read-only view over a bucket -- and grants no trust,
+// moves no object and deletes nothing.
 
 import {
   ABSENT,
@@ -119,28 +110,23 @@ export const NO_POINT_SENTENCE =
   "This catalog's view holds no point. That is a statement about the VIEW: check the sync " +
   "conditions above before concluding anything about the archive.";
 
-/** The two sync modes the connect form offers, in the REQUEST's own spelling.
+/** The two sync modes the connect form offers, in the REQUEST's spelling.
  *
- *  LOWERCASE, AND THAT IS NOT A STYLE CHOICE. `RecoveryCatalog.spec.sync.mode`
- *  is `Index`/`Full` on the custom resource and the request body spells the
- *  same two `index`/`full`; the API translates once. Sending the CRD's
- *  spelling here would be a `422` the form could not place.
- *
- *  `full` is what "connect an existing archive" needs: it rescans every
- *  catalog record under `logweir/catalog/v1/points/` rather than only the day
- *  shards of the index -- and it reads RECORDS, not bare receipts (see
+ *  Lowercase on purpose: the custom resource spells them `Index`/`Full` and
+ *  the API translates once, so the CRD's spelling would be a `422` the form
+ *  could not place. `full` rescans every catalog record under
+ *  `logweir/catalog/v1/points/`, not only the index's day shards (see
  *  [`CATALOG_MODE_HELP`]). */
 export const SYNC_MODES = Object.freeze(["full", "index"]);
 
-/** What the two sync modes read, said under the selector (PoC defect P6).
+/** What the two sync modes read, said under the selector.
  *
- *  It used to say that Full "walks the receipts and manifests in the bucket".
- *  It does not: both modes read the durable catalog's signed RECORDS under
- *  `logweir/catalog/v1/` (`docs/kubernetes.md` section 7d), and the sync Job is
- *  read-only by design, so it can never write the record a receipt is missing.
- *  A point written by a release before the catalog existed (`v0.1.5` and
- *  earlier) has a receipt and no record, and neither mode shows it until the
- *  operator backfills the records once with `logweir catalog sync`. */
+ *  Both modes read the durable catalog's signed RECORDS under
+ *  `logweir/catalog/v1/` (`docs/kubernetes.md` section 7d), and the sync Job
+ *  is read-only, so it never writes a record a receipt is missing. A point
+ *  written before the catalog existed (`v0.1.5` and earlier) has a receipt
+ *  and no record, and neither mode shows it until `logweir catalog sync`
+ *  backfills the records once. */
 export const CATALOG_MODE_HELP =
   "Full rescans every catalog record under logweir/catalog/v1/points/; Index reads the day " +
   "shards of the catalog index, newest first. Neither reads a backup receipt that has no " +
@@ -156,17 +142,13 @@ export const CONNECT_SENTENCE =
   "as untrusted, and no step of this form changes that.";
 
 /** The draft this form keeps: the three inputs, the intent that makes its
- *  submit durable, and THE BODY THAT INTENT WAS SPENT ON.
+ *  submit durable, and the body that intent was spent on.
  *
- *  `spentOn` is the last one and the least obvious. An idempotency key binds a
- *  REQUEST, not a form: PLAT-17.1's rule answers `409 idempotency_conflict`
- *  when a key arrives with a different request than the one it was first seen
- *  with. So an operator who submits, gets a refusal, CORRECTS the destination
- *  and submits again would spend the same key on a different body -- and every
- *  further retry would answer 409 until the page was reloaded. Recording what
- *  the key was spent on is what lets [`connectIntent`] mint a new one when the
- *  body moves, which is the same escape `ui/pages/schedules.js` gives a manual
- *  run through "Back up again". */
+ *  An idempotency key binds a REQUEST, not a form: a key reused with a
+ *  different body answers `409 idempotency_conflict`, so a submit corrected
+ *  after a refusal would 409 on every retry. `spentOn` is what lets
+ *  [`connectIntent`] mint a new key when the body moves (the same escape
+ *  `ui/pages/schedules.js` gives "Back up again"). */
 export const CONNECT_FIELDS = Object.freeze([
   "name", "destination", "syncMode", "intent", "spentOn",
 ]);
@@ -205,14 +187,12 @@ export function spentOn(body) {
   ]);
 }
 
-/** THE INTENT THIS DRAFT HOLDS, for the body it is about.
+/** The intent this draft holds, for the body it is about.
  *
  *  Minted on first use and kept for the life of the draft, so a double click,
- *  a lost response and a retry after a 503 are ONE request. **Re-minted when
- *  the body moves**, because an idempotency key binds a request: spending a
- *  key on a corrected body is a `409 idempotency_conflict` that no further
- *  retry can clear (see [`CONNECT_FIELDS`]). `body` absent means "just tell me
- *  what this draft holds", and re-mints nothing. */
+ *  a lost response and a retry after a 503 are ONE request; re-minted when
+ *  the body moves (see [`CONNECT_FIELDS`]). `body` absent reads the current
+ *  intent and re-mints nothing. */
 export function connectIntent(key, body) {
   const draft = readDraft(key);
   const held = draft === null ? undefined : draft.intent;
@@ -255,11 +235,9 @@ export function conditionOf(conditions, type) {
 
 /** Whether this catalog's Kubernetes view is one the page can list from.
  *
- *  READ FROM THE CONDITIONS THE CONTROLLER WROTE, and never from a comparison
- *  between `viewExpiresAt` and the browser's clock: the expiry is a server
- *  instant and a browser that is five minutes fast would declare a healthy
- *  view expired. `Ready=False/ViewExpired` and `Stale=True` are the
- *  controller's own words and they are what this reads. */
+ *  Read from the controller's conditions (`Ready=False/ViewExpired`,
+ *  `Stale=True`), never by comparing `viewExpiresAt` with the browser's
+ *  clock: a browser five minutes fast would declare a healthy view expired. */
 export function viewIsUsable(object) {
   const ready = conditionOf(statusOf(object).conditions, "Ready");
   if (ready === null) {
@@ -280,7 +258,7 @@ export function renderCatalogList(collection, ns) {
         ? detailLink("catalog", ns || meta.namespace || "", meta.name)
         : cell(null),
       cell(((object.spec || {}).destinationRef || {}).name),
-      // THE WORD, NOT THE SYNTAX (MCP-22): `Ready=True ViewReady` was the cell.
+      // The word, not the condition's syntax.
       conditionBadge(ready, "ready", "not ready"),
       cell(counts.total),
       cell(counts.available),
@@ -344,29 +322,22 @@ export function renderCatalogStatus(object) {
   );
 }
 
-/** THE ROUTE A "Restore this point" LINK CARRIES: the point's identity, the
- *  catalog that holds it, and THE PLAN BINDING.
+/** The route an older "Restore this point" link carries: the point's
+ *  identity, the catalog that holds it, and the plan binding (`point_id`,
+ *  `receipt_key`, `receipt_sha256`, and `manifest_sha256` when present; D3
+ *  section 5.5 step 4). The runner refuses a mismatch with exit 3
+ *  `PointBindingMismatch`.
  *
- *  D3 section 5.5 step 4's plan carries `source.point {point_id, receipt_key,
- *  receipt_sha256, manifest_sha256}`, and the runner re-checks that binding
- *  before it constructs a client -- a mismatch is exit 3
- *  `PointBindingMismatch`. Those four are REQUIRED fields of a published point
- *  (three of them; the manifest digest is optional and travels when it is
- *  there), so the link can carry what a plan is built from rather than a name
- *  and a hope.
+ *  It carries no `locationDigest`: the frozen destination digest is a fact
+ *  about a Backup's own destination snapshot, not about a point read out of
+ *  a bucket, so the API publishes none and this page invents none. The
+ *  location is named by the catalog's `destinationRef` (one per catalog,
+ *  immutable by CEL) plus the `locationId` that can serve the point.
  *
- *  IT CARRIES NO `locationDigest`, and this is the reconciliation's one
- *  surrendered field. The catalog's view entry has never held one -- the
- *  frozen destination digest is a fact about a BACKUP's own destination
- *  snapshot, not about a point read out of a bucket -- so the API publishes
- *  none and this page invents none. What names the location instead is the
- *  CATALOG's `destinationRef` (one destination per catalog, immutable by CEL)
- *  plus the `locationId` of the location that can serve the point. */
-// THE WIZARD READS ONLY `catalog` AND `point` FROM THIS LINK (PLAT-15.2): it
-// re-reads the point from the product API and builds the binding from that
-// answer. The richer spelling below is kept for links minted before the wizard
-// could restore a catalog point; the table now links through
-// `restoreCatalogPointRoute`, the wizard's own helper.
+ *  The wizard reads only `catalog` and `point` from this link and re-reads
+ *  the point itself; the table links through `restoreCatalogPointRoute`.
+ *  This spelling is kept for links minted before the wizard could restore a
+ *  catalog point. */
 export function restorePointRoute(ns, catalog, entry, destination) {
   const e = entry || {};
   const location = bestLocation(e);
@@ -386,21 +357,17 @@ export function restorePointRoute(ns, catalog, entry, destination) {
   );
 }
 
-// THE REDACTION MARKER. A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT
-// PASS ONE ON. The catalog sync runs a point's `backupId` through
-// `check_contract::redact` and its archive keys through
-// `logweir::check::redact_path`. A runner that predates the ULID exemption
-// (CATALOG-RECEIPTKEY-REDACTED) rewrote the 26-character run id, and runners
-// up to v0.2.0-rc.1 rewrote every SCHEDULED run's set id
-// (`<schedule uid>-<slot>`, FX-17) -- and with it the receipt key built from
-// it -- so such a point comes back with `backupId: "[redacted]"` and
-// `receiptKey: "[redacted].receipt.json"`. Carrying either into a plan would
-// build `source.backup` or `source.point.receipt_key` out of the redactor's
-// output and earn exit 3 `PointBindingMismatch` from the runner, one step
-// later and one layer further from the cause. The rule lives beside the
-// wizard's point selection (PLAT-15.2, `redactedBindingReason`), which refuses
-// such a point with one reason naming the field, and is re-exported here so
-// this page and the wizard cannot disagree about it.
+// A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT PASS ONE ON. The
+// catalog sync runs a point's `backupId` through `check_contract::redact` and
+// its archive keys through `logweir::check::redact_path`. A runner older than
+// the ULID exemption rewrote the 26-character run id, and runners up to
+// v0.2.0-rc.1 rewrote every scheduled run's set id (`<schedule uid>-<slot>`)
+// and the receipt key built from it, so such a point comes back with
+// `backupId: "[redacted]"` and `receiptKey: "[redacted].receipt.json"`.
+// Carrying either into a plan would earn exit 3 `PointBindingMismatch` one
+// step later and one layer further from the cause. The rule lives beside the
+// wizard's point selection (`redactedBindingReason`) and is re-exported here
+// so this page and the wizard cannot disagree.
 export { REDACTION_MARKER, isRedacted };
 
 /** The location a restore would read from: the first one the catalog reports
@@ -419,14 +386,10 @@ export function bestLocation(entry) {
   return locations.length === 0 ? null : locations[0];
 }
 
-/** What the restore link carries -- WHAT THE POINT ROUTE DELIVERS, and no more.
- *
- *  The first spelling of this sentence promised "the whole plan binding". It
- *  is not this page's to promise: the link carries exactly the fields
- *  `GET .../catalogs/{name}/points` published for that point, and whether
- *  those are enough to build a plan is a fact about the API's answer and not
- *  about the link. See [`POINT_BINDING_REDACTED_SENTENCE`] for the case where
- *  they are not. */
+/** What the restore link carries: exactly the fields `GET
+ *  .../catalogs/{name}/points` published for that point. Whether those are
+ *  enough to build a plan is a fact about the API's answer, not the link;
+ *  see [`POINT_BINDING_REDACTED_SENTENCE`] for when they are not. */
 export const POINT_BINDING_SENTENCE =
   "This link carries what the point route published for this point: the point id, the receipt " +
   "key and digest, the manifest digest where the catalog has one, and the destination the " +
@@ -435,28 +398,27 @@ export const POINT_BINDING_SENTENCE =
   "runner re-checks that binding before it constructs a client: a mismatch is a refusal, not a " +
   "restore of something else.";
 
-/** ONE POINT AS A ROW: the two axes, the signer, and the remedy.
+/** One point as a row: the two axes, the signer, and the remedy.
  *
- *  THE RESTORE CELL IS THE WIZARD'S OWN QUESTION (PLAT-15.2). A row the catalog
- *  marks `selectable` is offered only when `catalogPointOffer` -- the rule the
- *  wizard applies when it opens -- offers it too: a complete Backup-verdict
- *  join, an unredacted set id and receipt key, and both digests. A selectable row it
- *  refuses says why in the cell, so the table never offers a link the wizard
- *  will refuse. The controller's verdict on the point's own `Backup`
- *  (`backupVerdict`) is printed beside the catalog's verification, because it
- *  is the reason a green-looking row can be unselectable. */
+ *  The restore cell asks the wizard's own question: a `selectable` row is
+ *  offered only when `catalogPointOffer` (the rule the wizard applies when it
+ *  opens) offers it too, and a selectable row it refuses says why in the
+ *  cell, so the table never offers a link the wizard will refuse. The
+ *  controller's verdict on the point's own `Backup` (`backupVerdict`) is
+ *  printed beside the catalog's verification, because it is why a
+ *  green-looking row can be unselectable. */
 export function pointRow(entry, ns, catalog, destination, page) {
   const e = entry || {};
   const location = bestLocation(e);
   const offer = catalogPointOffer(e, page || {});
   return [
-    // THE ACTION FIRST (MCP-25's rule, the review's class sweep): the eighth of
-    // eight columns is the one a narrow window scrolls away.
+    // The action first: the last of eight columns is the one a narrow window
+    // scrolls away.
     e.selectable !== true
       ? ABSENT
       : (offer.offer
-        // A ROLE THAT CANNOT RESTORE IS NOT OFFERED THE LINK (MCP round 3,
-        // R3-2); the route would refuse it by name.
+        // A role that cannot restore is not offered the link; the route would
+        // refuse it by name.
         ? restorePointLink(restoreCatalogPointRoute(ns, catalog, e.pointId),
           granted(ns, "restoreCreate"), "Restore this point",
           " data-restore-point=\"" + esc(e.pointId) + "\"")
@@ -480,15 +442,15 @@ export function pointRow(entry, ns, catalog, destination, page) {
   ];
 }
 
-/** PROD-04.1: a point's consumer position evidence, as the catalog's view
- *  publishes it (`consumerPositions`): how long before the recovery point the
- *  positions were read -- the snapshot's freshness -- and per selected group
- *  its outcome and how many of its positions relate to archived data, with
- *  every count that is not zero: never committed, beyond the end, failed and
- *  not observed (review L5: "0 of 3 relate" alone hid three failed reads). The
- *  empty string when the point publishes none (the backup selected no group,
- *  or the record predates format 1.7.0): never "no positions". The positions
- *  themselves are in the positions document the point's signed receipt binds. */
+/** A point's consumer position evidence, as the catalog's view publishes it
+ *  (`consumerPositions`): how long before the recovery point the positions
+ *  were read, and per selected group its outcome and how many positions
+ *  relate to archived data, with every non-zero count (never committed,
+ *  beyond the end, failed, not observed), because "0 of 3 relate" alone
+ *  would hide three failed reads. The empty string when the point publishes
+ *  none (no group selected, or a record older than format 1.7.0): never "no
+ *  positions". The positions themselves are in the document the point's
+ *  signed receipt binds. */
 export function consumerPositionsNote(entry) {
   const cp = (entry || {}).consumerPositions;
   if (!cp || typeof cp !== "object") {
@@ -525,7 +487,7 @@ export function consumerPositionsNote(entry) {
       "atomic with the records: " + parts.join("; ")) + "</span>";
 }
 
-/** PROD-03.0: a point's schema-dependent topics, from its listed topics'
+/** A point's schema-dependent topics, from its listed topics'
  *  `schemaDependency` -- the topics whose archived keys or values carry
  *  Confluent wire-format framing, with the sides and the schema ids. */
 export function schemaDependentTopicsOf(entry) {
@@ -537,7 +499,7 @@ export function schemaDependentTopicsOf(entry) {
       schemaIdsOmitted: x.d.schemaIdsOmitted, basis: x.d.basis }));
 }
 
-/** PROD-03.0: the points of this page with schema-dependent topics, each
+/** The points of this page with schema-dependent topics, each
  *  named with its topics and their schema ids, under the sentence the review
  *  also says -- or `""` when no listed topic is schema-dependent. A point
  *  whose topics are not listed says nothing here: its schema dependency is
@@ -593,15 +555,15 @@ export function renderPoints(page, ns, catalog, destination) {
         esc(page.backupVerdictsIncomplete) + "\">" + esc(BACKUP_VERDICTS_INCOMPLETE_SENTENCE) +
         " (" + esc(page.backupVerdictsIncomplete) + ")</p>"
       : "") +
-    // ONE HTTP PAGE, SAID AS ONE. `CATALOG_WINDOW_SENTENCE` above is about the
-    // Kubernetes VIEW's own `viewLimit`; this is the separate truncation of
-    // this REQUEST, and reading the two as one would make a 200-row table look
-    // like the whole window (review F9). This build follows no cursor here.
+    // One HTTP page, said as one. `CATALOG_WINDOW_SENTENCE` is about the
+    // Kubernetes view's `viewLimit`; this is the separate truncation of this
+    // request, and reading the two as one would make a 200-row table look like
+    // the whole window. This build follows no cursor here.
     (cursorOf(page) === null
       ? ""
       : "<p class=\"note\" data-more-points=\"true\">" + messageText(MORE_POINTS_SENTENCE) + "</p>") +
     "<p class=\"note\">" + messageText(POINT_BINDING_SENTENCE) + "</p>" +
-    // PROD-03.0: which points' topics need a schema registry nobody captured.
+    // Which points' topics need a schema registry nobody captured.
     renderSchemaDependentPoints(page) +
     (entries.some((entry) => isRedacted((entry || {}).receiptKey) ||
       isRedacted((entry || {}).backupId))
@@ -614,12 +576,10 @@ export function renderPoints(page, ns, catalog, destination) {
 
 /** What the table says when a value the plan needs came back redacted.
  *
- *  A COMPLAINT, NOT A NOTE, and it names the fields and the repair. The
- *  alternative was to carry the redactor's output into the link and let the
- *  runner refuse the plan with exit 3 `PointBindingMismatch` -- a correct
- *  refusal, one step later, about a value nothing on screen said was wrong.
- *  Each such row says which field and why (`redactedBindingReason`); this is
- *  the one sentence for the page. */
+ *  A complaint, not a note: the alternative is a runner refusal (exit 3
+ *  `PointBindingMismatch`) one step later, about a value nothing on screen
+ *  said was wrong. Each such row names its field (`redactedBindingReason`);
+ *  this is the one sentence for the page. */
 export const POINT_BINDING_REDACTED_SENTENCE =
   "At least one point above published its plan binding -- its backup set id or its receipt " +
   "key -- as `[redacted]`: the catalog sync's own redactor withheld it on the way into the " +
@@ -642,13 +602,11 @@ export const MORE_POINTS_SENTENCE =
   "truncation from the window above: this one is the size of this request, and this build does " +
   "not follow the cursor here. Use `logweir catalog list` against the archive for the rest.";
 
-/** THE UNTRUSTED-SIGNER PANEL.
- *
- *  It shows the key id, how many points it signed, and the command that turns
- *  a public key its holder gives you into that same number. It offers NO
- *  control that adds the key anywhere, and the `kubectl` snippet below is
- *  rendered and never submitted -- the same shape `ui/pages/keys.js` has for
- *  the roster, for the same reason. */
+/** The untrusted-signer panel: the key id, how many points it signed, and
+ *  the command that turns a public key its holder gives you into that same
+ *  number. It offers NO control that adds the key anywhere, and the
+ *  `kubectl` snippet below is rendered and never submitted, as in
+ *  `ui/pages/keys.js`. */
 export function renderSigners(signers) {
   const list = Array.isArray((signers || {}).items)
     ? signers.items
@@ -729,12 +687,10 @@ export function renderTrustSnippet(signers) {
   );
 }
 
-/** What a spent key answers, and what clears it.
- *
- *  It is rendered rather than pre-empted because the escape is already in the
- *  form: correcting any field moves the body, and a moved body mints a new
- *  intent on the next submit. The sentence says so, so an operator who sees a
- *  409 knows the answer is "submit again", not "reload the page". */
+/** What a spent key answers, and what clears it. Rendered rather than
+ *  pre-empted: correcting any field moves the body, and a moved body mints a
+ *  new intent on the next submit, so the answer is "submit again", not
+ *  "reload the page". */
 export const INTENT_USED_SENTENCE =
   "The idempotency intent this form was holding was already spent on a DIFFERENT request, so " +
   "the API refused rather than guessing which of the two you meant. The submission below mints " +
@@ -750,17 +706,15 @@ export function isIntentConflict(error) {
 export function renderConnectForm(view) {
   const v = view || {};
   const values = v.values || {};
-  // ONE ERROR SHAPE, THE ONE EVERY OTHER FORM IN THIS TREE USES:
-  // `{fields, unmatched}` -- `fields` keyed by this form's own input names, and
-  // `unmatched` for a server cause no input on screen is about, which is shown
-  // beside the outcome rather than dropped.
+  // The error shape every form here uses: `{fields, unmatched}`, with
+  // `unmatched` holding a server cause no input is about, shown beside the
+  // outcome rather than dropped.
   const errors = ((v.errors || {}).fields) || {};
   const unmatched = (v.errors || {}).unmatched;
   const state = v.state || { phase: "idle" };
   const pending = state.phase === "pending";
-  // A ROLE THAT CANNOT CONNECT AN ARCHIVE IS NOT OFFERED THE FORM (MCP round
-  // 2, R2-14): a viewer saw an enabled Connect archive button that the API
-  // then refused 403.
+  // A role that cannot connect an archive is not offered the form; the API
+  // would refuse it 403.
   if (v.mayConnect === false) {
     return (
       "<section class=\"connect\"><h3>Connect an existing archive</h3>" +
@@ -805,11 +759,11 @@ export function renderConnectForm(view) {
   );
 }
 
-/** THE DESTINATION, CHOSEN FROM THE NAMESPACE'S OWN (MCP-23). A pick-list of
- *  the saved destinations the page read -- name and location -- rather than a
- *  free-text box a typo turns into a 422; the free-text box stays when the
- *  list could not be read, so the form never stops working because a read
- *  failed. An empty list says where a destination is made. */
+/** The destination, chosen from the namespace's own: a pick-list of the
+ *  saved destinations (name and location) rather than a free-text box a typo
+ *  turns into a 422. The free-text box stays when the list could not be
+ *  read, so a failed read never stops the form. An empty list says where a
+ *  destination is made. */
 export function renderDestinationChoice(view, values, errors) {
   const v = view || {};
   const chosen = String((values || {}).destination || "");
@@ -879,10 +833,9 @@ export function renderCatalogDetail(view) {
       ["view limit", cell(sync.viewLimit)],
     ]) +
     renderCatalogStatus(object) +
-    // A REFUSED SUB-READ IS RENDERED IN THE SECTION IT BELONGS TO, as a
-    // string, because these renderers are pure functions from JSON to HTML.
-    // It is never absorbed into an empty table: an empty table is what an
-    // empty catalog looks like, and the two could not be more different.
+    // A refused sub-read is rendered in its own section, as a string (these
+    // renderers are pure functions from JSON to HTML), and never absorbed into
+    // an empty table: an empty table is what an empty catalog looks like.
     (v.pointsError
       ? "<section class=\"points\"><h3>Recovery points</h3>" +
         errorBlock(v.pointsError, false) + "</section>"
@@ -909,8 +862,6 @@ export function renderCatalogPage(view) {
   }
   return renderCatalogList(v.collection, v.ns) + renderConnectForm(v);
 }
-
-// --------------------------------------------------------------- mount half
 
 /** The product API's own field paths mapped onto this form's input names, so a
  *  422 lands beside the control it is about. A LIST OF PAIRS, which is what
@@ -984,9 +935,8 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
     view.state = state;
     paint();
   }, lifecycle);
-  // THE NAMESPACE'S DESTINATIONS, READ BESIDE THE CATALOGS for the pick-list
-  // (MCP-23). A read that fails leaves the free-text box; it is never a reason
-  // the page fails.
+  // The namespace's destinations, read beside the catalogs for the pick-list.
+  // A failed read leaves the free-text box; it never fails the page.
   const destinationsRead = readConnectDestinations(ns, deps, lifecycle);
   try {
     view.collection = await listD3("catalog", ns, readOptions(lifecycle), deps);
@@ -1011,9 +961,9 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
   if (form === null) {
     return;
   }
-  // WHAT IS TYPED IS THE VIEW'S AS IT IS TYPED (P13's class): a settle of an
-  // earlier submission repaints this form from `view.values`, and those were
-  // otherwise only read at submit.
+  // What is typed is the view's as it is typed: a settle of an earlier
+  // submission repaints this form from `view.values`, which would otherwise be
+  // read only at submit.
   const typed = () => {
     view.values = Object.assign({}, view.values, {
       name: String((form.elements.name || {}).value || ""),
@@ -1032,15 +982,11 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
     };
     view.values = values;
     const body = connectBody(values);
-    // THE INTENT IS READ BEFORE THE DRAFT IS REWRITTEN, AND IT IS WRITTEN BACK
-    // WITH IT. `keepDraft` is a REPLACE over the declared fields, not a merge:
-    // keeping `values` alone would drop the intent this draft holds, and the
-    // next submission would mint a new one -- so a resend of the SAME draft
-    // would stop being the same request, which is the whole property an
-    // idempotency key exists to provide.
-    //
-    // AND IT IS MINTED FOR THIS BODY. A corrected destination is a DIFFERENT
-    // request, and spending the old key on it is a 409 no retry can clear.
+    // THE INTENT IS READ BEFORE THE DRAFT IS REWRITTEN, AND WRITTEN BACK WITH IT.
+    // `keepDraft` replaces the declared fields rather than merging, so keeping
+    // `values` alone would drop the intent and a resend of the same draft would
+    // stop being the same request. It is minted for THIS body: a corrected
+    // destination is a different request (see `CONNECT_FIELDS`).
     const intent = connectIntent(key, body);
     keepDraft(
       key,
@@ -1062,14 +1008,11 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
         const made = await connectArchive(ns, body, intent, deps);
         view.result = made;
         view.errors = { fields: {}, unmatched: [] };
-        // A DURABLE RESULT ENDS THE DRAFT AND EMPTIES THE FORM (PLAT-13.2, and
-        // d1w7's review F1 in a new form). The catalog EXISTS now: leaving the
-        // name and the destination in the inputs invites a second click that
-        // creates a SECOND RecoveryCatalog for one destination -- which D3
-        // section 5.5 refuses with `Ready=False/DuplicateCatalog`, leaving a
-        // dead object in a namespace this console holds no delete for. The
-        // outcome line above says what was made and links to it; the form
-        // below it is empty and ready for a different archive.
+        // A DURABLE RESULT ENDS THE DRAFT AND EMPTIES THE FORM. The catalog exists
+        // now; leaving the inputs filled invites a second click that creates a second
+        // RecoveryCatalog for one destination, which D3 section 5.5 refuses with
+        // `Ready=False/DuplicateCatalog` -- a dead object in a namespace this console
+        // holds no delete for.
         dropDraft(key);
         view.values = { syncMode: SYNC_MODES[0] };
         // AND THE LIST IS RE-READ, so the catalog that now exists is on screen
@@ -1111,11 +1054,10 @@ export async function mountCatalogDetail(node, ns, name, parse, lifecycle, deps)
     }
     return;
   }
-  // THE TWO SUB-READS ARE ALLOWED TO FAIL WITHOUT TAKING THE PAGE WITH THEM.
-  // A catalog whose point list cannot be read is a catalog whose STATUS is
-  // still worth showing -- the counts, the conditions and the sync job are
-  // exactly what says why the list is not there. The refusal is rendered in
-  // the section it belongs to, never absorbed into an empty table.
+  // THE TWO SUB-READS MAY FAIL WITHOUT TAKING THE PAGE WITH THEM: a catalog
+  // whose point list cannot be read still has a status worth showing (its
+  // counts, conditions and sync job say why the list is not there), and the
+  // refusal is rendered in its own section, never as an empty table.
   try {
     view.points = await readCatalogPoints(ns, name, { limit: 200 }, readOptions(lifecycle), deps);
   } catch (error) {

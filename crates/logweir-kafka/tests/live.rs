@@ -2,9 +2,8 @@
 use logweir_kafka::{rdkafka_reader::RdKafkaReader, reader::AuthConfig, reader::ClusterReader};
 
 /// The stack this process addresses, read as the e2e package reads it (the
-/// same module, compiled in), so these rows run on any compose slot
-/// (PROD-01.5b). `LOGWEIR_TEST_BOOTSTRAP` and `LOGWEIR_TEST_SASL_BOOTSTRAP`
-/// still override.
+/// same module, compiled in), so these rows run on any compose slot.
+/// `LOGWEIR_TEST_BOOTSTRAP` and `LOGWEIR_TEST_SASL_BOOTSTRAP` still override.
 #[path = "../../../e2e/tests/harness/stack.rs"]
 #[allow(dead_code)]
 mod stack;
@@ -46,9 +45,7 @@ fn reads_end_offsets_and_topic_configs() {
     assert!(cfg.contains_key("cleanup.policy"));
 }
 
-// ---------------------------------------------------------------------------
-// D2 W3 — the check inventory, against the real broker
-// ---------------------------------------------------------------------------
+// The check inventory, against the real broker.
 
 use logweir_core::check_contract::{CheckCode, ExpectedTopicState};
 use logweir_kafka::inventory::{
@@ -194,8 +191,6 @@ fn describe_configs_reads_the_broker_and_a_topic() {
     );
 }
 
-/// **D2 §4.2 [VERIFY U5], against a real broker.**
-///
 /// A metadata request that a broker refuses on authentication grounds does NOT
 /// fail with an authentication error: librdkafka retries until the caller's
 /// deadline and the call returns a TIMEOUT. The refusal appears only in the
@@ -251,17 +246,16 @@ fn a_refused_scram_credential_is_authentication_failed_and_not_a_timeout() {
     );
 }
 
-/// **The ADMIN half of D2 §4.2's `[VERIFY U5]`, against a real broker.**
+/// **The ADMIN half, against a real broker.**
 ///
 /// `validate_create_topics` is the FIRST call on a fresh `KafkaInventory` —
-/// which the `InventoryProbe` seam permits, and which W4's
-/// `target.topicCreate` and W9's `target.timestampBound` both do. In rdkafka
+/// which the `InventoryProbe` seam permits, and which `target.topicCreate`
+/// and `target.timestampBound` both do. In rdkafka
 /// 0.36 the admin client's `CapturingContext` is never consulted
 /// (`FaultLog`'s header carries the crate-source citations), so without
 /// `KafkaInventory::dial_consumer_if_silent` the consumer has never dialled,
 /// the fault log is empty, and a refused credential is reported as
-/// `MetadataTimeout`/`BrokerUnreachable` — the defect the consumer-side drain
-/// removed, surviving on the admin half.
+/// `MetadataTimeout`/`BrokerUnreachable`.
 ///
 /// The consumer is deliberately NOT touched before the admin call: that is the
 /// whole point of the case.

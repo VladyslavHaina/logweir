@@ -1,12 +1,12 @@
 //! Which socket peers the entry point treats as its trusted proxy.
 //!
 //! TWO SOURCES, ONE ANSWER. `trustedProxyCidrs` is the static list the
-//! administrator writes (PLAT-17.2, with its `/16` and `/48` width floors under
+//! administrator writes (with its `/16` and `/48` width floors under
 //! `requireTrustedProxy`). `trustedProxyService` names the INGRESS
-//! CONTROLLER'S Service, and the addresses of its serving endpoints are trusted
-//! beside the list — chart gap G6: a `/32` for the ingress pod is wrong the
-//! moment that pod is recreated, and a range wide enough to survive that
-//! trusts every other pod the node schedules.
+//! CONTROLLER'S Service, and the addresses of its serving endpoints are
+//! trusted beside the list: a `/32` for the ingress pod is wrong the moment
+//! that pod is recreated, and a range wide enough to survive that trusts
+//! every other pod the node schedules.
 //!
 //! WHAT THE SERVICE SOURCE TRUSTS, EXACTLY. Every address in an
 //! `EndpointSlice` labelled `kubernetes.io/service-name=<name>` in `<namespace>`
@@ -42,10 +42,10 @@
 //!
 //! NOTHING HERE IS AN IDENTITY INPUT. As with the static list, a trusted peer
 //! may only have its forwarded headers RECORDED, choose the sign-in
-//! rate-limit bucket by its `X-Forwarded-For` (`crate::http::login_rate_key`,
-//! FX-13; a bucket can only refuse), and satisfy the entry-point gate; no
+//! rate-limit bucket by its `X-Forwarded-For` (`crate::http::login_rate_key`;
+//! a bucket can only refuse), and satisfy the entry-point gate; no
 //! authentication, authorization, redirect or callback decision reads a
-//! forwarded header (D0, amended 2026-10-07).
+//! forwarded header (D0).
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
@@ -109,7 +109,7 @@ impl TrustedProxies {
 
     /// Whether either source names a proxy at all. Without one the console
     /// cannot tell its ingress from any other peer, so the per-peer connection
-    /// cap (`crate::transport::PeerLimit`, FX-24c) stays off.
+    /// cap (`crate::transport::PeerLimit`) stays off.
     #[must_use]
     pub fn is_configured(&self) -> bool {
         !self.cidrs.is_empty() || self.service.is_some()

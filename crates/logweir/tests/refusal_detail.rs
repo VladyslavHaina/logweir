@@ -1,4 +1,4 @@
-//! **FX-34**, the RUNNER's half: a guard refusal prints its reason code and
+//! The RUNNER's half: a guard refusal prints its reason code and
 //! its sentence as ONE `refusal-detail=` line, immediately before I9's
 //! `refusal-reason=` line, at EVERY exit 3 and at no other exit; and the line
 //! carries the Job's line token when the run was given one (`--line-token`),
@@ -16,10 +16,10 @@
 //! # Why the token, and not where the line stands
 //!
 //! A plan can start a line of its own in a pod log. This build's runner
-//! escapes the line breaks in the error text it prints itself (PROD-15.1's
-//! `one_line`); the Kafka client inside it logs to the same stderr by itself,
-//! unescaped, and an error may repeat a plan value that holds a line break
-//! (FX-43). Both streams reach a controller as one log, so
+//! escapes the line breaks in the error text it prints itself (`one_line`);
+//! the Kafka client inside it logs to the same stderr by itself, unescaped,
+//! and an error may repeat a plan value that holds a line break. Both streams
+//! reach a controller as one log, so
 //! nothing about a line's place tells the runner's line from the plan's. The
 //! token does: the controller makes it when it builds the Job, and a plan is
 //! older than its Job. The last rows of this file run a plan that writes
@@ -488,10 +488,8 @@ impl std::io::Write for Writes {
 
 /// **The writer seam, byte for byte**: the detail line and the state line,
 /// each with its newline, in ONE write, so nothing this process prints can
-/// come between them. Over the sentence PoC batch 5's runner printed
-/// (`claude/artifacts/poc-batch-5/prod111/k3-runner.log`): its opening word
-/// was a reason code then and is in no closed set now, so it stays in the
-/// sentence.
+/// come between them. Over a sentence whose opening word is in no closed set,
+/// so it stays in the sentence.
 ///
 /// KILLS: two writes; the detail line skipped for a refusal that says
 /// nothing; a word outside the closed set printed as the code; the token
@@ -665,9 +663,7 @@ fn the_documented_example_is_what_the_runner_prints() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// What the process writes, in the order it writes it, at every exit 3
-// ---------------------------------------------------------------------------
+// What the process writes, in the order it writes it, at every exit 3.
 //
 // A controller does not trust a line for where it stands (the token decides).
 // These rows still hold the runner to its own order, because it is the
@@ -851,7 +847,7 @@ fn every_refused_run_writes_the_pair_last_after_its_error_text() {
     );
 }
 
-/// **The reviewer's shape, on the shipped binary: the plan writes marker
+/// **On the shipped binary: the plan writes marker
 /// lines, and only the runner's own line carries the token.** A plan value
 /// holding line breaks and two marker lines of the plan author's choosing,
 /// in a field a refusal repeats. The runner is given a line token, as under
@@ -862,13 +858,10 @@ fn every_refused_run_writes_the_pair_last_after_its_error_text() {
 /// other. Every `refusal-detail=` line the plan produced is read as nobody's.
 /// The runner's sentence carries the plan's text as words, cleaned.
 ///
-/// This row does NOT assert that the plan's text starts a line of the log.
-/// Before PROD-15.1 it did: the human line printed an error's text raw. With
-/// PROD-15.1's `one_line` the human line holds the plan's line breaks as
-/// escapes, so the plan's marker lines are words inside one line (that is
-/// `a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`'s
-/// assertion, not this row's). This row holds on both sides of that change,
-/// and the token is what makes it not matter.
+/// This row does NOT assert that the plan's text starts a line of the log:
+/// `one_line` holds the plan's line breaks as escapes in the human line
+/// (`a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output`
+/// asserts that). The token is what makes it not matter.
 ///
 /// KILLS: the token printed on any other line (the human line, a tracing
 /// line); a detail line that carries a raw line break.
@@ -1073,9 +1066,9 @@ fn a_run_prints_the_token_it_was_given_in_one_line_and_none_otherwise() {
 ///   `if code == ExitCode::GuardRefused {`;
 /// * nothing in either runner prints the state line by itself, which would
 ///   leave the detail line's position to whatever came before; and
-///   `src/exit.rs` has no printer of the state line alone to reach for (the
-///   old `print_refusal_reason` and its writer seam are removed, and
-///   `refusal_reason_line` is called in one place, inside `print_refusal_to`).
+///   `src/exit.rs` has no printer of the state line alone to reach for
+///   (`refusal_reason_line` is called in one place, inside
+///   `print_refusal_to`).
 ///
 /// KILLS: a second exit-3 path that returns the code without `exiting`; the
 /// state line printed alone; a printer of the state line alone put back.

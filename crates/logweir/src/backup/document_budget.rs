@@ -1,4 +1,4 @@
-//! **FX-33 — the largest receipt and catalog record this run could sign,
+//! **The largest receipt and catalog record this run could sign,
 //! measured BEFORE the engine runs.**
 //!
 //! # Why a count is not enough
@@ -33,7 +33,7 @@
 //! | manifest key and version id | no | 1,024 bytes each (an S3 key's and a version id's limit) |
 //! | instants, exit code, covered window | no | nanosecond instants, `i32::MIN`, `i64::MIN` |
 //! | `consumer_positions` | the selection | `consumer_positions::worst_case_block` of the selection |
-//! | `source_watermarks` (PROD-02.1) | no (read just before the engine) | a block of `u64::MAX` pairs that reaches `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` |
+//! | `source_watermarks` | no (read just before the engine) | a block of `u64::MAX` pairs that reaches `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` |
 //!
 //! `tests/topic_budget.rs::no_real_receipt_is_larger_than_its_projection`
 //! holds the bound: real outcomes of every shape are never larger than what
@@ -227,7 +227,7 @@ fn every_topic<T: Clone>(topics: &[String], value: T) -> BTreeMap<String, T> {
     topics.iter().map(|t| (t.clone(), value.clone())).collect()
 }
 
-/// PROD-02.1's `source_watermarks` at its longest. The writer records the
+/// `source_watermarks` at its longest. The writer records the
 /// block only while it encodes within
 /// `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES`, so the first block of
 /// `u64::MAX` pairs that reaches the budget is never smaller than one it

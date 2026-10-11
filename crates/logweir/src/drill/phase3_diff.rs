@@ -9,7 +9,7 @@ pub struct Collision {
     pub existing_partitions: i32,
     pub existing_end_offsets: i64,
     pub existing_configs_differing: Vec<String>,
-    /// **FX-4.** `Some(<coverage>)` when the SOURCE topic's configuration was
+    /// `Some(<coverage>)` when the SOURCE topic's configuration was
     /// not captured (`unknown`, `notCaptured` or `captureDenied`): the keys
     /// above are the differences the archive's own record shows, and their
     /// ABSENCE proves nothing. `None` only for `captured`. It reaches the
@@ -20,16 +20,10 @@ pub struct Collision {
 
 #[derive(Debug, Clone, Default)]
 pub struct TargetDiff {
-    /// Target topics that already EXIST on the target — regardless of
-    /// whether they currently hold any records (Task 16 fix round 1,
-    /// MINOR-2: this comment previously said "and already hold records",
-    /// which is narrower than what the code below actually does — the
-    /// `Some(st) => ...` arm pushes a collision unconditionally, without
-    /// consulting `existing_end_offsets`. The code is right: refusing to
-    /// write into an existing empty topic costs at most a false alarm,
-    /// while the narrower rule would let a restore silently write into a
-    /// topic someone else created. This comment was corrected to match the
-    /// code, not the other way round).
+    /// Target topics that already EXIST on the target, whether or not they
+    /// hold records: refusing to write into an existing empty topic costs at
+    /// most a false alarm, while the narrower rule would let a restore write
+    /// into a topic someone else created.
     pub collisions: Vec<Collision>,
     /// Target topics that do not exist — the normal case on a scratch
     /// cluster. Every entry here has a matching `would_create` entry.
@@ -39,30 +33,19 @@ pub struct TargetDiff {
 }
 
 impl TargetDiff {
-    /// THE SINK. Phase 3's whole justification is that no shipped artifact
-    /// performs this diff; a value computed and then dropped would leave the
-    /// §4 positioning claim resting on something no reader ever sees. The
-    /// orchestrator writes this into `Scorecard.target_diff`, `drill show`
-    /// renders it, and phase 6 takes its rendered partition counts from
-    /// `would_create` rather than re-deriving them.
+    /// The sink: the orchestrator writes this into `Scorecard.target_diff`,
+    /// `drill show` renders it, and phase 6 takes its rendered partition
+    /// counts from `would_create` rather than re-deriving them. `absent` is
+    /// carried across: a topic in the backup and absent from the target is a
+    /// first-order fact about whether the restore can work.
     ///
-    /// `absent` is carried across explicitly (Task 16 fix round 1, MINOR-3):
-    /// it used to be computed and never read anywhere, including here — a
-    /// topic present in the backup and absent from the target is a
-    /// first-order fact about whether the restore can work, and belongs in
-    /// the signed document a reader actually sees, not only in an
-    /// in-process struct nothing consumes.
-    ///
-    /// **FX-4.** A collision whose SOURCE configuration was not captured is
-    /// named in `not_assessed` (`"<target topic>: configuration (<why>)"`),
-    /// so its `differing config: []` is never read as "no divergence". The
-    /// collision string itself is byte for byte what the writer before FX-4
-    /// produced: an existing field's content does not change format (the
-    /// owner's OD-7 rulings of 2026-10-05 made only the new arms and phase
-    /// 7's `unexpected_divergence` entry MINOR). `Some`, always, from here:
-    /// phase 3 ran, so "every collision assessed" (`Some([])`) is a claim
-    /// this function can make, and absent stays the spelling of "not
-    /// recorded".
+    /// A collision whose SOURCE configuration was not captured is named in
+    /// `not_assessed` (`"<target topic>: configuration (<why>)"`), so its
+    /// `differing config: []` is never read as "no divergence"; the collision
+    /// string itself keeps its format (an existing field's content does not
+    /// change). `Some`, always, from here: phase 3 ran, so "every collision
+    /// assessed" (`Some([])`) is a claim this function can make, and absent
+    /// stays the spelling of "not recorded".
     pub fn summarise(&self) -> logweir_core::scorecard::TargetDiffSummary {
         let mut not_assessed: Vec<String> = self
             .collisions
@@ -102,12 +85,10 @@ impl TargetDiff {
 /// one, else `max(partition_id) + 1`
 /// [U:crates/kafka-backup-core/src/restore/engine.rs:1421-1436].
 ///
-/// It is public and shared with `phase0_admit::create_target_topics` (guard
-/// **G-TS**) on purpose. Since Task 8 the engine no longer creates the target
-/// topics — the rendered document says `create_topics: false` — so this number
-/// is no longer only a REPORT in `would_create`: it is the count Logweir
-/// actually passes to `TopicCreator`. Two copies of the derivation would let
-/// `target_diff.would_create` claim one count in the signed scorecard while the
+/// It is shared with `phase0_admit::create_target_topics` (guard G-TS) on
+/// purpose: the rendered document says `create_topics: false`, so this is
+/// the count Logweir passes to `TopicCreator`, and two copies of the
+/// derivation would let `target_diff.would_create` sign one count while the
 /// broker was asked for another.
 pub fn restore_partition_count(t: &logweir_core::engine::TopicFacts) -> i32 {
     t.original_partition_count.unwrap_or_else(|| {
@@ -124,7 +105,7 @@ pub fn restore_partition_count(t: &logweir_core::engine::TopicFacts) -> i32 {
 /// which the operator's dry run fakes with an unconditional DryRunPassed.
 ///
 /// `coverage` is the SOURCE topics' configuration capture coverage from the
-/// verified backup receipt (FX-4): a collision's configuration difference is
+/// verified backup receipt: a collision's configuration difference is
 /// assessed only where it is `captured`.
 pub fn run(
     target: &TargetState,
@@ -145,7 +126,7 @@ pub fn run(
             }
             Some(st) => {
                 let total: i64 = st.end_offsets.iter().map(|(_, hi)| *hi).sum();
-                // FX-47: a source key the target does not report differs. Absent
+                // A source key the target does not report differs. Absent
                 // is never agreement (`phase7_verify::classify_parity`'s rule).
                 let differing = t
                     .configurations

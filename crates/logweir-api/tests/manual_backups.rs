@@ -1,8 +1,8 @@
-//! `POST /api/v1/namespaces/{ns}/backups` (PLAT-06.2, D1 §8).
+//! `POST /api/v1/namespaces/{ns}/backups` (D1 §8).
 //!
 //! THE SIX ROWS D1 §12 REQUIRES, and the API half of each: double click, lost
 //! HTTP response, refresh, paused schedule, failed preflight, and a successful
-//! scheduled-policy copy. The browser halves are W7's `ui/tests/*.spec.js`;
+//! scheduled-policy copy. The browser halves are in `ui/tests/*.spec.js`;
 //! what is asserted here is that the API makes each of them POSSIBLE — one
 //! object per intent, a replay that returns the original run, labels a reload
 //! can select on, no gate on suspension or readiness, and a copied policy whose
@@ -88,20 +88,16 @@ fn backups(app: &TestApp) -> Vec<Value> {
         .collect()
 }
 
-/// **The answer NAMES the run it made** — PLAT-18.2's live pass, whose console
-/// success line read "Created Backup  (uid )".
+/// **The answer NAMES the run it made.**
 ///
-/// The run's identity is in the answer and always was: `item` is the created
-/// object's projection (`name`, `namespace`, `uid`, `resourceVersion`), in the
-/// SAME `{requestId, replayed, item}` envelope every other create route answers
-/// with (`RestoreResponse`, `DestinationResponse`, the schedule create …), plus
-/// the one route-specific member `schedule`. The empty line was the console
-/// reading `result.object.metadata` where its own client returns `result.run`;
-/// that is a `ui/` fix, and this row is what keeps the API half of the
-/// agreement from drifting while it is made.
-///
-/// So it holds the identity to the OBJECT THE CLUSTER STORED, on the create and
-/// on the replay, and holds the envelope's member set.
+/// `item` is the created object's projection (`name`, `namespace`, `uid`,
+/// `resourceVersion`), in the SAME `{requestId, replayed, item}` envelope
+/// every other create route answers with (`RestoreResponse`,
+/// `DestinationResponse`, the schedule create …), plus the one
+/// route-specific member `schedule`; a console reading anything else prints
+/// "Created Backup  (uid )". So this holds the identity to the OBJECT THE
+/// CLUSTER STORED, on the create and on the replay, and holds the envelope's
+/// member set.
 ///
 /// KILLS: answering with the object as BUILT rather than as created (no uid, no
 /// resourceVersion — the create's return value dropped); a replay that answers
@@ -531,11 +527,11 @@ async fn the_copied_policy_digest_equals_the_schedules_own() {
 /// validating is what makes the answer a 422 about the RUN rather than a run
 /// that dies at the guard rail.
 ///
-/// `FieldError.field` IS A PATH. It used to be `"scheduleRef.name (topics)"`
-/// — a path with a parenthetical glued on — and `ui/contract.js` types the
-/// field as a plain string with no parser, so a console matching
-/// `e.field === "scheduleRef.name"` to highlight the schedule picker found
-/// nothing. The schedule's own offending field belongs in the message.
+/// `FieldError.field` IS A PATH, with no parenthetical glued on:
+/// `ui/contract.js` types the field as a plain string with no parser, so a
+/// console matching `e.field === "scheduleRef.name"` to highlight the
+/// schedule picker must find it. The schedule's own offending field belongs
+/// in the message.
 ///
 /// KILLS: decorating the path again; dropping the schedule field from the
 /// message, which would leave the person a 422 that names the picker and not
@@ -849,10 +845,9 @@ async fn dynamic_selection_is_copied_whole() {
 ///
 /// D1 §8.1 promises ONE CR path, and the sample's own header says the API
 /// produces "exactly this shape". A test that only checked the file was
-/// internally well-formed would let the two drift apart while still passing
-/// under a name that promises a comparison — which is what the reviewer found:
-/// the sample carried a decorative `app.kubernetes.io/name` label the route
-/// never writes.
+/// internally well-formed would let the two drift apart (a decorative label
+/// the route never writes) while still passing under a name that promises a
+/// comparison.
 ///
 /// So this drives `POST .../backups` against a schedule seeded with the
 /// sample's own copied policy, UID and generation, and asserts that the object
@@ -969,12 +964,10 @@ async fn the_shipped_sample_is_what_this_route_creates() {
     app.fake.assert_strict();
 }
 
-// ===========================================================================
-// The name rule, pinned across two languages by ONE file
-// ===========================================================================
+// THE NAME RULE, pinned across two languages by ONE file.
 
 /// **`ui/tests/fixtures/manual-backup-names.json` is THIS route's own rule, and
-/// this is the Rust half of that pin (review F1).**
+/// this is the Rust half of that pin.**
 ///
 /// A manual `Backup` has no name until its idempotency scope is hashed, so the
 /// name IS the replay guard, and the rule is implemented twice: here, in
@@ -982,14 +975,13 @@ async fn the_shipped_sample_is_what_this_route_creates() {
 /// `manualBackupName`. Two implementations of a hash agree until the day they
 /// do not.
 ///
-/// THE FIXTURE WAS PINNED ON ONE SIDE ONLY, WHICH IS NOT A PIN.
-/// `ui/tests/d1.spec.js` drives the page over every recorded row, and
-/// `scripts/live/d1/run.py`'s `L-06-2-cli` drives the real binary over ONE live
-/// scope — so a change to `ROUTE_CREATE`, [`NAME_PREFIX`], the field order,
-/// `push_field`'s width, `NAME_HASH_CHARS` or the base32 alphabet passed every
-/// gate that runs without a cluster. This row closes that: the six recorded
-/// names are now what BOTH implementations produce, checked in CI, with no
-/// cluster and no browser.
+/// A PIN NEEDS BOTH SIDES. `ui/tests/d1.spec.js` drives the page over every
+/// recorded row, and `scripts/live/d1/run.py`'s `L-06-2-cli` drives the real
+/// binary over ONE live scope -- so without this row a change to
+/// `ROUTE_CREATE`, [`NAME_PREFIX`], the field order, `push_field`'s width,
+/// `NAME_HASH_CHARS` or the base32 alphabet would pass every gate that runs
+/// without a cluster. The six recorded names are what BOTH implementations
+/// produce, checked in CI, with no cluster and no browser.
 ///
 /// KILLS: any change to the scope document that moves a name — the opener, a
 /// field's position, a length prefix's width, the alphabet, the 26-character
@@ -1116,7 +1108,7 @@ fn the_manual_run_name_fixture_is_this_routes_own_rule() {
     );
 }
 
-/// **FX-33 — "Back up now" on a schedule naming more topics than one backup
+/// **"Back up now" on a schedule naming more topics than one backup
 /// may is refused `422`, by name, and creates nothing.**
 ///
 /// The product API's own forms never accept such a list (a named allowlist

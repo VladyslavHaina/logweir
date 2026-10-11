@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `logweir-api` — the bounded Logweir product API (PLAT-17.1).
+//! `logweir-api` -- the bounded Logweir product API.
 //!
 //! WHAT THIS IS. One small HTTP service that serves the existing static UI
 //! at `/ui/` and a typed JSON API at `/api/v1` on the same origin, and that
@@ -43,7 +43,7 @@
 //!   generated, drift-tested OpenAPI document.
 //! * [`assets`] — the static UI allowlist.
 //! * [`transport`] — the stall deadline on every connection's output and on
-//!   every request body (FX-24b); `main.rs` applies it to each connection.
+//!   every request body; `main.rs` applies it to each connection.
 
 pub mod access;
 pub mod app;
@@ -86,7 +86,7 @@ pub struct Preflight {
     pub assets: assets::StaticAssets,
     /// Shared mode's key material.
     pub shared: Option<SharedPreflight>,
-    /// PLAT-19.2: the approval-policy document and the console confirmation
+    /// The approval-policy document and the console confirmation
     /// key. A served namespace bound to an explicit policy without a key is a
     /// refusal here.
     pub approval: approval::ApprovalSettings,

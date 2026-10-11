@@ -1,17 +1,10 @@
 //! `logweir drill show` — the fixed-width table is the README image (spec
-//! §13), so it is golden-tested rather than asserted field by field. The
-//! three tests below are exactly task-21b-brief.md Step 1, verbatim.
+//! §13), so it is golden-tested rather than asserted field by field.
 //!
-//! The tests after that are this task's own self-review coverage: the brief
-//! and its addendum freeze the golden and these three tests, but the task
-//! also demands that a reader can never mistake a non-passing drill, or a
-//! `Partial` integrity result, for a clean pass. Those properties hold in the
-//! given renderer today (every enum is Debug-printed verbatim, never
-//! hardcoded), but nothing pinned them down before this file. Each test names
-//! the exact guarantee it protects and is written so that reverting the
-//! guarantee (e.g. hardcoding "Pass") fails it at assertion time, not merely
-//! at compile time — see task-21b-report.md's mutant table for the mutations
-//! actually applied to confirm this.
+//! The rows after the golden pin that a reader can never mistake a
+//! non-passing drill, or a `Partial` integrity result, for a clean pass: each
+//! names the guarantee it protects and fails at assertion time, not merely at
+//! compile time, when the guarantee is reverted.
 mod fixtures;
 
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult, Outcome};
@@ -44,7 +37,7 @@ fn the_compared_rto_is_the_starred_one() {
     );
 }
 
-// ---------------------------------------------------------------- self-review
+// ---------------------------------------------------------------- guarantees
 
 /// Find the one line in the table whose label (after the leading `  ` or
 /// `* `) is `label` — never a substring match, so this cannot accidentally
@@ -67,11 +60,8 @@ fn row_line<'a>(table: &'a str, label: &str) -> &'a str {
 /// `fail-integrity` renders exactly that on the `outcome` row and never
 /// `pass`.
 ///
-/// The wire spelling, not Rust `Debug`: this row used to read `FailIntegrity`
-/// while the signed JSON said `fail-integrity` and `drill run`'s stdout line
-/// said `fail-integrity` — three spellings of one value out of one binary,
-/// with the table (the surface a human reads INSTEAD of the JSON) the odd one
-/// out.
+/// The wire spelling, as the signed JSON and `drill run`'s stdout line spell
+/// it, never Rust `Debug`.
 #[test]
 fn a_non_pass_outcome_never_renders_as_pass() {
     let mut sc = fixtures::scorecard_pass();
@@ -211,13 +201,11 @@ fn an_unmeasured_timing_figure_renders_as_a_placeholder_not_zero() {
     );
 }
 
-// ------------------------------------ Task 22, carried obligation 3: the
-// qualifiers footer. The fourteen frozen rows cite `objectives.rto_seconds`
-// and never show it, and drop `integrity.partial_reason` and
-// `engine_subreport.caveat` entirely. A footer below the table now carries
-// all three. These tests pin each one; a mutant that deletes the footer, or
-// that renders a tri-state `met` as a boolean, fails one of them at assertion
-// time rather than only drifting the golden.
+// ---------------------------------------------------------------- the
+// qualifiers footer: `objectives.rto_seconds`, `integrity.partial_reason` and
+// `engine_subreport.caveat`, which the fourteen frozen rows do not show. A
+// footer that is deleted, or a tri-state `met` rendered as a boolean, fails
+// one of these at assertion time.
 
 /// Find the one footer line whose label is `label`, searching only BELOW the
 /// fourteen frozen rows so this can never accidentally read a table row.
@@ -341,8 +329,7 @@ fn a_null_engine_subreport_is_named_rather_than_left_blank() {
 }
 
 /// Guarantee: the output says plainly that it is a summary and where the full
-/// document is. This is the sentence the carried obligation asks for; a mutant
-/// that drops it fails here.
+/// document is; dropping the sentence fails here.
 #[test]
 fn the_table_says_it_is_a_summary_of_a_signed_document() {
     let t = logweir::show::render_table(&fixtures::scorecard_pass());
@@ -356,12 +343,11 @@ fn the_table_says_it_is_a_summary_of_a_signed_document() {
     );
 }
 
-// ------------------------------------------------------------------ T0-1
-// `drill show` renders from a `Scorecard` alone: this function is handed no
-// signature, no sidecar and no key, so it cannot check whether the approval
-// key is the signing key. Presenting the document's own `self_attested` field
-// as a FINDING was therefore a claim dressed as a check — the exact defect
-// `drill verify` had, in the one surface that has no way to close it.
+// ------------------------------------------------------------------ the claim
+// `drill show` renders from a `Scorecard` alone, with no signature, sidecar
+// or key, so it cannot check whether the approval key is the signing key:
+// the document's own `self_attested` field is labelled a CLAIM, never a
+// finding.
 
 /// Guarantee: the table labels the row as CLAIMED and points at the reader
 /// that can actually derive it. A mutant that restores the unqualified
@@ -381,13 +367,10 @@ fn show_marks_self_attested_as_claimed() {
     );
 }
 
-// ------------------------------------------------------------------- T0-3
-// `redactions[]` was documented as "Always `[]` in v0.1", enforced by nothing
-// and DISPLAYED BY NOTHING. Task 4 closed the enforcement half in both
-// verifiers; this pins the first of the three display surfaces. `show` does
-// not verify — it renders — so the exit code is unchanged and the fact appears
-// in the footer whose heading is literally "qualifiers the fourteen rows above
-// do not carry".
+// ------------------------------------------------------------------ redactions
+// `show` does not verify, it renders, so the exit code is unchanged and a
+// non-empty `redactions[]` appears in the footer whose heading is literally
+// "qualifiers the fourteen rows above do not carry".
 
 /// Guarantee: a non-empty `redactions[]` is named, counted and its paths
 /// listed. A mutant that deletes the footer line — the surface "going quiet"
@@ -453,7 +436,7 @@ fn show_renders_an_em_dash_when_nothing_was_redacted() {
     );
 }
 
-/// **FX-4.** The `topic parity` row never lets an empty `unexpected []` read
+/// The `topic parity` row never lets an empty `unexpected []` read
 /// as configuration parity the document does not claim: a 1.0.0 document (no
 /// `not_assessed`) says the coverage was NOT RECORDED, a 1.1.0 one names every
 /// topic that was not assessed, and only `Some([])` — every topic assessed —
@@ -482,7 +465,7 @@ fn the_parity_row_says_what_was_not_assessed_and_never_reads_absent_as_assessed(
         "{}",
         row(&sc)
     );
-    // FX-21: a replication factor the source's record lacks is named in the
+    // A replication factor the source's record lacks is named in the
     // same list, never read as a match.
     sc.topic_parity.not_assessed = Some(vec![
         "drill-orders: replication_factor (notRecorded)".to_string()
@@ -496,7 +479,7 @@ fn the_parity_row_says_what_was_not_assessed_and_never_reads_absent_as_assessed(
     assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
 }
 
-/// **FX-3.** The `topic parity` row names what a `newTopic` restore did NOT
+/// The `topic parity` row names what a `newTopic` restore did NOT
 /// reconstruct, and never lets an older `newTopic` document's `intended [...]`
 /// read as intended: a writer before format 1.2.0 applied the scratch
 /// rationale in every mode, so the row says what that label means there. A
@@ -558,11 +541,11 @@ fn the_parity_row_names_what_a_new_topic_restore_did_not_reconstruct() {
     assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
 }
 
-// ------------------------------------------------------------------- FX-8
+// ------------------------------------------------------------------ time basis
 
 /// Guarantee: the footer says which clock a restore's time selection read —
 /// `source.time_basis` (scorecard 1.3.0) — and an ABSENT block reads "not
-/// recorded", never an em dash: a document from before FX-8 makes no claim
+/// recorded", never an em dash: an older document makes no claim
 /// that its selections used the topics' own clocks. An empty block is the em
 /// dash; a non-empty list is named with its topics.
 ///
@@ -595,7 +578,7 @@ fn show_names_the_time_basis_in_the_qualifiers_footer() {
     );
 }
 
-// ------------------------------------------------------------------ PROD-08.1
+// ------------------------------------------------------------------ verification
 
 /// Guarantee: the footer says what the `integrity` row's verdict covered —
 /// `integrity.verification` (scorecard 1.4.0). ABSENT reads "not recorded",
@@ -681,7 +664,7 @@ fn show_names_the_verification_coverage_in_the_qualifiers_footer() {
     );
 }
 
-// ------------------------------------------------------------------ FX-23
+// ------------------------------------------------------------------ unsampled topics
 
 /// Guarantee: the footer names the topics a sampled verification's
 /// `max_partitions` left without a sampled partition
@@ -703,7 +686,7 @@ fn show_names_the_unsampled_topics_in_the_qualifiers_footer() {
     );
 }
 
-// ------------------------------------------------------------------ PROD-15.1
+// ------------------------------------------------------------------ original names
 
 /// Guarantee: the footer says when a restore wrote under the source's
 /// ORIGINAL topic names (`target.original_name`, scorecard 1.8.0) — the

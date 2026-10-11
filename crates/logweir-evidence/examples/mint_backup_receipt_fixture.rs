@@ -36,15 +36,13 @@
 //! two-value set — so it satisfies all five of
 //! `BackupReceipt::validate_invariants`' arms, which are asserted here before
 //! anything is signed. Every value is a plausible constant, not a measured
-//! one: this is an example of the FORMAT, and `logweir backup run` writing a
-//! real one is Task 5b's.
+//! one: this is an example of the FORMAT, and `logweir backup run` writes
+//! the real one.
 //!
-//! # The one re-mint, and why the key id does not move
+//! # Why the key id does not move
 //!
-//! Task 5b fix round 1 re-mints the pair, on controller ruling, because
-//! `source.auth.mode` moved from `scram-sha-512` to **`scramSha512`** — the
-//! product's one spelling, and now a value BOTH readers close (arm 5). The
-//! key is still READ from the same checked-in throwaway PEM, so the
+//! `source.auth.mode` is **`scramSha512`** — the product's one spelling, a
+//! value BOTH readers close (arm 5). The key is READ from the same checked-in throwaway PEM, so the
 //! `917cf9a2…` fingerprint `docs/verify-a-scorecard.md` teaches auditors to
 //! pin is unchanged, and the three other signed pairs under
 //! `e2e/fixtures/signed/` are not touched by this program at all. ECDSA over
@@ -103,8 +101,8 @@ fn receipt() -> BackupReceipt {
                 "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
             // The committed fixture is the UNVERSIONED `1.0.0` document, and
-            // must stay byte-identical: FX-7's pin is absent here, so it writes
-            // nothing.
+            // must stay byte-identical: the manifest version pin (1.2.0) is
+            // absent here, so it writes nothing.
             manifest_version_id: None,
             prefix: "logweir/backups/logweir-backup-01J8Z9QK7V/".to_string(),
         },
@@ -113,9 +111,9 @@ fn receipt() -> BackupReceipt {
             from_ms: 1_757_415_734_000,
             to_ms: 1_757_419_486_000,
         },
-        // The signed fixture is a 1.0.0 receipt and STAYS one after FX-4's
-        // 1.1.0: it is the "old evidence verifies unchanged" case, and ruling
-        // R-G reserves the re-mint. A 1.0.0 document has no config_coverage.
+        // The signed fixture is a 1.0.0 receipt and STAYS one: it is the "old
+        // evidence verifies unchanged" case. A 1.0.0 document has no
+        // config_coverage.
         config_coverage: None,
         topic_configuration: None,
         owner_detection: None,
@@ -163,8 +161,7 @@ fn main() {
     );
 
     // The document first, then the signature over the EXACT bytes just
-    // written — never over a re-serialisation of them (spec §6 C3,
-    // verify-as-read).
+    // written — never over a re-serialisation of them (verify-as-read).
     let doc_path = dir.join("backup-receipt.json");
     std::fs::write(&doc_path, &bytes)
         .unwrap_or_else(|e| panic!("write {}: {e}", doc_path.display()));

@@ -1,10 +1,10 @@
-//! `TRUSTPOLICY-DELETE-DROPS-REVOCATION` — the durability guard itself: the
-//! cluster-wide compromise overlay, the deletion guard, the finalizer the
-//! `TrustPolicy` reconciler holds, and the `CompromiseGuard` condition.
+//! The trust-revocation durability guard itself: the cluster-wide compromise
+//! overlay, the deletion guard, the finalizer the `TrustPolicy` reconciler
+//! holds, and the `CompromiseGuard` condition. Deleting a `TrustPolicy` must
+//! not drop a compromise revocation it records.
 //!
-//! `trust_revocation_consumers.rs` is the reproduction, one row per consumer;
-//! this file pins the mechanism those rows depend on, so each of its mutants
-//! has a named row that kills it (the result file lists them).
+//! `trust_revocation_consumers.rs` reproduces the defect, one row per
+//! consumer; this file pins the mechanism those rows depend on.
 
 mod support;
 use support::at;
@@ -134,17 +134,14 @@ fn trust(resolution: Resolution) -> ResolvedTrust {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The overlay
-// ---------------------------------------------------------------------------
 
 /// A compromise recorded ANYWHERE reaches the key whichever source answers:
 /// the roster (the namespace was re-bound away), and another policy that
 /// lists the key `Active`. The instant is the recorder's, and the key names
 /// who recorded it.
 ///
-/// KILLS M4 ("`resolve_in` does not apply the records"): both halves read
-/// `Active`.
+/// KILLS: `resolve_in` not applying the records (both halves read `Active`).
 #[test]
 fn a_compromise_recorded_anywhere_reaches_every_source() {
     let recorder = policy("incident", &[], vec![compromised("2026-09-10T12:00:00Z")]);
@@ -189,12 +186,12 @@ fn a_compromise_recorded_anywhere_reaches_every_source() {
     assert!(t.key(SIGNER).is_none());
 }
 
-/// A policy the finalizer is HOLDING is still a record — for every namespace,
+/// A policy the finalizer is HOLDING is still a record, for every namespace,
 /// not only the ones it still names. The held object is the only record left
 /// (that is why it is held), so ignoring it while it waits would re-trust the
 /// key in a namespace re-bound away before the delete.
 ///
-/// KILLS M5 ("`compromise_records` skips a policy with a deletionTimestamp").
+/// KILLS: `compromise_records` skipping a policy with a deletionTimestamp.
 #[test]
 fn a_policy_being_deleted_is_still_a_record_everywhere() {
     let held = deleting(
@@ -217,8 +214,8 @@ fn a_policy_being_deleted_is_still_a_record_everywhere() {
     assert!(compromise_records(std::slice::from_ref(&held)).contains_key(SIGNER));
 }
 
-/// A cluster with ONE record reads byte-for-byte as it did before the overlay
-/// existed — so no object's stored verdict moves on upgrade — and two records
+/// A cluster with ONE record reads byte-for-byte as it did without the
+/// overlay, so no object's stored verdict moves on upgrade, and two records
 /// of one compromise take the EARLIEST instant.
 #[test]
 fn one_record_is_left_alone_and_two_take_the_earliest_instant() {
@@ -274,14 +271,12 @@ fn a_superseded_revocation_is_not_carried_across_sources() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The deletion guard
-// ---------------------------------------------------------------------------
 
 /// The table `deletion_guard` decides, row by row.
 ///
-/// KILLS M1 ("a terminating carrier counts"): row (c) releases both.
-/// KILLS M2 ("the roster is not consulted"): row (a) releases.
+/// KILLS: "a terminating carrier counts" (row (c) releases both); "the roster
+/// is not consulted" (row (a) releases).
 #[test]
 fn the_deletion_guard_releases_only_what_the_cluster_would_still_know() {
     let record = compromised("2026-09-10T12:00:00Z");
@@ -340,7 +335,7 @@ fn the_deletion_guard_releases_only_what_the_cluster_would_still_know() {
 
 /// `finalizer_action`, every cell.
 ///
-/// KILLS M3 ("never place the finalizer"): the first row.
+/// KILLS: "never place the finalizer" (the first row).
 #[test]
 fn the_finalizer_is_placed_held_and_released_by_the_guard() {
     let roster = roster_listing(&[(SIGNER, SIGNER_PEM)]);
@@ -420,9 +415,7 @@ fn the_finalizer_patch_is_metadata_and_nothing_else() {
     assert!(finalizer_patch(&ObjectMeta::default(), "incident", &[]).is_err());
 }
 
-// ---------------------------------------------------------------------------
 // The reconciler over a route table
-// ---------------------------------------------------------------------------
 
 fn roster_object(spec: &TrustRosterSpec) -> String {
     json!({
@@ -531,12 +524,12 @@ fn guard_condition(seen: &[SeenBody]) -> Value {
         .expect("the CompromiseGuard condition")
 }
 
-/// **Placed, FIRST** (review L2): a policy recording a compromise gets the
-/// finalizer before any other write of the pass, preconditioned on the handed
-/// object (`17`); the status patch then takes its precondition from the object
-/// the finalizer patch RETURNED (`18`). The mock enforces seam S7 exactly as
-/// the API server does, so a status patch still carrying `17` would be refused
-/// 409 and the reconcile would fail.
+/// **Placed, FIRST**: a policy recording a compromise gets the finalizer
+/// before any other write of the pass, preconditioned on the handed object
+/// (`17`); the status patch then takes its precondition from the object the
+/// finalizer patch RETURNED (`18`). The mock enforces seam S7 as the API
+/// server does, so a status patch still carrying `17` would be refused 409 and
+/// the reconcile would fail.
 #[tokio::test]
 async fn the_reconcile_places_the_finalizer_on_a_compromise_record() {
     let p = policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]);
@@ -692,9 +685,7 @@ async fn a_failed_roster_read_releases_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The condition on a policy that INHERITS a compromise
-// ---------------------------------------------------------------------------
 
 /// A policy listing a key another policy revoked for compromise says so, and
 /// what to do: record it here too, so an older controller agrees.
@@ -721,9 +712,7 @@ fn a_policy_listing_a_key_compromised_elsewhere_says_so() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // What the refusal says
-// ---------------------------------------------------------------------------
 
 /// A verdict refused because of an INHERITED compromise names the object that
 /// records it; one refused by its own policy's record reads exactly as before.
@@ -772,16 +761,14 @@ fn the_refusal_names_the_policy_that_records_the_compromise() {
     assert!(inherited.contains("legacy-roster-v1"), "{inherited}");
 }
 
-// ---------------------------------------------------------------------------
 // The shared keys-page fixture: what this controller writes IS what the
 // console renders (`ui/tests/d3.spec.js`)
-// ---------------------------------------------------------------------------
 
 /// `ui/tests/fixtures/d3/trustpolicy-compromise-inherited.json` is a policy
 /// listing the installation signer `Active` while ANOTHER policy records its
 /// `KeyCompromise` revocation. This row reads the fixture's own `spec`,
 /// evaluates it beside the recording policy at the fixture's instant, and
-/// asserts the controller's status IS the fixture's `status` — so the page
+/// asserts the controller's status IS the fixture's `status`, so the page
 /// test renders exactly what this build writes.
 #[test]
 fn the_shared_keys_fixture_is_what_the_controller_writes() {
@@ -812,14 +799,11 @@ fn the_shared_keys_fixture_is_what_the_controller_writes() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Review round (L1): the guard and finalizer branches the reviewer's mutants
-// RM1–RM3 showed unpinned
-// ---------------------------------------------------------------------------
+// The guard and finalizer branches
 
-/// **RM2.** A roster listing the compromised key ONLY as an approver key
-/// holds the deletion: `legacy-roster-v1` would otherwise admit new approvals
-/// signed by it.
+/// A roster listing the compromised key ONLY as an approver key holds the
+/// deletion: `legacy-roster-v1` would otherwise admit new approvals signed by
+/// it.
 #[test]
 fn a_roster_approver_listing_holds_the_deletion() {
     let dying = deleting(
@@ -841,10 +825,10 @@ fn a_roster_approver_listing_holds_the_deletion() {
     assert_eq!(g.held[0].still_listed_by, vec![ROSTER_SOURCE.to_string()]);
 }
 
-/// **RM3.** Another policy listing the key `Retired`, or `Revoked` with
-/// `Superseded`, still LISTS it: releasing would let that policy's namespaces
-/// verify the key's old evidence `Valid/Historical` again. Only a
-/// `KeyCompromise` record there makes it a carrier instead.
+/// Another policy listing the key `Retired`, or `Revoked` with `Superseded`,
+/// still LISTS it: releasing would let that policy's namespaces verify the
+/// key's old evidence `Valid/Historical` again. Only a `KeyCompromise` record
+/// there makes it a carrier instead.
 #[test]
 fn a_retired_or_superseded_listing_elsewhere_holds_the_deletion() {
     let dying = deleting(
@@ -895,14 +879,12 @@ async fn placing_the_finalizer_keeps_the_other_finalizers() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Review round (M1): a compromise record's event wakes every namespace
-// ---------------------------------------------------------------------------
+// A compromise record's event wakes every namespace
 
 /// The trigger's decision table. A compromise ADDED, a policy first seen with
 /// one, and one being deleted widen to every namespace; a status-only event of
 /// a policy with an unchanged record (the heartbeat) and any event of a policy
-/// with none stay at the declared scope — the fan-out is paid per record
+/// with none stay at the declared scope: the fan-out is paid per record
 /// change, not per heartbeat.
 #[test]
 fn a_compromise_record_event_widens_the_trigger_to_every_namespace() {
@@ -946,11 +928,10 @@ fn a_compromise_record_event_widens_the_trigger_to_every_namespace() {
     );
 }
 
-/// **M1, the reviewer's probe as a row.** The mapper every re-trust trigger
-/// uses (`targets_in_scope` over `PolicyScopeMemory::observe`) enqueues the
-/// terminal objects of a ROSTER namespace and of a namespace another policy
-/// governs when a compromise is newly recorded on a policy that governs
-/// neither.
+/// The mapper every re-trust trigger uses (`targets_in_scope` over
+/// `PolicyScopeMemory::observe`) enqueues the terminal objects of a ROSTER
+/// namespace and of a namespace another policy governs when a compromise is
+/// newly recorded on a policy that governs neither.
 #[test]
 fn a_new_compromise_record_enqueues_every_namespaces_objects() {
     use std::sync::Arc;
@@ -984,9 +965,9 @@ fn a_new_compromise_record_enqueues_every_namespaces_objects() {
     assert_eq!(namespaces, vec!["lw-roster-only", "lw-team-a", "lw-team-b"]);
 }
 
-/// **M1's class sweep, on the policies themselves.** A compromise newly
-/// recorded on one policy re-evaluates every OTHER policy (their
-/// `status.keys[]` read the record); a heartbeat of it re-evaluates none.
+/// The same, on the policies themselves: a compromise newly recorded on one
+/// policy re-evaluates every OTHER policy (their `status.keys[]` read the
+/// record); a heartbeat of it re-evaluates none.
 #[test]
 fn a_new_compromise_record_re_evaluates_the_other_policies() {
     use std::sync::Arc;
@@ -1025,12 +1006,10 @@ fn a_new_compromise_record_re_evaluates_the_other_policies() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Review round (L3): the one write to `trustpolicies` that is not /status
-// ---------------------------------------------------------------------------
+// The one write to `trustpolicies` that is not /status
 
 /// Every write call this crate makes on an `Api<TrustPolicy>` handle other than
-/// `patch_status`, as `(file, enclosing fn)` — a source scan, the same shape
+/// `patch_status`, as `(file, enclosing fn)`: a source scan, the same shape
 /// `tests/linkage.rs` uses. Pure over the texts handed in, so a planted
 /// violation can be checked too.
 fn trust_policy_writes(files: &[(String, String)]) -> Vec<(String, String)> {
@@ -1140,8 +1119,8 @@ fn weirkeeper_sources() -> Vec<(String, String)> {
     out
 }
 
-/// **L3.** The only non-status write to `trustpolicies` in the controller is
-/// `reconcile_finalizer`'s — a second one would be the controller editing
+/// The only non-status write to `trustpolicies` in the controller is
+/// `reconcile_finalizer`'s: a second one would be the controller editing
 /// trust, which RBAC's object-wide `patch` could not stop. NEGATIVE CONTROL: a
 /// planted `api.patch(` in another function is found.
 #[test]

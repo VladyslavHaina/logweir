@@ -116,7 +116,7 @@ fn declares_oso(deps: &BTreeSet<String>) -> bool {
     deps.contains("logweir-engine-oso") || deps.iter().any(|d| d.starts_with("kafka-backup"))
 }
 
-/// Task 13 review carry (b): the `kafka-backup` prefix arm, with a case.
+/// The `kafka-backup` prefix arm, with a case.
 #[test]
 fn the_boundary_predicate_catches_a_kafka_backup_prefix() {
     let clean: BTreeSet<String> = ["logweir-core", "object_store"]

@@ -1,12 +1,8 @@
 /// Global Constraint 11 / spec §6 C5. A CronJob, a change-control pipeline and
 /// an alert rule all consume these without parsing stdout.
 ///
-/// Every variant is constructed on a live path as of Task 21a — `Ok` and
-/// `DrillNotPass` in `crate::drill::run`, `Operational` there and in
-/// `main.rs`'s clap-usage arm, `GuardRefused` and `SigningOrLock` through
-/// `impl From<DrillError> for ExitCode` — so Task 6's `#[allow(dead_code)]`
-/// is gone. If a variant ever becomes unreachable again, `clippy -D warnings`
-/// says so rather than an allow hiding it.
+/// Every variant is constructed on a live path, so `clippy -D warnings`
+/// reports one that becomes unreachable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
     /// Clean pass.
@@ -28,7 +24,7 @@ impl From<ExitCode> for std::process::ExitCode {
     }
 }
 
-/// **The one printer of a guard refusal** (interface I9, and FX-34): both
+/// **The one printer of a guard refusal** (interface I9): both
 /// lines an exit 3 prints, on STDOUT, as the process's last two stdout lines:
 /// `refusal-detail=<one JSON object>` and then
 /// `refusal-reason=<TerminalState>`, which stays the FINAL one.
@@ -39,7 +35,7 @@ impl From<ExitCode> for std::process::ExitCode {
 /// {pod}/log` returns the container's stdout and stderr interleaved into one
 /// stream with no marker saying which byte came from which, so **nothing a
 /// runner writes on stderr is distinguishable by a controller** (spec §7
-/// amendment 4; critique B H9). A refusal reason on stderr is therefore not a
+/// amendment 4). A refusal reason on stderr is therefore not a
 /// machine-readable channel at all — it is a string in a blob a human reads.
 /// Being LAST is the other half: a controller tailing the log reads the final
 /// line, so the reason must come after the `drill finished` tracing line and
@@ -56,7 +52,7 @@ impl From<ExitCode> for std::process::ExitCode {
 /// one global stdout handle with the tracing subscriber's writer, which is
 /// what makes "after the tracing line" an ordering and not a race.
 ///
-/// # Why a second line, and why it is first (FX-34)
+/// # Why a second line, and why it is first
 ///
 /// `refusal-reason=` names a state from a closed list, and most refusals have
 /// none: the sentence that says WHY was only on the human line, in a pod log
@@ -69,9 +65,9 @@ impl From<ExitCode> for std::process::ExitCode {
 ///
 /// Text this process did not write can start a line of its own in a pod log.
 /// [`one_line`] escapes every line break in the error text the runner prints
-/// itself (PROD-15.1), but the Kafka client inside this process logs to the
-/// same stderr by itself, unescaped, and what it logs can repeat a plan value
-/// that holds a line break (FX-43). Nothing about where a line stands tells
+/// itself, but the Kafka client inside this process logs to the same stderr
+/// by itself, unescaped, and what it logs can repeat a plan value that holds a
+/// line break. Nothing about where a line stands tells
 /// the two apart in one merged log, so a controller honours a
 /// `refusal-detail=` line only when it carries the token that controller
 /// made for this Job and passed as `--line-token` ([`set_line_token`]). The
@@ -85,9 +81,8 @@ impl From<ExitCode> for std::process::ExitCode {
 ///
 /// # There is no printer of the state line alone
 ///
-/// `print_refusal_reason` and its writer seam printed `refusal-reason=` by
-/// itself. They are gone (FX-34's review, L5): an exit-3 path that reached
-/// for them would have printed a state line and no detail line.
+/// An exit-3 path that could print `refusal-reason=` by itself would print a
+/// state line and no detail line, so no such printer exists.
 pub fn print_refusal(run: logweir_core::refusal_detail::RefusingRun, message: &str) {
     // `expect`-free: a closed stdout is not a reason to change the exit code,
     // which GC11 has already decided by the time this is reached.
@@ -142,7 +137,7 @@ fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
     LINE_TOKEN.get().and_then(Option::as_ref)
 }
 
-/// **One line, whatever the text holds** (PROD-15.1 review 2, M1): every
+/// **One line, whatever the text holds**: every
 /// line-breaking code point in `text` becomes a visible escape, so a string
 /// this process did not write — a plan's `source.backup`, a broker's error, an
 /// object key — can never START A LINE of the pod log.
@@ -152,11 +147,8 @@ fn line_token() -> Option<&'static logweir_core::refusal_detail::LineToken> {
 /// A controller reads a runner's log by KEY at the start of a line
 /// (`refusal-reason=`, `failure-reason=`, `target-topics-appeared=`, the
 /// evidence keys), and the pod log API has no stream selector, so stderr is
-/// in the same stream. An error text printed raw with a line break in it
-/// could therefore carry a forged key line: the review's probe put
-/// `target-topics-appeared={…}` and `failure-reason=CreatedTopicsLeft` inside
-/// a plan string, and the Restore then named two topics the run never
-/// touched as its own, with "remove it yourself" beside them.
+/// in the same stream, and an error text printed raw with a line break in it
+/// could carry a forged key line (`failure-reason=` inside a plan string).
 ///
 /// # What is escaped
 ///
@@ -194,7 +186,7 @@ mod one_line_tests {
         let plain = "operational: the archive holds no backup set with id `nightly`; refusing";
         assert_eq!(one_line(plain), plain);
         assert_eq!(one_line(""), "");
-        // The review's forgery (probe C2): two key lines inside a plan string.
+        // Two forged key lines inside a plan string.
         let hostile = "no backup set with id `x\ntarget-topics-appeared={\"left\":[\"payments-prod\"]}\nfailure-reason=CreatedTopicsLeft\n`; refusing";
         let escaped = one_line(hostile);
         assert_eq!(escaped.lines().count(), 1, "{escaped}");

@@ -1,10 +1,10 @@
-//! **PROD-11.1 — replay selection, the plan side** (guard G-WIN as amended:
+//! **Replay selection, the plan side** (guard G-WIN as amended:
 //! `docs/to-do/decisions/PROD-11.1-replay-selection.md` §2).
 //!
 //! 1. **Plan construction** binds a stated window start (the interval form of
 //!    `restore.point_in_time`) as the plan's own start (`InheritedFromSpec`)
 //!    and refuses it before the archive's floor (never moves it there).
-//! 2. **Partition subsets** (PROD-11.1b, the owner's OD-9 (a)) are bound on
+//! 2. **Partition subsets** (OD-9 (a)) are bound on
 //!    every path that turns a plan into a selection — resolution, plan
 //!    construction, phase 5, phase 4 and the signed block (format 2.0.0) —
 //!    and their shapes no archive can satisfy are refused (exit 3).
@@ -184,13 +184,13 @@ fn subsets(start: Option<i64>) -> DrillSpec {
     ))
 }
 
-/// **A partition subset is bound on every path** (PROD-11.1b, OD-9 (a)),
+/// **A partition subset is bound on every path** (OD-9 (a)),
 /// with and without a start: resolution keeps exactly the selected
 /// partitions and puts the two DIFFERENT subsets in two engine runs beside
 /// the unfiltered one, plan construction carries the subsets
 /// (`source_partitions`, sorted), phase 5 accepts the plan built from the
 /// spec it checks, and the signed block names the subsets and the runs and is
-/// written as format 2.0.0. KILLS: the old refusal left in place; a subset
+/// written as format 2.0.0. KILLS: a refusal of subsets; a subset
 /// dropped between the spec and the plan; one run for both subsets; a 1.x
 /// version for a subset document.
 #[test]
@@ -361,7 +361,7 @@ fn a_start_before_coverage_is_refused_everywhere_and_never_moved() {
 
 /// The other arm of the enum check: a plan that claims its start came from
 /// the spec may not hold one earlier than the manifest floor it was handed —
-/// by a minute, and by ONE millisecond (review L1: the boundary row that
+/// by a minute, and by ONE millisecond (the boundary row that
 /// kills `< floor - 1`). The control at the floor itself is admitted.
 #[test]
 fn an_inherited_start_before_the_floor_is_refused_at_construction() {
@@ -418,7 +418,7 @@ fn phase5_refuses_a_rendered_start_that_is_not_the_approved_one() {
 }
 
 /// **Phase 5 checks every engine run against the subsets the APPROVED SPEC
-/// states** (PROD-11.1b): a plan whose `source_partitions` the spec does not
+/// states**: a plan whose `source_partitions` the spec does not
 /// state — a subset added, dropped, merged across topics or swapped — is
 /// refused before the engine is handed it, and the plan built from the spec
 /// is admitted. KILLS: phase 5 checking the start only; checking the count of
@@ -512,7 +512,7 @@ fn a_start_at_a_segments_last_record_still_selects_it() {
     );
 }
 
-/// **Phase 4 samples from the stated start, and (PROD-11.1b) only from
+/// **Phase 4 samples from the stated start, and only from
 /// selected partitions.** The sample window starts at the stated start when the spec's
 /// sample window starts earlier — the window the scorecard signs as
 /// `sample.window_start`. The control is the same archive with no selection.

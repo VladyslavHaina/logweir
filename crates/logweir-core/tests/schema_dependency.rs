@@ -1,4 +1,4 @@
-//! **PROD-03.0 — the detector, row by row.** Every row states the payloads,
+//! **The detector, row by row.** Every row states the payloads,
 //! the verdict, and (for a control) the value that would make it fail.
 //!
 //! The payloads are the Confluent wire format as its serializers write it:

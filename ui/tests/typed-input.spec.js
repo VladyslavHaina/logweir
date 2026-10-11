@@ -1,13 +1,11 @@
-// typed-input.spec.js -- P13 (poc-upgrade-2) and its class: a form that
-// repaints when an ASYNC READ lands keeps what the reader typed.
+// typed-input.spec.js -- a form that repaints when an ASYNC READ lands keeps
+// what the reader typed.
 //
-// THE DEFECT. Schedules -> Backup readiness repainted the whole panel when the
-// discovery read a source change starts came back, and rendered it from the
-// mount's view alone: the topics went empty, the source went back to the
-// preferred connection and the destination back to the default. Typing the
-// topics first and then choosing the source sent `topics: []`, refused 422.
-// The same panel sent the DEFAULT destination whatever was chosen, because
-// its submit read a hidden input written at render time and never again.
+// Rendering a repaint from the mount's view alone would empty the typed
+// topics, move the source back to the preferred connection and the
+// destination back to the default when the discovery read a source change
+// starts comes back -- and a submit that read a hidden input written at
+// render time would send the DEFAULT destination whatever was chosen.
 //
 // EVERY ROW HERE TYPES FIRST AND THEN LETS THE READ LAND, and each carries its
 // NEGATIVE CONTROL: the assertion that fails on the code before the fix.
@@ -116,7 +114,7 @@ async function mounted(ns, api) {
 }
 
 test("readiness_topics_typed_before_the_source_survive_the_discovery_repaint", async () => {
-  // P13's measured order A: topics first, then the source.
+  // Order A: topics first, then the source.
   const api = schedulesApi();
   const view = await mounted("typed-a", api);
   view.find("#readiness-topics").value = "orders, payments";
@@ -140,7 +138,7 @@ test("readiness_topics_typed_before_the_source_survive_the_discovery_repaint", a
 });
 
 test("readiness_topics_typed_while_the_discovery_read_is_in_flight_survive_it", async () => {
-  // P13's order C: the source first, then the topics at once, then the read lands.
+  // Order C: the source first, then the topics at once, then the read lands.
   const api = schedulesApi();
   const view = await mounted("typed-c", api);
   await chooseSource(view, "uid-B");
@@ -213,7 +211,7 @@ test("a_late_discovery_answer_for_an_earlier_connection_is_not_offered_beside_th
   assert.equal(view.find("#readiness-source").value, "uid-A");
 });
 
-// ------------------------------------------------------------ the class sweep
+// The class sweep.
 
 const CONNECTION = Object.freeze({
   metadata: { name: "orders-prod", uid: "uid-A", generation: 1 },

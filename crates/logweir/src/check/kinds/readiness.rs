@@ -56,7 +56,7 @@ pub fn connection_ids(operation: CheckOperation) -> (CheckId, Option<CheckId>) {
 }
 
 /// What to do when a cluster's bootstrap address answers and the brokers it
-/// advertises do not (PROD-01.2): the remedy [`authenticated`] gives in place
+/// advertises do not: the remedy [`authenticated`] gives in place
 /// of `BrokerUnreachable`'s generic one, which is about the bootstrap address.
 pub const ADVERTISED_UNREACHABLE_REMEDY: &str =
     "A connection test that only reads the cluster id passes here and nothing else can. Check \
@@ -76,12 +76,9 @@ pub fn authenticated(
     scope: Option<logweir_core::check_contract::CheckScope>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> (CheckOutcome, Option<String>) {
-    // THE SCOPE IS ON THE FAILURE ROWS TOO. It used to be applied only after
-    // both probes came back, so the row that carried the scope was always the
-    // one that had nothing to say and `connection.authenticated
-    // notReady/BrokerUnreachable` — the row an operator reads — reached the
-    // status with `scope: null` (D2 §6.3's acceptance sentence names "check
-    // time AND scope"; `objects/s14/notready-rows.json`).
+    // The scope is on the failure rows too: `connection.authenticated
+    // notReady/BrokerUnreachable` is the row an operator reads, and D2 §6.3
+    // names "check time AND scope".
     let scoped = |row: CheckOutcome| match scope.clone() {
         Some(s) => row.with_scope(s),
         None => row,
@@ -94,7 +91,7 @@ pub fn authenticated(
         Ok(l) => l,
         Err(f) => {
             let mut row = scoped(from_broker_failure(id, &f, now));
-            // PROD-01.2: THE BOOTSTRAP ANSWERED AND THE ADVERTISED BROKERS DID
+            // THE BOOTSTRAP ANSWERED AND THE ADVERTISED BROKERS DID
             // NOT. The cluster id above came off the bootstrap connection; a
             // listing that then cannot reach a broker is the cluster telling
             // this client to dial an address it cannot reach. Measured on the
@@ -199,12 +196,9 @@ pub fn topics_describable(
 /// [`crate::check::catalogue::scope`] records: `CheckOutcome::with_detail`
 /// does not redact, and a rule with two exceptions is a rule a reader has to
 /// remember. It is [`crate::check::redact_path`] rather than the whole-string
-/// form, because a sample is a segment key or a topic name and the long-run
-/// rule used to eat an ordinary key entire (reviewer finding F7). Since
-/// D2-REDACT-OVERBROAD the whole-string form keeps an object key as well; the
-/// per-segment form stays because it is the STRICTER of the two — it still
-/// redacts a forty-character component inside a path that the whole-string
-/// rule would read as anchored.
+/// form: a sample is a segment key or a topic name, and the per-segment form
+/// is the STRICTER of the two (it still redacts a forty-character component
+/// inside a path that the whole-string rule would read as anchored).
 #[must_use]
 pub fn detail(names: &[String]) -> serde_json::Value {
     serde_json::json!({
@@ -226,8 +220,8 @@ pub const DETAIL_SAMPLE: usize = 10;
 /// no topic is ever cut; an S3 object key may be 1,024 bytes, and ten of those
 /// would be a ten-kilobyte `detail` inside a record D2 §6.4 sizes at about
 /// 1.2 KiB. The cap is on the VALUE and the value is then re-serialised by
-/// `serde_json`, so the JSON stays parseable — which is the whole difference
-/// from capping the rendered line (reviewer finding **R-F3**).
+/// `serde_json`, so the JSON stays parseable, unlike a cap on the rendered
+/// line.
 pub const DETAIL_VALUE_MAX_CHARS: usize = 256;
 
 /// One sampled name: redacted as a key path, then truncated as a VALUE.
@@ -261,7 +255,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
 
     let (auth_id, topics_id) = connection_ids(req.operation);
     let scope = connection_scope(&req.connection, req.operation);
-    // PROD-01.2: the capability rows the plan lists, and only those. The plan
+    // The capability rows the plan lists, and only those. The plan
     // validation has already refused an id that is not this operation's.
     let capabilities: Vec<CheckId> = req.capability_checks.clone();
     // The broker half gets half the budget; the destination half gets the
@@ -343,7 +337,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     }
 
     if let Some(destination) = req.destination.as_ref() {
-        // FX-20c: every grant the run presents, compared with no request —
+        // Every grant the run presents, compared with no request —
         // a separated `evidenceWrite` Secret included, which no row probes
         // unless the destination opted in to the marker.
         if let Some(row) = credential_bound_row(&[destination], wiring) {
@@ -376,7 +370,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
     Emission::of(result)
 }
 
-/// PROD-01.2: the capability rows `listed`, in the plan's order, over one
+/// The capability rows `listed`, in the plan's order, over one
 /// authenticated connection.
 ///
 /// ONE ApiVersions observation serves every row that reads it, and it is
@@ -417,8 +411,8 @@ pub fn capability_rows(
         )
     };
     // ONE observation, inside what is left of the check's own budget, and not
-    // started with none left (review L9): a dial begun after the deadline
-    // would overrun the check and report the clock as a broker problem.
+    // started with none left: a dial begun after the deadline would overrun
+    // the check and report the clock as a broker problem.
     let observed = listed.iter().any(reads_api_versions).then(|| {
         if deadline.has_room() {
             probe.api_versions(deadline.remaining())

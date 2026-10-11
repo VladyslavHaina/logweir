@@ -1,16 +1,11 @@
-//! Exit-code contract tests beyond `cli_verify.rs`'s four brief-mandated
-//! cases. Global Constraint 11 reserves exit code 2 for "a drill result that
-//! is not a pass — a scorecard IS written and signed", and `2` is exactly
-//! the code clap's `Parser::parse()` hardcodes for EVERY usage error
-//! (`Error::exit()` in `clap_builder`). Left unhandled, a typo'd flag or a
-//! flag a later chart bump drops would report "the drill ran and did not
-//! pass — go fetch the signed scorecard" when no drill ran and nothing was
-//! written. `main.rs` now uses `try_parse` and maps any stderr-routed clap
-//! error to `ExitCode::Operational` (1) instead, while `--help`/`--version`
-//! (routed to stdout) keep exiting 0. These assert the real process exit
-//! status for each shape of usage error, plus the two Global-Constraint-13
-//! branches (`snapshot`/`diff` vs `plan`) that only `plan` had process-level
-//! coverage for before.
+//! Exit-code contract tests. Global Constraint 11 reserves exit code 2 for
+//! "a drill result that is not a pass — a scorecard IS written and signed",
+//! and `2` is the code clap's `Parser::parse()` hardcodes for EVERY usage
+//! error (`Error::exit()` in `clap_builder`). `main.rs` uses `try_parse` and
+//! maps any stderr-routed clap error to `ExitCode::Operational` (1), while
+//! `--help`/`--version` (routed to stdout) keep exiting 0. These assert the
+//! real process exit status for each shape of usage error, plus the two
+//! Global-Constraint-13 branches (`snapshot`/`diff` vs `plan`).
 
 mod support;
 use support::bin;
@@ -28,7 +23,7 @@ fn no_arguments_exits_operational_not_a_drill_result() {
 
 #[test]
 fn drill_verify_with_no_arguments_exits_operational_not_a_drill_result() {
-    // The exact case the finding names: missing required flags on a real
+    // Missing required flags on a real
     // subcommand must not be reported as exit code 2.
     let out = bin().args(["drill", "verify"]).output().unwrap();
     assert_eq!(
@@ -82,8 +77,8 @@ fn identity_bootstrap_and_distribution_help_are_release_smokeable() {
     }
 }
 
-/// PROD-16.1 fix round (second-pass review, L-P7): `main.rs`'s usage-error
-/// path still tries to delete the install's trust grant an `identity
+/// `main.rs`'s usage-error path still tries to delete the install's trust
+/// grant an `identity
 /// bootstrap` invocation names — a chart newer than this image passing a flag
 /// it does not know must not leave `create trustpolicies` bound. The process
 /// is pointed at an EMPTY ServiceAccount directory, so the attempt stops at
@@ -197,7 +192,7 @@ fn schema_snapshot_exits_1_naming_the_sub_project() {
 
 #[test]
 fn drill_verify_exits_signing_or_lock_on_a_payload_type_mismatch() {
-    // Controller ruling on the deferred finding: a payload_type mismatch is
+    // A payload_type mismatch is
     // evidence of SUBSTITUTION (a genuinely-signed sidecar for a different
     // kind of document, handed over in place of a scorecard), not
     // corruption — so it must map to exit 4, the same code a bad signature
@@ -446,13 +441,13 @@ fn a_credential_refusal_is_a_guard_refusal() {
     );
 }
 
-/// **Task 6.** The two failure modes of a SCRAM spec's password are two
+/// The two failure modes of a SCRAM spec's password are two
 /// different exit codes, and the difference is what a reconciler acts on.
 ///
 /// * The variable is **UNSET** while `auth.mode` is `scramSha512` → **exit 1**,
 ///   operational, and **no** `refusal-reason=` line. Nothing was refused: the
 ///   plan is probably fine and the fix is to project the Secret, which is
-///   exactly what "retry" means to Task 18's cron reconciler. A guard refusal
+///   exactly what "retry" means to the cron reconciler. A guard refusal
 ///   here would tell it to stop retrying a condition an operator is about to
 ///   fix.
 /// * The variable holds a value that **cannot be substituted** into the
@@ -537,9 +532,7 @@ fn a_missing_password_is_operational_and_a_broken_one_is_a_guard_refusal() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 22 — the pinned-approver refusal's exit code, and the flag's shape
-// ---------------------------------------------------------------------------
+// The pinned-approver refusal's exit code, and the flag's shape.
 
 /// The five flags a `restore run` needs, over the shipped example plan.
 fn restore_base() -> Vec<String> {
@@ -612,7 +605,7 @@ fn approver_refusal_is_a_guard_refusal() {
 ///    seam in `approval.rs::subject_kind_is_inside_the_signed_bytes`; and
 /// 2. that variant exits **3** in a real process, read from the process
 ///    status directly, via the one phase-1 guard reachable with no broker —
-///    the pinned-approver refusal this task lands.
+///    the pinned-approver refusal.
 #[test]
 fn the_subject_kind_refusal_shares_the_exit_3_mapping() {
     use logweir::drill::{phase1_approval, DrillError};

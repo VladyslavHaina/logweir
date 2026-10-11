@@ -1,4 +1,4 @@
-//! **FX-34.** A guard refusal's reason code and sentence, as ONE
+//! A guard refusal's reason code and sentence, as ONE
 //! machine-readable line a controller can read off a pod log.
 //!
 //! # Why this line exists
@@ -7,7 +7,7 @@
 //! most refusals have none: a plan that names `restore.partitions` is a plain
 //! `GuardRefused`. The sentence that says why was only on the human line, in
 //! a pod log that goes with the pod, so a `Restore` or a `Backup` said "the
-//! runner exited 3 (guard-refused)" and nothing else (PoC batch 5, F-1).
+//! runner exited 3 (guard-refused)" and nothing else.
 //!
 //! # The line
 //!
@@ -22,20 +22,18 @@
 //!
 //! # Who wrote the line: the Job's token, and nothing about where it stands
 //!
-//! A plan can start a line of its own in a pod log. An error may repeat a
-//! plan value, and a YAML scalar may hold a line break. The runner escapes
-//! every line break in the error text it prints itself (PROD-15.1's
-//! `one_line`, which this line was designed before); the Kafka client inside
-//! the runner logs to the same stderr by itself, unescaped (FX-43). Both
-//! streams reach a controller as ONE log, so no rule about where a line
-//! stands, or how well-formed it is, can tell the runner's line from text a
-//! plan's author got into the log. What the plan's author cannot have is a
-//! value that did not exist when the plan was written. So the controller
-//! makes a fresh random [`LineToken`] each time it builds a Job, hands it to
-//! the runner as a command-line ARGUMENT, and honours a `refusal-detail=`
-//! line only when the line carries that Job's token
-//! ([`RefusalDetail::read_line`]). A line with no token, or another token, is
-//! not the runner's and is not read at all.
+//! A plan can start a line of its own in a pod log. An error may repeat a plan
+//! value, and a YAML scalar may hold a line break. The runner escapes every
+//! line break in the error text it prints itself (`one_line`); the Kafka client
+//! inside the runner logs to the same stderr by itself, unescaped. Both streams
+//! reach a controller as ONE log, so no rule about where a line stands, or how
+//! well-formed it is, can tell the runner's line from text a plan's author got
+//! into the log. What the plan's author cannot have is a value that did not
+//! exist when the plan was written. So the controller makes a fresh random
+//! [`LineToken`] each time it builds a Job, hands it to the runner as a
+//! command-line ARGUMENT, and honours a `refusal-detail=` line only when the
+//! line carries that Job's token ([`RefusalDetail::read_line`]). A line with no
+//! token, or another token, is not the runner's and is not read at all.
 //!
 //! An argument and not an environment variable, for two reasons that are
 //! properties of this codebase: the engine child process inherits the
@@ -84,21 +82,14 @@ pub const REASON_CODE_MAX_BYTES: usize = 64;
 ///
 /// # Why 760
 ///
-/// It keeps a refused run's WHOLE condition message inside 1024 bytes, which
-/// is `status.progress.message`'s `maxLength` and the bound the product API
-/// serves a condition's message under: the 123 bytes the message always had,
-/// the 48-byte label, a 64-byte code, `: ` and 760 come to 997, with 27 to
-/// spare for the fixed text. A sentence that took the message past 1024
-/// would be cut a second time, with no marker, on its way to the console.
-///
-/// A smaller one cuts remedies. They are at the END of a sentence ("Delete
-/// them, or restore under a prefix nothing has used yet …"), and the fixed
-/// text of the longest sentences this build writes is 489 bytes (a restore
-/// whose target topics already exist), 453 and 435 before any name is
-/// interpolated: at the 512 every other relayed message is capped at
-/// ([`crate::check_contract::MESSAGE_MAX_CHARS`]) the commonest real refusal
-/// would lose its last clause with one topic in it. At 760 it keeps about
-/// eight. The refusal PoC batch 5 met is 402 bytes, its opening word included.
+/// It keeps a refused run's WHOLE condition message inside 1024 bytes,
+/// `status.progress.message`'s `maxLength` and the product API's bound (123
+/// fixed bytes, a 48-byte label, a 64-byte code, `: ` and 760 come to 997), so
+/// the console never cuts it a second time without a marker. A smaller one cuts
+/// remedies, which come at the END of a sentence: the longest fixed sentence
+/// this build writes is 489 bytes before any name, and at the 512 other relayed
+/// messages get (`crate::check_contract::MESSAGE_MAX_CHARS`) the commonest real
+/// refusal would lose its last clause with one topic in it.
 ///
 /// BYTES, not characters, because a status is stored and sent as bytes.
 pub const REASON_MESSAGE_MAX_BYTES: usize = 760;
@@ -225,10 +216,9 @@ pub enum RefusingRun {
 /// Every reason code `logweir restore run` can print: the code a guard
 /// refusal's sentence may open with on that path, and the default.
 ///
-/// The list is the exit-3 sweep's (FX-34's report carries the table, one row
-/// per place a refusal is built). Four of the codes are constants of the
-/// `logweir` crate, which this crate cannot name; `crates/logweir/tests/
-/// refusal_detail.rs` holds each literal here to its constant.
+/// Four of the codes are constants of the `logweir` crate, which this crate
+/// cannot name; `crates/logweir/tests/refusal_detail.rs` holds each literal
+/// here to its constant.
 pub const RESTORE_REASON_CODES: [&str; 14] = [
     crate::guard::TERMINAL_STATE_GUARD_REFUSED,
     crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
@@ -236,7 +226,6 @@ pub const RESTORE_REASON_CODES: [&str; 14] = [
     crate::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
     crate::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     crate::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
-    // PROD-01.1a.
     crate::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
     crate::guard::STORAGE_REGION_INVALID,
     crate::execution_contract::AUTHORIZATION_INVALID,
@@ -649,7 +638,7 @@ mod tests {
         refusal_detail_line(run, Some(&token()), message)
     }
 
-    /// The sentence PoC batch 5's K3 runner printed (`k3-runner.log`).
+    /// A real runner's refusal sentence, its opening word a retired code.
     const K3: &str = "PartitionSubsetsAwaitOwnerDecision: restore.partitions names a partition \
         subset of orders; a restore of a partition subset is refused until the owner decides \
         how its scorecard is versioned (OD-9), because a verifier that predates it would read \
@@ -691,10 +680,9 @@ mod tests {
 
     #[test]
     fn the_real_refusal_round_trips_whole() {
-        // K3's opening word was a reason code when PoC batch 5 ran and is in
-        // no closed set today (PROD-11.1b retired the refusal). So it is what
-        // any word outside the set is: part of the sentence, kept whole,
-        // behind the default code.
+        // K3's opening word is in no closed set today, so it is what any word
+        // outside the set is: part of the sentence, kept whole, behind the
+        // default code.
         let line = printed(Restore, K3);
         assert!(line.starts_with(REFUSAL_DETAIL_PREFIX));
         assert!(!line.contains('\n'), "one line: {line}");

@@ -1,26 +1,21 @@
-//! P10 — the manual-run pool: "Back up now" (and a manual restore) no longer
-//! turns N accepted requests into N simultaneous runner pods.
+//! The manual-run pool: "Back up now" (and a manual restore) does not turn N
+//! accepted requests into N simultaneous runner pods. A hundred at once took
+//! a single-node install past its 110-pod limit and its object store into
+//! `503 SlowDown`. At most `runs.maxManualBackupsActivePerNamespace` manual
+//! runs of a namespace hold a runner slot; the rest wait `Queued` with NOTHING
+//! created, and start in arrival order as slots free.
 //!
-//! THE DEFECT, MEASURED. On the PoC install one operator's hundred accepted
-//! `POST …/backups` became a hundred runner pods at once: docker-desktop hit
-//! its 110-pod limit, the node went `NotReady`, MinIO answered `503 SlowDown`
-//! (`poc-install.result.md`, 2026-09-24T16:08:53Z). These rows hold the
-//! controller half of the fix: at most `runs.maxManualBackupsActivePerNamespace`
-//! manual runs of a namespace hold a runner slot, the rest wait `Queued` with
-//! NOTHING created, and they start in arrival order as slots free.
-//!
-//! THE REVIEW ROUND (Tier-A, H1/M1). The first round decided from the watch
-//! cache alone, which lags the controller's own writes, so passes deciding in
-//! the same instant — a burst, runs released together from a hold, a restart,
-//! a `TrustPolicy` event — all saw the same free slot. Every "burst" row below
+//! The watch cache lags the controller's own writes, so passes deciding in the
+//! same instant (a burst, runs released together from a hold, a restart, a
+//! `TrustPolicy` event) all see the same free slot. Every "burst" row below
 //! therefore decides EVERY pass over the SAME STALE snapshot (nobody's
-//! admission reflected), which is the worst case the watch can produce, and
-//! asserts the ceiling holds anyway.
+//! admission reflected), the worst case the watch can produce, and asserts the
+//! ceiling holds anyway.
 //!
-//! EVERY ROW IS PURE OR A ROUTE-TABLE ROW. The pool reads no API (its
-//! snapshot is the reflector store the controller already runs), so a row
-//! hands `reconcile_backup_pooled` the exact snapshot and reservation registry
-//! it is about, and the double panics on any request the row did not route.
+//! Every row is pure or a route-table row. The pool reads no API (its snapshot
+//! is the reflector store the controller already runs), so a row hands
+//! `reconcile_backup_pooled` the exact snapshot and reservation registry it is
+//! about, and the double panics on any request the row did not route.
 
 mod support;
 use support::{leak, not_found, path};
@@ -52,9 +47,7 @@ const OTHER_NS: &str = "lw-p10-other";
 const CLUSTER_UID: &str = "7a2b9c1d-0000-4000-8000-0000000000c1";
 const SCHEDULE_UID: &str = "9c4d2e6f-0000-4000-8000-0000000000d1";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 fn utc(h: u32, m: u32, s: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 24, h, m, s)
@@ -96,9 +89,9 @@ fn manual(name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
     manual_in(NS, name, uid, created)
 }
 
-/// `n` runs created within the same second — the PoC shape — whose NAMES
-/// DESCEND while their UIDs (the server's tie-break) ascend, so a queue
-/// ordered by name and one ordered by arrival disagree on every pair.
+/// `n` runs created within the same second, whose NAMES DESCEND while their
+/// UIDs (the server's tie-break) ascend, so a queue ordered by name and one
+/// ordered by arrival disagree on every pair.
 fn burst(n: usize) -> Vec<Backup> {
     (0..n)
         .map(|i| {
@@ -153,8 +146,8 @@ fn succeeded(b: &Backup) -> Backup {
     with_status(b, json!({"phase": "Succeeded", "exitCode": 0}))
 }
 
-/// What a destination hold writes on a `Backup` (D2 §3.6): `phase: Pending`
-/// and `Admitted=False` naming the destination refusal.
+/// What a destination hold writes on a `Backup`: `phase: Pending` and
+/// `Admitted=False` naming the destination refusal.
 fn held_on_destination(b: &Backup) -> Backup {
     with_status(
         b,
@@ -323,17 +316,15 @@ fn decide(r: &Reservations, candidate: &Backup, snapshot: &[Backup], limit: u32)
     )
 }
 
-// ---------------------------------------------------------------------------
 // The rule, pure
-// ---------------------------------------------------------------------------
 
 /// **A burst admits exactly the ceiling, in arrival order, whatever order its
-/// passes run in and however stale the snapshot is** (review M1, probe P1).
+/// passes run in and however stale the snapshot is.**
 ///
 /// Seven runs created within one second, every pass deciding over the SAME
 /// snapshot in which nobody's admission is reflected, ceiling four, in three
 /// pass orders. Each order admits exactly four, and they are the four that
-/// ARRIVED first (creation second, then UID) — the burst's names descend, so
+/// ARRIVED first (creation second, then UID); the burst's names descend, so
 /// a queue ordered by name would pick the other end.
 ///
 /// KILLS: deciding without the reservation (all seven admitted in ascending
@@ -364,10 +355,10 @@ fn a_burst_admits_exactly_the_ceiling_in_arrival_order_whatever_the_pass_order()
     }
 }
 
-/// **Arrivals one at a time into growing snapshots never exceed the ceiling**
-/// — probe P1's exact shape: six same-second arrivals in descending name
-/// order, each pass seeing only the arrivals so far and none of the earlier
-/// admissions reflected, ceiling two. The first round admitted all six.
+/// **Arrivals one at a time into growing snapshots never exceed the
+/// ceiling**: six same-second arrivals in descending name order, each pass
+/// seeing only the arrivals so far and none of the earlier admissions
+/// reflected, ceiling two.
 #[test]
 fn arrivals_into_growing_snapshots_never_exceed_the_ceiling() {
     let runs = burst(6);
@@ -379,9 +370,9 @@ fn arrivals_into_growing_snapshots_never_exceed_the_ceiling() {
 }
 
 /// **An older run released from a hold does not take a slot a younger run was
-/// just admitted to** — probe P3: ceiling one; the younger run is admitted
-/// (reserved, its admission not reflected: the snapshot still shows it
-/// waiting); the older one rejoins from `Pending` and is QUEUED.
+/// just admitted to.** Ceiling one; the younger run is admitted (reserved, its
+/// admission not reflected: the snapshot still shows it waiting); the older
+/// one rejoins from `Pending` and is QUEUED.
 #[test]
 fn an_older_run_rejoining_from_a_hold_counts_the_younger_admission() {
     let older = manual(
@@ -410,8 +401,8 @@ fn an_older_run_rejoining_from_a_hold_counts_the_younger_admission() {
 }
 
 /// **Runs released together from a destination hold are admitted up to the
-/// ceiling and no further** (review H1, the `Backup` variant), pure half: three
-/// runs held `Pending`, every pass over the same stale snapshot, ceiling two.
+/// ceiling and no further**, pure half: three runs held `Pending`, every pass
+/// over the same stale snapshot, ceiling two.
 #[test]
 fn runs_released_together_from_a_hold_are_admitted_up_to_the_ceiling() {
     let runs: Vec<Backup> = burst(3).iter().map(held_on_destination).collect();
@@ -425,9 +416,9 @@ fn runs_released_together_from_a_hold_are_admitted_up_to_the_ceiling() {
     }
 }
 
-/// **After a restart an admitted run is counted from its OWN record** (review
-/// H1). A fresh process has no reservations; a run whose admission record
-/// (`Admitted=True`) was written before the crash — but whose Job was not — is
+/// **After a restart an admitted run is counted from its OWN record.** A
+/// fresh process has no reservations; a run whose admission record
+/// (`Admitted=True`) was written before the crash, but whose Job was not, is
 /// `Occupying` by its status, so the restarted controller does not admit a
 /// run into its slot.
 ///
@@ -450,7 +441,7 @@ fn after_a_restart_an_admitted_run_is_counted_from_its_own_record() {
 }
 
 /// **A reservation ends when the watch catches up, when its run finishes or
-/// is deleted, or when it is too old — and only in its own kind and
+/// is deleted, or when it is too old, and only in its own kind and
 /// namespace.**
 ///
 /// KILLS: a reservation that is never released (a slot leaks); one that is
@@ -531,8 +522,8 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
 }
 
 /// A manual `Restore` held on its approval (`phase: Pending`) in this
-/// namespace — the shape three console restores are in before their
-/// approvals verify.
+/// namespace: the shape console restores are in before their approvals
+/// verify.
 fn held_restore(name: &str, uid: &str) -> Restore {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
@@ -551,14 +542,14 @@ fn held_restore(name: &str, uid: &str) -> Restore {
 }
 
 /// **The ONE registry is scoped by kind: a `Backup` pass never releases a
-/// `Restore` reservation** (re-check B1, mutant K1).
+/// `Restore` reservation.**
 ///
 /// Production shares `Reservations::global()` between the `Backup` and
 /// `Restore` reconcilers. A `Backup` pass prunes against a snapshot of
-/// `Backup`s, in which no `Restore` appears — so without the kind check it
-/// would release every restore reservation in the namespace as "gone", and
-/// H1's restore burst would be back: three restores released from their
-/// approval hold together would make three Jobs at ceiling two.
+/// `Backup`s, in which no `Restore` appears, so without the kind check it
+/// would release every restore reservation in the namespace as "gone": three
+/// restores released from their approval hold together would make three Jobs
+/// at ceiling two.
 ///
 /// KILLS: dropping `r.kind != kind` from the prune scope.
 #[test]
@@ -607,13 +598,13 @@ fn a_backup_pass_keeps_a_restore_reservation_in_the_shared_registry() {
     );
 }
 
-/// **A reserved run that is later QUEUED gives its reservation back** (re-check
-/// B2, mutant K3) — so the older run it now waits behind is admitted on its
-/// next pass instead of both stalling until the TTL.
+/// **A reserved run that is later QUEUED gives its reservation back**, so the
+/// older run it now waits behind is admitted on its next pass instead of both
+/// stalling until the TTL.
 ///
 /// Ceiling one. X is admitted while the older run O is held (X's admission
 /// write then fails, so its status still says waiting). O rejoins and waits
-/// behind X's reservation; X's retry now queues behind O — and must release,
+/// behind X's reservation; X's retry now queues behind O, and must release,
 /// or O's next pass would still count X and the two would block each other.
 ///
 /// KILLS: deleting the release in the queued branch.
@@ -686,7 +677,7 @@ fn a_frozen_run_holds_its_slot_before_its_phase_says_so() {
 ///
 /// KILLS: counting a `Pending` hold as a slot; NOT counting a phase this build
 /// does not know; counting a scheduled run, a rehearsal's restore or a
-/// finished run — `Refused` included (review L5).
+/// finished run, `Refused` included.
 #[test]
 fn what_holds_a_slot_what_waits_and_what_is_outside() {
     let b = manual(
@@ -916,7 +907,7 @@ fn other_namespaces_scheduled_and_finished_runs_do_not_count() {
 }
 
 /// **The startup guard is real: a store that has not finished its first list
-/// is not a snapshot** (review L4, mutant R1).
+/// is not a snapshot.**
 ///
 /// kube-runtime swaps a whole list into the store at `InitDone`; before it,
 /// the store is empty (or, on a relist, the previous list), and an empty store
@@ -958,21 +949,18 @@ fn a_store_that_has_not_synced_is_not_a_snapshot() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The rule, through the reconciler
-// ---------------------------------------------------------------------------
 
 /// **N+1 manual Backups make N Jobs and one queued run** (N = 4, the default
 /// `runs.maxManualBackupsActivePerNamespace`, read from the installation
 /// policy because the row passes no ceiling of its own).
 ///
-/// Five runs created in one second, EVERY pass over the same snapshot (the
-/// burst the PoC measured, before any status was written), sharing one
-/// reservation registry as the process does. Four passes write the admission
-/// record, freeze and create a Job; the fifth writes `phase: Queued`,
-/// `status.queue.limit: 4` and `Admitted=False/ConcurrencyLimited` and creates
-/// NOTHING — no plan `ConfigMap`, no `status.execution`, no Job, so no
-/// execution claim either.
+/// Five runs created in one second, EVERY pass over the same snapshot (a
+/// burst before any status was written), sharing one reservation registry as
+/// the process does. Four passes write the admission record, freeze and
+/// create a Job; the fifth writes `phase: Queued`, `status.queue.limit: 4` and
+/// `Admitted=False/ConcurrencyLimited` and creates NOTHING: no plan
+/// `ConfigMap`, no `status.execution`, no Job, so no execution claim either.
 #[tokio::test]
 async fn n_plus_one_manual_backups_make_n_jobs_and_one_queued_run() {
     let runs = burst(5);
@@ -1028,13 +1016,12 @@ async fn n_plus_one_manual_backups_make_n_jobs_and_one_queued_run() {
     );
 }
 
-/// **H1, the `Backup` variant: three runs released together from a
-/// destination hold make exactly TWO Jobs at ceiling two.** Each run's stored
-/// status is the hold (`phase: Pending`, `Admitted=False/DestinationNotValid`);
-/// the destination step now passes (it is `admit_destination`'s rows'
-/// business, and these runs carry the inline archive so it answers
-/// `NotRequested`), and all three passes decide over the same snapshot in
-/// which all three are still `Pending`. The first round admitted all three.
+/// **Three runs released together from a destination hold make exactly TWO
+/// Jobs at ceiling two.** Each run's stored status is the hold (`phase:
+/// Pending`, `Admitted=False/DestinationNotValid`); the destination step now
+/// passes (these runs carry the inline archive, so `admit_destination`
+/// answers `NotRequested`), and all three passes decide over the same snapshot
+/// in which all three are still `Pending`.
 #[tokio::test]
 async fn three_backups_released_from_a_destination_hold_together_make_two_jobs() {
     let runs: Vec<Backup> = burst(3).iter().map(held_on_destination).collect();
@@ -1049,7 +1036,7 @@ async fn three_backups_released_from_a_destination_hold_together_make_two_jobs()
     assert_eq!((jobs, queued), (2, 1));
 }
 
-/// **The queued run starts when a slot frees** — and the admission record is
+/// **The queued run starts when a slot frees**, and the admission record is
 /// ONE write before anything is created: `status.queue: null` and
 /// `Admitted=True`, then the freeze, then the Job, every write preconditioned
 /// on where the one before it left the object (the double enforces seam S7).
@@ -1137,8 +1124,8 @@ async fn a_scheduled_run_is_not_queued_by_a_full_manual_pool() {
     assert!(reservations.is_empty(), "a scheduled run reserves nothing");
 }
 
-/// **A frozen manual run whose Job is gone is re-created, never re-queued** —
-/// the frozen-inputs contract (D1 §3.3).
+/// **A frozen manual run whose Job is gone is re-created, never re-queued**:
+/// the frozen-inputs contract.
 #[tokio::test]
 async fn a_frozen_manual_run_whose_job_is_gone_is_re_created_not_queued() {
     let runs = burst(5);

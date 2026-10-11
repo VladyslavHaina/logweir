@@ -1,23 +1,16 @@
-//! The saved-connection resolver — PLAT-07.1's ONE answer to "what does a
-//! runner Job need to dial this `KafkaCluster`".
+//! The saved-connection resolver: the one answer to "what does a runner Job
+//! need to dial this `KafkaCluster`".
 //!
 //! # One resolution, every path
 //!
 //! [`resolve`] turns a `KafkaCluster` into a [`ResolvedConnection`]: the public
 //! settings a plan or an argv carries (bootstrap servers, auth mode, username,
-//! TLS) and the REFERENCES the kubelet resolves in the Job's namespace (the
-//! password's Secret and key, the CA's Secret or ConfigMap and key). The probe
-//! (`controllers::kafka_cluster`), the backup (`controllers::backup`) and the
-//! restore (`controllers::restore`) Jobs are all built from it through
-//! [`ResolvedConnection::project`], and future discovery and preflight check
-//! Jobs are meant to be too — a check Job built any other way would be testing
-//! a connection the backup does not use.
-//!
-//! Before this module each path assembled its own credential environment:
-//! the probe and the backup from `kafka_cluster::source_password_env`, the
-//! restore from an inline copy of the same match. Two copies of one rule is
-//! how a probe comes to report `reachable: true` for settings a backup then
-//! dials differently.
+//! TLS) and the references the kubelet resolves in the Job's namespace (the
+//! password's Secret and key, the CA's Secret or ConfigMap and key). Every
+//! runner Job that dials Kafka is built from it through
+//! [`ResolvedConnection::project`]: a check Job built any other way would test a
+//! connection the backup does not use, and a probe could report
+//! `reachable: true` for settings a backup dials differently.
 //!
 //! # The controller reads no credential, and this module is why that is enough
 //!
@@ -25,8 +18,8 @@
 //! resolver never needs one. It validates the SHAPE of a reference — present,
 //! a DNS-1123 name, a legal data key — and writes the reference into a Job as
 //! `valueFrom.secretKeyRef` or a projected volume. Whether the named object
-//! exists is a fact only the kubelet (and a future PLAT-03.1 check Job) can
-//! establish; the refusal vocabulary below says so rather than pretending.
+//! exists is a fact only the kubelet (or a check Job) can establish; the
+//! refusal vocabulary below says so.
 //!
 //! # Rotation, and what is bound by a hash
 //!
@@ -75,23 +68,18 @@ pub use logweir_core::connection::{
 pub const CA_FILE_NAME: &str = "ca.crt";
 
 /// The file names a projected `mtls` client certificate and key have inside
-/// their volume, whatever data keys they came from (PROD-01.3).
+/// their volume, whatever data keys they came from.
 pub const CLIENT_CERT_FILE_NAME: &str = "tls.crt";
 /// See [`CLIENT_CERT_FILE_NAME`].
 pub const CLIENT_KEY_FILE_NAME: &str = "tls.key";
 
-/// WHAT a connection is being resolved for.
+/// What a connection is being resolved for: it decides the side a resolution
+/// projects under ([`ConnectionUse::side`]) and the ServiceAccount the Job runs
+/// as ([`ConnectionUse::service_account_name`]), so a caller cannot pick a
+/// variable family that disagrees with its run (`project` takes no side).
 ///
-/// **THE SECOND ARGUMENT OF [`resolve`], AND NOT DECORATION.** It decides the
-/// side a resolution projects under ([`ConnectionUse::side`]) and the
-/// ServiceAccount the Job runs as ([`ConnectionUse::service_account_name`]), so
-/// a caller cannot pick a variable family that disagrees with the run it is
-/// building — `project` takes no side argument for exactly that reason.
-///
-/// The refusal rules do NOT vary by use, and that is the point: a discovery or
-/// preflight check that accepted a connection a backup would refuse would be a
-/// green light for a run that cannot happen. Any new use is added here, and
-/// gets the same answer.
+/// The refusal rules do not vary by use: a check that accepted a connection a
+/// backup would refuse would green-light a run that cannot happen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionUse {
@@ -101,12 +89,12 @@ pub enum ConnectionUse {
     BackupSource,
     /// `logweir restore run` / `logweir drill run` — the cluster is the TARGET.
     RestoreTarget,
-    /// A topic-discovery check Job (D2 W8). Reads the SOURCE side.
+    /// A topic-discovery check Job. Reads the source side.
     Discovery,
-    /// A preflight check Job (D2 W9) for a `Backup` or a `DestinationAccess`
-    /// — the side a backup would dial.
+    /// A preflight check Job for a `Backup` or a `DestinationAccess`: the side a
+    /// backup would dial.
     PreflightSource,
-    /// A preflight check Job (D2 W9) for a `Restore` — the side a restore
+    /// A preflight check Job for a `Restore`: the side a restore
     /// would dial. Separate from [`ConnectionUse::PreflightSource`] because the
     /// two project different variable families, and a preflight that checked
     /// the wrong one would pass on a connection the run never uses.
@@ -128,9 +116,8 @@ impl ConnectionUse {
 
     /// The ServiceAccount a Job for this use runs as.
     ///
-    /// ONE ACCOUNT FOR EVERY USE TODAY (`logweir-runner`), stated as a function
-    /// rather than a constant so a check Job that later needs a narrower
-    /// account changes this line and not six Job builders.
+    /// One account for every use (`logweir-runner`), as a function so a check
+    /// Job that later needs a narrower account changes one line.
     #[must_use]
     pub const fn service_account_name(self) -> &'static str {
         crate::controllers::backup::RUNNER_SERVICE_ACCOUNT
@@ -247,7 +234,7 @@ impl Side {
     }
 
     /// The variable the credential Secret's `logweir-binding` key is projected
-    /// into (optional), PROD-01.3 security follow-up.
+    /// into (optional).
     #[must_use]
     pub const fn credential_binding_env(self) -> &'static str {
         match self {
@@ -265,7 +252,7 @@ impl Side {
         }
     }
 
-    /// The variable naming the projected `mtls` client certificate (PROD-01.3).
+    /// The variable naming the projected `mtls` client certificate.
     #[must_use]
     pub const fn tls_cert_file_env(self) -> &'static str {
         match self {
@@ -274,7 +261,7 @@ impl Side {
         }
     }
 
-    /// The variable naming the projected `mtls` client key (PROD-01.3).
+    /// The variable naming the projected `mtls` client key.
     #[must_use]
     pub const fn tls_key_file_env(self) -> &'static str {
         match self {
@@ -316,8 +303,8 @@ impl Side {
 }
 
 /// The Secret, and the two keys in it, an `mtls` connection's client
-/// certificate and private key are projected from (PROD-01.3). A reference:
-/// the controller never reads the Secret.
+/// certificate and private key are projected from. A reference: the controller
+/// never reads the Secret.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientCertificateReference {
@@ -362,11 +349,8 @@ pub struct CaReference {
 }
 
 /// One `KafkaCluster`, resolved: everything a runner Job needs to dial it, as
-/// public settings and references, and nothing else.
-///
-/// SERIALISABLE AND VALUE-FREE ON PURPOSE. It is the shape an immutable run
-/// snapshot can freeze (PLAT-06.1) and a product API can return (PLAT-17.1):
-/// every field is a setting or a reference, never a credential.
+/// public settings and references, and nothing else. Value-free, so an
+/// immutable run snapshot can freeze it and a product API can return it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedConnection {
@@ -382,13 +366,10 @@ pub struct ResolvedConnection {
     /// The `KafkaCluster`'s `metadata.uid`, when the object came from an API
     /// server.
     ///
-    /// AN OPTION, NOT A `String`: `plan_backup_spec` resolves a connection to
-    /// build a plan document, and a plan is a function of the SPEC — it must
-    /// not depend on whether the caller had a stored object. A consumer that
-    /// needs identity (a check result naming the object it checked) requires
-    /// `Some` itself and says so; `None` never reaches a live path, because
-    /// every controller that builds a Job reads the UID for the owner
-    /// reference first.
+    /// An option: `plan_backup_spec` resolves a connection to build a plan,
+    /// which is a function of the spec and must not depend on a stored object.
+    /// A consumer that needs identity requires `Some` itself; every controller
+    /// that builds a Job reads the UID for the owner reference first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<String>,
     /// The `KafkaCluster`'s `metadata.generation` — the spec version this
@@ -427,20 +408,18 @@ pub struct ResolvedConnection {
     /// Where the private CA is, when the connection names one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca: Option<CaReference>,
-    /// Where the `mtls` client certificate and key are (PROD-01.3). Absent for
-    /// every other mode, so a resolution of any object that predates `mtls`
-    /// serialises exactly as it did.
+    /// Where the `mtls` client certificate and key are. Absent for every other
+    /// mode, so a resolution of an object that predates `mtls` serialises as it
+    /// did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_certificate: Option<ClientCertificateReference>,
 }
 
 /// What a resolution contributes to one runner Job.
 ///
-/// FOUR LISTS, EACH APPENDED BY ITS CALLER. The three controllers already own
-/// Job fields of the same four kinds (the signing key, the archive credential,
-/// the approval bundle), and each keeps its own ordering: a connection's items
-/// are placed where the controller placed them before this module existed, so
-/// a `KafkaCluster` that names no new field produces a byte-identical Job.
+/// Four lists, each appended by its caller where the controller places its own
+/// items of the same kind, so a `KafkaCluster` that names no new field
+/// produces a byte-identical Job.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionProjection {
     /// The password, as `valueFrom.secretKeyRef`. Empty for `plaintext`.
@@ -528,12 +507,11 @@ fn refusal(reason: &'static str, field: &str, message: String) -> ConnectionRefu
 /// 4. The mode:
 ///    * `plaintext` with `tls: true` — refused, not downgraded
 ///      ([`TERMINAL_STATE_CONNECTION_CONFIG_INVALID`]); `plaintext` with a CA
-///      likewise. A `secretRef` left on a plaintext object is ignored and not
-///      projected, exactly as before this module.
+///      likewise. A `secretRef` left on a plaintext object is ignored.
 ///    * `scramSha512` needs a non-blank `username` and a `secretRef` with a
-///      non-blank name ([`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`], the
-///      state a backup reported for the same object before), a DNS-1123 name
-///      and a legal `passwordKey` ([`TERMINAL_STATE_CONNECTION_REFERENCE_INVALID`]).
+///      non-blank name ([`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`]), a
+///      DNS-1123 name and a legal `passwordKey`
+///      ([`TERMINAL_STATE_CONNECTION_REFERENCE_INVALID`]).
 /// 5. `tlsCa`, when named, needs `tls: true`, exactly one source, and a legal
 ///    name and key.
 ///
@@ -583,9 +561,9 @@ pub fn resolve(
     let bootstrap_servers = checked_bootstrap_servers(&namespace, &name, &spec.bootstrap_servers)?;
     let auth = &spec.auth;
 
-    // PROD-01.3: a client certificate belongs to `mtls` and to nothing else.
-    // The CRD's own rule refuses the shape at admission; this is the resolver's
-    // half, for an object admitted by a CRD that did not carry the rule.
+    // A client certificate belongs to `mtls` alone. The CRD refuses the shape at
+    // admission; this is the resolver's half, for an object admitted by an
+    // older CRD.
     if auth.client_certificate.is_some() && auth.mode != AuthMode::Mtls {
         return Err(refusal(
             TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
@@ -629,10 +607,8 @@ pub fn resolve(
         }
         AuthMode::ScramSha512 | AuthMode::ScramSha256 | AuthMode::Plain => {
             let mode = auth_mode_str(auth.mode);
-            // PROD-01.3: SASL/PLAIN only over TLS — the named reason
-            // `PlainWithoutTls`, before anything else about the object is
-            // judged, because it is the one shape that would send a password
-            // in the clear.
+            // SASL/PLAIN only over TLS (`PlainWithoutTls`), judged first: it is
+            // the one shape that would send a password in the clear.
             if auth.mode == AuthMode::Plain && !auth.tls {
                 return Err(refusal(
                     TERMINAL_STATE_PLAIN_WITHOUT_TLS,
@@ -1072,11 +1048,10 @@ fn check_data_key(
 }
 
 impl ResolvedConnection {
-    /// The credential BINDING this connection's credential Secret must carry
-    /// under `logweir-binding` (PROD-01.3 security follow-up):
-    /// [`logweir_core::connection::credential_binding`] over this object's UID
-    /// and its endpoint — the bootstrap set, the mode, the username, the TLS
-    /// switch and the CA reference.
+    /// The credential binding this connection's credential Secret must carry
+    /// under `logweir-binding`: [`logweir_core::connection::credential_binding`]
+    /// over this object's UID and its endpoint (the bootstrap set, the mode,
+    /// the username, the TLS switch and the CA reference).
     ///
     /// `None` without a UID (a resolution of a spec, never a stored object);
     /// [`ResolvedConnection::project`] then projects a value no Secret can
@@ -1117,7 +1092,7 @@ impl ResolvedConnection {
     /// The environment and mounts this connection contributes to its Job.
     /// References only: see this module's header.
     ///
-    /// **The binding pair (PROD-01.3 security follow-up).** A connection with
+    /// The binding pair: a connection with
     /// a credential also projects the EXPECTED binding as a literal and the
     /// Secret's own `logweir-binding` key as an OPTIONAL `secretKeyRef`, and
     /// the runner refuses the credential (`CredentialBindingMismatch`) unless
@@ -1174,9 +1149,8 @@ impl ResolvedConnection {
                 }),
             }
         }
-        // PROD-01.3: the `mtls` pair, from ONE Secret, as two files in one
-        // read-only volume at the runner's `0440` Secret mode. The two
-        // variables carry PATHS; the kubelet resolves the Secret.
+        // The `mtls` pair, from one Secret, as two files in one read-only volume
+        // at the runner's `0440` Secret mode; the variables carry paths.
         if let Some(cert) = self.client_certificate.as_ref() {
             projection.env_literal.push((
                 side.tls_cert_file_env().to_string(),

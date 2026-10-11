@@ -1,44 +1,39 @@
-//! **FX-31 review F2 — one memory budget for every archive read the
-//! controller makes.**
+//! One memory budget for every archive read the controller makes.
 //!
-//! FX-31 capped each read: a receipt or scorecard at 1 MiB, a manifest at
-//! 64 MiB (`logweir_store::caps`). A cap bounds ONE read, and the controller
-//! makes them concurrently. Every `BackupSchedule` reconcile evaluates its
-//! retention report, and every finishing run reads its evidence, and the kube
-//! runtime runs reconciles with no concurrency limit. The review measured
-//! eight retention evaluations of 63 MiB manifests at 348–395 MB peak RSS in
-//! one process. The chart's controller limit is 512Mi, and every controller
-//! start reconciles every schedule at once.
+//! A per-read cap (`logweir_store::caps`: a receipt or scorecard at 1 MiB, a
+//! manifest at 64 MiB) bounds one read, and the controller reads concurrently:
+//! every `BackupSchedule` reconcile evaluates its retention report, every
+//! finishing run reads its evidence, the kube runtime has no concurrency
+//! limit, and every controller start reconciles every schedule at once. Eight
+//! retention evaluations of 63 MiB manifests measured 348–395 MB peak RSS in
+//! one process, against the chart's 512Mi controller limit.
 //!
-//! So every controller read RESERVES its worst case out of one process-wide
-//! budget, [`CONTROLLER_READ_BUDGET_BYTES`], before it reads. It holds the
-//! reservation until the bytes AND everything parsed from them are dropped.
-//! A read that does not fit waits on its blocking thread until earlier
-//! reservations are released. The sum of in-flight worst cases therefore never
-//! exceeds the budget, however many reconciles run.
+//! So every controller read reserves its worst case out of one process-wide
+//! budget, [`CONTROLLER_READ_BUDGET_BYTES`], before it reads, and holds the
+//! reservation until the bytes and everything parsed from them are dropped. A
+//! read that does not fit waits on its blocking thread. The sum of in-flight
+//! worst cases never exceeds the budget, however many reconciles run.
 //!
 //! # What each read reserves
 //!
 //! | read | reserves | why |
 //! |---|---|---|
-//! | a receipt or scorecard (`verify_evidence`, `observe_archive`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | a scorecard: the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check (a document of tiny values parses into about 37× its size, `tests/read_caps.rs`). A backup receipt (FX-33): its 5,131,072-byte cap, folded and never parsed into a tree, so the bytes and the signature's copy of them, about 10 MiB (`tests/topic_budget.rs`). |
+//! | a receipt or scorecard (`verify_evidence`, `observe_archive`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | a scorecard: the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check (a document of tiny values parses into about 37× its size, `tests/read_caps.rs`). A backup receipt: its 5,131,072-byte cap, folded and never parsed into a tree, so the bytes and the signature's copy of them, about 10 MiB (`tests/topic_budget.rs`). |
 //! | one manifest in a retention report | [`MANIFEST_READ_COST_BYTES`] (64 MiB) | the cap's bytes are buffered. The fold over them keeps nothing per value. |
 //!
-//! With a 128 MiB budget, at most three documents, or two manifests, or one
-//! manifest and one document, are read at once. A read takes milliseconds
-//! against a healthy store. A degraded store makes the controller's evidence
-//! reads wait on one another for every namespace. That is the same trade the
-//! four-permit `evidence_fetch::controller_read_permits` pool already makes,
-//! and the store's own request timeout bounds it.
+//! With a 128 MiB budget, at most three documents, two manifests, or one of
+//! each are read at once. A read takes milliseconds against a healthy store;
+//! a degraded one makes evidence reads wait on one another across namespaces,
+//! the trade the four-permit `evidence_fetch::controller_read_permits` pool
+//! already makes, bounded by the store's own request timeout.
 //!
 //! # Blocking, on purpose
 //!
 //! Every read this guards runs inside `tokio::task::spawn_blocking` (interface
-//! I13: a `Store` call drives its own runtime). So the reservation is a
-//! plain mutex and condition variable, waited on by a blocking-pool thread. It
-//! never parks a reconciler's async task, and it needs no `.await` threaded
-//! through five call sites. No guarded function reserves while holding a
-//! reservation, so a wait can never wait on itself.
+//! I13), so the reservation is a plain mutex and condition variable waited on
+//! by a blocking-pool thread: it never parks a reconciler's async task. No
+//! guarded function reserves while holding a reservation, so a wait can never
+//! wait on itself.
 
 use std::sync::{Condvar, Mutex, PoisonError};
 
@@ -65,8 +60,8 @@ pub struct ReadBudget {
 }
 
 impl ReadBudget {
-    /// A budget of `total` bytes. The controller uses ONE,
-    /// [`ReadBudget::controller`]. A test builds its own to compare against it.
+    /// A budget of `total` bytes. The controller uses one,
+    /// [`ReadBudget::controller`]; a test builds its own.
     #[must_use]
     pub const fn new(total: u64) -> Self {
         Self {

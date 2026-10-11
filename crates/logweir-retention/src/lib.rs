@@ -1,23 +1,20 @@
 #![forbid(unsafe_code)]
-//! `logweir-retention` — the one supported enforcer (decision D3 §6.5).
+//! `logweir-retention` — the one supported enforcer.
 //!
 //! # Why this is its own binary
 //!
-//! D-SEAMS **S1** says there is one check runner and that `logweir check run`
-//! is it. This is the third recorded exception and the reason is structural:
+//! There is one check runner, `logweir check run`, and this binary is an
+//! exception to it for a structural reason:
 //! **deletion linkage must not be reachable from the everyday binary.** A
 //! `logweir retention run` subcommand would link `logweir-reaper` into the same
 //! executable an operator uses to take a backup, verify a receipt or print a
 //! scorecard, and the capability gate would have nothing left to prove.
 //!
-//! # Why this crate has a library target (review `d3w9` H6)
+//! # Why this crate has a library target
 //!
-//! The first landing put the whole binary in `main.rs`. No other crate can link
-//! a `[[bin]]`, so `cargo test -p logweir-retention` ran **zero tests** —
-//! against the one executable in this product that deletes archive data. The
-//! reviewer proved what that costs: flipping `"--dry-run" => dry_run = true` to
-//! `false`, so that a preview deletes for real, left every suite in the
-//! workspace green.
+//! No other crate can link a `[[bin]]`, so a binary-only crate runs **zero
+//! tests**, and this is the one executable in the product that deletes archive
+//! data.
 //!
 //! So the decision-making half lives here, behind two seams:
 //!
@@ -33,8 +30,7 @@
 //! `main.rs` is what is left: read the real environment, open the real ports,
 //! print, exit. Adding a library target does not widen the deletion boundary —
 //! `scripts/check-no-archive-write.sh` check 3 walks package edges, so a crate
-//! that linked this one to reach the reaper is caught transitively, which the
-//! reviewer verified by planting exactly that.
+//! that linked this one to reach the reaper is caught transitively.
 //!
 //! # The contract
 //!
@@ -91,16 +87,11 @@ use logweir_reaper::{
 /// The contract version this binary implements.
 pub const CONTRACT_VERSION: &str = "1";
 
-/// Exit 0.
 pub const EXIT_OK: i32 = 0;
 /// Exit 1 — work remains.
 pub const EXIT_INCOMPLETE: i32 = 1;
 /// Exit 3 — refused before anything ran.
 pub const EXIT_REFUSED: i32 = 3;
-
-// ---------------------------------------------------------------------------
-// The environment seam
-// ---------------------------------------------------------------------------
 
 /// Where the run's binding comes from.
 ///
@@ -140,10 +131,6 @@ pub fn env_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Refusals — every exit-3 path, in one closed enum
-// ---------------------------------------------------------------------------
 
 /// Why a run did not start. **Nothing has been deleted when one of these is
 /// returned**, which is what makes them exit 3 rather than exit 1.
@@ -188,10 +175,9 @@ pub enum Refusal {
     /// A per-run ceiling ([`env::MAX_DELETIONS`] or [`env::MAX_OBJECTS`]) is
     /// not a whole number of at least 1.
     ///
-    /// **FX-10: a ceiling the worker cannot read is refused, never replaced.**
-    /// Until 2026-10-05 an absent or malformed value silently became 50 or
-    /// 20 000 — so a renamed variable on either side, or a typo, ran with a
-    /// ceiling nobody configured, possibly far above the policy's own.
+    /// **A ceiling the worker cannot read is refused, never replaced**: a
+    /// default would let a renamed variable on either side, or a typo, run with
+    /// a ceiling nobody configured, possibly far above the policy's own.
     #[error(
         "{name} must be a whole number of at least 1; got `{value}`. A ceiling this worker \
          cannot read is not replaced by a default: nothing is deleted."
@@ -218,7 +204,7 @@ pub enum Refusal {
          unattributable deletion is not performed."
     )]
     NoRecordCredential,
-    /// FX-20: a projected credential — the delete-capable `AWS_*` key or the
+    /// A projected credential — the delete-capable `AWS_*` key or the
     /// `LOGWEIR_EVIDENCE_AWS_*` record key — whose Secret's `logweir-binding`
     /// is absent or names another policy, destination route or scope. The
     /// message opens with `CredentialBindingMismatch` and names variables,
@@ -230,14 +216,14 @@ pub enum Refusal {
     Port(String),
 }
 
-/// FX-20: the key line a refused run prints — `retention-refusal=<code>`, and
+/// The key line a refused run prints — `retention-refusal=<code>`, and
 /// for a refusal about one binding variable ` variable=<name>` after it — read
 /// by key name from a closed table
 /// (`weirkeeper::controllers::retention_policy::RETENTION_REFUSALS`) and put on
 /// the policy's status.
 pub const REFUSAL_LINE: &str = "retention-refusal=";
 
-/// FX-15: every code [`Refusal::code`] can return. The controller's
+/// Every code [`Refusal::code`] can return. The controller's
 /// `RETENTION_REFUSALS` must be this set, and
 /// `weirkeeper/tests/retention_policy_controller.rs` reads this array to hold
 /// it so.
@@ -267,7 +253,7 @@ pub const REFUSAL_CODES: [&str; 22] = [
 ];
 
 impl Refusal {
-    /// FX-15: the closed code the controller publishes for this refusal. Every
+    /// The closed code the controller publishes for this refusal. Every
     /// refusal has one, so a refused run's status says why without the pod log.
     #[must_use]
     pub fn code(&self) -> &'static str {
@@ -335,10 +321,6 @@ impl Refusal {
         EXIT_REFUSED
     }
 }
-
-// ---------------------------------------------------------------------------
-// Admission — pure
-// ---------------------------------------------------------------------------
 
 /// A static credential, by named variable.
 #[derive(Clone, PartialEq, Eq)]
@@ -431,7 +413,6 @@ pub fn parse_args(argv: &[&str]) -> Result<Args, Refusal> {
 /// A run that passed every pre-port check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admitted {
-    /// The validated plan.
     pub plan: Plan,
     /// The run binding the Job carried.
     pub binding: RunBinding,
@@ -496,13 +477,11 @@ impl Admitted {
 pub mod env {
     /// The approved plan digest.
     pub const PLAN_SHA256: &str = "LOGWEIR_RETENTION_PLAN_SHA256";
-    /// The policy UID.
     pub const POLICY_UID: &str = "LOGWEIR_RETENTION_POLICY_UID";
     /// The policy generation, for the record.
     pub const POLICY_GENERATION: &str = "LOGWEIR_RETENTION_POLICY_GENERATION";
     /// `spec.scope.prefix`, checked against the plan's own.
     pub const SCOPE_PREFIX: &str = "LOGWEIR_RETENTION_SCOPE_PREFIX";
-    /// The run id.
     pub const RUN_ID: &str = "LOGWEIR_RETENTION_RUN_ID";
     /// The approver reference, or `unattended`.
     pub const APPROVER: &str = "LOGWEIR_RETENTION_APPROVER";
@@ -530,10 +509,8 @@ pub mod env {
 
 /// The seven variables a run cannot start without.
 ///
-/// The two ceilings joined the five on 2026-10-05 (FX-10): the controller has
-/// projected both on every enforcement Job since the worker existed
-/// (`582ba14e`), so no supported pairing lacks them, and a run that would have
-/// to GUESS its own ceiling is a run that should not delete.
+/// The controller projects both ceilings on every enforcement Job, and a run
+/// that would have to GUESS its own ceiling is a run that should not delete.
 const REQUIRED: [&str; 7] = [
     env::PLAN_SHA256,
     env::POLICY_UID,
@@ -575,7 +552,7 @@ pub fn admit(
 ) -> Result<Admitted, Refusal> {
     let args = parse_args(argv)?;
 
-    // FX-20: THE BINDINGS FIRST. A delete-capable key, or a record key, from
+    // THE BINDINGS FIRST. A delete-capable key, or a record key, from
     // a Secret that was not bound to this policy, this destination route and
     // this scope is refused before anything else is read — no handle exists
     // yet, so nothing has been signed or sent.
@@ -598,9 +575,8 @@ pub fn admit(
         .parse::<i64>()
         .map_err(|_| Refusal::GenerationNotANumber(raw_generation.clone()))?;
 
-    // THE CEILINGS ARE THE JOB'S, READ STRICTLY (FX-10). They used to fall back
-    // to 50 and 20 000 on an absent or unparseable value, so a worker that
-    // never read them passed the one row that set exactly those numbers.
+    // THE CEILINGS ARE THE JOB'S, READ STRICTLY: no default stands in for an
+    // absent or unparseable value.
     let binding = RunBinding {
         policy_uid: policy_uid.clone(),
         scope_prefix,
@@ -654,10 +630,6 @@ pub fn admit(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Execution
-// ---------------------------------------------------------------------------
-
 /// What one run produced, as the process reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -697,7 +669,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
     );
     for point in &outcome.points {
         // ON A DRY RUN THE COUNT IS `remaining_keys`, which the reaper filled
-        // by ENUMERATING the set bound (review `d3w9` M1) — the number an
+        // by ENUMERATING the set bound — the number an
         // administrator needs, rather than the plan's own `1`.
         let objects = if admitted.dry_run {
             point.remaining_keys.len() as i64

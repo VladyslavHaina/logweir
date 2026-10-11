@@ -1,28 +1,21 @@
-// check-deadline.spec.js -- poc-upgrade-3's P15 and its class: a page that
-// follows a check keeps reading it until the check's OWN deadline, backs off
-// while it does, and -- when that deadline passes without a result -- says so
-// and offers "Run the check again". It never leaves a check on "this page
-// reads it again until then" with nothing reading it.
+// check-deadline.spec.js -- a page that follows a check keeps reading it
+// until the check's OWN deadline, backs off while it does, and -- when that
+// deadline passes without a result -- says so and offers "Run the check
+// again". It never leaves a check on "this page reads it again until then"
+// with nothing reading it.
 //
-// WHAT THE LIVE ROUND SAW. Schedules -> Backup readiness renewed an expired
-// check (`pf-gjepy6av...`) and read it twenty times, two seconds apart, all
-// `200` -- its whole forty-second budget -- and stopped. The check completed
-// sixty-four seconds after it was created. The panel kept "The check has not
-// finished ... this page reads it again until then" for as long as it stayed
-// open. Every follower in the console had the same shape: Test connection 30 s,
-// the schedule form 40 s, Test access 60 s, restore step 5 90 s -- under a
-// `Preflight` whose own budget is `timeoutSeconds` (120 by default, up to 600)
-// plus the 90 s its Job is given to start. Topic discovery had no follower at
-// all: "Discover topics" painted `pending` and left it there until a reload.
+// A `Preflight`'s own budget is `timeoutSeconds` (120 by default, up to 600)
+// plus the 90 s its Job is given to start, so a follower with a 30-90 s
+// budget gives up on a check that completes after it, and Topic discovery
+// needs a follower of its own.
 //
 // THE CLOCK IS node:test's MOCK TIMERS (`setTimeout` and `Date`). No page here
 // is handed a `wait`: each follow runs on the timer a browser gives it, and a
 // check that settles at 100 s is 100 s of mocked time. `setImmediate` stays
 // real, and it is what the rows flush promise continuations with.
 //
-// Every row carries its NEGATIVE CONTROL: an assertion that fails on the code
-// before this fix (a 30-90 s budget, a follow that stops without a word, a
-// "Run the check again" that replays the check that did not finish).
+// Every row carries its NEGATIVE CONTROL (a short budget, a follow that stops
+// without a word, a "Run the check again" that replays the unfinished check).
 
 import { mock, test } from "node:test";
 import assert from "node:assert/strict";
@@ -66,8 +59,6 @@ import { LIFE, fakeView, parse } from "./fake-view.js";
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
 const source = (path) => readFileSync(REPO + path, "utf8");
 
-// ------------------------------------------------------------------ the clock
-
 /** Runs `body` with `setTimeout` and `Date` mocked from zero, always undone. */
 function clocked(body) {
   return async () => {
@@ -100,8 +91,6 @@ async function advance(ms) {
 }
 
 const SETTLES_AT_MS = 100 * 1000;
-
-// ---------------------------------------------------------------- the objects
 
 /** A `Preflight` as the product API answers it. */
 function preflight(id, state, terminal, over) {
@@ -139,10 +128,7 @@ function newest(view, marker) {
   return chunks.length === 0 ? "" : chunks[chunks.length - 1].html;
 }
 
-// ===========================================================================
-// The deadline is the product's own, and the follow is polite
-// ===========================================================================
-
+// THE DEADLINE IS THE PRODUCT'S OWN, AND THE FOLLOW IS POLITE.
 test("the_follow_deadline_covers_the_longest_check_the_product_accepts", () => {
   // THE BUDGET IS PINNED TO THE PRODUCT'S NUMBERS, READ FROM THE PRODUCT. A
   // console constant that drifted below them is the defect this file is about.
@@ -168,14 +154,13 @@ test("the_follow_deadline_covers_the_longest_check_the_product_accepts", () => {
   assert.ok(PREFLIGHT_FOLLOW_MS > (Number(byDefault[1]) + Number(margin[1])) * 1000,
     "and certainly longer than a default check's own Job deadline");
   assert.ok(DISCOVERY_FOLLOW_MS >= (Number(tdMax[1]) + Number(margin[1])) * 1000);
-  // THE LIVE CASE, by name: 64 s, and the 100 s the rows below settle at.
+  // A 64 s check, and the 100 s the rows below settle at.
   assert.ok(PREFLIGHT_FOLLOW_MS > 64000 && PREFLIGHT_FOLLOW_MS > SETTLES_AT_MS);
 });
 
 test("the_follow_backs_off_and_never_hot_loops", () => {
-  // THE OLD CADENCE FOR THE FIRST TWENTY SECONDS (review L8): ten reads two
-  // seconds apart, so a check settling in that time is seen as fast as before;
-  // then 3, 4.5, 6.75 and 10 s.
+  // Ten reads two seconds apart for the first twenty seconds, so a check
+  // settling in that time is seen fast; then 3, 4.5, 6.75 and 10 s.
   const gaps = [0, 1, 5, 9, 10, 11, 12, 13, 50].map(followGap);
   assert.deepEqual(gaps, [2000, 2000, 2000, 2000, 3000, 4500, 6750, 10000, 10000]);
   let steady = 0;
@@ -205,10 +190,7 @@ test("the_stop_reasons_agree_between_the_follow_and_the_renderer", () => {
     /The discovery did not finish in the longest time a discovery may take.*Run the discovery again<\/button>/);
 });
 
-// ===========================================================================
-// The follow itself, on the mocked clock
-// ===========================================================================
-
+// THE FOLLOW ITSELF, on the mocked clock.
 test("a_check_settling_at_100_s_is_followed_until_it_settles", clocked(async () => {
   const reads = [];
   const shown = [];
@@ -306,10 +288,7 @@ test("a_passing_read_failure_is_asked_again_and_a_refusal_stops_the_follow", clo
   assert.equal(failing, FOLLOW_FAILURES_TOLERATED + 1);
 }));
 
-// ===========================================================================
-// Every page that follows a check
-// ===========================================================================
-
+// EVERY PAGE THAT FOLLOWS A CHECK.
 /** The schedules page's API: the panel and the form start checks that settle
  *  at 100 s, or never. */
 function schedulesApi(never) {
@@ -517,10 +496,9 @@ test("test_connection_says_when_a_check_outlived_its_deadline_and_runs_a_new_one
 }));
 
 test("a_connection_check_left_running_is_followed_again_when_the_view_returns", clocked(async () => {
-  // THE SECOND FACE OF THE CLASS: the panel remembers its check across visits,
-  // and the follow ended with the route that started it -- so a reader who
-  // came back while it ran found "this page reads it again until then" and
-  // nothing reading it.
+  // THE PANEL REMEMBERS ITS CHECK ACROSS VISITS, so a reader who comes back
+  // while it runs must find it read again, not "this page reads it again until
+  // then" with nothing reading it.
   const api = clusterApi(false);
   const routes = createRouteLifecycle();
   const first = fakeView();
@@ -628,11 +606,8 @@ test("test_access_says_when_a_check_outlived_its_deadline_and_tests_again", cloc
   assert.equal(api.tests.length, 2, "Run the check again is Test access again");
 }));
 
-// ===========================================================================
-// Fix round (review of poc-fixes-5): one follow per check, the route ends it,
-// and the refusals that are not blips
-// ===========================================================================
-
+// ONE FOLLOW PER CHECK, THE ROUTE ENDS IT, and the refusals that are not
+// blips.
 /** An API whose creates REPLAY by attempt token, as the product API does (D0:
  *  one key, one object): a second ask with the same token answers the same
  *  check. Its checks never settle, so a follow reads at its steady cadence.
@@ -725,11 +700,10 @@ const ASK_TWICE = [
 for (const [surface, ask, mount] of ASK_TWICE) {
   test("asking again while the check runs does not start a second follow: " + surface,
     clocked(async () => {
-      // REVIEW M1. The ask is re-enabled once its create answers, and asking
-      // again while the check runs REPLAYS it (the same intent token, the same
-      // id). Each answer started a follow of its own, and two follows of one
-      // check both stayed "mine": 6 reads a minute became 22 after two more
-      // clicks, for up to twelve minutes.
+      // The ask is re-enabled once its create answers, and asking again while the
+      // check runs REPLAYS it (the same intent token, the same id). Each answer
+      // must not start a follow of its own: two follows of one check would turn 6
+      // reads a minute into 22 after two more clicks, for up to twelve minutes.
       const ns = "m1-" + surface.replace(/[^a-z]/gi, "").toLowerCase();
       const api = replayingApi(ns);
       const view = await mount(ns, api);
@@ -757,9 +731,9 @@ for (const [surface, ask, mount] of ASK_TWICE) {
 }
 
 test("a_discovery_asked_again_while_it_runs_rereads_its_slots_once_when_it_finishes", clocked(async () => {
-  // THE PAGE HALF OF M1 for Discover topics: its follow re-reads the two slots
-  // when the discovery finishes, and a second ask that replayed the running
-  // discovery must not chain a second re-read onto the one follow.
+  // Discover topics' follow re-reads the two slots when the discovery
+  // finishes, and a second ask that replayed the running discovery must not
+  // chain a second re-read onto the one follow.
   const api = replayingApi("m1-slots", true);
   const view = fakeView();
   await mountClusterDetail(view.root, "m1-slots", "orders-prod", parse, LIFE(), api);
@@ -787,10 +761,10 @@ test("a_follow_asked_for_a_check_already_followed_is_that_follow", clocked(async
   assert.equal(reads, 10, "one follow's ten reads in twenty seconds, not twenty");
 }));
 
-// THE ROUTE ENDS EVERY FOLLOW (review M2). The fake APIs below IGNORE `signal`,
-// so the only thing that can stop a read after the route left is the
-// follower's own `keep` -- `active(lifecycle)` in each of them. The route
-// leaves during the first wait; after it, nothing is read and nothing painted.
+// THE ROUTE ENDS EVERY FOLLOW. The fake APIs below IGNORE `signal`, so the
+// only thing that can stop a read after the route left is the follower's own
+// `keep` -- `active(lifecycle)` in each of them. The route leaves during the
+// first wait; after it, nothing is read and nothing painted.
 const LEAVERS = [
   ["the readiness panel", async (ns, parse_, life, api) => {
     await mountSchedules(parse_.view.root, ns, parse_, life, api);
@@ -864,9 +838,9 @@ for (const [surface, start] of LEAVERS) {
   });
 }
 
-// THE REFUSALS THAT ARE NOT BLIPS (review M3, L3): the session ended (401),
-// the session may not read the check (403), this page refused to ask, and an
-// answer this page cannot read. Each is read ONCE and then said.
+// THE REFUSALS THAT ARE NOT BLIPS: the session ended (401), the session may
+// not read the check (403), this page refused to ask, and an answer this
+// page cannot read. Each is read ONCE and then said.
 for (const [label, error] of [
   ["401", Object.assign(new Error("the session ended; sign in again"), { status: 401 })],
   ["403", Object.assign(new Error("this role may not read preflights here"), { status: 403 })],
@@ -889,8 +863,8 @@ for (const [label, error] of [
 }
 
 test("a_follow_whose_route_aborts_ends_at_once_and_leaves_no_timer", clocked(async () => {
-  // REVIEW L1: the wait between reads was a plain timer, left running for up
-  // to ten seconds after the route had gone.
+  // The wait between reads must not be a plain timer left running for up to
+  // ten seconds after the route has gone.
   const route = new AbortController();
   let reads = 0;
   let settled = false;
@@ -914,8 +888,8 @@ test("a_follow_whose_route_aborts_ends_at_once_and_leaves_no_timer", clocked(asy
 }));
 
 test("a_read_the_server_never_answers_ends_at_the_deadline_as_unreadable", clocked(async () => {
-  // REVIEW L2: the deadline was checked only between reads, and a GET the
-  // server accepted and never answered held "checking..." past it.
+  // A GET the server accepted and never answered must not hold "checking..."
+  // past the deadline.
   const signals = [];
   let settled = false;
   const ended = followCheck({
@@ -934,8 +908,8 @@ test("a_read_the_server_never_answers_ends_at_the_deadline_as_unreadable", clock
 }));
 
 test("a_wall_clock_step_neither_ends_a_follow_nor_stretches_it", clocked(async () => {
-  // REVIEW L4: the deadline ran on Date.now(); an NTP step or a laptop waking
-  // an hour later ended the follow after one read with "did not finish".
+  // An NTP step or a laptop waking an hour later must not end the follow after
+  // one read with "did not finish": the deadline is monotonic.
   let reads = 0;
   const shown = [];
   const ended = followCheck({
@@ -954,9 +928,8 @@ test("a_wall_clock_step_neither_ends_a_follow_nor_stretches_it", clocked(async (
 }));
 
 test("a_failed_last_read_says_the_check_could_not_be_read_not_that_it_did_not_finish", clocked(async () => {
-  // REVIEW L5: the read at the deadline failed with a 503, the loop went on,
-  // found the deadline passed, and said "did not finish" -- which the page
-  // did not know: the check may have settled.
+  // The read at the deadline failed with a 503: the page must not say "did not
+  // finish", which it does not know -- the check may have settled.
   const unavailable = Object.assign(new Error("service unavailable"), { status: 503 });
   let reads = 0;
   const ended = followCheck({
@@ -977,9 +950,8 @@ test("a_failed_last_read_says_the_check_could_not_be_read_not_that_it_did_not_fi
 }));
 
 test("a_check_settling_within_twenty_seconds_is_seen_within_two", clocked(async () => {
-  // REVIEW L8: backing off from the first read delayed the common case -- a
-  // check settling at 17-26 s was shown at 26 s. The first twenty seconds keep
-  // the old two-second cadence.
+  // Backing off from the first read would delay the common case; the first
+  // twenty seconds keep a two-second cadence.
   const shown = [];
   followCheck({
     first: preflight("pf-17", "pending", false),

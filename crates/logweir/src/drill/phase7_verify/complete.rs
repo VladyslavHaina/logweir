@@ -1,7 +1,6 @@
-//! **PROD-08.1 — complete verification.** Phase 7's second lane, chosen by
-//! the plan's `sample.coverage: complete`. The contract it implements is
-//! `docs/to-do/decisions/PROD-08.1-integrity-contract.md`; this comment says
-//! how.
+//! Complete verification: phase 7's second lane, chosen by the plan's
+//! `sample.coverage: complete`. The contract it implements is
+//! `docs/to-do/decisions/PROD-08.1-integrity-contract.md`.
 //!
 //! # What it checks, per partition of every restored topic
 //!
@@ -15,14 +14,14 @@
 //!    record is expected when its timestamp is at or before the window's end
 //!    (inclusive, as the engine's restore filter is) and, when the plan's
 //!    window has a start of its own, at or after it. NOT from the segments'
-//!    first and last timestamps, which the engine selects by (PROD-01.1 S6,
-//!    S7): with out-of-order timestamps those misstate what a segment holds,
-//!    so a selection that reads them is not independent of the engine.
+//!    first and last timestamps, which the engine selects by: with
+//!    out-of-order timestamps those misstate what a segment holds, so a
+//!    selection that reads them is not independent of the engine.
 //! 3. **The replay comparison, every restored record.** The target partition
 //!    is read from offset 0 to its high watermark, in chunks, and each record
 //!    is mapped back to its source offset by its LAST `x-original-offset`
-//!    header (the one the backup appends after the record's own headers,
-//!    PROD-01.1 S5). A repeated source offset is a duplicate; a source offset
+//!    header (the one the backup appends after the record's own headers). A
+//!    repeated source offset is a duplicate; a source offset
 //!    below one already seen is out of order (archive order is source-offset
 //!    order, and the engine produces each partition in archive order); a
 //!    source offset the expected output does not hold — or no lineage header
@@ -35,7 +34,7 @@
 //! equals the expected count and every record is accounted for. The
 //! manifest's first/last-timestamp count BOUND (`check_restored_count`) is
 //! not consulted in this lane; it is what makes a correct point-in-time
-//! restore fail (PROD-01.1 ts-bound) and a skipped segment pass (ts-pit).
+//! restore fail and a skipped segment pass.
 //!
 //! # One ledger, still
 //!
@@ -60,8 +59,7 @@
 //! # Memory
 //!
 //! One partition at a time: a 32-byte digest per expected record and an
-//! 8-byte offset per restored record, never the records themselves. Bounded
-//! memory regardless of partition size is PROD-08.3's.
+//! 8-byte offset per restored record, never the records themselves.
 use super::{Evidence, SelectionVerdict};
 use crate::drill::DrillError;
 use logweir_core::engine::{BackupSetFacts, PartitionFacts, RestorePlan, WindowFloorSource};
@@ -87,11 +85,11 @@ pub const LINEAGE_HEADER: &str = "x-original-offset";
 /// `None` when it carries none (or the last one is not 8 bytes).
 ///
 /// The LAST, not the first: the backup appends its own header AFTER the
-/// record's own headers (PROD-01.1 S5), so a record that already carried
-/// `x-original-offset` — a topic that was itself restored — is archived with
+/// record's own headers, so a record that already carried
+/// `x-original-offset` (a topic that was itself restored) is archived with
 /// two, and only the last is this archive's lineage. With the pinned engine a
-/// restored record carries one (its produce side collapses repeated keys,
-/// PROD-01.1 R4), so first and last agree today; PROD-00.3e keeps both.
+/// restored record carries one (its produce side collapses repeated keys), so
+/// first and last agree today.
 #[must_use]
 pub fn lineage_offset(headers: &[(String, Option<Vec<u8>>)]) -> Option<i64> {
     headers
@@ -105,7 +103,7 @@ pub fn lineage_offset(headers: &[(String, Option<Vec<u8>>)]) -> Option<i64> {
 /// The window the expected output is selected by, from the PLAN: no lower
 /// bound when the plan's floor is the archive's (guard G-WIN,
 /// `ArchiveManifest`); the plan's own start when it inherited one
-/// (`InheritedFromSpec`, PROD-11.1's sub-window).
+/// (`InheritedFromSpec`).
 #[must_use]
 pub fn window_of(plan: &RestorePlan) -> CompleteWindow {
     CompleteWindow {
@@ -117,7 +115,7 @@ pub fn window_of(plan: &RestorePlan) -> CompleteWindow {
     }
 }
 
-/// PROD-11.1: the shared record predicate (`ReplaySelection::window_selects`),
+/// The shared record predicate (`ReplaySelection::window_selects`),
 /// the one the selection's preview and the plan are judged by.
 fn selected(window: &CompleteWindow, ts: i64) -> bool {
     ReplaySelection::window_selects(window.start_ms, window.end_ms, ts)
@@ -238,8 +236,8 @@ fn archive_side(
             );
             continue;
         }
-        // FX-31: under the segment ceiling. FX-30 owns this lane's decode
-        // caps; an object over this one is a read failure below, never a pass.
+        // Under the segment ceiling; an object over it is a read failure
+        // below, never a pass.
         let bytes = match store.get_capped(&seg.key, logweir_engine_oso::storage::caps::SEGMENT) {
             Ok((bytes, _)) => bytes,
             Err(StoreError::NotFound(_)) => {
@@ -477,15 +475,15 @@ pub(super) fn run(
     max_records: Option<u64>,
 ) -> Result<CompleteOutcome, DrillError> {
     let window = window_of(plan);
-    // PROD-11.1: the plan's partition selection. A plan with no subset
-    // selects every partition, and this loop is what it was.
+    // The plan's partition selection; a plan with no subset selects every
+    // partition.
     let selection = ReplaySelection::from_plan(plan);
     // Every (source topic, partition) to verify: the manifest's SELECTED
     // partitions and the target's, unioned. A partition the plan did not
     // select is compared only when the target holds a record there — with
     // nothing expected, so every such record is unexpected and fails it —
     // and otherwise is not listed: `complete.partitions[]` names the
-    // selection, never the archive's every partition (PROD-11.1 §5).
+    // selection, never the archive's every partition.
     let mut parts: BTreeMap<(String, i32), (String, i64)> = BTreeMap::new();
     for (src, tgt) in mapping {
         let ends: BTreeMap<i32, i64> = reader.end_offsets(tgt)?.into_iter().collect();
@@ -534,7 +532,7 @@ pub(super) fn run(
     for ((src, pid), (tgt, hi)) in &parts {
         let id = format!("{src}/{pid}");
         // An unselected partition expects NOTHING, whatever the archive holds
-        // for it (PROD-08.1 §2.1, "Partition subsets").
+        // for it.
         let chosen = selection.selects_partition(src, *pid);
         let pf = facts
             .topics
@@ -604,8 +602,8 @@ pub(super) fn run(
             verdicts.push(SelectionVerdict {
                 id,
                 claimed: 0,
-                // Its own sentence (review L-4): `partial_reason` carries both
-                // lanes' notes, and the same `why` twice said nothing twice.
+                // Its own sentence: `partial_reason` carries both lanes'
+                // notes, and the same `why` twice said nothing twice.
                 segments: Evidence::Unverified {
                     why: format!(
                         "{} archived segments were not read, past the bound",

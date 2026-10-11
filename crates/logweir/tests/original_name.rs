@@ -1,5 +1,5 @@
-//! **PROD-15.1 — restore under the original topic name into an absent topic:
-//! the runner's conditions, in process, over doubles.**
+//! **Restore under the original topic name into an absent topic: the
+//! runner's conditions, in process, over doubles.**
 //!
 //! Every row drives `phase0_admit::run_with_original_name` (or the creation
 //! step, or phase 9) over a broker double that answers exactly what the row
@@ -118,7 +118,7 @@ struct Broker {
     log_append_time: bool,
     reads_of_auto_create: Mutex<usize>,
     /// Topics a `Creator` sharing this list created: listed from then on, as
-    /// a real cluster would (review M4's cleanup reads them back).
+    /// a real cluster would.
     created: Arc<Mutex<Vec<TopicMeta>>>,
     /// A created topic's configuration is not the one Logweir set (someone
     /// deleted and recreated it, or it was auto-created).
@@ -243,7 +243,7 @@ struct Creator {
     /// Created with this many partitions instead of the asked count (a
     /// topic someone recreated differently).
     partitions_override: Option<i32>,
-    /// Answer only for these names (review L1's short answer).
+    /// Answer only for these names (a short answer).
     answers_only: Option<Vec<String>>,
     /// Names the broker refuses for a reason that is NOT "already exists",
     /// and the error it answers.
@@ -327,8 +327,8 @@ struct Run {
 }
 
 /// Phase 0 over the doubles. `source` is the source cluster id the bound
-/// point's VERIFIED receipt measured (review L3: the only source id that
-/// counts); `inputs` may name its own, which wins.
+/// point's VERIFIED receipt measured (the only source id that counts);
+/// `inputs` may name its own, which wins.
 fn admit(
     spec: &DrillSpec,
     source: Option<&str>,
@@ -433,9 +433,9 @@ fn the_block_beside_a_prefix_is_refused() {
     );
 }
 
-/// **An original-name restore REQUIRES complete verification** (the
-/// orchestrator's ruling of 2026-10-09). A sampled plan with the identity
-/// mapping is refused BY NAME at phase 0 — exit 3, before any broker is asked
+/// **An original-name restore REQUIRES complete verification.** A sampled
+/// plan with the identity mapping is refused BY NAME at phase 0 — exit 3,
+/// before any broker is asked
 /// anything, nothing created — whether `sample.coverage` is stated or left to
 /// its default; the same plan asking for complete coverage is admitted.
 /// CONTROL: a sampled plan under a PREFIX is admitted as before. KILLS:
@@ -498,8 +498,7 @@ fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
     );
 }
 
-/// **An original-name restore restores WHOLE topics** (the orchestrator's
-/// ruling of 2026-10-09, once PROD-11.1b allowed partition subsets). A plan
+/// **An original-name restore restores WHOLE topics.** A plan
 /// that carries the block and `restore.partitions` is refused BY NAME at
 /// phase 0: exit 3, before any broker is asked anything, nothing created.
 /// The creation step would create `orders` under its own name with every
@@ -508,7 +507,7 @@ fn a_sampled_plan_under_the_original_names_is_refused_by_name() {
 ///
 /// CONTROLS: the same plan without the subset is admitted; the same plan
 /// with a stated window START (whole partitions, bounded in time) is
-/// admitted; a subset restore under a PREFIX is what PROD-11.1b made it.
+/// admitted; a subset restore under a PREFIX is admitted.
 /// KILLS: deleting the whole-topics arm of `refuse_shape`; applying it to a
 /// stated window; applying it to a prefixed restore.
 #[test]
@@ -530,7 +529,7 @@ fn a_partition_subset_under_the_original_names_is_refused_by_name() {
     }
 
     // The YAML an operator writes: a subset beside the interval form of the
-    // point in time, the one spelling PROD-11.1b's grammar accepts.
+    // point in time, the one spelling the grammar accepts.
     let mut yaml: serde_yaml::Value =
         serde_yaml::to_value(plan_no_owner()).expect("the plan serialises");
     yaml["restore"] = serde_yaml::from_str(
@@ -660,8 +659,8 @@ fn the_verified_receipts_source_makes_the_target_another_cluster() {
 }
 
 /// The verified receipt naming the target as its source makes it the same
-/// cluster, and the allowlist naming another cluster changes nothing (review
-/// L3). KILLS: reading the allowlist's id beside the receipt's (`any` for
+/// cluster, and the allowlist naming another cluster changes nothing. KILLS:
+/// reading the allowlist's id beside the receipt's (`any` for
 /// `all` over the known ids is the core row
 /// `the_target_is_not_the_source_only_when_a_known_id_differs_and_none_equals`).
 #[test]
@@ -681,7 +680,7 @@ fn a_known_source_equal_to_the_target_is_the_same_cluster() {
     );
 }
 
-/// Review L3: the allowlist file's `source_cluster_id` is unsigned runner
+/// The allowlist file's `source_cluster_id` is unsigned runner
 /// input and never makes the target "another cluster" — without a verified
 /// receipt the source is unknown, and auto-creation must be proven disabled.
 /// KILLS: counting the allowlist's id again (the auto-creation read would be
@@ -917,7 +916,7 @@ fn a_receipt_recorded_owner_blocks_only_on_the_cluster_it_describes() {
     );
     admitted(admit(&plan_no_owner(), None, &Broker::disabled(), &other));
 
-    // The fix round's sweep of review M2: the receipt ADDS owners and never
+    // The receipt ADDS owners and never
     // stands in for looking. A receipt that looked and recorded NO owner (a
     // backup records a KafkaTopic whose reference it cannot record as none)
     // is not "none found" on the cluster it describes: the plan must state
@@ -1056,7 +1055,7 @@ fn create(
 ) -> (Result<(), DrillError>, phase0_admit::TopicPreflight) {
     let facts = two_topic_facts();
     let mut preflight = phase0_admit::TopicPreflight {
-        // PROD-01.2: the target's timestamp type is what its broker REPORTED,
+        // The target's timestamp type is what its broker REPORTED,
         // `None` when it reported none; this fixture's broker reports it.
         timestamp_type: Some("CreateTime".into()),
         retention_ms: "-1".into(),
@@ -1125,12 +1124,12 @@ fn a_name_that_appeared_since_phase_0_loses_before_anything_is_created() {
 }
 
 /// **After a lost race the topic this run created STILL EXISTS and is
-/// NAMED** (the orchestrator's ruling of 2026-10-09: no code path deletes a
-/// topic under an original name, ever — Kafka has no conditional delete, and
-/// a record a producer wrote between an "it is empty" read and the delete
-/// would be lost under a production name). `CreateTopics` answers "already
-/// exists" for `payments`; `orders`, which this run created in the same
-/// request, is left on the cluster, empty, and named with what to do.
+/// NAMED**: no code path deletes a topic under an original name, ever. Kafka
+/// has no conditional delete, and a record a producer wrote between an "it is
+/// empty" read and the delete would be lost under a production name.
+/// `CreateTopics` answers "already exists" for `payments`; `orders`, which
+/// this run created in the same request, is left on the cluster, empty, and
+/// named with what to do.
 /// KILLS: any cleanup of a topic the run created; dropping it from the
 /// names; a message that does not tell the operator to remove it.
 #[test]
@@ -1168,7 +1167,7 @@ fn after_a_lost_race_the_topic_this_run_created_still_exists_and_is_named() {
 }
 
 /// Any other stop of the creation step after this run created a topic names
-/// it and leaves it too: another name the broker refuses, and (review L1) an
+/// it and leaves it too: another name the broker refuses, and an
 /// answer without exactly one result per name asked. Each is exit 1 with the
 /// closed state `CreatedTopicsLeft`. KILLS: an unnamed empty topic under a
 /// production name; accepting a short answer (the engine would be handed
@@ -1236,15 +1235,13 @@ fn a_creation_that_stops_for_another_reason_names_and_leaves_what_it_created() {
     assert!(matches!(e, DrillError::Operational(_)), "{e}");
 }
 
-// ---------------------------------------------------------------------------
-// Review 2, M2: every stop of the creation step names what it may have left
-// ---------------------------------------------------------------------------
+// Every stop of the creation step names what it may have left.
 
 const UNCONFIRMED: &str = "exists now; this restore asked the cluster to create it and got no \
      definite answer, so it may be this restore's or someone else's: check what it holds and \
      who writes to it before you remove it";
 
-/// **Review 2, M2 (a), the reviewer's probe P1: the whole `CreateTopics` call
+/// **The whole `CreateTopics` call
 /// fails AFTER the broker applied it.** A client that gives up before the
 /// broker's answer arrives has no answer for any name, and every topic is on
 /// the cluster, empty, under its target name. The step lists the cluster
@@ -1253,7 +1250,7 @@ const UNCONFIRMED: &str = "exists now; this restore asked the cluster to create 
 /// `left` (that sentence claims ownership) and never in `appeared` (that one
 /// says someone else made it). Nothing is deleted.
 ///
-/// KILLS: the plain `?` this was (a generic exit 1 naming nothing, with two
+/// KILLS: a plain `?` (a generic exit 1 naming nothing, with two
 /// empty production-named topics left behind); calling such a topic `left`
 /// or `appeared`.
 #[test]
@@ -1322,7 +1319,7 @@ fn a_call_that_fails_after_the_broker_applied_it_names_every_topic_as_unconfirme
     assert!(listed(&broker).is_empty());
 }
 
-/// **Review 2, M2 (b), probe P2: a name answered with an error that is not a
+/// **A name answered with an error that is not a
 /// definite refusal, and created anyway.** Kafka goes on creating a topic
 /// whose request it answered `REQUEST_TIMED_OUT`. `orders` is answered `Ok`
 /// and is this run's (`left`); `payments` is answered an error, exists
@@ -1393,8 +1390,8 @@ fn a_name_answered_with_an_error_and_created_anyway_is_unconfirmed_never_left() 
 /// answering mid-request is exactly where a request can have been applied, so
 /// the run names EVERY name it has no definite answer for, and says each MAY
 /// exist, never that it does (`unconfirmedSeen: false`, the weaker sentence).
-/// KILLS: naming nothing when the look fails (the review's failure scenario,
-/// in its most likely form); claiming "exists now" without having looked.
+/// KILLS: naming nothing when the look fails; claiming "exists now" without
+/// having looked.
 #[test]
 fn a_cluster_that_cannot_be_listed_after_the_stop_names_every_unanswered_name_as_may_exist() {
     // One listing succeeds (the pre-create look), then none.
@@ -1449,13 +1446,13 @@ fn a_cluster_that_cannot_be_listed_after_the_stop_names_every_unanswered_name_as
     assert!(!stop.unconfirmed_seen);
 }
 
-/// **Review 2, L2, probe P3: a short `CreateTopics` answer whose one answered
+/// **A short `CreateTopics` answer whose one answered
 /// name was REFUSED is never called `left`.** Only `orders` is answered, and
 /// the answer is `TOPIC_ALREADY_EXISTS`: someone else's topic. It is named as
 /// `appeared`; `payments`, which got no answer and does not exist, is in no
-/// list. KILLS: counting every answered name as created (mutant R2-05: the
-/// product would say "created by this restore … remove it yourself" about a
-/// topic it never made).
+/// list. KILLS: counting every answered name as created (the product would
+/// say "created by this restore … remove it yourself" about a topic it never
+/// made).
 #[test]
 fn a_short_answer_naming_a_refused_topic_never_calls_it_left() {
     let broker = Broker::disabled();
@@ -1513,7 +1510,7 @@ fn a_short_answer_naming_a_refused_topic_never_calls_it_left() {
     let broker = Broker::disabled();
     let facts_broker = Arc::clone(&broker.created);
     let mut preflight = phase0_admit::TopicPreflight {
-        // PROD-01.2: the target's timestamp type is what its broker REPORTED,
+        // The target's timestamp type is what its broker REPORTED,
         // `None` when it reported none; this fixture's broker reports it.
         timestamp_type: Some("CreateTime".into()),
         retention_ms: "-1".into(),
@@ -1535,7 +1532,7 @@ fn a_short_answer_naming_a_refused_topic_never_calls_it_left() {
     assert!(stop.appeared.is_empty());
 }
 
-/// **Review 2, M2 (c), probe P4: more than a hundred topics.** The line and
+/// **More than a hundred topics.** The line and
 /// every surface that copies it carry the first 100 names of a list AND how
 /// many there are, so a reader says "and 50 more"; the runner's own message
 /// names every one. KILLS: a cut that says nothing (150 left topics shown as
@@ -1578,11 +1575,11 @@ fn more_than_a_hundred_topics_are_cut_on_the_line_with_their_count() {
     assert!(stop.status_line_value().len() <= logweir_core::creation_stop::MAX_VALUE_BYTES);
 }
 
-/// **Review 2, L1: the two stdout lines that carry everything to Kubernetes,
+/// **The two stdout lines that carry everything to Kubernetes,
 /// through their writer seam.** EXACTLY the lists' line and then the reason,
 /// each ended by one newline, the reason LAST: the controller lifts the pair
 /// only from the log's last two non-empty lines. KILLS: not printing the
-/// `failure-reason=` line (mutant R2-29), printing the two in the other
+/// `failure-reason=` line, printing the two in the other
 /// order, printing anything after them.
 #[test]
 fn the_stopped_creation_steps_two_stdout_lines_are_the_lists_then_the_reason_last() {

@@ -1,46 +1,34 @@
-//! `BackupReceipt::validate_invariants` has exactly FORTY-FIVE arms — the four
-//! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
-//! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
-//! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
-//! eight (12-19) that run only on the 1.3.0 `topic_configuration` block and
-//! the two (20-21) over its `owner_detection`, plus since PROD-03.0 the eight
-//! (22-29) that run only on the 1.5.0 `schema_dependency` block, plus since
-//! PROD-04.1 the six (30-35) that run only on the 1.7.0 `consumer_positions`
-//! block, since PROD-01.4a the five (36-40) that read only the 1.6.0
-//! `generations` block, and since PROD-02.1 the five (41-45) over the 1.8.0
-//! `source_watermarks` block — and each one refuses with an exact message. The
-//! positions document the `consumer_positions` block binds has its own fourteen
-//! (CP-1 to CP-14, `validate_consumer_positions_document`), asserted here the
-//! same way.
+//! `BackupReceipt::validate_invariants` has exactly FORTY-FIVE arms: the four
+//! SELF-CONTRADICTION invariants, the CLOSED VALUE SET of `source.auth.mode`
+//! (arm 5), and the arms that run only on an optional block: 6-11 on 1.1.0's
+//! `config_coverage`, 12-21 on 1.3.0's `topic_configuration` and its
+//! `owner_detection`, 22-29 on 1.5.0's `schema_dependency`, 30-35 on 1.7.0's
+//! `consumer_positions`, 36-40 on 1.6.0's `generations` and 41-45 on 1.8.0's
+//! `source_watermarks`. Each refuses with an exact message. The positions
+//! document the `consumer_positions` block binds has its own fourteen (CP-1 to
+//! CP-14, `validate_consumer_positions_document`), asserted here the same way.
 //!
-//! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
-//! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_forty_seven_return_err_statements` closes over
-//! the function's TOTAL by reading its source text. So an arm added to the
-//! function without a case here fails the second test, and a case deleted
-//! from `arm_cases()` fails the first — neither number can go stale under
-//! cover of the other.
+//! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message`
+//! closes over them, while
+//! `validate_invariants_has_exactly_forty_seven_return_err_statements` counts
+//! the function's statements in its source text, so neither number can go stale
+//! under cover of the other.
 //!
 //! # Why the messages are asserted in FULL and not by `contains`
 //!
 //! The refusal text is the interface. `docs/verify_scorecard.py`'s mirrored
-//! block (Task 5b) is required to produce the same string byte-for-byte, and
-//! `scripts/check-verifier-parity.sh` compares the two readers' refusal TEXT
-//! rather than merely that both refused. A `contains("format_version")` here
-//! would let one reader say something the other does not and still go green —
-//! which is the exact defect the scorecard's parity gate exists because of.
+//! block must produce the same string byte-for-byte, and
+//! `scripts/check-verifier-parity.sh` compares the two readers' refusal TEXT,
+//! so a `contains("format_version")` here would let one reader say something
+//! the other does not and still go green.
 //!
 //! # Why there is an aggregate test AND a per-arm test for every arm
 //!
-//! The per-arm tests are what a failure should be NAMED after: a
-//! reviewer applying "delete arm 2" wants to read `arm_2_…` in the failure
-//! list, not scan a table. The aggregate `backup_receipt_invariants_have_
-//! exactly_four_arms` is what makes "exactly four" a claim rather than a
-//! comment: it walks the same case list, asserts every case is refused with
-//! its exact message, asserts the list has four entries, and asserts the
-//! pristine receipt is `Ok(())`. Both read from one `arm_cases()`, so the two
-//! cannot come apart.
+//! The per-arm tests are what a failure should be NAMED after (`arm_2_…` in the
+//! failure list); the aggregate walks the same `arm_cases()`, asserts every
+//! case is refused with its exact message and the pristine receipt is `Ok(())`,
+//! so the two cannot come apart.
 //!
 //! Global Constraint 1: an integration-test target, not `logweir-core`
 //! source. Pure — no clock, no I/O except the one checked-in fixture read at
@@ -131,9 +119,9 @@ fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     let mut arm3 = pristine();
     arm3.records.insert("invoices".to_string(), 1);
 
-    // Arm 4: a window that ends before it begins. The END IS EXCLUSIVE since
-    // Task 5b, so `from_ms == to_ms` is refused by the same arm — that
-    // direction is `arm_4_refuses_an_empty_window` below.
+    // Arm 4: a window that ends before it begins. The END IS EXCLUSIVE, so
+    // `from_ms == to_ms` is refused by the same arm
+    // (`arm_4_refuses_an_empty_window` below).
     let mut arm4 = pristine();
     arm4.covered.from_ms = 2;
     arm4.covered.to_ms = 1;
@@ -212,17 +200,14 @@ fn arm_4_refuses_a_covered_window_that_ends_before_it_begins() {
     assert_arm(4);
 }
 
-/// **ARM 5 — the closed value set.** `source.auth.mode` is `"plaintext"` or
-/// `"scramSha512"` and nothing else (controller ruling, Task 5b fix round 1).
+/// **ARM 5: the closed value set.** Below 1.4.0, `source.auth.mode` is
+/// `"plaintext"` or `"scramSha512"` and nothing else.
 ///
-/// Three cases, because the arm has three distinct jobs. `scram-sha-512` is
-/// the LEGACY spelling this product used to write and now refuses, which is
-/// the whole point of closing the set: the value Task 17 copies into
-/// `Backup.status.auth.mode` must be the one that field's CRD description
-/// promises. `totally-made-up` is the value Task 5b's review signed and
-/// verified 0/0 at both readers, i.e. the defect this arm removes. And the
-/// two accepted values are asserted too, so an arm that refused everything
-/// could not pass this test.
+/// Three cases, because the arm has three jobs: `scram-sha-512` is a LEGACY
+/// spelling, refused so that `Backup.status.auth.mode` holds what its CRD
+/// description promises; `totally-made-up` is a value no format defines; and
+/// the two accepted values are asserted too, so an arm that refused everything
+/// could not pass.
 #[test]
 fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     for (mode, want) in [
@@ -272,7 +257,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     }
 }
 
-/// **PROD-01.3, arms 5b and 5c.** The three modes PROD-01.3 adds are values of
+/// **Arms 5b and 5c.** The three modes 1.4.0 adds are values of
 /// format 1.4.0 and later: under an older minor they are refused as a value
 /// no writer of that version could have produced (5b), from 1.4.0 they are
 /// accepted, and the closed set there is five (5c). Below 1.4.0 an unknown
@@ -329,9 +314,9 @@ fn arm_5_is_versioned_by_the_prod_01_3_modes() {
     }
 }
 
-/// The written version follows the mode: a PROD-01.3 mode is 1.4.0 whatever
-/// the archive pins and whether or not the receipt carries PROD-05.1's
-/// `topic_configuration` (1.4.0 defines both); the two original modes keep the
+/// The written version follows the mode: a 1.4.0 mode is 1.4.0 whatever the
+/// archive pins and whether or not the receipt carries `topic_configuration`
+/// (1.4.0 defines both); the two original modes keep the
 /// documents they always were (1.1.0, 1.2.0 pinned, 1.3.0 with the topic
 /// configuration), so no receipt a plaintext or SCRAM-SHA-512 backup writes
 /// changes by a byte.
@@ -395,10 +380,8 @@ fn the_written_version_follows_the_auth_mode() {
     );
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly thirty-six refusing statements
-/// (arm 5 is three statements, so the twenty-nine arms through PROD-03.0's are
-/// thirty-one, PROD-04.1's six (30-35) make thirty-seven, PROD-01.4a's five
-/// (36-40) make forty-two, and PROD-02.1's five (41-45) make forty-seven).
+/// **THE TOTAL.** `validate_invariants` has exactly forty-seven refusing
+/// statements (arm 5 is three statements, so forty-five arms make forty-seven).
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -455,19 +438,11 @@ fn validate_invariants_has_exactly_forty_seven_return_err_statements() {
     );
 }
 
-/// The acceptance criterion, and the test every mutant in Task 5's brief is
-/// named against: the four SELF-CONTRADICTION arms, each refusing with its
-/// exact message, and a pristine receipt accepted. Arm 5 — the closed value
-/// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
-/// function's total is
+/// The acceptance criterion: the four SELF-CONTRADICTION arms, each refusing
+/// with its exact message, and a pristine receipt accepted. Arm 5 is
+/// `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the function's
+/// total is
 /// `validate_invariants_has_exactly_forty_seven_return_err_statements`.
-///
-/// **RENAMED, Task 12 closeout carry (c).** It was
-/// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
-/// round made false: the invariant gained a fifth arm and the name went on
-/// claiming there were four. The body was always exact and was always scoped
-/// to the four self-contradiction arms in writing; only the name said
-/// otherwise, and a name is what a reviewer reads first.
 #[test]
 fn backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message() {
     let cases = arm_cases();
@@ -538,7 +513,7 @@ fn arm_2_refuses_a_named_manifest_on_a_failed_backup() {
 }
 
 /// A whitespace-only `manifest_key` is ABSENT, not "a manifest made of
-/// spaces" (ruling R-A, the same predicate the scorecard's `partial_reason`
+/// spaces" (the same predicate the scorecard's `partial_reason`
 /// uses). `.is_empty()` alone accepts this document at exit 0.
 #[test]
 fn arm_2_treats_a_blank_manifest_key_as_absent() {
@@ -557,12 +532,6 @@ fn arm_2_treats_a_blank_manifest_key_as_absent() {
 /// Arm 1 is checked FIRST, like `Scorecard::refuse_unreadable_major`: a
 /// document from a future major is refused before any other arm is evaluated
 /// against fields that build may have redefined.
-///
-/// **RENAMED, Task 12 closeout carry (c).** It was
-/// `arm_1_is_evaluated_before_the_other_three`, a name that predated arm 5 and
-/// counted one arm too few. The property asserted was always the general one —
-/// before EVERY other arm — and the body below violates all four of them, arm
-/// 5 included; the name now says so.
 #[test]
 fn arm_1_is_evaluated_before_every_other_arm() {
     let mut doc = pristine();
@@ -625,20 +594,14 @@ fn arm_3_refuses_records_that_omit_a_named_topic() {
     );
 }
 
-/// Arm 4 is `<`, not `<=`, since Task 5b (Task 5's review, F3): `to_ms` is the
-/// EXCLUSIVE end of the window, so `from_ms == to_ms` describes a range that
-/// contains nothing and cannot be the window of an archive holding a record.
+/// Arm 4 is `<`, not `<=`: `to_ms` is the EXCLUSIVE end of the window (I22, as
+/// `config/crd/backups.yaml` documents it), so `from_ms == to_ms` contains
+/// nothing and cannot be the window of an archive holding a record. Reverting
+/// the arm to `<=` makes this fail.
 ///
-/// Task 5 asserted the opposite here — `arm_4_accepts_an_instantaneous_window`
-/// — while `config/crd/backups.yaml` already documented the same window's
-/// `toMs` as exclusive (I22). This test is that assertion turned round, and it
-/// is the mutant guard for the change: reverting the arm to `>` makes it fail
-/// at assertion time.
-///
-/// The single-record backup that motivated the old test is still legal, and
-/// still a window: `crates/logweir/src/backup/phase_run.rs` converts the
-/// manifest's inclusive newest timestamp to an exclusive bound, so that run
-/// produces `[t, t+1)` rather than `[t, t]`.
+/// A single-record backup is still a window:
+/// `crates/logweir/src/backup/phase_run.rs` converts the manifest's inclusive
+/// newest timestamp to an exclusive bound, `[t, t+1)`.
 #[test]
 fn arm_4_refuses_an_empty_window() {
     let mut doc = pristine();
@@ -696,9 +659,7 @@ fn the_checked_in_receipt_fixture_parses_and_satisfies_its_invariants() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-4: format 1.1.0's `config_coverage` block and arms 6-11
-// ---------------------------------------------------------------------------
+// Format 1.1.0's `config_coverage` block and arms 6-11.
 
 fn coverage(value: &str, reason: Option<&str>, ts: Option<(&str, &str)>) -> TopicConfigCoverage {
     TopicConfigCoverage {
@@ -1008,8 +969,7 @@ fn the_1_0_0_arms_are_evaluated_before_the_config_coverage_arms() {
 /// **The version pair a renumber must move together.** The receipt this build
 /// WRITES must be one that may carry `config_coverage` (its minor is at least
 /// `CONFIG_COVERAGE_SINCE_MINOR`), or every receipt the backup signs would be
-/// refused by its own arm 6. Should another 1.1.0 field merge first, FX-4
-/// becomes 1.2.0: both constants move, and this keeps them coherent.
+/// refused by its own arm 6.
 #[test]
 fn the_written_version_defines_config_coverage() {
     let mut parts = logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
@@ -1025,8 +985,8 @@ fn the_written_version_defines_config_coverage() {
     );
 }
 
-/// **The reader's half of "absent is unknown, never captured"** — the mutant
-/// the FX-4 brief names "an absent field read as `captured`".
+/// **The reader's half of "absent is unknown, never captured"**: an absent
+/// field must never read as `captured`.
 #[test]
 fn source_config_coverage_reads_absent_as_unknown_never_captured() {
     // No receipt at all: a plan not bound to a recovery point.
@@ -1095,9 +1055,7 @@ fn a_1_0_0_receipt_round_trips_byte_for_byte_through_the_1_1_0_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PROD-05.1: format 1.3.0's `topic_configuration` block and arms 12-21
-// ---------------------------------------------------------------------------
+// Format 1.3.0's `topic_configuration` block and arms 12-21.
 
 fn entry(value: Option<&str>, source: &str, portability: &str) -> ConfigEntry {
     ConfigEntry {
@@ -1477,7 +1435,7 @@ const ARM_20_TAIL: &str = " is not a detection this format defines: it is presen
                            beside topic_configuration, and lists \"declared\" and \
                            \"kafkaTopicResources\" each at most once";
 
-/// **Arm 20 (fix round, M2).** `owner_detection` is the closed set, each word
+/// **Arm 20.** `owner_detection` is the closed set, each word
 /// at most once, and only beside the model it qualifies. An EMPTY list is a
 /// run that looked nowhere — legal — and so is an absent one.
 #[test]
@@ -1516,7 +1474,7 @@ fn arm_20_refuses_a_detection_outside_the_closed_set_or_beside_no_model() {
     }
 }
 
-/// **Arm 21 (fix round, M2).** An owner is recorded only from a source the
+/// **Arm 21.** An owner is recorded only from a source the
 /// run looked in: a `declared` owner needs `declared`, a `kafkaTopicResource`
 /// owner `kafkaTopicResources`. An absent detection reads as empty.
 #[test]
@@ -1610,9 +1568,7 @@ fn the_written_version_defines_topic_configuration() {
     );
 }
 
-// ===========================================================================
-// PROD-03.0: format 1.5.0, `schema_dependency` (arms 22-29)
-// ===========================================================================
+// Format 1.5.0, `schema_dependency` (arms 22-29).
 
 use logweir_core::backup_receipt::{SchemaDependency, SideFraming, TopicSchemaDependency};
 
@@ -2113,7 +2069,7 @@ fn the_written_version_defines_schema_dependency() {
             }
         }
     }
-    // 1.5.0 defines the PROD-01.3 modes: a 1.5.0 receipt naming one is
+    // 1.5.0 defines the 1.4.0 auth modes: a 1.5.0 receipt naming one is
     // accepted by arm 5.
     let mut doc = pristine_1_5();
     doc.source.auth.mode = "mtls".into();
@@ -2159,12 +2115,9 @@ fn a_1_4_0_receipt_round_trips_byte_for_byte_through_the_1_5_0_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PROD-01.4a: format 1.6.0's `generations` block and arms 36-40
-// ---------------------------------------------------------------------------
+// Format 1.6.0's `generations` block and arms 36-40.
 
-/// Two topic IDs as `kafka-topics.sh --describe` printed them (PROD-01.4's
-/// `ffi-route-evidence.txt`).
+/// Two topic IDs as `kafka-topics.sh --describe` printed them.
 const ID_A: &str = "gtOq2VXiTCK1QM2UtERijA";
 const ID_B: &str = "tpWwuKExQo2lN9NziDMpYg";
 
@@ -2361,7 +2314,7 @@ fn arm_38_refuses_an_id_that_is_not_canonical() {
     for bad in [
         // Kafka's "no ID" is never an identity.
         "AAAAAAAAAAAAAAAAAAAAAA",
-        // Nor its reserved ONE_UUID / METADATA_TOPIC_ID (review M1).
+        // Nor its reserved ONE_UUID / METADATA_TOPIC_ID.
         "AAAAAAAAAAAAAAAAAAAAAQ",
         // C4: librdkafka's helper's STANDARD alphabet for a real ID.
         "Cf6zT/mcTNCoxuPmv1Ztxw",
@@ -2602,7 +2555,7 @@ fn the_generation_rule_reads_two_receipts_of_one_source_cluster() {
     ));
 }
 
-/// **Review M1 and M2 over two receipts.** A recreated topic can never read
+/// **Over two receipts.** A recreated topic can never read
 /// as the same generation through Kafka's reserved ID: a receipt that records
 /// `AAAAAAAAAAAAAAAAAAAAAQ` is refused (arm 38), and even read unverified the
 /// rule does not take it as an identity. And a capture whose after-read
@@ -2633,7 +2586,7 @@ fn neither_a_sentinel_nor_a_missing_after_read_makes_two_points_the_same() {
         between(Some(&before_recreation), &after_recreation, "orders"),
         Generation::NotEstablished(Unestablished::PreviousUnread(_))
     ));
-    // M2: this capture's after-read failed.
+    // This capture's after-read failed.
     let mut current = pristine_1_6();
     let e = generation(&mut current, "orders");
     e.topic_id_after = None;
@@ -2652,10 +2605,8 @@ fn neither_a_sentinel_nor_a_missing_after_read_makes_two_points_the_same() {
     );
 }
 
-// ===========================================================================
-// PROD-04.1: format 1.7.0, `consumer_positions` (arms 30-35) and the
-// positions document it binds (CP-1 to CP-14)
-// ===========================================================================
+// Format 1.7.0, `consumer_positions` (arms 30-35) and the positions document it
+// binds (CP-1 to CP-14).
 
 /// A partition's facts, as JSON.
 fn facts(
@@ -2824,7 +2775,7 @@ fn arm_30_refuses_consumer_positions_under_the_minor_before_it() {
     );
 }
 
-/// Arm 31, including the review's L1: a capture that ends before it starts.
+/// Arm 31, including a capture that ends before it starts.
 #[test]
 fn arm_31_refuses_a_backwards_window_a_listing_outside_the_set_or_no_group() {
     let tail = "the capture ends at or after it starts, the listing is \"complete\" or \
@@ -2947,10 +2898,9 @@ fn arm_33_refuses_an_outcome_or_reason_that_does_not_fit() {
     }
 }
 
-/// Arm 34, with one row per clause of the captured branch (the review's A6:
-/// a captured group missing `active`, `members`, `listed_state` or its
-/// counts), the review's M2 (a captured group described `Dead` with no
-/// member), and the two other branches.
+/// Arm 34, with one row per clause of the captured branch (a captured group
+/// missing `active`, `members`, `listed_state` or its counts, and one described
+/// `Dead` with no member), and the two other branches.
 #[test]
 fn arm_34_refuses_fields_that_do_not_fit_the_outcome() {
     let tail = "a captured group records a type of \"classic\" or \"consumer\", both states \
@@ -3144,9 +3094,8 @@ fn the_written_version_defines_consumer_positions() {
         format_version_for(&archive, true, false, &auth, false, false, false),
         "1.4.0"
     );
-    // A run with every block (integration batch 5): the highest version that
-    // defines them all, never a lower one — PROD-04.1's over PROD-01.4a's
-    // `generations` and PROD-03.0's `schema_dependency`.
+    // A run with every block: the highest version that defines them all,
+    // never a lower one.
     assert_eq!(
         format_version_for(&archive, true, true, &auth, true, true, false),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
@@ -3157,7 +3106,7 @@ fn the_written_version_defines_consumer_positions() {
     );
 }
 
-// --------------------------------------------- the positions document, CP-1..14
+// The positions document, CP-1 to CP-14.
 
 /// `validate_consumer_positions_document` has exactly fourteen `return
 /// Err(format!(` statements, one per arm — the slice
@@ -3204,7 +3153,7 @@ fn cp_1_refuses_a_document_for_a_receipt_that_selected_no_group() {
     );
 }
 
-/// CP-2, and the review's A8: the digest moves with ONE position, though the
+/// CP-2: the digest moves with ONE position, though the
 /// counts do not, so a document whose counts agree is still not the one the
 /// receipt signed.
 #[test]
@@ -3372,7 +3321,7 @@ fn cp_9_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
         check(pristine_cp(), &other).unwrap_err(),
         want("billing", "captured", "absent", "{\"payments\"}")
     );
-    // The review's A3: a kept EXCLUDED position on a changed topic counts too.
+    // A kept EXCLUDED position on a changed topic counts too.
     let mut other = pristine_document();
     let t = other.topics.get_mut("orders").unwrap();
     t.partitions[1].high_watermark_after = Some(8);
@@ -3413,7 +3362,7 @@ fn cp_9_refuses_a_position_on_a_changed_topic_and_a_blame_without_a_change() {
     );
 }
 
-/// CP-10, the review's L4: a topic no read gave a partition for.
+/// CP-10: a topic no read gave a partition for.
 #[test]
 fn cp_10_refuses_a_capture_over_an_unread_topic_and_a_blame_with_every_topic_read() {
     let want = |id: &str, outcome: &str, reason: &str, unread: &str| {
@@ -3609,7 +3558,7 @@ fn cp_14_refuses_counts_the_positions_do_not_give() {
     );
 }
 
-// ------------------------------------------- PROD-02.1: source_watermarks, 41..45
+// `source_watermarks`, arms 41-45.
 
 /// A 1.8.0 receipt over `orders` (2 partitions, one empty) and `payments`
 /// (1 partition): an ordinary backup with its source's watermarks.
@@ -3732,7 +3681,7 @@ fn arm_43_refuses_a_topic_with_no_partition() {
     );
 }
 
-/// R4: `low > high` is refused, on an ordinary receipt and on an empty one.
+/// `low > high` is refused, on an ordinary receipt and on an empty one.
 #[test]
 fn arm_44_refuses_a_low_watermark_above_its_high() {
     let mut doc = pristine_1_8();
@@ -3761,7 +3710,7 @@ fn arm_44_refuses_a_low_watermark_above_its_high() {
         .starts_with("source_watermarks[\"payments\"] partition 0 has low 11 above high 10"));
 }
 
-/// R4: an empty capture that claims an empty partition whose low and high
+/// An empty capture that claims an empty partition whose low and high
 /// differ, or that counts a record, is refused.
 #[test]
 fn arm_45_refuses_an_empty_capture_the_watermarks_or_records_contradict() {
@@ -3818,7 +3767,7 @@ fn the_written_version_defines_source_watermarks() {
     );
 }
 
-/// R3: a receipt without the block round-trips byte for byte (no
+/// A receipt without the block round-trips byte for byte (no
 /// `source_watermarks` key is ever written for it).
 #[test]
 fn a_receipt_without_source_watermarks_round_trips_byte_for_byte() {

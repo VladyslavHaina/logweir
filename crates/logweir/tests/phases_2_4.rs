@@ -15,19 +15,12 @@ const TARGET_CLUSTER_ID: &str = "MkU3OEVBNTcwNTJENDM2Qk";
 
 #[test]
 fn the_diff_reports_an_existing_target_topic_as_a_collision_with_its_current_state() {
-    // The target's `cleanup.policy` is set to "delete", NOT the manifest's
-    // "compact" (see `fixtures::backup_facts_orders`) — a genuine value
-    // mismatch is required to exercise `existing_configs_differing` at all.
-    // The brief's own literal fixture reused "compact" on both sides, which
-    // makes `contains(&"cleanup.policy".to_string())` FAIL no matter how
-    // phase 3 is implemented (equal values can never be "differing") — this
-    // is a correction to the test's own data, not to the diff logic. Task 16
-    // review round 1 also found a mutant that replaces the value comparison
-    // with `contains_key` (i.e. "present at all", not "present and unequal")
-    // and still passes every test; `retention.ms` below, set to the SAME
-    // value on both sides, is what kills that mutant — it must NOT appear in
-    // `existing_configs_differing`, while `cleanup.policy` (genuinely
-    // different) must.
+    // The target's `cleanup.policy` is "delete", NOT the manifest's "compact"
+    // (see `fixtures::backup_facts_orders`): a genuine value mismatch is
+    // required to exercise `existing_configs_differing` at all. `retention.ms`
+    // is set to the SAME value on both sides and must NOT appear, which kills
+    // a comparison that checks "present at all" instead of "present and
+    // unequal".
     let target = fixtures::target_with(
         TARGET_CLUSTER_ID,
         "drill-orders",
@@ -77,12 +70,10 @@ fn an_absent_target_topic_becomes_a_would_create_entry_at_the_manifest_partition
     assert_eq!(d.would_create, vec![("drill-orders".to_string(), 3)]);
 }
 
-/// `TargetDiff.absent` used to be computed and never read anywhere,
-/// including inside `summarise()` — deleting the push in `phase3_diff::run`
-/// passed all tests. A topic present in the backup and absent from the
-/// target is a first-order fact about whether the restore can work, so it
-/// must reach `TargetDiffSummary`, the signed document's own copy — not only
-/// the in-process `TargetDiff`.
+/// A topic present in the backup and absent from the target is a first-order
+/// fact about whether the restore can work, so `TargetDiff.absent` must reach
+/// `TargetDiffSummary`, the signed document's own copy — not only the
+/// in-process `TargetDiff`.
 #[test]
 fn the_summary_carries_absent_topics_not_only_would_create() {
     let target = fixtures::empty_target(TARGET_CLUSTER_ID);
@@ -175,7 +166,7 @@ fn a_window_covering_no_segment_is_an_error_not_an_empty_pass() {
     assert!(phase4_sample::run(&facts, &spec, &["orders".into()]).is_err());
 }
 
-/// Task 19 fix round 1 (review finding F2): `records_per_partition: 0` reaches
+/// `records_per_partition: 0` would reach
 /// `SampleSelection.count` with nothing to reject it, which lets
 /// `OsoCliEngine::fingerprints` return `Ok(vec![])` (an empty archive, not an
 /// error) and phase 7 sign a byte-fingerprint `Pass` over zero comparisons.
@@ -219,8 +210,8 @@ fn a_partition_with_a_gap_or_a_pruned_range_inside_the_window_is_reported() {
 /// — the two are not directly comparable, and a gap that is real but sits
 /// OUTSIDE the offsets this window actually reads must not be claimed to
 /// "overlap the sampled window" (that string is copied verbatim into the
-/// signed scorecard's `sample.coverage_note`; Task 16 review round 1,
-/// MAJOR-1). `backup_facts_orders(3)`'s segments span offsets 0..499 for the
+/// signed scorecard's `sample.coverage_note`). `backup_facts_orders(3)`'s
+/// segments span offsets 0..499 for the
 /// window used here, so a gap at 100_000..200_000 is nowhere near what was
 /// read and must produce no note at all.
 #[test]
@@ -331,8 +322,7 @@ fn a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty() {
 /// topic's partitions. The reported aggregates (`records_expected`,
 /// `topics`, `partitions`) must describe exactly what survives that
 /// truncation, never a pre-truncation total for partitions the `Selection`
-/// no longer names (Task 16 review round 1, MINOR-4: this was previously
-/// computed before truncation ran and was entirely untested). With
+/// no longer names. With
 /// `max_partitions: Some(1)` over `backup_facts_orders(3)`'s 3 partitions
 /// (each contributing 500 records — two 250-record segments), only the
 /// first partition survives, so `records_expected` must be 500, not the
@@ -365,7 +355,7 @@ fn max_partitions_truncates_consistently_with_the_reported_counts() {
     assert_eq!(s.topics, 1);
 }
 
-/// PROD-08.1: a COMPLETE selection is every partition the manifest lists for
+/// A COMPLETE selection is every partition the manifest lists for
 /// a restored topic — even one whose segments' first/last timestamps all lie
 /// outside the sample window (the engine's selection, which complete coverage
 /// does not read), and even with `max_partitions` set (phase 0 refuses the
@@ -417,7 +407,7 @@ fn a_complete_selection_is_every_listed_partition_whatever_the_window() {
 
 /// `phase4_sample::run` cannot populate `SampleSelection.set.manifest_key` —
 /// `BackupSetFacts` does not carry one. `Selection::bind_backup_set` is the
-/// structural fix (Task 16 review round 1, MAJOR-2): a caller who forgets to
+/// structural fix: a caller who forgets to
 /// call it before `DataEngine::fingerprints` gets a specific, loud
 /// `EngineError::Operational` (see `logweir-engine-oso/src/engine.rs`'s
 /// `fingerprints`), rather than correctness resting on a comment.
@@ -449,13 +439,12 @@ fn selection_set_arrives_empty_and_bind_backup_set_patches_every_entry() {
             && p.set.backup_id == real_ref.backup_id));
 }
 
-// ---------------------------------------------------------------------------
-// FX-4 / T13: consumer 4 (phase 2's target state) and phase 3's collision diff.
-// ---------------------------------------------------------------------------
+// Phase 2's target state and phase 3's collision diff, over a refused
+// configuration read.
 
 /// A target that HAS `drill-orders` (healthy metadata) but refuses its
-/// DescribeConfigs — what `RdKafkaReader::topic_configs` returns now instead
-/// of the empty map rdkafka 0.36.2 used to hand back for a refused resource.
+/// DescribeConfigs, as `RdKafkaReader::topic_configs` reports a refused
+/// resource.
 fn refused_configs_reader() -> Reader {
     Reader::new(TARGET_CLUSTER_ID)
         .lists("drill-orders", 3)
@@ -468,7 +457,7 @@ fn refused_configs_reader() -> Reader {
         })
 }
 
-/// **FX-4 / T13, consumer 4.** An existing target topic whose configuration
+/// An existing target topic whose configuration
 /// read is REFUSED is never recorded with an empty configuration: phase 3
 /// would then report "differing config: []" about a topic it never read.
 ///
@@ -486,16 +475,16 @@ fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
     }
 }
 
-/// **FX-4, phase 3.** A collision's configuration difference is ASSESSED only
+/// **Phase 3.** A collision's configuration difference is ASSESSED only
 /// where the source topic's capture coverage is `captured`; otherwise the
 /// collision is named in the scorecard's `target_diff.not_assessed`, and an
 /// empty `differing config: []` is never read as "no difference".
 ///
-/// The collision STRING is byte for byte what the writer before FX-4 produced,
-/// whatever the coverage: the qualifier lives in the new optional field, never
-/// inside an existing string (the owner's OD-7 rulings of 2026-10-05 made only
-/// the new receipt arms and phase 7's fail-safe entry MINOR). The expected
-/// lines are LITERALS of main's `summarise` format, not rebuilt from it.
+/// The collision STRING is byte for byte the older writer's, whatever the
+/// coverage: the qualifier lives in the optional field, never inside an
+/// existing string (OD-7 made only the new receipt arms and phase 7's
+/// fail-safe entry MINOR). The expected lines are LITERALS of `summarise`'s
+/// format, not rebuilt from it.
 ///
 /// Negative controls: a qualifier appended to the string fails the
 /// exact-string asserts; dropping the entry for an uncaptured source, or
@@ -504,7 +493,7 @@ fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
 #[test]
 fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() {
     // `retention.ms` is reported EQUAL, so only `cleanup.policy` differs: an
-    // unreported key would differ too (FX-47, the row after this one).
+    // unreported key would differ too (the row after this one).
     let target = fixtures::target_with(
         TARGET_CLUSTER_ID,
         "drill-orders",
@@ -581,7 +570,7 @@ fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() 
     assert_eq!(s.not_assessed, Some(vec![]));
 }
 
-/// **FX-47.** A source setting the existing target topic does not report is a
+/// A source setting the existing target topic does not report is a
 /// difference, never agreement: `differing config: […]` names every difference
 /// the archive's own record shows (the scorecard schema), and phase 7 pins the
 /// same rule (`verify_phase.rs::a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed`).

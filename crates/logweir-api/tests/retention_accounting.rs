@@ -1,12 +1,11 @@
-//! FX-22: the product API reads the SAME four counts a `RetentionPolicy`'s
-//! status carries, and never calls a point the per-run ceiling held back
-//! "kept".
+//! The product API reads the SAME four counts a `RetentionPolicy`'s status
+//! carries, and never calls a point the per-run ceiling held back "kept".
 //!
-//! THE EVIDENCE (PoC batch 3, F-3): 371 points, and the status read "321 kept,
-//! 50 candidate(s)" for `keepLast: 300` and for `keepLast: 10` alike. The
-//! controller now publishes `keptCount`, `candidateCount`, `truncatedByCap`
-//! and the ceiling it applied; this is the row that the API passes them on,
-//! exactly, and publishes NOTHING as kept when they are not recorded.
+//! With 371 points, `keepLast: 300` and `keepLast: 10` must not both read
+//! "321 kept, 50 candidate(s)". The controller publishes `keptCount`,
+//! `candidateCount`, `truncatedByCap` and the ceiling it applied; this row
+//! holds that the API passes them on, exactly, and publishes NOTHING as kept
+//! when they are not recorded.
 //!
 //! THREE SIDES READ ONE CHAIN OF FIXTURES.
 //!
@@ -105,7 +104,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
             .clone()
     };
 
-    // ---- keepLast: 300 ----------------------------------------------------
+    // keepLast: 300.
     let three_hundred = item("keep-300");
     let ev = &three_hundred["lastEvaluation"];
     assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
@@ -131,7 +130,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     );
     assert_eq!(ev["candidates"].as_array().expect("candidates").len(), 50);
 
-    // ---- keepLast: 10 -----------------------------------------------------
+    // keepLast: 10.
     let ten = item("keep-10");
     let ev = &ten["lastEvaluation"];
     assert_eq!(ev["pointsEvaluated"], 371, "{ev}");
@@ -158,7 +157,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     for held in (61..=371).map(|d| format!("p{d:03}")) {
         assert!(!listed.contains(&held), "{held} is held back and is listed");
     }
-    // And the two policies no longer read alike.
+    // And the two policies do not read alike.
     assert_ne!(
         (
             &three_hundred["lastEvaluation"]["keptCount"],
@@ -276,7 +275,7 @@ fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
          and none of them is in the response"
     );
 
-    // A LIVE PRE-FIX OBJECT, as the lab's API server returned it.
+    // AN OBJECT FROM BEFORE THE ACCOUNTING, as an API server returned it.
     let live: Value = serde_json::from_str(
         &std::fs::read_to_string(
             repo_root().join("crates/logweir-api/tests/fixtures/retention-policy-report.json"),
@@ -300,7 +299,7 @@ fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
     assert_eq!(ev["candidateCount"], 3);
 }
 
-/// **The response says whether the accounting is recorded** (review M1).
+/// **The response says whether the accounting is recorded.**
 /// `lastEvaluation.accounting` is on every answer, `Recorded` or
 /// `NotRecorded`, so a client never has to infer it from a member that is
 /// missing.
@@ -314,16 +313,15 @@ fn an_evaluation_without_the_accounting_publishes_nothing_as_kept() {
 ///   points skipped), answers `Recorded` with `keptCount: 0` — and no `kept`
 ///   member either, because an empty list is not serialised.
 ///
-/// Before this member the two read alike to a client of `kept`: no member,
-/// `truncated: false`.
+/// Without this member the two would read alike to a client of `kept`: no
+/// member, `truncated: false`.
 ///
-/// MUTANTS: F1a — the member is the constant `Recorded`: the older shape reads
-/// `Recorded` beside no counts. F1b — the constant `NotRecorded`: the control
-/// and the controller's own two policies read `NotRecorded` beside their
-/// counts.
+/// MUTANTS: the member as the constant `Recorded` (the older shape reads
+/// `Recorded` beside no counts); the constant `NotRecorded` (the control and
+/// the controller's own two policies read `NotRecorded` beside their counts).
 #[tokio::test]
 async fn the_response_says_whether_the_accounting_is_recorded() {
-    // The pre-FX-22 shape of `keep-10`.
+    // The older shape of `keep-10`.
     let mut older = named("keep-10");
     older["metadata"]["name"] = json!("older-shape");
     older["metadata"]["uid"] = json!("22220001-0000-4000-8000-000000000022");
@@ -463,17 +461,18 @@ async fn the_response_says_whether_the_accounting_is_recorded() {
     );
 }
 
-/// **A `kept` list that is not the recorded count is not published** (review
-/// M2). After a rollback of the controller image alone, and while no point
+/// **A `kept` list that is not the recorded count is not published.** After
+/// a rollback of the controller image alone, and while no point
 /// lands or leaves, the older controller has rewritten `kept` in its own
 /// shape — 321 ids for `keepLast: 10`, the held-back points among them — and
 /// could not remove `keptCount: 10` and `truncatedByCap: 311`, which still
 /// add up to the unchanged 371. The sum closes; the list is not the count's.
 ///
-/// The review's probe of this shape read `kept_rows=200 of which held-back
-/// ids=190 truncated=true`: 190 points that are due, published as kept.
+/// Such a shape probed through a list projection reads `kept_rows=200 of
+/// which held-back ids=190 truncated=true`: 190 points that are due,
+/// published as kept.
 ///
-/// MUTANT F2a: drop the list comparison from `RetentionEvaluation::accounting`.
+/// MUTANT: drop the list comparison from `RetentionEvaluation::accounting`.
 #[test]
 fn a_kept_list_that_is_not_the_recorded_count_is_not_published() {
     let mut rolled = named("keep-10");
@@ -582,7 +581,7 @@ fn zero_held_back_is_published_as_zero() {
     assert_eq!(ev["keptCount"], 350);
 }
 
-/// **`viewIncomplete`, one rule** (review L3 and L5; the console applies the
+/// **`viewIncomplete`, one rule** (the console applies the
 /// same one): never hide a warning, and never assert a completeness that is
 /// not recorded.
 ///
@@ -594,9 +593,8 @@ fn zero_held_back_is_published_as_zero() {
 /// | `false` | not recorded | absent |
 /// | absent | either | absent |
 ///
-/// MUTANTS: A8 (the worker's) — publish `false` when the status is silent;
-/// F6a — withhold `true` without the accounting (the branch's first rule);
-/// F6b — publish `false` without the accounting.
+/// MUTANTS: publish `false` when the status is silent; withhold `true`
+/// without the accounting; publish `false` without the accounting.
 #[test]
 fn the_view_flag_is_never_hidden_and_never_asserted_without_the_accounting() {
     // The pure rule, every cell of the table.

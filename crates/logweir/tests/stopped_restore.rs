@@ -1,10 +1,10 @@
-//! **FX-23 — a restore the engine stopped early must never be signed `pass`.**
+//! **A restore the engine stopped early must never be signed `pass`.**
 //!
 //! A SIGTERM reaches the pinned engine between topics: it finishes the topic
 //! it is on, exits 0, and the topics after it in manifest order are never
 //! restored (their targets exist, empty, because Logweir creates them in phase
-//! 0). PROD-07.1's review proved, against the shipped phases 4, 6 and 7, that
-//! the default SAMPLED lane signed `pass` over that restore in two shapes:
+//! 0). Without the fixes below, the default SAMPLED lane signs `pass` over
+//! that restore in two shapes:
 //!
 //! - **hole A** — `max_partitions` truncated the sample to the topics that
 //!   finished, and the missing topic's segments straddle the point in time,
@@ -16,8 +16,8 @@
 //! Each row below drives the real `phase4_sample::run`,
 //! `phase6_restore::assert_post_condition` and `phase7_verify` over a
 //! two-topic archive in manifest order `payments` (restored), `orders` (the
-//! topic the engine never started). The holes are now `Fail`; the review's two
-//! controls stay `Fail`. Then one row per fix shows that fix deciding alone:
+//! topic the engine never started). The holes are `Fail`, and so are their
+//! two controls. Then one row per fix shows that fix deciding alone:
 //!
 //! - **(a)** the per-partition count bound (holes A and B, with no engine
 //!   report and `orders` unsampled);
@@ -335,7 +335,7 @@ fn drive_with(c: &Case, selection: Option<&[(&str, i32)]>, tweak: impl FnOnce(&m
     if let Some(chosen) = selection {
         sel.per_partition
             .retain(|s| chosen.contains(&(s.topic.as_str(), s.partition)));
-        // The old truncation kept partitions phase 4 now drops; rebuild them.
+        // First-N truncation keeps partitions phase 4 drops; rebuild them.
         for (t, p) in chosen {
             if !sel
                 .per_partition
@@ -386,9 +386,9 @@ fn read(entries: &[(&str, i32)]) -> EngineReport {
     )
 }
 
-// ------------------------------------------------- the review's four rows
+// ------------------------------------------------- the two holes and their controls
 
-/// **Hole A, now `Fail`.** `max_partitions: 1` keeps `payments/0` alone,
+/// **Hole A is `Fail`.** `max_partitions: 1` keeps `payments/0` alone,
 /// `orders` is named unsampled, and its one segment straddles the point in
 /// time — the aggregate bound is `[25, 150]` and holds 50. The per-partition
 /// bound proves one `orders` record in the window and finds none.
@@ -415,7 +415,7 @@ fn hole_a_a_missing_topic_whose_segment_straddles_the_point_in_time_is_fail() {
     assert_eq!(r.out.integrity.records_sampled_matching, 25);
 }
 
-/// **Hole B, now `Fail`.** `orders` wholly inside with 25 records; the
+/// **Hole B is `Fail`.** `orders` wholly inside with 25 records; the
 /// aggregate bound is `[50, 150]` and `payments`' 25 in-window straddle
 /// records made the sum 50. Per partition, `orders/0` proves 25 and holds 0.
 #[test]

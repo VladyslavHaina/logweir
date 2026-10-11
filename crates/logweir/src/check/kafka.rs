@@ -1,6 +1,6 @@
 //! The broker half of a check: how a [`ConnectionPlan`] becomes a probe.
 //!
-//! # This is a sanctioned construction site, and it is the fifth
+//! # A sanctioned construction site
 //!
 //! Interface **I1** says a Kafka client's auth is built in exactly one
 //! function, [`AuthConfig::from_spec`], and
@@ -20,17 +20,15 @@
 //! `secretKeyRef` to an empty key is not a credential, and reporting it as one
 //! would send an operator to the broker's ACLs instead of to the Secret.
 //!
-//! # TLS WITHOUT SASL IS REFUSED, NOT DOWNGRADED (PLAT-07.1)
+//! # TLS without SASL is refused, not downgraded
 //!
-//! `logweir_core::spec::AuthSpec::Plaintext` carries no `tls` field, so a
-//! mapping that answers `Plaintext` for `authMode: plaintext` DISCARDS
-//! [`ConnectionPlan::tls`] — and a plan saying `tls: true` is then dialled in
-//! the clear against a listener the operator believes is encrypted. That arm
-//! existed in `crate::probe` until PLAT-07.1 removed it ("this is the runner's
-//! half"), and `weirkeeper::connection` refuses the same shape before any Job
-//! is created. This is the CHECK runner's half of the same refusal, and it is
-//! here rather than in `client_config` because by the time an `AuthConfig`
-//! exists the fact has already been thrown away.
+//! `logweir_core::spec::AuthSpec::Plaintext` carries no `tls` field, so
+//! mapping `authMode: plaintext` to it would discard [`ConnectionPlan::tls`]
+//! and dial a `tls: true` plan in the clear against a listener the operator
+//! believes is encrypted. `weirkeeper::connection` refuses the same shape
+//! before any Job is created; this is the check runner's half, here rather
+//! than in `client_config` because an `AuthConfig` has already thrown the
+//! fact away.
 //!
 //! **There is no private client configuration here.** `KafkaInventory::connect`
 //! derives `security.protocol`, `sasl.*`,
@@ -43,7 +41,7 @@
 //!
 //! # A mode this build cannot dial is an authentication answer, not a crash
 //!
-//! `logweir_core::spec::AuthSpec` has five arms since PROD-01.3 —
+//! `logweir_core::spec::AuthSpec` has five arms —
 //! `plaintext`, `scramSha512`, `scramSha256`, `plain` (over TLS only) and
 //! `mtls`. Any other spelling a plan carries is reported as
 //! [`CheckCode::AuthenticationFailed`] naming the mode, because nothing was
@@ -61,11 +59,11 @@ use logweir_kafka::reader::AuthConfig;
 pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
 /// The spelling `AuthSpec::ScramSha512` serialises as.
 pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
-/// The spelling `AuthSpec::ScramSha256` serialises as (PROD-01.3).
+/// The spelling `AuthSpec::ScramSha256` serialises as.
 pub const AUTH_MODE_SCRAM_SHA_256: &str = logweir_core::connection::AUTH_MODE_SCRAM_SHA_256;
-/// The spelling `AuthSpec::Plain` serialises as (PROD-01.3).
+/// The spelling `AuthSpec::Plain` serialises as.
 pub const AUTH_MODE_PLAIN: &str = logweir_core::connection::AUTH_MODE_PLAIN;
-/// The spelling `AuthSpec::Mtls` serialises as (PROD-01.3).
+/// The spelling `AuthSpec::Mtls` serialises as.
 pub const AUTH_MODE_MTLS: &str = logweir_core::connection::AUTH_MODE_MTLS;
 
 /// The plan's `authMode` as an [`AuthSpec`], or the reason this build cannot
@@ -93,7 +91,7 @@ pub fn auth_spec(plan: &ConnectionPlan) -> Result<AuthSpec, CheckFailure> {
     let spec = match plan.auth_mode.as_str() {
         // THE DOWNGRADE ARM, CLOSED. See the module header: `AuthSpec` has no
         // plaintext-with-TLS shape, so accepting this plan would silently drop
-        // the transport the controller asked for (D-SEAMS S5).
+        // the transport the controller asked for.
         //
         // `AuthenticationFailed` and not `TlsHandshakeFailed`: no handshake was
         // attempted, and a code claiming one would send an operator to the
@@ -134,7 +132,7 @@ pub fn auth_spec(plan: &ConnectionPlan) -> Result<AuthSpec, CheckFailure> {
             ))
         }
     };
-    // PROD-01.3: PLAIN without TLS (PlainWithoutTls) and mTLS without TLS are
+    // PLAIN without TLS (PlainWithoutTls) and mTLS without TLS are
     // refused before a socket exists — the check runner's half of the rule.
     if let Some(refusal) = spec.transport_refusal() {
         return Err(CheckFailure::new(CheckCode::AuthenticationFailed, refusal));
@@ -152,7 +150,7 @@ pub fn projected_password(plan: &ConnectionPlan) -> Option<String> {
     std::env::var(var).ok().filter(|p| !p.is_empty())
 }
 
-/// The `mtls` client-certificate pair the plan names (PROD-01.3), as the two
+/// The `mtls` client-certificate pair the plan names, as the two
 /// IN-POD PATHS the controller projected — never opened here, for the
 /// reason [`auth_config`] gives about `caFile`.
 ///
@@ -178,12 +176,11 @@ pub fn client_certificate(
     }
 }
 
-/// Build this connection's [`AuthConfig`] — interface **I1**, plus PLAT-07.1's
-/// projected trust anchor and PROD-01.3's client certificate.
+/// Build this connection's [`AuthConfig`] — interface **I1**, plus the
+/// projected trust anchor and the client certificate.
 ///
-/// `with_tls_ca_file` REFUSES a CA on a connection that is not TLS, which is
-/// D-SEAMS **S5** from the broker side: a trust anchor must never be the thing
-/// that decides a transport.
+/// `with_tls_ca_file` REFUSES a CA on a connection that is not TLS: a trust
+/// anchor must never be the thing that decides a transport.
 ///
 /// # `caFile` is an IN-POD PATH, and this runner never opens it
 ///
@@ -191,7 +188,7 @@ pub fn client_certificate(
 /// `AuthConfig::with_tls_ca_file`, which becomes librdkafka's
 /// `ssl.ca.location`; nothing here reads, parses or validates the file. That
 /// is what lets the controller choose where it comes from: D2 §4.3 can render
-/// a `source-ca.pem` key into the plan `ConfigMap`, but W8's `TopicDiscovery`
+/// a `source-ca.pem` key into the plan `ConfigMap`, but the `TopicDiscovery`
 /// reconciler deliberately does not, because a `KafkaCluster` may name its CA
 /// in a **Secret** and that controller holds no verb on `secrets`. It projects
 /// the same mount an execution Job gets — `/connection/source-ca/ca.crt` — and
@@ -214,7 +211,7 @@ pub fn client_certificate(
 /// # Errors
 /// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`].
 pub fn auth_config(plan: &ConnectionPlan) -> Result<AuthConfig, CheckFailure> {
-    // PROD-01.3 security follow-up, FIRST: a projected credential whose
+    // First: a projected credential whose
     // binding does not name the connection this check Job was built for is
     // refused before the password or key is read and before any client exists.
     // `AuthenticationFailed` (nothing was unreachable) with the named reason

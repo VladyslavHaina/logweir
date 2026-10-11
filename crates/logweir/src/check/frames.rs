@@ -148,8 +148,7 @@ impl<W: Write> FrameWriter<W> {
         let mut count = 0usize;
         for entry in entries {
             let cost = relay_cost(entry);
-            // THE SECOND BOUND. Removing this check is mutant M6, and
-            // `the_writer_stops_at_the_relay_budget` is what kills it.
+            // THE SECOND BOUND (`the_writer_stops_at_the_relay_budget`).
             if self.used.saturating_add(cost) > self.budget {
                 break;
             }
@@ -167,9 +166,6 @@ impl<W: Write> FrameWriter<W> {
     /// An EMPTY payload still writes one part, which is
     /// `frames::write_parts`'s own rule: "the stream was present and empty"
     /// and "the stream was absent" stay distinguishable in the end frame.
-    ///
-    /// # Errors
-    /// [`EmitError`].
     pub fn write_stream(&mut self, stream: Stream, payload: &[u8]) -> Result<(), EmitError> {
         let parts = frames::write_parts(stream, payload)?;
         for line in &parts {
@@ -181,9 +177,6 @@ impl<W: Write> FrameWriter<W> {
 
     /// The end frame, built from the record of what was written, and the LAST
     /// line this writer emits.
-    ///
-    /// # Errors
-    /// [`EmitError`].
     pub fn finish(&mut self, plan_sha256: &str, subject_uid: &str) -> Result<EndFrame, EmitError> {
         let end = frames::end_frame(
             plan_sha256,

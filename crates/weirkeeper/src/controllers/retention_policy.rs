@@ -1,17 +1,15 @@
-//! The `RetentionPolicy` reconciler — what would be removed, and (only when an
+//! The `RetentionPolicy` reconciler: what would be removed, and (only when an
 //! administrator has said so twice) what is.
 //!
-//! # WHAT A RECONCILER IN THIS DIRECTORY MAY DO WHEN THE ANSWER IS
-//! IRREVERSIBLE (D3 W9)
+//! # A reconciler whose answer is irreversible
 //!
-//! This is the first reconciler whose output can destroy data, and every arm of
-//! it is shaped by that. It still patches only its own `/status` and creates
-//! only a Job of a different kind; it holds no delete verb, no `secrets` verb,
-//! and — the load-bearing part — **it does not link the code that deletes.**
-//! `logweir-reaper` is reachable from `logweir-retention` and from nothing else
-//! (`scripts/check-no-archive-write.sh` check 3), so the authority this
-//! controller has is exactly "create a Job from an approved plan", which is a
-//! thing an operator can see in `kubectl get jobs`.
+//! This reconciler's output can destroy data. It still patches only its own
+//! `/status` and creates only a Job of a different kind; it holds no delete
+//! verb, no `secrets` verb, and it does not link the code that deletes:
+//! `logweir-reaper` is reachable from `logweir-retention` and nothing else
+//! (`scripts/check-no-archive-write.sh` check 3). Its authority is exactly
+//! "create a Job from an approved plan", which an operator can see in
+//! `kubectl get jobs`.
 //!
 //! # The four gates between a rule and a deleted object
 //!
@@ -19,58 +17,39 @@
 //!    publishes and creates nothing.
 //! 2. `spec.enforcement.approvedPlanSha256` must equal
 //!    `status.lastEvaluation.planSha256`, and the plan must be younger than
-//!    `planMaxAgeSeconds` — both halves, and the second one is enforced here
-//!    rather than only declared (review `d3w9` H4). **The digest is a function
-//!    of what would be deleted and of nothing that moves on its own**: no
-//!    instant, no generation, no counter (review `d3w9` C1). A rules edit, a
-//!    `holds` edit or a new backup changes the CONTENT, and that is what
-//!    invalidates an approval.
-//! 3. A lease is written with a resourceVersion-preconditioned patch **and it
-//!    must land** — a 409 aborts the pass before any Job exists (review `d3w9`
-//!    C3) — and THEN a consistent, non-cached, cluster-wide list of `Restore`s
-//!    is made. A restore that arrived after the lease cannot slip past the
-//!    list, because the list happens second; and because the restore-side
-//!    admission hold is still a hand-off to whoever owns `controllers/restore.rs`,
-//!    this list **fails closed on the whole destination**: any nonterminal
-//!    restore reading it stops the run.
-//! 4. Each point's **intent tombstone** is written, create-only under
-//!    `logweir/`, before that point's first delete, and a point whose intent
-//!    cannot be written is not deleted (review `d3w9` L7). The run's own record
-//!    carries the outcome and so is necessarily written after it. The worker
-//!    also re-validates every key and refuses the whole plan on the first one
-//!    outside `<scope>/<backupId>/`.
+//!    `planMaxAgeSeconds`, enforced here. The digest is a function of what
+//!    would be deleted and of nothing that moves on its own (no instant,
+//!    generation or counter): a rules edit, a `holds` edit or a new backup
+//!    changes the content, and that is what invalidates an approval.
+//! 3. A lease is written with a resourceVersion-preconditioned patch and it
+//!    must land (a 409 aborts the pass before any Job exists), and then a
+//!    consistent, non-cached, cluster-wide list of `Restore`s is made. A
+//!    restore that arrived after the lease cannot slip past the list, because
+//!    the list happens second, and the list fails closed on the whole
+//!    destination: any nonterminal restore reading it stops the run.
+//! 4. Each point's intent tombstone is written, create-only under `logweir/`,
+//!    before that point's first delete, and a point whose intent cannot be
+//!    written is not deleted. The run's own record carries the outcome and is
+//!    written after it. The worker also re-validates every key and refuses the
+//!    whole plan on the first one outside `<scope>/<backupId>/`.
 //!
-//! # This controller does not function live until W13 lands (review `d3w9` L5)
+//! # A run whose pod is refused at creation fails fast
 //!
-//! Every Job it builds requests the [`SERVICE_ACCOUNT`] ServiceAccount, and
-//! nothing on this branch creates it — W13 owns it together with the
-//! `retention.enabled` chart value. An `Enforce` policy here produces a Job
-//! whose pods the API server will not admit, which is correctly fail-closed and
-//! is a **merge-ordering constraint**, not a runtime surprise to discover at
-//! the live acceptance.
+//! A `ResourceQuota`, a `LimitRange`, an admission webhook or a missing
+//! [`SERVICE_ACCOUNT`] can refuse the enforcement Job's pod, leaving only a
+//! `FailedCreate` Event on the Job. Once the Job has had no pod for 30 seconds
+//! and that Event says why ([`crate::check::refused_pod_creation`]), the Job is
+//! cancelled and `Enforced=False` / `PodCreationForbidden` names the
+//! admission's own words. The run is harvested when the cancelled Job has
+//! finished (the lease is held until then) and counts toward
+//! `EnforcementDegraded` like any failed run. Nothing was deleted.
 //!
-//! # A run whose pod is refused at creation says so, and fails fast (FX-11)
+//! # The evaluation reads the right destination
 //!
-//! A `ResourceQuota`, a `LimitRange`, an admission webhook — or the missing
-//! ServiceAccount above — can refuse the enforcement Job's pod, and the Job
-//! controller's only trace is a `FailedCreate` Event on the Job. Once the Job
-//! has had no pod for 30 seconds and that Event says why
-//! ([`crate::check::refused_pod_creation`], the `Preflight` grace and the same
-//! matcher), the Job is cancelled and `Enforced=False` / `PodCreationForbidden`
-//! names the admission's own words at once. The run is harvested when the
-//! cancelled Job has finished (the lease is held until then): a failed run
-//! counted toward `EnforcementDegraded` like any other — never
-//! `RunInProgress` until `enforcement.deadlineSeconds` and then "produced no
-//! exit code". Nothing was deleted, because nothing ran.
-//!
-//! # And the evaluation names the right destination
-//!
-//! Its input is the `RecoveryCatalog`'s bounded VIEW of this destination
-//! (`crate::catalog_view`), read out of the page `ConfigMap`s the catalog
-//! published — never a bucket walk with the controller's one global handle, and
-//! never the schedule's current archive URL. That is where RET-WRONGBUCKET
-//! closes for destination-backed retention; the legacy `BackupSchedule` report
-//! gets the honesty note in `backup_schedule.rs` instead (D3 §6.3).
+//! Its input is the `RecoveryCatalog`'s bounded view of this destination
+//! (`crate::catalog_view`), read from the page `ConfigMap`s the catalog
+//! published: never a bucket walk with the controller's global handle, and
+//! never a schedule's archive URL.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -104,10 +83,6 @@ use crate::retention_plan::{self as plan, PointFacts};
 use crate::runner_log;
 
 use super::Context;
-
-// ---------------------------------------------------------------------------
-// Conditions — D3 §6.2's five names, and their closed reasons
-// ---------------------------------------------------------------------------
 
 /// `Ready`: this policy is usable.
 pub const CONDITION_READY: &str = "Ready";
@@ -173,17 +148,16 @@ pub const REASON_PLAN_EXPIRED: &str = "PlanExpired";
 pub const REASON_ACTIVE_RESTORE: &str = "ActiveRestore";
 /// `Enforced=False`: `spec.enforcement.schedule` is not a UTC cron expression.
 ///
-/// A refusal and not a fall-back to "every reconcile" (review `d3w9` M5): a
-/// retention cadence this build cannot read is a cadence nobody configured.
+/// A refusal and not a fall-back to "every reconcile": a retention cadence
+/// this build cannot read is a cadence nobody configured.
 pub const REASON_UNSUPPORTED_SCHEDULE: &str = "UnsupportedSchedule";
 /// `Enforced=False`: the lease PATCH did not land, so nothing holds these
-/// points and no Job may start (review `d3w9` C3).
+/// points and no Job may start.
 pub const REASON_LEASE_NOT_HELD: &str = "LeaseNotHeld";
 /// `Enforced=False`: an object already holds the plan `ConfigMap`'s name and is
-/// not this plan (review `d3w9` M6).
+/// not this plan.
 pub const REASON_PLAN_CONFIG_MAP_CONFLICT: &str = "PlanConfigMapConflict";
-/// `Enforced=False`: the run record PATCH did not land, so no Job was created
-/// (defect RET-STARTRUN-PATCH-OUTCOME).
+/// `Enforced=False`: the run record PATCH did not land, so no Job was created.
 pub const REASON_RUN_NOT_RECORDED: &str = "RunNotRecorded";
 /// `Enforced=True`: a run is in flight.
 pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
@@ -191,15 +165,15 @@ pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
 pub const REASON_RUN_COMPLETE: &str = "RunComplete";
 /// `Enforced=False`: the last run did not complete.
 pub const REASON_RUN_FAILED: &str = "RunFailed";
-/// `Enforced=False` — FX-20: the worker refused a credential whose Secret is
-/// not bound to this policy, its destination's route and its scope
+/// `Enforced=False`: the worker refused a credential whose Secret is not bound
+/// to this policy, its destination's route and its scope
 /// (`retention-refusal=CredentialBindingMismatch`). Nothing was deleted.
 pub const REASON_CREDENTIAL_BINDING_MISMATCH: &str =
     logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH;
 
-/// FX-20, FX-15: every `retention-refusal=` code this build publishes — a
-/// CLOSED table, so no byte of a pod log reaches the status except one of
-/// these. It is the worker's `logweir_retention::REFUSAL_CODES`, which
+/// Every `retention-refusal=` code this build publishes: a closed table, so no
+/// byte of a pod log reaches the status except one of these. It is the
+/// worker's `logweir_retention::REFUSAL_CODES`, which
 /// `tests/retention_policy_controller.rs` reads to hold the two equal. Only
 /// [`REASON_CREDENTIAL_BINDING_MISMATCH`] is also a condition reason; the
 /// others are named in `Enforced`'s and `Degraded`'s messages.
@@ -228,39 +202,35 @@ pub const RETENTION_REFUSALS: [&str; 22] = [
     "PlanDuplicateKey",
 ];
 /// `Enforced=False`: the last run never started, because the namespace refused
-/// its pod at creation — a `ResourceQuota`, a `LimitRange`, an admission
-/// webhook or a missing ServiceAccount (FX-11). The shared terminal state a
-/// `Backup`'s or a `Restore`'s runner reaches for the same refusal, and the
-/// condition message carries the admission's words. A failed run like
-/// [`REASON_RUN_FAILED`] in every other respect: it is counted, and three in a
-/// row are `EnforcementDegraded`.
+/// its pod at creation (a `ResourceQuota`, a `LimitRange`, an admission webhook
+/// or a missing ServiceAccount). The terminal state a `Backup`'s or `Restore`'s
+/// runner reaches for the same refusal; the message carries the admission's
+/// words. Counted like [`REASON_RUN_FAILED`]: three in a row are
+/// `EnforcementDegraded`.
 pub const REASON_POD_CREATION_FORBIDDEN: &str =
     crate::conditions::TERMINAL_STATE_POD_CREATION_FORBIDDEN;
-/// `Enforced=True` with `requireApprovedPlan: false` — D3 §6.5 requires the
-/// choice to be visible ON the object.
+/// `Enforced=True` with `requireApprovedPlan: false`: the choice is visible on
+/// the object.
 pub const REASON_UNATTENDED: &str = "UnattendedDeletionEnabled";
 /// `Enforced=False`: there is nothing to delete.
 pub const REASON_NOTHING_TO_DO: &str = "NothingToDo";
-/// `Enforced=False`: points are due and the plan is empty, because not one of
-/// them fits the per-run ceiling (FX-22 review L1). Each is in a backup set
-/// that more due points name than `spec.enforcement.maxDeletionsPerRun`, a set
-/// is planned whole or not at all, and so no plan names them until the ceiling
-/// is raised. NOT [`REASON_NOTHING_TO_DO`]: "the evaluation found nothing to
-/// remove" beside a held-back count above zero is the defect FX-22 is about,
-/// on the one condition an operator reads to learn why nothing is deleted.
+/// `Enforced=False`: points are due and the plan is empty, because none fits
+/// the per-run ceiling: each is in a backup set that more due points name than
+/// `spec.enforcement.maxDeletionsPerRun`, and a set is planned whole or not at
+/// all. Not [`REASON_NOTHING_TO_DO`], which beside a held-back count above
+/// zero would misstate why nothing is deleted.
 pub const REASON_NOTHING_FITS_CEILING: &str = "NothingFitsCeiling";
-/// `Enforced=False`: the catalog view does not hold every point of the
-/// archive (a window, an unfinished walk, or the catalog did not say), so no
-/// run starts from it (FX-40). The evaluation is still published.
+/// `Enforced=False`: the catalog view does not hold every point of the archive
+/// (a window, an unfinished walk, or the catalog did not say), so no run
+/// starts from it. The evaluation is still published.
 pub const REASON_VIEW_INCOMPLETE: &str = "ViewIncomplete";
 /// `Enforced=False`: the catalog view is past its `viewExpiresAt`, or states
-/// none, so no run starts from it (FX-40).
+/// none, so no run starts from it.
 pub const REASON_VIEW_EXPIRED: &str = "ViewExpired";
 /// `Enforced=False`: a Job of this run's name exists and is not ours.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
 /// `Enforced=False`: the destination has no `spec.access.evidenceWrite` grant
-/// an enforcement Job could write its record with, so no Job is created
-/// (defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD).
+/// an enforcement Job could write its record with, so no Job is created.
 pub const REASON_EVIDENCE_GRANT_UNUSABLE: &str = "EvidenceGrantUnusable";
 
 /// `ExternalLifecycleConflict=True`: the declared expiry would expire kept
@@ -274,7 +244,7 @@ pub const REASON_CONSECUTIVE_FAILURES: &str = "ConsecutiveRunFailures";
 /// `EnforcementDegraded=False`.
 pub const REASON_HEALTHY: &str = "Healthy";
 
-/// Every reason this reconciler writes — the closed set a test asserts over.
+/// Every reason this reconciler writes: the closed set a test asserts over.
 pub const CONDITION_REASONS: &[&str] = &[
     REASON_POLICY_READY,
     REASON_CONFLICT,
@@ -311,10 +281,6 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_HEALTHY,
 ];
 
-// ---------------------------------------------------------------------------
-// `status.enforcement` and `status.guarantees`
-// ---------------------------------------------------------------------------
-
 /// `status.enforcement` when nothing deletes.
 pub const ENFORCEMENT_RECOMMENDATION_ONLY: &str = "RecommendationOnly";
 /// `status.enforcement` when the Logweir worker does.
@@ -337,12 +303,12 @@ pub const IDLE_REQUEUE_SECONDS: u64 = 60;
 /// The error requeue.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 
-/// How many consecutive failed runs stop the scheduling — D3 §6.5.
+/// How many consecutive failed runs stop the scheduling.
 pub const DEGRADED_AFTER_FAILURES: i64 = 3;
 
-/// The per-point codes that are about the BUCKET or the CREDENTIAL rather than
-/// the plan — the only ones a degraded policy re-probes for on its own
-/// (`reprobe_due`, review M1).
+/// The per-point codes that are about the bucket or the credential rather than
+/// the plan: the only ones a degraded policy re-probes for on its own
+/// (`reprobe_due`).
 pub const BUCKET_LEVEL_CODES: &[&str] = &["VersionedBucket", "VersionProbeRefused"];
 
 /// How long after a bucket-level refusal a degraded policy starts one re-probe
@@ -361,12 +327,11 @@ pub const COMPONENT_RETENTION: &str = "retention";
 /// The Job and `ConfigMap` name prefix.
 pub const NAME_PREFIX: &str = "lwr-";
 
-/// The retention Job's ServiceAccount. Its own, never the runner's: the
-/// retention pod is the one pod in the installation that mounts a delete-capable
-/// credential.
+/// The retention Job's ServiceAccount, never the runner's: the retention pod
+/// is the one pod in the installation that mounts a delete-capable credential.
 pub const SERVICE_ACCOUNT: &str = "logweir-retention";
 
-/// The binary the Job runs — NOT `logweir` (D-SEAMS S1's third exception).
+/// The binary the Job runs: `logweir-retention`, not `logweir`.
 pub const RETENTION_BINARY: &str = "logweir-retention";
 /// The retention contract version this controller pins into every Job.
 pub const RETENTION_CONTRACT_VERSION: &str = "1";
@@ -414,25 +379,18 @@ pub mod env {
 
 /// What the write guard says when a status PATCH cannot be preconditioned.
 ///
-/// **Named, not inlined, because it is a contract two places depend on**: the
-/// operator reading the controller log, and
-/// `tests/retention_policy_controller.rs`, which pins it so that a write
-/// silently losing its precondition cannot stop being reported. A /status
-/// compare-and-set needs `metadata.resourceVersion` (D-SEAMS S7); the cursor
-/// is `None` only before the first patch of a pass on an object that carries
-/// none, or after a 409 cleared it, and in both cases a blind write would
-/// overwrite a status this pass never read.
+/// Named because two places depend on it: the operator reading the controller
+/// log, and `tests/retention_policy_controller.rs`, which pins it so a write
+/// that loses its precondition is always reported. A /status compare-and-set
+/// needs `metadata.resourceVersion` (seam S7); without one, a blind write
+/// would overwrite a status this pass never read.
 pub const NO_RESOURCE_VERSION: &str =
     "RetentionPolicy carries no metadata.resourceVersion, which a /status compare-and-set \
      needs (D-SEAMS S7); no patch is sent";
 
 /// The annotation an administrator's `kubectl patch` records itself in, so the
-/// enforcement record can name who approved (D3 §6.5).
+/// enforcement record can name who approved.
 pub const APPROVER_ANNOTATION: &str = "logweir.dev/retention-plan-approver";
-
-// ---------------------------------------------------------------------------
-// Errors and outcomes
-// ---------------------------------------------------------------------------
 
 /// The only thing that is not a status write.
 #[derive(Debug)]
@@ -476,7 +434,7 @@ pub enum RetentionPhase {
     Declared,
 }
 
-/// What one pass did — the value every controller-double test asserts over.
+/// What one pass did: the value every controller-double test asserts over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     /// Where the pass left the policy.
@@ -501,48 +459,26 @@ pub struct Outcome {
     pub plan_sha256: Option<String>,
     /// The Job this pass acted on, if any.
     pub job_name: Option<String>,
-    /// **How many object-store deletes this controller performed. Always
-    /// zero.** It is on the outcome so a test can assert it rather than assume
-    /// it, and it is a constant because this crate cannot delete: see
-    /// `scripts/check-no-archive-write.sh`.
+    /// How many object-store deletes this controller performed. Always zero:
+    /// on the outcome so a test asserts it, and constant because this crate
+    /// cannot delete (`scripts/check-no-archive-write.sh`).
     pub deletes_performed: u32,
 }
 
 /// A digest the catalog published, reduced to the bare lowercase hex the
 /// recomputation produces.
 ///
-/// **THE TWO SPELLINGS ARE THE SAME DIGEST AND THIS IS THE ONLY PLACE THAT
-/// KNOWS IT.** `RecoveryCatalog.status.pages[].sha256` is documented in the
-/// CRD (`config/crd/recoverycatalogs.yaml`: "`sha256:<lowercase hex>` over its
-/// entry lines") and written that way by `catalog_view::seal`, while
-/// `catalog_view::page_digest` — the function this controller recomputes the
-/// page with, and the one the runner's own `catalog-page=… sha256=<hex>`
-/// header is checked against — returns BARE hex. Comparing the two literally
-/// is never equal, so every `RetentionPolicy` in a real cluster answered
-/// `Evaluated=False/ViewUnreadable` and no retention report was rendered for
-/// any destination (defect RET-DIGEST-PREFIX, reproduced live 2026-09-18; the
-/// controller's own message printed both values, equal apart from the prefix).
+/// `RecoveryCatalog.status.pages[].sha256` is `sha256:<lowercase hex>` (the
+/// CRD, `charts/logweir/crds/recoverycatalogs.yaml`, and `catalog_view::seal`),
+/// while `catalog_view::page_digest`, which this controller recomputes the
+/// page with, returns bare hex. Compared literally they never match, and every
+/// policy would read `Evaluated=False/ViewUnreadable`.
 ///
-/// NORMALISING HERE AND NOT AT THE WRITER is deliberate: `page_digest` has a
-/// second caller (`catalog_view.rs`'s check of the runner's header, documented
-/// bare) that is already consistent, so prefixing the function would move the
-/// defect rather than remove it. The reader is the side that has to accept
-/// what the contract says is published.
-///
-/// BOTH SPELLINGS ARE ACCEPTED, DEFENSIVELY AND NOT FOR COMPATIBILITY — and
-/// the difference is worth stating, because the weaker claim is the one that
-/// gets quoted. **No released build has ever published the bare spelling**:
-/// `catalog_view::seal` has written `sha256_prefixed` since the catalog
-/// controller first landed (review finding L3). Accepting the bare form costs
-/// nothing — the hex must still match the page's bytes — and means a writer
-/// that ever emitted it would be read rather than refused. What follows from
-/// this function is only that upgrade and rollback need no catalog resync,
-/// which is true because the accepted set only grew.
-///
-/// The prefix is the ONLY thing stripped. A value that is neither spelling — a
-/// truncated digest, an upper-case one, a different algorithm — is returned
-/// unchanged and fails the full-length comparison at the call site, which is
-/// the behaviour that matters.
+/// Normalised at the reader, not the writer: `page_digest` has a second caller
+/// (the runner header check) that is already consistent. Both spellings are
+/// accepted defensively; the hex must still match the page's bytes. Only the
+/// prefix is stripped: a truncated, upper-case or other-algorithm value fails
+/// the full-length comparison at the call site.
 fn bare_hex(published: &str) -> &str {
     published.strip_prefix("sha256:").unwrap_or(published)
 }
@@ -564,10 +500,6 @@ fn refused(reason: &'static str) -> Outcome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The context
-// ---------------------------------------------------------------------------
-
 /// Everything one pass reads that is not the object itself.
 pub struct PolicyContext<'a> {
     /// The client every `Api` is built from.
@@ -579,10 +511,6 @@ pub struct PolicyContext<'a> {
     /// This pass's instant.
     pub now: DateTime<Utc>,
 }
-
-// ---------------------------------------------------------------------------
-// The pass
-// ---------------------------------------------------------------------------
 
 /// Reconcile one `RetentionPolicy`.
 ///
@@ -631,56 +559,40 @@ struct Pass<'a> {
     namespace: String,
     uid: String,
     ctx: &'a PolicyContext<'a>,
-    /// The `metadata.resourceVersion` the NEXT status PATCH will use as its
-    /// precondition — review `d3w9` **C3**.
+    /// The `metadata.resourceVersion` the next status PATCH will use as its
+    /// precondition.
     ///
-    /// # Why this is threaded rather than read from the object each time
+    /// An enforcing pass patches three times (the evaluation, the lease,
+    /// `lastEnforcement`), and each success advances the version; reusing the
+    /// watcher's version would make the lease patch 409, and an unwritten lease
+    /// with a Job created anyway is an untracked deletion run that the next
+    /// pass would start again. This reconciler holds no `get` on its own kind,
+    /// so the version each successful PATCH returns is the only fresh one.
     ///
-    /// The first landing took the version from `self.policy`, the object the
-    /// watcher delivered, on every patch. An enforcing pass patches three
-    /// times: the evaluation, then the lease, then `lastEnforcement`. The first
-    /// succeeds and advances the object's version; the second and third then
-    /// carry a version the API server has already superseded, 409, and — worse
-    /// — the 409 was mapped to `Ok(())`. The lease was therefore **never
-    /// written**, the Job was created anyway, the run was never tracked or
-    /// harvested, `consecutiveRunFailures` never moved, and sixty seconds later
-    /// the next pass computed a new run id and created a **second deletion
-    /// Job**.
-    ///
-    /// This reconciler holds no `get` on its own kind, so it cannot re-read the
-    /// object; the version each successful PATCH returns is the only fresh one
-    /// available, and it is what the next patch uses.
-    ///
-    /// A `Mutex` and not a `RefCell`: the arms take `&self`, `kube`'s
-    /// `Controller` requires the reconcile future to be `Send`, and `RefCell`
-    /// is not `Sync`. It is uncontended by construction — one pass, one thread
-    /// — and **no guard is ever held across an `await`**, which is the other
-    /// way a lock makes a future non-`Send`.
+    /// A `Mutex`, not a `RefCell`: the reconcile future must be `Send`. It is
+    /// uncontended (one pass, one thread), and no guard is ever held across an
+    /// `await`.
     resource_version: std::sync::Mutex<Option<String>>,
-    /// The status as this pass believes it now stands, for the
-    /// "nothing changed, send nothing" comparison.
-    ///
-    /// Threaded for the same reason as the version: after the evaluation patch
-    /// the object in hand is stale, and comparing the lease against the stale
-    /// copy would send a patch that is already there — or skip one that is not.
+    /// The status as this pass believes it now stands, for the "nothing
+    /// changed, send nothing" comparison; after the evaluation patch the
+    /// object in hand is stale.
     observed_status: std::sync::Mutex<Option<Value>>,
 }
 
 /// What one status PATCH did.
 ///
-/// A three-way answer and not a `Result<(), _>`, because "nothing needed
-/// writing" and "somebody else wrote first" are different facts and exactly one
-/// of them may be swallowed.
+/// Three answers, not a `Result<(), _>`: "nothing needed writing" and
+/// "somebody else wrote first" are different facts, and only one of them may
+/// be swallowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchOutcome {
     /// The API server accepted it and the version cursor moved.
     Applied,
     /// The computed status equalled the stored one; nothing was sent.
     Unchanged,
-    /// The precondition failed. **The caller decides.** For an evaluation this
-    /// is "the next pass reads it"; for the LEASE it is "abort before creating
-    /// a Job", because a run whose lease did not land is a run nothing is
-    /// holding points for.
+    /// The precondition failed, and the caller decides: for an evaluation, the
+    /// next pass reads it; for the lease, abort before creating a Job, because
+    /// nothing would be holding the points.
     Conflict,
 }
 
@@ -691,11 +603,10 @@ impl Pass<'_> {
 
     /// The spec has changed since the controller last acted on it.
     ///
-    /// `metadata.generation != status.observedGeneration` is the ONLY thing on
-    /// the object that says so, and D3 §6.5 makes it the one release for a
-    /// degraded policy: not time, not a restart, not the count ageing out. A
-    /// policy that has never been reconciled has no `observedGeneration`, and
-    /// "never acted on" counts as changed — it has no failure history either.
+    /// `metadata.generation != status.observedGeneration` is the only thing on
+    /// the object that says so, and it is the one release for a degraded
+    /// policy: not time, a restart, or the count ageing out. A policy never
+    /// reconciled has no `observedGeneration` and counts as changed.
     fn spec_changed(&self) -> bool {
         self.policy
             .status
@@ -707,17 +618,11 @@ impl Pass<'_> {
 
     /// The consecutive-failure budget this pass starts from.
     ///
-    /// **A SPEC CHANGE ZEROES IT, AND THAT IS WHY THIS IS A FUNCTION AND NOT A
-    /// FIELD READ.** D3 §6.5 says a spec change releases the stop; a release
-    /// that left the counter at its ceiling would give the operator exactly one
-    /// run before the next failure re-degraded the policy, which is not a
-    /// retry budget. Live at `d387f87` that is what happened:
-    /// `consecutiveRunFailures` stayed at 3 across the generation bump that
-    /// correctly resumed scheduling.
-    ///
-    /// Every reader of the count goes through here — the enforcement decision,
-    /// the harvest that adds to it, and the evaluation that publishes it — so
-    /// the release rule is stated once.
+    /// A spec change zeroes it: a release that left the counter at its ceiling
+    /// would give the operator one run before the next failure re-degraded the
+    /// policy. Every reader of the count (the enforcement decision, the
+    /// harvest, the published evaluation) goes through here, so the release
+    /// rule is stated once.
     fn budget_before(&self) -> i64 {
         if self.spec_changed() {
             return 0;
@@ -734,20 +639,18 @@ impl Pass<'_> {
         self.budget_before() >= DEGRADED_AFTER_FAILURES
     }
 
-    /// A degraded policy may start ONE re-probe run now (review M1).
+    /// A degraded policy may start one re-probe run now.
     ///
-    /// D3 §6.5 releases a degraded policy on a spec change, because what failed
-    /// is usually something the spec can fix. Two refusals are not:
-    /// `VersionProbeRefused` clears when an operator grants the retention
-    /// credential `s3:GetObject`, and `VersionedBucket` when the bucket stops
-    /// being versioned — both outside the object. So when EVERY per-point code
-    /// of the last run is one of [`BUCKET_LEVEL_CODES`] and that run finished
-    /// at least [`REPROBE_AFTER`] ago, one run is scheduled again. It is safe
-    /// by construction: the worker refuses before deleting anything for as
-    /// long as the reason holds (a HEAD per key, the intent tombstone's version
-    /// id), so a re-probe deletes nothing unless the refusal has cleared, and
-    /// it costs one Job and one intent tombstone per planned point per day.
-    /// A failed re-probe re-stamps `finishedAt`, which is the backoff.
+    /// A spec change releases a degraded policy, but two refusals are fixed
+    /// outside the object: `VersionProbeRefused` (grant the retention
+    /// credential `s3:GetObject`) and `VersionedBucket` (stop versioning the
+    /// bucket). So when every per-point code of the last run is in
+    /// [`BUCKET_LEVEL_CODES`] and it finished at least [`REPROBE_AFTER`] ago, one
+    /// run is scheduled again. Safe by construction: the worker refuses before
+    /// deleting anything while the reason holds, so a re-probe deletes nothing
+    /// until it has cleared, and costs one Job and one intent tombstone per
+    /// planned point per day. A failed re-probe re-stamps `finishedAt`, which is
+    /// the backoff.
     fn reprobe_due(&self) -> bool {
         let Some(last) = self
             .policy
@@ -770,12 +673,9 @@ impl Pass<'_> {
                 .is_some_and(|f| self.ctx.now - *f >= REPROBE_AFTER)
     }
 
-    /// The last run's outcome IN WORDS, for the `EnforcementDegraded` message.
-    ///
-    /// A condition that says only "3 consecutive runs have failed" tells an
-    /// operator that something is wrong and nothing about what; D3 §6.5's
-    /// clause is "it says why in words". The exit code and the closed per-point
-    /// codes are what the object already knows, so they are what it says.
+    /// The last run's outcome in words, for the `EnforcementDegraded` message:
+    /// the exit code and the closed per-point codes, which is what the object
+    /// knows.
     fn last_failure_detail(&self) -> String {
         let record = self
             .policy
@@ -811,25 +711,16 @@ impl Pass<'_> {
 
     /// The enforcement slot `spec.enforcement.schedule` names, at `now`.
     ///
-    /// Review `d3w9` **M5** and **Q1**. The first landing read the cron field
-    /// nowhere and used `now / 60` as the run id's slot, so an operator who
-    /// wrote `"17 4 * * *"` expecting one nightly run had nothing bounding how
-    /// often an approved plan could start one, and the deterministic-name
-    /// protection against a duplicate reconcile held for exactly one minute.
-    ///
-    /// The slot is now the cron's own latest due firing, and it is BOTH the
-    /// cadence gate and the run id's slot — which is what makes "one run per
-    /// slot" a property of the name rather than of the clock.
-    ///
-    /// `Err` is an unparseable expression, which is a refusal and not a
-    /// silently-hourly cadence.
+    /// The slot is the cron's own latest due firing, and it is both the cadence
+    /// gate and the run id's slot, so "one run per slot" is a property of the
+    /// name rather than the clock. `Err` is an unparseable expression: a
+    /// refusal, not a silently hourly cadence.
     fn enforcement_slot(&self) -> Result<Option<DateTime<Utc>>, String> {
         let Some(enforcement) = self.policy.spec.enforcement.as_ref() else {
             return Ok(None);
         };
-        // UTC and no time zone: D3 §6.2 says "UTC cron", and a retention
-        // cadence that moved with a zone's DST would run twice or not at all on
-        // two nights a year.
+        // UTC, no time zone: a retention cadence that moved with DST would run
+        // twice or not at all on two nights a year.
         let cadence = crate::cadence::Cadence::parse(&enforcement.schedule, None)
             .map_err(|e| format!("spec.enforcement.schedule is not a UTC cron expression: {e}"))?;
         Ok(cadence.latest_due_slot(self.ctx.now))
@@ -845,11 +736,9 @@ impl Pass<'_> {
     }
 
     async fn run(&mut self) -> Result<Outcome, ReconcileError> {
-        // 1. CONFLICT FIRST. Two policies for one destination put BOTH in
-        //    `Ready=False/Conflict` and NEITHER evaluates or enforces (D3 §6.3).
-        //    It is first because a conflicted policy must not so much as
-        //    compute a plan: a plan an administrator could approve is the thing
-        //    that makes two contesting policies dangerous.
+        // 1. Conflict first: two policies for one destination are both
+        //    `Ready=False/Conflict`, and neither may so much as compute a plan
+        //    an administrator could approve.
         if let Some(other) = self.contesting_policy().await? {
             return self
                 .publish_refusal(
@@ -883,11 +772,9 @@ impl Pass<'_> {
     /// Another `RetentionPolicy` in this namespace covering the same
     /// destination.
     ///
-    /// LISTED IN THIS NAMESPACE ONLY, and compared on `destinationRef.name`,
-    /// which is namespace-local by construction. The tie-break is deterministic
-    /// — the pair is symmetric, so both objects see the conflict and both go
-    /// `Ready=False`, which is what D3 §6.3 asks for ("put both in
-    /// `Ready=False/Conflict`").
+    /// Listed in this namespace only, compared on `destinationRef.name`. The
+    /// pair is symmetric, so both objects see the conflict and both go
+    /// `Ready=False`.
     async fn contesting_policy(&self) -> Result<Option<String>, ReconcileError> {
         let api: Api<RetentionPolicy> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
         let list = api.list(&ListParams::default()).await?;
@@ -902,27 +789,21 @@ impl Pass<'_> {
         Ok(others.into_iter().next())
     }
 
-    // -----------------------------------------------------------------------
-    // `ExternalLifecycle`
-    // -----------------------------------------------------------------------
-
-    /// D3 §6.6: record the declaration, mark what is and is not enforced, and
-    /// raise `ExternalLifecycleConflict` when the declared expiry would expire
-    /// points the rules consider kept.
+    /// Record the declaration, mark what is and is not enforced, and raise
+    /// `ExternalLifecycleConflict` when the declared expiry would expire points
+    /// the rules keep.
     ///
-    /// **Logweir reads no lifecycle configuration.** `object_store` 0.14
-    /// exposes no such API, so `ageExpiry` and `legalHold` are
-    /// `ProviderEnforcedUnverified` — not `LogweirEnforced` and not a claim
-    /// that the rule is in force — and the three guarantees a bucket rule
-    /// cannot express are `NotEnforced` outright.
+    /// Logweir reads no lifecycle configuration (`object_store` exposes no
+    /// such API), so `ageExpiry` and `legalHold` are
+    /// `ProviderEnforcedUnverified`, not a claim that the rule is in force, and
+    /// the three guarantees a bucket rule cannot express are `NotEnforced`.
     async fn declare_external(&self) -> Result<Outcome, ReconcileError> {
         let declared = self.policy.spec.external_lifecycle.as_ref();
         let expiration_days = declared.map(|d| i64::from(d.expiration_days));
         let rules = self.rules();
-        // THE CONFLICT: the bucket would expire what the rules keep. Compared
-        // on `keepDays` because that is the only rule a lifecycle rule can be
-        // compared against at all — `keepLast` and `minUsablePoints` are
-        // COUNTS, and a lifecycle rule cannot count.
+        // The conflict: the bucket would expire what the rules keep. Compared
+        // on `keepDays` only: `keepLast` and `minUsablePoints` are counts, and a
+        // lifecycle rule cannot count.
         let conflict = match (expiration_days, rules.keep_days) {
             (Some(expiry), Some(keep)) => expiry < keep,
             _ => false,
@@ -988,14 +869,11 @@ impl Pass<'_> {
             "enforcement": ENFORCEMENT_EXTERNAL,
             "guarantees": guarantees,
             "conditions": conditions,
-            // CLEARED, BESIDE `Evaluated=Unknown/NeverEvaluated` (O-1's class,
-            // swept by FX-11). A policy that was `Report` or `Enforce` before
-            // it declared a provider rule kept its last evaluation under a
-            // merge patch that omits the key: the console showed a plan
-            // preview this mode says it never makes, the API derived an
-            // approved-plan state from it, and a later switch back to
-            // `Enforce` re-used its `planExpiresAt` anchor. The next
-            // evaluation writes a fresh one.
+            // Cleared, beside `Evaluated=Unknown/NeverEvaluated`: a merge patch
+            // omitting it would keep a previous mode's evaluation, showing a
+            // plan preview this mode never makes, deriving an approved-plan
+            // state from it, and reusing its `planExpiresAt` on a switch back
+            // to `Enforce`.
             "lastEvaluation": Value::Null,
         });
         self.adopt_generation(&mut status);
@@ -1015,10 +893,6 @@ impl Pass<'_> {
             deletes_performed: 0,
         })
     }
-
-    // -----------------------------------------------------------------------
-    // The tracked run
-    // -----------------------------------------------------------------------
 
     /// `Some` when a run this policy started is still in flight or has not been
     /// harvested.
@@ -1051,8 +925,7 @@ impl Pass<'_> {
                 self.harvest(&run_id, None, &RunReport::default()).await?,
             ));
         };
-        // D-SEAMS S6, applied to a Job: a Job wearing this run's name is not
-        // thereby this policy's Job.
+        // A Job wearing this run's name is not thereby this policy's Job.
         if !super::recovery_catalog::owned_by(&job, &self.uid) {
             return Ok(Some(
                 self.publish_refusal(
@@ -1067,23 +940,19 @@ impl Pass<'_> {
             ));
         }
         if !super::backup::job_finished(&job) {
-            // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at
-            // all while the Job's own status counts a pod or it is younger than
-            // the 30-second grace; otherwise one pod list and, when it finds
-            // none, one events list by the Job's UID. The Job is cancelled and
-            // the status names the refusal NOW.
+            // A pod the namespace refused is failed fast: no request while the
+            // Job counts a pod or is younger than the 30-second grace,
+            // otherwise one pod list and, when it finds none, one events list
+            // by the Job's UID. The Job is cancelled and the status names the
+            // refusal now.
             //
-            // THE RUN IS NOT HARVESTED IN THIS PASS, AND THE LEASE STAYS (FX-11
-            // review L1). The lease must never die before the run it protects
-            // (`LEASE_MARGIN_SECONDS`), and a cancelled Job is not yet a
-            // finished one: a pod the Job controller admitted between this
-            // pass's pod list and its processing of the deadline patch could
-            // still run until the Job controller kills it. The Job finishes
-            // within about a second, its watch (`owns(jobs)`) wakes the next
-            // pass, and THAT pass harvests it through `harvest_run`, which
-            // proves "no pod" at the finish (`finished_without_pod`) — or reads
-            // the exit code of a pod that did start — and only then releases
-            // the lease, counts the run and patches the TTL.
+            // The run is not harvested in this pass, and the lease stays: a pod
+            // admitted between the pod list and the deadline patch could still
+            // run until the Job controller kills it. The Job finishes within
+            // about a second, its watch wakes the next pass, and `harvest_run`
+            // proves "no pod" at the finish (or reads a started pod's exit
+            // code) before it releases the lease, counts the run and patches
+            // the TTL.
             if let Some(refusal) =
                 check::refused_pod_creation(self.ctx.client, &self.namespace, &job, self.ctx.now)
                     .await?
@@ -1107,21 +976,16 @@ impl Pass<'_> {
         Ok(Some(self.harvest(&run_id, Some(&job), &report).await?))
     }
 
-    /// The exit code AND the run's own key lines, through the pod's OWNER UID
-    /// and never through a label (D-SEAMS **S6**, defect SEC-PODLOG).
-    ///
-    /// Review `d3w9` **H2**. The first landing read the exit code and stopped,
-    /// so `status.lastEnforcement.{deleted, failed, objectsDeleted, recordKey,
-    /// recordSha256}` — all five declared in the CRD — were never written. The
-    /// consequence was not cosmetic: `previously_refused()` reads `failed[]`,
-    /// so D3 §6.5's "a provider refusal is recorded, kept, and **excluded from
-    /// the next plan** until the reason clears" never fired, and every run
-    /// re-attempted the locked point.
+    /// The exit code and the run's own key lines, through the pod's owner UID,
+    /// never a label (seam **S6**). All five `status.lastEnforcement` fields
+    /// come from here; `previously_refused()` reads `failed[]`, which is what
+    /// keeps a provider-refused point out of the next plan until the reason
+    /// clears.
     async fn harvest_run(&self, job: &Job) -> Result<RunReport, ReconcileError> {
         let Some(pod) = check::pod::find_owned_pod(self.ctx.client, &self.namespace, job).await?
         else {
-            // FX-11: a Job that finished without ever having a pod, and whose
-            // `FailedCreate` Event says why, is that refusal — not "produced no
+            // A Job that finished without ever having a pod, whose
+            // `FailedCreate` Event says why, is that refusal, not "produced no
             // exit code".
             return Ok(RunReport {
                 refused: check::finished_without_pod(
@@ -1189,12 +1053,12 @@ impl Pass<'_> {
         })
     }
 
-    /// The pass that CANCELLED a run whose pod was refused at creation — FX-11.
+    /// The pass that cancelled a run whose pod was refused at creation.
     ///
     /// `Enforced=False` / `PodCreationForbidden` with the admission's words, so
-    /// the refusal is on the object the moment it is known; and nothing else.
+    /// the refusal is on the object the moment it is known, and nothing else:
     /// `lastEnforcement`, the lease and `consecutiveRunFailures` are left for
-    /// the harvest of the finished Job (review L1, see `tracked_run`).
+    /// the harvest of the finished Job (see `tracked_run`).
     async fn report_refused(
         &self,
         run_id: &str,
@@ -1244,9 +1108,9 @@ impl Pass<'_> {
     /// Publish what a finished run did, clear the lease, and count the failure
     /// if it was one.
     ///
-    /// **The status is written BEFORE the Job's TTL is patched** (S7's ordering,
-    /// the same rule `controllers/backup.rs` follows): pod garbage collection
-    /// must never race the exit-code read.
+    /// The status is written before the Job's TTL is patched (S7's ordering,
+    /// as in `controllers/backup.rs`): pod garbage collection must never race
+    /// the exit-code read.
     async fn harvest(
         &self,
         run_id: &str,
@@ -1255,15 +1119,13 @@ impl Pass<'_> {
     ) -> Result<Outcome, ReconcileError> {
         let exit_code = report.exit_code;
         let failed = exit_code != Some(0);
-        // THROUGH `budget_before`, so a spec change zeroes the count here too.
-        // A harvest also writes `observedGeneration`, i.e. it adopts the new
-        // generation; adopting it without releasing the budget would leave the
-        // release depending on which arm happened to run first.
+        // Through `budget_before`, so a spec change zeroes the count here too:
+        // a harvest adopts the new generation, and the release must not depend
+        // on which arm ran first.
         let previous = self.budget_before();
-        // A RUN THAT STOPPED ON ITS OWN CEILING IS NOT A FAILED RUN (review
-        // `d3w9` M2). It exits 1 because work remains, and counting it would
-        // make three ordinary bounded runs on a large archive set
-        // `EnforcementDegraded` and stop retention for good.
+        // A run that stopped on its own ceiling is not a failed run: it exits 1
+        // because work remains, and counting it would degrade retention on a
+        // large archive after three ordinary bounded runs.
         let bounded = report.bounded_only();
         let failures = if failed && !bounded {
             previous + 1
@@ -1373,21 +1235,18 @@ impl Pass<'_> {
             ),
         ]);
         let mut harvest_status = json!({
-                // FX-20c (review M-1): a run refused on its credential's binding
-                // leaves a policy that deletes nothing until a human rebinds the
-                // Secret — a standing state, published as
-                // `publish_standing_refusal` publishes one, so the console
-                // does not read "enforced by Logweir" over it.
+                // A run refused on its credential's binding leaves a policy that
+                // deletes nothing until a human rebinds the Secret: a standing
+                // state, published as `publish_standing_refusal` publishes one,
+                // so the console does not read "enforced by Logweir" over it.
                 "enforcement": if binding_refused {
                     ENFORCEMENT_RECOMMENDATION_ONLY
                 } else {
                     ENFORCEMENT_LOGWEIR_WORKER
                 },
-                // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
-                // WROTE (review `d3w9` H2). `failed[]` is the input
-                // `previously_refused()` reads, so without it D3 §6.5's "a provider
-                // refusal is recorded, kept and excluded from the next plan" could
-                // not fire at all.
+                // The five fields the CRD declares; `failed[]` is what
+                // `previously_refused()` reads to keep a provider-refused point
+                // out of the next plan.
                 "lastEnforcement": {
                     "runId": run_id,
                     "finishedAt": self.ctx.now,
@@ -1402,9 +1261,9 @@ impl Pass<'_> {
                     "recordKey": report.record_key,
                     "recordSha256": report.record_sha256,
                 },
-                // RFC 7386: `null` DELETES the key. The lease exists only while a
-                // run holds it, and a lease left behind would hold restore
-                // admission for nothing.
+                // RFC 7386: `null` deletes the key. The lease exists only while
+                // a run holds it; one left behind would hold restore admission
+                // for nothing.
                 "lease": Value::Null,
                 "consecutiveRunFailures": failures,
                 "conditions": conditions,
@@ -1413,25 +1272,19 @@ impl Pass<'_> {
             // Object-wise, one key: the other guarantees are untouched.
             harvest_status["guarantees"] = json!({ "ageExpiry": GUARANTEE_NOT_ENFORCED });
         }
-        // Through the helper like every other writer. It adopts the generation
-        // and adds nothing here: this patch already carries the count (already
-        // released by `budget_before()`) and its own `EnforcementDegraded`.
+        // Through the helper like every other writer: it adopts the generation
+        // and adds nothing here, because this patch already carries the count
+        // (released by `budget_before()`) and its own `EnforcementDegraded`.
         self.adopt_generation(&mut harvest_status);
         let outcome = self.patch_status(harvest_status).await?;
 
-        // THE TTL AFTER THE STATUS, and only then (S7). The Job's pod carries
-        // the exit code this pass just published.
-        //
-        // AND ONLY IF THE STATUS ACTUALLY LANDED. `patch_status` answers
-        // `Conflict` both for a 409 and for a pass whose precondition cursor is
-        // gone ([`NO_RESOURCE_VERSION`]) — in either case this run's exit code
-        // was NOT published. Setting the Job's TTL then is the one irreversible
-        // half of the pair: the Job and its pod are collected, the exit code
-        // becomes unreadable, and the next pass harvests a run it can only
-        // record as "produced no exit code". S7's ordering rule exists to stop
-        // garbage collection racing the exit-code read; a write that did not
-        // land has not won that race, it has lost it. So the TTL waits, the run
-        // stays untracked, and the next pass reads it again.
+        // The TTL after the status, and only if the status actually landed.
+        // `patch_status` answers `Conflict` both for a 409 and for a missing
+        // precondition cursor ([`NO_RESOURCE_VERSION`]), and either way the
+        // exit code was not published. The TTL is the irreversible half: the
+        // Job and pod would be collected and the next pass could only record
+        // "produced no exit code". So the TTL waits and the next pass reads the
+        // run again.
         match outcome {
             PatchOutcome::Applied | PatchOutcome::Unchanged => {
                 if let Some(job) = job {
@@ -1479,29 +1332,15 @@ impl Pass<'_> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // The evaluation
-    // -----------------------------------------------------------------------
-
     async fn evaluate(&self) -> Result<Outcome, ReconcileError> {
-        // The destination, for its location id and (in `Enforce`) its Job
-        // environment — RESOLVED FOR TWO ROLES FROM ONE READ.
-        //
-        // `ArchiveRead` is what the LOCATION is resolved under: this controller
-        // reads nothing from the archive at all, and that role is the narrowest
-        // one the location is available from.
-        //
-        // `EvidenceWrite` is the RECORD credential, and it is a SEPARATE
-        // resolution because it is a separate principal — defect
-        // RET-EVIDENCE-GRANT-IS-ARCHIVEREAD. Until this existed the enforcement
-        // Job's `LOGWEIR_EVIDENCE_AWS_*` carried `resolved.grant`, which is the
-        // `archiveRead` one, so on a destination that separates the four
-        // principals the first intent tombstone was refused `403 AccessDenied`
-        // (`state=Kept code=TombstoneRefused`, `deleted=0 failed=1`, live in
-        // `claude/artifacts/d2-live/u620260921t140000z`) and retention could not
-        // run at all — while on a destination whose `archiveRead` happens to be
-        // writable it attributed deletions to the one credential D3 §7f says
-        // must not write under `logweir/`.
+        // The destination, resolved for two roles from one read. `ArchiveRead`
+        // is what the location is resolved under: this controller reads
+        // nothing from the archive, and that is the narrowest role the
+        // location is available from. `EvidenceWrite` is the record
+        // credential, a separate principal: the enforcement Job's
+        // `LOGWEIR_EVIDENCE_AWS_*` must not carry the `archiveRead` grant,
+        // which on a destination that separates principals cannot write the
+        // intent tombstones (and must not write under `logweir/` anyway).
         let roles = match destination::resolve_ref_roles(
             self.ctx.client,
             &self.namespace,
@@ -1522,16 +1361,15 @@ impl Pass<'_> {
         };
         let resolved = roles.primary;
 
-        // THE SCOPE MUST BE THE DESTINATION'S OWN PREFIX (D3 §6.2). A policy
-        // whose scope names a prefix the destination does not root would give a
-        // plan a bound the destination's credential could still reach.
+        // The scope must be the destination's own prefix: a scope the
+        // destination does not root would give a plan a bound the
+        // destination's credential could still reach.
         let dest_prefix = resolved.location.prefix.trim_end_matches('/');
         let scope = self.policy.spec.scope.prefix.trim_end_matches('/');
-        // ON A SEGMENT BOUNDARY (review `d3w9` M3). A bare `starts_with` lets
-        // `…/team-ab` — a sibling tenant's prefix — pass a guard whose stated
-        // purpose is that a scope may only ever NARROW the destination it
-        // covers. The destination's own prefix may legitimately be empty, in
-        // which case every scope is under it.
+        // On a segment boundary: a bare `starts_with` would let `…/team-ab`, a
+        // sibling's prefix, pass a guard whose purpose is that a scope may only
+        // narrow the destination. An empty destination prefix covers every
+        // scope.
         let narrows = dest_prefix.is_empty()
             || scope == dest_prefix
             || scope.starts_with(&format!("{dest_prefix}/"));
@@ -1561,13 +1399,12 @@ impl Pass<'_> {
             location_id: location_id.clone(),
             scope_prefix: self.policy.spec.scope.prefix.clone(),
         };
-        // THE CONTROLLER'S OWN VERDICTS, BEFORE ANY ROW IS COUNTED. A point
+        // The controller's own verdicts, before any row is counted: a point
         // whose `Backup` the controller refused is not usable, whatever the
-        // (possibly older) view row says — and a listing that could not be
-        // completed is an evaluation that could not be completed: an unseen
-        // refusal would let a stale row take a keep rank and push an older
-        // good point into the plan, and "could not tell" never authorises a
-        // deletion.
+        // view row says. A listing that could not be completed is an
+        // evaluation that could not be completed: an unseen refusal would let a
+        // stale row take a keep rank and push an older good point into the
+        // plan, and "could not tell" never authorises a deletion.
         let refusals = match self.controller_refusals().await? {
             Ok(refusals) => refusals,
             Err((reason, message)) => return self.publish_verdicts_failure(reason, &message).await,
@@ -1620,7 +1457,7 @@ impl Pass<'_> {
             .map_or(3600, |e| i64::from(e.plan_max_age_seconds));
         let window = self.plan_window(&plan_sha256, plan_max_age);
 
-        // ENFORCE, OR NOT.
+        // Enforce, or not.
         let view_refusal = view.run_refusal(&self.policy.spec.catalog_ref.name, self.ctx.now);
         let decision = self.enforcement_decision(&plan_sha256, &evaluation, &window, view_refusal);
         let mut outcome = Outcome {
@@ -1638,10 +1475,9 @@ impl Pass<'_> {
             deletes_performed: 0,
         };
 
-        // THE REAL OBJECT COUNT IS NOT KNOWN HERE (review `d3w9` M1). The
-        // catalog view carries no segment keys, so every candidate's `objects`
-        // is `None` — "not observed" — rather than the misleading `1` the first
-        // landing published, and the `Evaluated` condition says so.
+        // The real object count is not known here: the catalog view carries no
+        // segment keys, so every candidate's `objects` is `None` ("not
+        // observed"), and the `Evaluated` condition says so.
         self.publish_evaluation(
             &evaluation,
             &EvaluationBounds {
@@ -1717,9 +1553,8 @@ impl Pass<'_> {
                 }
                 StartOutcome::EvidenceGrantUnusable(message) => {
                     outcome.enforced_reason = REASON_EVIDENCE_GRANT_UNUSABLE;
-                    // AND THE OBJECT STOPS CLAIMING DELETION. Nothing will run
-                    // here until a human edits the destination, so the two
-                    // fields the console reads say so too — review M1.
+                    // And the object stops claiming deletion: nothing runs here
+                    // until a human edits the destination.
                     outcome.enforcement = ENFORCEMENT_RECOMMENDATION_ONLY;
                     self.publish_standing_refusal(REASON_EVIDENCE_GRANT_UNUSABLE, &message)
                         .await?;
@@ -1729,27 +1564,19 @@ impl Pass<'_> {
         Ok(outcome)
     }
 
-    /// When this plan's approval window opened and when it closes — review
-    /// `d3w9` **H4**, and the other half of **C1**.
+    /// When this plan's approval window opened and when it closes.
     ///
-    /// # The anchor is the DIGEST, not the pass
+    /// Anchored to the first pass that saw this digest: recomputed from `now`
+    /// it would never expire, and an instant inside the digested bytes would
+    /// change the digest. While `status.lastEvaluation.planSha256` equals what
+    /// this pass computed, the stored `planExpiresAt` stands.
     ///
-    /// `planExpiresAt` recomputed from `now` on every pass would never expire;
-    /// anchored to an instant inside the digested bytes it would change the
-    /// digest, which is C1. So it is anchored to the first pass that SAW this
-    /// digest: while `status.lastEvaluation.planSha256` still equals what this
-    /// pass computed, the stored `planExpiresAt` stands.
-    ///
-    /// # And a lapsed window re-anchors, once, refusing that pass
-    ///
-    /// A digest that never changes is an archive that has not moved, so the
-    /// plan still describes exactly what it described — but D3 §6.5 makes the
-    /// age a gate in its own terms ("the plan is younger than
-    /// `planMaxAgeSeconds`"), and an approval left lying for a week must not
-    /// silently authorise today's run. The pass that observes the lapse
-    /// therefore **refuses** with [`REASON_PLAN_EXPIRED`] and re-anchors the
-    /// window, so the administrator's next look sees a fresh preview of the
-    /// same plan rather than a policy wedged forever.
+    /// A lapsed window re-anchors once, refusing that pass: an unchanged
+    /// digest means the archive has not moved, but the plan's age is a gate in
+    /// its own right, and an approval left lying for a week must not silently
+    /// authorise today's run. The pass refuses with [`REASON_PLAN_EXPIRED`] and
+    /// re-anchors, so the administrator sees a fresh preview of the same plan
+    /// rather than a policy wedged for ever.
     fn plan_window(&self, plan_sha256: &str, max_age_seconds: i64) -> PlanWindow {
         let stored = self
             .policy
@@ -1786,21 +1613,19 @@ impl Pass<'_> {
         }
     }
 
-    /// The reached refusals among this namespace's `Backup`s —
-    /// [`view::ControllerRefusals`].
+    /// The reached refusals among this namespace's `Backup`s
+    /// ([`view::ControllerRefusals`]).
     ///
-    /// Read through the LENIENT [`view::BackupVerdictFacts`] projection of an
+    /// Read through the lenient [`view::BackupVerdictFacts`] projection of an
     /// untyped list: one `Backup` this build cannot type refuses at most its
-    /// own point (an unreadable verdict is a refusal) and never wedges the
-    /// evaluation. Bounded by [`MAX_BACKUP_PAGES`] pages of
-    /// [`BACKUP_PAGE_LIMIT`].
+    /// own point and never wedges the evaluation. Bounded by
+    /// [`MAX_BACKUP_PAGES`] pages of [`BACKUP_PAGE_LIMIT`].
     ///
     /// `Ok(Err((ready_reason, message)))` is a join that could not be
-    /// completed — the bound, a list failure, or a refusal tied to no point —
-    /// which the caller PUBLISHES as `Evaluated=False` and plans nothing on:
-    /// retention is the deletion authority, and the refusal it did not see is
-    /// exactly the one that would have enlarged the plan. A list failure is an
-    /// answer on the object, not a silent error-requeue loop.
+    /// completed (the bound, a list failure, or a refusal tied to no point),
+    /// which the caller publishes as `Evaluated=False` and plans nothing on:
+    /// the refusal retention did not see is exactly the one that would have
+    /// enlarged the plan.
     #[allow(clippy::type_complexity)]
     async fn controller_refusals(
         &self,
@@ -1872,12 +1697,11 @@ impl Pass<'_> {
 
     /// Read the catalog's published pages.
     ///
-    /// `Ok(Err(message))` is "the view is not readable right now", which is an
-    /// `Evaluated=False` status and NOT a reconcile error: a retention
+    /// `Ok(Err(message))` is "the view is not readable right now": an
+    /// `Evaluated=False` status, not a reconcile error, because a retention
     /// evaluation failure must never block anything, least of all a backup.
-    ///
-    /// The entries come back WITH what the catalog said about the view's own
-    /// bound ([`CatalogView`]), so the evaluation can say it too (FX-22).
+    /// The entries come back with what the catalog said about the view's own
+    /// bound ([`CatalogView`]).
     async fn view_entries(&self) -> Result<Result<CatalogView, String>, ReconcileError> {
         let catalogs: Api<RecoveryCatalog> =
             Api::namespaced(self.ctx.client.clone(), &self.namespace);
@@ -1889,12 +1713,10 @@ impl Pass<'_> {
                 self.namespace
             )));
         };
-        // THE CATALOG MUST COVER THE SAME DESTINATION. A policy pointed at
-        // destination A whose catalog syncs destination B would evaluate B's
-        // points and name A's bucket — the exact shape of RET-WRONGBUCKET, one
-        // level up. The pure evaluation would still refuse every point (their
-        // `locations[]` would not match), but saying so here gives the operator
-        // the field name.
+        // The catalog must cover the same destination: a policy for A whose
+        // catalog syncs B would evaluate B's points and name A's bucket. The
+        // evaluation would refuse every point anyway (their `locations[]`
+        // would not match), but this names the field.
         let catalog_dest = catalog
             .spec
             .destination_ref
@@ -1937,13 +1759,10 @@ impl Pass<'_> {
                     view::PAGE_DATA_KEY
                 )));
             };
-            // THE PAGE DIGEST, CHECKED, AND ITS ABSENCE IS A FAILURE (review
-            // `d3w9` M4). `status.pages[].sha256` is over exactly these bytes,
-            // so a page that changed under the reader is caught here rather
-            // than turned into a plan — and a page the catalog published no
-            // digest for is a page nothing can check. The same function already
-            // refuses an INCOMPLETE view; accepting an UNVERIFIED one would be
-            // the same defect through the other door.
+            // The page digest, checked, and its absence is a failure:
+            // `status.pages[].sha256` is over exactly these bytes, so a page
+            // that changed under the reader is caught here rather than turned
+            // into a plan, and a page with no digest is one nothing can check.
             let Some(expected) = page.sha256.as_deref() else {
                 return Ok(Err(format!(
                     "catalog page {} carries no `status.pages[].sha256`, so its bytes cannot be \
@@ -1989,22 +1808,17 @@ impl Pass<'_> {
     /// The controller-supplied protection set: every nonterminal `Restore` that
     /// names a set at this destination.
     ///
-    /// **Matched on the archive location AND the backup set**, never on the set
-    /// alone: two destinations legitimately hold sets of the same `backupId`,
-    /// and protecting one because the other is being restored would be the
-    /// wrong-destination defect wearing a helpful face.
+    /// Matched on the archive location and the backup set, never the set
+    /// alone: two destinations can hold sets of the same `backupId`.
     async fn active_restore_sets(
         &self,
         location_id: &str,
     ) -> Result<BTreeSet<String>, ReconcileError> {
-        // A CONSISTENT LIST: `ListParams` with no `resource_version` is a
-        // quorum read from etcd, not a read of the API server's watch cache.
-        // D3 §6.5 requires the re-listing before a Job is created to be
-        // non-cached, and this is that read — over EVERY namespace this
-        // controller acts in (`crate::scope`, D0 stage 5): the whole cluster
-        // by default, the execution namespaces when scoped. A restore in a
-        // namespace the controller cannot see cannot be running a Job this
-        // controller created, and it could not have been read anyway.
+        // A consistent list: `ListParams` with no `resource_version` is a
+        // quorum read from etcd, not the watch cache, over every namespace this
+        // controller acts in (`crate::scope`). A restore in a namespace the
+        // controller cannot see cannot be running a Job this controller
+        // created.
         let restores: Vec<Restore> =
             crate::scope::list_everywhere::<Restore>(self.ctx.client, &ListParams::default())
                 .await?;
@@ -2028,10 +1842,9 @@ impl Pass<'_> {
 
     /// The protection set, in the vocabulary the pure evaluation uses.
     ///
-    /// A `Restore` names a `backupSetRef`, and the evaluation keys on POINT
-    /// ids, so the mapping happens here over the view's own entries: every
-    /// point whose set a nonterminal restore names is protected. Two points in
-    /// one set are both protected, which is correct — a restore reads the set.
+    /// A `Restore` names a `backupSetRef` and the evaluation keys on point ids,
+    /// so every point whose set a nonterminal restore names is protected (a
+    /// restore reads the whole set).
     async fn protection_set(
         &self,
         location_id: &str,
@@ -2049,8 +1862,8 @@ impl Pass<'_> {
         })
     }
 
-    /// Points a previous run was refused on, kept until the reason clears —
-    /// D3 §6.5's bounded retry.
+    /// Points a previous run was refused on, kept until the reason clears: the
+    /// bounded retry.
     fn previously_refused(&self) -> BTreeMap<String, String> {
         self.policy
             .status
@@ -2067,10 +1880,6 @@ impl Pass<'_> {
             .unwrap_or_default()
     }
 
-    // -----------------------------------------------------------------------
-    // Enforcement
-    // -----------------------------------------------------------------------
-
     #[allow(clippy::too_many_arguments)]
     async fn start_run(
         &self,
@@ -2082,15 +1891,10 @@ impl Pass<'_> {
         candidates: &[plan::Candidate],
         slot: DateTime<Utc>,
     ) -> Result<StartOutcome, ReconcileError> {
-        // THE RECORD CREDENTIAL IS SETTLED BEFORE ANYTHING IS SPENT — defect
-        // RET-EVIDENCE-GRANT-IS-ARCHIVEREAD.
-        //
-        // First, before the lease, before the plan `ConfigMap` and before the
-        // run record: a destination whose `evidenceWrite` grant no enforcement
-        // Job can use is a configuration problem, not a failed run, and it must
-        // cost neither a lease, nor an immutable `ConfigMap`, nor a slot of the
-        // three-failure retry budget. The old shape created the Job anyway and
-        // let the worker exit 3 at the store builder, which spent one.
+        // The record credential is settled before anything is spent: a
+        // destination whose `evidenceWrite` grant no enforcement Job can use is
+        // a configuration problem, not a failed run, and must cost neither a
+        // lease, an immutable `ConfigMap`, nor a slot of the retry budget.
         let delete_secret = self
             .policy
             .spec
@@ -2109,38 +1913,26 @@ impl Pass<'_> {
             }
         };
         let leased: Vec<String> = candidates.iter().map(|c| c.point_id.clone()).collect();
-        // THE SLOT IS THE CRON'S, NOT THE MINUTE'S (review `d3w9` M5/Q1). The
-        // run id is a pure function of it, so "one run per slot" is a property
-        // of the NAME — a duplicate reconcile inside a slot gets 409
-        // `AlreadyExists` from the API server — rather than of the clock.
+        // The slot is the cron's, so the run id (a pure function of it) makes
+        // "one run per slot" a property of the name: a duplicate reconcile
+        // inside a slot gets 409 `AlreadyExists`.
         let run_id = plan::run_id(&self.uid, plan_sha256, slot.timestamp());
 
-        // A RUN THIS POLICY HAS ALREADY HARVESTED IS NOT STARTED AGAIN —
-        // defect RET-COUNT-EARLY.
+        // A run this policy has already harvested is not started again.
         //
-        // The run id is a pure function of the policy, the plan digest and the
-        // slot, so every pass inside one slot that computes the same plan
-        // recomputes the SAME id. `jobs.create` below then answers 409
-        // `AlreadyExists` — deliberately, that is what makes a duplicate
-        // reconcile idempotent — and the pass falls through to record
-        // `lastEnforcement` as if a new run had begun, clearing `finishedAt`
-        // with the explicit nulls a genuinely new run needs. The object then
-        // claims the finished run is in flight, `tracked_run` harvests the SAME
-        // Job a second time, and `consecutiveRunFailures` gains a failure no
-        // Job produced. Every further reconcile in the slot adds another: live
-        // on `af64073`, TWO enforcement Jobs and a count of 3, with
-        // `EnforcementDegraded` firing a full run early.
+        // Every pass inside one slot that computes the same plan recomputes the
+        // same run id, so `jobs.create` answers 409. Falling through would
+        // record `lastEnforcement` as a new run (clearing `finishedAt`),
+        // `tracked_run` would harvest the same Job again, and
+        // `consecutiveRunFailures` would gain failures no Job produced,
+        // degrading retention early.
         //
-        // WHY HERE AND NOT IN `enforcement_decision`. The "one run per slot"
-        // check there guards the approved-plan branch only; the unattended
-        // branch (`requireApprovedPlan: false`) returns `start: true` before the
-        // slot is computed at all, which is the configuration the live defect
-        // ran under. This is the one place both branches pass through, and the
-        // first place the id exists.
+        // Here and not in `enforcement_decision`: the unattended branch
+        // (`requireApprovedPlan: false`) returns `start: true` before the slot
+        // is computed. This is the one place both branches pass through.
         //
-        // FINISHED IS THE CONDITION, NOT MERELY RECORDED. A record with no
-        // `finishedAt` is a run still in flight, and `tracked_run` — not this
-        // arm — is what looks after it.
+        // Finished is the condition: a record with no `finishedAt` is a run in
+        // flight, which `tracked_run` looks after.
         let recorded = self
             .policy
             .status
@@ -2157,14 +1949,8 @@ impl Pass<'_> {
             return Ok(StartOutcome::AlreadyHarvested);
         }
 
-        // (a) THE LEASE, with a resourceVersion-preconditioned patch, AND IT
-        //     MUST LAND (review `d3w9` C3). The first landing swallowed the
-        //     409 this patch got every enforcing pass — the evaluation patch
-        //     had already advanced the object's version — so the Job was
-        //     created with no lease recorded, the run was never tracked or
-        //     harvested, and sixty seconds later a second deletion Job
-        //     followed. A run nothing is holding points for is a run that must
-        //     not start.
+        // (a) The lease, with a resourceVersion-preconditioned patch, and it
+        //     must land: a run nothing is holding points for must not start.
         let expires_at = self.ctx.now
             + chrono::Duration::seconds(
                 self.policy
@@ -2193,16 +1979,13 @@ impl Pass<'_> {
             return Ok(StartOutcome::LeaseNotHeld);
         }
 
-        // (b) AND THEN the consistent re-list. The ORDER is the whole property:
-        //     a restore that arrives after (a) is seen by (b).
+        // (b) Then the consistent re-list. The order is the whole property: a
+        //     restore that arrives after (a) is seen by (b).
         //
-        //     **FAIL CLOSED ON THE WHOLE DESTINATION**, not only on the leased
-        //     points. The restore-side admission hold D3 §6.5 calls for lives
-        //     in `controllers/restore.rs`, which is another worker's file and a
-        //     recorded hand-off; until it lands, the only guard that exists is
-        //     this one, and a `Restore` reading ANY set at this destination is
-        //     enough to stop the run. A run refused for a restore it would not
-        //     have touched costs one cadence slot; the other way costs the set.
+        //     It fails closed on the whole destination, not only the leased
+        //     points: a `Restore` reading any set at this destination stops
+        //     the run. A run refused for a restore it would not have touched
+        //     costs one cadence slot; the other way costs the set.
         let active_sets = self.active_restore_sets(&resolved.canonical_url).await?;
         if !active_sets.is_empty() {
             warn!(
@@ -2238,23 +2021,17 @@ impl Pass<'_> {
         );
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
 
-        // (c) A JOB ALREADY AT THIS NAME ENDS THE PASS, BEFORE THE RECORD.
+        // (c) A Job already at this name ends the pass, before the record.
         //
-        // This read is what lets the record be written BEFORE the Job exists
-        // (defect RET-STARTRUN-PATCH-OUTCOME, below) without re-opening defect
-        // RET-COUNT-EARLY. The create's own `409 AlreadyExists` arm used to be
-        // the only place this was noticed, and it is reachable even when the
-        // guard at the top of this function is not: that guard compares against
-        // the run the object LAST recorded, and `previously_refused()` makes
-        // the plan digest oscillate back to an EARLIER run's, which inside one
-        // slot is the same run id. Reaching that arm AFTER the record had been
-        // written would be the resurrection all over again — `finishedAt`
-        // nulled for a run that has already been harvested and counted.
+        // This read lets the record be written before the Job exists (below)
+        // without restarting a harvested run: `previously_refused()` can make
+        // the plan digest oscillate back to an earlier run's, which inside one
+        // slot is the same run id, and the guard at the top only compares
+        // against the run last recorded.
         //
-        // The remaining window is one where the Job appears between this read
-        // and the create below. A Job that was absent a moment ago is a NEW
-        // Job, not a harvested one, so the record this pass wrote describes it
-        // correctly; the create's 409 arm keeps the record it wrote and returns.
+        // If the Job appears between this read and the create, it is a new Job
+        // for this run, so the record this pass wrote describes it correctly;
+        // the create's 409 arm keeps it.
         if jobs
             .get_opt(&job_name)
             .await
@@ -2270,43 +2047,26 @@ impl Pass<'_> {
             return Ok(StartOutcome::AlreadyHarvested);
         }
 
-        // (d) THE RUN RECORD, AND *THEN* THE JOB — defect
-        //     RET-STARTRUN-PATCH-OUTCOME.
+        // (d) The run record, and then the Job.
         //
-        // The order used to be the other way round and the patch's outcome was
-        // discarded, so a record write refused after the Job was created left a
-        // deletion Job running that the status never tracked: `tracked_run`
-        // reads `status.lastEnforcement`, finds the previous run or none, and
-        // never harvests this one — an orphan that deletes objects, reports its
-        // outcome to nobody, and is counted against no retry budget. The
-        // failure is not exotic: the lease patch two steps up exists because
-        // this object's version moves under the pass constantly, and a 409 here
-        // is the ordinary answer to that.
-        //
-        // DELETING THE JOB ON A REFUSED WRITE IS THE OTHER REPAIR AND IS NOT
-        // AVAILABLE: Global Constraint 6 gives this controller no `delete` verb
-        // on `jobs`, by design. Writing first needs no new capability and has a
-        // strictly better failure mode — a record with no Job is a run that
-        // never ran, which the next pass simply supersedes, while a Job with no
-        // record is deletions nothing accounts for.
+        // A record write refused after the Job was created would leave a
+        // deletion Job that the status never tracks: no harvest, no reported
+        // outcome, no retry budget. A 409 here is ordinary, because this
+        // object's version moves under the pass constantly. Deleting the Job
+        // on a refused write is not available (this controller has no `delete`
+        // on `jobs`, by design), and writing first fails better: a record with
+        // no Job is a run that never ran, which the next pass supersedes.
         //
         // `runId`, `startedAt` and `planSha256` are this run's own; the seven
-        // terminal fields below describe a run that has FINISHED and are
-        // deleted, by explicit RFC 7386 `null`, so the previous run's outcome
-        // cannot be read as this one's (defect RET-DEGRADED-UNREACHABLE).
-        // `previously_refused()` reads `failed[]` to exclude a point from the
-        // next plan, so a stale one is not cosmetic.
+        // terminal fields below describe a finished run and are deleted by
+        // explicit RFC 7386 `null`, so the previous run's outcome cannot be
+        // read as this one's (`previously_refused()` reads `failed[]`).
         //
-        // **THE RUN REACHING HERE IS ALWAYS A DIFFERENT ONE**, and that is why
-        // the clearing is unconditional. `start_run` is reached only after
-        // `tracked_run` returned "nothing in flight", which it does only when
-        // no run is recorded or the recorded one carries `finishedAt`. So a
-        // recorded run seen here has finished — and the guard at the top of
-        // this function has already returned for it. A second, write-side
-        // "clear only a different run" test was written and removed: it is
-        // provably dead behind that gate, and a branch no row can reach is not
-        // a guard (defect RET-COUNT-EARLY, and the argument is recorded so the
-        // next reader does not re-add it).
+        // The clearing is unconditional because the run reaching here is
+        // always a different one: `start_run` follows `tracked_run` reporting
+        // nothing in flight, and the guard at the top has already returned for
+        // a harvested run of this id. A "clear only a different run" branch
+        // would be unreachable.
         let record = json!({
             "runId": run_id,
             "startedAt": self.ctx.now,
@@ -2340,13 +2100,10 @@ impl Pass<'_> {
                     "created the retention Job for an approved plan"
                 );
             }
-            // A DETERMINISTIC NAME MAKES A DUPLICATE RECONCILE A 409, not a
-            // second deletion run — the whole reason the run id is a pure
-            // function of the policy, the plan digest and the minute. Reaching
-            // this arm now means the Job appeared between the read above and
-            // this create, so it is a Job for THIS run started by a concurrent
-            // pass: the record this pass wrote a moment ago describes it, and
-            // it is left exactly as written.
+            // A deterministic name makes a duplicate reconcile a 409, not a
+            // second deletion run. Reaching this arm now means the Job appeared
+            // after the read above, started by a concurrent pass for this run:
+            // the record this pass wrote describes it, and is left as written.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(
                     job = %job_name, run = %run_id,
@@ -2355,31 +2112,19 @@ impl Pass<'_> {
                 );
                 return Ok(StartOutcome::Started(job_name));
             }
-            // THE RECORD IS WITHDRAWN, AND THE BUDGET IS NOT SPENT — review
-            // finding MED-1. A `403` from a quota or an admission webhook, a
-            // `422`, a `500`: the record has landed and no Job exists, so the
-            // NEXT pass reaches `tracked_run`'s absent-Job arm — `runId`
-            // present, `finishedAt` absent, Job absent — and harvests it with
-            // no exit code, which is one consecutive FAILURE and a message
-            // ("its pod is gone or was never readable") describing a pod that
-            // never existed. Three transient create failures would wedge
-            // retention at `EnforcementDegraded=True` until an operator edited
-            // the spec, for runs that never ran.
+            // The record is withdrawn, and the budget is not spent. A `403`
+            // from a quota or webhook, a `422`, a `500`: the record landed and
+            // no Job exists, so the next pass would harvest it with no exit
+            // code as a failure, and three transient create failures would
+            // wedge retention at `EnforcementDegraded=True` for runs that never
+            // ran. So the record is withdrawn with an explicit RFC 7386 `null`
+            // before the error is returned.
             //
-            // A run that was never created is not a failed run. The record is
-            // therefore withdrawn with an explicit RFC 7386 `null` before the
-            // error is returned, which is the same instrument the record's own
-            // seven terminal fields use, and the reconciler requeues onto a
-            // status that says no run is in flight.
-            //
-            // WHAT THIS DOES NOT CLOSE, STATED: a controller that DIES between
-            // the record write and the create leaves the record behind, and the
-            // next pass counts that run as a failure. Closing that needs the
-            // record to carry which Job it is waiting for, which is a CRD field
-            // this branch may not add; it is recorded as
-            // RET-RECORD-WITHOUT-JOB-COUNTS rather than left for someone to
-            // rediscover. The window is one API call wide and fail-safe in the
-            // direction that matters — retention stops sooner, never later.
+            // Not closed: a controller that dies between the record write and
+            // the create leaves the record, and the next pass counts that run
+            // as a failure. Closing it needs a CRD field naming the awaited
+            // Job. The window is one API call wide and fails safe: retention
+            // stops sooner, never later.
             Err(e) => {
                 let withdrawn = self
                     .patch_status(json!({ "lastEnforcement": Value::Null }))
@@ -2407,15 +2152,13 @@ impl Pass<'_> {
     ) -> Result<Result<(), String>, ReconcileError> {
         let maps: Api<ConfigMap> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
         if let Some(existing) = maps.get_opt(name).await? {
-            // AN OBJECT AT THIS NAME IS NOT THEREBY THIS PLAN (review `d3w9`
-            // M6). The name is `<stem>-plan-<12 hex of digest>` and the stem is
-            // derived from the policy UID, so it is predictable to anyone who
-            // can read the status — and a namespace tenant with `create
-            // configmaps` can squat it with different bytes and
-            // `immutable: true`. The worker's own digest check would turn that
-            // into a permanent exit 3, which is safe and is still a denial of
-            // service the controller cannot repair, holding no `delete` verb.
-            // Refusing here says which object and why.
+            // An object at this name is not thereby this plan. The name is
+            // derived from the policy UID, so anyone who can read the status
+            // can predict it, and a tenant with `create configmaps` can squat
+            // it with different bytes and `immutable: true`. The worker's
+            // digest check would turn that into a permanent exit 3 the
+            // controller cannot repair (it holds no `delete` verb); refusing
+            // here says which object and why.
             let found = existing
                 .metadata
                 .annotations
@@ -2498,12 +2241,11 @@ impl Pass<'_> {
 
     /// The retention Job.
     ///
-    /// **It runs `logweir-retention` and not `logweir`** (D-SEAMS S1's third
-    /// exception), under its OWN ServiceAccount, with two separately named
-    /// credentials: the delete-capable one from
-    /// `spec.enforcement.credentialSecretRef`, and the destination's
-    /// `evidenceWrite` grant for the record. Neither alone can both remove a
-    /// point and write the document that attributes its removal.
+    /// It runs `logweir-retention`, not `logweir`, under its own
+    /// ServiceAccount, with two separately named credentials: the
+    /// delete-capable one from `spec.enforcement.credentialSecretRef`, and the
+    /// destination's `evidenceWrite` grant for the record. Neither alone can
+    /// both remove a point and write the document that attributes its removal.
     fn build_job(
         &self,
         job_name: &str,
@@ -2549,10 +2291,10 @@ impl Pass<'_> {
             ),
             ("RUST_LOG".to_string(), "warn".to_string()),
         ];
-        // The destination's addressing, complete and explicit (D-SEAMS S5).
-        // FX-20: WITHOUT the destination grant's binding EXPECTATION — the
-        // `AWS_*` credential in this pod is the delete-capable one, and its
-        // expectation is the policy's own (below).
+        // The destination's addressing, complete and explicit, without the
+        // destination grant's binding expectation: the `AWS_*` credential in
+        // this pod is the delete-capable one, whose expectation is the
+        // policy's own (below).
         let dest_env = resolved.job_env();
         env_literal.extend(
             dest_env
@@ -2586,8 +2328,8 @@ impl Pass<'_> {
         env_literal.sort_by(|a, b| a.0.cmp(&b.0));
         env_literal.dedup_by(|a, b| a.0 == b.0);
 
-        // THE DELETE-CAPABLE CREDENTIAL, by `secretKeyRef` ONLY. It never
-        // appears in the Job spec, in a ConfigMap, in the status or in a log.
+        // The delete-capable credential, by `secretKeyRef` only: it never
+        // appears in the Job spec, a ConfigMap, the status or a log.
         let mut env_from_secret: Vec<crate::job::EnvFromSecret> = Vec::new();
         if let Some(secret) = enforcement.map(|e| e.credential_secret_ref.name.clone()) {
             env_from_secret.push(crate::job::EnvFromSecret {
@@ -2602,9 +2344,9 @@ impl Pass<'_> {
                 optional: false,
                 key: crate::crds::backup_destination::DEFAULT_SECRET_ACCESS_KEY_KEY.to_string(),
             });
-            // FX-20: AND ITS BINDING, optional, beside it. The worker refuses
-            // a delete key whose Secret is not bound to this policy, its
-            // destination's route and its scope before it builds a handle.
+            // And its optional binding beside it: the worker refuses a delete
+            // key whose Secret is not bound to this policy, its destination's
+            // route and its scope before it builds a handle.
             env_from_secret.push(crate::job::EnvFromSecret {
                 name: logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV.to_string(),
                 secret_name: secret,
@@ -2617,36 +2359,25 @@ impl Pass<'_> {
                 .from_secret
                 .iter()
                 .filter(|e| {
-                    // THE DESTINATION'S ARCHIVE CREDENTIAL IS DROPPED HERE ON
-                    // PURPOSE, AND ALL THREE VARIABLES OF IT. `AWS_ACCESS_KEY_ID`
-                    // in a retention pod is the DELETE-capable grant and nothing
-                    // else; letting the destination's read grant land on the
-                    // same variable would silently decide which of the two the
-                    // worker deletes with.
-                    //
-                    // `AWS_SESSION_TOKEN` USED TO SURVIVE THIS FILTER, which
-                    // was the same defect one variable along: an `archiveRead`
-                    // grant declaring `sessionTokenKey` put the READER's token
-                    // in the pod beside the DELETER's id and secret, and a
-                    // mismatched triple is not a credential — every call would
-                    // have failed `InvalidAccessKeyId`/`SignatureDoesNotMatch`
-                    // with nothing in the message about where the third part
-                    // came from. The three names are one credential and they
-                    // are dropped as one.
+                    // The destination's archive credential is dropped here, all
+                    // three variables of it: `AWS_ACCESS_KEY_ID` in a retention
+                    // pod is the delete-capable grant and nothing else. A
+                    // reader's `AWS_SESSION_TOKEN` beside the deleter's id and
+                    // secret would be a mismatched triple, failing every call
+                    // with no hint where the third part came from.
                     e.name != destination::AWS_ACCESS_KEY_ID_ENV
                         && e.name != destination::AWS_SECRET_ACCESS_KEY_ENV
                         && e.name != destination::AWS_SESSION_TOKEN_ENV
-                        // FX-20: and the destination grant's binding with
-                        // them — its Secret is not the one in this pod.
+                        // And the destination grant's binding with them: its
+                        // Secret is not the one in this pod.
                         && e.name
                             != logweir_core::credential_binding::ARCHIVE_CREDENTIAL_BINDING_ENV
                 })
                 .cloned(),
         );
         // The `evidenceWrite` grant, for the record under `logweir/`: the
-        // destination's own, resolved under its own role, checked by
-        // `evidence_credential` before this pass spent anything, and NEVER
-        // either of the other two principals reused.
+        // destination's own, checked by `evidence_credential` before this pass
+        // spent anything, and never one of the other two principals reused.
         env_from_secret.extend(evidence_env.iter().cloned());
 
         let mut job = crate::job::build(&crate::job::RunnerJobSpec {
@@ -2674,12 +2405,12 @@ impl Pass<'_> {
             plan_config_map: None,
             image: self.ctx.runner_image.image.clone(),
             image_pull_policy: self.ctx.runner_image.image_pull_policy.clone(),
-            // `RetentionPolicy` states no resources for its Job (FX-2's sweep).
+            // `RetentionPolicy` states no resources for its Job.
             resources: None,
         });
-        // THE BINARY. `job::build` renders the runner's argv against the image's
-        // default entrypoint; retention runs a DIFFERENT executable in the same
-        // image, so the command is set here and nowhere else.
+        // The binary: `job::build` renders the runner's argv against the
+        // image's default entrypoint, and retention runs a different
+        // executable in the same image.
         if let Some(spec) = job.spec.as_mut() {
             if let Some(pod) = spec.template.spec.as_mut() {
                 for container in &mut pod.containers {
@@ -2747,9 +2478,9 @@ impl Pass<'_> {
                 message: "spec.mode is Enforce and spec.enforcement is absent".to_string(),
             };
         };
-        // NO RUN FROM A PARTIAL OR EXPIRED VIEW (FX-40). Points outside the
-        // view are never evaluated, so a set shared across its edge, or a
-        // point a stale view still lists, cannot be proven safe to delete.
+        // No run from a partial or expired view: points outside it are never
+        // evaluated, so a set shared across its edge, or a point a stale view
+        // still lists, cannot be proven safe to delete.
         if let Some((reason, message)) = view_refusal {
             return EnforcementDecision {
                 start: false,
@@ -2758,12 +2489,10 @@ impl Pass<'_> {
                 message,
             };
         }
-        // THREE CONSECUTIVE FAILURES STOP SCHEDULING UNTIL THE SPEC CHANGES.
-        // Both halves live in `budget_before`: it returns 0 when
-        // `metadata.generation != status.observedGeneration`, which is the only
-        // thing on the object that says the spec changed. One rule, read here,
-        // in `harvest` and in `publish_evaluation`, so the condition a console
-        // reads and the decision this pass makes cannot disagree.
+        // Three consecutive failures stop scheduling until the spec changes.
+        // `budget_before` returns 0 when the generation moved; one rule, read
+        // here, in `harvest` and in `publish_evaluation`, so the condition and
+        // the decision cannot disagree.
         let failures = self.budget_before();
         if self.budget_spent() && !self.reprobe_due() {
             return EnforcementDecision {
@@ -2777,15 +2506,11 @@ impl Pass<'_> {
             };
         }
         if evaluation.candidates.is_empty() {
-            // AN EMPTY PLAN BESIDE HELD-BACK POINTS IS NOT "NOTHING TO REMOVE"
-            // (FX-22 review L1). The rules would remove `truncated_by_cap`
-            // points and the ceiling left every one of them out, which only
-            // happens when each is in a group larger than the ceiling (a
-            // backup set, or sets linked by an object they share). This
-            // policy will delete nothing, on any firing, until someone raises
-            // the ceiling, and `Enforced` is where an operator looks to learn
-            // why nothing is deleted. Text and reason only: the plan is the
-            // evaluation's, and it is empty either way.
+            // An empty plan beside held-back points is not "nothing to remove":
+            // every point the rules would remove is in a group (a backup set,
+            // or sets linked by a shared object) larger than the ceiling, so
+            // nothing is deleted until someone raises it, and `Enforced` is
+            // where an operator looks to learn why.
             if evaluation.truncated_by_cap > 0 {
                 return EnforcementDecision {
                     start: false,
@@ -2815,17 +2540,14 @@ impl Pass<'_> {
                     .to_string(),
             };
         }
-        // THE CADENCE, WHICH IS ALSO THE RUN ID'S SLOT (review `d3w9` M5/Q1).
-        // An unparseable expression is a refusal: a retention policy whose cron
-        // this build cannot read must not fall back to "every reconcile".
+        // The cadence, which is also the run id's slot. An unparseable
+        // expression is a refusal, never "every reconcile".
         let slot = match self.enforcement_slot() {
-            // A SLOT OLDER THAN THE PLAN WINDOW IS NOT ACTED ON. `latest_due_slot`
-            // answers "the most recent firing at or before now", which for any
-            // cron is almost always Some — a controller that started nine months
-            // after a yearly schedule's firing would otherwise treat it as due.
-            // The bound is `planMaxAgeSeconds`, deliberately the same one that
-            // bounds an approval: a slot no approval could still be valid for is
-            // a slot to wait past, not to catch up on.
+            // A slot older than the plan window is not acted on:
+            // `latest_due_slot` is almost always `Some`, so a controller started
+            // nine months after a yearly firing would otherwise treat it as
+            // due. The bound is `planMaxAgeSeconds`, the one that bounds an
+            // approval.
             Ok(Some(slot))
                 if self.ctx.now - slot
                     <= chrono::Duration::seconds(i64::from(enforcement.plan_max_age_seconds)) =>
@@ -2861,11 +2583,9 @@ impl Pass<'_> {
                 }
             }
         };
-        // ONE RUN PER SLOT. The run id is a pure function of the slot, so a
-        // second pass inside one slot recomputes the same name and gets 409
-        // `AlreadyExists` — but a pass that has already RECORDED a run for this
-        // slot should not even try, or every reconcile would POST a Job it
-        // knows is there.
+        // One run per slot: a second pass inside a slot would get 409 anyway,
+        // but a pass that already recorded a run for this slot should not POST
+        // a Job it knows is there.
         let last_run = self
             .policy
             .status
@@ -2909,11 +2629,8 @@ impl Pass<'_> {
                 ),
             };
         }
-        // THE AGE GATE, WHICH THE FIRST LANDING DECLARED AND NEVER ENFORCED
-        // (review `d3w9` H4). `planMaxAgeSeconds` is one of D3 §6.5's four
-        // gates and the CRD bounds it 300..86400 as if it meant something;
-        // `REASON_PLAN_EXPIRED` sat in the closed reason set with nothing
-        // emitting it.
+        // The age gate: `planMaxAgeSeconds` (300..86400 in the CRD) is one of
+        // the four gates.
         if window.expired {
             return EnforcementDecision {
                 start: false,
@@ -2935,10 +2652,6 @@ impl Pass<'_> {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Status writes
-    // -----------------------------------------------------------------------
-
     async fn publish_evaluation(
         &self,
         evaluation: &plan::Evaluation,
@@ -2959,24 +2672,17 @@ impl Pass<'_> {
                         DateTime::from_timestamp_millis(c.recovery_point_at_ms)
                             .unwrap_or(self.ctx.now),
                     ),
-                    // ABSENT WHEN THIS BUILD CANNOT SAY (review `d3w9` M1).
-                    // `skip_serializing_if` on the CRD field makes `null` and
-                    // absent the same thing on the wire; absent is D3 §12's
-                    // "not observed", and it is the honest answer while the
-                    // view carries no segment keys.
+                    // Absent when this build cannot say: the view carries no
+                    // segment keys, and absent is "not observed".
                     "objects": c.objects(),
                     "bytes": c.bytes,
                 });
-                // AND ABSENT MEANS NO KEY AT ALL, NOT `null` — FX-29's class
-                // sweep. An array is replaced wholesale by a merge patch, so a
-                // `null` member inside an element is not a deletion: it is
-                // STORED as `null` (the CRD marks `objects` and `bytes`
-                // `nullable: true`). But this controller reads its status back
-                // TYPED, where `null` and absent are the same `None` and
-                // re-serialise as no key — so the no-op skip compared a patch
-                // carrying `null`s with a stored status carrying none and saw
-                // a change on every pass, and the status was written on every
-                // pass even when nothing else had moved.
+                // And absent means no key at all, not `null`: inside a replaced
+                // array a `null` member is stored (`nullable: true`), but the
+                // controller reads its status back typed, where `null` and
+                // absent are both `None`. A patch carrying `null`s would never
+                // compare equal to the stored status, and would be sent on every
+                // pass.
                 if let Some(fields) = candidate.as_object_mut() {
                     fields.retain(|_, value| !value.is_null());
                 }
@@ -2993,35 +2699,22 @@ impl Pass<'_> {
             .iter()
             .map(|s| json!({"pointId": s.point_id, "reason": s.reason.as_str()}))
             .collect();
-        // `sharedSegments` REPORTS WHAT IS TRUE (review `d3w9` H1). The
-        // guarantee is "a segment two points share is not removed with one of
-        // them", and `evaluate` can only make it when a point carries its
-        // segment keys. `point_facts` cannot supply them — the catalog view
-        // entry has no segment field at all — so on every view this build reads
-        // the honest answer is `NotEnforced`, and the first landing wrote
-        // `LogweirEnforced` unconditionally. That is the withdrawn-guarantee
-        // defect class on a status field.
+        // `sharedSegments` reports what is true. The guarantee is "a segment
+        // two points share is not removed with one of them", and `evaluate`
+        // can only make it when a point carries its segment keys, which no
+        // catalog view entry does; so it is `NotEnforced`. Derived from the
+        // points rather than a constant, so it changes by itself the day a
+        // view carries segment keys.
         //
-        // Derived from the POINTS rather than from a constant, so the day a
-        // view entry carries its segment keys the value changes with no other
-        // edit, and a test that goes through `point_facts` is what observes it.
-        //
-        // SHARED SETS ARE PROTECTED NOW, AND THIS STILL SAYS `NotEnforced`
-        // (defect SHARED-SET-RETENTION). `evaluate` step 4 protects every
-        // candidate that names the same backup set as a retained point, from
-        // the `backupId` every view entry carries, and that is the whole of
-        // the sharing the engine's own layout produces (every key under
-        // `{backup_id}/`). What it cannot see is a manifest naming a segment in
-        // ANOTHER set's directory, and the guarantee as worded — "a segment
-        // two points share is not removed with one of them" — covers that
-        // case. `LogweirEnforced` would claim it; the Evaluated message says
-        // exactly which half is in force instead.
+        // Points naming one backup set are protected together (the engine's
+        // own layout puts every key under `{backup_id}/`); what cannot be seen
+        // is a manifest naming a segment in another set's directory. The
+        // Evaluated message says exactly which half is in force.
         let segments_visible = bounds.segments_visible;
-        // FX-20c (the class sweep): a binding refusal the newest run reached
-        // STANDS while the decision would enforce again — on the condition AND
-        // on the two fields the console reads (review M-1): only a human
-        // rebinding the Secret clears it, so it is a standing state, as
-        // [`Self::publish_standing_refusal`] publishes one.
+        // A binding refusal the newest run reached stands while the decision
+        // would enforce again, on the condition and on the two fields the
+        // console reads: only a human rebinding the Secret clears it
+        // ([`Self::publish_standing_refusal`]).
         let held = if decision.start {
             self.held_binding_refusal()
         } else {
@@ -3033,11 +2726,9 @@ impl Pass<'_> {
             decision.enforcement
         };
         let guarantees = json!({
-            // NOT WHILE THE RETRY BUDGET IS SPENT (review M4). A degraded policy
-            // schedules no run — and one degraded by `VersionedBucket` can never
-            // delete at all — so "age expiry is enforced by Logweir" is not true
-            // of it, whatever `spec.mode` asks for. `EnforcementDegraded` says
-            // why; this field must not contradict it.
+            // Not while the retry budget is spent: a degraded policy schedules
+            // no run, so "age expiry is enforced by Logweir" would contradict
+            // `EnforcementDegraded`, whatever `spec.mode` asks for.
             "ageExpiry": if enforcement == ENFORCEMENT_LOGWEIR_WORKER
                 && !self.budget_spent()
             {
@@ -3052,9 +2743,9 @@ impl Pass<'_> {
             } else {
                 GUARANTEE_NOT_ENFORCED
             },
-            // NOT `LogweirEnforced`: `object_store` exposes no WORM readback, so
-            // "legal hold respected" means "a provider refusal is authoritative
-            // and recorded", never "Logweir knows the hold exists" (D3 §16).
+            // Not `LogweirEnforced`: `object_store` exposes no WORM readback,
+            // so "legal hold respected" means "a provider refusal is
+            // authoritative and recorded", never "Logweir knows the hold exists".
             "legalHold": GUARANTEE_PROVIDER_UNVERIFIED,
         });
         let conditions = self.conditions(&[
@@ -3076,17 +2767,14 @@ impl Pass<'_> {
                     evaluation.candidates.len(),
                     evaluation.protected.len(),
                     evaluation.skipped.len(),
-                    // WHAT THE TWO BOUNDS LEFT OUT, SAID ON THE OBJECT (FX-22).
-                    // "N kept, 50 candidate(s)" read as the whole of it while
-                    // the per-run ceiling held back 311 more, and while the
-                    // catalog's view was a window over a larger archive.
+                    // What the two bounds left out, said on the object: the
+                    // per-run ceiling's held-back points and a windowed view.
                     bounds.held_back_sentence(evaluation),
                     bounds.view_sentence(&self.policy.spec.catalog_ref.name),
                     if segments_visible {
                         ""
                     } else {
-                        // SAID ON THE OBJECT, not only in a Rust doc comment
-                        // (review `d3w9` H1 and M1).
+                        // Said on the object, not only in a doc comment.
                         " This catalog view carries no segment keys. Points that name one \
                          backup set are protected together (SharedSegment, matched on \
                          backupId), but a segment one set's manifest names under another \
@@ -3101,7 +2789,7 @@ impl Pass<'_> {
                              `logweir-retention --dry-run` enumerates the real count. \
                              {} point(s) would be removed{}.",
                             evaluation.candidates.len(),
-                            // NOT "N would be removed" ALONE when the ceiling
+                            // Not "N would be removed" alone when the ceiling
                             // cut the plan: N is this plan, not the rules.
                             if evaluation.truncated_by_cap > 0 {
                                 " by this plan"
@@ -3112,14 +2800,10 @@ impl Pass<'_> {
                     }
                 ),
             ),
-            // FX-20c (the class sweep): A BINDING REFUSAL IS NOT UN-SAID BY
-            // THE NEXT DECISION. After a run refused its credential
-            // (`Enforced=False/CredentialBindingMismatch`), the following
-            // evaluation pass in the same slot decided `start` again and
-            // published `Enforced=True` (`UnattendedDeletionEnabled`,
-            // `RunInProgress`) while every run of the policy was refused. The
+            // A binding refusal is not un-said by the next decision: the
             // controller reads no Secret, so only a later run can see a
-            // rebound one; until one is harvested, the refusal stands.
+            // rebound one, and until one is harvested the refusal stands
+            // rather than `Enforced=True` over runs that are all refused.
             match held {
                 Some(message) => (
                     CONDITION_ENFORCED,
@@ -3140,14 +2824,10 @@ impl Pass<'_> {
                 REASON_NO_CONFLICT,
                 "no bucket lifecycle rule is declared for this destination".to_string(),
             ),
-            // `EnforcementDegraded` IS PUBLISHED BY THE PASS THAT ACTS ON IT,
-            // not only by the harvest that last incremented the count. The
-            // evaluation is where the budget is read and where scheduling is
-            // stopped, so it is where the object has to say so — otherwise the
-            // one thing an operator can see (a policy that quietly creates no
-            // Jobs) has no explanation anywhere, which is what `d387f87`
-            // shipped. `budget_spent()` is the same function the decision above
-            // used, so the words and the behaviour are one thing.
+            // `EnforcementDegraded` is published by the pass that acts on it:
+            // the evaluation is where scheduling stops, so it is where the
+            // object must say so, from the same `budget_spent()` the decision
+            // used.
             (
                 CONDITION_DEGRADED,
                 if self.budget_spent() { "True" } else { "False" },
@@ -3174,30 +2854,23 @@ impl Pass<'_> {
                 },
             ),
         ]);
-        // `lastEvaluation.at` IS THE EVALUATION THAT REACHED THESE FINDINGS —
-        // FX-29's class sweep. It was `now` on every evaluation, and this
-        // reconciler's own status write wakes it (`Controller::new` watches the
-        // policy), so every `Report`/`Enforce` policy whose catalog resolved
-        // wrote its status on every pass, for ever. It is kept while the rest
-        // of the block — the counts, the candidates, the plan and its expiry —
-        // comes out the same, and moves with the first evaluation that finds
-        // something different (`keep_instant_unless_changed`, compared on what
-        // the API server will store).
+        // `lastEvaluation.at` is the evaluation that reached these findings:
+        // kept while the rest of the block comes out the same, and moved by
+        // the first evaluation that finds something different
+        // (`keep_instant_unless_changed`, compared on what the API server will
+        // store). A fresh `now` on every pass would make every pass a write
+        // that wakes the next pass.
         //
-        // THE FOUR COUNTS CLOSE (FX-22): `pointsEvaluated` = `keptCount` +
+        // The four counts close: `pointsEvaluated` = `keptCount` +
         // `candidateCount` + `truncatedByCap` + the points in `skipped`. A
-        // point the per-run ceiling held back is in `truncatedByCap` and in
-        // NO list: it is not kept, and it is not in this plan. `0` is written
-        // for "nothing was held back" — an answer, where an absent member is
-        // "an older controller did not say" (D3 §12) — and `viewIncomplete`
-        // is `null`, which a merge patch reads as "remove", when the catalog
-        // did not say whether its view holds every point.
+        // point the per-run ceiling held back is in `truncatedByCap` and in no
+        // list. `0` means "nothing was held back"; an absent member means an
+        // older controller did not say; `viewIncomplete` is `null` (a merge
+        // patch's "remove") when the catalog did not say.
         //
-        // EACH LIST IS CUT AT THE CRD'S `maxItems` AND ITS COUNT WRITTEN BESIDE
-        // IT (FX-39). A list past the bound makes the API server refuse the
-        // whole status write (`422 Invalid`), conditions included, and since
-        // the evaluation is published before a run starts, the policy would
-        // stop enforcing with nothing on the object but its old status.
+        // Each list is cut at the CRD's `maxItems` with its count beside it: a
+        // list past the bound makes the API server refuse the whole status
+        // write, conditions included.
         let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
         let cut = |list: &[Value]| list[..list.len().min(EVALUATION_LIST_BOUND)].to_vec();
         let kept = &evaluation.kept[..evaluation.kept.len().min(EVALUATION_LIST_BOUND)];
@@ -3216,33 +2889,20 @@ impl Pass<'_> {
             "protected": cut(&protected),
             "skipped": cut(&skipped),
             "planSha256": plan_sha256,
-            // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
-            // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
-            // written by `start_run` and by nothing else, so an evaluation
-            // that rendered a NEW plan without starting a run left the ref
-            // naming the previous run's `ConfigMap` while `planSha256`
-            // beside it named the new plan's bytes: two fields of one block
-            // describing two different plans, and the one an administrator
-            // reads to preview what would be deleted was the stale one.
-            //
-            // The name is a pure function of the policy UID and the digest
-            // (`plan::plan_config_map_name`), so it is exactly as true as
-            // the digest it sits next to — including before any run
-            // materializes the object, which is the case this fixes.
+            // The plan this evaluation rendered, named beside its digest. The
+            // name is a pure function of the policy UID and the digest
+            // (`plan::plan_config_map_name`), so it is as true as the digest,
+            // even before any run materializes the object; a ref written only
+            // by `start_run` would name the previous run's plan.
             "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
             "planExpiresAt": window.expires_at,
         });
-        // A MEMBER THE STORED BLOCK DOES NOT CARRY NEVER MOVES THE INSTANT
-        // (FX-22, and FX-29's rule kept under version skew). The members
-        // `ADDITIVE_EVALUATION_FIELDS` lists are new. Over a CRD that predates them the API server PRUNES
-        // them from every write, so the stored block never has them, "the
-        // block changed" would be true on every pass, `at` would move on
-        // every pass, and that write — a real one, the instant differs — is
-        // the watch event that starts the next pass: FX-29's hot loop, for
-        // every policy, for as long as the controller is ahead of its CRD.
-        // They are compared as already stored. The patch still carries them,
-        // so a CRD that knows them stores them once; one that does not prunes
-        // them and the write changes nothing.
+        // A member the stored block does not carry never moves the instant.
+        // Over a CRD that predates `ADDITIVE_EVALUATION_FIELDS` the API server
+        // prunes them, so the stored block never has them and "the block
+        // changed" would be true on every pass: a hot loop for as long as the
+        // controller is ahead of its CRD. They are compared as stored; the
+        // patch still carries them, so a CRD that knows them stores them once.
         let stored = stored_for_instant(
             self.observed()
                 .as_ref()
@@ -3254,9 +2914,8 @@ impl Pass<'_> {
             "enforcement": enforcement,
             "guarantees": guarantees,
             "lastEvaluation": last_evaluation,
-            // FX-20: what `spec.enforcement.credentialSecretRef` must carry
-            // under `logweir-binding`; `null` clears it when enforcement is
-            // removed.
+            // What `spec.enforcement.credentialSecretRef` must carry under
+            // `logweir-binding`; `null` clears it when enforcement is removed.
             "credentialBinding": credential_binding,
             "conditions": conditions,
         });
@@ -3264,11 +2923,10 @@ impl Pass<'_> {
         self.patch_status(status).await
     }
 
-    /// FX-20: the binding the delete-capable credential's Secret must carry —
-    /// this policy's UID, the archive route of the destination it resolves to
-    /// NOW, and its scope prefix
-    /// ([`logweir_core::credential_binding::retention_binding`]). A destination
-    /// deleted and re-created under the same name at another endpoint changes
+    /// The binding the delete-capable credential's Secret must carry: this
+    /// policy's UID, the archive route of the destination it resolves to now, and
+    /// its scope prefix ([`logweir_core::credential_binding::retention_binding`]).
+    /// A destination re-created under the same name at another endpoint changes
     /// it, so the delete key never follows the name to a new route.
     fn retention_credential_binding(&self, resolved: &ResolvedDestination) -> String {
         logweir_core::credential_binding::retention_binding(
@@ -3292,38 +2950,22 @@ impl Pass<'_> {
         Ok(())
     }
 
-    /// [`Self::publish_enforcement_refusal`] for a refusal that is a STANDING
-    /// configuration state and not a per-pass race — review finding M1.
-    ///
-    /// # What the difference is, on the object
+    /// [`Self::publish_enforcement_refusal`] for a refusal that is a standing
+    /// configuration state, not a per-pass race.
     ///
     /// `publish_evaluation` has already written `status.enforcement` as
-    /// `decision.enforcement` — `LogweirWorker` for an approved `Enforce`
-    /// policy — and `status.guarantees.ageExpiry` is keyed off exactly that
-    /// value, so it is `LogweirEnforced`. The console reads those two fields
-    /// and not the condition reason: `ui/render.js` renders `LogweirWorker` as
-    /// *"an isolated Logweir retention worker deletes archive objects under
-    /// this policy"* and `LogweirEnforced` as *"enforced by Logweir"*. On a
-    /// policy that will not create a Job until a human edits the
-    /// `BackupDestination`, both sentences are false.
+    /// `LogweirWorker` and `status.guarantees.ageExpiry` as `LogweirEnforced`, and
+    /// the console reads those two fields ("an isolated Logweir retention worker
+    /// deletes archive objects", "enforced by Logweir"), not the condition reason.
+    /// On a policy that will create no Job until a human edits the destination,
+    /// both would be false. `ActiveRestore`, `LeaseNotHeld`, `RunNotRecorded` and
+    /// `PlanConfigMapConflict` clear on the next reconcile by themselves and keep
+    /// the plain helper; this case follows [`Self::publish_refusal`], which writes
+    /// `ENFORCEMENT_RECOMMENDATION_ONLY`.
     ///
-    /// `ActiveRestore`, `LeaseNotHeld`, `RunNotRecorded` and
-    /// `PlanConfigMapConflict` are per-pass races that clear on the next
-    /// reconcile with no human action, so `LogweirWorker` stays true of those
-    /// policies and they keep using the plain helper above. The precedent for
-    /// THIS case is [`Self::publish_refusal`], which every other
-    /// destination-resolution failure goes through and which writes
-    /// `ENFORCEMENT_RECOMMENDATION_ONLY`; `ui/render.js` states the rule
-    /// outright — *"A policy in `mode: Enforce` whose destination will not
-    /// resolve reports `RecommendationOnly`, and the panel must say what is
-    /// happening rather than what was requested."*
-    ///
-    /// `guarantees` is patched OBJECT-WISE and names one key: RFC 7386 merges
-    /// an object member by member, so `minUsablePoints`,
-    /// `activeRestoreProtection`, `sharedSegments` and `legalHold` survive
-    /// untouched. Only the one guarantee this refusal falsifies moves.
-    /// `conditions`, an ARRAY, still goes through [`Self::conditions`]'s full
-    /// upsert for the reason recorded there.
+    /// `guarantees` is patched object-wise, naming one key (RFC 7386 merges
+    /// object members), so the other guarantees survive. `conditions`, an array,
+    /// goes through [`Self::conditions`]'s full upsert.
     async fn publish_standing_refusal(
         &self,
         reason: &'static str,
@@ -3341,9 +2983,9 @@ impl Pass<'_> {
     }
 
     async fn publish_view_failure(&self, message: &str) -> Result<Outcome, ReconcileError> {
-        // A RETENTION EVALUATION FAILURE NEVER BLOCKS A BACKUP. It is a
-        // different controller, a different object and a different condition;
-        // `Evaluated=False` is the whole of it, and no `Backup` is touched.
+        // A retention evaluation failure never blocks a backup: a different
+        // controller, object and condition. `Evaluated=False` is the whole of
+        // it.
         let conditions = self.conditions(&[
             (
                 CONDITION_READY,
@@ -3378,9 +3020,9 @@ impl Pass<'_> {
         })
     }
 
-    /// The controller's own `Backup` verdicts could not all be read. NOT a
-    /// catalog failure, so it does not say one (review L2): `Ready` names the
-    /// Backup side, `Evaluated` has its own reason, and nothing is planned.
+    /// The controller's own `Backup` verdicts could not all be read. Not a
+    /// catalog failure, so it does not say one: `Ready` names the Backup side,
+    /// `Evaluated` has its own reason, and nothing is planned.
     async fn publish_verdicts_failure(
         &self,
         ready_reason: &'static str,
@@ -3464,34 +3106,19 @@ impl Pass<'_> {
         Ok(refused(reason))
     }
 
-    /// The FULL condition array, with `rows` upserted into it — never `rows`
+    /// The full condition array, with `rows` upserted into it, never `rows`
     /// alone.
     ///
-    /// **`conditions` IS AN ARRAY, AND A MERGE PATCH REPLACES AN ARRAY WHOLE**
-    /// (RFC 7386). Returning only the rows a call site happened to name
-    /// therefore DELETED every condition it did not name, and that is how
-    /// `EnforcementDegraded` came to be missing from a policy that had spent
-    /// its retry budget: `harvest` published it, the very next pass published
-    /// `publish_evaluation`'s four conditions, and the array replace took it
-    /// off the object. Live at `d387f87`: `consecutiveRunFailures 3`,
-    /// scheduling correctly stopped, and `EnforcementDegraded` **absent** — not
-    /// `False`, not present at all — so nothing a console could read said the
-    /// policy had stopped or why.
+    /// A merge patch replaces an array whole, so returning only the rows a call
+    /// site named would delete every other condition: `EnforcementDegraded`
+    /// would vanish on the pass after `harvest` published it, leaving nothing
+    /// to say the policy had stopped, and a one-row refusal would wipe
+    /// `Ready`, `Evaluated` and `ExternalLifecycleConflict` mid-pass.
     ///
-    /// It was never only that condition. A pass that evaluates and is then
-    /// refused calls `publish_enforcement_refusal`, which names ONE condition;
-    /// before this change that single-element array replaced `Ready`,
-    /// `Evaluated` and `ExternalLifecycleConflict` too, mid-pass.
-    ///
-    /// **The base is the status as THIS PASS believes it now stands**, not the
-    /// object the watcher delivered: a pass patches more than once, and the
-    /// second patch has to preserve what the first one wrote. `observed()` is
-    /// exactly that cursor, and the watcher's copy is only the fallback for the
-    /// first write of a pass.
-    ///
-    /// Order is stable — existing conditions keep their positions, new types
-    /// are appended — so a diff of two status writes shows what changed rather
-    /// than a reshuffle.
+    /// The base is the status as this pass believes it now stands
+    /// (`observed()`): a pass patches more than once and the second patch must
+    /// keep what the first wrote. Order is stable (existing conditions keep
+    /// their positions, new types are appended), so a diff shows what changed.
     fn conditions(&self, rows: &[(&str, &str, &str, String)]) -> Vec<Value> {
         let existing = self.existing_conditions();
         let mut out = existing.clone();
@@ -3507,11 +3134,11 @@ impl Pass<'_> {
             .collect()
     }
 
-    /// FX-20c: the stored `Enforced=False/CredentialBindingMismatch` message,
-    /// when the newest run is FINISHED, exited 3, and is the run that
-    /// condition was written for — the refusal an evaluation pass must not
-    /// overwrite with a decision to enforce. `None` once a later run has
-    /// started (its `finishedAt` is cleared) or finished otherwise.
+    /// The stored `Enforced=False/CredentialBindingMismatch` message, when the
+    /// newest run is finished, exited 3, and is the run that condition was
+    /// written for: the refusal an evaluation pass must not overwrite with a
+    /// decision to enforce. `None` once a later run has started (its
+    /// `finishedAt` is cleared) or finished otherwise.
     fn held_binding_refusal(&self) -> Option<String> {
         let refused = self.existing_conditions().into_iter().find(|c| {
             c.r#type == CONDITION_ENFORCED
@@ -3549,10 +3176,9 @@ impl Pass<'_> {
             .unwrap_or_default()
     }
 
-    /// One condition, carrying the `lastTransitionTime` the `metav1.Condition`
-    /// contract says it should — `merge_condition` keeps the existing one when
-    /// neither `status` nor `reason` moved, so a condition that has not
-    /// transitioned does not look like it has on every pass.
+    /// One condition, with the `metav1.Condition` `lastTransitionTime`
+    /// contract: `merge_condition` keeps the existing one when neither
+    /// `status` nor `reason` moved.
     fn one_condition(
         &self,
         existing: &[Condition],
@@ -3572,31 +3198,21 @@ impl Pass<'_> {
         merge_condition(existing.iter().find(|c| c.r#type == r#type), next)
     }
 
-    /// Adopt `metadata.generation` onto the status — **and, when it advances,
-    /// release the consecutive-failure budget in the SAME patch.**
+    /// Adopt `metadata.generation` onto the status and, when it advances,
+    /// release the consecutive-failure budget in the same patch.
     ///
-    /// EVERY WRITER THAT SETS `observedGeneration` GOES THROUGH HERE, and the
-    /// reason is a hole this branch's first landing left (review finding G1).
-    /// Seven writers adopt the generation; only the evaluation released the
-    /// budget. `evaluate()` returns through the refusal writers **before** the
-    /// evaluation is ever reached — an unreadable catalog view, a refused plan,
-    /// an unusable destination, a declared external lifecycle — so a policy
-    /// degraded at the ceiling, whose operator edits the spec, and whose view
-    /// is still unreadable, had its edit CONSUMED: `observedGeneration` moved,
-    /// `consecutiveRunFailures` stayed at 3, `spec_changed()` went false, and
-    /// the budget was spent again. The runs were failing for a reason, so a
-    /// refusal co-occurring with the edit is the likely case, not an exotic
-    /// one. Every further edit would be eaten the same way.
+    /// Every writer that sets `observedGeneration` goes through here. Many
+    /// passes return through a refusal writer before the evaluation is reached
+    /// (an unreadable view, a refused plan, an unusable destination, a declared
+    /// external lifecycle), and the runs were failing for a reason, so a
+    /// refusal co-occurring with the operator's spec edit is the likely case.
+    /// If those writers adopted the generation without releasing the budget,
+    /// the edit would be consumed and the budget spent again. Adopting and
+    /// releasing are the same event and the same patch, so a 409 cannot split
+    /// them.
     ///
-    /// ONE RULE, STATED ONCE — the argument `budget_before()` already makes,
-    /// applied to the write side. Adopting the generation and releasing the
-    /// budget are the same event and are therefore the same patch: splitting
-    /// them would let a 409 between the two leave the generation new and the
-    /// count at its ceiling, which is the defect with an extra step.
-    ///
-    /// The `EnforcementDegraded` condition is cleared here too, upserted into
-    /// whatever conditions the caller has already built, so an operator never
-    /// sees `EnforcementDegraded=True` beside `consecutiveRunFailures: 0`.
+    /// The `EnforcementDegraded` condition is cleared here too, so an operator
+    /// never sees `EnforcementDegraded=True` beside `consecutiveRunFailures: 0`.
     fn adopt_generation(&self, status: &mut Value) {
         let object = status
             .as_object_mut()
@@ -3605,31 +3221,23 @@ impl Pass<'_> {
         if !self.spec_changed() {
             return;
         }
-        // THE HELPER FILLS IN WHAT THE CALLER DID NOT SAY, and never overrides
-        // it. `harvest` writes the count this run produced — and `budget_before()`
-        // has already zeroed the history for it, so a run that failed under the
-        // NEW spec is one failure and not none; overwriting that with the
-        // release's `0` would lose the run. Same for the condition: a writer
-        // that has published its own `EnforcementDegraded` has more to say
-        // about it than "released" does.
+        // The helper fills in what the caller did not say and never overrides
+        // it: `harvest` writes the count this run produced (already released by
+        // `budget_before()`, so a failure under the new spec is one failure),
+        // and a writer that published its own `EnforcementDegraded` has more to
+        // say than "released".
         //
-        // AN EXPLICIT `0`, NEVER A DELETION: "no consecutive failures" is an
-        // answer, and a console showing an empty field would be showing an
-        // absence where there is one. And inserted only on the pass that adopts
-        // a NEW generation — in an RFC 7386 merge a key carried on every pass
-        // would overwrite a count the harvests are keeping.
+        // An explicit `0`, never a deletion: "no consecutive failures" is an
+        // answer. Inserted only on the pass that adopts a new generation;
+        // carried on every pass, it would overwrite the harvests' count.
         object
             .entry("consecutiveRunFailures".to_string())
             .or_insert_with(|| json!(0));
-        // "THE CALLER SAID IT" MEANS THIS PASS, NOT THE OBJECT'S HISTORY.
-        // `conditions()` preserves every condition the object already carries,
-        // so the array always holds an `EnforcementDegraded` once one has ever
-        // been published — checking for its mere presence would make this arm
-        // dead. A row a caller WROTE this pass carries this pass's
-        // `observedGeneration`; a row merely carried forward still carries the
-        // old one. That is the difference, and it is the difference that makes
-        // `harvest`'s freshly computed verdict win while a stale `True` from
-        // before the edit is replaced.
+        // "The caller said it" means this pass: `conditions()` preserves every
+        // condition the object carries, so presence alone proves nothing. A row
+        // written this pass carries this pass's `observedGeneration`; a row
+        // carried forward has the old one. So `harvest`'s fresh verdict wins,
+        // and a stale `True` from before the edit is replaced.
         let written_this_pass = object
             .get("conditions")
             .and_then(Value::as_array)
@@ -3662,8 +3270,8 @@ impl Pass<'_> {
                 Some(at) => conditions[at] = released,
                 None => conditions.push(released),
             },
-            // A writer that carries no conditions at all still gets the release
-            // one, built over the full existing array so nothing is dropped.
+            // A writer that carries no conditions still gets the release one,
+            // built over the full existing array so nothing is dropped.
             None => {
                 object.insert(
                     "conditions".to_string(),
@@ -3680,9 +3288,8 @@ impl Pass<'_> {
         }
     }
 
-    /// Every status write is a resourceVersion-preconditioned merge PATCH —
-    /// D-SEAMS **S7**, in both halves.
-    /// The version the next patch will precondition on.
+    /// The version the next patch will precondition on (seam **S7**: every
+    /// status write is a resourceVersion-preconditioned merge PATCH).
     fn version(&self) -> Option<String> {
         self.resource_version
             .lock()
@@ -3707,8 +3314,8 @@ impl Pass<'_> {
 
     async fn patch_status(&self, status: Value) -> Result<PatchOutcome, ReconcileError> {
         let patch = json!({ "status": status });
-        // CLONED OUT BEFORE THE AWAIT. A guard alive across an `.await` makes
-        // the reconcile future non-`Send`, which `kube`'s `Controller` refuses.
+        // Cloned out before the await: a guard alive across an `.await` makes
+        // the reconcile future non-`Send`.
         let observed = self.observed().clone();
         if status_unchanged(observed.as_ref(), &patch) {
             debug!(
@@ -3737,9 +3344,8 @@ impl Pass<'_> {
             .await
         {
             Ok(applied) => {
-                // THE CURSOR MOVES. This is the only fresh version available to
-                // a reconciler that holds no `get` on its own kind, and the
-                // next patch of this pass needs it (review `d3w9` C3).
+                // The cursor moves: the only fresh version available to a
+                // reconciler with no `get` on its own kind.
                 self.set_version(
                     applied
                         .metadata
@@ -3757,9 +3363,9 @@ impl Pass<'_> {
                     .expect("the status cursor is uncontended") = Some(merged);
                 Ok(PatchOutcome::Applied)
             }
-            // A 409 IS THE PRECONDITION WORKING: something wrote this status
-            // between the read and the write, so the object in hand is stale.
-            // **It is returned, not swallowed** — see `PatchOutcome::Conflict`.
+            // A 409 is the precondition working: something wrote this status
+            // since the read, so the object in hand is stale. Returned, not
+            // swallowed (see `PatchOutcome::Conflict`).
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(
                     policy = %self.name, namespace = %self.namespace,
@@ -3776,7 +3382,7 @@ impl Pass<'_> {
 }
 
 /// The catalog view one evaluation read, with what the catalog said about the
-/// view's own bounds (FX-22).
+/// view's own bounds.
 struct CatalogView {
     /// Every entry of every published page.
     entries: Vec<ViewEntry>,
@@ -3795,8 +3401,8 @@ struct CatalogView {
 
 impl CatalogView {
     /// Why an `Enforce` run may not start from this view, or `None` when the
-    /// catalog said the view is current and holds every point (FX-40). A run
-    /// deletes, so "not said" refuses like "no".
+    /// catalog said the view is current and holds every point. A run deletes,
+    /// so "not said" refuses like "no".
     fn run_refusal(&self, catalog: &str, now: DateTime<Utc>) -> Option<(&'static str, String)> {
         match self.expires_at {
             Some(at) if at > now => {}
@@ -3816,8 +3422,8 @@ impl CatalogView {
             }
         }
         let mut causes: Vec<&str> = Vec::new();
-        // NO REMEDY THE CATALOG CANNOT TAKE (review D3): `spec.sync` is
-        // immutable, and `viewLimit` cures only a window the limit cut.
+        // No remedy the catalog cannot take: `spec.sync` is immutable, and
+        // `viewLimit` cures only a window the limit cut.
         if self.truncated == Some(true) {
             causes.push(
                 "its view is a window (status.truncated). When spec.sync.viewLimit cut it, \
@@ -3858,16 +3464,10 @@ impl CatalogView {
     }
 }
 
-/// What bounded one evaluation beside the rules — the facts that make its
-/// counts a complete account, or say why they are not (FX-22).
-///
-/// **A bound that cut a computation is published with the result it cut.**
-/// The per-run ceiling cut the plan at 50 points and the status said "321
-/// kept, 50 candidate(s)" for `keepLast: 300` and `keepLast: 10` alike; the
-/// catalog's view is a window of `spec.sync.viewLimit` points, or the pages of
-/// a walk its object budget stopped, and the evaluation of an archive larger
-/// than either read `EvaluationComplete` with nothing saying that the points
-/// outside the view were never looked at.
+/// What bounded one evaluation beside the rules: the facts that make its
+/// counts a complete account, or say why they are not. A bound that cut a
+/// computation is published with the result it cut: the per-run ceiling, and
+/// a catalog view that is a window or the pages of an unfinished walk.
 struct EvaluationBounds {
     /// The per-run point ceiling `plan::evaluate` applied.
     max_deletions_per_run: i64,
@@ -3886,15 +3486,11 @@ struct EvaluationBounds {
 
 impl EvaluationBounds {
     /// The `Evaluated` message's sentence about the per-run ceiling. Empty
-    /// when the ceiling held nothing back, so a plan under it reads as it
-    /// always did.
+    /// when the ceiling held nothing back.
     ///
-    /// WHEN THE PLAN IS EMPTY THE SENTENCE DOES NOT PROMISE A LATER PLAN (FX-22
-    /// review L1). A plan that names nothing while points are due means not
-    /// one of them fits: each is in a backup set that more due points name
-    /// than the ceiling, and a set is planned whole or not at all. The next
-    /// evaluation finds the same sets over the same ceiling, so "they stay due
-    /// until a later plan names them" was a promise nothing keeps; the remedy
+    /// When the plan is empty the sentence promises no later plan: every due
+    /// point is in a backup set larger than the ceiling, and a set is planned
+    /// whole or not at all, so the next evaluation finds the same. The remedy
     /// is the ceiling, and the sentence names it.
     fn held_back_sentence(&self, evaluation: &plan::Evaluation) -> String {
         if evaluation.truncated_by_cap <= 0 {
@@ -3919,8 +3515,8 @@ impl EvaluationBounds {
     }
 
     /// `status.lastEvaluation.viewIncomplete`: `Some(true)` when the catalog
-    /// said its view does not hold every point — a window, or an unfinished
-    /// walk; `Some(false)` only when it said BOTH that the walk finished and
+    /// said its view does not hold every point (a window, or an unfinished
+    /// walk); `Some(false)` only when it said both that the walk finished and
     /// that the view is whole; `None` when it did not say. An unknown half
     /// never reads as "whole".
     fn view_incomplete(&self) -> Option<bool> {
@@ -3945,14 +3541,11 @@ impl EvaluationBounds {
                     self.view_entries
                 ),
             };
-            // `status.truncated` HAS MORE THAN ONE CAUSE (FX-22 review L4).
-            // The catalog sets it when the archive holds more points than
-            // `spec.sync.viewLimit`, and also when it left entries out for
-            // page space, when one entry was too large for a page, and when
-            // the walk counted rows it then merged as duplicates
-            // (`catalog_view::materialise`). Raising `viewLimit` helps the
-            // first and none of the others, so the remedy is named with its
-            // condition instead of as the answer.
+            // `status.truncated` has more than one cause: more points than
+            // `spec.sync.viewLimit`, entries left out for page space, an entry
+            // too large for a page, or rows merged as duplicates
+            // (`catalog_view::materialise`). Raising `viewLimit` helps only the
+            // first, so the remedy is named with its condition.
             out.push_str(&format!(
                 " The catalog view is a window: {counted}. The points outside it were not \
                  evaluated, are in none of these counts, and are never candidates while they \
@@ -3976,9 +3569,9 @@ impl EvaluationBounds {
     }
 }
 
-/// The `lastEvaluation` members FX-22 and FX-39 added. Each is additive: a status
-/// written before them does not carry them, and a CRD that predates them
-/// prunes them.
+/// The `lastEvaluation` members added after the first release. Each is
+/// additive: an older status does not carry them, and an older CRD prunes
+/// them.
 pub const ADDITIVE_EVALUATION_FIELDS: [&str; 6] = [
     "keptCount",
     "truncatedByCap",
@@ -3991,21 +3584,15 @@ pub const ADDITIVE_EVALUATION_FIELDS: [&str; 6] = [
 /// `stored` as the "did the findings change?" comparison should see it: with
 /// every [`ADDITIVE_EVALUATION_FIELDS`] member it lacks taken from `next`.
 ///
-/// So a block that differs from the stored one ONLY by members the stored one
-/// does not carry keeps its instant — see the call site for why that is the
-/// difference between one write and a hot loop. A member the stored block
-/// does carry is compared as usual, and a `null` in `next` (a merge patch's
-/// "remove") is not copied: there is nothing to remove from a block that
-/// lacks it.
+/// So a block that differs from the stored one only by members the stored one
+/// lacks keeps its instant (see the call site: one write versus a hot loop). A
+/// member the stored block carries is compared as usual, and a `null` in
+/// `next` (a merge patch's "remove") is not copied.
 ///
-/// THE COST, STATED: "the stored block lacks it" is also what a newer block
-/// looks like before a catalog first says whether its view is a window, so
-/// `viewIncomplete` appearing does not move `at` on its own. A readable view
-/// always comes with the catalog's `status.truncated` and `status.cursor`
-/// (the catalog writes them with its pages), so that transition does not
-/// arise from a view this controller evaluates; and the member cannot be left
-/// out of the list, because over an older CRD it is pruned like the
-/// others.
+/// The cost: `viewIncomplete` first appearing does not move `at` on its own.
+/// A readable view always comes with the catalog's `status.truncated` and
+/// `status.cursor`, so that transition does not arise from a view this
+/// controller evaluates.
 #[must_use]
 pub fn stored_for_instant(stored: Option<&Value>, next: &Value) -> Option<Value> {
     let mut stored = stored?.clone();
@@ -4024,8 +3611,7 @@ pub fn stored_for_instant(stored: Option<&Value>, next: &Value) -> Option<Value>
 /// What a finished retention run reported about itself.
 ///
 /// Parsed from the worker's `retention-point=` / `retention-record=` /
-/// `retention-result=` key lines — **by name and never by position**, the rule
-/// `notify-result=` and `refusal-reason=` already follow, because a pod log is
+/// `retention-result=` key lines, by name and never by position: a pod log is
 /// stdout and stderr merged in nondeterministic order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunReport {
@@ -4041,21 +3627,21 @@ pub struct RunReport {
     pub record_key: Option<String>,
     /// That record's digest.
     pub record_sha256: Option<String>,
-    /// Why the run's pod was never created, when the Job controller said so —
-    /// the `FailedCreate` row of [`crate::check::waiting`], redacted (FX-11).
-    /// `Some` only for a run with no pod at all, so `exit_code` is `None`.
+    /// Why the run's pod was never created, when the Job controller said so:
+    /// the `FailedCreate` row of [`crate::check::waiting`], redacted. `Some`
+    /// only for a run with no pod at all, so `exit_code` is `None`.
     pub refused: Option<String>,
-    /// FX-20: the worker's `retention-refusal=` code, from the closed
-    /// [`RETENTION_REFUSALS`] table — `Some` only for a run that exited 3 on a
+    /// The worker's `retention-refusal=` code, from the closed
+    /// [`RETENTION_REFUSALS`] table: `Some` only for a run that exited 3 on a
     /// refusal the status names.
     pub refusal_code: Option<&'static str>,
-    /// FX-15: the binding variable that refusal names (`variable=`), one of
-    /// the nine [`env`] names this controller projects, or `None`.
+    /// The binding variable that refusal names (`variable=`), one of the nine
+    /// [`env`] names this controller projects, or `None`.
     pub refusal_variable: Option<&'static str>,
 }
 
-/// FX-15: the refusal as `Enforced` and `Degraded` name it — the code, and
-/// the variable in parentheses — or `None` for a run that named none.
+/// The refusal as `Enforced` and `Degraded` name it (the code, and the variable
+/// in parentheses), or `None` for a run that named none.
 fn named_refusal(report: &RunReport) -> Option<String> {
     let code = report.refusal_code?;
     Some(match report.refusal_variable {
@@ -4065,12 +3651,10 @@ fn named_refusal(report: &RunReport) -> Option<String> {
 }
 
 impl RunReport {
-    /// Whether the only thing that stopped this run was its own object ceiling
-    /// — review `d3w9` **M2**.
-    ///
-    /// Such a run exits 1 (work remains) and must **not** count toward
-    /// `consecutiveRunFailures`: three bounded runs on a large archive would
-    /// otherwise set `EnforcementDegraded` and stop retention for good.
+    /// Whether the only thing that stopped this run was its own object
+    /// ceiling. Such a run exits 1 (work remains) and must not count toward
+    /// `consecutiveRunFailures`, or three bounded runs on a large archive would
+    /// stop retention for good.
     #[must_use]
     pub fn bounded_only(&self) -> bool {
         !self.failed.is_empty()
@@ -4084,10 +3668,9 @@ impl RunReport {
 /// The worker's code for "I stopped on my own ceiling".
 pub const BUDGET_EXHAUSTED_CODE: &str = "BudgetExhausted";
 
-/// Read a retention Job's key lines — **pure**.
-///
-/// Bounded by construction: it reads only lines carrying one of the three
-/// prefixes, and a value it cannot parse is skipped rather than guessed.
+/// Read a retention Job's key lines. Pure, and bounded: only lines carrying
+/// one of the three prefixes are read, and an unparseable value is skipped,
+/// not guessed.
 #[must_use]
 pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
     let mut report = RunReport {
@@ -4119,10 +3702,9 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
                 None => {}
             }
         } else if let Some(rest) = line.strip_prefix("retention-refusal=") {
-            // A CLOSED TABLE: the code is one this build knows, as a
-            // `'static`, or nothing at all is read from the line — and so is
-            // the variable (FX-15), from the nine names this controller
-            // projects.
+            // A closed table: the code is one this build knows, or nothing is
+            // read from the line, and the variable likewise from the nine names
+            // this controller projects.
             let mut fields = rest.split_whitespace();
             let code = fields.next().unwrap_or_default();
             report.refusal_code = RETENTION_REFUSALS
@@ -4156,10 +3738,9 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
 
 /// What `start_run` did, and why it did not do more.
 ///
-/// A named enum rather than `Option<String>`: "the lease did not land", "a
-/// restore is reading this destination" and "something else owns the plan
-/// ConfigMap's name" are three different findings that an operator fixes in
-/// three different places, and the first landing collapsed them into `None`.
+/// A named enum: "the lease did not land", "a restore is reading this
+/// destination" and "something else owns the plan ConfigMap's name" are
+/// different findings an operator fixes in different places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartOutcome {
     /// The Job was created (or already existed at its deterministic name).
@@ -4170,10 +3751,8 @@ pub enum StartOutcome {
     AlreadyHarvested,
     /// The lease PATCH did not land, so nothing is holding these points.
     LeaseNotHeld,
-    /// The run record PATCH did not land, so NO Job was created — defect
-    /// RET-STARTRUN-PATCH-OUTCOME. A run the status does not track is a run
-    /// nothing harvests, nothing counts against the retry budget and nobody
-    /// can account the deletions of.
+    /// The run record PATCH did not land, so no Job was created: a run the
+    /// status does not track is one nothing harvests, counts or accounts for.
     RunNotRecorded,
     /// A nonterminal `Restore` reads this destination.
     ActiveRestore,
@@ -4181,22 +3760,21 @@ pub enum StartOutcome {
     /// plan.
     PlanConfigMapConflict(String),
     /// The destination has no `spec.access.evidenceWrite` grant an enforcement
-    /// Job could write its record with — defect
-    /// RET-EVIDENCE-GRANT-IS-ARCHIVEREAD. Returned BEFORE the lease, so this
-    /// pass spends no lease, no `ConfigMap`, no run record and no retry-budget
-    /// slot on a configuration problem.
+    /// Job could write its record with. Returned before the lease, so the pass
+    /// spends no lease, `ConfigMap`, run record or retry-budget slot on a
+    /// configuration problem.
     EvidenceGrantUnusable(String),
 }
 
-/// How long the current plan stays approvable — review `d3w9` H4.
+/// How long the current plan stays approvable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanWindow {
     /// When the window closes. Published as
     /// `status.lastEvaluation.planExpiresAt`.
     pub expires_at: DateTime<Utc>,
-    /// Whether THIS pass observed the previous window lapse. A pass that did
+    /// Whether this pass observed the previous window lapse. Such a pass
     /// starts no run and re-anchors the window, so the administrator's next
-    /// look sees a fresh preview of the same plan rather than a wedged policy.
+    /// look sees a fresh preview of the same plan.
     pub expired: bool,
 }
 
@@ -4213,16 +3791,10 @@ pub struct EnforcementDecision {
     pub message: String,
 }
 
-// ---------------------------------------------------------------------------
-// Small pure helpers
-// ---------------------------------------------------------------------------
-
-/// `Enforced=False/NothingFitsCeiling`'s message: how many points are due,
-/// the ceiling none of them fits, and what to change (FX-22 review L1).
-///
-/// `due` points in all are held back, so a ceiling of `due` fits every one of
-/// them in one plan; the field's own maximum is 500, and a backlog larger than
-/// that goes set by set.
+/// `Enforced=False/NothingFitsCeiling`'s message: how many points are due, the
+/// ceiling none of them fits, and what to change. A ceiling of `due` fits all
+/// of them in one plan; the field's maximum is 500, and a larger backlog goes
+/// set by set.
 #[must_use]
 pub fn nothing_fits_ceiling_message(due: i64, ceiling: i64) -> String {
     let remedy = if due <= i64::from(MAX_DELETIONS_PER_RUN_LIMIT) {
@@ -4249,62 +3821,37 @@ pub fn nothing_fits_ceiling_message(due: i64, ceiling: i64) -> String {
 pub const MAX_DELETIONS_PER_RUN_LIMIT: i32 = 500;
 
 /// The three `LOGWEIR_EVIDENCE_AWS_*` references an enforcement Job writes its
-/// intent tombstone and its run record with, or the message that names the
-/// field the destination cannot supply one from.
+/// intent tombstone and run record with, or the message naming the field the
+/// destination cannot supply one from.
 ///
-/// # Which grant, and the fall-back that STANDS
-///
-/// `docs/kubernetes.md` §7f's table has exactly two rows and they are two
-/// principals: the delete grant from `spec.enforcement.credentialSecretRef`,
+/// Two principals: the delete grant (`spec.enforcement.credentialSecretRef`),
 /// which may remove a point and may not write under `logweir/`, and the record
-/// grant from the destination's own `spec.access.evidenceWrite`, which may
-/// create under `logweir/` and may not delete. *Neither alone is enough*, which
-/// is the property that makes a deletion attributable — and it is a property of
-/// WHICH grant lands on which variable, so this is where it is decided, once,
-/// for the only Job in the product that deletes anything.
+/// grant (the destination's `spec.access.evidenceWrite`), which may create
+/// under `logweir/` and may not delete. Neither alone is enough, which makes a
+/// deletion attributable, and this is where the one deleting Job's variables
+/// are decided (`docs/kubernetes.md`, "Enforcing").
 ///
-/// **`evidenceWrite` absent still means `archiveWrite`**, exactly as
-/// [`destination::resolve`] defaults it (D2 §3.4) and as
-/// `docs/kubernetes.md` §7 and `docs/install.md` state it: *absent grants do
-/// not widen*. An installation that never separated its principals is the
-/// pre-destination status quo and does not move on an upgrade. What this
-/// function refuses is not the default — it is a role that resolves to
-/// **nothing a Job can use**, which is a different thing and was previously a
-/// Job that could only refuse itself.
+/// `evidenceWrite` absent still means `archiveWrite`, as
+/// [`destination::resolve`] defaults it: absent grants do not widen, and an
+/// installation that never separated principals does not move on upgrade. The
+/// role is resolved separately from `archiveRead`, the read-only principal,
+/// which is never a fall-back here.
 ///
-/// The role is still resolved SEPARATELY from `archiveRead`, which is the whole
-/// of defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD: `archiveRead` is the read-only
-/// principal `docs/kubernetes.md` §7a recommends, it is never a fall-back for
-/// this variable, and projecting it here left every intent tombstone refused
-/// `403` on a destination that separated the two.
+/// Refused, each because it could only be a Job that refuses itself:
 ///
-/// # What is refused, and why each one is not a Job
-///
-/// 1. **The role's own resolver refusal** — a malformed grant. Read here and
-///    nowhere earlier: it can only ever be about `spec.access.<role>`, since
-///    every role-independent check has already passed for the archive
-///    resolution, and a `Report` policy reads no record credential at all.
+/// 1. **The role's own resolver refusal**, a malformed grant.
 /// 2. **A grant with no static keys.** `logweir-retention`'s
-///    `EvidenceSink::open` builds its sink with `StoreOptions::static_keys`
-///    from `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` and `…_SECRET_ACCESS_KEY` and
-///    has no workload-identity path, so a `WorkloadIdentity` grant renders a
-///    Job that can only exit 3 — after spending a lease, a `ConfigMap`, a run
-///    record and one of three retry-budget slots.
-/// 3. **The record grant IS the delete Secret.** One principal that both
-///    removes a point and writes the record attributing its removal is the
-///    aggregation §7f's two rows exist to prevent, and it is the one shape of
-///    it a controller can actually see. **It catches the spelling and not the
-///    material**: two differently named Secrets may hold identical keys, and
-///    this controller reads neither, so §7f says in words that genuinely
-///    distinct principals remain an operator obligation.
+///    `EvidenceSink::open` uses `StoreOptions::static_keys` and has no
+///    workload-identity path, so a `WorkloadIdentity` grant would exit 3 after
+///    spending a lease, a `ConfigMap`, a run record and a retry-budget slot.
+/// 3. **The record grant is the delete Secret**: one principal that both
+///    removes a point and attributes the removal. This catches the name, not
+///    the material: two Secrets may hold identical keys, and keeping the
+///    principals distinct remains the operator's obligation.
 ///
-/// `declared` only decides which field the message NAMES — the operator's own
+/// `declared` only decides which field the message names (the operator's own
 /// `spec.access.evidenceWrite`, or the `spec.access.archiveWrite` it defaulted
-/// to — so that the sentence points at the line they wrote.
-///
-/// # Errors
-///
-/// The operator-facing sentence, naming the field and never a key.
+/// to), so the sentence points at the line they wrote.
 pub fn evidence_credential(
     evidence: Result<&ResolvedDestination, &destination::DestinationRefusal>,
     declared: bool,
@@ -4319,10 +3866,9 @@ pub fn evidence_credential(
         }
     };
     let where_ = format!("BackupDestination {}/{}", evidence.namespace, evidence.name);
-    // THE FIELD THE OPERATOR ACTUALLY WROTE. Telling someone to fix
-    // `spec.access.evidenceWrite` on an object that does not declare one sends
-    // them looking for a line that is not there; the grant came from
-    // `archiveWrite` and the message says so.
+    // The field the operator actually wrote: an object that declares no
+    // `evidenceWrite` got the grant from `archiveWrite`, and the message says
+    // so.
     let field = if declared {
         "spec.access.evidenceWrite"
     } else {
@@ -4369,8 +3915,8 @@ pub fn evidence_credential(
                     key: token.clone(),
                 });
             }
-            // FX-20: the record Secret's binding, optional, beside it; the Job
-            // builder adds the destination's expectation.
+            // The record Secret's optional binding, beside it; the Job builder
+            // adds the destination's expectation.
             out.push(crate::job::EnvFromSecret {
                 name: logweir_core::credential_binding::EVIDENCE_CREDENTIAL_BINDING_ENV.to_string(),
                 secret_name: secret.clone(),
@@ -4392,9 +3938,9 @@ pub fn evidence_credential(
     }
 }
 
-/// A grant's `mode` as `spec.access.<role>.mode` spells it — for a message that
-/// names what the operator wrote, never the grant's `Debug` (which carries
-/// Secret and ServiceAccount NAMES into a status field).
+/// A grant's `mode` as `spec.access.<role>.mode` spells it, never the grant's
+/// `Debug`, which would carry Secret and ServiceAccount names into a status
+/// field.
 fn grant_mode(grant: &destination::ResolvedGrant) -> &'static str {
     match grant {
         destination::ResolvedGrant::SecretKeys { .. } => "SecretKeys",
@@ -4407,9 +3953,8 @@ fn grant_mode(grant: &destination::ResolvedGrant) -> &'static str {
 /// "the last run exited 1 with AccessDenied on 2 point(s)", and the honest
 /// shapes when there is less to say.
 ///
-/// **The codes are the closed per-point vocabulary and never a raw provider
-/// error body** — the same rule the record follows. Duplicates are counted, not
-/// listed: three points denied for one reason is one reason.
+/// The codes are the closed per-point vocabulary, never a raw provider error
+/// body. Duplicates are counted, not listed.
 fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
     let exit = match exit_code {
         Some(code) => format!("the last run exited {code}"),
@@ -4430,10 +3975,9 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
         .into_iter()
         .map(|(code, n)| format!("{code} on {n} point(s)"))
         .collect();
-    // THE TWO REFUSALS THAT ARE ABOUT THE BUCKET, NOT THE POINT (defect
-    // OBJECT-LOCK-DELETE-MARKER), said with their remedy: nothing about them
-    // clears on a retry, so the retry budget is what stops the policy, and the
-    // condition that says so must say why.
+    // The two refusals about the bucket, not the point, said with their
+    // remedy: nothing about them clears on a retry, so the retry budget is
+    // what stops the policy, and the condition must say why.
     let mut remedy = String::new();
     if versioned {
         remedy.push_str(
@@ -4461,7 +4005,7 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
 }
 
 /// Whether every per-point code of a run is about the bucket or the
-/// credential ([`BUCKET_LEVEL_CODES`]) — the one condition under which a
+/// credential ([`BUCKET_LEVEL_CODES`]): the one condition under which a
 /// degraded policy re-probes on its own.
 fn only_bucket_level(codes: &[String]) -> bool {
     !codes.is_empty()
@@ -4470,9 +4014,9 @@ fn only_bucket_level(codes: &[String]) -> bool {
             .all(|c| BUCKET_LEVEL_CODES.contains(&c.as_str()))
 }
 
-/// What a spent retry budget means for scheduling, IN THE SAME WORDS the
-/// re-probe rule uses (re-check RL1): the plain D3 §6.5 stop, or the stop with
-/// its one exception when every code was bucket-level.
+/// What a spent retry budget means for scheduling, in the words the re-probe
+/// rule uses: the plain stop, or the stop with its one exception when every
+/// code was bucket-level.
 fn scheduling_stop(codes: &[String]) -> &'static str {
     if only_bucket_level(codes) {
         "Scheduling is stopped except for one re-probe run 24 h after the last run; a spec \
@@ -4484,15 +4028,14 @@ fn scheduling_stop(codes: &[String]) -> &'static str {
 
 /// One view entry, as the evaluation sees it.
 ///
-/// **`segment_keys` is empty and that is the view's shape, not an omission
-/// here**: D3 W8's page entry carries `manifestKey` and no segment list. The
-/// plan therefore names the manifest and the set's key bound, and the worker
-/// enumerates within that bound — see `retention_plan::PlanLine::enumerate_set`.
+/// `segment_keys` is empty because the view's page entry carries `manifestKey`
+/// and no segment list: the plan names the manifest and the set's key bound,
+/// and the worker enumerates within it
+/// (`retention_plan::PlanLine::enumerate_set`).
 ///
 /// `refusals` is the namespace's `Backup`s' reached refusals: a row whose own
 /// `Backup` the controller recorded `Invalid`/`Untrusted` is marked
-/// [`PointFacts::refused_by_controller`], whatever the (possibly older) row
-/// says. An empty set changes nothing.
+/// [`PointFacts::refused_by_controller`], whatever the row says.
 #[must_use]
 pub fn point_facts(entry: &ViewEntry, refusals: &view::ControllerRefusals) -> PointFacts {
     PointFacts {
@@ -4517,14 +4060,13 @@ pub fn point_facts(entry: &ViewEntry, refusals: &view::ControllerRefusals) -> Po
 /// ([`view::ControllerRefusals`]).
 pub const BACKUP_PAGE_LIMIT: u32 = 500;
 
-/// How many `Backup` pages one evaluation follows before it refuses to plan —
+/// How many `Backup` pages one evaluation follows before it refuses to plan:
 /// 10 000 objects, far above `protection_policy`'s 1 000, because here an
 /// incomplete listing stops retention rather than narrowing a health verdict.
 pub const MAX_BACKUP_PAGES: usize = 20;
 
-/// The terminal `Restore` phases. A restore in any other phase — including one
-/// with no phase at all, which is a `Restore` the reconciler has not seen yet —
-/// is nonterminal and protects its point.
+/// The terminal `Restore` phases. Any other phase, including none (a `Restore`
+/// the reconciler has not seen yet), is nonterminal and protects its point.
 pub const TERMINAL_RESTORE_PHASES: &[&str] = &["Succeeded", "Failed", "Refused"];
 
 /// Whether this `Restore` has finished.
@@ -4539,27 +4081,17 @@ pub fn is_terminal_restore(restore: &Restore) -> bool {
 
 /// Whether this `Restore` reads from the destination under evaluation.
 ///
-/// # BY IDENTITY, NEVER BY SUBSTRING (review `d3w9` **C2**)
+/// By identity, never by substring. `location_id` is the destination's
+/// canonical URL, which does not contain the `BackupDestination`'s name, and a
+/// `Restore` with `sourceDestinationRef` carries the sentinel
+/// `logweir-destination://<name>` as its archive URL; a substring match would
+/// miss every restore that names its destination by reference, and leave the
+/// reaper free to delete a set a live restore reads.
 ///
-/// The first landing asked `location_id.contains(reference.name)`.
-/// `location_id` is the destination's canonical URL — `s3://<bucket>/<prefix>`
-/// — which does not contain the `BackupDestination` OBJECT's name, and
-/// `crds/restore.rs`'s CEL rule forces `sourceArchive.url` to the sentinel
-/// `logweir-destination://<name>` whenever `sourceDestinationRef` is set, so
-/// the URL fallback could not rescue it either. A nonterminal `Restore` that
-/// named its destination by reference — the path the whole D2/D3 design steers
-/// toward — was therefore **not seen at all**: no `ActiveRestore` protection,
-/// nothing in the consistent re-list, and the reaper free to delete the
-/// manifest and segments of a set a live restore was reading. Whether it
-/// misfired was a coincidence of spelling: a destination named `kafka` *would*
-/// have matched `s3://lw/kafka-backups/…`.
-///
-/// So: when the restore names a destination, compare the two NAMES and require
-/// the same namespace — a `destinationRef` is namespace-local, so the same name
-/// elsewhere is a different object. This is the comparison
-/// `controllers/protection_policy.rs` already makes. The URL equality stays,
-/// and only for the case it was written for: a legacy restore that names no
-/// destination at all.
+/// So when the restore names a destination, the two names are compared within
+/// the same namespace (a `destinationRef` is namespace-local), as
+/// `controllers/protection_policy.rs` does. URL equality remains only for a
+/// legacy restore that names no destination.
 ///
 /// `destination_name` is the policy's own `spec.destinationRef.name`.
 #[must_use]
@@ -4576,10 +4108,6 @@ pub fn restore_touches(
     let url = restore.spec.source_archive.url.trim_end_matches('/');
     url == location_id.trim_end_matches('/')
 }
-
-// ---------------------------------------------------------------------------
-// The registration point
-// ---------------------------------------------------------------------------
 
 async fn installation_policy(client: &kube::Client) -> check::policy::Policy {
     use std::sync::OnceLock;
@@ -4623,13 +4151,11 @@ async fn reconcile(
     Ok(policy_action(&outcome))
 }
 
-/// The [`Action`] a pass returns: a timed requeue — [`RUNNING_REQUEUE_SECONDS`]
-/// while a run is started or running, [`IDLE_REQUEUE_SECONDS`] otherwise —
-/// never `await_change()`.
-///
-/// An enforcement slot comes due with no event on any object, so this
-/// requeue is what starts the run (FX-29 review M-1, pinned by
-/// `retention_policy_controller::an_enforcement_slot_starts_from_the_timed_requeue`).
+/// The [`Action`] a pass returns: a timed requeue ([`RUNNING_REQUEUE_SECONDS`]
+/// while a run is started or running, [`IDLE_REQUEUE_SECONDS`] otherwise),
+/// never `await_change()`: an enforcement slot comes due with no event on any
+/// object, so this requeue is what starts the run
+/// (`retention_policy_controller::an_enforcement_slot_starts_from_the_timed_requeue`).
 #[must_use]
 pub fn policy_action(outcome: &Outcome) -> Action {
     let seconds = match outcome.phase {
@@ -4658,25 +4184,24 @@ fn error_policy(policy: Arc<RetentionPolicy>, err: &ReconcileError, _ctx: Arc<Co
 
 /// Run the `RetentionPolicy` controller until the process ends.
 ///
-/// **It takes no archive handle.** Deletion happens inside the retention Job
-/// with its own credential; the evaluation reads the catalog's view out of
-/// `ConfigMap`s. This process never holds a handle that could reach either.
+/// It takes no archive handle: deletion happens inside the retention Job with
+/// its own credential, and the evaluation reads the catalog's view out of
+/// `ConfigMap`s.
 pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
-    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
-    // namespaces, and then this reconciler runs once per namespace with an
-    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
+    // One watch per watched namespace: `crate::scope` is the whole cluster
+    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
+    // then this reconciler runs once per namespace with an `Api::namespaced`
+    // watch, the only shape the scoped chart's RoleBindings permit.
     crate::scope::run_everywhere(move |namespace| {
         controller_in(client.clone(), runner_image.clone(), namespace)
     })
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
+/// cluster).
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,

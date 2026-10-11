@@ -1,4 +1,4 @@
-// replay-selection.spec.js -- PROD-11.1b (review M1): a restore of a
+// replay-selection.spec.js -- a restore of a
 // PARTITION SUBSET says so on every console surface -- the History list row,
 // the History detail and the operation view -- and its complete-coverage
 // sentence says "every SELECTED partition", never "every restored partition".
@@ -50,8 +50,6 @@ const EVERY = "every record of every restored partition was compared with the ar
 const subset = () => fixture("restore-subset-pass.json");
 const whole = () => fixture("restore-valid-pass.json");
 
-// ------------------------------------------------------------ the sentences
-
 test("prod111b_selection_words_name_the_partitions_and_never_read_as_everything", () => {
   const sel = subset().status.integrity.selection;
   assert.equal(selectionWords(sel), PARTIAL,
@@ -97,7 +95,7 @@ test("prod111b_the_complete_coverage_sentence_says_selected_partitions_for_a_sub
   assert.ok(!verificationScopeSentence({ level: "sampled", coverage: "sampled" }).includes("partial"));
 });
 
-// ------------------------------------------------- the custom resource (k8s)
+// The custom resource.
 
 test("prod111b_the_history_list_row_says_partial_and_the_unnarrowed_row_does_not", () => {
   const row = renderHistoryList({ items: [subset()] }, { items: [] }, "team-a");
@@ -144,7 +142,7 @@ test("prod111b_the_operation_view_names_the_selection_in_both_modes", () => {
   assert.doesNotMatch(plain, /data-selection|restored \(signed\)|partial:/);
 });
 
-// ------------------------------------------------- the product API (console)
+// The product API.
 
 test("prod111b_the_apis_selection_decodes_and_reaches_every_console_surface", async () => {
   const decoded = decodeConsoleItem("restores", fixture("console/restore-subset-pass.json"));

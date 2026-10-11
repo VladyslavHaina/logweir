@@ -7,7 +7,7 @@
 //! names. It does NOT decide `unknown | limited | attestedComplete`, and
 //! neither does this module: the attestation that can turn a listing into
 //! `attestedComplete` lives in the installation policy `ConfigMap`, which only
-//! the controller reads (D-SEAMS **S3**). A runner that guessed would be
+//! the controller reads. A runner that guessed would be
 //! claiming completeness on evidence it does not hold, and "a plausible but
 //! wrong `complete`" is the worst outcome D2 §5.4 lists.
 //!
@@ -23,8 +23,8 @@
 //!
 //! The end frame's `topicLines` block is therefore ABSENT on that path and
 //! present with `count: 0` for a cluster that showed no topic: "the inventory
-//! did not run" and "the cluster is empty" are different findings, and
-//! PLAT-09.1's acceptance requires a user to be able to tell them apart.
+//! did not run" and "the cluster is empty" are different findings, and a
+//! user must be able to tell them apart.
 
 use logweir_core::check_contract::{CheckId, CheckPlanKind, CheckResult, TopicInventoryRequest};
 use logweir_kafka::inventory::{self, InventoryRequest, ProbeTimeouts};

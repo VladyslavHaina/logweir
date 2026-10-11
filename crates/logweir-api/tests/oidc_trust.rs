@@ -25,8 +25,6 @@ use std::time::Duration;
 
 use logweir_api::auth::oidc::{HttpClient as _, HyperHttpClient, TlsTrust};
 
-// ------------------------------------------------------------------ DER
-
 fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
     let len = content.len();
@@ -100,10 +98,9 @@ fn mint(common_name: &str) -> Minted {
         algorithm.clone(),
         name(common_name),
         // notAfter is RFC 5280's "no well-defined expiration" GeneralizedTime
-        // (§4.1.2.5), not a UTCTime. rustls judges the window at the WALL
-        // clock, and UTCTime cannot say anything after 2049: the old
-        // `491231235959Z` made every row here fail from 2050-01-01. FX-9
-        // found it by running the suite 26,752 days ahead.
+        // (§4.1.2.5), not a UTCTime: rustls judges the window at the WALL clock,
+        // and UTCTime cannot say anything after 2049, so a UTCTime notAfter would
+        // fail every row here from 2050-01-01.
         seq(&[tlv(0x17, b"200101000000Z"), tlv(0x18, b"99991231235959Z")]),
         name(common_name),
         spki,
@@ -127,8 +124,6 @@ fn pem(label: &str, der: &[u8]) -> String {
     out.push_str(&format!("-----END {label}-----\n"));
     out
 }
-
-// --------------------------------------------------------------- server
 
 /// A loopback HTTPS server presenting `minted`, answering every request with
 /// a fixed JSON document. Returns its port. The thread lives until the test
@@ -192,8 +187,6 @@ async fn fetch(trust: &TlsTrust, url: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "the test's own deadline expired".to_string())?
         .map_err(|e| e.to_string())
 }
-
-// ----------------------------------------------------------------- rows
 
 #[tokio::test]
 async fn a_private_ca_in_the_bundle_is_trusted_beside_the_system_roots() {
