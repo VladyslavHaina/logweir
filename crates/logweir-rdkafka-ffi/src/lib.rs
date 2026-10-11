@@ -82,7 +82,13 @@
 //! when none is left, the crate is deleted and `check-unsafe-scope.sh` loses
 //! its perimeter lines. `rd_kafka_DescribeTopics` ([`topics`], PROD-01.4a)
 //! leaves through PROD-01.4b: rust-rdkafka PR #721 or a successor, released,
-//! with the URL-safe text form derived from the two halves.
+//! with the URL-safe text form derived from the two halves. PROD-01.4b drafted
+//! that successor against 0.36.2 (`AdminClient::describe_topics`: the ID as
+//! its two halves, displayed in Kafka's text form, and a per-topic error beside
+//! each name); it is not filed upstream without the owner's go-ahead. A safe
+//! wrapper reads the per-topic code through rdkafka-sys's
+//! `rd_kafka_resp_err_t` enum, so switching to one also waits for that read to
+//! be sound for a code the enum does not list (obligation 5).
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(missing_docs)]
