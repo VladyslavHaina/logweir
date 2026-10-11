@@ -1,6 +1,6 @@
 // fake-dom.js -- the smallest document `render.js`'s `enhanceDatagrids` can
-// run in, so the datagrid's DOM behaviour is asserted under `node --test`
-// (PLAT-18.2 review HIGH-1). Not a spec: the gate's glob does not collect it.
+// run in, so the datagrid's DOM behaviour is asserted under `node --test`.
+// Not a spec: the gate's glob does not collect it.
 //
 // It implements exactly what the enhancement touches -- elements with
 // attributes, children and text, `hidden`/`disabled`/`value`, listeners and a

@@ -1,4 +1,5 @@
-// emit-schema-dependency.js -- PROD-03.0's console text, for the live row.
+// emit-schema-dependency.js -- the schema-dependency console text, for the
+// live row.
 //
 //     node ui/tests/emit-schema-dependency.js <point.json> <topic>[,<topic>...]
 //
@@ -20,15 +21,13 @@
 // renders, one write to stdout. Not a test (no `.spec` in the name), and not
 // shipped.
 //
-// THE POINT GOES THROUGH `decodeCatalogPoints` BEFORE ANYTHING RENDERS IT
-// (FX-48). That is the decoder `readCatalogPoints` applies between the API and
-// both pages, and until it was used here this tool rendered the file's own
-// object: the live row was green while the console showed nothing, because the
-// decoder dropped `schemaDependency` and this tool never asked it. So the
-// point is put in the page envelope the route answers, decoded, and the
-// DECODED point is what every render below is given. A point that is not one
-// the API may publish -- a required member missing -- is a contract failure
-// here, by name, exactly as it would be in the console.
+// THE POINT GOES THROUGH `decodeCatalogPoints` BEFORE ANYTHING RENDERS IT:
+// that is the decoder `readCatalogPoints` applies between the API and both
+// pages, so a member the decoder drops cannot leave the live row green while
+// the console shows nothing. The point is put in the page envelope the route
+// answers, decoded, and the DECODED point is what every render below is
+// given. A point the API may not publish -- a required member missing -- is
+// a contract failure here, by name, exactly as it would be in the console.
 
 import { readFileSync } from "node:fs";
 

@@ -1,24 +1,21 @@
-// check-intent.spec.js -- P14 (poc-upgrade-2): asking a check again is not
-// replaying its last answer.
+// check-intent.spec.js -- asking a check again is not replaying its last
+// answer.
 //
-// THE DEFECT. The schedule form's "Check readiness", clicked with unchanged
-// inputs after the earlier check's validity had passed, sent the same
-// content-derived Idempotency-Key; the product API (D0: one key, one object)
-// answered `200 replayed: true` with the EXPIRED check, the page said "does
-// not apply to your current inputs", and no click could make a fresh one.
-//
-// THE FIX, on both sides. The API's replay answer names `expired` itself
+// A content-derived Idempotency-Key alone would make "Check readiness",
+// clicked with unchanged inputs after the earlier check's validity passed,
+// replay the EXPIRED check (one key, one object): "does not apply to your
+// current inputs", with no click able to make a fresh one. So the API's
+// replay answer names `expired` itself
 // (`crates/logweir-api/tests/preflights.rs`,
-// `a_replay_names_its_own_expiry_and_a_new_key_asks_afresh`); the console
+// `a_replay_names_its_own_expiry_and_a_new_key_asks_afresh`), and the console
 // carries an intent token in the key, kept while the check it named can
 // still be the answer and renewed once it is spent (`lifecycle.js`'s
 // `askCheck`). A genuine retry inside the window still replays.
 //
-// THE SERVER BELOW IS D0's RULE, modelled: an object per (body, key); the
-// same key answers the same object, a replay projects "not recomputed" and
-// -- as the API now does -- `expired` once the validity has passed. On the
-// code before the fix the console sent no token, so the second click's key
-// was the first's and every row's negative control below fails.
+// THE SERVER BELOW MODELS THAT RULE: an object per (body, key); the same key
+// answers the same object, a replay projects "not recomputed" and `expired`
+// once the validity has passed. Without the token the second click's key is
+// the first's, and every row's negative control fails.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -42,8 +39,6 @@ const flush = () => new Promise((done) => setTimeout(done, 20));
 
 const NOT_RECOMPUTED = { reason: "unverifiable",
   basis: "this response did not recompute staleness; read the preflight itself for a current verdict" };
-
-// ------------------------------------------------------------- the rule itself
 
 test("a_preflight_is_spent_only_when_it_can_no_longer_answer_the_same_question", () => {
   const base = { id: "pf-1", terminal: true, state: "ready", applicable: true, stale: false,
@@ -117,8 +112,6 @@ test("ask_check_replays_a_retry_and_renews_only_a_spent_check", async () => {
   assert.notEqual(checkIntent("ns/form", "q2", null, null).token, after);
 });
 
-// ------------------------------------------------------- the server, modelled
-
 /** D0's replay rule over Preflights, with a clock. */
 function preflightServer() {
   const s = { now: 0, objects: new Map(), creates: [], VALID: 600 };
@@ -187,7 +180,7 @@ const DRAFT = Object.freeze({
 });
 
 test("the_schedule_forms_check_asked_again_after_it_expired_is_a_new_check", async () => {
-  // R8.3 on the PoC: both clicks came back `replayed: true` of the expired check.
+  // Both clicks would come back `replayed: true` of the expired check.
   resetMode();
   resetCheckIntents();
   const ns = "p14-create";
@@ -244,7 +237,7 @@ test("the_list_panels_check_asked_again_after_it_expired_is_a_new_check", async 
   assert.match(panel, /pf-2/);
 });
 
-// ------------------------------------------------------------ discovery, the class
+// Discovery, the class.
 
 const CONNECTION = Object.freeze({
   metadata: { name: "orders-prod", uid: "uid-A", generation: 1 },
@@ -252,9 +245,9 @@ const CONNECTION = Object.freeze({
 });
 
 test("a_topic_discovery_asked_again_once_stale_is_a_new_discovery", async () => {
-  // P14's CLASS on Clusters -> Discover topics: the key was the parameters
-  // alone, and the server's `reuseFresh` covers only a FRESH identical
-  // inventory, so a stale one was replayed for as long as it was kept (24 h).
+  // The discovery key must not be the parameters alone: the server's
+  // `reuseFresh` covers only a FRESH identical inventory, so a stale one would
+  // be replayed for as long as it is kept (24 h).
   resetMode();
   resetCheckIntents();
   const s = { now: 0, objects: new Map(), FRESH: 900 };
@@ -299,7 +292,7 @@ test("a_topic_discovery_asked_again_once_stale_is_a_new_discovery", async () => 
   assert.match(view.html(), /td-2/, "and the new discovery is the one on screen");
 });
 
-// ------------------------------------------------ review L4: overlapping asks
+// Overlapping asks.
 
 test("two_overlapping_asks_of_a_spent_check_renew_once", async () => {
   // The renewal was not compare-and-swap: two asks that both saw the replay

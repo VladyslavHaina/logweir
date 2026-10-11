@@ -1,4 +1,4 @@
-// complete-coverage.spec.js -- PROD-08.1a: the console asks for complete
+// complete-coverage.spec.js -- the console asks for complete
 // coverage as an explicit, advanced choice with its cost stated, and says
 // sampled or complete -- with a complete verification's exact counts and
 // whether it covered -- wherever a restore's result is shown.
@@ -185,11 +185,11 @@ test("prod081a_the_list_row_says_complete_and_not_covered_and_never_pass", () =>
   const covered = renderHistoryList({ items: [forgedPass(true)] }, { items: [] }, "team-a");
   assert.match(covered, /coverage: complete, covered</);
 
-  // A CONSOLE LIST ROW (review RM5): no recorded verification block, only the
-  // API's summary, which says verified -- beside `covered: false` and an
-  // outcome that reads pass. Its RESULT cell must still carry the
-  // unverified-claim caption: the row's own verdict refuses covered: false
-  // even if a summary ever said otherwise.
+  // A CONSOLE LIST ROW: no recorded verification block, only the API's
+  // summary, which says verified -- beside `covered: false` and an outcome
+  // that reads pass. Its RESULT cell must still carry the unverified-claim
+  // caption: the row's own verdict refuses covered: false even if a summary
+  // ever said otherwise.
   const consoleRow = (coveredValue) => {
     const object = forgedPass(coveredValue);
     delete object.status.evidence;
@@ -247,8 +247,8 @@ test("prod081a_the_operation_view_says_complete_and_not_covered_in_both_modes", 
     assert.match(html, /<strong>NO<\/strong>/);
     // THE RESULT AND THE COVERAGE SAY "NOT A PASS". The evidence section's own
     // badge is about the SIGNATURE -- a signed failure verifies, and saying so
-    // is the point of publishing it (FAILED-DRILL-EVIDENCE-UNPUBLISHED) -- so
-    // it is not the verdict, and the verdict sections carry no green at all.
+    // is the point of publishing it -- so it is not the verdict, and the verdict
+    // sections carry no green at all.
     const result = /<section class="result">[\s\S]*?<\/section>/.exec(html)[0];
     const coverage = /<section class="coverage"[\s\S]*?<\/section><\/section>/.exec(html)[0];
     assert.ok(visible(result).includes("fail-integrity"), visible(result));
@@ -274,7 +274,7 @@ test("prod081a_a_sampled_run_never_claims_complete", () => {
     "NEGATIVE CONTROL: a complete block drawn for a sampled run fails this");
   const row = renderHistoryList({ items: [plain] }, { items: [] }, "team-a");
   assert.match(row, /data-coverage="not-recorded">coverage: sampled \(not recorded\)</);
-  // A sampled 1.4.0 scorecard, with FX-23's unsampled topics.
+  // A sampled 1.4.0 scorecard, with unsampled topics.
   const scope = {
     level: "sampled", recordsSampled: 25, recordsSampledMatching: 25, recordsExpected: 25,
     coverage: "sampled", unsampledTopics: ["audit", "payments"],
@@ -383,7 +383,7 @@ test("prod081a_the_wizard_offers_complete_coverage_as_an_advanced_choice_with_it
   // The default plan sentence is the sampled one; the choice changes it.
   assert.ok(verificationPlanSentence(state).includes("sampled check"));
   // It points at the choice below it and never says no level compares every
-  // record (review L5: that read as a contradiction above this very choice).
+  // record, which would read as a contradiction above this very choice.
   assert.ok(verificationPlanSentence(state)
     .includes("choose complete coverage below to compare every record"),
   "NEGATIVE CONTROL: the sentence before PROD-08.1a's choice fails this");

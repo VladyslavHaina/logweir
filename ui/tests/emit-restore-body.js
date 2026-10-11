@@ -1,5 +1,5 @@
 // emit-restore-body.js -- the laptop walkthrough's create body, built by the
-// page's own code. Task 28.
+// page's own code.
 //
 //     node ui/tests/emit-restore-body.js --out .demo/laptop/
 //
@@ -12,26 +12,19 @@
 //     approval-name=approval-<8 hex>
 //
 // THIS FILE CONTAINS NO YAML AND CANNOT. The plan document is
-// `renderPlanBytes` from `../plan.js` -- the wizard's own renderer, interface
-// register I19 -- and the two names are `mintNames`, the hash `planHash`. A
-// hand-written YAML string here would be a document nobody's page emits: the
-// `Restore` would still be created, `logweir drill approve` would still hash
-// it, Task 16's five approval checks would still pass, and the RUNNER would
-// fail at step 12, three slots after the guard that exists to catch it
-// (`render_plan_bytes_emits_a_document_the_runner_parses`, Task 27). So
+// `renderPlanBytes` from `../plan.js` -- the wizard's own renderer -- and the
+// two names are `mintNames`, the hash `planHash`. A hand-written YAML string
+// here would be a document no page emits, and only the RUNNER would notice,
+// after every approval check had passed. So
 // `crates/logweir/tests/laptop_demo_lint.rs` asserts, over this file's source,
-// that it imports those three from `../plan.js` and that it carries no YAML
-// literal.
+// that it imports those three from `../plan.js` and carries no YAML literal.
 //
-// AND THE BODY IS THE WIZARD'S, NOT A COPY OF IT. `restoreBody` is imported
-// from `../pages/restore-wizard.js` -- the same function the "Create the
-// Restore" button calls. A second body builder here would be a second thing to
-// keep in step with `ArchiveRef`, and the one field it would be easiest to
-// forget is the one that took a fix round to find: `spec.sourceArchive.
-// secretRef.name`, without which the controller injects no object-store
-// credential into the runner Job and the run dies at the archive (plan erratum
-// E24g). Importing it makes the scripted half of X-UIWRITE byte-comparable
-// with the in-browser half.
+// AND THE BODY IS THE WIZARD'S, NOT A COPY OF IT: `restoreBody` is imported
+// from `../pages/restore-wizard.js`, the function the "Create the Restore"
+// button calls. A second builder would be a second thing to keep in step with
+// `ArchiveRef` -- and `spec.sourceArchive.secretRef.name` is the field it
+// would be easiest to forget, without which the controller injects no
+// object-store credential into the runner Job.
 //
 // THE ARGUMENT IS A WIZARD STATE, NOT A KUBERNETES OBJECT. `--fields <path>`
 // (default `<out>/plan-fields.json`) is the object the six steps accumulate:
@@ -39,14 +32,13 @@
 // fields: {...}}`, where `fields` is exactly what
 // `ui/tests/fixtures/plan-fields.json` holds. The demo writes that file with
 // the values of the archive it has just made -- the endpoint, the region, the
-// path style and the evidence bucket are wizard step-1 inputs that NO custom
-// resource records (plan erratum E24d), so a live run is the only place they
-// are confirmed against the runner.
+// path style and the evidence bucket are wizard step-1 inputs that no custom
+// resource records, so a live run is the only place they are confirmed
+// against the runner.
 //
 // It is a TOOL, not a test: it registers no test, and
 // `scripts/check-ui-behaviour.sh` runs `ui/tests/*.spec.js`, which this file
-// deliberately does not match (plan erratum E24g's glob narrowing). It reaches
-// no network.
+// deliberately does not match. It reaches no network.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

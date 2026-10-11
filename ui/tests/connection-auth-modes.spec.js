@@ -1,8 +1,8 @@
-// connection-auth-modes.spec.js -- PROD-01.3 in the console: SASL/PLAIN over
-// TLS, SCRAM-SHA-256 and mTLS client certificates, and the security
-// follow-up's write-only credential entry.
+// connection-auth-modes.spec.js -- SASL/PLAIN over TLS, SCRAM-SHA-256 and
+// mTLS client certificates in the console, and the write-only credential
+// entry.
 //
-// THE THREAT the console half closes: the product API no longer accepts the
+// THE THREAT the console half closes: the product API does not accept the
 // NAME of an existing Secret for a connection's credential, because a
 // connection that could name any Secret could make Logweir present another
 // team's credential to brokers of its author's choosing. In console mode the
