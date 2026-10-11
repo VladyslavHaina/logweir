@@ -155,25 +155,20 @@ pub mod policy;
 /// vocabulary and the deduplication ledger, as pure functions over objects the
 /// caller already read. `controllers::protection_policy` is the thin half.
 pub mod protection;
-/// PLAT-14.3 / decision D3 §4: the pure half of a recurring recovery rehearsal
-/// — the template digest a standing authorization binds, the qualifying-point
-/// filter chain, the rendered plan and the scope the controller proves it falls
-/// inside. `controllers::rehearsal_schedule` is the thin half.
 pub mod read_budget;
 /// FX-34: why a guard refused a run, read off the runner's one
 /// `refusal-detail=` line by a bounded read made once, validated and cleaned
 /// before it reaches a `Restore`'s or a `Backup`'s terminal condition.
 pub mod refusal;
-pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;
 /// P10: the manual-run pool — how many "Back up now" and manual-restore runner
 /// Jobs one namespace may have active at once, and the FIFO order the rest wait
 /// in. Pure; `controllers::{backup,restore}` are the thin halves.
 pub mod run_pool;
-/// FX-2: `runnerResources` — the validation a `Restore`'s and a
-/// `RehearsalSchedule`'s requests and limits pass before they reach the
-/// runner container, and the ceilings they are refused above.
+/// FX-2: `runnerResources` — the validation a `Restore`'s requests and
+/// limits pass before they reach the runner container, and the ceilings they
+/// are refused above.
 pub mod runner_resources;
 pub mod scope;
 pub mod slot;

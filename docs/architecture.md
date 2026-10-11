@@ -378,6 +378,14 @@ Accepted from 2026-09-16. Adds five kinds to Amendment A's list: `TrustPolicy`
 (cluster-scoped), `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog` and
 `RetentionPolicy` (namespaced). With Amendment F's three that makes fourteen.
 
+**Withdrawn in v1 (OD-12, 2026-10-11): `RehearsalSchedule`.** Its CRD, its
+controller and the standing-authorization arms of `Restore` admission and the
+`Approval` controller are removed, so v1 ships thirteen kinds.
+`Approval.spec.subjectRef.kind: RehearsalSchedule` and `Restore.spec.authorization`
+stay in the schemas so objects written before v1 still decode, and both are
+refused by name (`StandingAuthorizationRefused`). The rest of this amendment is
+kept as the record of the decision (release-notes item 73).
+
 | Kind | Scope | Why it is a kind and not a field |
 |---|---|---|
 | `TrustPolicy` | Cluster | It replaces a cluster-scoped kind; a namespace tenant must not be able to name or edit the trust that authorises it. It cannot live on a namespaced object at all. |

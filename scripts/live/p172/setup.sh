@@ -35,7 +35,7 @@ rules:
     resources: [backupdestinations, backupschedules, preflights, topicdiscoveries]
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
-    resources: [protectionpolicies, recoverycatalogs, rehearsalschedules, retentionpolicies]
+    resources: [protectionpolicies, recoverycatalogs, retentionpolicies]
     verbs: ["get", "list"]
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]

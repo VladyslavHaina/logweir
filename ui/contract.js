@@ -384,9 +384,9 @@ export const CAPABILITY_FLAGS = Object.freeze([
   "catalogConnect", "catalogWindowQuery", "catalogs", "connectionCreate",
   "connectionTest", "connectionsRead", "credentialWrite", "destinations",
   "manualBackupCreate", "operationEvents", "operationsRead", "preflight",
-  "protection", "rehearsals", "restoreCreate", "restoresRead", "retention",
-  "scheduleCreate", "scheduleSetSuspension", "schedulesRead", "topicDiscovery",
-  "trustAdministration", "trustPoliciesRead",
+  "protection", "restoreCreate", "restoresRead", "retention", "scheduleCreate",
+  "scheduleSetSuspension", "schedulesRead", "topicDiscovery", "trustAdministration",
+  "trustPoliciesRead",
 ]);
 
 const CAPABILITIES = shapeOf(

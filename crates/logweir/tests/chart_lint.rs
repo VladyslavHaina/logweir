@@ -468,12 +468,12 @@ fn chart_lint_crds_are_byte_identical_copies() {
     // `weirkeeper::crds::KINDS` to derive it — `logweir` declares no edge to
     // `weirkeeper` and adding one to satisfy a test would change the
     // dependency graph the one-signer and pure-core gates police. ADR 0008
-    // records fourteen kinds: Amendment A's six, Amendment F's three and
-    // Amendment G's five.
+    // records thirteen kinds: Amendment A's six, Amendment F's three and
+    // Amendment G's four (its `RehearsalSchedule` is withdrawn in v1).
     assert_eq!(
-        14,
+        13,
         source.len(),
-        "config/crd holds fourteen CRDs: {source:?}"
+        "config/crd holds thirteen CRDs: {source:?}"
     );
     assert_eq!(
         source, copy,
@@ -752,7 +752,7 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
         names_of(&chart, "CustomResourceDefinition"),
         "the CRD names differ"
     );
-    assert_eq!(14, names_of(&chart, "CustomResourceDefinition").len());
+    assert_eq!(13, names_of(&chart, "CustomResourceDefinition").len());
     for name in names_of(&chart, "CustomResourceDefinition") {
         assert_eq!(
             find(&install, "CustomResourceDefinition", &name).value["spec"],
@@ -2163,7 +2163,6 @@ fn console_plural(ty: &str) -> &'static str {
         "TopicDiscovery" => "topicdiscoveries",
         "Preflight" => "preflights",
         "ProtectionPolicy" => "protectionpolicies",
-        "RehearsalSchedule" => "rehearsalschedules",
         "RecoveryCatalog" => "recoverycatalogs",
         "RetentionPolicy" => "retentionpolicies",
         "TrustPolicy" => "trustpolicies",
@@ -2291,7 +2290,6 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             [
                 "protectionpolicies",
                 "recoverycatalogs",
-                "rehearsalschedules",
                 "retentionpolicies",
             ]
             .iter()
@@ -2745,7 +2743,7 @@ const RENDER_NAMESPACE: &str = "logweir-system";
 /// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
 /// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
 /// derives them from `kube.rs`; this list pins what is REACHABLE.
-const API_NAMESPACED_GRANTS: [&str; 39] = [
+const API_NAMESPACED_GRANTS: [&str; 37] = [
     "get logweir.dev/approvals",
     "list logweir.dev/approvals",
     "create logweir.dev/approvals",
@@ -2779,8 +2777,6 @@ const API_NAMESPACED_GRANTS: [&str; 39] = [
     "get logweir.dev/recoverycatalogs",
     "list logweir.dev/recoverycatalogs",
     "create logweir.dev/recoverycatalogs",
-    "get logweir.dev/rehearsalschedules",
-    "list logweir.dev/rehearsalschedules",
     "get logweir.dev/retentionpolicies",
     "list logweir.dev/retentionpolicies",
     "get core/configmaps",

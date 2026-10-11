@@ -52,7 +52,6 @@ pub mod kafka_cluster;
 pub mod preflight;
 pub mod protection_policy;
 pub mod recovery_catalog;
-pub mod rehearsal_schedule;
 pub mod restore;
 pub mod retention_policy;
 pub mod selection;
@@ -73,15 +72,15 @@ pub const VERSION: &str = "v1alpha1";
 /// fixes the kind list and requires a recorded architectural decision for each
 /// addition: the first six are Amendment A's, `BackupDestination`,
 /// `TopicDiscovery` and `Preflight` are **Amendment F**'s, and `TrustPolicy`,
-/// `ProtectionPolicy`, `RehearsalSchedule`, `RecoveryCatalog` and
-/// `RetentionPolicy` are **Amendment G**'s. `TrustRoster` is NOT removed: it
+/// `ProtectionPolicy`, `RecoveryCatalog` and `RetentionPolicy` are
+/// **Amendment G**'s (its `RehearsalSchedule` is withdrawn in v1, OD-12). `TrustRoster` is NOT removed: it
 /// stays served and reconciled, deprecated in its own description, so a
 /// cluster that has one keeps working while `TrustPolicy` is adopted.
 /// `the_kind_list_is_exactly_the_adr` asserts the emitted set against this
 /// list and additionally asserts that no kind is named `Drill`,
 /// `RestoreDrill`, `Switchover` or `MetadataSnapshot`, and that no kind
 /// contains `Kafka` other than `KafkaCluster`.
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 13] = [
     "KafkaCluster",
     "BackupSchedule",
     "Backup",
@@ -93,7 +92,6 @@ pub const KINDS: [&str; 14] = [
     "Preflight",
     "TrustPolicy",
     "ProtectionPolicy",
-    "RehearsalSchedule",
     "RecoveryCatalog",
     "RetentionPolicy",
 ];
@@ -1101,18 +1099,6 @@ pub fn render_all() -> Vec<Rendered> {
             crd
         },
         &protection_policy::SPEC_RULES,
-    );
-    push(
-        "RehearsalSchedule",
-        "rehearsalschedules.yaml",
-        {
-            let mut crd = rehearsal_schedule::RehearsalSchedule::crd();
-            for (path, rule, message) in rehearsal_schedule::NESTED_RULES {
-                attach_rule(&mut crd, path, rule, message);
-            }
-            crd
-        },
-        &rehearsal_schedule::SPEC_RULES,
     );
     push(
         "RecoveryCatalog",

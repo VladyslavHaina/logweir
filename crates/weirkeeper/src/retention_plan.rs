@@ -169,8 +169,8 @@ impl Hold {
 /// previous run was told. Passing them in keeps [`evaluate`] pure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Protection {
-    /// Points named by a nonterminal `Restore` or `RehearsalSchedule` — D3
-    /// §6.4 step 4's `ActiveRestore`.
+    /// Points named by a nonterminal `Restore` — D3 §6.4 step 4's
+    /// `ActiveRestore`.
     pub active_restore: BTreeSet<String>,
     /// Points a provider refused on a previous attempt, keyed by point id with
     /// the closed code that refused them (`LegalHold`, `Denied`). They are kept
@@ -230,7 +230,7 @@ impl CandidateReason {
 /// with a reason, never removed — D3 §6.4 step 4's last line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectReason {
-    /// A nonterminal restore or rehearsal references it.
+    /// A nonterminal restore references it.
     ActiveRestore,
     /// The newest `minUsablePoints` usable points, whatever the rules say.
     MinUsablePoints,

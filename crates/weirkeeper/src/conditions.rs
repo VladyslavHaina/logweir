@@ -580,16 +580,10 @@ pub const TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT: &str = "ApprovalBundleConflic
 /// namespace, or Kubernetes UID than the Restore being reconciled.
 pub const TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH: &str = "ApprovalSubjectMismatch";
 
-/// The standing rehearsal authorization on `Restore.spec.authorization` does
-/// not admit this run — PLAT-14.3b, D3 §4.3.
-///
-/// **ITS OWN REASON, AND NOT `ApprovalSubjectMismatch`.** The facts it reports
-/// — an expired document, a key withdrawn between one slot and the next, a key
-/// whose usage may not authorise, a plan outside the signed scope — are not
-/// "the approval names another object", and an operator told the latter goes
-/// looking at a subject binding that is perfectly correct. It is terminal for
-/// THIS `Restore`: both specs are sealed, so the slot cannot be rescued, and
-/// the schedule's next slot renders a new plan and re-checks everything.
+/// The `Restore` carries `spec.authorization`, a standing rehearsal
+/// authorization, and standing authorizations are withdrawn in v1 (OD-12).
+/// Terminal: `spec` is sealed. The `Approval` controller refuses an `Approval`
+/// naming a `RehearsalSchedule` under the same reason.
 pub const TERMINAL_STATE_STANDING_AUTHORIZATION_REFUSED: &str = "StandingAuthorizationRefused";
 
 /// A Job already occupies the Restore's name but is not controlled by this

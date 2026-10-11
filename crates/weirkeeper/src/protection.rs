@@ -415,9 +415,7 @@ impl Evidence {
     /// ([`evidence_objective_met`]), and a verdict some verifier DID write is
     /// not "the controller could not look". It is read as [`Evidence::Untrusted`]
     /// — a reached verdict this installation does not accept — so it is refused
-    /// and never deferred to the catalog (final review sweep, 2026-09-22; the
-    /// rehearsal join applies the same rule in
-    /// `controllers::rehearsal_schedule::candidate_from_backup`).
+    /// and never deferred to the catalog (final review sweep, 2026-09-22).
     ///
     /// # A `Valid` is read WITH its basis (TRUST-VALID-BASIS-CLASS)
     ///

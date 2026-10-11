@@ -19,15 +19,11 @@ use super::{Condition, Time};
 /// signature by a rostered key exists here", which any approved restore
 /// already produced.
 ///
-/// THE THIRD VALUE IS ADDITIVE AND NARROW. `RehearsalSchedule` (ADR 0008
-/// Amendment G) is what carries a STANDING authorization: one signed document
-/// whose `planHash` is a digest of a sealed `RehearsalSchedule.spec`, checked
-/// again every slot. It is a different referent for the same rule, not a new
-/// rule — the approval controller's checks 7 and 8 become "the recomputed
-/// subject digest" and "the signed subject kind" — and it exists because a
-/// rehearsal that needed a human every week is a rehearsal nobody runs, while
-/// a controller that could mint its own authorization would be the bypass
-/// PLAT-19.2 exists to prevent.
+/// THE THIRD VALUE IS KEPT ONLY SO OLD OBJECTS DECODE. `RehearsalSchedule`
+/// (ADR 0008 Amendment G) carried a STANDING rehearsal authorization.
+/// Standing authorizations are withdrawn in v1 (OD-12): the approval
+/// controller refuses such an `Approval` by name (`StandingAuthorizationRefused`)
+/// and it authorises nothing.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 pub enum SubjectKind {
     /// A `Restore` — including a drill, which is a `Restore` with
@@ -35,7 +31,8 @@ pub enum SubjectKind {
     Restore,
     /// A `Backup`.
     Backup,
-    /// A `RehearsalSchedule`, carrying a standing rehearsal authorization.
+    /// A `RehearsalSchedule`: a standing rehearsal authorization, withdrawn
+    /// in v1 and refused by name.
     RehearsalSchedule,
 }
 
@@ -109,7 +106,7 @@ pub struct VerifiedSubjectRef {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "Approval",
-    doc = "A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` gained `RehearsalSchedule` in ADR 0008 Amendment G: the enum only GROWS, but the decode is closed, so a controller image that predates that amendment cannot deserialize such an object and its whole Approval watch stalls. Nothing in this build creates one; before anything does, every rollback target must already understand the value (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).",
+    doc = "A DSSE-signed authorisation for one Restore or Backup. All four spec fields are required: a create form that posts only the documents posts an object the schema rejects. `spec` is immutable. `subjectRef.kind` also admits `RehearsalSchedule` (ADR 0008 Amendment G) so objects written before v1 still decode; standing rehearsal authorizations are withdrawn in v1 and such an Approval is refused `StandingAuthorizationRefused`. A controller image that predates Amendment G cannot deserialize such an object and its whole Approval watch stalls, so delete them before rolling back that far (docs/kubernetes.md, `Upgrade, rollback and legacy Jobs`).",
     plural = "approvals",
     singular = "approval",
     namespaced,

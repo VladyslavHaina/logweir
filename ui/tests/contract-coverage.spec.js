@@ -439,11 +439,6 @@ const ROUTES_NOT_READ = Object.freeze({
   "GET /readyz": "a probe endpoint for the kubelet, not a console read",
   "GET /api/v1/namespaces":
     "the console takes its namespaces from the session document's grants and lists none",
-  "GET /api/v1/namespaces/{ns}/rehearsal-schedules":
-    "no console page reads rehearsal schedules; the protection page shows the last rehearsal " +
-    "from the protection policy's own view",
-  "GET /api/v1/namespaces/{ns}/rehearsal-schedules/{name}":
-    "no console page reads rehearsal schedules",
 });
 
 /** TWO ROUTES ANSWER A SECOND DOCUMENT THE PATH'S ONE `200` SCHEMA CANNOT

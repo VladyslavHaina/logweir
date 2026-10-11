@@ -8,7 +8,7 @@ Commands use `docker-desktop`; substitute your intended context explicitly.
 path***, which walks this guide's supported steps in order and then carries on
 to the first backup, a restore and a disaster restore.
 
-**Minimum Kubernetes: 1.29.** The fourteen CRDs use CEL validation rules, which
+**Minimum Kubernetes: 1.29.** The thirteen CRDs use CEL validation rules, which
 are GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
 commented out.
 
@@ -941,7 +941,7 @@ add a kind, and it spends exactly four Kubernetes verbs:
 | `get`/`list` on the eight product kinds | every projection the API serves |
 | `create` on all eight | the collection routes with a POST, and `approvals` for PLAT-19.2: the console's signed ordinary confirmation, a governed request's confirmation object, and the approver's countersigned Approval (`POST .../restores/{name}/approval`) |
 | `patch` on `backupschedules`, `backupdestinations`, `topicdiscoveries`, `preflights` | suspension and policy edits, access rotation, and the two checks whose `spec.cancelRequested` may be raised |
-| `get`/`list` on `protectionpolicies`, `recoverycatalogs`, `rehearsalschedules`, `retentionpolicies` | D3's read surfaces |
+| `get`/`list` on `protectionpolicies`, `recoverycatalogs`, `retentionpolicies` | D3's read surfaces |
 | `create` on `recoverycatalogs` | "connect existing archive", D3's one write |
 | `get`/`list` on `trustpolicies` (cluster-scoped, its own `ClusterRoleBinding`) | the keys view, and comparing a readiness check's governing `TrustPolicy` referent |
 | `get` on `trustrosters` with `resourceNames: ["default"]` (cluster-scoped, `<release>-api-trustroster`) | comparing a readiness check's `TrustRoster/default` referent; without it every readiness verdict on a cluster with a roster is `unverifiable` and served stale. No `list` and no other roster |
@@ -985,16 +985,15 @@ hold every grant the console holds). `chart_lint` holds the same property from
 Rust for the console and for the controller account, per scope.
 
 **What an operator may write on the D3 kinds.** `logweir-operator` gains
-`create` on `protectionpolicies`, `recoverycatalogs` and `rehearsalschedules`,
-and then exactly the edit each CRD permits: `update`/`patch` on a
-`ProtectionPolicy` (its spec is not sealed — an objective is policy you tune),
-and `patch` alone on the other two, whose CRDs leave one mutable field each
-(`spec.suspend` on a rehearsal, `spec.syncRequest` on a catalog). What may
+`create` on `protectionpolicies` and `recoverycatalogs`, and then exactly the
+edit each CRD permits: `update`/`patch` on a `ProtectionPolicy` (its spec is
+not sealed — an objective is policy you tune), and `patch` alone on a
+`RecoveryCatalog`, whose CRD leaves one mutable field (`spec.syncRequest`). What may
 change is the CRD's own CEL rule and not the verb, exactly as it is for
 `backupschedules`. `retentionpolicies` is not among them — see
 `logweir-retention-admin` above.
 
-**What the viewer can and cannot see.** `logweir-viewer` reads all fourteen
+**What the viewer can and cannot see.** `logweir-viewer` reads all thirteen
 kinds, including `backupdestinations`, `topicdiscoveries` and `preflights`. It
 holds no verb on `configmaps`, so a kubectl viewer sees a topic inventory's
 **summary** on `status.result.counts` and never its pages: the chunk documents
@@ -1483,13 +1482,13 @@ POST.
 ## Upgrade CRDs before upgrading the controller
 
 Helm installs `crds/` only on first install; it neither upgrades nor rolls CRDs
-back. Apply the new additive schemas, wait for all fourteen Logweir definitions
+back. Apply the new additive schemas, wait for all thirteen Logweir definitions
 to be established, and only then upgrade the release:
 
 ```bash
 kubectl --context docker-desktop apply --server-side --force-conflicts -f charts/logweir/crds/
 for crd in approvals backupdestinations backups backupschedules kafkaclusters \
-           preflights protectionpolicies recoverycatalogs rehearsalschedules \
+           preflights protectionpolicies recoverycatalogs \
            restores retentionpolicies topicdiscoveries trustpolicies trustrosters; do
   kubectl --context docker-desktop wait --for=condition=Established \
     "crd/${crd}.logweir.dev" --timeout=60s
@@ -1497,7 +1496,9 @@ done
 helm upgrade logweir charts/logweir -n logweir-system --wait --timeout 10m
 ```
 
-The loop names all fourteen kinds, the five D3 ones included, and the order
+The loop names all thirteen kinds, the four D3 ones included (the
+`rehearsalschedules` CRD of an earlier build stays until you delete it,
+release-notes item 73), and the order
 matters in one direction only: **CRDs first, controller second**. A controller
 that starts before its CRDs exist logs a reflector error per missing kind and
 reconciles nothing of that kind; CRDs applied ahead of a controller that does
@@ -1513,9 +1514,9 @@ passes, on the OLD schemas (the PoC install's upgrade rehearsal R1 found the six
 prints nothing when the live definitions are the chart's.
 
 Stop before Helm if any apply/wait/diff fails. **Every change in this release is
-additive**: eight new kinds — `BackupDestination`, `TopicDiscovery`,
-`Preflight`, `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`,
-`RecoveryCatalog` and `RetentionPolicy` — plus optional fields and optional
+additive**: seven new kinds — `BackupDestination`, `TopicDiscovery`,
+`Preflight`, `TrustPolicy`, `ProtectionPolicy`, `RecoveryCatalog` and
+`RetentionPolicy` — plus optional fields and optional
 status blocks on `Backup`, `BackupSchedule` and `Restore`, and one additive
 enum value on `Approval`. **No kind is removed**: `TrustRoster` is deprecated in
 its description and still served, and with no `TrustPolicy` present the
@@ -1531,8 +1532,8 @@ none of the new fields resolves exactly as it did.
 `Approval.spec.subjectRef.kind` gained `RehearsalSchedule`. A controller image
 that predates this change cannot decode such an object, and that is a reflector
 decode error which stalls **every** `Approval` reconcile — not one object. Only
-a standing rehearsal authorization creates one (`logweir drill approve
---standing`, [kubernetes.md](kubernetes.md) §7g); an installation that never
+a standing rehearsal authorization minted by an earlier build creates one (v1
+mints none, [kubernetes.md](kubernetes.md) §7g); an installation that never
 minted one can apply these CRDs and roll the controller back safely, and one
 that did must remove those `Approval`s first — see
 [kubernetes.md, "The one widening that is NOT rollback-safe"](kubernetes.md#the-one-widening-that-is-not-rollback-safe-approvalspecsubjectrefkind). The one field that stopped
@@ -1563,7 +1564,7 @@ want you to automate — an object that names someone else's Secret beside an
 endpoint it controls may already exist — so it is done **one Secret, one
 object, by name, with a dry run**:
 
-1. **Before the roll**, suspend every `BackupSchedule` and `RehearsalSchedule`
+1. **Before the roll**, suspend every `BackupSchedule`
    that uses a credential Secret (its destination's, its connection's or its
    inline archive's), so their slots are skipped rather than refused.
 2. Apply the CRDs (three additive `status` fields:
@@ -1627,7 +1628,7 @@ Use the selected installation path above. The namespace is **not** created by ha
 
 `logweir.yaml` is the checked-in `kubectl kustomize` output of `config/`,
 regenerated by `just install-yaml` and never edited by hand. It contains the
-Namespace, the fourteen CustomResourceDefinitions, the RBAC — one
+Namespace, the thirteen CustomResourceDefinitions, the RBAC — one
 ServiceAccount, **six** ClusterRoles (`weirkeeper`, the three human roles,
 `logweir-trust-admin` and `logweir-retention-admin`) and one ClusterRoleBinding
 — the controller Deployment
@@ -1855,7 +1856,7 @@ private/public identity and old trust policy.
 
 The four cleanup scopes are the control plane, scratch topics, archive objects
 and evidence objects. `kubectl delete -f logweir.yaml` removes only that first thing:
-the Namespace and everything inside it, the fourteen CRDs and all their custom
+the Namespace and everything inside it, the thirteen CRDs and all their custom
 resources across namespaces, RBAC, Deployment and NetworkPolicy. Deleting those
 resources can also collect their owned Jobs and ConfigMaps. Export records you
 need before uninstalling.

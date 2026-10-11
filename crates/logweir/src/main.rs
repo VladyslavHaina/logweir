@@ -229,49 +229,16 @@ fn main() -> std::process::ExitCode {
             out,
             subject_kind,
             approval_subject,
-            standing,
-            schedule_namespace,
-            schedule_name,
-            schedule_uid,
-            scope,
-            valid_days,
-            issued_at,
-        }) => {
-            // `--subject-kind RehearsalSchedule` without `--standing` would
-            // mint bytes under `PAYLOAD_TYPE_APPROVAL` that the `Approval`
-            // controller refuses for that referent. Told here, once, rather
-            // than discovered from a rejected object.
-            if subject_kind == cli::SubjectKindArg::RehearsalSchedule && !standing {
-                eprintln!(
-                    "--subject-kind RehearsalSchedule requires --standing: a RehearsalSchedule \
-                     is authorised by a STANDING rehearsal authorization, signed under its own \
-                     payload type, and the Approval controller refuses an ordinary approval for \
-                     that referent"
-                );
-                return logweir::exit::ExitCode::Operational.into();
-            }
-            let standing = standing.then(|| logweir::approve::StandingArgs {
-                schedule_namespace: schedule_namespace.unwrap_or_default(),
-                schedule_name: schedule_name.unwrap_or_default(),
-                schedule_uid: schedule_uid.unwrap_or_default(),
-                scope: scope.unwrap_or_default(),
-                valid_days,
-                issued_at,
-            });
-            logweir::approve::run(&logweir::approve::ApproveArgs {
-                spec,
-                key,
-                // Absent only under `--standing`, which refuses a non-empty
-                // value for either; clap requires both on the per-run path.
-                approver: approver.unwrap_or_default(),
-                ticket: ticket.unwrap_or_default(),
-                out,
-                // The parser owns the vocabulary; `approve` owns the bytes.
-                subject_kind: subject_kind.as_str().to_string(),
-                approval_subject: approval_subject.map(|s| s.wire().to_string()),
-                standing,
-            })
-        }
+        }) => logweir::approve::run(&logweir::approve::ApproveArgs {
+            spec,
+            key,
+            approver,
+            ticket,
+            out,
+            // The parser owns the vocabulary; `approve` owns the bytes.
+            subject_kind: subject_kind.as_str().to_string(),
+            approval_subject: approval_subject.map(|s| s.wire().to_string()),
+        }),
         cli::Command::Drill(cli::DrillCmd::Countersign {
             document,
             confirmation,

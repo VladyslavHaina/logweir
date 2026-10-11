@@ -65,13 +65,12 @@ is the companion to this page.
 
 | Document | Signed by | What it records | Fields are defined in |
 |---|---|---|---|
-| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill or scheduled rehearsal that reached a result: the archive, the target, the approval, the measured RTO and RPO, and an integrity check, sampled unless the plan asked for complete coverage | [Scorecard format](formats/drill-scorecard.md) |
+| Scorecard | The runner's evidence-signing key (under Kubernetes, the installation identity), in a DSSE sidecar | One restore drill that reached a result: the archive, the target, the approval, the measured RTO and RPO, and an integrity check, sampled unless the plan asked for complete coverage | [Scorecard format](formats/drill-scorecard.md) |
 | Put receipt | The same key | What the store reported when the scorecard was uploaded | [The storage receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Backup receipt | The same key | One completed backup run: the source cluster, the topics, per-topic record counts, the covered window, the manifest digest and, from format 1.1.0, per-topic configuration capture coverage | [Backup receipt format](formats/backup-receipt.md) |
 | Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window, where its archive is and, from format 1.1.0, a copy of each topic's configuration capture coverage | [Catalog point format](formats/catalog-point.md) |
-| Standing authorization | An approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule may run, for at most 90 days. It is kept beside the schedule, not with the evidence ([key custody](#key-custody)) | [The standing rehearsal authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature) |
-| RehearsalSchedule | Nothing: Kubernetes status written by the controller | The cadence and objectives of scheduled rehearsals, and the last pass, failure and skipped slot | [CRD schema](../config/crd/rehearsalschedules.yaml), described in [Kubernetes §7g](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization) |
-| Restore | Nothing: Kubernetes status written by the controller | One restore or rehearsal run under Kubernetes: its exit code, how it ended and, when it signed a scorecard, where that is | [CRD schema](../config/crd/restores.yaml), described in [Kubernetes §12](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here) |
+| Standing authorization | An approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule could run, for at most 90 days, before v1 withdrew scheduled rehearsals ([key custody](#key-custody)) | [The standing rehearsal authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature) |
+| Restore | Nothing: Kubernetes status written by the controller | One restore run under Kubernetes: its exit code, how it ended and, when it signed a scorecard, where that is | [CRD schema](../config/crd/restores.yaml), described in [Kubernetes §12](kubernetes.md#12-a-restore-runs-only-against-a-verified-approval-and-the-hash-is-recomputed-here) |
 
 Four reading notes:
 
@@ -80,14 +79,12 @@ Four reading notes:
   run signs nothing, and is recorded only on unsigned Kubernetes status or in
   the operator's own logs
   ([runs that end before a result sign nothing](#runs-that-end-before-a-result-sign-nothing)).
-- **A rehearsal writes an ordinary scorecard.** In it, `approval.approver`
-  reads `standing-authorization/<schedule>` rather than a person's name,
-  because what the approver's key signed was the schedule's scope and not this
-  run, and `triggered_by` reads `rehearsal/<schedule>/<slot>`.
-- **RehearsalSchedule and Restore status are an index, not evidence.** Both are
-  unsigned. A schedule keeps only the latest pass, failure and skip;
-  `status.lastSucceeded.evidence` names the signed scorecard, which outlives
-  the status and the `Restore`.
+- **A rehearsal (withdrawn in v1) wrote an ordinary scorecard.** In it,
+  `approval.approver` reads `standing-authorization/<schedule>` rather than a
+  person's name, because what the approver's key signed was the schedule's
+  scope and not this run, and `triggered_by` reads `rehearsal/<schedule>/<slot>`.
+- **Restore status is an index, not evidence.** It is unsigned, and the signed
+  scorecard it names outlives it.
 - **A backup receipt or a catalog point says what was captured. Only a
   scorecard says that something was restored and checked.**
 
@@ -116,8 +113,8 @@ results of tests".
 | What the evidence supports | Fields |
 |---|---|
 | A restore from a named archive was tested at a recorded time, and the test recorded its own outcome. | [Scorecard](formats/drill-scorecard.md): `run_id`, `requested_at`, `outcome`, `source.backup_id`, `source.manifest_sha256` |
-| The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes, and a rehearsal's plan was proven to fall inside a scope signed for that one schedule by a key with usage `GovernedApproval`. The approving key differs from the evidence-signing key where `approval.self_attested` reads `false`. | [Scorecard](formats/drill-scorecard.md): `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`, `approval.self_attested`; [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
-| Scheduled rehearsals recur on a configured cadence; the last pass is recorded, and so are the last failure and the last refused slot, with their reasons. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.reason`, `status.lastSkipped.slot`, `status.lastSkipped.reason` |
+| The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes. The approving key differs from the evidence-signing key where `approval.self_attested` reads `false`. | [Scorecard](formats/drill-scorecard.md): `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`, `approval.self_attested` |
+| A rehearsal that ran before v1 (scheduled rehearsals are withdrawn) ran a plan proven to fall inside a scope signed for that one schedule by a key with usage `GovernedApproval`. | [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
 | The restore software is identified by version and digest (Logweir's build-input digest, or OSO's image digest for its release), so tests before and after a change to it can be told apart. | [Scorecard](formats/drill-scorecard.md): `engine.version`, `engine.digest` |
 
 **What it does not show**
@@ -190,7 +187,6 @@ results of tests".
 | In scratch mode, the target was proven to be a designated scratch cluster before anything ran: its id was on the allowlist and its marker topic existed. | [Scorecard](formats/drill-scorecard.md): `target.marker_topic` |
 | The cluster the archive came from was read from that cluster at backup time and is recorded separately, so the two ids can be compared. | [Backup receipt](formats/backup-receipt.md): `source.cluster_id`; [Scorecard](formats/drill-scorecard.md): `target.cluster_id` |
 | Restored data went to prefixed topic names under an attested mapping. The topics the restore set out to create are listed, and so is any mapped name that already existed when the restore ran; from format 1.1.0, `target_diff.not_assessed` names each such collision whose configuration difference was not assessed. | [Scorecard](formats/drill-scorecard.md): `target.topic_mapping_prefix`, `target.topic_mapping_sha256`, `target_diff.would_create`, `target_diff.collisions`, `target_diff.not_assessed` |
-| A scheduled rehearsal may run only in scratch mode, against one target cluster id and under one topic prefix, as its signed scope fixes them. | [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `scope.modes`, `scope.targetClusterId`, `scope.topicPrefix` |
 
 **What it does not show**
 
@@ -213,7 +209,6 @@ results of tests".
 | The objectives the approved plan set for the test, and whether the test met them, are recorded; no objective, or an unmeasurable one, reads `null` and never `true`. | [Scorecard](formats/drill-scorecard.md): `objectives.rto_seconds`, `objectives.rpo_seconds`, `objectives.pass_rate`, `objectives.met` |
 | The test's recovery time is measured four ways, so the figure compared with the objective can be read against the other three. | [Scorecard](formats/drill-scorecard.md): `measured.rto_seconds`, `measured.rto_requested_to_verified_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds` |
 | The archive's coverage gap at the requested recovery point is measured. | [Scorecard](formats/drill-scorecard.md): `measured.rpo_seconds` |
-| A rehearsal schedule carries a recovery-time objective and records the recovery time its last passing rehearsal measured. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `spec.objectives.rtoSeconds`, `status.lastSucceeded.rtoSeconds` |
 
 **What it does not show**
 
@@ -286,7 +281,6 @@ Article 25(5):
 |---|---|
 | Each restore test that reaches a result is documented in a signed scorecard, whether it passed or not: `outcome` reads `pass`, `fail-objective`, `fail-integrity` or `preflight-failed`, and a test that did not pass says why. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.result`, `integrity.partial_reason`, `phases[].notes` |
 | Under Kubernetes, a test that ended before a result, and so signed nothing, is recorded unsigned on its `Restore`: the exit code, what the run exited with, and the state the object ended in. | [Restore](../config/crd/restores.yaml): `status.exitCode`, `status.exitReason`, `status.reason`, `status.conditions` |
-| The latest failed rehearsal, signed or not, is recorded unsigned on its schedule with its reason, and the schedule reports itself unhealthy until a rehearsal passes. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `status.lastFailed.at`, `status.lastFailed.reason`, `status.conditions` |
 | The test records how strong its check was and, where `integrity.level` reads `byte-fingerprint`, how many sampled records read back exactly as archived. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled`, `integrity.records_sampled_matching`, `sample.records_expected` |
 | The stored record of a test is bound to its exact signed bytes, and the store's answer to its create-only upload is recorded. | [Put receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document): `scorecard_sha256`, `scorecard_key`, `create_only_enforced`, `version_id` |
 
@@ -322,7 +316,6 @@ address and report deficiencies to the management body.
 | What the evidence supports | Fields |
 |---|---|
 | A restore test of a backup that reached a result left a signed scorecard, dated by when the test was requested. | [Scorecard](formats/drill-scorecard.md): `requested_at`, `source.backup_id`, `outcome` |
-| Restore tests recur on a configured cadence, and the last passing one names its signed scorecard. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `spec.schedule`, `status.lastSucceeded.evidence` |
 
 **What it does not show**
 
@@ -393,7 +386,6 @@ addressed.
 | A sample of the backup data was checked against the archive whose manifest digest is recorded: byte for byte where `integrity.level` reads `byte-fingerprint`, and by record count alone for a partition the check could not fingerprint (`consume-only`). | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled_matching`, `integrity.mismatches`, `source.manifest_sha256` |
 | From format 1.1.0, whether each topic's configuration record in the backup was complete is recorded, and the scorecard names each restored topic whose configuration was therefore not compared. | [Backup receipt](formats/backup-receipt.md): `config_coverage.<topic>.coverage`; [Scorecard](formats/drill-scorecard.md): `topic_parity.not_assessed` |
 | The RTO and pass-rate objectives the plan set for this test, and whether the test met them, are recorded. They are inputs chosen by the control owner, not the entity's objectives. | [Scorecard](formats/drill-scorecard.md): `objectives.rto_seconds`, `objectives.pass_rate`, `objectives.met`, `measured.rto_excluding_preflight_seconds` |
-| Tests recur on a schedule, with the last result of each kind recorded. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.at` |
 
 **What it does not show**
 
@@ -448,7 +440,7 @@ and retention periods for the copies.
 | 4.2.2(b), configuration data: from format 1.3.0, each backup receipt also records per topic the source's partition count and replication factor, its explicit overrides and the effective values of the settings that decide which records it keeps, each with its source and portability class, and the topic's declarative owner with where the run looked for one; a topic whose configuration could not be read records no settings. The catalog point copies it. | [Backup receipt](formats/backup-receipt.md): `topic_configuration.<topic>.partitions`, `topic_configuration.<topic>.replication_factor`, `topic_configuration.<topic>.entries`, `topic_configuration.<topic>.owner`, `owner_detection`; [Catalog point](formats/catalog-point.md): `topics[].configuration`, `topics[].partitions`, `owner_detection` |
 | 4.2.2(e): data was restored from a recorded archive into a recorded target. | [Scorecard](formats/drill-scorecard.md): `source.backup_id`, `target.cluster_id`, `target_diff.would_create` |
 | 4.2.3: the archive manifest's digest is signed and can be re-derived by hand, and a restore test that reaches a result records the check it made on a sample of the archive, and how strong it was. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `integrity.level`, `integrity.result` |
-| 4.2.6: each recovery test that reaches a result leaves a signed record of it, including why it did not pass; one that ends before a result signs nothing, and under Kubernetes is recorded on unsigned status. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`; [Restore](../config/crd/restores.yaml): `status.exitCode`, `status.exitReason`; [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `status.lastFailed.reason` |
+| 4.2.6: each recovery test that reaches a result leaves a signed record of it, including why it did not pass; one that ends before a result signs nothing, and under Kubernetes is recorded on unsigned status. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`; [Restore](../config/crd/restores.yaml): `status.exitCode`, `status.exitReason` |
 
 **What it does not show**
 
@@ -493,8 +485,8 @@ proposal.
 
 | What the evidence supports | Fields |
 |---|---|
-| Restore tests recur on a schedule. Each one that reaches a result leaves a dated, signed scorecard, and the latest one that failed, signed or not, is recorded on the schedule. | [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.at`; [Scorecard](formats/drill-scorecard.md): `requested_at`, `outcome` |
-| What a test found, including why it did not pass, is recorded as an input to the revision step. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`, `phases[].notes`; [RehearsalSchedule](../config/crd/rehearsalschedules.yaml): `status.lastFailed.reason` |
+| Each restore test that reaches a result leaves a dated, signed scorecard. | [Scorecard](formats/drill-scorecard.md): `requested_at`, `outcome` |
+| What a test found, including why it did not pass, is recorded as an input to the revision step. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`, `phases[].notes` |
 | For (A) and (B), a backup was restored in a test and checked on a sample; where `integrity.level` reads `byte-fingerprint`, the sampled records were compared byte for byte with it. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
 
 **What it does not show**
@@ -692,8 +684,7 @@ where `outcome` reads `pass`, and at exit 2, where it reads `fail-objective`,
 `fail-integrity` or `preflight-failed`
 ([interface I8](stability.md#interface-i8-is-amended-exit-2-prints-the-signed-failures-keys-too)).
 A run that ends earlier signs nothing and uploads nothing: a plan refused before
-anything ran (exit 3, which includes every refusal of a standing authorization
-at the runner), an operational failure such as a broker outage during the
+anything ran (exit 3), an operational failure such as a broker outage during the
 restore (exit 1), a failed signature or lock proof (exit 4), and a run killed
 before it signed, whose Job ends with no exit code. A backup run is the same: a
 backup whose engine fails signs no receipt and indexes no recovery point.
@@ -703,16 +694,13 @@ Such a run is recorded only outside the signed evidence:
 - Under Kubernetes, on its `Restore`: `status.exitCode`, `status.exitReason`,
   `status.reason` and `status.conditions`, unsigned and kept as long as the
   object is ([what the status carries](kubernetes.md#what-the-status-carries-and-what-it-copies)).
-  A rehearsal's `Restore` objects are deleted with their schedule.
-- For a rehearsal, also on the schedule: `status.lastFailed.reason` and the
-  `RehearsalHealthy` condition, which keep only the latest failure.
 - Kubernetes' own Events about the Job and its pod, which are rotated and rate
   limited ([best effort](kubernetes.md#diagnostics-are-derived-from-events-which-are-best-effort)).
   Logweir writes no Event of its own.
 - From the command line, the exit code and the run's own output.
 
 So the signed scorecards under `logweir/drills/` are the record of tests that
-reached a result, not of every test that was attempted. A series of rehearsals
+reached a result, not of every test that was attempted. A series of tests
 that each ended at exit 1 or exit 3 leaves no signed trace, and an absence of
 failing scorecards does not show that no test failed. Counting attempts takes
 the Kubernetes status, or the operator's own logs, kept for as long as the
@@ -748,16 +736,13 @@ Who holds those keys is outside the documents:
   independent of the evidence
   ([where the public key comes from](verify-a-scorecard.md#where-the-public-key-comes-from)).
 
-A rehearsal's scorecard identifies the standing authorization it ran under only
-by `approval.approver` (the schedule's name), `approval.key_id` and
-`approval.approved_at`, which is the document's `issuedAt`. No scorecard field
-carries a digest of the document, and the runner uploads no copy of it under
-`logweir/drills/`. The signed document and its sidecar are kept in the
-namespace's `Approval` object and copied into each run's bundle `ConfigMap`,
-which is deleted with the run's `Restore`
-([§7g](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization)).
-Keeping them beside the scorecards, for as long as an auditor needs them, is
-the operator's work.
+A scorecard a rehearsal signed before v1 identifies the standing authorization
+it ran under only by `approval.approver` (the schedule's name),
+`approval.key_id` and `approval.approved_at`, which is the document's
+`issuedAt`. No scorecard field carries a digest of the document, and the
+runner uploaded no copy of it under `logweir/drills/`; keeping the documents
+beside the scorecards is the operator's work
+([§7g](kubernetes.md#7g-scheduled-rehearsals-are-withdrawn-in-v1)).
 
 Every timestamp in these documents was read from the clock of a machine that
 produced it: the runner's, or for an approval, the approver's. Logweir uses no
@@ -876,9 +861,8 @@ RTO does not predict how long a production restore would take.
 `measured.rpo_seconds` is the archive's coverage gap at the requested point:
 how far the newest restored record falls short of the point asked for. It is
 not data lost from the source, which no restore test measures
-([`rpo_seconds`](formats/drill-scorecard.md#rpo_seconds)). A rehearsal schedule
-carries a recovery-time objective in `spec.objectives.rtoSeconds`, and no
-recovery-point objective;
+([`rpo_seconds`](formats/drill-scorecard.md#rpo_seconds)). No recovery-point
+objective is carried;
 [PROD-08.2](to-do/product-expansion.md#prod-082--measure-recovery-objectives-through-exercises)
 plans one. Logweir records the objectives a plan sets; choosing them for each
 function is the control owner's work.
@@ -899,8 +883,6 @@ allowlist and marker checks are skipped, `target.marker_topic` is absent, and
 only the new topic names separate restored data from the cluster's existing
 topics; that cluster may be the source cluster itself. Restoring into a live
 topic is refused in every mode ([Never #1](stability.md#never--four-entries)).
-Scheduled rehearsals run in scratch mode only (Standing authorization
-`scope.modes`).
 
 ### Test scope, cadence and follow-up
 
@@ -913,14 +895,11 @@ digest. Whether a test's scope covers what a clause names, such as all
 functions, the critical or important ones, or the systems holding protected
 health information, is the control owner's mapping.
 
-Cadence is configuration: `spec.schedule` says when rehearsals should fire. The
-signed record of tests is the set of scorecards under `logweir/drills/`, which
+Cadence is the operator's: v1 runs a restore test when one is asked for
+(scheduled rehearsals are withdrawn). The signed record of tests is the set of scorecards under `logweir/drills/`, which
 Logweir never deletes; it holds the tests that reached a result, and a test
 that ended earlier is recorded only on unsigned status
 ([runs that end before a result sign nothing](#runs-that-end-before-a-result-sign-nothing)).
-RehearsalSchedule status keeps only the latest pass, failure and skip; a skipped
-slot is not run late, and its reason survives in `status.lastSkipped.reason`
-only until the next skip.
 
 The evidence records results. The impact analysis, test scenarios, review of
 the results, corrective action, plan revision and reporting to management that

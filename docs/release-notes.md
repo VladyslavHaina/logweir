@@ -66,9 +66,10 @@ archive holding transaction markers is refused unless the plan allows them), 68
 empty capture), 69 (FX-44, a failed restore removes or names the scratch
 topic it created), 70 (FX-49, the console's original-name box takes effect
 when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
-points) and 72 (PROD-01.5a
+points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
-changes) so far. Items continue the next entry's
+changes) and 73 (PROD-17.1 C1, scheduled rehearsals and standing
+authorizations withdrawn) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3327,6 +3328,47 @@ changes, and no broker line's status changes
 twice. The shards' durations are measured on the pull request's CI run.
 **Rollback:** revert the change; nothing deployed is affected.
 
+#### 73. Scheduled rehearsals and standing authorizations are withdrawn (PROD-17.1 C1)
+
+**Changed.** The `RehearsalSchedule` kind, its reconciler, its CRD and RBAC,
+the product API's `GET .../rehearsal-schedules[/{name}]` with its `rehearsals`
+capability flag, and `logweir drill approve --standing` are removed. Why: a
+standing authorization needs a personal approver key, which v1 does not ship
+(OD-12, after OD-8). A `Restore` carrying `spec.authorization` is now refused
+`StandingAuthorizationRefused` before its `Approval` is read and before any
+Job exists, and an `Approval` whose `spec.subjectRef.kind` is
+`RehearsalSchedule` is refused `StandingAuthorizationRefused` and is never
+`Verified`. Both fields stay in the CRDs, so objects written before v1 still
+parse. `drill approve --standing` and `--subject-kind RehearsalSchedule` are
+usage errors. Every standing authorization already signed (formats 1.0.0 and
+1.1.0) and every scorecard a rehearsal signed still verify as before.
+**What an upgraded install sees.** `helm upgrade` leaves the
+`rehearsalschedules.logweir.dev` CRD in the cluster (Helm never deletes
+`crds/`), and its objects stay, unreconciled. A rehearsal `Restore` that had
+not started is refused; one whose Job was already running finishes under the
+bundle it was started with; one already finished keeps its status. To remove
+them:
+
+```
+kubectl --context "$LOGWEIR_CONTEXT" get rehearsalschedules -A
+kubectl --context "$LOGWEIR_CONTEXT" delete crd rehearsalschedules.logweir.dev
+```
+
+Deleting the CRD deletes every `RehearsalSchedule` with it.
+**Do:** before the controller rolls, list `RehearsalSchedule` objects with the
+first command. Run restore tests as per-run `Restore`s, which the console
+confirms.
+**Scope:** controller rows over a recording API double (each refusal by name,
+with no `POST` and no `Approval` read, and its negative control), CLI rows
+through the shipped binary, the regenerated CRDs, chart renders and OpenAPI
+document. [UNVERIFIED — no live install has run this build's refusals yet; PROD-14.1's clean install carries them.]
+**Rollback:** roll the chart, the controller and the runner back together.
+Helm does not re-create a deleted CRD. If you deleted it, re-apply the older
+chart's `crds/` (`kubectl apply --server-side --force-conflicts -f
+charts/logweir/crds/`) before rolling the controller back. Its controller then
+resumes any schedule left in the cluster, under standing documents that still
+verify until they expire.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3337,6 +3379,8 @@ In addition to the next entry's six, in its order:
   whole. Re-create a catalog whose `viewLimit` cut its view with a larger one
   (`spec.sync` is immutable), and read a stopped walk's `Synced` condition. An
   archive of more than 5000 points is not enforced on v1.
+- **Before the controller rolls, list every `RehearsalSchedule`** (item 73):
+  after the upgrade none runs, and its CRD stays until you delete it.
 - **Before the upgrade, split every `Backup` and `BackupSchedule` that names
   or resolves to more than 1,000 topics** (item 65). The two commands in
   [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
@@ -3437,7 +3481,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71 and 72, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72 and 73, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3518,7 +3562,9 @@ runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
 transaction markers; items 69 and 71 change the runner and the controller and
 need nothing, in either order; item 70 changes the console only; item 72
-changes only how the repository is tested and needs nothing. To roll back to
+changes only how the repository is tested and needs nothing; item 73
+removes a kind, a route and a flag, and leaves the `RehearsalSchedule` CRD for
+the operator to delete. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

@@ -218,16 +218,16 @@ const SIX_KINDS: [&str; 6] = [
     "trustrosters",
 ];
 
-/// The eight kinds ADR 0008's Amendments F (D2) and G (D3) added, in the plural
-/// order `config/crd/` lists them. `logweir-viewer` reads all eight in ONE
-/// rule; the controller's grants are per kind, in rules of their own, because
-/// each one has a different caller to name.
-const EIGHT_NEW_KINDS: [&str; 8] = [
+/// The seven kinds ADR 0008's Amendments F (D2) and G (D3) added, in the
+/// plural order `config/crd/` lists them (G's `rehearsalschedules` is
+/// withdrawn in v1). `logweir-viewer` reads all seven in ONE rule; the
+/// controller's grants are per kind, in rules of their own, because each one
+/// has a different caller to name.
+const SEVEN_NEW_KINDS: [&str; 7] = [
     "backupdestinations",
     "preflights",
     "protectionpolicies",
     "recoverycatalogs",
-    "rehearsalschedules",
     "retentionpolicies",
     "topicdiscoveries",
     "trustpolicies",
@@ -236,17 +236,13 @@ const EIGHT_NEW_KINDS: [&str; 8] = [
 /// The three kinds D2 §7.2 gives `logweir-operator` `create` and `patch` on.
 const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topicdiscoveries"];
 
-/// The three kinds D3 §9 gives `logweir-operator` `create` on.
+/// The two kinds D3 §9 gives `logweir-operator` `create` on.
 ///
-/// THREE AND NOT FOUR. Amendment G added five kinds; `trustpolicies` is
-/// cluster-scoped and write-fenced to `logweir-trust-admin`, and
-/// `retentionpolicies` is write-fenced to `logweir-retention-admin`, so what an
-/// operator may bring into existence is protection, a catalog and a rehearsal.
-const THREE_D3_OPERATOR_KINDS: [&str; 3] = [
-    "protectionpolicies",
-    "recoverycatalogs",
-    "rehearsalschedules",
-];
+/// `trustpolicies` is cluster-scoped and write-fenced to
+/// `logweir-trust-admin`, `retentionpolicies` is write-fenced to
+/// `logweir-retention-admin`, and `rehearsalschedules` is withdrawn in v1, so
+/// what an operator may bring into existence is protection and a catalog.
+const TWO_D3_OPERATOR_KINDS: [&str; 2] = ["protectionpolicies", "recoverycatalogs"];
 
 fn v(items: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
@@ -650,8 +646,6 @@ fn every_granted_verb_has_a_caller() {
             "retentionpolicies" => "RetentionPolicy",
             // PLAT-14.2 (D3 W6).
             "protectionpolicies" => "ProtectionPolicy",
-            // PLAT-14.3 (D3 W7), the other direction of the same mapping.
-            "rehearsalschedules" => "RehearsalSchedule",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
                  `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
@@ -1118,12 +1112,6 @@ fn every_call_site_has_a_grant() {
             // and ONE named `RecoveryCatalog` for `get_opt`. Nothing else is
             // granted and nothing else is called.
             "ProtectionPolicy" => ("logweir.dev", "protectionpolicies"),
-            // PLAT-14.3 (D3 W7): `controllers/rehearsal_schedule.rs` reaches
-            // its own kind for the `Controller::new` watch and `patch_status`,
-            // and `controllers/approval.rs` `get`s the one a standing
-            // `Approval` names — D3 §4.3's digest is recomputed from the
-            // referent's own sealed spec, so the referent has to be read.
-            "RehearsalSchedule" => ("logweir.dev", "rehearsalschedules"),
             // PLAT-16.1 / PLAT-16.2 (D3 W9): `controllers/retention_policy.rs`
             // reaches its own kind for the `Controller::new` watch, the
             // namespace-wide conflict `list` and `patch_status`; ONE named
@@ -1466,26 +1454,6 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies/status"]),
             v(&["patch"]),
         ),
-        // PLAT-14.3 (D3 W7) — the `RehearsalSchedule` reconciler's own rows.
-        // `get` HAS a caller here where the other new kinds have none:
-        // `controllers/approval.rs` reads the referent a standing `Approval`
-        // names, because the digest it binds is recomputed from that object's
-        // sealed spec (D3 §4.3(a)).
-        (
-            v(&["logweir.dev"]),
-            v(&["rehearsalschedules"]),
-            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-        ),
-        (
-            v(&["logweir.dev"]),
-            v(&["rehearsalschedules/status"]),
-            v(&["patch"]),
-        ),
-        // The ONE `Restore` a due slot creates. `create` only — nothing in the
-        // crate updates, replaces or deletes a `Restore` object, and a
-        // rehearsal that could edit its own child after creating it could
-        // change the plan its approver's scope was proved against.
-        (v(&["logweir.dev"]), v(&["restores"]), v(&["create"])),
         // PLAT-16.1 / PLAT-16.2 (D3 W9) — the `RetentionPolicy` reconciler's
         // own rows. `watch` is `Controller::new`; `list` is the conflict check,
         // which needs the whole namespace to find a second policy covering the
@@ -1525,7 +1493,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&SIX_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D2 §7.2 and D3 §9 — the eight kinds Amendments F and G added, read
+        // D2 §7.2 and D3 §9 — the seven kinds Amendments F and G added, read
         // only, in a SEPARATE rule so the six-kind list stays byte-identical
         // to the controller's own first rule. `trustpolicies` is
         // cluster-scoped, so a `RoleBinding` of this role does not convey it;
@@ -1533,7 +1501,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // is a separate and visible decision.
         (
             v(&["logweir.dev"]),
-            v(&EIGHT_NEW_KINDS),
+            v(&SEVEN_NEW_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
     ];
@@ -1578,12 +1546,11 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // `the_schedule_edit_restriction_is_cel_not_rbac` records for
         // `backupschedules`.
         (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["patch"])),
-        // D3 §9 — declare protection, connect an existing archive, schedule a
-        // rehearsal. THREE of D3's four namespaced kinds;
-        // `retentionpolicies` is the fourth and is asserted ABSENT below.
+        // D3 §9 — declare protection, connect an existing archive. TWO of
+        // D3's namespaced kinds; `retentionpolicies` is asserted ABSENT below.
         (
             v(&["logweir.dev"]),
-            v(&THREE_D3_OPERATOR_KINDS),
+            v(&TWO_D3_OPERATOR_KINDS),
             v(&["create"]),
         ),
         // A `ProtectionPolicy`'s `.spec` carries NO immutability seal —
@@ -1597,18 +1564,13 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies"]),
             v(&["update", "patch"]),
         ),
-        // The other two seal everything but one field each — `spec.suspend`
-        // ("the standing authorization binds a digest of this spec") and
-        // `spec.syncRequest` ("a catalog of a different location is a
-        // different catalog"). A merge patch reaches exactly that field, so
+        // A catalog seals everything but `spec.syncRequest` ("a catalog of a
+        // different location is a different catalog"). A merge patch reaches
+        // exactly that field, so
         // `patch` WITHOUT `update`: a PUT is the shape most likely to carry a
         // second, unnoticed field, which the API server would then refuse for
         // that field alone.
-        (
-            v(&["logweir.dev"]),
-            v(&["recoverycatalogs", "rehearsalschedules"]),
-            v(&["patch"]),
-        ),
+        (v(&["logweir.dev"]), v(&["recoverycatalogs"]), v(&["patch"])),
     ];
     let operator_rules = rules_of("config/rbac/operator_role.yaml", "logweir-operator");
     assert_eq!(
@@ -2280,10 +2242,11 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         "examples/cronjob-drill.yaml carries a ServiceAccount and a CronJob"
     );
 
-    // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
+    // And the install file's exact shape: 1 Namespace + 13 CRDs + 1
     // ServiceAccount + 6 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
     // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
-    // six, Amendment F's three and Amendment G's five — and a kind that
+    // six, Amendment F's three and Amendment G's four (its
+    // `RehearsalSchedule` is withdrawn in v1) — and a kind that
     // reaches `config/crd/` without reaching
     // `config/crd/kustomization.yaml` shows up here as a count that did not
     // move. SIX ClusterRoles since D3 W13: `weirkeeper`, the three human
@@ -2297,7 +2260,7 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
         by_kind,
         BTreeMap::from([
             ("Namespace".to_string(), 1),
-            ("CustomResourceDefinition".to_string(), 14),
+            ("CustomResourceDefinition".to_string(), 13),
             ("ServiceAccount".to_string(), 1),
             ("ClusterRole".to_string(), 6),
             ("ClusterRoleBinding".to_string(), 1),
@@ -2308,8 +2271,8 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
     assert_eq!(
         docs.len(),
-        25,
-        "logweir.yaml must hold exactly 25 documents"
+        24,
+        "logweir.yaml must hold exactly 24 documents"
     );
 }
 

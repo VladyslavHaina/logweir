@@ -54,9 +54,10 @@
 # who could delete a `BackupDestination` could remove the object a running
 # Backup froze its location from.
 #
-# THE THREE D3 KINDS (§9): `create`, PLUS THE EDIT EACH ONE ACTUALLY ALLOWS.
-# D3 §9 gives the operator `create` on `protectionpolicies`,
-# `rehearsalschedules` and `recoverycatalogs`, and — exactly as with
+# THE TWO D3 KINDS (§9): `create`, PLUS THE EDIT EACH ONE ACTUALLY ALLOWS.
+# D3 §9 gives the operator `create` on `protectionpolicies` and
+# `recoverycatalogs` (its third, `rehearsalschedules`, is withdrawn in v1),
+# and — exactly as with
 # `backupschedules` above — what may then CHANGE is the CRD's own CEL rule and
 # not a verb here:
 #
@@ -64,13 +65,11 @@
 #   is policy an operator is expected to tune, so it gets `update` AND `patch`,
 #   for the same reason `backupschedules` has both: `kubectl edit` and
 #   `kubectl apply` send a PATCH, so `update` alone is a grant nobody can use.
-# * `rehearsalschedules` seals every field but `spec.suspend` — "the standing
-#   authorization binds a digest of this spec, so an edit would authorize work
-#   nobody approved". Suspending is a merge patch, so `patch` WITHOUT `update`:
-#   a PUT of the whole object is the shape most likely to carry a second,
-#   unnoticed field, and the API server would refuse it for that field alone.
 # * `recoverycatalogs` seals everything but `spec.syncRequest` ("a catalog of a
-#   different location is a different catalog"). Same shape, same verb.
+#   different location is a different catalog"). That is a merge patch, so
+#   `patch` WITHOUT `update`: a PUT of the whole object is the shape most likely
+#   to carry a second, unnoticed field, and the API server would refuse it for
+#   that field alone.
 #
 # THE FOURTH D3 KIND IS NOT HERE, AND THAT IS THE DECISION. `retentionpolicies`
 # is the only kind in this product whose object can end in a deletion, so its
@@ -126,12 +125,11 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
-  # D3 §9 — declare protection, connect an archive, schedule a rehearsal.
+  # D3 §9 — declare protection, connect an archive.
   - apiGroups: ["logweir.dev"]
     resources:
       - protectionpolicies
       - recoverycatalogs
-      - rehearsalschedules
     verbs: ["create"]
   # A `ProtectionPolicy`'s spec is not sealed: objectives are policy, and both
   # verbs are needed for the same reason `backupschedules` needs both.
@@ -144,5 +142,4 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources:
       - recoverycatalogs
-      - rehearsalschedules
     verbs: ["patch"]

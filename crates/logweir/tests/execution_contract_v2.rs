@@ -185,50 +185,21 @@ fn signed_authorization_with(
     }
 }
 
-/// A standing authorization MINTED by this build's own `logweir drill approve
-/// --standing` code path over `scope`, for `uid` — the bytes an approver would
-/// hand the cluster — with the keyring that pins the minting key.
+/// A standing authorization over `scope`, for `uid`, at the `formatVersion`
+/// this build's writer rule picks for that scope
+/// (`wire::standing_format_version_for`: 1.1.0 for a coverage scope).
+///
+/// PROD-17.1 C1 (OD-12) withdrew `logweir drill approve --standing`, which
+/// these rows used to mint the document with; the runner's reading of a
+/// signed standing document is unchanged, so the bytes are built here.
 fn minted_authorization(uid: &str, scope: &serde_json::Value) -> SignedAuthorization {
-    use logweir::approve::{mint_standing, ApproveArgs, StandingArgs};
-    let dir = tempfile::tempdir().unwrap();
-    let scope_path = dir.path().join("scope.json");
-    std::fs::write(&scope_path, scope.to_string()).unwrap();
-    let approver = SigningKey::generate_ed25519();
-    let key = dir.path().join("approver.pem");
-    std::fs::write(&key, approver.to_pkcs8_pem().unwrap()).unwrap();
-    let out = dir.path().join("standing-authorization.json");
-    let args = ApproveArgs {
-        spec: None,
-        key,
-        approver: String::new(),
-        ticket: String::new(),
-        out: out.clone(),
-        subject_kind: "RehearsalSchedule".to_string(),
-        approval_subject: None,
-        standing: Some(StandingArgs {
-            schedule_namespace: "team-a".to_string(),
-            schedule_name: "weekly-orders".to_string(),
-            schedule_uid: uid.to_string(),
-            scope: scope_path,
-            valid_days: 30,
-            issued_at: Some(Utc::now() - chrono::Duration::days(1)),
-        }),
-    };
-    mint_standing(&args, Utc::now()).expect("this build mints the scope");
-    let keys = serde_json::to_vec(&serde_json::json!({
-        "formatVersion": "1.0.0",
-        "keys": [{
-            "keyId": approver.key_id(),
-            "publicKeyPem": approver.verifying_key().to_public_key_pem().unwrap(),
-            "usages": ["GovernedApproval"],
-        }],
-    }))
-    .unwrap();
-    SignedAuthorization {
-        document: std::fs::read(&out).unwrap(),
-        sidecar: std::fs::read(out.with_extension("sig")).unwrap(),
-        keys,
-    }
+    let typed: logweir_core::rehearsal_scope::RehearsalScope =
+        serde_json::from_value(scope.clone()).expect("the fixture is a RehearsalScope");
+    signed_authorization_with(
+        uid,
+        scope.clone(),
+        wire::standing_format_version_for(&typed),
+    )
 }
 
 /// The scope a complete-only standing authorization signs (review M1):

@@ -9,7 +9,8 @@
 #   runs it. `--self-check` runs every check below, then stops before the
 #   suite.
 #
-# WHY THIS EXISTS. `crates/logweir/tests/standing_approve.rs` minted its
+# WHY THIS EXISTS. `crates/logweir/tests/standing_approve.rs` (since removed
+# with the standing mint) minted its
 # fixture at a fixed instant (2026-09-01, thirty days) while the mint read the
 # wall clock, so three rows went red on 2026-10-01 and blocked every
 # integration on main. Nothing that runs at the real clock can see that class
