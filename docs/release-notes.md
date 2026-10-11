@@ -63,8 +63,9 @@ and verified), 66 (PROD-16.2,
 two-person approval in the console, no key), 67 (PROD-01.1a, an
 archive holding transaction markers is refused unless the plan allows them), 68
 (PROD-02.1, a backup of a source whose records all expired is a signed, named
-empty capture) and 69 (FX-44, a failed restore removes or names the scratch
-topic it created) so far. Items continue the next entry's
+empty capture), 69 (FX-44, a failed restore removes or names the scratch
+topic it created) and 70 (FX-49, the console's original-name box takes effect
+when ticked) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3254,6 +3255,22 @@ line no block), a rehearsal row (a failed child's block becomes
 older controller ignores the line; an older runner prints none, and leaves a
 failed run's topics as before.
 
+#### 70. The console's "Restore under the original topic names" box takes effect when ticked (FX-49)
+
+**Changed.** Ticking the restore wizard's original-name box, or its owner
+statement, now redraws the wizard at once: the owner statement, the locked
+*Verify every record* and the plan appear. Before, nothing changed until another
+field was edited (PoC batch 7, F-1). The approval panel now says a `newTopic`
+restore's topics stay on the target cluster, where it printed "nothing is
+deleted (teardown delete)" (F-5).
+**Do:** nothing.
+**Scope:** console rows only (`ui/tests/original-name.spec.js`,
+`ui/tests/console-approval.spec.js`): the mounted wizard driven by `change`
+events, a scan that every field the wizard re-reads on an edit is listened to,
+and the approval panel's `newTopic` and scratch wording.
+**Rollback:** the console image; an older console needs another field edited
+after the tick.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3364,7 +3381,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68 and 69, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69 and 70, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3444,7 +3461,7 @@ console and the chart, and needs nothing until a namespace is bound
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
 transaction markers; item 69 changes the runner and the controller and needs
-nothing, in either order. To roll back to
+nothing, in either order; item 70 changes the console only. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image
