@@ -544,6 +544,14 @@ mvp-demo:
 sandbox image="docker.io/vladyslavhaina/logweir:latest":
     LOGWEIR_IMAGE={{image}} LOGWEIR_BIN="$PWD/scripts/logweir-image.sh" ./scripts/mvp-demo.sh
 
+# PROD-14.1: the emergency recovery kit, a versioned offline directory and
+# tarball (docs/install.md, *Recover onto a clean installation with the kit*):
+#
+#     just recovery-kit v<X.Y.Z> --release-assets <dir> [--trust <dir>] [--save-images linux/<arch>]
+#     just recovery-kit <v<X.Y.Z>|sha-<commit>> --local-build    # a dry run with this host's build
+recovery-kit version *args:
+    bash scripts/recovery-kit.sh {{version}} {{args}}
+
 # The pre-flight: refuse a namespace that is missing any of the four current
 # Secrets, naming the FIRST absent one.
 #

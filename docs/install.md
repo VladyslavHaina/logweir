@@ -1450,6 +1450,114 @@ values file that still sets `notify` is refused at render, naming it.
 
 ---
 
+## Recover onto a clean installation with the kit
+
+The cluster that ran Logweir is gone, with every `Backup`, `Restore` and
+schedule, and the archive survives in object storage. A clean installation
+recovers from the archive alone, with no public network once the kit is built.
+
+**Build the kit while you still can, and again at every upgrade.** First export
+the public trust material, as the trust administrator:
+
+```bash
+mkdir trust-export
+kubectl --context <ctx> get trustpolicy <name> -o json \
+  | logweir trust export --policy <name> --stdin > trust-export/trustpolicy-<name>.yaml
+kubectl --context <ctx> -n logweir-system get configmap logweir-signing-trust \
+  -o jsonpath='{.data.signing\.pub\.pem}' > trust-export/signing.pub.pem
+kubectl --context <ctx> -n logweir-system get configmap logweir-signing-trust \
+  -o jsonpath='{.data.key-id}{"\n"}' > trust-export/signing-key-id.txt
+```
+
+Then, on a connected machine, in a checkout of the release:
+
+```bash
+gh release download v<X.Y.Z> -R VladyslavHaina/logweir -D release-assets
+just recovery-kit v<X.Y.Z> --release-assets release-assets \
+  --trust trust-export --save-images linux/<arch>
+```
+
+`--save-images` saves each image for the nodes' platform. An image published
+for one platform only is saved as it is, with a warning: the identity hook's
+pinned image is linux/amd64, which an arm64 node runs only under emulation.
+
+`just recovery-kit <version> --local-build` is a dry run: it packs this host's
+`target/release/logweir` instead of the release's three archives, and
+`kit.json` says `"binaries": "local-build"`. The result is
+`target/recovery-kit/logweir-recovery-kit-<version>/`, the same as a `.tar.gz`,
+and its `.sha256`:
+
+| Path | What it is |
+|---|---|
+| `bin/` | the `logweir` CLI for linux-amd64, linux-arm64 and darwin-arm64 (the release's archives) |
+| `chart/` | the chart package |
+| `images/images.txt`, `values-offline.yaml` | the controller, runner, console and identity-hook images by digest, as chart values; `images/*.tar` with `--save-images` |
+| `schemas/` | the frozen JSON schemas of every signed document |
+| `verify/verify_scorecard.py` | the independent verifier |
+| `trust/` | what you exported above |
+| `RECOVERY.md`, `kit.json`, `MANIFEST.sha256` | this section, what the kit holds, and every file's sha256 |
+
+**The kit holds no private key and no password.** It refuses to pack a
+private-key PEM (plain or base64), a Kubernetes Secret, or a file named like a
+key, a password or a credential: exit 3, `REFUSED`, and nothing is written.
+Keep these separately, in your secret store:
+
+- the archive's read-only key pair, for `archiveRead` (widened to the catalog
+  sync row of *3.11 Object-store permissions*);
+- the target cluster's credential (the SCRAM `password`, or the TLS client
+  certificate and key);
+- the console's key Secret (`cursor.key`, plus `session.key` in shared mode)
+  and, in shared mode, the OIDC client secret and the Ingress TLS certificate;
+- the old installation identity backup, only if you recover the same identity
+  (*Back up and recover the installation identity*).
+
+**Recover.**
+
+1. **Check the kit.** `sha256sum -c MANIFEST.sha256` (or `shasum -a 256 -c`)
+   prints `OK` for every file.
+2. **Load the images** where the cluster can use them: `docker load -i
+   images/<role>-<os>-<arch>.tar` for each, or push them to your registry.
+   `docker image inspect <reference>` succeeds for every line of
+   `images/images.txt`.
+3. **Install the chart from the kit**, with the console in the mode you run
+   (*5e. Running the console in the cluster*):
+
+   ```bash
+   helm install logweir chart/<package>.tgz -n logweir-system --create-namespace \
+     -f values-offline.yaml -f <your values> --wait --timeout 10m
+   ```
+
+   With images loaded on the node and no registry, also set
+   `imagePullPolicy`, `runnerImagePullPolicy`,
+   `identity.bootstrapImagePullPolicy` and `api.console.imagePullPolicy` to
+   `Never`. The fresh install generates its own identity and console key and
+   creates the `logweir-installation` policy, so restores are confirmed in the
+   console (*5f. Approval modes*). Name the target cluster in
+   `identity.installationTrust.allowedTargetClusterIds`.
+4. **Trust the archive's signer.** Compare `trust/signing-key-id.txt` with your
+   out-of-band record (`docs/keys.md`). Then, as `logweir-trust-admin`, copy
+   that key's entry (usage `EvidenceSigning`) from `trust/trustpolicy-<name>.yaml`
+   into `spec.keys` of `logweir-installation` with `kubectl edit trustpolicy
+   logweir-installation`. Keys are append-only. Do not apply the exported
+   policy beside it: two `default: true` policies refuse every namespace with
+   `TrustPolicyConflict`.
+5. **Connect the existing archive.** On the console's *Destinations* page,
+   create a destination whose `archiveRead` grant is the archive's read-only
+   key pair. On the *Catalog* page, *Connect an existing archive* (a `Full`
+   sync). Points written by v0.1.5 or earlier have no catalog record until
+   `logweir catalog sync` backfills them once.
+6. **Choose a point** the catalog marks selectable (`Available`, and
+   `Verified` or `VerifiedHistorical`), name the topics and the target, and
+   create the restore. In a confirm namespace, Create is the approval.
+7. **Restore and verify.** The restore's completion panel shows the verdict.
+   Check it without Logweir too: fetch the scorecard and its `.sig` from the
+   keys in the `Restore`'s `status.evidence`, and run
+   `python3 verify/verify_scorecard.py scorecard.json scorecard.sig signing.pub.pem`
+   with the NEW installation's public key (`logweir-signing-trust`). The old
+   backup's receipt verifies under `trust/signing.pub.pem`.
+
+---
+
 ## Upgrade CRDs before upgrading the controller
 
 Helm installs `crds/` only on first install; it neither upgrades nor rolls CRDs
