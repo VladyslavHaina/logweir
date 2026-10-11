@@ -17,12 +17,7 @@ pub enum Command {
     /// Provision or adopt the persistent Kubernetes installation signer.
     #[command(subcommand)]
     Identity(IdentityCmd),
-    // Task 22 fix round 1, FIX 5. This is a `//` comment, not a `///` one, on
-    // purpose: clap turns doc comments into help TEXT, so build rationale in a
-    // `///` would be printed to users by `logweir drill --help`. The `///`
-    // lines below are the description clap renders; before they existed the
-    // `drill` row of `logweir --help` was blank — the first thing a new user
-    // sees of the subcommand the whole tool exists for.
+    // Build rationale stays in `//` comments: clap prints `///` lines as help.
     /// Run a restore drill, or show and verify the scorecard one produced.
     ///
     /// `drill run` is the tag-0 name for `restore run`; it takes the same
@@ -30,70 +25,39 @@ pub enum Command {
     /// deprecation line on stderr.
     #[command(subcommand)]
     Drill(DrillCmd),
-    // Chain L, Task 9b, interfaces I20/I8. `restore` is the NAME: a restore
-    // into a new topic at a point in time on a real cluster is what tag 1's
-    // flagship does, and `drill` is that same command with
-    // `target.mode: scratch`. The `///` line below is what clap renders.
+    // `restore` is the name (interfaces I20/I8); `drill` is the same command
+    // with `target.mode: scratch`.
     /// Restore a sampled window from an archive into a target cluster, verify
     /// it per record, and emit a signed scorecard.
     #[command(subcommand)]
     Restore(RestoreCmd),
-    // Chain L, Task 4. The `///` line below is what clap renders in
-    // `logweir --help`; the build rationale stays in `//` comments so it is
-    // not printed to users (the same rule the `Drill` arm above records).
     /// Back up a source cluster into an archive, from a Logweir spec.
     #[command(subcommand)]
     Backup(BackupCmd),
     /// Print a JSON Schema. Tag 1 accepts `scorecard` and `backup-receipt`.
     Schema { which: String },
-    // PLAT-15.1 / decision D3 §5. A SUBCOMMAND GROUP under `catalog`, for the
-    // reason `Backup` records for its own: `catalog verify`, `catalog show`
-    // and the disaster-import half (PLAT-15.2) have somewhere to land without
-    // changing either of these two argv surfaces.
-    //
-    // These are the OPERATOR's commands and not a runner surface. D-SEAMS S1
-    // fixes one check runner, and a controller that wants a catalog
-    // synchronised runs `logweir check run` with D2's `catalogSync` plan kind
-    // in a Job — see `crates/logweir/src/catalog/cli.rs`'s module header for
-    // the four differences that keep these two from being a second execution
-    // path.
+    // Decision D3 §5. The operator's commands, not a runner surface: a
+    // controller syncs a catalog with `logweir check run`'s `catalogSync` kind
+    // (`crates/logweir/src/catalog/cli.rs`'s module header).
     /// Read and backfill the durable recovery catalog in an archive's
     /// evidence root.
     #[command(subcommand)]
     Catalog(CatalogCmd),
-    // PLAT-19.1 / decision D3 §7.1 and §7.5. A SUBCOMMAND GROUP, for the
-    // reason `Catalog` records for its own: `trust show` and the
-    // PLAT-19.2 confirmation-key commands have somewhere to land without
-    // renaming either of these two argv surfaces.
-    //
-    // NEITHER LEAF DIALS KUBERNETES, and neither takes a key. Both read one
-    // object on stdin or from a file and write one document on stdout — see
-    // `crates/logweir/src/trust.rs`'s module header for why `kubectl` is the
-    // credential rather than this binary.
+    // Decision D3 §7.1 and §7.5. Neither leaf dials Kubernetes or takes a key:
+    // each reads one object on stdin or from a file and writes one document on
+    // stdout (`crates/logweir/src/trust.rs`'s module header).
     /// Back up and migrate the cluster's explicit trust policy.
     #[command(subcommand)]
     Trust(TrustCmd),
-    // Decision D2 §4.2 / D-SEAMS S1. A SUBCOMMAND GROUP for the same
-    // structural reason `Catalog` is one: D2 §4.5 phase 2 turns
-    // the `KafkaCluster` probe into a sixth plan kind, and PLAT-09.2 invokes
-    // the same `check run` from a Backup-owned Job. A flat `CheckRun` would
-    // have to be renamed to make room for a sibling.
-    //
-    // This is the RUNNER's surface and not an operator's. The controller
-    // writes the argv (`weirkeeper::check::job::runner_argv`) and pins the
-    // plan digest in the pod environment; a human running it by hand needs the
-    // same three variables, which is why the leaf documents them.
+    // Decision D2 §4.2. The runner's surface, not an operator's: the
+    // controller writes the argv (`weirkeeper::check::job::runner_argv`) and
+    // pins the plan digest in the pod environment.
     /// Run one check plan — discovery, readiness, restore preflight,
     /// destination access or evidence fetch.
     #[command(subcommand)]
     Check(CheckCmd),
-    // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
-    // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
-    // cannot be told which auth to use, refuses unless the cluster is in a
-    // restore-target allowlist AND holds a healthy marker topic — which no
-    // `role: source` cluster does — and prints the observed id only inside
-    // prose. `crates/logweir/src/probe.rs`'s module header states all four with
-    // their call sites. The `///` lines below are what clap renders.
+    // Interface I14: a purpose-built liveness probe, not `doctor` with fewer
+    // flags (`crates/logweir/src/probe.rs`'s module header says why).
     /// Dial a Kafka cluster, read its cluster id, and print exactly two stdout
     /// lines — `cluster-id=<id>` then `reachable=true|false` — exiting 0 when a
     /// broker answered and 1 when none did.
@@ -146,14 +110,8 @@ pub enum Command {
     },
     /// Check credentials, engine VERSION and glibc floor, target reachability,
     /// marker topic and approver key — before a drill is attempted.
-    //
     // "engine version", not "engine digest": `doctor` compares the engine's
-    // `--version` string against the pin (`doctor::ENGINE_PIN`) and computes NO
-    // digest.
-    // `third_party/kafka-backup-binary.digest` is read only to interpolate
-    // into a failure message. The module's own doc comment said "engine
-    // version pinned" and was right; this help text was the wrong one, and it
-    // is the line an operator reads before deciding what `doctor` proved.
+    // `--version` against the pin (`doctor::ENGINE_PIN`) and computes no digest.
     Doctor {
         #[arg(long)]
         spec: PathBuf,
@@ -384,16 +342,8 @@ pub enum IdentityCmd {
 pub enum DrillCmd {
     /// Mint the DSSE-signed approval `drill run --approval` requires. Runs no
     /// drill and touches no cluster.
-    //
-    // The unowned-path audit: `drill run --approval` is MANDATORY, and the
-    // only producer in the tree was a cargo EXAMPLE
-    // (`logweir-evidence/examples/sign_approval.rs`), which ships in neither
-    // the container image nor the release tarballs. On the Kubernetes path
-    // this product targets, an operator could not mint `approval.sig` from
-    // Logweir's own artifacts at all — and `plan_hash` binds the approval to
-    // the exact spec bytes, so they would have to re-mint on every spec edit.
-    // See `crates/logweir/src/approve.rs` for why this is a subcommand rather
-    // than a second `[[bin]]`.
+    // `drill run --approval` is mandatory and `plan_hash` binds it to the exact
+    // spec bytes, so the product's own binary mints it (`approve.rs`).
     Approve {
         /// The drill spec this approval authorises. `plan_hash` is the sha256
         /// of its EXACT bytes, so re-run this after any edit — including a
@@ -492,11 +442,8 @@ pub enum DrillCmd {
     /// key. Exit 0 only if the signature covers the bytes of `--scorecard`
     /// exactly as stored.
     Verify {
-        // The flag stays `--scorecard` even though `--payload-type` now lets
-        // it name three other documents. Renaming it would break every
-        // existing invocation, every doc, `scripts/check-verifier-parity.sh`
-        // and `docs/verify-a-scorecard.md` in exchange for a better word; a
-        // `--document` alias is a tag-2 conversation, not a tag-1 rename.
+        // The flag stays `--scorecard` although `--payload-type` names three
+        // other documents: a rename would break every invocation and doc.
         #[arg(long)]
         scorecard: PathBuf,
         #[arg(long)]
@@ -506,17 +453,11 @@ pub enum DrillCmd {
         /// Which of the four documents Logweir signs this is —
         /// `scorecard`, `backup-receipt`, `receipt` (the post-put storage
         /// readback) or `teardown`.
-        //
-        // DEFAULT `scorecard`, so every invocation that existed before Task 5
-        // is byte-for-byte unchanged: the three-argument form still verifies
-        // a scorecard and still runs its invariant arms. The value is
-        // resolved to a media type by `crate::verify::resolve_payload_type`,
-        // and an unrecognised one is an ERROR (exit 1) rather than a
-        // passthrough of anything containing a slash — a typo would otherwise
-        // surface as "unexpected payloadType" and read like a bad artifact
-        // instead of a bad command line. `docs/verify_scorecard.py`'s
-        // `--payload-type` is the same flag with the same short names, so an
-        // auditor runs the two readers with one command line.
+        // Default `scorecard`, the three-argument form. An unrecognised value
+        // is an error (exit 1), not a passthrough, so a typo reads as a bad
+        // command line rather than a bad artifact
+        // (`crate::verify::resolve_payload_type`); `docs/verify_scorecard.py`
+        // takes the same short names.
         #[arg(long, default_value = "scorecard")]
         payload_type: String,
         /// **PROD-04.1.** With `--payload-type backup-receipt`: the positions
@@ -601,16 +542,9 @@ pub struct RestoreRunArgs {
     /// as it did before this flag existed. With ids given, an approval whose
     /// approver key id is outside the set is refused with exit 3 BEFORE phase
     /// 0 dials anything.
-    //
-    // NO `value_delimiter`, DELIBERATELY, and this comment is the pin. A
-    // comma-separated form would make `--approver-key-ids "a,b"` silently mean
-    // two ids while the operator never emits that shape
-    // (`restore_controller.rs::only_unexpired_roster_key_ids_reach_the_argv`:
-    // "repeated flags, never one comma-joined value"). One accepted shape
-    // means a comma-joined value is ONE id, matches nothing, and refuses
-    // loudly with the offending string in the message instead of being
-    // reinterpreted. `crates/logweir/tests/cli_exit_codes.rs::
-    // a_comma_joined_approver_key_id_is_one_id_not_two` asserts it.
+    // No `value_delimiter`: the operator never emits a comma-joined value, so
+    // one is ONE id, matches nothing, and is refused loudly
+    // (`crates/logweir/tests/cli_exit_codes.rs::a_comma_joined_approver_key_id_is_one_id_not_two`).
     #[arg(long)]
     pub approver_key_ids: Vec<String>,
     #[arg(long)]
@@ -741,11 +675,8 @@ pub enum BackupCmd {
     /// `LOGWEIR_SOURCE_TLS_KEY_FILE` — see `drill run` for why there is no
     /// flag, and for the two exit codes an unset and an unrenderable value
     /// produce.
-    //
-    // GC18(c)'s four rails all bind this command; `crates/logweir/src/backup/mod.rs`
-    // says where each one is enforced. It is a SUBCOMMAND under `backup` rather
-    // than a bare `logweir backup` so Task 18's scheduler and a future
-    // `backup verify` have somewhere to land without changing this one's argv.
+    // GC18(c)'s four rails all bind this command
+    // (`crates/logweir/src/backup/mod.rs` says where each is enforced).
     Run {
         /// **D2 §3.5's store-contract handshake.** Written by the controller
         /// for a destination-backed Job and omitted for every legacy or
@@ -904,9 +835,7 @@ impl SubjectKindArg {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PLAT-15.1 — the recovery catalog's two operator subcommands
-// ---------------------------------------------------------------------------
+// The recovery catalog's two operator subcommands.
 
 /// The flags `catalog sync` and `catalog list` share: WHERE the archive is.
 ///

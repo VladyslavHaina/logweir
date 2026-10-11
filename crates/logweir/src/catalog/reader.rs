@@ -243,7 +243,7 @@ pub fn cross_check(
     }
     let mut disagreements =
         ReceiptFacts::of_record(point).disagreements(&ReceiptFacts::of_receipt(receipt));
-    // **FX-7 — the pin, one way round.** A record that carries
+    // **The pin, one way round.** A record that carries
     // `archive.manifest_version_id` must carry the RECEIPT's: a different pin,
     // or one the receipt does not have, would send a reader to the wrong
     // object version. A record WITHOUT one says "unknown" (rule 2) — an older
@@ -274,7 +274,7 @@ pub fn cross_check(
     }
 }
 
-/// **FX-4, rule 3 for `topics[].config_coverage`.** Every coverage entry the
+/// **Rule 3 for `topics[].config_coverage`.** Every coverage entry the
 /// RECORD claims must be the receipt's own, byte for byte — a record may know
 /// LESS than its receipt (an older writer copies nothing: absent is UNKNOWN,
 /// rule 2), never more, and never something else. So a record that says
@@ -310,7 +310,7 @@ fn unbacked_coverage(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<Strin
         .collect()
 }
 
-/// **PROD-05.1, rule 3 for `topics[].configuration` and
+/// **Rule 3 for `topics[].configuration` and
 /// `topics[].partitions`.** The same one-way rule as [`unbacked_coverage`]: a
 /// record may carry LESS than its receipt (an older writer copies nothing:
 /// absent is NOT RECORDED or UNKNOWN, rule 2), never more and never something
@@ -352,7 +352,7 @@ fn unbacked_configuration(point: &CatalogPoint, receipt: &BackupReceipt) -> Vec<
     out
 }
 
-/// **PROD-05.1, rule 3 for `owner_detection`.** The same one-way rule: a
+/// **Rule 3 for `owner_detection`.** The same one-way rule: a
 /// record may carry none (an older writer), never a list its receipt does
 /// not. A record that claims the run looked for owners it never looked for
 /// would turn "owner not checked" into "applied through the admin API".
@@ -369,7 +369,7 @@ fn unbacked_owner_detection(point: &CatalogPoint, receipt: &BackupReceipt) -> Op
     })
 }
 
-/// **PROD-04.1, rule 3 for `consumer_positions`.** The same one-way rule: a
+/// **Rule 3 for `consumer_positions`.** The same one-way rule: a
 /// record may carry none (an older writer, or a backup that selected no
 /// group), never a summary or digest its verified receipt does not back. A
 /// record that claimed a group captured, or its positions related to archived
@@ -400,7 +400,7 @@ fn unbacked_consumer_positions(point: &CatalogPoint, receipt: &BackupReceipt) ->
     }
 }
 
-/// **PROD-04.1, rule 4.** Two records of one point must carry the same
+/// **Rule 4.** Two records of one point must carry the same
 /// consumer position summary wherever BOTH carry one.
 fn consumer_positions_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Option<String> {
     match (a.consumer_positions.as_ref(), b.consumer_positions.as_ref()) {
@@ -412,7 +412,7 @@ fn consumer_positions_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Option<St
     }
 }
 
-/// **PROD-03.0, rule 3 for `topics[].schema_dependency`.** The same one-way
+/// **Rule 3 for `topics[].schema_dependency`.** The same one-way
 /// rule as [`unbacked_coverage`]: a record may carry LESS than its receipt (an
 /// older writer copies nothing: absent is NOT ASSESSED, rule 2), never more
 /// and never something else. A record that says `notDetected` beside a
@@ -447,7 +447,7 @@ fn dependency_summary(e: &logweir_core::backup_receipt::TopicSchemaDependency) -
     format!("{:?} ids {ids:?}", e.verdict)
 }
 
-/// **PROD-03.0, rule 4.** Two records of one point must agree on a topic's
+/// **Rule 4.** Two records of one point must agree on a topic's
 /// schema dependency wherever BOTH carry one; one carrying none (an older
 /// writer) is not a conflict.
 fn schema_dependency_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
@@ -472,7 +472,7 @@ fn schema_dependency_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String
         .collect()
 }
 
-/// **PROD-01.4a, rule 3 for `topics[].identity`.** The same one-way rule as
+/// **Rule 3 for `topics[].identity`.** The same one-way rule as
 /// [`unbacked_coverage`]: a record may carry no topic IDs (an older writer:
 /// absent is UNKNOWN, rule 2), never IDs its receipt does not back. A record
 /// that could swap an ID would turn a recreated topic into the same
@@ -513,7 +513,7 @@ fn identity_summary(i: &logweir_core::backup_receipt::TopicIdentity) -> String {
     )
 }
 
-/// **PROD-01.4a, rule 4 for `topics[].identity`.** Two records of one point
+/// **Rule 4 for `topics[].identity`.** Two records of one point
 /// must agree on a topic's IDs wherever BOTH carry them.
 fn identity_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
     a.topics
@@ -555,7 +555,7 @@ fn configuration_summary(c: Option<&logweir_core::backup_receipt::TopicConfigura
     }
 }
 
-/// **PROD-05.1, rule 4.** Two records of one point must agree on a topic's
+/// **Rule 4.** Two records of one point must agree on a topic's
 /// configuration model and partition count wherever BOTH carry one.
 fn configuration_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
     let mut out = Vec::new();
@@ -587,7 +587,7 @@ fn configuration_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
     out
 }
 
-/// **FX-4, rule 4 for `topics[].config_coverage`.** Two records of one point
+/// **Rule 4 for `topics[].config_coverage`.** Two records of one point
 /// must agree wherever BOTH carry an entry; one carrying none (an older
 /// writer) is not a conflict.
 fn coverage_conflicts(a: &CatalogPoint, b: &CatalogPoint) -> Vec<String> {
@@ -663,19 +663,14 @@ pub fn reconcile(a: &CatalogPoint, b: &CatalogPoint) -> Duplicate {
     Duplicate::SameIdentity { locations }
 }
 
-// ---------------------------------------------------------------------------
-// The INDEX half of the layout (review finding F3)
-// ---------------------------------------------------------------------------
+// The INDEX half of the layout.
 
 /// What reading ONE day-sharded index entry established.
 ///
-/// **Rule 1 applies here too, and it did not before.** `docs/formats/
-/// catalog-point.md` promises "refusal is per entry, not per catalog"; the
-/// first version of this module implemented that for `record.json` and let a
-/// single unreadable object under `logweir/catalog/v1/log/` abort a whole
-/// listing. A `v2` Logweir that renames a field in the index, a truncated
-/// object or one transient `get` would have taken `logweir catalog list` down
-/// wholesale instead of listing what it could.
+/// **Rule 1 applies here too**: `docs/formats/catalog-point.md` promises
+/// "refusal is per entry, not per catalog", so one unreadable index object (a
+/// renamed field from a newer writer, a truncated object, a transient `get`)
+/// never takes `logweir catalog list` down.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogEntryVerdict {
     Entry(Box<CatalogLogEntry>),
@@ -686,7 +681,7 @@ pub enum LogEntryVerdict {
     /// Not an index entry at all: not JSON, no `format_version`, not semver,
     /// or a shape major 1 cannot hold.
     Unreadable(String),
-    /// **Review finding F6.** The entry contradicts itself: its `record_key`
+    /// The entry contradicts itself: its `record_key`
     /// is not the one its `point_id` implies, or its `point_id` is not a
     /// well-formed `lwp1-<32 hex>`.
     ///
