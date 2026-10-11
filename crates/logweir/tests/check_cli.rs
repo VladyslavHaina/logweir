@@ -13267,7 +13267,7 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
 /// **Points that only failed to be read never push a readable point out of
 /// the window.** An archive can hold many points nobody can take — an older
 /// build's oversized points, reads that failed — and the window is
-/// `viewLimit` entries in walk order. Here five such points are NEWER than
+/// `viewLimit` entries. Here five such points are NEWER than
 /// three readable ones, so the walk meets them first, and the window holds
 /// three: it lists the three readable points, and counts all eight (so the
 /// controller's view says it is a window). CONTROL: with room for all eight,
@@ -13346,13 +13346,15 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
 /// **A readable point never pushes EVIDENCE out of the window.** Entries
 /// that say something about the archive's integrity — a `Conflict` (the
 /// archive contradicts the signed receipt), a record whose bytes are not a
-/// record — are never the ones an `Available` point displaces. Here three
-/// such points are newer than three readable ones, the window holds three,
-/// and it keeps the three pieces of evidence; the readable points are
-/// counted, and the view says it is a window.
+/// record — are never the ones an OLDER `Available` point displaces (since
+/// FX-50 a newer point with a record takes the place of an older one, and
+/// bytes that are not a record keep theirs). Here three such points are
+/// newer than three readable ones, the window holds three, and it keeps the
+/// three pieces of evidence; the readable points are counted, and the view
+/// says it is a window.
 ///
 /// KILLS: an `Available` point displacing any entry that is not `Available`
-/// (a tampered point pushed out of the listing by points written after it).
+/// (a tampered point pushed out of the listing by older points).
 #[test]
 fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
