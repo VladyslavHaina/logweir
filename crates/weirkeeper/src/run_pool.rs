@@ -1,99 +1,78 @@
-//! The manual-run pool — P10: how many "Back up now" and manual-restore runner
-//! Jobs one namespace may have ACTIVE at once, and the order the rest wait in.
+//! The manual-run pool: how many "Back up now" and manual-restore runner Jobs
+//! one namespace may have active at once, and the order the rest wait in.
 //!
-//! # The defect this closes
-//!
-//! D1 §8.3 keeps manual runs outside a schedule's `concurrencyPolicy` on
-//! purpose — "Back up now" must work while the nightly run is still going —
-//! and nothing else bounded them. On the PoC install one operator's hundred
-//! accepted `POST …/backups` (all `201` within 2.4 s) became a hundred
-//! simultaneous runner pods: docker-desktop hit its 110-pod limit ("Too many
-//! pods"), the node went `NotReady`, and MinIO answered `503 SlowDown`. The
-//! evidence-fetch Jobs on the same install WERE bounded (four per namespace,
-//! `check::limits`), and the queue they formed drained correctly. This module
-//! is the same idea for the runs themselves.
+//! Manual runs stay outside a schedule's `concurrencyPolicy` on purpose (D1
+//! §8.3: "Back up now" must work while the nightly run is going), and nothing
+//! else bounded them: a hundred accepted `POST …/backups` once became a hundred
+//! simultaneous runner pods, a node past its pod limit and an object store
+//! answering `503 SlowDown`. This is the bound evidence-fetch Jobs already
+//! have (`check::limits`), applied to the runs themselves.
 //!
 //! # The rule, in one sentence
 //!
-//! A manual run that is about to create its first object is ADMITTED when the
-//! runs of its kind that hold a slot in its namespace — the ones whose own
-//! status says so ([`Standing::Occupying`]) PLUS the ones this process
-//! admitted and the watch has not shown yet ([`Reservations`]) — plus the
-//! OLDER runs still waiting for one, are below the ceiling; otherwise it is
-//! QUEUED, and nothing at all is created for it.
+//! A manual run about to create its first object is admitted when the runs of
+//! its kind holding a slot in its namespace (by their own status,
+//! [`Standing::Occupying`], plus this process's not-yet-reflected admissions,
+//! [`Reservations`]) plus the older runs still waiting are below the ceiling;
+//! otherwise it is queued and nothing is created for it.
 //!
-//! # Why a reservation, and why a status alone is not enough (review H1, M1)
+//! # Why a reservation, and why a status alone is not enough
 //!
-//! The snapshot is the reflector store the controller already runs, and a
-//! store lags the controller's own writes. The first round of this module
-//! decided from the store alone, so every pass that decided between one
-//! admission and the watch delivering that admission saw the same free slot:
-//! three console restores released together from their approval hold, a burst
-//! of "Back up now" released from a destination hold, or every run re-enqueued
-//! at once by a restart or a `TrustPolicy` event were ALL admitted past the
-//! ceiling (probes P1–P3 of the Tier-A review). So admission is now a
-//! check-and-reserve under ONE process-wide lock:
+//! The snapshot is the reflector store, which lags the controller's own
+//! writes, so every pass deciding between one admission and the watch showing
+//! it would see the same free slot, and a burst (runs released together from a
+//! hold, or re-enqueued by a restart or a `TrustPolicy` event) would all be
+//! admitted past the ceiling. Admission is a check-and-reserve under one
+//! process-wide lock:
 //!
 //! 1. take the snapshot (inside the lock);
-//! 2. forget every reservation the snapshot has caught up with (the run is
-//!    now `Occupying` by its own status, or terminal, or gone) and every one
-//!    older than [`RESERVATION_TTL_SECONDS`];
+//! 2. forget every reservation the snapshot has caught up with (now
+//!    `Occupying` by its own status, terminal, or gone) and every one older
+//!    than [`RESERVATION_TTL_SECONDS`];
 //! 3. decide, counting a reserved peer as occupying whatever its phase says;
 //! 4. on admit, reserve.
 //!
-//! Every pass that decides after an admission therefore counts it, whatever
-//! the watch has delivered, and concurrent passes are serialised by the lock:
-//! a burst of any size admits at most the ceiling.
+//! So every later decision counts the admission, and a burst of any size
+//! admits at most the ceiling.
 //!
-//! # And why a status record as well: restarts (review H1)
+//! # And a status record, for restarts
 //!
-//! A reservation lives in this process. So the pass that admits a run WRITES
-//! the admission onto the run before it creates anything — `Admitted=True`
-//! ([`admitted_by_status`]) — and a run whose status carries it is
-//! `Occupying` from then on, in every process and after every restart. A
-//! failed write creates nothing (the create steps are behind it), and the
-//! reservation covers the window until the watch shows the write.
+//! A reservation lives in this process, so the admitting pass writes
+//! `Admitted=True` ([`admitted_by_status`]) onto the run before it creates
+//! anything, and the run is `Occupying` from then on in every process. A
+//! failed write creates nothing, and the reservation covers the window until
+//! the watch shows the write.
 //!
-//! # FIFO by arrival (review M1)
+//! # FIFO by arrival
 //!
-//! [`QueueKey`] is `metadata.creationTimestamp`, then the UID: the API
-//! server's own clock, never a name a client chose (a manual name is random
-//! base32, so ordering by it put later arrivals ahead of earlier ones).
+//! [`QueueKey`] is `metadata.creationTimestamp`, then the UID: the API server's
+//! own values, never a client-chosen name (a manual name is random base32).
 //!
 //! # What "occupying" is read from
 //!
 //! A recorded `status.execution` or `jobRef`, an `Admitted=True` condition, a
-//! `Running`/`Resolving` phase, and ANY PHASE THIS BUILD DOES NOT KNOW (the
-//! safe direction: an over-count costs a requeue, an under-count a pod).
-//! `Succeeded`, `Failed` and `Refused` are terminal — the one terminal set the
-//! rest of the controller uses. The only non-terminal statuses that are not
-//! occupying are "nothing has been created": no phase at all, `Queued`, and
-//! `Pending` — a hold on a missing destination or on an approval, which may
-//! last hours under a Governed policy and must not block the line. A held run
-//! rejoins the line at its own creation time when the hold clears, and from
-//! that instant it is reserved.
+//! `Running`/`Resolving` phase, and any phase this build does not know (an
+//! over-count costs a requeue, an under-count a pod). `Succeeded`, `Failed` and
+//! `Refused` are terminal. The only non-terminal statuses that do not occupy
+//! are "nothing created": no phase, `Queued`, and `Pending`, a hold on a
+//! missing destination or approval that may last hours and must not block the
+//! line. A held run rejoins the line at its own creation time when the hold
+//! clears.
 //!
 //! # The residual, stated
 //!
-//! Two controller PROCESSES do not share reservations. The chart runs one
-//! replica with `Recreate` and no leader election (Global Constraint 30), so a
-//! rollout never overlaps two; the cases that can are a force-deleted or
-//! partitioned pod whose replacement starts while it still runs. Each process
-//! counts the other's durable `Admitted=True` as soon as its own watch
-//! delivers it, so the excess is what both admit within one watch lag — at
-//! most twice the ceiling, briefly, draining as runs finish. A crash after
-//! the admission write is covered by the write; a crash BEFORE it created
-//! nothing.
+//! Two controller processes do not share reservations. The chart runs one
+//! replica with `Recreate` and no leader election (Global Constraint 30), so
+//! only a force-deleted or partitioned pod can overlap its replacement; each
+//! counts the other's durable `Admitted=True` once its watch delivers it, so
+//! the excess is at most twice the ceiling, briefly.
 //!
 //! # What this module is not
 //!
-//! It reads no clock (`now` is an argument) and holds no client. It does not
-//! decide anything about a scheduled, catch-up or retry `Backup` — those are
-//! [`Standing::Outside`] and their own policies bound them — and it does not
-//! change what a run executes: a
-//! queued run has no plan `ConfigMap`, no Job and no execution claim, and it
-//! freezes its inputs on the pass that admits it, exactly as it would have on
-//! its first pass.
+//! It reads no clock (`now` is an argument) and holds no client. Scheduled,
+//! catch-up and retry `Backup`s are [`Standing::Outside`], bounded by their own
+//! policies, and a queued run has no plan, Job or execution claim: it freezes
+//! its inputs on the pass that admits it, as it would have on its first pass.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -110,8 +89,7 @@ pub const BACKUP_LIMIT_FIELD: &str = "runs.maxManualBackupsActivePerNamespace";
 /// The installation-policy field a `Restore` is queued behind.
 pub const RESTORE_LIMIT_FIELD: &str = "runs.maxManualRestoresActivePerNamespace";
 
-/// `phase: Refused` — terminal, as `retention_policy::TERMINAL_RESTORE_PHASES`
-/// and `backup_schedule` already treat it (review L5).
+/// `phase: Refused`, terminal as everywhere else in the controller.
 pub const PHASE_REFUSED: &str = "Refused";
 
 /// How long a reservation is honoured without the watch catching up with it.
@@ -151,13 +129,10 @@ pub enum Standing {
 
 /// The order a queue drains in: `metadata.creationTimestamp`, then the UID.
 ///
-/// THE API SERVER'S OWN VALUES, NOT A CLIENT'S. `creationTimestamp` is the
+/// The API server's own values, never a client's: `creationTimestamp` is the
 /// one instant on the object no controller wrote, and the UID is the server's
-/// too, so two controller passes — or a controller restarted in between —
-/// always agree about the order. A name is NOT part of the key: a manual name
-/// is random base32, and ordering by it put a later arrival ahead of an
-/// earlier one (review M1). A fixture with no timestamp sorts first
-/// (`None < Some`); an API server never produces one.
+/// too, so two passes, or a restarted controller, agree about the order. A
+/// fixture with no timestamp sorts first; an API server never produces one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct QueueKey {
     created: Option<DateTime<Utc>>,
@@ -212,17 +187,15 @@ impl Decision {
 
 /// Whether a `Backup` is a pool member at all: a MANUAL run.
 ///
-/// D1 §3.1's own derivation ([`crate::identity::declared_trigger`], rule 4
-/// included), so an object created before `spec.trigger` existed is manual
-/// exactly when the controller that created it would have said so. The same
-/// predicate `backup_schedule` uses to keep manual runs OUT of
-/// `concurrencyPolicy` keeps them IN here, so the two pools cannot overlap.
+/// D1 §3.1's own derivation ([`crate::identity::declared_trigger`]), so an
+/// object created before `spec.trigger` existed is manual exactly when its
+/// creator would have said so. The predicate `backup_schedule` uses to keep
+/// manual runs out of `concurrencyPolicy` keeps them in here, so the two pools
+/// cannot overlap.
 ///
-/// A SELF-DECLARED TRIGGER, AND THAT IS A KNOWN LIMIT (review L1): a subject
-/// who may create `Backup`s directly can declare a scheduled kind for an
-/// existing schedule and a valid slot, and such a run is bounded by neither
-/// this pool nor `concurrencyPolicy`. RBAC on `create backups` governs direct
-/// object creation; D1 §15 records the residual.
+/// A known limit: the trigger is self-declared, so a subject who may create
+/// `Backup`s directly can declare a scheduled kind and be bounded by neither
+/// pool; RBAC on `create backups` governs that (D1 §15).
 #[must_use]
 pub fn is_manual_backup(backup: &Backup) -> bool {
     crate::identity::declared_trigger(backup).0 == TriggerKind::Manual
@@ -346,12 +319,9 @@ struct Reservation {
     at: DateTime<Utc>,
 }
 
-/// The admissions this process has made, keyed by UID — the check-and-reserve
-/// half of the gate (review H1, M1).
-///
-/// ONE LOCK, HELD ONLY OVER PURE WORK: the snapshot, the pruning, the decision
-/// and the insert. No `await` happens under it, so it serialises decisions and
-/// nothing else.
+/// The admissions this process has made, keyed by UID: the check-and-reserve
+/// half of the gate. One lock, held only over pure work (snapshot, pruning,
+/// decision, insert), with no `await` under it.
 #[derive(Debug, Default)]
 pub struct Reservations {
     held: Mutex<HashMap<String, Reservation>>,
@@ -387,14 +357,10 @@ impl Reservations {
     /// Decide one candidate and, on admit, RESERVE it — atomically with every
     /// other decision this process makes.
     ///
-    /// `peers` is the SOURCE of the snapshot, and it is called only once the
-    /// lock is held (the re-check's N1): a snapshot taken before the lock could
-    /// predate a reservation another pass makes while this one waits for the
-    /// lock, and pruning against it would release that reservation as "gone".
-    /// On the controller's current-thread runtime no other pass can run
-    /// between the two, but the rule should not depend on the runtime. It
-    /// answers `None` while the watch has not synced (then nothing is decided
-    /// and nothing reserved). `standing` is [`backup_standing`] or
+    /// `peers` is the source of the snapshot, called only once the lock is held:
+    /// a snapshot taken earlier could predate another pass's reservation and
+    /// prune it as "gone". It answers `None` while the watch has not synced
+    /// (nothing is decided or reserved). `standing` is [`backup_standing`] or
     /// [`restore_standing`].
     pub fn decide<K, F>(
         &self,
@@ -423,11 +389,9 @@ impl Reservations {
             .filter_map(|p| p.meta().uid.as_deref().map(|u| (u, p.as_ref())))
             .collect();
         let namespace = candidate.meta().namespace.clone().unwrap_or_default();
-        // FORGET WHAT THE SNAPSHOT HAS CAUGHT UP WITH — in THIS kind and THIS
-        // namespace only, because that is all the snapshot is known to hold
-        // (a scoped controller runs one store per namespace): the run's own
-        // status now counts it (occupying) or frees it (finished), or the run
-        // is gone. And, everywhere, whatever is older than the TTL.
+        // Forget what the snapshot has caught up with, in this kind and
+        // namespace only (a scoped controller runs one store per namespace),
+        // and, everywhere, whatever is older than the TTL.
         held.retain(|uid, r| {
             if (now - r.at).num_seconds() > RESERVATION_TTL_SECONDS {
                 return false;
@@ -533,9 +497,8 @@ impl Reservations {
 
 /// Where the gate reads its peers, its ceiling and its reservations from.
 ///
-/// A CLOSURE AND NOT A STORE, so a route-table row can hand the gate the exact
-/// snapshot it is about and production can hand it the reflector store
-/// ([`store_snapshot`]) without either knowing about the other.
+/// A closure rather than a store, so a route-table row can hand the gate its
+/// exact snapshot and production the reflector store ([`store_snapshot`]).
 pub struct Pool<'a, K> {
     /// Every object of this kind the controller copy watches, or `None` while
     /// its watch has not finished its first list.
@@ -567,15 +530,10 @@ where
     }
 }
 
-/// The installation policy's ceiling for `kind`: the ONE place a manual-run
-/// gate maps its pool to its `runs` field (FX-10).
-///
-/// A pure function of the LOADED policy. The backup gate's whole path — the
-/// process environment, the `ConfigMap`, this mapping, the queue — has a row at
-/// a non-default value in `weirkeeper/tests/configured_values.rs`; the restore
-/// gate's cannot be driven end to end in a binary of its own (its approval and
-/// signing fixtures live in `restore_controller.rs`), so its half of the
-/// mapping is held here, where a row can reach it.
+/// The installation policy's ceiling for `kind`: the one place a manual-run
+/// gate maps its pool to its `runs` field, as a pure function of the loaded
+/// policy (`weirkeeper/tests/configured_values.rs` drives the backup half end
+/// to end; the restore half is held here).
 #[must_use]
 pub fn ceiling(kind: PoolKind, policy: &crate::check::policy::Policy) -> u32 {
     match kind {
@@ -619,10 +577,9 @@ pub fn was_queued(phase: Option<&str>, has_queue: bool, admitted_reason: Option<
 
 /// The `Admitted=False` message a queued run carries.
 ///
-/// STABLE FOR A GIVEN CEILING, AND THAT IS DELIBERATE. It names the ceiling
-/// and the policy field, and neither the count nor the position: both move
-/// every time a run finishes, and a message that moved with them would be one
-/// status write per queued run per finished run.
+/// Stable for a given ceiling: it names the ceiling and the policy field, not
+/// the count or the position, which move every time a run finishes and would
+/// cost a status write per queued run per finished run.
 #[must_use]
 pub fn queued_message(kind: &str, namespace: &str, limit: u32, field: &str) -> String {
     format!(
