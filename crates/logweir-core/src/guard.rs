@@ -12,21 +12,14 @@ pub struct GuardRefusal(pub String);
 /// key's presence means someone believes they are configuring purging.
 ///
 /// IT FAILS CLOSED. A document this function cannot parse is a document it did
-/// not scan, and it returns `Err` rather than an empty list — a scanner that
-/// answers "I found nothing" over text it never read is indistinguishable from
-/// a scanner that read the text and found nothing clean, which is precisely
-/// the shape this whole guard exists to prevent. The predecessor returned
-/// `vec![]` on a parse error.
+/// not scan, and it returns `Err` rather than an empty list: "I found nothing"
+/// over text it never read would be indistinguishable from a clean scan.
 ///
-/// This is a BACKSTOP, and its scope is worth stating exactly, because its
-/// name invites over-reading: today it is applied to the adopter's SPEC TEXT
-/// (`phase0_admit::run`) and to rendered documents in the renderer's own
-/// tests. Global Constraint 4 / GR7 — the three keys never being emitted on
-/// any argv or in any rendered YAML — is enforced STRUCTURALLY, at
-/// `logweir-engine-oso`'s renderers, which name none of the three keys and
-/// escape every interpolated value through `yaml_scalar` so a value cannot
-/// forge a key line. That structural property is the guarantee; this function
-/// is a second pair of eyes over the input a human wrote.
+/// A BACKSTOP over the adopter's SPEC TEXT (`phase0_admit::run`) and over
+/// rendered documents in the renderer's tests. Global Constraint 4 / GR7 (the
+/// three keys never emitted on any argv or in any rendered YAML) is enforced
+/// STRUCTURALLY by `logweir-engine-oso`'s renderers, which name none of the
+/// keys and escape every interpolated value through `yaml_scalar`.
 pub fn scan_forbidden_keys(doc_text: &str) -> Result<Vec<String>, GuardRefusal> {
     let v: serde_yaml::Value = serde_yaml::from_str(doc_text).map_err(|e| {
         GuardRefusal(format!(
@@ -86,43 +79,27 @@ pub fn reject_withdrawn_notifications(
     ))
 }
 
-/// The six characters upstream's topic selector treats as GLOB PATTERN
-/// SYNTAX rather than as part of a name.
+/// The six characters upstream's topic selector treats as GLOB PATTERN SYNTAX
+/// rather than as part of a name.
 ///
 /// `TopicSelection.include`/`exclude` "supports glob patterns"
 /// [U/kafka-backup/crates/kafka-backup-core/src/config.rs:334-343], and both
-/// renderers put operator-chosen topic names straight into
-/// `topics.include`. So a topic legitimately NAMED `orders*` or `events[1]`
-/// is handed to the engine as a PATTERN: one named entry silently widens to a
-/// set, and GC18(c)'s "mandatory named-topic allowlist with no wildcard" rail
-/// would be satisfied only by nobody having typed one. `*`/`?` are the
-/// classic pair; `[`/`]` open and close a character class; `{`/`}` open and
-/// close a brace alternation. All six are refused, and the CLOSING halves are
-/// refused as well as the opening ones — a scanner that accepted `a]b`
-/// because the class was never opened would be reasoning about the glob
-/// dialect's grammar instead of about whether the string is a plain name.
+/// renderers put operator-chosen names into `topics.include`, so a topic NAMED
+/// `orders*` or `events[1]` would silently widen to a set. `*`/`?`, `[`/`]` (a
+/// character class) and `{`/`}` (a brace alternation) are all refused, closing
+/// halves included: the question is whether the string is a plain name, not the
+/// glob dialect's grammar.
 pub const GLOB_METACHARACTERS: [char; 6] = ['*', '?', '[', ']', '{', '}'];
 
 /// GC18(c) rail 1, and guard **G-GLOB**: no topic include entry may contain a
 /// glob metacharacter. Shared by `render_backup::render` (over
 /// `BackupPlan::topics`) and `render_restore::render` (over BOTH sides of
-/// `topic_mapping` — a mapped target name is an include entry too), so the
-/// two renderers can never disagree about what counts as a plain name.
+/// `topic_mapping`), so the two renderers cannot disagree.
 ///
-/// It lives HERE, in the pure core, for the same reason `redact_url` does:
-/// two copies of a predicate is how the two copies come to disagree.
-///
-/// Returns the FIRST offending entry verbatim, not a formatted message: the
-/// caller owns the wording (`render_backup::RenderError::GlobMetacharacter`
-/// carries the whole explanation), and an `Err(String)` that is already prose
-/// cannot be re-wrapped without either nesting two sentences or discarding
-/// the entry the operator has to go and fix.
-///
-/// **It does not, and must not, quote or escape anything.** Quoting is a YAML
-/// concern and `logweir_engine_oso::yaml::yaml_scalar` already does it
-/// unconditionally; globbing is the ENGINE's concern, one layer further out.
-/// A quoted `"orders*"` is still a glob to the engine's selector, which is
-/// exactly why this predicate exists beside the escaper rather than inside it.
+/// Returns the FIRST offending entry verbatim; the caller owns the wording
+/// (`render_backup::RenderError::GlobMetacharacter`). It does not quote or
+/// escape: quoting is YAML's concern (`yaml_scalar`), and a quoted `"orders*"`
+/// is still a glob to the engine's selector.
 pub fn reject_glob_metacharacters(entries: &[String]) -> Result<(), String> {
     for entry in entries {
         if entry.chars().any(|c| GLOB_METACHARACTERS.contains(&c)) {
@@ -157,19 +134,18 @@ pub fn reject_plaintext_endpoint_without_allow_http(
     Ok(())
 }
 
-/// **FX-20 fix round (review F1)**: the named reason a storage location whose
-/// S3 `region` is not a region name is refused. It names the message, not a
-/// terminal state: the `refusal-reason=` line stays `GuardRefused`, as FX-16's
-/// `PointBindingSetMismatch` does.
+/// The named reason a storage location whose S3 `region` is not a region name
+/// is refused. It names the message, not a terminal state: the
+/// `refusal-reason=` line stays `GuardRefused`, as `PointBindingSetMismatch`
+/// does.
 pub const STORAGE_REGION_INVALID: &str = "StorageRegionInvalid";
 
-/// **FX-20 fix round (review F1)**: refuses a spec storage block whose S3
-/// `region` does not match [`crate::engine::S3_REGION_PATTERN`], before any
-/// client exists. Without an endpoint the region is part of the host the
-/// request goes to (`s3.<region>.amazonaws.com`), so `x@attacker.example/`
-/// would send the archive credential's signed requests elsewhere while the
-/// location's bucket, and so its binding, stayed the victim's. The location
-/// binding covers the region too; this is the second, independent rule.
+/// Refuses a spec storage block whose S3 `region` does not match
+/// [`crate::engine::S3_REGION_PATTERN`], before any client exists: without an
+/// endpoint the region is part of the host (`s3.<region>.amazonaws.com`), so
+/// `x@attacker.example/` would send the credential's signed requests elsewhere.
+/// The location binding covers the region too; this is the second, independent
+/// rule.
 ///
 /// The message names the field and never the value: a region crafted as a
 /// userinfo could carry a credential.
@@ -189,7 +165,7 @@ pub fn reject_invalid_storage_region(
     Ok(())
 }
 
-/// **PROD-01.3: SASL/PLAIN only over TLS.** Refuses a spec's auth block whose
+/// **SASL/PLAIN only over TLS.** Refuses a spec's auth block whose
 /// mode is `plain` without `tls: true` — the message opens with
 /// `PlainWithoutTls: `, so the runner's `refusal-reason=` line names it
 /// ([`TERMINAL_STATE_PLAIN_WITHOUT_TLS`]) — and `mtls` without `tls: true`
@@ -221,25 +197,16 @@ pub const MAX_TOPIC_NAME_CHARS: usize = 249;
 /// `^[a-zA-Z0-9._-]{1,249}$`, the pattern
 /// `weirkeeper::crds::selection::TOPIC_NAME_PATTERN` puts on every CRD field
 /// that holds one — and not `.` or `..`, which that pattern admits and Kafka
-/// refuses (`Topic.validate`: "Topic name cannot be \".\" or \"..\""; PROD-15.1
-/// review 2, L12).
+/// refuses (`Topic.validate`: "Topic name cannot be \".\" or \"..\"").
 ///
-/// # Why this is a second rail beside [`reject_glob_metacharacters`]
+/// # A second rail beside [`reject_glob_metacharacters`]
 ///
-/// The two answer different questions. The glob rail asks "would the engine's
-/// selector read this as a PATTERN", and its six characters are the ones that
-/// silently widen one named entry into a set. This asks "is this a name at
-/// all" — and it is the rail that matters for a list produced by something
-/// other than a human typing into a CRD field. A drifted, older or hostile
-/// runner can relay `orders eu`, a 400-character name, or a name carrying a
-/// control character; every one of those passes the glob rail, freezes into an
-/// immutable plan, and then fails opaquely inside the engine instead of being
-/// refused by name.
-///
-/// Written as a character predicate and not a regex on purpose: this crate has
-/// no regex dependency, the grammar is four ASCII classes, and a hand-written
-/// predicate cannot be defeated by a `.` that matches a newline or by a
-/// multiline anchor.
+/// The glob rail asks whether the engine would read a name as a PATTERN; this
+/// asks whether it is a name at all, which matters for a list a runner relays
+/// rather than a human types: `orders eu`, a 400-character name or a control
+/// character pass the glob rail and would fail opaquely inside the engine. A
+/// character predicate, not a regex: no regex dependency, and no `.` or
+/// multiline anchor to get wrong.
 #[must_use]
 pub fn topic_name_is_kafka_legal(name: &str) -> bool {
     // ASCII-only by construction: every accepted character is one byte, so a
@@ -273,40 +240,24 @@ pub fn reject_non_kafka_topic_names(entries: &[String]) -> Result<(), String> {
 /// The five characters a projected password may not contain, and interface
 /// **I11**'s producer half.
 ///
-/// # Why escaping cannot be the answer here
+/// # Why escaping cannot be the answer
 ///
-/// The password is NOT in the bytes Logweir renders. `crate::spec::AuthSpec`
-/// carries no secret and `crate::engine::AuthRender` says so in its own doc
-/// comment: the rendered document names `${LOGWEIR_SOURCE_PASSWORD}` and the
-/// engine substitutes the value out of its OWN process environment, as raw
-/// text, BEFORE the document is parsed as YAML
-/// [U:crates/kafka-backup-cli/src/commands/config.rs:1-34]. So there is no
-/// interpolation site to escape at: by the time the value meets the document,
-/// every escaper in this workspace has already run. The value itself has to be
-/// safe to substitute into pre-parse text, and this is the predicate that says
-/// so.
+/// The password is NOT in the bytes Logweir renders: the document names
+/// `${LOGWEIR_SOURCE_PASSWORD}` and the engine substitutes the value from its
+/// OWN environment, as raw text, BEFORE parsing the YAML
+/// [U:crates/kafka-backup-cli/src/commands/config.rs:1-34]. So the value itself
+/// must be safe in pre-parse text. `\n` (and `\r`) would start a NEW YAML key
+/// (`"hunter2\ndry_run: true"` is two keys); `"` and `'` close the quoted
+/// scalar the placeholder sits in; and `$` could name another environment
+/// variable on some readings of the expansion pass.
 ///
-/// A `\n` in the value ends the physical line and whatever follows it becomes
-/// a NEW YAML key at whatever indentation it carries — `sasl_password:
-/// "hunter2\ndry_run: true"` is two keys, not one. `\r` does the same on a
-/// CRLF reader. `"` closes the double-quoted scalar the placeholder sits
-/// inside, and `'` closes a single-quoted one, so either can end the scalar
-/// early and leave the rest of the value as document structure. `$` is
-/// refused because upstream's expansion pass is not idempotent-safe: a value
-/// containing `${OTHER}` is itself scanned for expansion on some readings of
-/// that pass, and a password that can name an environment variable is a
-/// password that can read one.
+/// # Where it is called
 ///
-/// # Where it is called, and where it is DELIBERATELY NOT called
-///
-/// **The runner** calls it, on the projected value, at the moment it reads
+/// **The runner** calls it on the projected value when it reads
 /// `LOGWEIR_SOURCE_PASSWORD`/`LOGWEIR_TARGET_PASSWORD`
 /// (`crates/logweir/src/drill/mod.rs::check_projected_credentials`). The
-/// CONTROLLER does not: `weirkeeper` holds no `get` on Secrets anywhere
-/// (spec §9), so it never sees the projected value and has nothing to
-/// validate. A predicate the controller re-used would be a check performed on
-/// a value the controller does not have — see spec §7 amendment 4, "the runner
-/// refuses, not the controller", and critique B H11.
+/// CONTROLLER does not: `weirkeeper` holds no `get` on Secrets, so it never
+/// sees the value.
 pub const UNRENDERABLE_CREDENTIAL_CHARACTERS: [char; 5] = ['\n', '\r', '"', '\'', '$'];
 
 /// The one reason string every `CredentialRefusal` carries. It names the
@@ -317,12 +268,9 @@ const CREDENTIAL_REFUSAL_REASON: &str = "a projected password is substituted int
 /// A refused credential: the offending character and the mechanism.
 ///
 /// **It never carries the value, and its `Display` is a pure function of
-/// `character`.** That is a stronger property than "does not print the
-/// secret": two different unrenderable passwords with the same first
-/// offending character produce byte-identical messages, so the message cannot
-/// carry a fragment of either one, and `tests/guard.rs` asserts exactly that
-/// rather than asserting the absence of a list of substrings somebody has to
-/// keep complete.
+/// `character`**, so two passwords with the same first offending character
+/// produce byte-identical messages, which cannot carry a fragment of either
+/// (`tests/guard.rs` asserts exactly that).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRefusal {
     pub character: char,
@@ -389,16 +337,12 @@ pub fn credential_is_renderable(secret: &str) -> Result<(), CredentialRefusal> {
 /// with a state name" is not a different fact about the run — it is a plain
 /// guard refusal.
 pub const TERMINAL_STATE_GUARD_REFUSED: &str = "GuardRefused";
-/// [I9] Spec §3.2's terminal state for a projected credential that cannot be
-/// substituted into the config text (`credential_is_renderable`). Its call
-/// site is Task 6's; the runner's own read
-/// (`crates/logweir/src/drill/mod.rs::check_projected_credentials`) already
-/// emits it.
+/// [I9] The terminal state for a projected credential that cannot be
+/// substituted into the config text (`credential_is_renderable`, read by
+/// `crates/logweir/src/drill/mod.rs::check_projected_credentials`).
 pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRenderable";
-/// [I9] Spec §3.2's terminal state for a target topic whose configuration the
-/// drill refuses to write to. Its call site is **Task 8**'s; the constant
-/// lives here so the three states are one list and a controller's mapping can
-/// be written against it before the third producer lands.
+/// [I9] The terminal state for a target topic whose configuration the drill
+/// refuses to write to.
 pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
 /// [I9] A time selection (a stated `restore.point_in_time`, or a
 /// `sample.window_end` that cuts the archive) over a source topic whose
@@ -415,7 +359,7 @@ pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByPr
 /// state; its call sites are the runner's guards over a spec's auth
 /// (`crate::spec::AuthSpec::transport_refusal`).
 pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = crate::connection::PLAIN_WITHOUT_TLS;
-/// [I9] **PROD-01.3 security follow-up.** A projected credential Secret whose
+/// [I9] A projected credential Secret whose
 /// `logweir-binding` is absent or names another connection or endpoint
 /// (`crate::connection::CredentialBindingRefusal`). Refused before any client
 /// exists, so a credential is never presented to brokers it was not entered
@@ -427,8 +371,7 @@ pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
 /// `restore.allow_transaction_markers: true`. Its call site is
 /// `crate::transaction_markers::refusal`; refused before phase 2.
 pub const TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE: &str = "TransactionMarkersInArchive";
-/// [I9] Every tag-1 terminal state a guard refusal can name. **Task 20**
-/// (Phase B) is the only consumer.
+/// [I9] Every terminal state a guard refusal can name.
 pub const TERMINAL_STATES: [&str; 7] = [
     TERMINAL_STATE_GUARD_REFUSED,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
@@ -462,27 +405,23 @@ pub fn terminal_state(message: &str) -> &'static str {
     TERMINAL_STATE_GUARD_REFUSED
 }
 
-/// [I9] `refusal-reason=<state>`.
-///
-/// Pure, and here rather than in the binary, because `logweir-core` does no
-/// I/O (`crate` doc, `lib.rs:1`): this crate produces the LINE and
-/// `crates/logweir/src/exit.rs::print_refusal` prints it. Splitting it
-/// that way is what lets the line's format be unit-tested without a process,
-/// and what stops a `println!` appearing in the pure layer.
+/// [I9] `refusal-reason=<state>`. Pure: this crate produces the LINE and
+/// `crates/logweir/src/exit.rs::print_refusal` prints it, so the format is
+/// unit-tested without a process.
 pub fn refusal_reason_line(message: &str) -> String {
     format!("refusal-reason={}", terminal_state(message))
 }
 
-/// **RECEIPT-DUP.** A backup run whose execution was already claimed by an
+/// A backup run whose execution was already claimed by an
 /// earlier run: exit 1, no engine run, nothing signed. Retryable, because a
 /// retry is a NEW execution id.
 pub const TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClaimed";
-/// **RECEIPT-DUP.** A backup run whose execution claim the evidence store could
+/// A backup run whose execution claim the evidence store could
 /// not prove exclusive (put refused, conditional create unsupported or
 /// ignored): exit 4, no engine run, nothing signed. Not retryable.
 pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
 
-/// **PROD-15.1 review M4.** A restore whose creation step lost a race: a
+/// A restore whose creation step lost a race: a
 /// mapped target name phase 0 proved absent existed when the run came to
 /// create it. Exit 1 (phases 0–5 ran); the runner names what appeared and
 /// what it created and LEFT on its `target-topics-appeared=` line. Nothing is
@@ -493,7 +432,7 @@ pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TAR
 /// than a race and LEFT topics on the cluster: ones this execution created
 /// (a broker refused another name, answered short, or did not serve a created
 /// topic in time), or ones it asked for, got no definite answer about, and
-/// cannot account for (review 2, M2). Exit 1; each is named on
+/// cannot account for. Exit 1; each is named on
 /// `target-topics-appeared=` (`left`, `unconfirmed`) and left in place.
 pub const TERMINAL_STATE_CREATED_TOPICS_LEFT: &str = "CreatedTopicsLeft";
 
@@ -508,7 +447,7 @@ pub const LEFT_TOPIC_SENTENCE: &str =
      writes to it";
 
 /// What EVERY surface says about a topic in the THIRD list of a stopped
-/// creation step, `unconfirmed` (PROD-15.1 review 2, M2): a name this restore
+/// creation step, `unconfirmed`: a name this restore
 /// asked the cluster to create, for which it got NO DEFINITE ANSWER (the whole
 /// `CreateTopics` call failed, the name got no answer, or it got an error
 /// that is not "already exists"), and which the cluster LISTED when the run
@@ -536,9 +475,9 @@ pub const UNCONFIRMED_UNLISTED_TOPIC_SENTENCE: &str =
 pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
 
 /// Which runner's log a `failure-reason=` line is read from. **The closed
-/// set is PER KIND** (PROD-15.1 review 2, M1's class note): one list for both
-/// reconcilers let a Backup's log lift a restore-only state onto a `Backup`,
-/// and a Restore's log a backup-only one.
+/// set is PER KIND**: one list for both reconcilers would let a Backup's log
+/// lift a restore-only state onto a `Backup`, and a Restore's log a
+/// backup-only one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureReasonKind {
     /// `logweir backup run`: RECEIPT-DUP's two execution-claim states.
@@ -610,7 +549,7 @@ pub fn check_topic_mapping_coverage(
 ///
 /// * `original_name: false` (every restore but one) — the target DIFFERS from
 ///   its source, or the restore would write over the topic it came from;
-/// * `original_name: true` (PROD-15.1, a plan that passed
+/// * `original_name: true` (a plan that passed
 ///   [`crate::original_name::refuse_shape`]) — the target IS its source, for
 ///   EVERY topic. An original-name restore maps nothing partway: a mapping
 ///   that renames one topic and keeps another's name is two plans, and the
@@ -657,14 +596,11 @@ mod tests {
 
     /// GR7 / Global Constraint 4: the phase-0 guard is the backstop for a
     /// forbidden key that reaches a rendered restore document by any route.
-    /// It is exercised against a constructed document, because no Logweir code
-    /// path may exist that is capable of emitting the key — global ruling GR7
-    /// deleted the `LOGWEIR_TEST_INJECT_DRY_RUN` hook Task 21c's brief
-    /// proposed, and Global Constraint 4 admits no test or debug exception.
+    /// Exercised against a constructed document, because no Logweir code path
+    /// may be able to emit the key (no test or debug exception).
     ///
-    /// The expected value is the DOTTED PATH `target.dry_run`, not the bare
-    /// key name the addendum's snippet wrote: `scan_forbidden_keys` reports
-    /// where it found the key, which is the only form an operator can act on.
+    /// The expected value is the DOTTED PATH `target.dry_run`: where the key
+    /// was found is the only form an operator can act on.
     #[test]
     fn a_dry_run_key_in_a_rendered_restore_document_is_caught_by_the_key_scan() {
         let rendered = "\
@@ -688,9 +624,7 @@ target:
         );
     }
 
-    /// **A NAME THAT IS NOT A KAFKA NAME IS REFUSED BEFORE IT IS FROZEN** —
-    /// D1 §3.3's "Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated
-    /// before freeze".
+    /// **A NAME THAT IS NOT A KAFKA NAME IS REFUSED BEFORE IT IS FROZEN.**
     ///
     /// The rail exists for the list that does NOT come from a CRD field: a
     /// dynamic selection takes its names from a runner's stdout, and the glob
@@ -722,7 +656,7 @@ target:
         }
         for bad in [
             "",
-            // PROD-15.1 review 2, L12: Kafka refuses exactly these two, which
+            // Kafka refuses exactly these two, which
             // the character grammar alone admits.
             ".",
             "..",

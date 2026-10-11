@@ -9,17 +9,15 @@ pub struct EngineId {
     pub digest: String,  // "sha256:…"
 }
 
-/// A storage location shaped EXACTLY like OSO's own `StorageBackendConfig`, so
-/// the rendered YAML and our own reads cannot drift apart. Upstream types it as
-/// an internally tagged enum whose variants have incompatible REQUIRED fields
-/// [VERIFIED U/kafka-backup/crates/kafka-backup-core/src/storage/config.rs:14-105
-/// and config.rs:24] — `filesystem` requires `path` and has no `bucket`;
-/// `azure` requires `account_name` + `container_name` and has no `bucket`; `gcs`
-/// accepts only `bucket`/`service_account_path`/`prefix`. A stringly-typed
-/// struct would render `backend: filesystem` alongside a `bucket:` key, and
-/// serde would fail the config load with a hard "missing field" error that the
-/// unknown-key readback of Task 12 CANNOT catch — the same argument this plan
-/// already makes for `time_window_start`.
+/// A storage location shaped EXACTLY like OSO's own `StorageBackendConfig`
+/// [VERIFIED
+/// U/kafka-backup/crates/kafka-backup-core/src/storage/config.rs:14-105], so
+/// the rendered YAML and our own reads cannot drift apart: an internally tagged
+/// enum whose variants have incompatible REQUIRED fields (`filesystem` requires
+/// `path`, `azure` `account_name` + `container_name`, `gcs` only
+/// `bucket`/`service_account_path`/`prefix`). A stringly-typed struct would
+/// render `backend: filesystem` beside a `bucket:` key, which the engine's
+/// config load fails with "missing field".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum StorageUrl {
@@ -53,19 +51,14 @@ pub enum StorageUrl {
 }
 
 impl StorageUrl {
-    /// **C15** (`docs/to-do/decisions/PROD-00-engine-route.md` 3.15): an S3
-    /// location whose endpoint is plain `http://` while `allow_http` is false.
-    ///
-    /// Engine 0.21.0 refused that document before any connection ("HTTP
-    /// error: builder error"). From 0.22.0 on, including the 0.23.3 pin, the
+    /// **C15**: an S3 location whose endpoint is plain `http://` while
+    /// `allow_http` is false. From 0.22.0 on, including the 0.23.3 pin, the
     /// engine's YAML path ORs `allow_http` with the endpoint's scheme
-    /// (`storage/config.rs:116-118` and `storage/mod.rs:58-73` at v0.23.3,
-    /// unchanged since 0.22.0), logs "enabling allow_http" and dials the
-    /// endpoint in the clear. YAML cannot tell `allow_http: false` from an
-    /// absent key, so the only safe place to keep the combination out of the
-    /// engine is before a document exists. The scheme is compared without
-    /// regard to ASCII case, which is stricter than the engine's own
-    /// case-sensitive test.
+    /// (`storage/config.rs:116-118`, `storage/mod.rs:58-73`) and dials the
+    /// endpoint in the clear, and YAML cannot tell `allow_http: false` from an
+    /// absent key, so the combination is refused before a document exists. The
+    /// scheme is compared without regard to ASCII case, stricter than the
+    /// engine's own test.
     pub fn plaintext_endpoint_without_allow_http(&self) -> bool {
         match self {
             Self::S3 {
@@ -91,13 +84,12 @@ impl StorageUrl {
         }
     }
 
-    /// **FX-20 fix round (review F1).** An S3 location whose `region` is not a
-    /// region name ([`is_valid_s3_region`]). With no endpoint, `object_store`
-    /// builds the host as `s3.<region>.amazonaws.com`, so a region such as
-    /// `x@attacker.example/` moves the request — and the archive credential's
-    /// signature, access key id and session token — to another host. Every
-    /// runner refuses such a location before any client exists, and
-    /// `logweir-store` refuses to build one.
+    /// An S3 location whose `region` is not a region name
+    /// ([`is_valid_s3_region`]). With no endpoint, `object_store` builds the
+    /// host as `s3.<region>.amazonaws.com`, so a region such as
+    /// `x@attacker.example/` would move the request, and the credential's
+    /// signature, to another host. Every runner refuses such a location before
+    /// any client exists, and `logweir-store` refuses to build one.
     #[must_use]
     pub fn has_invalid_region(&self) -> bool {
         matches!(self, Self::S3 { region: Some(region), .. } if !is_valid_s3_region(region))
@@ -129,10 +121,9 @@ pub struct BackupSetRef {
 }
 
 /// One finding about an archive that an operator must be told and that NO
-/// signed field records (FX-1 fix round, M1): what
-/// [`DataEngine::describe_with_notices`] returns beside the facts, for the
-/// caller to PRINT — a warning line and a structured log event — and never to
-/// act on. Putting such a finding into signed evidence is PROD-04.1's.
+/// signed field records: what [`DataEngine::describe_with_notices`] returns
+/// beside the facts, for the caller to PRINT (a warning line and a structured
+/// log event) and never to act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveNotice {
     /// A stable, machine-readable name for the kind of finding, and the value
@@ -168,43 +159,21 @@ impl BackupSetFacts {
         self.consumer_group_snapshot_sha256.is_some()
     }
 
-    /// **Guard G-WIN's floor.** The archive set's EARLIEST COVERED TIMESTAMP
-    /// as recorded in the manifest, over the topics the caller NAMES: the
-    /// minimum `start_timestamp` over `topics[].partitions[].segments[]` for
-    /// every topic in `named_topics`, and nothing else.
+    /// **Guard G-WIN's floor.** The archive set's EARLIEST COVERED TIMESTAMP as
+    /// the manifest records it, over the topics the caller NAMES: the minimum
+    /// `start_timestamp` over `topics[].partitions[].segments[]` for every
+    /// topic in `named_topics`. `None` when the set records no segment for any
+    /// named topic; a caller that needs a floor must refuse instead
+    /// (`logweir::drill::build_plan`).
     ///
-    /// `None` when the set records no segment for any named topic, which is
-    /// not a number this function may invent — a caller that needs a floor
-    /// must refuse instead (`logweir::drill::build_plan`).
-    ///
-    /// # Why `named_topics` and not the whole set
-    ///
-    /// This is the restore-side twin of the backup receipt's
-    /// `covered.from_ms`, which is the minimum over the topics the BACKUP
-    /// named (`logweir::backup::phase_run`, interface I22), and the two must
-    /// report the same instant for the same archive and the same topics or
-    /// "the archive's earliest covered timestamp" means two things in two
-    /// signed documents (plan erratum **E7(b)**). An archive set may hold
-    /// topics this restore does not name — a set is written per backup, a
-    /// restore selects from it — and an unnamed topic's older segment would
-    /// otherwise drag the floor below every instant the restore can reach.
-    ///
-    /// # Why it lives here, on the facts
-    ///
-    /// TWO callers must get the SAME answer from the SAME manifest: plan
-    /// construction computes the floor it binds into
-    /// `RestorePlan.time_window.0`, and phase 5 RE-DERIVES it from the
-    /// manifest it already holds to check the rendered document against it.
-    /// Two independent minimum-walks would be free to drift, and the whole
-    /// point of the phase-5 check is that it is an independent reading of the
-    /// same fact — not of the same code path's cached result. Both callers
-    /// pass the keys of the SAME topic mapping for the same reason.
-    ///
-    /// The MINIMUM, never the maximum: a floor taken from the newest segment
-    /// would exclude every record before it, which is precisely the silent
-    /// loss G-WIN refuses. And the minimum over the whole walk, never the
-    /// first segment it reaches: nothing orders a real manifest, so a later
-    /// partition may hold the older segment.
+    /// Over `named_topics` because it is the restore-side twin of the backup
+    /// receipt's `covered.from_ms` (the minimum over the topics the backup
+    /// named, interface I22), and an unnamed topic's older segment would drag
+    /// the floor below every instant the restore can reach. Here, on the facts,
+    /// because plan construction and phase 5's independent re-derivation must
+    /// get the same answer from the same manifest. The MINIMUM over the whole
+    /// walk: a floor from the newest segment would exclude every record before
+    /// it, and nothing orders a real manifest.
     pub fn earliest_covered_timestamp_ms(
         &self,
         named_topics: &std::collections::BTreeSet<&str>,
@@ -219,54 +188,27 @@ impl BackupSetFacts {
     }
 }
 
-/// Returns (lower, upper): the count the manifest can PROVE over [floor_ms, pit_ms].
-/// `lower` sums record_count for segments wholly inside the window; `upper` adds
-/// every segment that straddles either bound. A restored count outside [lower, upper]
-/// is an integrity failure; inside it, the sampled reconciliation is the finer check.
+/// Returns (lower, upper): the count the manifest can PROVE over [floor_ms,
+/// pit_ms]. `lower` sums `record_count` for segments wholly inside the window;
+/// `upper` adds every segment that straddles either bound. A restored count
+/// outside [lower, upper] is an integrity failure; inside it, the sampled
+/// reconciliation is the finer check. A negative `record_count` contributes 0.
 ///
-/// SegmentFacts::record_count is i64 (engine.rs:120) and non-negative by
-/// construction; a negative value contributes 0 rather than wrapping.
+/// **Both bounds are INCLUSIVE**, as the plan's window is (the engine filters
+/// `r.timestamp >= s && r.timestamp <= e`,
+/// [U:crates/kafka-backup-core/src/restore/helpers.rs:74-82]), so a segment
+/// touching a bound exactly is inside it.
 ///
-/// # Both bounds are INCLUSIVE, because the plan's window is
+/// **A BOUND, not an equality**: the manifest's finest granularity is the
+/// SEGMENT, so when `point_in_time` falls inside one the count at or before it
+/// is not derivable. The boundary question belongs to G-PITR's payload set,
+/// never to a count. A segment outside the window contributes to neither bound,
+/// or a large archive would make `upper` unfalsifiable.
 ///
-/// `RestorePlan::time_window` is `(floor, point_in_time-or-window_end)` and its
-/// END is inclusive — the engine's own restore filter is
-/// `r.timestamp >= s && r.timestamp <= e`
-/// [U:crates/kafka-backup-core/src/restore/helpers.rs:74-82], and
-/// `docs/stability.md` records that the restore window's end is inclusive while
-/// the backup receipt's `covered.to_ms` is exclusive. So "wholly inside" here is
-/// `start_timestamp >= floor_ms && end_timestamp <= pit_ms`, and a segment
-/// touching a bound exactly is inside it, not across it.
-///
-/// # Why a BOUND and not an equality
-///
-/// The manifest's finest granularity is the SEGMENT: `SegmentFacts` carries
-/// `start_timestamp`/`end_timestamp`/`record_count` and there is no per-record
-/// timestamp anywhere in `BackupSetFacts`. When `point_in_time` falls INSIDE a
-/// segment — the normal case for a point-in-time restore — the number of records
-/// at or before it is not derivable, so the manifest can only over-count (take
-/// the whole segment) or under-count (drop it). An equality would therefore fail
-/// a CORRECT implementation, and would then be "fixed" by weakening it, which is
-/// what STANDING RULE 21 forbids. Hence: `lower` is what the manifest proves must
-/// be there, `upper` is the most it could account for, and the boundary question
-/// inside the bound belongs to G-PITR's payload set, never to a count.
-///
-/// # Segments outside the window contribute to NEITHER bound
-///
-/// A segment that ends before `floor_ms` or starts after `pit_ms` overlaps the
-/// window nowhere; counting it into `upper` would let an arbitrarily large
-/// archive make the upper bound unfalsifiable.
-///
-/// # The caller restricts `facts` to the topics it will count
-///
-/// This function sums over every topic in the `facts` it is handed, deliberately:
-/// its signature carries no topic filter, so the ONE decision about which topics
-/// are in scope stays at the call site, next to the count it is compared against.
-/// `logweir::drill::phase7_verify::check_restored_count` therefore passes a
-/// `BackupSetFacts` restricted to the source topics its `topic_mapping` names,
-/// which is the same rule `earliest_covered_timestamp_ms` applies to the floor
-/// (plan erratum **E7(b)**) — an archive may hold topics a restore does not
-/// name, and their records are not records this restore was ever going to write.
+/// The caller restricts `facts` to the topics it will count
+/// (`logweir::drill::phase7_verify::check_restored_count` passes only its
+/// mapping's source topics), the rule `earliest_covered_timestamp_ms` applies
+/// to the floor.
 pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i64) -> (u64, u64) {
     let mut lower = 0u64;
     let mut straddling = 0u64;
@@ -308,16 +250,11 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
 /// whole `record_count` to `upper`, exactly as before.
 ///
 /// # Why per partition
-///
-/// The aggregate bound is one sum over every mapped topic, and a sum has
-/// slack: a restore an engine stopped early (a SIGTERM is seen between
-/// topics, and the engine then exits 0) leaves whole topics empty, and the sum
-/// stayed inside its bound whenever the missing topic's segments straddled
-/// the point in time (they add nothing to `lower`), or the restored topics'
-/// straddling records made up its count. One bound per partition has no
-/// sibling to borrow from, and the straddler's 1 makes "this partition holds
-/// in-window records" a lower bound of at least 1, so an empty partition the
-/// manifest proves non-empty in the window is outside its own bound.
+/// A sum over every mapped topic has slack: a restore an engine stopped early
+/// (a SIGTERM between topics, then exit 0) leaves whole topics empty, and the
+/// sum can stay inside its bound. One bound per partition has no sibling to
+/// borrow from, and the straddler's 1 makes an empty partition the manifest
+/// proves non-empty in the window fall outside its own bound.
 ///
 /// A segment that overlaps the window with neither end inside it (it starts
 /// before `floor_ms` and ends after `pit_ms`) proves nothing: its records may
@@ -373,28 +310,16 @@ pub enum EngineReport {
 }
 
 /// Where `RestorePlan.time_window.0` came from. An enum, not a bool, so the
-/// plan's claim about its own floor is a VALUE that can be checked against the
-/// floor it describes — and the one place that check happens is plan
-/// construction: `logweir::drill::build_plan_with_floor` refuses, exit 3, an
-/// `ArchiveManifest` plan whose `time_window.0` is not the manifest floor it
-/// was handed. In tag 1 that check is this enum's only reader.
+/// plan's claim about its own floor is a VALUE plan construction checks:
+/// `logweir::drill::build_plan_with_floor` refuses, exit 3, an
+/// `ArchiveManifest` plan whose `time_window.0` is not the manifest floor.
 ///
-/// **Phase 5 does not read it.**
-/// `logweir::drill::phase5_preflight::check_rendered_window_floor` renders the
-/// document, parses the `time_window_start` INTEGER back off the bytes and
-/// compares it with a floor re-derived from the manifest, so it refuses an
-/// `InheritedFromSpec` plan whose start is not the archive's exactly as it
-/// refuses an `ArchiveManifest` one: by the integer, never by the claim. A
-/// guard that read the claim could be talked out of refusing by the very plan
-/// it is refusing.
-///
-/// **`InheritedFromSpec` is PROD-11.1's.** It was constructed nowhere in tag
-/// 1 (plan erratum E7). Since guard G-WIN's recorded amendment
-/// (`docs/to-do/decisions/PROD-11.1-replay-selection.md` §2) it is what a plan
-/// says when its spec states window start (`restore.point_in_time: "<start>/<end>"`): plan construction binds
-/// that instant and refuses it before the archive's floor, phase 5 re-derives
-/// the same instant from the SPEC and the manifest (never from this claim) and
-/// checks the rendered integer against it, and the complete lane selects its
+/// **Phase 5 does not read it**: `check_rendered_window_floor` compares the
+/// rendered `time_window_start` INTEGER with a floor re-derived from the spec
+/// and the manifest, so a guard that read the claim could not be talked out of
+/// refusing by the plan it refuses. `InheritedFromSpec` is what a plan says
+/// when its spec states a window start
+/// (`restore.point_in_time: "<start>/<end>"`); the complete lane selects its
 /// expected output from it (`complete::window_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFloorSource {
@@ -418,19 +343,18 @@ impl TopicFacts {
     /// records no segment for the topic.
     ///
     /// Both ends, because a segment's bounds are its first and last records'
-    /// timestamps and not its minimum and maximum (PROD-01.1 S6): with
-    /// out-of-order timestamps the first record can be the later one.
+    /// timestamps and not its minimum and maximum: with out-of-order timestamps
+    /// the first record can be the later one.
     ///
     /// A LOWER bound on the newest archived timestamp, never the value itself:
     /// a record inside a segment can be later than both ends, which only
-    /// decoding the segment shows. `crate::time_basis` reads it
-    /// both ways, and only one is certain (review L-1): a window END below it
-    /// certainly excludes an archived record, so that window is a time
-    /// selection; a window end at or after it excludes nothing THE MANIFEST
-    /// SHOWS, and is treated as no selection, though with out-of-order
-    /// timestamps inside a segment the engine can still drop a later record.
-    /// That residue is PROD-01.1b's, and the scorecard format and
-    /// `docs/stability.md` say so where the empty lists are described.
+    /// decoding the segment shows. `crate::time_basis` reads it both ways, and
+    /// only one is certain: a window END below it certainly excludes an
+    /// archived record, so that window is a time selection; a window end at or
+    /// after it excludes nothing THE MANIFEST SHOWS and is treated as no
+    /// selection, though the engine can still drop a later out-of-order record
+    /// inside a segment. The scorecard format and `docs/stability.md` state
+    /// that residue where the empty lists are described.
     #[must_use]
     pub fn newest_recorded_timestamp_ms(&self) -> Option<i64> {
         self.partitions
@@ -502,72 +426,37 @@ pub struct RestorePlan {
     pub checkpoint_state: std::path::PathBuf,
     pub checkpoint_interval_secs: u64,
     /// Where the engine writes its offset-mapping report
-    /// [U:crates/kafka-backup-core/src/config.rs:857-858
-    /// `pub offset_report: Option<std::path::PathBuf>`].
+    /// [U:crates/kafka-backup-core/src/config.rs:857-858]. A FIELD OF THE PLAN,
+    /// like `checkpoint_state`, so the path is a function of the approved
+    /// bytes; `--offset-report-out` sets it, else `offsets.json` in the per-run
+    /// workdir.
     ///
-    /// A FIELD OF THE PLAN, like `checkpoint_state` beside it, and for the
-    /// same reason: `plan_hash` covers the plan, so the path the engine writes
-    /// to is a function of the approved bytes rather than of an environment
-    /// variable read at render time. `--offset-report-out` sets it; absent
-    /// that it is `offsets.json` in the same per-run workdir as
-    /// `checkpoint_state`.
-    ///
-    /// **Pod-local, and that is why phase 8 uploads it.** The engine writes
-    /// this file with `tokio::fs::write` inside the container
-    /// [U:crates/kafka-backup-core/src/restore/engine.rs:417-427] and the pod
-    /// is then deleted, so the only durable copy is the one
-    /// `logweir::drill::phase8_score::run` puts at
-    /// `logweir/drills/<run_id>.offsets.json` — recorded, with its digest, in
-    /// the signed scorecard's `evidence.offset_report_key` /
-    /// `evidence.offset_report_sha256`.
-    ///
-    /// Global Constraint 20 is UNCHANGED by its presence: tag 1 renders the
-    /// report and applies nothing (constraint 35). The report is a
-    /// description of what the offsets WOULD map to; committing it is tag 2's
-    /// `Switchover`, behind its own approval and its own ADR.
+    /// **Pod-local, so phase 8 uploads it** to
+    /// `logweir/drills/<run_id>.offsets.json`, recorded with its digest in the
+    /// signed scorecard's `evidence.offset_report_*`. Rendering the report
+    /// applies nothing (Global Constraint 20): committing offsets is a later,
+    /// separately approved operation.
     pub offset_report: std::path::PathBuf,
 }
 
-/// How a cluster's client is told to authenticate, as the renderer needs it —
-/// the render-side twin of `crate::spec::AuthSpec`. Carried by
-/// `BackupPlan::source_auth` and by `RestorePlan::target_auth`.
+/// How a cluster's client is told to authenticate, as the renderer needs it:
+/// the render-side twin of `crate::spec::AuthSpec` (`AuthSpec::to_render()` is
+/// the one mapping, interface **I1**). Carried by `BackupPlan::source_auth` and
+/// `RestorePlan::target_auth`.
 ///
-/// **It never carries a password.** `ScramSha512` names the username only;
-/// the secret reaches the engine through its own `${VAR}` environment
-/// expansion, which is the one thing `yaml_scalar` explicitly cannot defend
-/// against and therefore the one thing that must never be interpolated by us.
-/// `crate::spec::AuthSpec::to_render()` is the one mapping into this type
-/// (interface **I1**).
+/// **It never carries a password.** The secret reaches the engine through its
+/// own `${VAR}` environment expansion, which `yaml_scalar` cannot defend
+/// against, so it is never interpolated by us. `Plaintext` renders **nothing at
+/// all**: the engine's `SecurityProtocol` default is `PLAINTEXT`
+/// [U:crates/kafka-backup-core/src/config.rs:261-269].
 ///
-/// The `Plaintext` arm renders **nothing at all** in all three documents: the
-/// engine's own `SecurityProtocol` default is `PLAINTEXT`
-/// [U:crates/kafka-backup-core/src/config.rs:261-269], so an explicit key
-/// would be a fourth spelling to keep in step with upstream for no
-/// behavioural gain — and it is what keeps every golden that predates SCRAM
-/// byte-identical.
-///
-/// # `tls_ca_file` is a path, it is not in the plan hash, and it needs TLS
-///
-/// The CA certificate file a TLS connection's brokers are verified against,
-/// when it is not in the engine's bundled roots — rendered as the engine's
-/// `ssl_ca_location`. It is a POD-LOCAL PATH to a file projected
-/// from the saved connection, never certificate text, and it is attached by the
-/// runner from `crate::connection::{SOURCE,TARGET}_TLS_CA_FILE_ENV` after the
-/// plan is built, exactly as the password placeholder is: a trust anchor is a
-/// deployment input that rotates, not an identity an approval binds.
-/// [`AuthRender::with_tls_ca_file`] is the one way it is attached, and it
-/// refuses a CA for a connection that is not TLS.
-///
-/// # PROD-01.3: three more mechanisms, one more file pair
-///
-/// `ScramSha256` and `Plain` render exactly like `ScramSha512` with another
-/// `sasl_mechanism`; `Plain` without TLS is refused by the renderer
-/// (`RenderError::PlainWithoutTls`), the backstop behind the runner's guard.
-/// `Mtls` renders `security_protocol: SSL` and the two client-certificate
-/// paths, which — like the CA — are POD-LOCAL PATHS attached by the runner
-/// ([`AuthRender::with_client_certificate`]) from
-/// `crate::connection::{SOURCE,TARGET}_TLS_{CERT,KEY}_FILE_ENV`, and never key
-/// material.
+/// `tls_ca_file` (rendered as `ssl_ca_location`) and the `Mtls`
+/// client-certificate pair are POD-LOCAL PATHS to files projected from the
+/// saved connection, attached by the runner after the plan is built
+/// ([`AuthRender::with_tls_ca_file`], [`AuthRender::with_client_certificate`]):
+/// never key material, and not in the plan hash, because a trust anchor rotates
+/// while an approval binds an identity. A CA without TLS, and `Plain` without
+/// TLS (`RenderError::PlainWithoutTls`), are refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRender {
     Plaintext,
@@ -701,24 +590,16 @@ impl AuthRender {
 /// Everything `render_backup::render` needs to emit a `backup.yaml`, and
 /// nothing else.
 ///
-/// # There is deliberately no `source_cluster_id` field — do not look for one
+/// No `source_cluster_id` field: phase 0 reads the cluster id FROM THE BROKER,
+/// never from a spec, and an adopter-supplied string must not stand where a
+/// measured fact belongs.
 ///
-/// GC18(c)'s fourth rail is "the source `cluster_id` recorded and re-asserted
-/// `!= target`". That rail lands in **Task 4**, where the run happens, and NOT
-/// as a field here, because phase 0 reads the cluster id FROM THE BROKER and
-/// never from a spec (`crates/logweir/src/drill/phase0_admit.rs:94`). A
-/// `source_cluster_id` on this struct would be an adopter-supplied string
-/// standing where a measured fact belongs — the same class of defect as
-/// letting a drill spec widen its own cluster allowlist, which is why
-/// `AllowedClusters` is a separate file argument.
-///
-/// The other three rails ARE this struct's business and are enforced by the
-/// renderer: `topics` is a named allowlist with no glob metacharacter
-/// (**G-GLOB**, `crate::guard::reject_glob_metacharacters`); the type has no
-/// field that could produce `reset_consumer_offsets`, `auto_consumer_groups`,
-/// `create_topics` or any consumer-group key, so the rendered document is
-/// read-only by construction; and `purge_topics`/`dry_run` are unrepresentable
-/// here and re-scanned out of the rendered bytes by `render_and_digest`.
+/// The renderer enforces the other rails: `topics` is a named allowlist with no
+/// glob metacharacter (**G-GLOB**, `crate::guard::reject_glob_metacharacters`);
+/// no field can produce `reset_consumer_offsets`, `auto_consumer_groups`,
+/// `create_topics` or any consumer-group key, so the document is read-only by
+/// construction; and `purge_topics`/`dry_run` are unrepresentable and
+/// re-scanned out of the rendered bytes by `render_and_digest`.
 #[derive(Debug, Clone)]
 pub struct BackupPlan {
     pub backup_id: String,
@@ -777,18 +658,16 @@ pub struct PreflightReport {
     pub records_to_restore: u64,
     pub time_range: Option<(i64, i64)>,
     pub partitions: Vec<PartitionCoverage>,
-    /// The per-run readback of spec §9.3 phase 5(1).
+    /// The per-run readback of phase 5's header preflight.
     pub header_preflight_honoured: bool,
     /// Paths the engine logged as `Ignoring unknown config key <path>`.
     pub unknown_key_warnings: Vec<String>,
-    /// `sha256:<hex>` over the exact bytes written as `restore.yaml` at phase 5.
-    /// For a plan restored by several engine runs (PROD-11.1: one per
-    /// distinct partition subset), every run's digest in run order, joined by
-    /// `,`.
-    /// Phase 6 re-renders, re-hashes and refuses on divergence (T0-14; ruling
-    /// R-E: the refusal is exit 1, operational, no artifact — by phase 6 the
-    /// guards have run and `validate-restore` has already executed, so GC11's
-    /// exit 3 "refused before anything runs" does not describe it).
+    /// `sha256:<hex>` over the exact bytes written as `restore.yaml` at phase
+    /// 5; for a plan restored by several engine runs (one per distinct
+    /// partition subset), every run's digest in run order, joined by `,`. Phase
+    /// 6 re-renders, re-hashes and refuses on divergence: exit 1, operational,
+    /// no artifact (by phase 6 the guards have run and `validate-restore` has
+    /// executed).
     pub rendered_restore_sha256: String,
 }
 
@@ -817,21 +696,16 @@ pub struct SampleSelection {
     /// sharing a topic/partition with an overlapping window would otherwise
     /// merge silently, making the archive side a strict SUPERSET of what a
     /// real restore populated — extra fingerprints read as a mismatch, so a
-    /// healthy restore fails a drill that actually succeeded. Added per
-    /// controller authorization after Task 12's review (see
-    /// task-12-fix-report.md): no drill phase consumed this type yet, so this
-    /// was the cheapest point at which to add it.
+    /// healthy restore fails a drill that actually succeeded.
     pub set: BackupSetRef,
     pub topic: String,
     pub partition: i32,
-    /// A closed set since Task 21c — see `crate::spec::Anchor` for why, and
-    /// for why v0.1 refuses everything but `Head` at phase 0.
+    /// A closed set: see `crate::spec::Anchor` for why, and for why v0.1
+    /// refuses everything but `Head` at phase 0.
     pub anchor: crate::spec::Anchor,
     /// A CAP on how many fingerprints `fingerprints()` returns, not a promise
     /// of exactly this many: fewer than `count` matching records in the
-    /// window is not an error. What this bounds differs BY ANCHOR — an
-    /// earlier version of this comment claimed a memory guarantee the code
-    /// did not actually provide for every anchor, which is corrected here:
+    /// window is not an error. What this bounds differs BY ANCHOR:
     /// - `"head"`: bounds the READ, not only the output.
     ///   `OsoCliEngine::fingerprints` stops decoding further segments once
     ///   `count` in-window records are in hand, because the earliest records
@@ -886,7 +760,7 @@ pub trait DataEngine {
     /// This is not merely a phase ordering the orchestrator happens to follow.
     /// Phase 5 records the digest of the exact bytes it wrote as `restore.yaml`
     /// (`PreflightReport::rendered_restore_sha256`), and phase 6 re-renders,
-    /// re-hashes and REFUSES on divergence (T0-14) — so `restore` needs that
+    /// re-hashes and REFUSES on divergence — so `restore` needs that
     /// digest to compare against, and an implementation that memoises it on the
     /// engine value has nothing to compare when `preflight` never ran. An
     /// implementor MUST fail with `EngineError::Operational` in that case
@@ -906,11 +780,9 @@ pub trait DataEngine {
     /// PRECONDITION: none. Runs the engine's `backup` subcommand over the
     /// rendered document.
     ///
-    /// The default body returns `EngineError::Operational` so every existing
-    /// test double keeps compiling: this trait is implemented by
-    /// `OsoCliEngine` and by a double in `logweir-core`,
-    /// `logweir-engine-oso` and `crates/logweir`, none of which can be made
-    /// to override a new REQUIRED method in the task that adds it.
+    /// The default body returns `EngineError::Operational`, so a test double
+    /// need
+    /// not implement it.
     ///
     /// **Never a fabricated `Ok(BackupFacts { exit_code: 0, .. })`.** Phase
     /// −1's caller reads this result and then reads the ARCHIVE the run was
@@ -929,7 +801,7 @@ pub trait DataEngine {
         ))
     }
 
-    /// FX-1 fix round (M1). `describe`, plus what the engine found about the
+    /// `describe`, plus what the engine found about the
     /// set that no signed field carries and an operator must still be told.
     /// Today that is one thing: the set's consumer-groups snapshot is present
     /// but not in the shape the engine writes. A drill restores data and a
@@ -938,8 +810,7 @@ pub trait DataEngine {
     /// beside the manifest cannot be read. `drill run` and `backup run` print
     /// every notice (`logweir::drill::surface_archive_notices`).
     ///
-    /// The default is `describe` and no notice, so every existing double keeps
-    /// compiling unchanged — the `backup` pattern above.
+    /// The default is `describe` and no notice.
     /// `default_describe_with_notices_is_describe_with_no_notice`
     /// (`logweir-core/tests/engine_trait.rs`) pins it.
     fn describe_with_notices(
