@@ -801,7 +801,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: bootstrap
-          image: docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968
+          image: docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6
           imagePullPolicy: IfNotPresent
           args:
             - identity

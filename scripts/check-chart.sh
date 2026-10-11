@@ -1825,6 +1825,30 @@ if [ "$offline_ok" -eq 1 ]; then
 fi
 [ "$offline_ok" -eq 1 ] || fail=1
 
+# ---------------------------------------------------------------- 13. kubeVersion
+# PROD-14.1: the Kubernetes floor is Chart.yaml's `kubeVersion`, and Helm's own
+# check refuses an older cluster on install, upgrade and template (Argo CD
+# passes the cluster's version), so the chart adds no `fail` of its own. The
+# control is the floor itself.
+echo "== 13. Helm refuses a cluster below Chart.yaml's kubeVersion =="
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --kube-version 1.28.15 > /dev/null 2> "$tmp/kube-old.err"
+rc=$?
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --kube-version 1.29.0 > /dev/null 2> "$tmp/kube-floor.err"
+rc_floor=$?
+if [ "$rc" -eq 0 ] || ! grep -F -q "chart requires kubeVersion: >=1.29.0-0" "$tmp/kube-old.err"; then
+  echo "FAIL: Kubernetes 1.28.15 was not refused by Chart.yaml's kubeVersion (rc=$rc)" >&2
+  sed 's/^/      /' "$tmp/kube-old.err" >&2
+  fail=1
+elif [ "$rc_floor" -ne 0 ]; then
+  echo "FAIL: control: Kubernetes 1.29.0, the floor, did not render (rc=$rc_floor)" >&2
+  sed 's/^/      /' "$tmp/kube-floor.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (Kubernetes 1.28.15 refused by kubeVersion >=1.29.0-0; control: 1.29.0 renders)"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2

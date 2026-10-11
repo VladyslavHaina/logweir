@@ -1288,8 +1288,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         install.contains("identity.bootstrapImage")
             && install.contains("identity bootstrap --help")
             && install.contains("refuses an emptied value")
-            && install.contains("amd64-only"),
-        "install docs must state the pinned compatible bootstrap image, its re-pin check and its architecture limit"
+            && install.contains("is an index of linux/amd64 and\nlinux/arm64"),
+        "install docs must state the pinned compatible bootstrap image, its re-pin check and its \
+         architectures (PROD-14.1: an index of both)"
     );
     assert!(
         install.contains("post-rollback")
@@ -2258,6 +2259,11 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "an offline render is refused",
             "`identity.renderedOffline`",
+        ),
+        // PROD-14.1 (item 84): the multi-platform identity hook; its pin.
+        (
+            "the identity hook runs natively on arm64",
+            "sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6",
         ),
     ];
     assert_eq!(

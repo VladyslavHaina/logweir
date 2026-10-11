@@ -5560,6 +5560,106 @@ fn chart_lint_install_md_carries_bring_your_own_registry() {
     }
 }
 
+/// **PROD-14.1: the version and architecture constraints show before
+/// installation**, and they are the chart's own: the Kubernetes floor read
+/// from `Chart.yaml`'s `kubeVersion` (which Helm enforces on install, upgrade
+/// and template), the Helm floor read from `logweir.helmCleansFailedHooks`
+/// (which the chart enforces by name), and both node architectures, on the
+/// three pages an operator reads first: `helm show chart` (the description),
+/// the chart README's first screen and install.md's first section.
+///
+/// CONTROL: the numbers are derived, so moving `kubeVersion` to
+/// `>=1.30.0-0` (or the helper to 3.20) without the pages fails here; so does
+/// a bootstrap pin whose fixture no longer names both platforms.
+#[test]
+fn chart_lint_constraints_show_before_install() {
+    let chart = read("charts/logweir/Chart.yaml");
+    let kube = chart
+        .lines()
+        .find_map(|l| l.strip_prefix("kubeVersion: "))
+        .expect("Chart.yaml carries kubeVersion")
+        .trim_matches('"')
+        .strip_prefix(">=")
+        .expect("kubeVersion is a floor")
+        .trim_end_matches(".0-0")
+        .to_string();
+    let helper = read("charts/logweir/templates/approval-policy.yaml");
+    let helm = helper
+        .split("semverCompare \">=")
+        .nth(1)
+        .and_then(|rest| rest.split(".0-0\"").next())
+        .expect("logweir.helmCleansFailedHooks names the Helm floor")
+        .to_string();
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let description = flat(
+        chart
+            .split("description: >-")
+            .nth(1)
+            .and_then(|rest| rest.split("\ntype:").next())
+            .expect("Chart.yaml's description"),
+    );
+    let readme = read("charts/logweir/README.md");
+    let first_screen = flat(
+        readme
+            .split("## Copy this directory and install it")
+            .next()
+            .expect("the README's first screen"),
+    );
+    let install = read("docs/install.md");
+    let first_section = flat(install.split("\n---").next().expect("install.md's first section"));
+    for (page, text, needles) in [
+        (
+            "Chart.yaml's description",
+            &description,
+            vec![
+                format!("Kubernetes {kube}+"),
+                format!("Helm {helm}+"),
+                "linux/amd64 or linux/arm64".to_string(),
+            ],
+        ),
+        (
+            "charts/logweir/README.md's first screen",
+            &first_screen,
+            vec![
+                format!("Kubernetes **{kube}** or newer"),
+                format!("Helm **{helm}** or newer"),
+                "**linux/amd64 or linux/arm64**".to_string(),
+                "support-matrix.md#brokers".to_string(),
+            ],
+        ),
+        (
+            "docs/install.md's first section",
+            &first_section,
+            vec![
+                format!("**Minimum Kubernetes: {kube}.**"),
+                format!("**Helm {helm} or newer, or 4.x.**"),
+                "**Nodes: linux/amd64 or linux/arm64.**".to_string(),
+                "support-matrix.md#brokers".to_string(),
+            ],
+        ),
+    ] {
+        for needle in needles {
+            assert!(
+                text.contains(&needle),
+                "{page} must state `{needle}` before installation (PROD-14.1)"
+            );
+        }
+    }
+    // The identity hook is one of those images: its pin is an index of both.
+    let help = read("crates/logweir/tests/fixtures/bootstrap-image-help.txt");
+    assert!(
+        help.contains("# (an index of linux/amd64 and linux/arm64;"),
+        "the pinned bootstrap image's fixture must record that it is an index of both platforms"
+    );
+    let values = read("charts/logweir/values.yaml");
+    assert!(
+        values
+            .lines()
+            .any(|l| l.trim_start().starts_with("bootstrapImage:") && l.ends_with("amd64 + arm64")),
+        "values.yaml's identity.bootstrapImage comment must name both platforms"
+    );
+}
+
 // ------------------------------------------- PLAT-19.2: approval-policy parity
 
 /// The `approvalPolicy` document a values file would render, exactly the

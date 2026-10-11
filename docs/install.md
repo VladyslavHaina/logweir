@@ -9,8 +9,20 @@ path***, which walks this guide's supported steps in order and then carries on
 to the first backup, a restore and a disaster restore.
 
 **Minimum Kubernetes: 1.29.** The thirteen CRDs use CEL validation rules, which
-are GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
-commented out.
+are GA at 1.29, and the chart's `kubeVersion` makes Helm refuse an older
+cluster. The `ValidatingAdmissionPolicy` example is 1.30+ and ships commented
+out.
+
+**Helm 3.19 or newer, or 4.x.** A first install with the console needs 3.19 for
+its trust grant, and the chart refuses an older Helm by name (§5f). The chart's
+gates render with Helm 4.0.1.
+
+**Nodes: linux/amd64 or linux/arm64.** The controller, runner and console
+images, the identity hook's included, are published for both ([support-matrix.md, *Architectures*](support-matrix.md#architectures)).
+
+**Brokers:** Apache Kafka 3.7.1, 3.9.2, 4.1.2 and 4.3.1 (KRaft) and Confluent
+Platform 8.3.2 are supported; Redpanda is a backup source only; anything else
+is untested ([support-matrix.md, *Brokers*](support-matrix.md#brokers)).
 
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
 shipped. The engine the images carry is **Logweir's build of OSO 0.23.3**,
@@ -251,11 +263,9 @@ helm upgrade --install logweir charts/logweir -n logweir-system \
 From a checkout the four image defaults are `:latest`; the published chart
 above is the way to install one commit's images by construction.
 
-That pinned runner predates PROD-00.2 and is amd64-only: on an arm64 node
-without amd64 emulation the bootstrap hook fails with `exec format error` and
-writes no identity, so schedule the hooks on amd64-capable nodes with
-`kubernetes.nodeSelector` until the pin moves to a runner published since
-PROD-00.2, which carries linux/arm64 too.
+That pinned runner (rev `d4e32956`) is an index of linux/amd64 and
+linux/arm64, like every image published since PROD-00.2: the hook runs natively
+on either node architecture.
 
 Development on Docker Desktop with locally built images uses the explicit
 local-image exception; it is not a user installation or publication claim:
@@ -433,9 +443,10 @@ them is published by CI only after the commit that adds them, so:
    `bash scripts/check-chart.sh --write`, `just chart-check` and
    `cargo test -p logweir --test chart_lint`.
 
-Both steps are done for PROD-16.1: `identity.bootstrapImage` is pinned to the
-runner main CI published for rev `2fe8d907` (the digest is in
-`charts/logweir/values.yaml`) and the value is `true` by default. End users
+Both steps are done for PROD-16.1, and PROD-14.1 re-pinned
+`identity.bootstrapImage` to the runner main CI published for rev `d4e32956`, an
+index of linux/amd64 and linux/arm64 (the digest is in
+`charts/logweir/values.yaml`); the value is `true` by default. End users
 supply neither a key nor an image hash.
 
 ---

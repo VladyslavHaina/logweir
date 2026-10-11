@@ -10,8 +10,11 @@
 # the controller pod in `ImagePullBackOff` — the same recorded, expected result
 # as path (a) of `docs/install.md`.
 #
-# `kubeVersion` is Global Constraint 25's floor: the six CRDs use CEL
-# validation rules, GA at 1.29.
+# `kubeVersion` is Global Constraint 25's floor: the thirteen CRDs use CEL
+# validation rules, GA at 1.29. Helm refuses an older cluster before anything
+# installs (`helm install`, `upgrade` and `template` alike). The other
+# constraints, Helm 3.19+ or 4.x and linux/amd64 or linux/arm64 nodes, are in
+# `description` and on README.md's first screen.
 #
 # `crds/` holds the CustomResourceDefinitions, the one checked-in copy, which
 # `just crds` writes and `just crds-check` holds to the Rust emitter.
@@ -24,7 +27,8 @@ description: >-
   Logweir — a Kafka backup-and-restore drill runner with a Kubernetes control
   plane (weirkeeper), a signed scorecard, and a static UI. This chart installs
   the control plane; optionally an in-cluster MinIO backend, two demo Kafka
-  clusters and the UI.
+  clusters and the UI. Needs Kubernetes 1.29+, Helm 3.19+ or 4.x, and
+  linux/amd64 or linux/arm64 nodes.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
