@@ -195,7 +195,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-22 | `RetentionPolicy` status counts points held back by the per-run cap as "kept" | P2 | M1 | fix | — | — | none | A | In progress |
 | 0 | FX-23 | A restore the engine stopped early (SIGTERM, exit 0, later topics never restored) can be signed `pass` by the default sampled check | P1 | M1 | fix | — | — | compose | A | Done |
 | 0 | FX-24 | A connection that never sends a byte is never timed out, so 256 silent sockets hold every API connection permit and the API answers nobody | P1 | M1 | fix | — | — | none | A | Done |
-| 0 | FX-25 | The native engine can outrun the target topics phase 0 created: "Partition N not available" failed a restore in about 1 of 17 native runs (exit 1, nothing signed; the FX-21 review, slot 3). Since PROD-00.2 the arm64 runner and CI's Linux e2e run the engine natively. FX-18's bounded "the cluster serves the topic" wait in phase 0 is the expected fix: after FX-18 merges, run 30 native restores on compose and close this row if none fails; otherwise add an engine patch that retries the metadata refresh (`partition_router.rs:178-215` in 0.23.3) | P2 | M1 | fix | FX-18 | — | compose | B | In progress |
+| 0 | FX-25 | The native engine can outrun the target topics phase 0 created: "Partition N not available" failed a restore in about 1 of 17 native runs (exit 1, nothing signed; the FX-21 review, slot 3). Since PROD-00.2 the arm64 runner and CI's Linux e2e run the engine natively. FX-18's bounded "the cluster serves the topic" wait in phase 0 is the expected fix: after FX-18 merges, run 30 native restores on compose and close this row if none fails; otherwise add an engine patch that retries the metadata refresh (`partition_router.rs:178-215` in 0.23.3) | P2 | M1 | fix | FX-18 | — | compose | B | Done |
 | 0 | FX-24b | A client that stops reading an answer, or a signed-in client that stops sending a request body, holds an API connection permit with no deadline, so 256 such connections still hold every permit and the API answers nobody (measured by the FX-24 review on the built binary: real request unanswered at 30 s, all 256 open at 32.9 s; `/ui/*` and `/healthz` are public, and `api.console.networkPolicy.enabled` defaults to false). Fix: a stall deadline in an IO wrapper around `TokioIo` (a pending write, flush or body read that makes no progress for N s fails `TimedOut`) and a total deadline on `read_json`. Rows: the slow-reader probe answered within N plus slack; controls: a slow but steady reader completes and an SSE stream with heartbeats is not cut; a slow signed-in body is closed; mutants: no wrapper, N far past, reads only | P1 | M1 | fix | FX-24 | — | none | A | Done |
 | 0 | FX-24c | A client that reads or sends as little as one byte per 30 s keeps its API connection: FX-24b's stall clock restarts on any progress, so 256 slow-rate clients still hold every permit (measured by the FX-24b review: 1 B per 20 s still open at 100 s). In shared mode only an enforcing NetworkPolicy keeps such peers away, and `api.console.networkPolicy.enabled` defaults to false. Fix, one or more: a per-peer connection cap for peers outside the trusted-proxy set; a minimum transfer rate over a window; a total response deadline outside the event stream. Rows: 256 slow-rate clients, then a real request answered; controls: a slow but legitimate download and the event stream; mutants | P2 | M1 | fix | FX-24b | — | none | A | Done |
 | 0 | FX-28 | The OIDC client's provider deadline covers the response head only: a provider, or a path to it, that stalls the body holds the login or callback handler and its connection permit with no bound (`crates/logweir-api/src/auth/oidc.rs:1106-1115`). `/auth/login` reaches it unauthenticated whenever discovery is stale. Fix: one `timeout(PROVIDER_DEADLINE, …)` around the request and the body collect together, and TCP keepalive on the connector. Row: a real-HTTP fake provider that sends headers and then stalls; the callback answers within the deadline plus slack; control: the old code is still pending | P2 | M1 | fix | — | — | none | A | Done |
@@ -565,6 +565,32 @@ What it fixed:
 - **Delivered:** a Restore or Backup that a guard refused says why in its status. The reason comes from the one `refusal-detail=` line the runner prints at exit 3. The controller honours that line only when it carries the Job's own random line token (160 bits, passed as the runner's last argument, compared in constant time). Without the token the old message stands, byte for byte. The read is bounded, done once, and written only on a change.
 - **Operator rule:** the runner image must be at least as new as the controller. A runner from before this change stops at argument parsing, and the docs name the symptom, the chart keys and the rollback order (both together, or the controller first).
 - **Owed:** the PoC rows. The older-runner row cannot run on the PoC, because there is no per-object runner image.
+
+**PR #23 — merged (2026-10-11) as `8d121b33`, release-notes items 62 to 66.** Integrated by worker `integrate-9`. The orchestrator fixed one Linux-only test-meter defect at the PR (`6f45720a`: on Linux the FX-33 walk meter read `ru_maxrss`, which survives exec; it now reads the child's own `VmHWM`).
+- **FX-27, FX-42 item 1, FX-25** (item 62; worker `v1-small-1`, the orchestrator's checklist pass, ACCEPT).
+  - FX-27: every engine document turns the engine's metrics server off, so runner pods open no port 8080. A live e2e negative control failed without the block.
+  - FX-42 item 1: a failed RetentionPolicy read says so and never prints the no-deletion sentence.
+  - **FX-25 — Done:** 30 of 30 native restores passed on compose with the FX-18 wait, so no engine patch is needed.
+  - FX-27 and FX-42 are Done after their PoC rows.
+- **FX-35** (item 63; the orchestrator's checklist pass, ACCEPT): a restore started from a Backup is bound to its recovery point through the catalog flow's own resolution. When no catalog lists the point yet, it says NOT RECORDED and why. Done after its PoC row.
+- **FX-39, FX-40 narrowed** (item 64; Tier-A review `claude/fx-39-40.review.md`, ACCEPT-WITH-FIXES, one MEDIUM, D1).
+  - The status lists are cut at 500, with their counts. `accounting()` reads the counts.
+  - An `Enforce` run starts from no catalog view that is a window, incomplete, expired or of unknown age.
+  - A resumed Full rescan is a window. Where the walk began is read from the Job's own digest-pinned plan, and anything unknown is a window; a background security notice moved it there from the status in hand.
+  - The plan-bytes probe shows 0 differences over 437 fixtures.
+  - Done after its PoC rows, including the orchestrator's: an Index catalog over a whole archive still reads `truncated: false`.
+- **FX-33** (item 65; Tier-A review ACCEPT-WITH-FIXES with one HIGH, H1; the second pass was ACCEPT-WITH-FIXES with one LOW, fixed).
+  - One backup names at most 1,000 topics, refused by name before the engine. One receipt cap applies everywhere.
+  - In a full catalog view only an entry with no record gives its place, and any point with a record may take it, so a set's newer receipt is never overtaken by its older one.
+  - The Index walk pages each day shard (the FX-40 review's D4). A record read that did not answer leaves the walk incomplete.
+  - Proven live: a 500-topic backup is listed, verified and restored whole.
+  - Done after its PoC rows.
+- **PROD-16.2** (item 66; Tier-A review ACCEPT-WITH-FIXES with one HIGH, S-1; the second pass found two MEDIUMs and three LOWs, fixed and read by the orchestrator).
+  - Two-person approval in the shared console: the second signed-in person clicks Approve, and nobody holds a key.
+  - The console verifies its own request signature first, and shows the whole scope, including the original-name owner statement, the exact window ends and the target. It refuses a plan whose notifications it cannot show.
+  - Authorization document 2.2.0; scorecard 1.9.0 and 2.1.0 with `approval.console`; verifier 1.29.0. The controller and the runner each re-check under one identity rule.
+  - The stated residual: whoever controls the console, its key or the identity provider can make both halves.
+  - Done after its PoC rows (decision record §8).
 
 ## Foundation dependency map
 
