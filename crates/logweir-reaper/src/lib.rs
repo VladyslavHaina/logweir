@@ -143,11 +143,8 @@ pub struct Plan {
     pub format: String,
     /// The document version.
     pub format_version: String,
-    /// The policy's namespace.
     pub policy_namespace: String,
-    /// The policy's name.
     pub policy_name: String,
-    /// The policy's UID.
     pub policy_uid: String,
     /// The destination's location id.
     pub location_id: String,
@@ -159,7 +156,6 @@ pub struct Plan {
     pub keep_days: Option<i64>,
     /// `minUsablePoints`, as applied.
     pub min_usable_points: i64,
-    /// The lines.
     pub lines: Vec<PlanLine>,
 }
 
@@ -236,7 +232,6 @@ pub enum Refusal {
          disagrees with its own declaration is refused"
     )]
     ManifestNotFirst {
-        /// The point.
         point_id: String,
         /// What the line's key list starts with.
         first: String,
@@ -268,11 +263,9 @@ pub enum Refusal {
          attributable to exactly one plan line"
     )]
     DuplicateKey {
-        /// The key.
         key: String,
         /// The first point naming it.
         first: String,
-        /// The second.
         second: String,
     },
 }
@@ -692,11 +685,9 @@ pub struct Tombstone {
     pub stage: String,
     /// The run that wrote it.
     pub run_id: String,
-    /// The policy UID.
     pub policy_uid: String,
     /// The plan digest that authorised it.
     pub plan_sha256: String,
-    /// The point.
     pub point_id: String,
     /// The archive set.
     pub backup_id: String,
@@ -761,7 +752,6 @@ impl PointState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PointOutcome {
-    /// The point id.
     pub point_id: String,
     /// `Deleted`, `Orphaned` or `Kept`.
     pub state: String,
@@ -1154,7 +1144,6 @@ fn resolve_keys<L: Lister>(line: &PlanLine, lister: &L) -> Result<Vec<String>, S
 /// Who a run is, for the tombstones it writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunAttribution {
-    /// The run id.
     pub run_id: String,
     /// The policy UID — the tombstone key's first segment.
     pub policy_uid: String,
@@ -1333,15 +1322,10 @@ pub struct Record {
     pub format: String,
     /// The document version.
     pub format_version: String,
-    /// The run id.
     pub run_id: String,
-    /// The policy's namespace.
     pub policy_namespace: String,
-    /// The policy's name.
     pub policy_name: String,
-    /// The policy's UID.
     pub policy_uid: String,
-    /// The generation.
     pub policy_generation: i64,
     /// The plan digest that authorised this run.
     pub plan_sha256: String,
@@ -1350,7 +1334,6 @@ pub struct Record {
     pub approver: String,
     /// The destination's location id.
     pub location_id: String,
-    /// The scope prefix.
     pub scope_prefix: String,
     /// `keepLast`, as applied.
     pub keep_last: Option<i64>,
@@ -1375,7 +1358,6 @@ pub struct Record {
 /// What the caller knows that the plan does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordContext {
-    /// The run id.
     pub run_id: String,
     /// The policy generation this run was created at.
     ///

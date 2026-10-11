@@ -80,7 +80,6 @@ pub mod code {
     pub const TYPE_CONSUMER: u32 = 1;
     /// `RD_KAFKA_CONSUMER_GROUP_TYPE_CLASSIC`.
     pub const TYPE_CLASSIC: u32 = 2;
-    /// `GROUP_AUTHORIZATION_FAILED`.
     pub const GROUP_AUTHORIZATION_FAILED: i32 = 30;
 }
 
@@ -117,15 +116,10 @@ impl GroupType {
 /// A group's state as librdkafka named it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GroupState {
-    /// `PreparingRebalance`.
     PreparingRebalance,
-    /// `CompletingRebalance`.
     CompletingRebalance,
-    /// `Stable`.
     Stable,
-    /// `Dead`.
     Dead,
-    /// `Empty`.
     Empty,
     /// librdkafka's Unknown (0), or a value beyond its enum. KIP-848's
     /// `Assigning` and `Reconciling` arrive as this. Treated as ACTIVE (T4).
@@ -174,7 +168,6 @@ impl GroupState {
 /// One entry of the typed listing (ListConsumerGroups), with a UTF-8 id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedEntry {
-    /// The group id.
     pub group_id: String,
     /// Protocol type empty: a group made by commits alone.
     pub is_simple: bool,
@@ -187,7 +180,6 @@ pub struct TypedEntry {
 /// One entry of the name listing (ListGroups of every type), with a UTF-8 id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameEntry {
-    /// The group id.
     pub group_id: String,
     /// The legacy describe's per-group error code, `0` for none.
     pub error: i32,
@@ -208,7 +200,6 @@ pub enum TargetedAnswer {
     },
     /// The describe answered the id with an error.
     Refused {
-        /// The code.
         code: i32,
         /// librdkafka's message.
         message: String,
@@ -733,7 +724,6 @@ pub struct MemberDescription {
 /// A captured group's description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupDescription {
-    /// The group id.
     pub group_id: String,
     /// The type, agreed by the listing and the description.
     pub group_type: GroupType,
@@ -741,11 +731,9 @@ pub struct GroupDescription {
     pub state: GroupState,
     /// Whether the protocol type is empty.
     pub is_simple: bool,
-    /// The partition assignor.
     pub partition_assignor: Option<String>,
     /// The coordinator's broker id.
     pub coordinator: Option<i32>,
-    /// The members.
     pub members: Vec<MemberDescription>,
 }
 
@@ -761,11 +749,8 @@ pub struct DescribedObservation {
     pub group_type: u32,
     /// Whether the protocol type is empty.
     pub is_simple: bool,
-    /// The assignor.
     pub partition_assignor: Option<String>,
-    /// The coordinator.
     pub coordinator: Option<i32>,
-    /// The members.
     pub members: Vec<MemberDescription>,
     /// Topic names of an assignment that were NULL or not UTF-8.
     pub unreadable_topics: usize,

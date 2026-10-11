@@ -83,25 +83,18 @@ pub mod code {
     /// `RD_KAFKA_RESP_ERR__NO_OFFSET` (`rdkafka.h:353`): no valid offset to
     /// commit. [`super::commit_request`] refuses that input before it is sent.
     pub const NO_OFFSET: i32 = -168;
-    /// `COORDINATOR_LOAD_IN_PROGRESS`.
     pub const COORDINATOR_LOAD_IN_PROGRESS: i32 = 14;
-    /// `COORDINATOR_NOT_AVAILABLE`.
     pub const COORDINATOR_NOT_AVAILABLE: i32 = 15;
-    /// `NOT_COORDINATOR`.
     pub const NOT_COORDINATOR: i32 = 16;
-    /// `ILLEGAL_GENERATION`.
     pub const ILLEGAL_GENERATION: i32 = 22;
-    /// `UNKNOWN_MEMBER_ID`: a non-member commit to a group with members (K3).
+    /// `UNKNOWN_MEMBER_ID`: a non-member commit to a group with members.
     pub const UNKNOWN_MEMBER_ID: i32 = 25;
-    /// `REBALANCE_IN_PROGRESS`.
     pub const REBALANCE_IN_PROGRESS: i32 = 27;
-    /// `TOPIC_AUTHORIZATION_FAILED`: per topic (T15).
+    /// `TOPIC_AUTHORIZATION_FAILED`: per topic.
     pub const TOPIC_AUTHORIZATION_FAILED: i32 = 29;
-    /// `GROUP_AUTHORIZATION_FAILED`.
     pub const GROUP_AUTHORIZATION_FAILED: i32 = 30;
-    /// `GROUP_ID_NOT_FOUND`: a share group refuses OffsetCommit with it (K4).
+    /// `GROUP_ID_NOT_FOUND`: a share group refuses OffsetCommit with it.
     pub const GROUP_ID_NOT_FOUND: i32 = 69;
-    /// `FENCED_INSTANCE_ID`.
     pub const FENCED_INSTANCE_ID: i32 = 82;
     /// `UNSTABLE_OFFSET_COMMIT`: a pending transactional offset commit.
     pub const UNSTABLE_OFFSET_COMMIT: i32 = 88;
@@ -294,7 +287,7 @@ pub enum CommitError {
     #[error("{group}: group active: the broker refused a non-member commit (UNKNOWN_MEMBER_ID)")]
     GroupActive { group: String },
     /// GROUP_ID_NOT_FOUND (69): the id is a group that takes no offset
-    /// commits, such as a share group (K4). Nothing changed.
+    /// commits, such as a share group. Nothing changed.
     #[error("{group}: not a consumer group: the broker refused the commit (GROUP_ID_NOT_FOUND)")]
     NotAConsumerGroup { group: String },
     /// GROUP_AUTHORIZATION_FAILED (30): OffsetCommit needs Read on the group;
@@ -373,7 +366,7 @@ pub fn partition_answer(
     match raw_offset {
         n if n >= 0 => PartitionPosition::Committed(CommittedPosition {
             offset: n,
-            // The safe API exposes no leader epoch (C3): not exposed, not −1.
+            // The safe API exposes no leader epoch: not exposed, not −1.
             leader_epoch: None,
             metadata,
         }),
@@ -640,7 +633,7 @@ mod tests {
         );
     }
 
-    /// The safe route exposes no leader epoch (C3): a read says `None`, "not
+    /// The safe route exposes no leader epoch: a read says `None`, "not
     /// exposed", never a guessed −1 or 0.
     #[test]
     fn a_safe_read_never_invents_a_leader_epoch() {

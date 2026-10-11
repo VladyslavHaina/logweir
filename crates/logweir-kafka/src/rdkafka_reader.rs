@@ -335,7 +335,7 @@ impl RdKafkaReader {
     /// - One entry per requested partition, in request order. A partition
     ///   with no committed offset is [`PartitionPosition::NoCommittedPosition`],
     ///   never offset 0; so is every partition of an ABSENT group and of a
-    ///   SHARE group (K7), so classify the group before reading meaning into
+    ///   SHARE group, so classify the group before reading meaning into
     ///   it.
     /// - A pending transactional offset commit makes the whole bounded fetch
     ///   time out: [`PositionsError::PositionsUnstable`] for a group the
@@ -376,7 +376,7 @@ impl RdKafkaReader {
     ///   the group [`CommitError::NotAuthorized`]; no coordinator within the
     ///   bound [`CommitError::NotVisibleOrUnreachable`], nothing sent.
     /// - An ABSENT group id is created by the commit as a simple classic
-    ///   group (K3): classify the target first.
+    ///   group: classify the target first.
     /// - Only each position's offset is committed, with leader epoch −1 and
     ///   [`crate::positions::COMMIT_METADATA_MARKER`] as its metadata.
     /// - Any other failure is [`CommitError::Failed`] with its integer code;
@@ -441,7 +441,7 @@ impl RdKafkaReader {
 
     /// What this principal's METADATA says about one topic — the evidence
     /// [`empty_topic_config_answer`] names an empty DescribeConfigs answer
-    /// by (T13). Read only for a topic whose answer came back empty.
+    /// by. Read only for a topic whose answer came back empty.
     fn topic_visibility(&self, topic: &str) -> TopicVisibility {
         use rdkafka::error::RDKafkaErrorCode as Code;
         let md = match self.consumer.fetch_metadata(Some(topic), T) {
@@ -459,8 +459,9 @@ impl RdKafkaReader {
         }
     }
 
-    /// One BROKER resource's answer under T13, flattened: an empty entry list
-    /// is the cluster authorizer's refusal, never an empty configuration.
+    /// One BROKER resource's answer under the empty-answer rule, flattened: an
+    /// empty entry list is the cluster authorizer's refusal, never an empty
+    /// configuration.
     fn broker_answer(
         broker_id: i32,
         cfg: rdkafka::admin::ConfigResource,
@@ -488,9 +489,9 @@ impl RdKafkaReader {
         }
     }
 
-    /// One topic resource's answer under T13: an empty entry list is a
-    /// FAILED read, named from the topic's metadata; never an empty set of
-    /// overrides. Shared by [`ClusterReader::topic_configs`] and
+    /// One topic resource's answer under the empty-answer rule: an empty entry
+    /// list is a FAILED read, named from the topic's metadata; never an empty
+    /// set of overrides. Shared by [`ClusterReader::topic_configs`] and
     /// [`ClusterReader::describe_topic_configs`], so the two cannot disagree.
     fn topic_answer(
         &self,
@@ -500,8 +501,9 @@ impl RdKafkaReader {
         Self::topic_answer_with(topic, result, || self.topic_visibility(topic))
     }
 
-    /// [`Self::topic_answer`] with the metadata read INJECTED, so the T13
-    /// decision is testable over a constructed rdkafka result with no broker
+    /// [`Self::topic_answer`] with the metadata read INJECTED, so the
+    /// empty-answer decision is testable over a constructed rdkafka result with
+    /// no broker
     /// (`tests::an_empty_topic_answer_is_a_refusal_never_an_empty_override_set`).
     /// `visibility` is called only for an empty answer.
     fn topic_answer_with(
@@ -510,7 +512,7 @@ impl RdKafkaReader {
         visibility: impl FnOnce() -> TopicVisibility,
     ) -> TopicConfigRead {
         // The `Err` arm is what the TYPE promises and rdkafka 0.36.2 never
-        // produces (T13): kept, because a later rdkafka that reads the
+        // produces: kept, because a later rdkafka that reads the
         // per-resource error would hand it here, and it classifies exactly.
         let cfg = result.map_err(|code| Self::classify_topic_error(topic, code))?;
         if cfg.entries.is_empty() {
@@ -551,7 +553,7 @@ fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
 /// How [`RdKafkaReader::created_topic_configs`] reads one answer of
 /// the configuration read it repeats: the configuration is done;
 /// `TopicNotFound` and `NotAuthorized` are a creation still propagating
-/// (`NotAuthorized` here is T13's inference from an EMPTY DescribeConfigs
+/// (`NotAuthorized` here is an inference from an EMPTY DescribeConfigs
 /// answer, never a code the broker sent); anything else (unreachable, a
 /// timeout, a client error) is final. A pure function so a unit row pins the
 /// exact set: dropping `NotAuthorized` brings back the empty-answer
@@ -765,7 +767,7 @@ impl ClusterReader for RdKafkaReader {
     }
 
     /// As the default, and ALSO waits out [`KafkaError::NotAuthorized`],
-    /// because here that error is T13's inference from an EMPTY DescribeConfigs
+    /// because here that error is an inference from an EMPTY DescribeConfigs
     /// answer ([`empty_topic_config_answer`]), never a code the broker sent
     /// (rdkafka 0.36.2 does not read the per-resource error). Kafka answers a
     /// topic its metadata does not hold yet with exactly that empty list, and
@@ -928,11 +930,11 @@ impl ClusterReader for RdKafkaReader {
         Ok(out)
     }
 
-    /// [`Self::broker_configs`]'s read, for EVERY broker id
-    /// the metadata lists, in ONE DescribeConfigs request; each broker's
-    /// answer is held to T13 exactly as the one-broker read is (an empty
-    /// answer is a refused read, an error), so `None` means only "this broker
-    /// answered and did not name the key".
+    /// [`Self::broker_configs`]'s read, for EVERY broker id the metadata lists,
+    /// in ONE DescribeConfigs request; each broker's answer is held to the
+    /// empty-answer rule exactly as the one-broker read is (an empty answer is
+    /// a refused read, an error), so `None` means only "this broker answered
+    /// and did not name the key".
     fn broker_config_value_all(&self, key: &str) -> Result<Vec<(i32, Option<String>)>, KafkaError> {
         use rdkafka::admin::{AdminOptions, OwnedResourceSpecifier, ResourceSpecifier};
         let md = self

@@ -41,7 +41,7 @@ pub(crate) const POSITIONS_CLIENT_ID: &str = "logweir-positions";
 /// | key | value | why |
 /// |---|---|---|
 /// | `group.id` | the group | OffsetFetch and OffsetCommit name it |
-/// | `group.protocol` | `classic` | pinned: librdkafka says its default "will change to `consumer`", and a commit's non-member shape (generation −1, empty member id, K3) and the bounds below are the classic protocol's |
+/// | `group.protocol` | `classic` | pinned: librdkafka says its default "will change to `consumer`", and a commit's non-member shape (generation −1, empty member id) and the bounds below are the classic protocol's |
 /// | `enable.auto.commit` | `false` | the handle commits only what it is asked to |
 /// | `enable.auto.offset.store` | `false` | nothing is ever stored implicitly |
 /// | `isolation.level` | `read_committed` | pinned: it is what makes librdkafka send RequireStable (`rdkafka.c:3655-3656`); without it a pending transactional commit reads as the pre-transaction position (§3.4, T8) |
@@ -226,7 +226,7 @@ impl GroupHandle {
         let entries = commit_request(positions)?;
         let mut tpl = TopicPartitionList::with_capacity(entries.len());
         for e in &entries {
-            // This route cannot set a leader epoch (C3): librdkafka sends the
+            // This route cannot set a leader epoch: librdkafka sends the
             // element's default, −1. Refuse an entry that asks for anything
             // else rather than send −1 in its name.
             if e.leader_epoch != COMMIT_LEADER_EPOCH {

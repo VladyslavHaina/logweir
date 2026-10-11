@@ -64,9 +64,7 @@ pub const TOPIC_OVERRIDE_SOURCE: &str = "dynamicTopicConfig";
 /// is indexed by position in this list.
 pub const KAFKA_LINES: [&str; 2] = ["3.9", "4.x"];
 
-/// `portable`.
 pub const PORTABLE: &str = "portable";
-/// `inherited`.
 pub const INHERITED: &str = "inherited";
 /// `removedInKafka4`.
 pub const REMOVED_IN_KAFKA_4: &str = "removedInKafka4";
@@ -76,7 +74,6 @@ pub const CLUSTER_BOUND: &str = "clusterBound";
 pub const REQUIRES_TIERED_STORAGE: &str = "requiresTieredStorage";
 /// `providerOnly`.
 pub const PROVIDER_ONLY: &str = "providerOnly";
-/// `secret`.
 pub const SECRET: &str = "secret";
 
 /// `ConfigEntry::portability`'s closed set (receipt arm 16), in the order the
