@@ -60,21 +60,49 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y cmake pkg-config clang libclang-dev libsasl2-dev libssl-dev zlib1g-dev libcurl4-openssl-dev
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
+  # FX-41: the e2e suite in four shards BY TEST BINARY, each on its own
+  # runner with its own stack, engine build and logweir build (the Rust cache
+  # is shared). Every file under e2e/tests/ is in exactly one shard's `tests`:
+  # e2e/tests/stack_params.rs fails otherwise, in `check`. Balanced on the
+  # per-binary times of a local run on the default line, 4.3.1 (86 minutes
+  # of tests, 2026-10-10). Each shard's expected minutes of tests read
+  # "local; CI": CI ran the binaries whose rows are the same on 3.7.1 in 0.6
+  # of their local time. Setup takes about 15 minutes before any test runs.
+  # `publish` needs every shard.
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 80, not 50: the job took 48 minutes on main before PROD-01.4a, PROD-04.1
-    # and PROD-11.1b added about 9 minutes of rows (`replay_selection` alone is
-    # 7), and it was cancelled at 50 with every finished row green. Of the
-    # total, about 7 minutes are setup and 8 are PROD-00.2's engine build from
-    # the vendored source. The headroom is for the rows still to land; the
-    # real fix is to split the suite across two jobs (FX-41).
-    timeout-minutes: 80
+    name: e2e ${{ matrix.shard }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 23; 14
+          - shard: 1
+            tests: [record_semantics, topic_identity, record_semantics_oracle, check_image,
+                    config_coverage, new_topic_parity, topic_budget]
+          # 23; 14. On 4.x group_admin's fixture is seven groups of four types.
+          - shard: 2
+            tests: [position_evidence, group_admin, original_name, fixture_retention,
+                    replication_factor_parity, resume_semantics]
+          # 22; 13
+          - shard: 3
+            tests: [replay_selection, auth_modes, full_drill, pitr_boundary,
+                    credential_binding_store, compat_contract, stack_params, created_topics,
+                    schema_dependency, smoke, stopped_restore, topic_configuration]
+          # 22; 13, with the `--features e2e` rows under crates/.
+          - shard: 4
+            crates: true
+            tests: [guards, consumer_group_snapshot, backup_argv, mvp_demo, empty_capture,
+                    topic_ids, scram, consumer_positions, offset_side, point_set_binding]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
       # listeners (SASL_SSL/PLAIN, SCRAM-SHA-256, mTLS). `just e2e-up` starts
       # every profile COMPOSE_PROFILES names; without it those rows fail.
+      # The broker is the default line `.env` pins, Kafka 4.3.1 (PROD-01.5a);
+      # the legacy 3.7.1 line runs in engine-matrix.yml's weekly rows.
       COMPOSE_PROFILES: auth
     runs-on: ubuntu-24.04
     steps:
@@ -118,8 +146,9 @@ jobs:
       - run: just e2e-up
       - run: ./scripts/e2e-seed.sh
       - run: cargo build --locked -p logweir
-      - run: cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
+      - run: cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
       - name: Kafka adapter and production timeout integration tests
+        if: matrix.crates
         run: |
           cargo test --locked -p logweir-kafka --features e2e --test live -- --test-threads=1
           cargo test --locked -p logweir --features e2e --lib check_storage_skips_a_genuinely_unreachable_endpoint
@@ -129,7 +158,7 @@ jobs:
         run: docker compose -f e2e/compose/docker-compose.yml logs --no-color > /tmp/compose.log
       - if: always()
         uses: actions/upload-artifact@v4
-        with: { name: compose-logs, path: /tmp/compose.log }
+        with: { name: 'compose-logs-${{ matrix.shard }}', path: /tmp/compose.log }
       - if: always()
         run: docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 

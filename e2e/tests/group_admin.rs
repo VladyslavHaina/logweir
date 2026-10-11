@@ -362,7 +362,7 @@ fn every_fixture_group_gets_the_verdict_its_type_calls_for() {
     let fixture = fixture_groups();
     assert!(!fixture.is_empty(), "groups.sh listed no group");
     // THE LINE (review H1). A broker that serves ListGroups below v5 (3.7.1,
-    // the default stack CI's e2e job runs) types no group: its own tool prints
+    // the legacy line engine-matrix runs) types no group: its own tool prints
     // TYPE `-`, and the typed listing carries type 0 for every entry. T4 then
     // excludes every group as `GroupTypeNotCaptured { UnknownType { raw: 0 } }`
     // (decision record §14). The row asserts that outcome; it never skips.
