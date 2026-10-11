@@ -38,20 +38,20 @@ pub const FORMAT_VERSION: &str = "1.4.0";
 /// the installation policy set, the policy snapshot and authorization
 /// document v2, with `now` always an argument.
 pub mod approval_policy;
-/// PROD-16.2: the approval scope — everything a second person must be shown
+/// The approval scope — everything a second person must be shown
 /// before they approve, as a pure function of the request the console signed
 /// and the plan it names by hash; complete, or not approvable.
 pub mod approval_scope;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;
-/// PROD-04.1: the receipt's consumer position evidence (format 1.7.0), its
+/// The receipt's consumer position evidence (format 1.7.0), its
 /// closed vocabularies and the rules its arms re-derive.
 pub mod consumer_positions;
-/// PROD-15.1: the one line a runner prints about a stopped creation step
+/// The one line a runner prints about a stopped creation step
 /// (`target-topics-appeared=`), written and read through one definition.
 pub mod creation_stop;
-/// FX-20: the credential binding for every credential reference — object
+/// The credential binding for every credential reference — object
 /// stores, retention and notification sinks — beside PROD-01.3's Kafka one.
 pub mod credential_binding;
 pub mod destination;
@@ -60,41 +60,41 @@ pub mod engine;
 pub mod execution_contract;
 pub mod guard;
 pub mod ids;
-/// PROD-15.1: restore under the original topic name into an absent topic —
-/// the conditions contract (OD-2), the separate approval subject, and the
+/// Restore under the original topic name into an absent topic —
+/// the conditions contract, the separate approval subject, and the
 /// probe's scratch name.
 pub mod original_name;
 pub mod outcome;
-/// FX-33: the facts a reader takes from a backup receipt without building a
+/// The facts a reader takes from a backup receipt without building a
 /// tree of it — the shared controller's bounded read.
 pub mod receipt_facts;
-/// FX-34: a guard refusal's reason code and sentence as one validated,
+/// A guard refusal's reason code and sentence as one validated,
 /// cleaned and bounded `refusal-detail=` line.
 pub mod refusal_detail;
 /// PLAT-19.1 / decision D3 §4.3: the scope a standing rehearsal
 /// authorization signs over. Types only — the `plan ∈ scope` predicate is
 /// W7's, against W5's execution contract v2.
 pub mod rehearsal_scope;
-/// PROD-11.1: the replay selection — an inclusive window start and per-topic
+/// The replay selection — an inclusive window start and per-topic
 /// partition subsets — and the one function preview and execution select by.
 pub mod replay_selection;
 pub mod schema;
 pub mod schema_dependency;
 pub mod scorecard;
 pub mod spec;
-/// FX-8: which clock a restore's time selection reads per source topic, and
+/// Which clock a restore's time selection reads per source topic, and
 /// the `PointInTimeByProducerTime` refusal.
 pub mod time_basis;
-/// FX-33: how many topics one backup may name and what its signed documents
+/// How many topics one backup may name and what its signed documents
 /// may weigh — the one place every reader's cap and refusal derive from.
 pub mod topic_budget;
-/// PROD-05.1: the topic configuration model's portability table, the capture
+/// The topic configuration model's portability table, the capture
 /// rule and the detection of declarative owners.
 pub mod topic_configuration;
-/// PROD-01.4a: the topic ID's canonical text, its closed sets, and the
+/// The topic ID's canonical text, its closed sets, and the
 /// generation rule two points' IDs are read by.
 pub mod topic_identity;
-/// PROD-01.1a: transaction markers in a restored archive, and the
+/// Transaction markers in a restored archive, and the
 /// `TransactionMarkersInArchive` refusal.
 pub mod transaction_markers;
 /// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,

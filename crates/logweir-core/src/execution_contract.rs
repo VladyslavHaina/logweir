@@ -7,12 +7,12 @@
 //! the controller and runner share one wire contract without introducing a
 //! dependency between their crates.
 //!
-//! # Version 2 (decision D3 §8, Amendment I)
+//! # Version 2
 //!
 //! [`VERSION`] is `"2"`. The bump is the whole point of the version existing:
 //! v2 carries three things a v1 runner would silently not do — the recovery
-//! **point binding** (D3 §5.5), the **standing rehearsal authorization**
-//! (D3 §4.3) and the **progress / teardown stdout lines** (D3 §2.4) — so an
+//! **point binding**, the **standing rehearsal authorization**
+//! and the **progress / teardown stdout lines** — so an
 //! old binary must refuse the new argument *before dispatch* rather than run a
 //! plan whose checks it does not implement. It does: the argv handshake is
 //! `VERSION_ARG` and an old build's exact-match on `"1"` rejects `"2"`.
@@ -83,7 +83,7 @@ pub const ALL_ENV: [&str; 13] = [
 ];
 
 /// The mandatory names a STANDING-authorized run carries — [`ALL_ENV`] minus
-/// the two per-run approval digests (PLAT-14.3b).
+/// the two per-run approval digests.
 ///
 /// `APPROVAL_NAME_ENV` and `APPROVAL_UID_ENV` STAY: they name the standing
 /// `Approval`, which is a real object a human signed and the one an auditor
@@ -108,8 +108,7 @@ pub const STANDING_MANDATORY_ENV: [&str; 11] = [
 // ---------------------------------------------------------------------------
 
 /// Which authorization this run was created under: [`AUTHORIZATION_KIND_APPROVAL`]
-/// (the per-run `Approval`, tag 1's only shape) or [`AUTHORIZATION_KIND_STANDING`]
-/// (D3 §4.3's standing rehearsal authorization).
+/// (the per-run `Approval`, tag 1's only shape) or [`AUTHORIZATION_KIND_STANDING`].
 ///
 /// **Absent means `approval`.** That is the compatible direction and the
 /// fail-closed one at the same time: a standing-authorized run *needs* the
@@ -349,7 +348,7 @@ impl std::fmt::Display for ContractVersion {
 }
 
 // ---------------------------------------------------------------------------
-// The recovery point bound into plan bytes (D3 §5.1 / §5.5)
+// The recovery point bound into plan bytes
 // ---------------------------------------------------------------------------
 
 /// `source.point` — the recovery point a v2 restore plan is bound to.
@@ -372,7 +371,7 @@ impl std::fmt::Display for ContractVersion {
 /// no binding check. That is not a weaker mode for the same run — it is the
 /// only mode a pre-catalog plan can express.
 ///
-/// # Present, `source.backup` names the point's own set (FX-16)
+/// # Present, `source.backup` names the point's own set
 ///
 /// The receipt describes ONE backup set, so a plan carrying the block names
 /// that set in `source.backup` — never `latestCompleted`, never another id —
@@ -381,7 +380,7 @@ impl std::fmt::Display for ContractVersion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PointBinding {
     /// `lwp1-` + 32 lowercase hex characters, content-derived from the signed
-    /// receipt (D3 §5.1). A DISPLAY and lookup key; `receipt_sha256` is the
+    /// receipt. A DISPLAY and lookup key; `receipt_sha256` is the
     /// binding.
     pub point_id: String,
     /// The object key of the signed backup receipt, under `logweir/backups/`.
@@ -416,13 +415,13 @@ pub const PAYLOAD_TYPE_STANDING_AUTHORIZATION: &str =
 /// [`STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE`].
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION: &str = "1.0.0";
 
-/// **PROD-08.1a.** The minor that defines `scope.coverage` and
+/// The minor that defines `scope.coverage` and
 /// `scope.completeMaxRecords`. A document declaring an older minor that
 /// carries either is refused: the fields are a signer's choice of a STRONGER
 /// check, and a document that predates them cannot have made it.
 pub const STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR: u64 = 1;
 
-/// **PROD-08.1a.** The version a document whose scope carries
+/// The version a document whose scope carries
 /// `coverage` or `completeMaxRecords` is minted at.
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE: &str = "1.1.0";
 
@@ -437,7 +436,7 @@ pub const SUBJECT_API_VERSION: &str = "logweir.dev/v1alpha1";
 /// ten-year life is one the decision does not permit, whoever minted it.
 pub const MAX_STANDING_AUTHORIZATION_DAYS: i64 = 90;
 
-/// What the standing authorization names as its subject (D3 §4.3, §4.5).
+/// What the standing authorization names as its subject.
 ///
 /// The UID is the field that matters. It is what turns
 /// `LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID` — a label the controller sets —
@@ -648,7 +647,7 @@ pub fn admit_standing_authorization(
             doc.format_version
         )));
     }
-    // PROD-08.1a: the scope's coverage fields, in a document new enough to
+    // The scope's coverage fields, in a document new enough to
     // carry them, and coherent. Each can only REFUSE: a scope without them
     // admits what every 1.0.0 scope admitted (`plan_within_scope`).
     if doc.scope.needs_coverage_format() {
@@ -776,7 +775,7 @@ pub fn admit_standing_authorization(
 }
 
 // ---------------------------------------------------------------------------
-// The progress channel (D3 §2.4), contract-versioned and bounded
+// The progress channel, contract-versioned and bounded
 // ---------------------------------------------------------------------------
 
 /// `progress-contract=<version>` — the ONE line that says which grammar the
@@ -788,7 +787,7 @@ pub fn admit_standing_authorization(
 /// announced once, at the top of the run, and the per-phase grammar stays
 /// exactly `<n>:<name>`.
 pub const PROGRESS_CONTRACT_PREFIX: &str = "progress-contract=";
-/// `progress-phase=<n>:<name>` (D3 §2.4).
+/// `progress-phase=<n>:<name>`.
 pub const PROGRESS_PHASE_PREFIX: &str = "progress-phase=";
 /// The hard cap on a whole progress line, including the prefix.
 ///
@@ -885,10 +884,10 @@ pub fn progress_phase_line(phase: i8, name: &str) -> Option<String> {
     Some(line)
 }
 
-/// `teardown-key=<key>` (D3 §2.4), printed only when phase 9 attested.
+/// `teardown-key=<key>`, printed only when phase 9 attested.
 pub const TEARDOWN_KEY_PREFIX: &str = "teardown-key=";
 
-/// **FX-44.** `teardown-failed=[{"topic":…,"error":…},…]`: the topics a
+/// `teardown-failed=[{"topic":…,"error":…},…]`: the topics a
 /// restore's teardown left on the target cluster, each with why. The runner
 /// prints it whenever teardown left one: phase 9 of a run that signed, and the
 /// teardown of a run that failed after it created its target topics, which
@@ -1002,12 +1001,12 @@ pub struct PlanScopeFacts {
     /// A standing rehearsal restores everything, and no approver saw a
     /// narrowing in its plan bytes, so [`plan_within_scope`] refuses any.
     pub replay_selection: Vec<String>,
-    /// **PROD-08.1a.** `sample.coverage`, which must be exactly the signed
+    /// `sample.coverage`, which must be exactly the signed
     /// scope's ([`RehearsalScope::signed_coverage`]). A `complete` plan
     /// verifies every partition of every restored topic, so it states NO
     /// `sample.max_partitions` — phase 0 refuses the pair.
     pub coverage: crate::spec::Coverage,
-    /// **PROD-08.1a.** `sample.complete_max_records`, held to the signed
+    /// `sample.complete_max_records`, held to the signed
     /// scope's `completeMaxRecords` when it states one.
     pub complete_max_records: Option<u64>,
     /// **PROD-01.1a (review OE-1).** `restore.allow_transaction_markers`. The
@@ -1105,7 +1104,7 @@ impl std::fmt::Display for ScopeRefusal {
 ///   that satisfies the second has not thereby satisfied the first — the
 ///   controller still owes the point-selection check — so this comparison is
 ///   necessary and not sufficient, and W7 keeps §4.2's filter.
-/// * **`coverage` is SIGNED, and the plan's must be exactly it** (PROD-08.1a).
+/// * **`coverage` is SIGNED, and the plan's must be exactly it**.
 ///   A scope that states no `coverage` — every scope signed before document
 ///   format 1.1.0 — authorises `sampled` and nothing else: a `complete` plan
 ///   under it is refused by name, so an approver who signed sampled
@@ -1260,7 +1259,7 @@ pub fn plan_within_scope(
             Some(_) => {}
         }
     }
-    // PROD-11.1 (review M1): a standing rehearsal restores every partition
+    // A standing rehearsal restores every partition
     // from the archive's floor. A plan stating a replay selection would sign a
     // narrowed verdict no approver saw — the plan bytes are not hash-bound to
     // the standing authorization, only checked against its scope — so any
@@ -1273,7 +1272,7 @@ pub fn plan_within_scope(
             facts.replay_selection.join(", ")
         ));
     }
-    // PROD-01.1a (review OE-1): the override that restores transaction
+    // The override that restores transaction
     // markers as data needs an approver to have seen it, for the same reason.
     if facts.allows_transaction_markers {
         mismatches.push(
@@ -1520,7 +1519,7 @@ mod tests {
             "{refusal}"
         );
         let subset = plan_scope_facts(
-            // PROD-11.1b: a subset is written beside the open-start interval.
+            // A subset is written beside the open-start interval.
             &plan("  point_in_time: \"../2026-01-01T12:00:00Z\"\n  partitions: {orders: [1]}\n"),
             &allowed,
         );
@@ -2058,7 +2057,7 @@ mod tests {
         .is_err());
     }
 
-    /// Key-usage separation (D3 §7.3): the installation's own evidence key may
+    /// Key-usage separation: the installation's own evidence key may
     /// never authorise its own rehearsals.
     #[test]
     fn only_an_authorization_usage_key_may_authorize() {
@@ -2199,7 +2198,7 @@ mod tests {
         assert_eq!(AuthorizationKind::default(), AuthorizationKind::Approval);
     }
 
-    /// **FX-44.** The `teardown-failed=` line round-trips, is held to the
+    /// The `teardown-failed=` line round-trips, is held to the
     /// CRD's bounds on both sides, and carries only names a broker accepts.
     #[test]
     fn the_teardown_failed_line_is_bounded_and_round_trips() {

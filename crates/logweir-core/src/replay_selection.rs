@@ -852,7 +852,7 @@ mod tests {
         }
     }
 
-    /// The wire form of a SUBSET (PROD-11.1b): `restore.partitions` parses
+    /// The wire form of a SUBSET: `restore.partitions` parses
     /// only beside an interval form of `point_in_time` — `"<start>/<end>"`, or
     /// `"../<end>"` from the archive's floor — which a runner that predates
     /// partition subsets cannot parse, so it refuses the plan instead of

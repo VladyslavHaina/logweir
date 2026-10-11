@@ -13,7 +13,7 @@ use logweir_core::engine::{RestorePlan, StorageUrl};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// **PROD-11.1.** One engine run of a restore plan.
+/// One engine run of a restore plan.
 ///
 /// The pinned engine's `restore.source_partitions` is a run-wide filter: it
 /// applies to every topic the run restores (`restore/engine.rs:1253-1264` and
@@ -122,7 +122,7 @@ pub fn render_and_digest(plan: &RestorePlan) -> Result<(String, String), RenderE
     Ok((doc, digest))
 }
 
-/// **PROD-11.1.** Every run's document and its digest, in run order, each
+/// Every run's document and its digest, in run order, each
 /// checked exactly as [`render_and_digest`] checks the one document of a
 /// one-run plan.
 pub fn render_all_and_digest(
@@ -138,7 +138,7 @@ pub fn render_all_and_digest(
         .collect()
 }
 
-/// **PROD-11.1.** Every run's document, in run order.
+/// Every run's document, in run order.
 pub fn render_all(plan: &RestorePlan) -> Result<Vec<(RestoreRun, String)>, RenderError> {
     runs(plan)
         .into_iter()
@@ -297,7 +297,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
         "  time_window_end: {}\n",
         plan.time_window.1.timestamp_millis()
     ));
-    // **PROD-11.1.** `pub source_partitions: Option<Vec<i32>>`
+    // `pub source_partitions: Option<Vec<i32>>`
     // [U:crates/kafka-backup-core/src/config.rs:859-861 @ v0.23.3], a filter
     // the engine applies to EVERY topic of this run — which is why a plan
     // whose topics carry different subsets is several runs (`runs`). Rendered
@@ -409,7 +409,7 @@ pub fn render_topic_mapping_block(
 /// the archive: one arm set, one golden per backend. Every free-text field
 /// goes through `yaml_scalar`.
 ///
-/// **C15** (PROD-00.3f): a plain `http://` endpoint with `allow_http: false`
+/// **C15**: a plain `http://` endpoint with `allow_http: false`
 /// is REFUSED here, before a single key is written, because the pinned engine
 /// (0.22.0 and later) would derive plaintext from the scheme and ignore the
 /// rendered `false`. This is the one function every engine document's storage

@@ -1,5 +1,5 @@
 //! **The Kafka API versions an endpoint serves, as the endpoint told this
-//! client** (PROD-01.2) — pure: what the lines mean, with no socket.
+//! client** — pure: what the lines mean, with no socket.
 //!
 //! # Why a client needs to know
 //!

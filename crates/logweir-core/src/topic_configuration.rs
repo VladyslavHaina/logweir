@@ -37,7 +37,7 @@
 //! config name" on both lines), or one a later Kafka adds. It is recorded, so
 //! a restore can say it was there, and never applied.
 //!
-//! # What the classes mean for a restore (PROD-05.2)
+//! # What the classes mean for a restore
 //!
 //! | class | meaning | applied by a restore |
 //! |---|---|---|

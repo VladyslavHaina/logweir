@@ -115,17 +115,17 @@ pub const PLACEHOLDER_TARGET_PASSWORD: &str = "${LOGWEIR_TARGET_PASSWORD}";
 /// about `time_window_start`.
 pub const ENGINE_SCRAM_SHA_512: &str = "SCRAM-SHA512";
 
-/// **PROD-01.3.** The engine's spelling of SASL/SCRAM-SHA-256 — the same
+/// The engine's spelling of SASL/SCRAM-SHA-256 — the same
 /// `SCREAMING-KEBAB-CASE` rule as [`ENGINE_SCRAM_SHA_512`], so ONE hyphen
 /// (`SCRAM-SHA256`), where librdkafka says `SCRAM-SHA-256`. The variant list in
 /// the measured parse error above names it.
 pub const ENGINE_SCRAM_SHA_256: &str = "SCRAM-SHA256";
 
-/// **PROD-01.3.** The engine's spelling of SASL/PLAIN, `PLAIN` — the one
+/// The engine's spelling of SASL/PLAIN, `PLAIN` — the one
 /// mechanism both clients spell alike.
 pub const ENGINE_PLAIN: &str = "PLAIN";
 
-/// **FX-27.** The engine's Prometheus server defaults ON, unauthenticated, at
+/// The engine's Prometheus server defaults ON, unauthenticated, at
 /// `0.0.0.0:8080` (engine 0.23.3 `config.rs:93-103`), and nothing scrapes it,
 /// so the backup and restore documents both end with this top-level block.
 pub const METRICS_OFF: &str = "metrics:\n  enabled: false\n";
@@ -192,7 +192,7 @@ pub(crate) fn render_security_block(
             tls,
             tls_ca_file,
         } => (ENGINE_SCRAM_SHA_512, username, *tls, tls_ca_file),
-        // PROD-01.3: the same three keys and the same placeholder with
+        // The same three keys and the same placeholder with
         // another mechanism.
         AuthRender::ScramSha256 {
             username,

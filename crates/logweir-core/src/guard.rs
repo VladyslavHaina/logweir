@@ -132,7 +132,7 @@ pub fn reject_glob_metacharacters(entries: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// **C15 at the spec layer** (PROD-00.3f): a spec whose storage is an
+/// **C15 at the spec layer**: a spec whose storage is an
 /// `http://` endpoint with `allow_http: false` is refused before anything
 /// runs, with exit 3, like destination rule R3. The renderers refuse the same
 /// combination again for every engine document
@@ -400,7 +400,7 @@ pub const TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE: &str = "CredentialNotRendera
 /// lives here so the three states are one list and a controller's mapping can
 /// be written against it before the third producer lands.
 pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigRefused";
-/// [I9] **FX-8.** A time selection (a stated `restore.point_in_time`, or a
+/// [I9] A time selection (a stated `restore.point_in_time`, or a
 /// `sample.window_end` that cuts the archive) over a source topic whose
 /// recorded timestamp type is `LogAppendTime`, in a plan that does not state
 /// `restore.time_basis: producerTime`. The archive holds producer time only,
@@ -408,7 +408,7 @@ pub const TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED: &str = "TargetTopicConfigR
 /// Its call site is `crate::time_basis::decide`; refused after the archive is
 /// described and before any target topic is created.
 pub const TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME: &str = "PointInTimeByProducerTime";
-/// [I9] **PROD-01.3.** A connection whose auth mode is `plain` (SASL/PLAIN)
+/// [I9] A connection whose auth mode is `plain` (SASL/PLAIN)
 /// without `tls: true`. PLAIN sends the password itself, so the plan is
 /// refused before any client exists rather than dialled in the clear. The
 /// message is [`crate::connection::PlainWithoutTls`]'s, which opens with this
@@ -422,7 +422,7 @@ pub const TERMINAL_STATE_PLAIN_WITHOUT_TLS: &str = crate::connection::PLAIN_WITH
 /// for.
 pub const TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH: &str =
     crate::connection::CREDENTIAL_BINDING_MISMATCH;
-/// [I9] **PROD-01.1a.** The restored partitions' archive holds records shaped
+/// [I9] The restored partitions' archive holds records shaped
 /// like transaction control records, and the plan does not state
 /// `restore.allow_transaction_markers: true`. Its call site is
 /// `crate::transaction_markers::refusal`; refused before phase 2.
@@ -489,7 +489,7 @@ pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnprove
 /// deleted.
 pub const TERMINAL_STATE_TARGET_TOPIC_APPEARED: &str = crate::original_name::TARGET_TOPIC_APPEARED;
 
-/// **PROD-15.1.** A restore whose creation step stopped for a reason other
+/// A restore whose creation step stopped for a reason other
 /// than a race and LEFT topics on the cluster: ones this execution created
 /// (a broker refused another name, answered short, or did not serve a created
 /// topic in time), or ones it asked for, got no definite answer about, and
@@ -559,7 +559,7 @@ pub const BACKUP_FAILURE_REASONS: [(&str, i32); 2] = [
 ];
 
 /// Every state a RESTORE's `failure-reason=` may carry, each beside exit 1:
-/// the stopped creation step's two (PROD-15.1). Closed the same way.
+/// the stopped creation step's two. Closed the same way.
 pub const RESTORE_FAILURE_REASONS: [(&str, i32); 2] = [
     (TERMINAL_STATE_TARGET_TOPIC_APPEARED, 1),
     (TERMINAL_STATE_CREATED_TOPICS_LEFT, 1),

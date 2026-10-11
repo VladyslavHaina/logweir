@@ -43,7 +43,7 @@ fn call_failure(e: &CallError) -> (i32, String) {
     }
 }
 
-/// **PROD-01.4a.** A whole DescribeTopics failure, named: a transport failure
+/// A whole DescribeTopics failure, named: a transport failure
 /// (no result within the bound, or librdkafka's transport codes) is
 /// `Unreachable`, never "not found" ([`crate::topic_ids::call_failure`]).
 fn topics_call_failure(e: &CallError) -> KafkaError {

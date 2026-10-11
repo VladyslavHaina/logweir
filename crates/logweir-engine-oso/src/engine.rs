@@ -47,7 +47,7 @@ fn captured(s: &str) -> String {
     )
 }
 
-/// **FX-23.** The engine's offset-mapping report at `path`, as phase 7 reads
+/// The engine's offset-mapping report at `path`, as phase 7 reads
 /// it: the `(target topic, partition)` of every entry.
 ///
 /// `Absent` when there is no file (the engine writes one only from a completed
@@ -84,7 +84,7 @@ pub fn read_engine_report(path: &std::path::Path) -> EngineReport {
     }
 }
 
-/// FX-23: whatever is at a report path before a restore is NOT that
+/// Whatever is at a report path before a restore is NOT that
 /// restore's. The default path is per run, but `--offset-report-out` may name
 /// a fixed one, and a report an earlier run left there would be read as this
 /// run's (and uploaded by phase 8 as its evidence) whenever the engine writes
@@ -101,7 +101,7 @@ fn remove_stale_report(path: &std::path::Path) -> Result<(), EngineError> {
     }
 }
 
-/// **PROD-11.1.** One `PreflightReport` for a plan restored by several engine
+/// One `PreflightReport` for a plan restored by several engine
 /// runs (one per distinct partition subset). The verdict-bearing fields can
 /// only get worse by merging: `valid` and `header_preflight_honoured` hold
 /// only when they hold for EVERY run, every run's errors, warnings, coverage
@@ -147,8 +147,8 @@ pub fn merge_preflight_reports(mut reports: Vec<PreflightReport>) -> PreflightRe
     out
 }
 
-/// **PROD-11.1.** The offset report of a restore made of several engine runs:
-/// every run's report is checked (FX-23) only when every run's was READ — the
+/// The offset report of a restore made of several engine runs:
+/// every run's report is checked only when every run's was READ — the
 /// union of their entries, the runs restoring disjoint topics. Otherwise the
 /// first run's report that could not be read (Unreadable before Absent) is the
 /// answer, and phase 7 checks nothing from it, as for one run.
@@ -169,7 +169,7 @@ pub fn merge_engine_reports(reports: Vec<EngineReport>) -> EngineReport {
     }
 }
 
-/// **PROD-11.1.** The evidence file a multi-run restore leaves at the plan's
+/// The evidence file a multi-run restore leaves at the plan's
 /// `offset_report` path, which phase 8 uploads: a JSON ARRAY with one element
 /// per engine run, in run order — that run's report, byte for byte, or `null`
 /// when the run wrote none. The bytes are concatenated, never parsed, so the
@@ -389,7 +389,7 @@ impl OsoCliEngine {
         which: (usize, usize, &std::collections::BTreeMap<String, String>),
     ) -> Result<RestoreFacts, EngineError> {
         let cfg = self.write(config_name, doc)?;
-        // FX-23: whatever is at the report path now is NOT this restore's. The
+        // Whatever is at the report path now is NOT this restore's. The
         // default path is per run, but `--offset-report-out` may name a fixed
         // one, and a report an earlier run left there would be read below as
         // this run's (and uploaded by phase 8 as its evidence) whenever this
@@ -443,7 +443,7 @@ impl OsoCliEngine {
         self.assert_no_dropped_logweir_key(doc, &run.unknown_key_warnings)?;
         // `restore` has no --format; the exit code is its only machine-readable
         // VERDICT, so every timing here is OURS. Its offset-mapping report is
-        // read for one thing only (FX-23): an engine a SIGTERM stopped between
+        // read for one thing only: an engine a SIGTERM stopped between
         // topics exits 0 and writes a report without the topics it never
         // started, and phase 7 refuses a report that lacks a mapped partition
         // the manifest proves holds records in the window.
@@ -495,7 +495,7 @@ impl OsoCliEngine {
             .rsplit_once('/')
             .map(|(dir, _)| format!("{dir}/{name}"))
             .unwrap_or_else(|| name.to_string());
-        // FX-31: under the engine-document cap. An object over it is an
+        // Under the engine-document cap. An object over it is an
         // error like any other read failure that leaves presence unknown.
         match self
             .store
@@ -564,7 +564,7 @@ pub enum ConsumerGroupSnapshotRead {
     /// named no topic yet at the end of the pass
     /// (`U/…/backup/engine.rs:853-856`) — or when writing it FAILED, which
     /// the engine only logs (`:584-589`, "non-fatal"). So absence means "not
-    /// captured", never "no group had committed" (PROD-04.1).
+    /// captured", never "no group had committed".
     Absent,
     /// The object, in the shape the engine writes. `sha256` is over its bytes,
     /// the same value `describe` publishes.
@@ -615,14 +615,14 @@ impl ConsumerGroupSnapshotRead {
     }
 }
 
-/// **PROD-04.1.** The group type every group imported from an engine
+/// The group type every group imported from an engine
 /// consumer-group snapshot carries: the engine records none (PROD-04.0 §3.7:
 /// it keeps a streams group's positions with no type at all), so an imported
 /// group is never shown as a consumer group's, and its positions are never
 /// applied on the snapshot's word (AP-04.1-7).
 pub const IMPORTED_GROUP_TYPE: &str = "unknown";
 
-/// **PROD-04.1.** One group of an engine snapshot, imported.
+/// One group of an engine snapshot, imported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedGroup {
     /// The group id the engine recorded.
@@ -636,7 +636,7 @@ pub struct ImportedGroup {
     pub positions: Vec<vendored::consumer_groups::Position>,
 }
 
-/// **PROD-04.1.** An engine consumer-group snapshot, imported: the ONE way a
+/// An engine consumer-group snapshot, imported: the ONE way a
 /// foreign archive's snapshot is read as positions. Logweir's own backups
 /// never write one (the rendered document leaves the engine's
 /// `consumer_group_snapshot` at its default, `false`); they record the
@@ -654,7 +654,7 @@ pub struct ImportedSnapshot {
 }
 
 impl ConsumerGroupSnapshotRead {
-    /// **PROD-04.1.** The snapshot as an import source: `None` when there is no
+    /// The snapshot as an import source: `None` when there is no
     /// object, `Some(Err)` when it is unreadable or a group's positions are not
     /// the engine's shape — never a partial import, which would read as "no
     /// committed position" for what it dropped.
@@ -738,7 +738,7 @@ impl DataEngine for OsoCliEngine {
         // other read error still propagates, because then neither fact can be
         // stated.
         //
-        // FX-1: its CONTENT is not a fact `describe` publishes, and it is no
+        // Its CONTENT is not a fact `describe` publishes, and it is no
         // longer a reason to refuse the archive. The content used to be parsed
         // against an invented shape and a mismatch returned `Operational` —
         // "says nothing about the archive; fix the environment and re-run"
@@ -836,7 +836,7 @@ impl DataEngine for OsoCliEngine {
         // run, so Global Constraint 11's exit 3 ("refused by a guard, before
         // anything runs") does not describe it.
         //
-        // PROD-11.1: every engine run's document, rendered and written before
+        // Every engine run's document, rendered and written before
         // any engine is spawned (a plan with no subset is one run and writes
         // `restore.yaml`, exactly as before).
         let runs = render_restore::render_all_and_digest(plan)
@@ -885,7 +885,7 @@ impl DataEngine for OsoCliEngine {
         // carry this ruling is gated on open question O2 and is deferred; see
         // docs/stability.md.
         //
-        // PROD-11.1: the comparison is over EVERY run's document, in order.
+        // The comparison is over EVERY run's document, in order.
         let runs = render_restore::render_all_and_digest(plan)
             .map_err(|e| EngineError::Operational(e.to_string()))?;
         let six: Vec<String> = runs.iter().map(|(_, _, d)| d.clone()).collect();
@@ -912,7 +912,7 @@ impl DataEngine for OsoCliEngine {
             }
         }
         let count = runs.len();
-        // PROD-11.1: with several runs, `plan.offset_report` is the composed
+        // With several runs, `plan.offset_report` is the composed
         // report Logweir writes after the last run; whatever an earlier run
         // left there is not this restore's (FX-23's rule, below, per path).
         if count > 1 {
@@ -1001,7 +1001,7 @@ impl DataEngine for OsoCliEngine {
             sel.partition,
             sel.window,
         )? {
-            // FX-31: one segment, under the segment ceiling (FX-30 owns the
+            // One segment, under the segment ceiling (FX-30 owns the
             // decode's own caps).
             let (bytes, _) = self.store.get_capped(&key, crate::storage::caps::SEGMENT)?;
             for r in crate::kbak::decode_segment(&bytes)? {

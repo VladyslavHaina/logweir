@@ -309,7 +309,7 @@ fn a_complete_binding_admits() {
 }
 
 /// Each of the seven required variables, missing in turn, is named. The two
-/// per-run ceilings joined the five on 2026-10-05 (FX-10): an absent ceiling
+/// per-run ceilings joined the five on 2026-10-05: an absent ceiling
 /// used to become 50 or 20 000 without a word.
 #[test]
 fn each_missing_binding_variable_is_named() {
@@ -1090,7 +1090,7 @@ fn the_key_lines_are_shaped_as_the_contract_prints_them() {
 }
 
 // ===========================================================================
-// FX-20: the delete-capable key is used only when it is bound to this policy
+// The delete-capable key is used only when it is bound to this policy
 // ===========================================================================
 
 /// **An unbound or foreign delete key — or record key — is refused at

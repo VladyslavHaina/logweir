@@ -46,7 +46,7 @@ fn the_scan_agrees_with_the_full_decoder_on_every_fixture() {
                 assert_eq!(s.offset, f.offset, "{name}");
                 assert_eq!(s.key, cut(&f.key, prefix), "{name} prefix {prefix}");
                 assert_eq!(s.value, cut(&f.value, prefix), "{name} prefix {prefix}");
-                // PROD-01.1a: each header's key, in order, cut the same way.
+                // Each header's key, in order, cut the same way.
                 let keys: Vec<Vec<u8>> = f
                     .headers
                     .iter()

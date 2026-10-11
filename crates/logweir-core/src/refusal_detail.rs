@@ -1,4 +1,4 @@
-//! **FX-34.** A guard refusal's reason code and sentence, as ONE
+//! A guard refusal's reason code and sentence, as ONE
 //! machine-readable line a controller can read off a pod log.
 //!
 //! # Why this line exists
@@ -26,7 +26,7 @@
 //! plan value, and a YAML scalar may hold a line break. The runner escapes
 //! every line break in the error text it prints itself (PROD-15.1's
 //! `one_line`, which this line was designed before); the Kafka client inside
-//! the runner logs to the same stderr by itself, unescaped (FX-43). Both
+//! the runner logs to the same stderr by itself, unescaped. Both
 //! streams reach a controller as ONE log, so no rule about where a line
 //! stands, or how well-formed it is, can tell the runner's line from text a
 //! plan's author got into the log. What the plan's author cannot have is a

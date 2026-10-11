@@ -1,4 +1,4 @@
-//! The PURE half of a saved backup destination (decision D2 §3.1–§3.4).
+//! The PURE half of a saved backup destination.
 //!
 //! A `BackupDestination` names WHERE archives live (an immutable location) and
 //! HOW they are reached (an immutable transport security choice), never a
@@ -7,7 +7,7 @@
 //! messages and for the controller, the engine-compatibility refusal (D2 G4),
 //! the canonical URL, the location digest and the two `StorageUrl` renderings.
 //!
-//! **Addressing never implies transport** (D-SEAMS S5). `PathStyle` versus
+//! **Addressing never implies transport**. `PathStyle` versus
 //! `VirtualHosted` is an addressing choice; `TLS` versus `InsecureHTTP` is a
 //! transport choice; neither derives the other, in either direction, and
 //! [`validate_transition`] refuses an edit that would change either the
@@ -198,7 +198,7 @@ fn is_prefix_char(c: char) -> bool {
 
 /// R5, hand-written rather than pulled from a URL crate: the pure layer
 /// carries none, and CEL enforces the same shape with a regex because the 1.29
-/// floor has no URL library (D2 §3.2). Scheme, host and optional port only —
+/// floor has no URL library. Scheme, host and optional port only —
 /// no userinfo, path, query or fragment. A single trailing `/` is tolerated
 /// because operators type it.
 fn endpoint_shape_ok(endpoint: &str) -> bool {
@@ -520,7 +520,7 @@ impl DestinationLocation {
     /// Transport and addressing are deliberately NOT in the digest: they
     /// describe the route, not the location, and two destinations that differ
     /// only in addressing hold the same objects. This is the value a recovery
-    /// point freezes (D2 §3.7) and the one the restore API compares when
+    /// point freezes and the one the restore API compares when
     /// offering destinations for an existing recovery point (§3.12 step 5), so
     /// a TLS destination can serve a recovery point written through a
     /// plaintext one at the same bucket, and neither can serve a recovery

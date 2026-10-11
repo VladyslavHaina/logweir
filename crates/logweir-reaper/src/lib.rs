@@ -584,7 +584,7 @@ impl DeleteError {
     /// A `Locked` is a provider-authoritative legal hold. `object_store` 0.14
     /// exposes no WORM readback, so "legal hold respected" means exactly "a
     /// provider refusal is authoritative and recorded" — never "Logweir knows
-    /// the hold exists" (D3 §16).
+    /// the hold exists".
     #[must_use]
     pub fn is_hold(self) -> bool {
         matches!(self, Self::Locked)

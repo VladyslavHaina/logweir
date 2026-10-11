@@ -90,11 +90,11 @@ impl ConsumedRecord {
 
 /// v0.1 shipped PLAINTEXT and SASL/SCRAM-SHA-512 (optionally over TLS);
 /// PROD-01.3 adds SASL/SCRAM-SHA-256, SASL/PLAIN over TLS and TLS client
-/// certificates (`mtls`). OAUTHBEARER and MSK IAM stay deferred (OD-3) behind
+/// certificates (`mtls`). OAUTHBEARER and MSK IAM stay deferred behind
 /// `crate::token::TokenProvider`; there is no AWS dependency in this crate
 /// (Global Constraint 1).
 ///
-/// `tls_ca_file` (PLAT-07.1) is the pod-local path of a projected private CA
+/// `tls_ca_file` is the pod-local path of a projected private CA
 /// certificate: when set, librdkafka's `ssl.ca.location` points at it and the
 /// image's default trust store is not consulted for this connection. It is
 /// attached with [`AuthConfig::with_tls_ca_file`], which refuses it for a
@@ -185,7 +185,7 @@ impl AuthConfig {
     /// runner's own `check_projected_credentials` has already validated
     /// whatever is there.
     ///
-    /// # The transport refusals (PROD-01.3)
+    /// # The transport refusals
     ///
     /// `plain` and `mtls` without `tls: true` are `KafkaError::Client`
     /// carrying [`logweir_core::spec::AuthSpec::transport_refusal`]'s text.
@@ -260,7 +260,7 @@ impl AuthConfig {
 }
 
 impl AuthConfig {
-    /// Attach a projected private CA file (PLAT-07.1), or refuse because the
+    /// Attach a projected private CA file, or refuse because the
     /// transport is not TLS.
     ///
     /// `None` returns `self` unchanged, so a connection that names no CA builds
@@ -326,8 +326,8 @@ impl AuthConfig {
         }
     }
 
-    /// Attach the projected client-certificate pair of an `mtls` connection
-    /// (PROD-01.3), or refuse.
+    /// Attach the projected client-certificate pair of an `mtls` connection,
+    /// or refuse.
     ///
     /// `None` returns `self` unchanged for every mode but `Mtls`, whose client
     /// config is then refused when it is built: an mTLS dial with no
@@ -438,7 +438,7 @@ pub trait TopicDeleter: Send + Sync {
 }
 
 /// Where one value in a DescribeConfigs answer came from — Kafka's
-/// `ConfigSource`, as librdkafka reports it per entry (FX-4).
+/// `ConfigSource`, as librdkafka reports it per entry.
 ///
 /// `DynamicTopicConfig` is a TOPIC OVERRIDE; the next four are the broker's
 /// (a per-broker dynamic value, the cluster-wide dynamic default, the broker's
@@ -473,7 +473,7 @@ impl ConfigSourceKind {
 
 /// One entry of a topic's DescribeConfigs answer, with the flags a capture
 /// decision needs — what [`ClusterReader::topic_configs`]'s flat map throws
-/// away (FX-4).
+/// away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigEntryObservation {
     pub name: String,
@@ -570,7 +570,7 @@ pub fn empty_broker_config_answer(broker_id: i32) -> KafkaError {
     ))
 }
 
-/// **FX-18.** How long a caller that has just CREATED a topic waits for the
+/// How long a caller that has just CREATED a topic waits for the
 /// cluster to serve it before reading it.
 ///
 /// A successful `CreateTopics` means the controller has committed the topic,
@@ -588,7 +588,7 @@ pub const CREATED_TOPIC_SETTLE: std::time::Duration = std::time::Duration::from_
 /// The longest pause between two attempts in [`settle`].
 const SETTLE_MAX_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// **FX-18.** One attempt at a read that may be racing a topic's creation.
+/// One attempt at a read that may be racing a topic's creation.
 #[derive(Debug)]
 pub enum Settling<T> {
     /// The read answered.
@@ -601,7 +601,7 @@ pub enum Settling<T> {
     Failed(KafkaError),
 }
 
-/// **FX-18.** Run `attempt` until it is [`Settling::Done`] or
+/// Run `attempt` until it is [`Settling::Done`] or
 /// [`Settling::Failed`], retrying [`Settling::NotYet`] with a doubling pause
 /// (50 ms up to one second) until `within` has passed, then returning the last
 /// `NotYet` error.
@@ -658,7 +658,7 @@ pub trait ClusterReader: Send + Sync {
     /// a refused cluster read is [`KafkaError::NotAuthorized`] — see
     /// [`empty_broker_config_answer`].
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError>;
-    /// **PROD-15.1.** One broker setting, read from EVERY broker the
+    /// One broker setting, read from EVERY broker the
     /// cluster's metadata lists: `(broker id, value)`, with `None` where that
     /// broker's answer did not name the key. An original-name restore into the
     /// source cluster needs `auto.create.topics.enable=false` PROVEN on every
@@ -697,7 +697,7 @@ pub trait ClusterReader: Send + Sync {
             "this ClusterReader does not report per-entry configuration sources".to_string(),
         ))
     }
-    /// **PROD-05.1.** Per named topic, its replication factor as the
+    /// Per named topic, its replication factor as the
     /// cluster's metadata states it: the SMALLEST replica count of its
     /// partitions (a partition mid-reassignment lists the adding replicas too,
     /// so the smallest never overstates), from one metadata request. A topic
@@ -710,7 +710,7 @@ pub trait ClusterReader: Send + Sync {
         let _ = topics;
         Ok(BTreeMap::new())
     }
-    /// **PROD-01.4a.** Per named topic, its topic ID (KIP-516) through
+    /// Per named topic, its topic ID (KIP-516) through
     /// DescribeTopics — one verdict per name, in the order given
     /// ([`crate::topic_ids`]): the ID in Kafka's text, `NoId` from a broker
     /// that has none, `NotFound`, `NotAuthorized` (named, never "absent"), or
@@ -730,7 +730,7 @@ pub trait ClusterReader: Send + Sync {
             .map(|t| (t.clone(), crate::topic_ids::TopicIdRead::NotRead))
             .collect())
     }
-    /// **FX-18.** Wait, at most `within`, until `topic` — which the caller has
+    /// Wait, at most `within`, until `topic` — which the caller has
     /// just CREATED with `partitions` partitions — is SERVED: its metadata
     /// lists every partition with a leader, and every leader answers a
     /// ListOffsets read. Only the answers of a creation still propagating are
@@ -756,7 +756,7 @@ pub trait ClusterReader: Send + Sync {
         let _ = (topic, partitions, within);
         Ok(())
     }
-    /// **FX-18.** [`Self::topic_configs`] for a topic the caller has just
+    /// [`Self::topic_configs`] for a topic the caller has just
     /// CREATED: [`Self::await_served`], then the read, retrying
     /// [`KafkaError::TopicNotFound`] (a broker whose metadata does not hold the
     /// topic yet) until `within` from the start.
@@ -794,7 +794,7 @@ pub trait ClusterReader: Send + Sync {
         from: i64,
         max: usize,
     ) -> Result<Vec<ConsumedRecord>, KafkaError>;
-    /// **PROD-04.1.** One capture of the `selected` consumer groups over the
+    /// One capture of the `selected` consumer groups over the
     /// partitions of `topics`: classification, descriptions, positions, and
     /// the partitions' marks read after them (`crate::capture`'s module doc
     /// says the order and why). Never fails: every failed read is a value.
@@ -813,7 +813,7 @@ pub trait ClusterReader: Send + Sync {
             "this ClusterReader cannot read consumer groups",
         )
     }
-    /// **PROD-04.1.** Per named topic, its partitions (metadata) and each
+    /// Per named topic, its partitions (metadata) and each
     /// one's log start offset and high watermark, read READ_UNCOMMITTED: the
     /// marks a backup reads again after the engine, to see whether a topic
     /// changed during the capture.

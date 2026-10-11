@@ -276,7 +276,7 @@ fn opt_bytes(
 }
 
 // ---------------------------------------------------------------------------
-// PROD-03.0: a STREAMING scan that keeps only each record's prefix bytes.
+// A STREAMING scan that keeps only each record's prefix bytes.
 // ---------------------------------------------------------------------------
 
 /// What [`scan_segment`] keeps of one record: its offset and at most the

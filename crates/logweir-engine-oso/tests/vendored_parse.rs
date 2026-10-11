@@ -55,7 +55,7 @@ fn an_unknown_coverage_state_degrades_to_unknown_carrying_the_raw_string() {
 }
 
 // ---------------------------------------------------------------------------
-// FX-1: the consumer-groups snapshot, against bytes the engine really wrote.
+// The consumer-groups snapshot, against bytes the engine really wrote.
 // ---------------------------------------------------------------------------
 
 mod snapshot {

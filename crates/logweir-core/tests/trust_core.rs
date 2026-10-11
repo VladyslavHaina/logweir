@@ -633,7 +633,7 @@ fn usable_for_verification_separates_full_historical_and_none() {
 // `claimed_signing_time`
 // ---------------------------------------------------------------------------
 
-/// The five document types and their fields (D3 §7.4).
+/// The five document types and their fields.
 #[test]
 fn the_claimed_signing_time_is_read_per_document_type() {
     let cases: [(&str, serde_json::Value, &str); 5] = [
@@ -763,7 +763,7 @@ fn from_document_always_names_an_absence() {
 }
 
 // ---------------------------------------------------------------------------
-// The rehearsal scope types (D3 §4.3)
+// The rehearsal scope types
 // ---------------------------------------------------------------------------
 
 /// The scope round-trips through its wire shape, in camelCase.
@@ -798,7 +798,7 @@ fn the_rehearsal_scope_serialises_in_camel_case() {
              differently would verify against a document nobody signed"
         );
     }
-    // PROD-08.1a: the two 1.1.0 fields are absent from a scope that states
+    // The two 1.1.0 fields are absent from a scope that states
     // neither, so its bytes are a 1.0.0 scope's.
     for field in ["coverage", "completeMaxRecords"] {
         assert!(

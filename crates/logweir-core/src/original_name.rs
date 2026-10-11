@@ -105,12 +105,12 @@ pub const APPROVAL_SUBJECT_MISMATCH: &str = "ApprovalSubjectMismatch";
 /// to create it: the race is lost by name, and nothing is written into it.
 /// Both modes: the creation step is one step.
 pub const TARGET_TOPIC_APPEARED: &str = "TargetTopicAppeared";
-/// OD-10: a one-person confirmation of an original-name restore that carries
+/// A one-person confirmation of an original-name restore that carries
 /// no typed topic names.
 pub const ORIGINAL_NAME_CONFIRMATION_MISSING: &str = "OriginalNameConfirmationMissing";
-/// OD-10: the typed topic names are not exactly the plan's source topics.
+/// The typed topic names are not exactly the plan's source topics.
 pub const ORIGINAL_NAME_CONFIRMATION_MISMATCH: &str = "OriginalNameConfirmationMismatch";
-/// OD-10: typed topic names on an authorization that is not a one-person
+/// Typed topic names on an authorization that is not a one-person
 /// confirmation of an original-name restore — a field nothing else reads.
 pub const ORIGINAL_NAME_CONFIRMATION_NOT_ACCEPTED: &str = "OriginalNameConfirmationNotAccepted";
 /// A `KafkaTopic` resource the runner was given that it cannot read, or whose
@@ -144,7 +144,7 @@ pub const APPROVAL_SUBJECT_ORDINARY: &str = "ordinary";
 pub enum ApprovalSubject {
     /// Every restore that is not an original-name restore.
     Ordinary,
-    /// A restore under the original topic names (PROD-15.1).
+    /// A restore under the original topic names.
     OriginalName,
 }
 
@@ -660,7 +660,7 @@ pub const OWNER_FOUND_IN_PLAN: &str = "plan";
 /// `crate::topic_configuration::strimzi_owners`.
 pub const OWNER_FOUND_IN_KAFKA_TOPIC_RESOURCES: &str = "kafkaTopicResources";
 /// The bound recovery point's verified receipt: the owners its backup
-/// recorded for the SOURCE topics (PROD-05.1), counted only where the target
+/// recorded for the SOURCE topics, counted only where the target
 /// may be the source cluster.
 pub const OWNER_FOUND_IN_POINT_RECEIPT: &str = "pointReceipt";
 /// The closed set of places the runner looks (arm ON-6), in the order a

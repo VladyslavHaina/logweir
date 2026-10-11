@@ -122,12 +122,12 @@ use crate::trust::KeyUsage;
 /// The name the synthesised policy of an unbound namespace carries.
 pub const LEGACY_GOVERNED_POLICY_NAME: &str = "legacy-governed-v1";
 
-/// PROD-16.1: the name of the policy an unbound namespace resolves to when the
+/// The name of the policy an unbound namespace resolves to when the
 /// installation's unbound default is `confirm` ([`default_confirm_policy`]).
 /// Reserved: no declared policy may carry it.
 pub const DEFAULT_CONFIRM_POLICY_NAME: &str = "default-confirm-v1";
 
-/// PROD-16.1: the annotation that records a fresh install's `confirm` unbound
+/// The annotation that records a fresh install's `confirm` unbound
 /// default. It appears in TWO places, both written by the identity hook in the
 /// one run that GENERATES the installation identity, and both are required:
 ///
@@ -146,7 +146,7 @@ pub const APPROVAL_DEFAULT_ANNOTATION: &str = "logweir.dev/approval-default";
 /// [`APPROVAL_DEFAULT_ANNOTATION`], and the first field of a [`MarkerClaim`].
 pub const APPROVAL_DEFAULT_CONFIRM: &str = "confirm";
 
-/// PROD-16.1: the provenance annotation on the installation `TrustPolicy`.
+/// The provenance annotation on the installation `TrustPolicy`.
 pub const CREATED_BY_ANNOTATION: &str = "logweir.dev/created-by";
 
 /// Its value: the identity hook.
@@ -206,7 +206,7 @@ pub const PAYLOAD_TYPE_RESTORE_AUTHORIZATION: &str =
 /// [`RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT`] for one that does.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
 
-/// **PROD-15.1.** The minor that defines `approvalSubject` and
+/// The minor that defines `approvalSubject` and
 /// `originalNameConfirmation`. A document declaring an older minor that
 /// carries either is refused: the fields change WHAT the document
 /// authorises (a restore under the original topic names), and a document
@@ -215,17 +215,17 @@ pub const RESTORE_AUTHORIZATION_FORMAT_VERSION: &str = "2.0.0";
 /// (`crate::execution_contract::STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR`).
 pub const RESTORE_AUTHORIZATION_SUBJECT_SINCE_MINOR: u64 = 1;
 
-/// **PROD-15.1.** The version a document that carries `approvalSubject` or
+/// The version a document that carries `approvalSubject` or
 /// `originalNameConfirmation` is written at.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_SUBJECT: &str = "2.1.0";
 
-/// **PROD-16.2.** The minor that defines `approver` and `approvedAt`, the
+/// The minor that defines `approver` and `approvedAt`, the
 /// two fields a console approval adds. A document declaring an older minor
 /// that carries either is refused: they say a SECOND PERSON approved, and a
 /// document that predates them cannot have said so.
 pub const RESTORE_AUTHORIZATION_APPROVER_SINCE_MINOR: u64 = 2;
 
-/// **PROD-16.2.** The version a document that carries `approver` or
+/// The version a document that carries `approver` or
 /// `approvedAt` is written at.
 pub const RESTORE_AUTHORIZATION_FORMAT_VERSION_APPROVER: &str = "2.2.0";
 
@@ -248,7 +248,7 @@ pub fn restore_authorization_format_version_for(
 /// * **2.2.0** when it carries the console approver (`approver`,
 ///   `approvedAt`; PROD-16.2);
 /// * else **2.1.0** when it carries the approval subject or the typed
-///   confirmation (PROD-15.1);
+///   confirmation;
 /// * else **2.0.0**.
 ///
 /// Each step is taken exactly when its fields are present, so a document
@@ -817,7 +817,7 @@ pub struct ApprovalPolicy {
     /// Governed in the supported baseline"); meaningless and `false` for
     /// `Ordinary`, which has no approver.
     pub require_distinct_principal: bool,
-    /// **PROD-16.2.** Who signs the approval of a `Governed` policy: a
+    /// Who signs the approval of a `Governed` policy: a
     /// personal key (the default, and the only value an `Ordinary` policy
     /// has) or the console.
     pub approver_signature: ApproverSignature,
@@ -826,7 +826,7 @@ pub struct ApprovalPolicy {
 /// The snapshot as serialised: fixed field order, so the bytes — and
 /// therefore the digest — are a function of the policy alone.
 ///
-/// PROD-16.2: `approverSignature` is the LAST key and is written only when
+/// `approverSignature` is the LAST key and is written only when
 /// it is `Console`, so every policy without it keeps the bytes and the digest
 /// it always had. A runner built before the key refuses a snapshot that
 /// carries it (`deny_unknown_fields`): it never runs a two-person policy as
@@ -926,7 +926,7 @@ impl ApprovalPolicy {
             require_distinct_principal: snapshot.require_distinct_principal,
             approver_signature: snapshot.approver_signature.unwrap_or_default(),
         };
-        // PROD-16.2: a snapshot is one of the table's rows, or it is not a
+        // A snapshot is one of the table's rows, or it is not a
         // snapshot `ApprovalPolicySet::parse` rendered: only a Governed
         // policy has an approver, so only it can say who signs for one.
         if let Err(not_a_row) = policy.route() {
@@ -952,7 +952,7 @@ pub enum EffectivePolicy {
     /// `legacy-governed-v1`, today's behaviour. Accepts v1 approval documents
     /// signed by a `GovernedApproval` key and nothing else.
     Legacy,
-    /// An explicit installation binding, or (PROD-16.1) an unbound namespace
+    /// An explicit installation binding, or an unbound namespace
     /// under a `confirm` unbound default, which is the concrete
     /// [`default_confirm_policy`]. Accepts authorization document v2 naming
     /// exactly this policy, and nothing else.
@@ -1002,7 +1002,7 @@ impl EffectivePolicy {
 }
 
 /// A policy's `mode` as the installation document may spell it: the internal
-/// names, or (PROD-16.1) the operator's. The chart renders the internal names,
+/// names, or the operator's. The chart renders the internal names,
 /// so an image-only rollback reads the same document it always did; a
 /// hand-written document may use either. Mapped onto [`ApprovalMode`] in ONE
 /// place, [`ModeSpelling::mode`].
@@ -1019,7 +1019,7 @@ enum ModeSpelling {
 }
 
 impl ModeSpelling {
-    /// The internal mode. `two-person` (PROD-16.2) is `Governed`, with the
+    /// The internal mode. `two-person` is `Governed`, with the
     /// console as the approver's signature ([`Self::implies_console`]).
     fn mode(self) -> ApprovalMode {
         match self {
@@ -1052,7 +1052,7 @@ struct PolicyEntry {
     max_age_seconds: Option<i64>,
     #[serde(default)]
     require_distinct_principal: Option<bool>,
-    /// PROD-16.2: `Console`, or absent (a personal key). A field an OLDER
+    /// `Console`, or absent (a personal key). A field an OLDER
     /// binary does not know, so it refuses the whole document at start
     /// (`deny_unknown_fields`) rather than run a two-person namespace as a
     /// strict one, or the reverse.
@@ -1062,7 +1062,7 @@ struct PolicyEntry {
 
 /// The installation document as written.
 ///
-/// `defaultMode` (PROD-16.1) is a field an OLDER binary does not know, and
+/// `defaultMode` is a field an OLDER binary does not know, and
 /// `deny_unknown_fields` makes such a binary refuse the whole document at
 /// start — fail closed, never a silent fall back to an unbound default it
 /// cannot represent. The chart renders it only when it is set.
@@ -1211,7 +1211,7 @@ impl ApprovalPolicySet {
                 )));
             }
             let mode = entry.mode.mode();
-            // PROD-16.2: who signs the approval. `mode: two-person` says the
+            // Who signs the approval. `mode: two-person` says the
             // console; `approverSignature: Console` on a Governed policy says
             // the same thing in the internal words (what the chart renders).
             let approver_signature = match entry.approver_signature.as_deref() {
@@ -1310,7 +1310,7 @@ impl ApprovalPolicySet {
         })
     }
 
-    /// This set as a reader that observed `marker` sees it (PROD-16.1).
+    /// This set as a reader that observed `marker` sees it.
     ///
     /// The document is the same; only the unbound default can move, and only
     /// when the document sets no `defaultMode`.
@@ -1399,7 +1399,7 @@ impl ApprovalPolicySet {
     /// readiness value D0 asks both processes to expose, so an operator can
     /// see that the console and the controller run the same configuration.
     ///
-    /// PROD-16.1: it also covers what an UNBOUND namespace resolves to, when
+    /// It also covers what an UNBOUND namespace resolves to, when
     /// that is not `legacy-governed-v1` — so a console that has read the
     /// fresh-install marker and a controller that has not yet publish
     /// different digests, and the disagreement is visible. An installation
@@ -1467,7 +1467,7 @@ impl Requester {
     }
 }
 
-/// **PROD-16.2.** The second person of a console approval, as the console
+/// The second person of a console approval, as the console
 /// authenticated them when they clicked Approve: the session's verified
 /// issuer and subject, never a display name, an email, a group or a key id.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1603,10 +1603,10 @@ impl RestoreAuthorization {
                 "the bytes are not an authorization document v2: {e}"
             ))
         })?;
-        // PROD-15.1: the 2.1.0 fields under a version that predates them are
+        // The 2.1.0 fields under a version that predates them are
         // refused at EVERY reader, here, before anything reads the fields.
         doc.check_subject_fields_version()?;
-        // PROD-16.2: and the 2.2.0 fields, the same way.
+        // And the 2.2.0 fields, the same way.
         doc.check_approver_fields()?;
         Ok(doc)
     }
@@ -1753,13 +1753,13 @@ pub enum AuthorizationRefusal {
     WindowInvalid(String),
     /// The window has closed.
     Expired(String),
-    /// **PROD-16.2.** The policy takes its approval from the console and the
+    /// The policy takes its approval from the console and the
     /// document names no approver: it is the REQUEST, and authorises
     /// nothing. The pending state of a two-person request — and the state a
     /// request written straight to the API server as an Approval stays in
     /// for ever.
     ApprovalRequired(String),
-    /// **PROD-16.2.** The document's approver is not a second person: the
+    /// The document's approver is not a second person: the
     /// requester, a principal that cannot be compared with the requester, the
     /// local administrator, a service account, or a principal of another
     /// issuer.
@@ -1827,7 +1827,7 @@ pub fn v1_under_bound_policy_refusal(policy: &ApprovalPolicy) -> AuthorizationRe
 
 /// Everything about a v2 document that does NOT depend on the clock: format,
 /// subject, plan and policy — and, under a policy whose approval the console
-/// signs (PROD-16.2), the second person ([`check_console_approval`]). The
+/// signs, the second person ([`check_console_approval`]). The
 /// runner, which admits a run the controller already admitted, calls this and
 /// [`check_window_shape`]; the controller calls
 /// [`check_restore_authorization`], which adds the clock.
@@ -1873,11 +1873,11 @@ fn check_document_binding(
             doc.format_version, doc.kind
         )));
     }
-    // PROD-15.1: the 2.1.0 fields under 2.0.0 are refused (`from_bytes` did
+    // The 2.1.0 fields under 2.0.0 are refused (`from_bytes` did
     // this for a parsed document; this is the same rule for one built in
     // memory, so no reader can skip it).
     doc.check_subject_fields_version()?;
-    // PROD-16.2: and the 2.2.0 fields under 2.0.0 or 2.1.0, the same way.
+    // And the 2.2.0 fields under 2.0.0 or 2.1.0, the same way.
     doc.check_approver_fields()?;
     // PROD-16.2: THE POLICY IS ONE OF THE TABLE'S ROWS, or nothing is judged
     // under it. Every reader reaches this, whatever else it calls.
@@ -1932,13 +1932,13 @@ fn check_document_binding(
                 .to_string(),
         ));
     }
-    // PROD-15.1: a subject this build does not know is refused here, at every
+    // A subject this build does not know is refused here, at every
     // boundary; whether it is the PLAN's subject is the caller's comparison
     // (`crate::original_name::check_approval_subject`), because the plan is
     // not in this function's hands.
     let subject = crate::original_name::ApprovalSubject::from_wire(doc.approval_subject.as_deref())
         .map_err(AuthorizationRefusal::DocumentInvalid)?;
-    // OD-10: typed names belong ONLY to a one-person confirmation of an
+    // Typed names belong ONLY to a one-person confirmation of an
     // original-name restore. Whether they are the plan's topics is, again,
     // the caller's comparison; their presence anywhere else is refused here.
     if doc.original_name_confirmation.is_some()
@@ -1953,7 +1953,7 @@ fn check_document_binding(
     }
     check_ticket(doc.authorization_mode, doc.ticket.as_deref())
         .map_err(AuthorizationRefusal::DocumentInvalid)?;
-    // PROD-16.2: a console approver belongs to a `Console` policy and to no
+    // A console approver belongs to a `Console` policy and to no
     // other. AFTER the policy comparison above, so a document for another
     // policy is named as that; this arm is what is left when the digest
     // matches and the fields are there all the same.
@@ -2488,7 +2488,7 @@ pub fn check_restore_authorization(
     check_document_binding(doc, expected, policy)?;
     check_window_shape(doc, policy)?;
     check_clock(doc, now)?;
-    // PROD-16.2: the second person, last — so an expired request reads as
+    // The second person, last — so an expired request reads as
     // expired, as a personal-key policy's does, and not as merely pending.
     check_console_approval(doc, policy, Some(now))
 }
@@ -3145,7 +3145,7 @@ namespaces:
     }
 
     // ------------------------------------------------------------------
-    // PROD-16.1: the unbound default
+    // The unbound default
     // ------------------------------------------------------------------
 
     #[test]
@@ -3529,7 +3529,7 @@ namespaces:
     }
 
     // ------------------------------------------------------------------
-    // PROD-16.2: two-person approval in the console
+    // Two-person approval in the console
     // ------------------------------------------------------------------
 
     const TWO_PERSON_DOC: &str = "policies:

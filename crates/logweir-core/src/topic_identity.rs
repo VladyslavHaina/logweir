@@ -46,7 +46,7 @@
 //! `NotEstablished` is TODAY'S FALLBACK, stated and never guessed: a point
 //! whose ID is unknown — every receipt before 1.6.0, a broker below 2.8, a
 //! refused or failed read — is never the same generation as another point.
-//! The offset rule of decision §4 (PROD-02.1) is what will decide those
+//! The offset rule of decision §4 is what will decide those
 //! links; until it lands, they are UNKNOWN.
 //!
 //! What equal IDs do NOT say: that the offsets between the two points are
@@ -71,7 +71,7 @@ pub const TOPIC_ID_TEXT_LEN: usize = 22;
 pub const DESCRIBE_TOPICS: &str = "describeTopics";
 
 /// `topic_id_source` for an ID the engine's manifest carried — the engine
-/// route of decision §6.3 (PROD-00.3). No writer in this build produces it;
+/// route of decision §6.3. No writer in this build produces it;
 /// the format defines it so that route needs no version of its own.
 pub const ENGINE_MANIFEST: &str = "engineManifest";
 
@@ -175,7 +175,7 @@ pub fn is_canonical(text: &str) -> bool {
 /// (`topics[].identity.topic_id`, `.topic_id_after`) is a real topic ID in
 /// Kafka's text — never one of Kafka's reserved IDs, never another alphabet.
 /// A record's copied facts are otherwise checked against the verified receipt
-/// it names (D3 §5.2 rule 3), which no verifier fetches; this check needs
+/// it names, which no verifier fetches; this check needs
 /// nothing but the record, and keeps a sentinel from ever reading as an
 /// identity in a catalog. `docs/verify_scorecard.py::_catalog_point_problem`
 /// returns the same text.

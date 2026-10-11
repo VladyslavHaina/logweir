@@ -496,7 +496,7 @@ impl ClusterReader for JustCreated {
     }
 }
 
-/// **FX-18.** The read after a create waits for the topic, and the plain read
+/// The read after a create waits for the topic, and the plain read
 /// does not.
 ///
 /// NEGATIVE CONTROL, in the same row: the plain `topic_configs` on a topic
@@ -520,7 +520,7 @@ fn a_read_after_a_create_waits_for_the_topic_and_a_plain_read_does_not() {
     assert_eq!(waited.calls(), 4, "three answers waited out, then the read");
 }
 
-/// **FX-18.** A refusal is not propagation: the default
+/// A refusal is not propagation: the default
 /// `created_topic_configs` returns `NotAuthorized` on the first answer, and
 /// does not spend `CREATED_TOPIC_SETTLE` on it. (`RdKafkaReader` waits it out
 /// too, because there it is T13's inference from an empty answer; its exact
@@ -543,7 +543,7 @@ fn a_refusal_after_a_create_is_returned_at_once() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
-/// **FX-18.** `settle` is a bounded poll: it returns the answer as soon as
+/// `settle` is a bounded poll: it returns the answer as soon as
 /// there is one, a failure at once, and the last "not yet" at the deadline,
 /// unchanged so the caller can still classify it.
 #[test]

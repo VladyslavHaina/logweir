@@ -19,59 +19,36 @@ pub enum StoreError {
     AlreadyExists(String),
     /// Distinguished from `Io` so a caller can tell "definitely absent" from
     /// "could not tell" (permission denied, a timeout, a truncated read, a
-    /// transient network error). Task 12 fix: `describe()`'s sibling
-    /// consumer-groups-snapshot read used to collapse every `get` failure
-    /// into `None` ("no snapshot"), which reported a 403 or a dropped
-    /// connection identically to genuine absence — a positive claim
-    /// (`consumer_group_snapshot_sha256: None`) the store never actually
-    /// established, which then flows into the signed scorecard.
+    /// transient network error). A 403 is never reported as absence, because
+    /// absence is a positive claim that flows into the signed scorecard
+    /// (`consumer_group_snapshot_sha256: None`).
     #[error("object not found at {0}")]
     NotFound(String),
     #[error("storage: {0}")]
     Io(String),
     #[error("unsupported storage backend `{0}`")]
     Backend(String),
-    /// Controller amendment: the handle returned by `read_only_from_url`
-    /// physically cannot put. Every put method checks this before it checks
-    /// anything else — including before the `LOGWEIR_ROOT` assertion — so a
-    /// read-only handle constructed over the OSO archive prefix (which is
-    /// exactly the case `read_only_from_url` exists to allow) can never reach
-    /// a codepath that writes.
+    /// The handle returned by `read_only_from_url` physically cannot put. Every
+    /// put method checks this before anything else, including the
+    /// `LOGWEIR_ROOT` assertion, so a read-only handle over the OSO archive
+    /// prefix can never reach a codepath that writes.
     #[error("store is read-only — refusing to put {0}")]
     ReadOnly(String),
-    /// The object at this key parsed as JSON but is not a backup manifest:
-    /// it declares no `topics` array at all.
-    ///
-    /// TASK 13 REVIEW CARRY, DISCHARGED HERE. `manifest_facts` used to answer
-    /// `{"hello":"world"}` and `{"topics":5}` with
-    /// `Backend("… declares no segment, so it bounds no window")` — the same
-    /// error a REAL manifest describing an empty backup set gets. Those two
-    /// facts are not the same fact, and collapsing them is the
-    /// `NotFound`-versus-`Io` defect this enum's own doc comments already
-    /// argue about: "this is not a manifest" is a configuration error (the
-    /// prefix points at the wrong thing, or a sibling JSON object was picked
-    /// up by the `/manifest.json` filter), while "this manifest bounds no
-    /// window" is a fact about a backup set that really exists. A caller —
-    /// and a reader of a controller log — needs to be able to tell them
-    /// apart, so `manifest_facts` now returns THIS for the first and keeps
-    /// `Backend` for the second.
-    ///
-    /// The second field carries what was wrong, so the message names the key
-    /// AND the reason rather than only one of them.
+    /// The object at this key parsed as JSON but is not a backup manifest: it
+    /// declares no `topics` array at all. A configuration error (the prefix
+    /// points at the wrong thing, or a sibling JSON object was picked up by the
+    /// `/manifest.json` filter), unlike `Backend`'s "this manifest bounds no
+    /// window", which is a fact about a backup set that really exists. The
+    /// second field carries what was wrong.
     #[error("{0} is not a backup manifest: {1}")]
     NotAManifest(String, String),
-    /// **FX-31.** The object is larger than the cap its reader set, so it was
-    /// not read: [`Store::get_capped`] refused it on the size the store
-    /// reported before any body byte was taken, or stopped at the first chunk
-    /// that went past the cap when a store reported a size within it and then
-    /// streamed more.
+    /// The object is larger than the cap its reader set, so it was not read:
+    /// [`Store::get_capped`] refused it on the size the store reported before
+    /// any body byte was taken, or stopped at the first chunk that went past
+    /// the cap when a store reported a size within it and then streamed more.
     ///
-    /// A fact about the OBJECT, not a failure of the store: the read was
-    /// answered, and the answer is "too big for this reader". It is never
-    /// `NotFound` (the object is there) and never `Io` (nothing is wrong with
-    /// the connection, and a retry reads the same object). The message names
-    /// the key, the cap and what was observed, so the sentence an operator
-    /// reads says which limit to look up.
+    /// A fact about the OBJECT, not a failure of the store: never `NotFound`
+    /// (the object is there) and never `Io` (a retry reads the same object).
     #[error(
         "{key} is larger than the {cap}-byte read cap ({observed}); nothing past the cap was read"
     )]
@@ -108,8 +85,8 @@ impl std::fmt::Display for OverCap {
     }
 }
 
-/// What a `HEAD` of one object says — [`Store::head`], for an existence test
-/// that must not read the body (FX-31).
+/// What a `HEAD` of one object says: [`Store::head`], for an existence test
+/// that must not read the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectHead {
     /// The object's size, as the store reports it.
@@ -119,12 +96,12 @@ pub struct ObjectHead {
     pub version: Option<String>,
 }
 
-/// **FX-31 — the read cap of every document Logweir reads from an object
-/// store, in one table.**
+/// **The read cap of every document Logweir reads from an object store, in one
+/// table.**
 ///
-/// [`Store::get_capped`] takes a cap and nothing reads without one: the
-/// uncapped `Store::get` is gone, so a new read site has to name which of
-/// these it is (or argue for a new row here). The caps are per DOCUMENT and
+/// [`Store::get_capped`] takes a cap and there is no uncapped read, so a new
+/// read site has to name which of these it is (or argue for a new row here).
+/// The caps are per DOCUMENT and
 /// per READER: a runner, CLI or check Job reads in its own pod under its own
 /// memory limit, while `weirkeeper` is one process for every namespace, so
 /// the controller's caps are the smaller `CONTROLLER_*` rows and an object a
@@ -135,22 +112,22 @@ pub struct ObjectHead {
 /// | [`SIDECAR`] | 64 KiB | everyone | one DSSE signature is about 312 bytes; equal to the evidence relay's sidecar cap |
 /// | [`SIGNED_DOCUMENT`] | 64 MiB | runner, CLI | a receipt is about 3.1 KB per topic (2.9 to 6.5 KB by shape; `logweir_core::topic_budget`). This build writes none over [`CONTROLLER_RECEIPT`]; an older one admitted 5,000 topics, about 15 to 21 MB, and this cap is what still reads such a receipt for a restore |
 /// | [`CONTROLLER_DOCUMENT`] | 1 MiB | `weirkeeper`: a scorecard, and every signed document that is not a backup receipt | equal to the evidence relay's cap for such a document (`MAX_EVIDENCE_SCORECARD_BYTES`), so it is verifiable by the controller exactly when it is verifiable through a relay. Parsed whole, so the cap also bounds that parse |
-/// | [`CONTROLLER_RECEIPT`] | 5,131,072 | `weirkeeper`: a backup receipt | **FX-33.** `logweir_core::topic_budget::MAX_RECEIPT_BYTES`, the largest receipt Logweir writes: 1,000 topics at 5,000 bytes each plus 128 KiB. Equal to the relay's payload cap. Never parsed into a tree: the controller folds the five facts it needs from the bytes |
-/// | [`CATALOG_RECEIPT`] | 5,131,072 | the catalog walk (a check Job) | **FX-33.** Equal to [`CONTROLLER_RECEIPT`], so a point the catalog lists `Available` is one the controller can verify |
-/// | [`CATALOG_RECORD`] | 6,131,072 | the catalog walk | **FX-33.** `topic_budget::MAX_RECORD_BYTES`: the catalog point record copies the receipt's per-topic blocks two levels deeper |
+/// | [`CONTROLLER_RECEIPT`] | 5,131,072 | `weirkeeper`: a backup receipt | `logweir_core::topic_budget::MAX_RECEIPT_BYTES`, the largest receipt Logweir writes: 1,000 topics at 5,000 bytes each plus 128 KiB. Equal to the relay's payload cap. Never parsed into a tree: the controller folds the five facts it needs from the bytes |
+/// | [`CATALOG_RECEIPT`] | 5,131,072 | the catalog walk (a check Job) | Equal to [`CONTROLLER_RECEIPT`], so a point the catalog lists `Available` is one the controller can verify |
+/// | [`CATALOG_RECORD`] | 6,131,072 | the catalog walk | `topic_budget::MAX_RECORD_BYTES`: the catalog point record copies the receipt's per-topic blocks two levels deeper |
 /// | [`MANIFEST`] | 256 MiB | runner, CLI, check Jobs | about 540 bytes per segment entry, so about 500,000 segments |
 /// | [`CONTROLLER_MANIFEST`] | 64 MiB | `weirkeeper`'s retention report | about 124,000 segments; parsed as a stream, so memory is the bytes and no more |
-/// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. FX-30 owns the decode cap |
+/// | [`SEGMENT`] | 1 GiB | runner, CLI | eight times the engine's default `segment_max_bytes` (128 MiB); Logweir's default is 10 MiB. The decoder has its own cap |
 /// | [`ENGINE_DOCUMENT`] | 64 MiB | runner, CLI | the engine's consumer-groups snapshot and validation report |
 /// | [`PROBE`] | 0 | check Jobs, `backup run` | a readiness probe of a key nobody wrote, and the backup set check's "is the manifest there": the answer is the GET's status, and any body is refused unread |
 ///
-/// **A receipt has ONE cap for every reader that must agree about it**
-/// (FX-33): the controller's own handle, the evidence relay and the catalog
+/// **A receipt has ONE cap for every reader that must agree about it**:
+/// the controller's own handle, the evidence relay and the catalog
 /// walk. The runner and the CLI keep [`SIGNED_DOCUMENT`], which is why an
 /// archive written over the bound by an older build stays restorable from
 /// the command line while the catalog lists it as oversized.
 ///
-/// PROD-03.0's schema-dependency detection reads archived segments through
+/// Schema-dependency detection reads archived segments through
 /// [`Store::get_bounded`] under its own 64 MiB stored cap (a `HEAD`, then a
 /// ranged GET of exactly the reported size), so it is bounded the same way
 /// and is not a row here.
@@ -173,7 +150,7 @@ pub mod caps {
     /// tiny values parses into about 37 times its size, so this cap is also
     /// what bounds that parse: about 40 MB at worst.
     pub const CONTROLLER_DOCUMENT: u64 = MAX_EVIDENCE_SCORECARD_BYTES;
-    /// **FX-33.** A backup receipt read by the SHARED controller: the largest
+    /// A backup receipt read by the SHARED controller: the largest
     /// receipt Logweir writes, and the evidence relay's payload cap. The
     /// controller holds the bytes (its signature is over them) and folds the
     /// facts it needs as they are parsed
@@ -181,11 +158,11 @@ pub mod caps {
     /// of one, which is what lets this cap be five times
     /// [`CONTROLLER_DOCUMENT`] at a third of its memory.
     pub const CONTROLLER_RECEIPT: u64 = MAX_EVIDENCE_PAYLOAD_BYTES;
-    /// **FX-33.** A backup receipt read by the catalog walk. Equal to
+    /// A backup receipt read by the catalog walk. Equal to
     /// [`CONTROLLER_RECEIPT`]: a point the catalog lists `Available` is one
     /// the controller can verify, whichever way its evidence is read.
     pub const CATALOG_RECEIPT: u64 = logweir_core::topic_budget::MAX_RECEIPT_BYTES;
-    /// **FX-33.** A catalog point record read by the catalog walk.
+    /// A catalog point record read by the catalog walk.
     pub const CATALOG_RECORD: u64 = logweir_core::topic_budget::MAX_RECORD_BYTES;
     /// An engine manifest read in a runner, CLI or check-Job process.
     pub const MANIFEST: u64 = 256 << 20;
@@ -202,16 +179,9 @@ pub mod caps {
 
 /// The `backup_id` a manifest key belongs to: the key's parent directory.
 ///
-/// TASK 13 REVIEW CARRY, DISCHARGED HERE. This derivation was copy-pasted in
-/// two places — `Store::list_manifests` and `Store::manifest_facts` — and the
-/// second one's doc comment promised it was "derived exactly as
-/// `list_manifests` derives it, so the two can never disagree about which
-/// backup set a manifest belongs to". A promise kept by two copies of four
-/// chained iterator calls is a promise one edit breaks silently, and
-/// `manifest_facts`'s `backup_id` is the string the retention report's
-/// rendered `aws s3 rm` command names. It is one function now, both callers
-/// go through it, and `the_backup_id_derivation_is_one_function` asserts the
-/// two agree over every shape that reaches either.
+/// One function, so `Store::list_manifests` and `Store::manifest_facts` (whose
+/// `backup_id` names the retention report's `aws s3 rm` command) cannot
+/// disagree; `the_backup_id_derivation_is_one_function` asserts it.
 ///
 /// `pub` because `weirkeeper`'s retention reconciler lists manifest KEYS
 /// (`list_manifest_keys`, the same call `list_manifests` is written on top of)
@@ -225,13 +195,11 @@ pub fn backup_id_from_manifest_key(key: &str) -> String {
         .to_string()
 }
 
-/// **FX-31 — the covered window ONE manifest body declares, folded while it
-/// is parsed**: `(oldest start_timestamp, newest end_timestamp)` over every
-/// segment of every partition of every topic.
-///
-/// It replaces a walk over a `serde_json::Value` of the whole body and keeps
-/// that walk's answers exactly, because [`Store::manifest_facts`]'s callers
-/// and tests were written against them:
+/// **The covered window ONE manifest body declares, folded while it is
+/// parsed**: `(oldest start_timestamp, newest end_timestamp)` over every
+/// segment of every partition of every topic. Its answers are those of a
+/// `serde_json::Value` walk of the whole body, which
+/// [`Store::manifest_facts`]'s callers rely on:
 ///
 /// | body | answer |
 /// |---|---|
@@ -420,8 +388,8 @@ mod window {
         Segment,
     }
 
-    /// The type name `Value`'s walk reported for a `topics` that is not an
-    /// array (`kind_of`, which this replaces).
+    /// The type name, as `Value`'s walk names it, of a `topics` that is not an
+    /// array.
     pub(super) type NotAnArray = &'static str;
 
     /// The top level: `Some(Ok(fold))` for an object whose LAST `topics` is
@@ -699,26 +667,19 @@ pub struct PutOutcome {
 }
 
 /// What a provider actually reported about an object's WORM retention. Only
-/// ever constructed from a readback — never inferred from bucket settings, and
-/// never defaulted — so `evidence.immutable` in a signed scorecard can be
-/// `true` only when a provider said so (spec §6 C3).
+/// ever constructed from a readback, never inferred from bucket settings and
+/// never defaulted, so `evidence.immutable` in a signed scorecard can be `true`
+/// only when a provider said so.
 #[derive(Debug, Clone)]
 pub struct LockInfo {
     pub immutable: bool,
     pub retain_until: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// The covered window one manifest declares, plus the backup set it belongs
-/// to. Interface **I12**, the only new type in the `logweir-store`
-/// extraction.
-///
-/// It exists because `list_manifests` returns `Vec<BackupSetRef>` and
-/// `BackupSetRef` is `{ backup_id, manifest_key }` — derived from the key
-/// string alone, with no object read, so **there is no timestamp anywhere in
-/// the returned type**. The only structure carrying one is `BackupSetFacts`,
-/// produced by `OsoCliEngine::describe`, in the crate this extraction exists
-/// to keep out of the control plane. A retention reconciler needs a window
-/// and must not link that crate to get one.
+/// The covered window one manifest declares, plus the backup set it belongs to:
+/// what a retention reconciler needs without linking the engine crate
+/// (`list_manifests`' `BackupSetRef` is derived from the key alone and carries
+/// no timestamp).
 #[derive(Debug, Clone)]
 pub struct ManifestFacts {
     pub backup_id: String,
@@ -740,12 +701,9 @@ pub struct Store {
     /// Built once per store and reused. See `new_rt` for why per-call runtimes
     /// break connection reuse on every network backend.
     rt: Arc<tokio::runtime::Runtime>,
-    /// Controller amendment: true only for handles returned by
-    /// `read_only_from_url`. A handle that physically cannot put is a
-    /// stronger guarantee than a prefix check, and it keeps the write path's
-    /// `LOGWEIR_ROOT` guard (in `from_url` and in `put_create_only`) intact —
-    /// this flag never widens or bypasses that guard, it only ever adds an
-    /// earlier, unconditional refusal in front of it.
+    /// True only for handles returned by `read_only_from_url`: an earlier,
+    /// unconditional refusal in front of the `LOGWEIR_ROOT` guard, which it
+    /// never widens or bypasses.
     read_only: bool,
     /// TEST DOUBLE ONLY — true for [`Store::in_memory_ignoring_conditional_put`]
     /// and NEVER set by a production constructor. It models an S3-compatible
@@ -753,24 +711,24 @@ pub struct Store {
     /// create-only put over an existing key SUCCEEDS and reports
     /// `create_only_enforced: true`, because that is what such a store tells
     /// its client. `object_store` has no way to see it, and the backup
-    /// runner's execution claim (RECEIPT-DUP) must fail closed on it, so the
+    /// runner's execution claim must fail closed on it, so the
     /// runner's rows need a store that lies the way that one does.
     ignores_create_mode: bool,
     /// TEST DOUBLE ONLY — true for [`Store::in_memory_erroring_on_existing_key`]
     /// and never set by a production constructor. A create-only put over an
     /// existing key answers `StoreError::Io` instead of `AlreadyExists`: a
     /// store that errors where it should have refused. The backup runner's
-    /// exclusivity probe must not read that error as proof (RECEIPT-DUP).
+    /// exclusivity probe must not read that error as proof.
     errors_on_existing_key: bool,
     /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_versioned`] and `None`
     /// for every production constructor, which read version ids from the
     /// backend itself. `object_store`'s `InMemory` reports no version id and
-    /// IGNORES a request for one, so a versioned bucket (FX-7: the backup
+    /// IGNORES a request for one, so a versioned bucket (the backup
     /// runner pins the manifest's version id, and readers read by it) has to
     /// be modelled beside it. See [`VersionedBucket`].
     versions: Option<Arc<VersionLog>>,
     /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_misreporting_size`]
-    /// and `None` for every production constructor (FX-31). Every GET and HEAD
+    /// and `None` for every production constructor. Every GET and HEAD
     /// answer is then rewritten to REPORT a size other than the object's, and
     /// every body byte a reader takes is counted. Modelled here, beside
     /// `versions`, rather than as a wrapping `ObjectStore`: that trait cannot
@@ -787,8 +745,8 @@ struct Misreport {
 
 impl Store {
     /// One arm per `StorageUrl` variant, matching upstream's own
-    /// `StorageBackendConfig` shape [VERIFIED
-    /// U/kafka-backup/crates/kafka-backup-core/src/storage/config.rs:14-105].
+    /// `StorageBackendConfig` shape
+    /// (`kafka-backup-core/src/storage/config.rs`).
     /// The client is built INSIDE `rt.block_on`, so the client and its
     /// connection pool belong to the runtime that will later drive them.
     /// Shared by `from_url` and `read_only_from_url` — the two constructors
@@ -808,7 +766,7 @@ impl Store {
                     allow_http,
                     ..
                 } => {
-                    // FX-20 fix round (review F1): `from_env()` reads
+                    // `from_env()` reads
                     // `AWS_REGION`/`AWS_DEFAULT_REGION` when the location names
                     // none, and the region becomes the host on an endpoint-less
                     // location, so the environment's spelling is held to the
@@ -859,28 +817,19 @@ impl Store {
         })
     }
 
-    /// The write-path constructor. Enforces Global Constraint 6 at
-    /// construction rather than only at the put: a spec naming a prefix
-    /// outside `logweir/` is a phase-0 refusal, not a panic in the middle of
-    /// a signed upload.
+    /// The write-path constructor. Enforces Global Constraint 6 at construction
+    /// rather than only at the put: a spec naming a prefix outside `logweir/`
+    /// is a phase-0 refusal, not a panic in the middle of a signed upload.
     ///
-    /// THE PREFIX MUST BE EXACTLY `logweir/`, not merely start with it, and
-    /// that is a fix. `starts_with` admitted `logweir/prod/` — a legal-looking
-    /// prefix that `docs/quickstart.md` and `examples/drill.yaml` both already
-    /// described as refused — while every key builder in this crate is
-    /// hard-coded to `logweir/drills/…`. The result was `assert!(key
-    /// .starts_with(&self.prefix))` firing in `put_create_only`, AFTER the
-    /// restore had already run: a panic, exit 101, outside the five-code exit
-    /// contract entirely, on the one path where the drill had already touched
-    /// the operator's cluster. Refusing at construction puts it back inside
-    /// the contract, and this constructor's own doc comment above already
-    /// promised exactly that.
+    /// THE PREFIX MUST BE EXACTLY `logweir/`, not merely start with it: every
+    /// key builder in this crate is hard-coded to `logweir/drills/…`, so
+    /// `logweir/prod/` would pass here and fail `put_create_only`'s assertion
+    /// after the restore had run.
     ///
-    /// `Filesystem` is exempt because it HAS no prefix — `StorageUrl::prefix`
-    /// returns `""` for it, since upstream's variant carries only `path` — and
-    /// its keys still go through the `LOGWEIR_ROOT` assertion in
-    /// `put_create_only`, so objects still land under `<path>/logweir/`. The
-    /// exemption is about a field that does not exist, not about the rule.
+    /// `Filesystem` is exempt because it HAS no prefix (`StorageUrl::prefix`
+    /// returns `""` for it); its keys still go through the `LOGWEIR_ROOT`
+    /// assertion in `put_create_only`, so objects still land under
+    /// `<path>/logweir/`.
     pub fn from_url(u: &StorageUrl) -> Result<Self, StoreError> {
         let rt = Self::new_rt();
         let prefix = u.prefix().to_string();
@@ -899,18 +848,13 @@ impl Store {
         })
     }
 
-    /// Controller amendment (added after the addenda pass): the read-path
-    /// constructor for reading the OSO archive. Skips the `LOGWEIR_ROOT`
-    /// prefix guard — the archive prefix (e.g. `kafka-backups/daily`) is never
-    /// under `logweir/`, and `from_url` would refuse to construct a `Store`
-    /// over it, which would make `list_backup_sets`/`describe`/
-    /// `segment_keys_for` unable to run at all.
+    /// The read-path constructor for reading the OSO archive. Skips the
+    /// `LOGWEIR_ROOT` prefix guard, because the archive prefix (e.g.
+    /// `kafka-backups/daily`) is never under `logweir/`.
     ///
-    /// The handle this returns physically cannot put: `read_only` is set
-    /// `true` here and `put_create_only` checks it FIRST, before the
-    /// `LOGWEIR_ROOT` assertion, so this constructor never becomes a second
-    /// way to write outside `logweir/`. `from_url`'s guard is unchanged and
-    /// stays the only way to build a *writable* store.
+    /// The handle this returns physically cannot put: `read_only` is set here
+    /// and `put_create_only` checks it FIRST, so `from_url` stays the only way
+    /// to build a *writable* store.
     pub fn read_only_from_url(u: &StorageUrl) -> Result<Self, StoreError> {
         let rt = Self::new_rt();
         let prefix = u.prefix().to_string();
@@ -928,7 +872,7 @@ impl Store {
         })
     }
 
-    /// The EXPLICIT write-path constructor (D2 W2). Same `LOGWEIR_ROOT`
+    /// The EXPLICIT write-path constructor. Same `LOGWEIR_ROOT`
     /// guard as [`Store::from_url`], and the same handle; what differs is
     /// that every addressing, transport and credential decision comes from
     /// the arguments rather than from the process environment.
@@ -950,13 +894,12 @@ impl Store {
         })
     }
 
-    /// The EXPLICIT read-path constructor (D2 W2), the sibling of
+    /// The EXPLICIT read-path constructor, the sibling of
     /// [`Store::read_only_from_url`]. The handle it returns physically cannot
     /// put, for the same reason and by the same flag.
     ///
-    /// This is what the controller's allowlisted `ControllerIdentity`
-    /// evidence cache builds (D2 §3.10) and what a check Job's archive and
-    /// evidence reads use.
+    /// This is what the controller's allowlisted `ControllerIdentity` evidence
+    /// cache builds and what a check Job's archive and evidence reads use.
     pub fn read_only_with(u: &StorageUrl, opts: &StoreOptions) -> Result<Self, StoreError> {
         let rt = Self::new_rt();
         let prefix = u.prefix().to_string();
@@ -997,9 +940,7 @@ impl Store {
     ///
     /// Split out of [`Store::build_backend_with`] so [`s3_builder_config`] can
     /// read back what a store WILL dial without dialling it. That readback is
-    /// taken off this very builder, not off a second model of it, which is the
-    /// property `s3_effective`'s own doc claims and which the first version of
-    /// this module did not actually have.
+    /// taken off this very builder, not off a second model of it.
     fn s3_builder(
         u: &StorageUrl,
         opts: &StoreOptions,
@@ -1025,14 +966,12 @@ impl Store {
                 .with_bucket_name(&eff.bucket)
                 // From the `StorageUrl` and from nothing else.
                 .with_virtual_hosted_style_request(eff.virtual_hosted_style)
-                // THE SINGLE TRANSPORT OVERRIDE. `AmazonS3Builder::with_allow_http`
-                // writes into the builder's own `client_options`, which this
-                // call then REPLACES wholesale — so calling both would leave
-                // one of them dead, and a dead override is how a guard comes
-                // to be deleted as redundant while the live one is deleted as
-                // "already covered". `client` was built above from
-                // `eff.allow_http`, which came from the plan's transport and
-                // from nothing else (defect SEC-ENVHTTP, D-SEAMS S5).
+                // THE SINGLE TRANSPORT OVERRIDE.
+                // `AmazonS3Builder::with_allow_http` writes into the builder's
+                // own `client_options`, which this call then REPLACES
+                // wholesale, so calling both would leave one of them dead.
+                // `client` was built above from `eff.allow_http`, which came
+                // from the plan's transport and from nothing else.
                 .with_client_options(client);
             if let Some(r) = &eff.region {
                 b = b.with_region(r);
@@ -1179,7 +1118,7 @@ impl Store {
     }
 
     /// A TEST DOUBLE of an S3-compatible store that ACCEPTS `If-None-Match: *`
-    /// and overwrites anyway (RECEIPT-DUP): every create-only put succeeds,
+    /// and overwrites anyway: every create-only put succeeds,
     /// replaces what is there, and reports `create_only_enforced: true` —
     /// exactly what such a store's answer looks like to `object_store`. No
     /// production path builds it.
@@ -1193,7 +1132,7 @@ impl Store {
 
     /// A TEST DOUBLE of a store that ERRORS (`StoreError::Io`) on a
     /// create-only put over an existing key, where an enforcing store answers
-    /// `AlreadyExists` (RECEIPT-DUP). No production path builds it.
+    /// `AlreadyExists`. No production path builds it.
     #[doc(hidden)]
     pub fn in_memory_erroring_on_existing_key(prefix: &str) -> Self {
         Self {
@@ -1202,7 +1141,7 @@ impl Store {
         }
     }
 
-    /// A TEST DOUBLE of a store that MISREPORTS an object's size (FX-31): every
+    /// A TEST DOUBLE of a store that MISREPORTS an object's size: every
     /// GET (and HEAD) answers with `reported` as the object's size and the
     /// range it covers, and then streams the object's real bytes — a
     /// misbehaving proxy or endpoint, which is what [`Store::get_capped`]'s
@@ -1255,11 +1194,11 @@ impl Store {
         r
     }
 
-    /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
+    /// A TEST DOUBLE of a VERSIONED bucket, and the handle a test uses
     /// to act on it the way a writer OTHER than this store would: overwrite a
     /// key unconditionally, as the engine's own manifest put does. No
-    /// production path builds it, and it offers no delete (G-RET: this crate
-    /// names no object-store delete).
+    /// production path builds it, and it offers no delete (this crate names no
+    /// object-store delete).
     ///
     /// Every successful put through the STORE, and every write through the
     /// handle, becomes a new version with a fresh id; [`Store::get_capped`] reports
@@ -1292,8 +1231,7 @@ impl Store {
     /// and DROPPING a runtime per call orphans those pooled connections, so
     /// every later call pays a fresh TCP+TLS handshake and can observe
     /// `connection closed before message completed` on a reused pool entry.
-    /// The InMemory suite cannot surface this — it does no I/O — which is why
-    /// the assertion lives in Task 20 step 0's MinIO leg as well.
+    /// The InMemory suite cannot surface this, because it does no I/O.
     fn new_rt() -> Arc<tokio::runtime::Runtime> {
         Arc::new(
             tokio::runtime::Builder::new_current_thread()
@@ -1303,8 +1241,9 @@ impl Store {
         )
     }
 
-    /// **FX-31 — read one object whole, and never more than `max_bytes` of
-    /// it.** Returns the bytes and the version id the store answered with.
+    /// **Read one object whole, and never more than `max_bytes` of it.**
+    /// Returns
+    /// the bytes and the version id the store answered with.
     ///
     /// # The two fences, in order
     ///
@@ -1327,9 +1266,8 @@ impl Store {
     /// tenant's multi-gigabyte object at a receipt key, for every namespace,
     /// on every restart.
     ///
-    /// `StoreError::NotFound` specifically when the object genuinely does not
-    /// exist, distinct from every other failure mode (`Io`) — see
-    /// `StoreError::NotFound`'s doc comment for why the distinction exists.
+    /// `StoreError::NotFound` only when the object does not exist, never for
+    /// another failure (`Io`).
     /// `EngineError: From<StoreError>` keeps every `?`-based caller a plain
     /// operational failure, whose message names the cap.
     pub fn get_capped(
@@ -1359,7 +1297,7 @@ impl Store {
         })
     }
 
-    /// **FX-31 — what the store says about one object, without its body.**
+    /// **What the store says about one object, without its body.**
     ///
     /// For an existence test: "is the sidecar there" needs no byte of it, and
     /// reading a whole object to throw it away is exactly the unbounded read
@@ -1390,7 +1328,7 @@ impl Store {
         })
     }
 
-    /// **PROD-03.0 — read an object only when it is at most `max_bytes`
+    /// **Read an object only when it is at most `max_bytes`
     /// long, and only within `within`.** `Ok(None)` when the store reports it
     /// larger: nothing is fetched. Otherwise the bytes of a ranged read of
     /// exactly the size the store reported, so an object that grows between
@@ -1446,8 +1384,8 @@ impl Store {
         })
     }
 
-    /// **FX-7 — read ONE VERSION of an object**, by the version id a signed
-    /// document pinned, and (FX-31) never more than `max_bytes` of it, by the
+    /// **Read ONE VERSION of an object**, by the version id a signed
+    /// document pinned, and never more than `max_bytes` of it, by the
     /// same two fences as [`Store::get_capped`]. Returns the bytes and the
     /// version id the store answered with.
     ///
@@ -1518,25 +1456,15 @@ impl Store {
         })
     }
 
-    /// Every key under `prefix`, sorted, with no filter of any kind. Added for
-    /// Task 20 phase 8, which reads the engine's own validation report out of
-    /// the per-run prefix Logweir itself set in `validation.yaml`:
-    /// `list_manifest_keys` cannot serve that read because its
-    /// `/manifest.json` filter would return nothing there.
+    /// Every key under `prefix`, sorted, with no filter of any kind. Phase 8
+    /// reads the engine's own validation report through it:
+    /// `list_manifest_keys`' `/manifest.json` filter would return nothing
+    /// there.
     ///
-    /// Sorted so a caller taking `keys[0]` gets a deterministic answer rather
-    /// than whatever order the backend happened to stream.
-    ///
-    /// The sort is DEFENSIVE and, honestly, unproven: `object_store` 0.14
-    /// contracts no list ordering across backends, but both in-process
-    /// backends this workspace can build (`InMemory`, which is a `BTreeMap`,
-    /// and `LocalFileSystem`) happen to return keys already ordered. So no
-    /// test here can distinguish "sorted by this line" from "sorted by the
-    /// backend" — deleting `out.sort()` leaves the suite green (Task 20 fix
-    /// round 1, mutant Z4). It is kept because phase 8 takes `keys[0]` and a
-    /// backend that streamed in arbitrary order would otherwise make WHICH
-    /// engine report is retained non-deterministic; it is documented as
-    /// unproven rather than asserted as a tested guarantee.
+    /// Sorted so a caller taking `keys[0]` gets a deterministic answer. The
+    /// sort is DEFENSIVE and untested: `object_store` 0.14 contracts no list
+    /// ordering, but both in-process backends happen to return keys ordered, so
+    /// deleting `out.sort()` leaves the suite green.
     pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         use futures::StreamExt as _;
         let rt = &self.rt;
@@ -1554,14 +1482,10 @@ impl Store {
 
     /// ONE BOUNDED PAGE of keys under `prefix`, in ascending key order,
     /// starting strictly AFTER `start_after`, together with the cursor that
-    /// resumes the walk — `None` when this page exhausted the prefix.
-    ///
-    /// Decision D3 §5.2: this is the ONE new store capability the recovery
-    /// catalog needs, and it deliberately adds no write and no delete. It
-    /// exists because [`Store::list_keys`] is an UNBOUNDED, in-memory, sorted
-    /// list: a catalog of a hundred thousand points cannot be read by a
-    /// controller materialising a bounded Kubernetes view, and a CLI printing
-    /// fifty rows must not first hold every key in the bucket.
+    /// resumes the walk: `None` when this page exhausted the prefix. The
+    /// recovery catalog's one store capability; it adds no write and no delete,
+    /// and unlike [`Store::list_keys`] it never holds every key under the
+    /// prefix.
     ///
     /// # What `max` bounds, and what it does not
     ///
@@ -1569,33 +1493,21 @@ impl Store {
     /// retained at any moment, whatever the prefix holds.
     ///
     /// It does NOT bound how many objects the backend streams. `object_store`
-    /// 0.14.1 contracts no list ordering — "Note: the order of returned
-    /// `ObjectMeta` is not guaranteed" sits above `list_with_offset` itself
-    /// ([VERIFIED object_store-0.14.1/src/lib.rs:1238-1252]) — so a page that
-    /// took the first `max` keys off the stream and called them "the smallest
-    /// `max`" would be non-deterministic across backends, and its `next`
-    /// cursor could skip keys a later page would then never return. A catalog
-    /// that silently loses points is worse than one that lists slowly. The
-    /// walk is therefore complete and the SELECTION is bounded, and the design
-    /// keeps `n` small by day-sharding the log (D3 §5.2) rather than by
-    /// trusting an ordering the crate does not promise.
+    /// 0.14.1 contracts no list ordering ("the order of returned `ObjectMeta`
+    /// is not guaranteed", above `list_with_offset`), so taking the first `max`
+    /// keys off the stream would be non-deterministic across backends, and its
+    /// cursor could skip keys. The walk is therefore complete and the SELECTION
+    /// is bounded; the catalog keeps `n` small by day-sharding its log.
     ///
     /// `prefix` is evaluated on a PATH SEGMENT basis, which is
-    /// `ObjectStore::list`'s own rule and not this method's: `foo/bar` is a
-    /// prefix of `foo/bar/x` and **not** of `foo/bar_baz/x` ([VERIFIED
-    /// object_store-0.14.1/src/lib.rs:1233-1236]). A caller that wants
-    /// "everything whose key starts with this STRING" must list the containing
-    /// segment and filter; a partial segment matches nothing at all rather
-    /// than matching loosely, which is the safer of the two failure modes and
-    /// is why it is written down here.
+    /// `ObjectStore::list`'s own rule: `foo/bar` is a prefix of `foo/bar/x` and
+    /// **not** of `foo/bar_baz/x`. A partial segment matches nothing at all.
     ///
-    /// `start_after` is EXCLUSIVE, which is `list_with_offset`'s own contract
-    /// ("objects at exactly `offset` will not be included", ibid.), so feeding
-    /// the returned cursor straight back in returns the next page and never
-    /// repeats its last row.
+    /// `start_after` is EXCLUSIVE, which is `list_with_offset`'s own contract,
+    /// so feeding the returned cursor straight back in returns the next page
+    /// and never repeats its last row.
     ///
-    /// `max == 0` returns an empty page and no cursor: a caller asking for
-    /// nothing is answered with nothing rather than with everything.
+    /// `max == 0` returns an empty page and no cursor.
     pub fn list_page(
         &self,
         prefix: &str,
@@ -1611,8 +1523,7 @@ impl Store {
             let p = OPath::from(prefix);
             // `list_with_offset` when the caller gave a cursor, `list`
             // otherwise. NOT `list` plus a filter: on S3 and GCS the offset is
-            // pushed down into the request, which is the whole reason D3 names
-            // this method rather than a slice of `list_keys`.
+            // pushed down into the request.
             let mut st = match start_after {
                 Some(after) => self.inner.list_with_offset(Some(&p), &OPath::from(after)),
                 None => self.inner.list(Some(&p)),
@@ -1653,9 +1564,9 @@ impl Store {
         })
     }
 
-    /// Every key under `prefix` ending `/manifest.json` — exactly what the CLI's
-    /// `list` scans (GT-10). Expressed as `list_keys` plus the filter, so the
-    /// two can never disagree about what "under this prefix" means.
+    /// Every key under `prefix` ending `/manifest.json`: exactly what the CLI's
+    /// `list` scans. Expressed as `list_keys` plus the filter, so the two can
+    /// never disagree about what "under this prefix" means.
     pub fn list_manifest_keys(&self, prefix: &str) -> Result<Vec<String>, EngineError> {
         Ok(self
             .list_keys(prefix)?
@@ -1666,15 +1577,10 @@ impl Store {
 
     /// The provider's Object Lock state for `key`, or `None` when the backend
     /// exposes no such readback.
-    ///
-    /// `object_store` 0.14 — the crate, version and feature set Global
-    /// Constraint 9 fixes — models no Object Lock / WORM retention API at all,
-    /// on any of its `aws`/`azure`/`gcp`/`http` backends. So this returns
-    /// `None` on every backend Logweir can currently build, and phase 8
-    /// therefore publishes `evidence.immutable: false`. That is the point:
-    /// spec §6 C3 allows `immutable: true` ONLY after a provider readback, so
-    /// the absence of a readback must produce an honest `false` rather than an
-    /// optimistic guess derived from the bucket's configuration or the
+    /// `object_store` 0.14 models no Object Lock / WORM retention API on any
+    /// backend, so this returns `None` everywhere and phase 8 publishes
+    /// `evidence.immutable: false`: `immutable: true` is allowed ONLY after a
+    /// provider readback, never from the bucket's configuration or the
     /// adopter's say-so. If a future object_store exposes the readback, this
     /// method is the one place that changes.
     pub fn object_lock_readback(&self, key: &str) -> Option<LockInfo> {
@@ -1693,57 +1599,32 @@ impl Store {
             .collect())
     }
 
-    /// The covered window ONE manifest declares, read out of the manifest
-    /// BODY. Interface **I12**, for the retention reconciler (spec §5, guard
-    /// G-RET), which runs in `weirkeeper` and therefore cannot call
-    /// `OsoCliEngine::describe`.
-    ///
-    /// An untyped `serde_json::Value` read of the manifest body's
-    /// covered-window fields. Links NO vendored upstream struct — the same
-    /// untyped read, for the same reason, that `segments_in_manifest` states
-    /// in its own doc comment further down this file. The field paths are
-    /// `topics[].partitions[].segments[].{start_timestamp,end_timestamp}`,
-    /// two of the three that method already reads.
+    /// The covered window ONE manifest declares, read out of the manifest BODY,
+    /// for the retention reconciler, which runs in `weirkeeper` and therefore
+    /// cannot call `OsoCliEngine::describe`.
     ///
     /// `newest_record_ms` is the MAXIMUM `end_timestamp` and `oldest_record_ms`
     /// the MINIMUM `start_timestamp` over every segment of every partition of
-    /// every topic — the whole manifest, unfiltered, because a backup set's
-    /// window is the union of its segments' windows and not any one topic's.
-    /// Both come from the BODY: the key carries no timestamp, so deriving
-    /// either from the key string would report `0`.
+    /// every topic: a backup set's window is the union of its segments'
+    /// windows. Both come from the BODY; the key carries no timestamp.
+    /// `backup_id` comes from [`backup_id_from_manifest_key`], the function
+    /// `list_manifests` also calls.
     ///
-    /// `backup_id` is the manifest key's parent directory, derived by the ONE
-    /// function [`backup_id_from_manifest_key`] that `list_manifests` also
-    /// calls, so the two cannot disagree about which backup set a manifest
-    /// belongs to. (Task 13 review carry: it used to be two copies of the same
-    /// four chained calls, under a doc comment promising they agreed.)
+    /// A body with no `topics` array is not a manifest at all
+    /// ([`StoreError::NotAManifest`]); a manifest-shaped body whose segments
+    /// bound no window is `Backend`, a fact about a real set. An empty min/max
+    /// would be published as a real window.
     ///
-    /// TWO DIFFERENT FAILURES, TWO DIFFERENT ERRORS (Task 13 review carry).
-    /// A body that carries no `topics` array — `{"hello":"world"}`, or
-    /// `{"topics":5}` where the key exists but is not an array — is not a
-    /// manifest at all, and answers [`StoreError::NotAManifest`]. A body that
-    /// IS manifest-shaped but whose segments bound no window answers
-    /// `Backend`, because "this backup set declares no segment" is a fact
-    /// about a real set and not a configuration mistake. Collapsing the two,
-    /// which is what this method did, reported a prefix pointing at the wrong
-    /// objects identically to an empty backup set.
-    ///
-    /// A manifest with no segment bounds no window, and saying so is the only
-    /// honest answer: an empty min/max would be published as a real window.
-    ///
-    /// # FX-31: read under the caller's cap, and parsed as a STREAM
+    /// # Read under the caller's cap, and parsed as a STREAM
     ///
     /// `max_bytes` is the reader's cap ([`caps::CONTROLLER_MANIFEST`] in the
     /// controller's retention report); a manifest over it is
-    /// [`StoreError::TooLarge`], which the report lists under `skipped` —
+    /// [`StoreError::TooLarge`], which the report lists under `skipped`,
     /// neither kept nor removable. The window is folded while the body is
-    /// parsed ([`manifest_window`]) and no `serde_json::Value` of the manifest
-    /// is ever built, so the memory this takes is the capped bytes and no
-    /// more: a document of tiny values (`[0,0,0,…]`) costs a `Value` tree
-    /// about 37 times its own size (16 MiB of JSON held 621 MB, measured by
-    /// `crates/weirkeeper/tests/read_caps.rs`), in the one process every
-    /// namespace shares. The answers are the ones the earlier `Value` walk
-    /// gave, byte for byte, including which duplicate key wins (the last).
+    /// parsed ([`manifest_window`]) and no `serde_json::Value` is built: a
+    /// document of tiny values (`[0,0,0,…]`) costs a `Value` tree about 37
+    /// times its own size (measured by `crates/weirkeeper/tests/read_caps.rs`),
+    /// in the one process every namespace shares.
     pub fn manifest_facts(&self, key: &str, max_bytes: u64) -> Result<ManifestFacts, StoreError> {
         let (bytes, _) = self.get_capped(key, max_bytes)?;
         let (oldest_record_ms, newest_record_ms) = manifest_window(key, &bytes)?;
@@ -1765,26 +1646,19 @@ impl Store {
     /// Qualifies a manifest-relative key into the fully-qualified key
     /// `get`/`list_manifest_keys` operate on.
     ///
-    /// Upstream stores every key a manifest carries — `manifest_key` itself
-    /// (`{backup_id}/manifest.json` [VERIFIED
-    /// U/kafka-backup/crates/kafka-backup-core/src/backup/engine.rs:1599]) and
-    /// every segment key (`{backup_id}/topics/{topic}/partition={n}/
-    /// segment-{offset:020}.bin{ext}` [VERIFIED .../backup/engine.rs:1436-1442])
-    /// — RELATIVE to the configured prefix, prepending that prefix only at the
-    /// storage boundary (`S3Backend::full_path` [VERIFIED
-    /// .../storage/s3.rs:101-104]: `format!("{}/{}", prefix.trim_end_matches('/'),
-    /// key)`). `list_manifest_keys` and `get` in THIS file already operate in
-    /// the fully-qualified space — the `prefix` handed to `object_store::list`
-    /// IS the search root — so a key read out of a manifest BODY must be
-    /// qualified the same way before `get` can resolve it. Fixed after a
-    /// review found `segment_keys_for` passing the manifest's relative key
-    /// straight through: a real archive at `s3://bucket` with a non-empty
-    /// `prefix` would have every returned segment key 404 in `get`, reporting
-    /// a present backup's segments as missing.
+    /// Upstream stores every key a manifest carries
+    /// (`{backup_id}/manifest.json` and every
+    /// `{backup_id}/topics/{topic}/partition={n}/segment-{offset:020}.bin{ext}`)
+    /// RELATIVE to the configured prefix, prepending it only at the storage
+    /// boundary (`S3Backend::full_path`:
+    /// `format!("{}/{}", prefix.trim_end_matches('/'), key)`). This file's
+    /// `list_manifest_keys` and `get` work in the fully-qualified space, so a
+    /// key read out of a manifest BODY must be qualified before `get` can
+    /// resolve it, or every segment of an archive with a non-empty `prefix`
+    /// would 404.
     ///
-    /// `pub` since Task 21c: `OsoCliEngine::describe` must qualify the segment
-    /// keys it lifts out of a manifest body for exactly the same reason
-    /// `segments_in_manifest` does, and it lives in a different module.
+    /// `pub` because `OsoCliEngine::describe` qualifies the segment keys it
+    /// lifts out of a manifest body the same way.
     pub fn qualify(&self, relative_key: &str) -> String {
         if self.prefix.is_empty() {
             relative_key.to_string()
@@ -1793,7 +1667,7 @@ impl Store {
         }
     }
 
-    /// **FX-16 (review M-1).** The bucket-absolute key the ENGINE reads backup
+    /// The bucket-absolute key the ENGINE reads backup
     /// set `backup_id`'s manifest at, for a plan whose storage is this
     /// store's: `<prefix>/<backup_id>/manifest.json`, normalised as an
     /// `object_store` path, in the form [`Store::list_keys`] returns keys.
@@ -1810,24 +1684,18 @@ impl Store {
         OPath::from(self.qualify(&format!("{backup_id}/manifest.json"))).to_string()
     }
 
-    /// Resolves `topic`/`partition` against ONE manifest's body and returns
-    /// its (qualified key, start_timestamp, end_timestamp) triples,
-    /// unfiltered by any time window. Shared by `segment_keys_for` (scans
-    /// every manifest under the prefix — kept for callers that genuinely want
-    /// every backup set, none as of this crate) and `segment_keys_for_set`
-    /// (reads exactly the one manifest a caller names — what
-    /// `OsoCliEngine::fingerprints` uses, per the Task 12 fix that closed the
-    /// cross-set merging hole: two backup sets sharing a topic/partition with
-    /// an overlapping window used to merge silently here).
+    /// Resolves `topic`/`partition` against ONE manifest's body and returns its
+    /// (qualified key, start_timestamp, end_timestamp) triples, unfiltered by
+    /// any time window. Shared by `segment_keys_for` (every manifest under the
+    /// prefix) and `segment_keys_for_set` (exactly the one manifest a caller
+    /// names, which `OsoCliEngine::fingerprints` uses so two backup sets
+    /// sharing a topic/partition never merge).
     ///
-    /// Parsed as `serde_json::Value` rather than `crate::vendored::manifest::
-    /// BackupManifest`: Task 12b executes BEFORE Task 12, so the vendored types
-    /// do not exist yet. The three field paths read here — topics[].name,
-    /// .partitions[].partition_id, .segments[].{key,start_timestamp,
-    /// end_timestamp} — are the same ones Task 12's `describe()` maps. Each
-    /// `key` is manifest-relative (see `qualify`) and is qualified into this
-    /// store's key space before being returned, so the caller can `get` it
-    /// directly.
+    /// Parsed as `serde_json::Value`, reading three field paths: topics[].name,
+    /// .partitions[].partition_id,
+    /// .segments[].{key,start_timestamp,end_timestamp}. Each `key` is
+    /// manifest-relative (see `qualify`) and is qualified into this store's key
+    /// space before being returned, so the caller can `get` it directly.
     fn segments_in_manifest(
         &self,
         manifest_key: &str,
@@ -1835,7 +1703,7 @@ impl Store {
         partition: i32,
     ) -> Result<Vec<(String, i64, i64)>, EngineError> {
         let mut segs: Vec<(String, i64, i64)> = Vec::new();
-        // FX-31: a runner-side read, under the manifest cap.
+        // A runner-side read, under the manifest cap.
         let (bytes, _) = self.get_capped(manifest_key, caps::MANIFEST)?;
         let v: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| EngineError::Operational(format!("{manifest_key}: {e}")))?;
@@ -1879,13 +1747,10 @@ impl Store {
         Ok(segs)
     }
 
-    /// The Interfaces-block method from Task 12b's brief. Resolves
-    /// `topic`/`partition` against EVERY manifest under this store's prefix.
-    /// No caller in this workspace uses this anymore as of the Task 12 fix
-    /// (see `segment_keys_for_set`) — kept because it is part of Task 12b's
-    /// committed, tested Interfaces contract, and a future caller that
-    /// genuinely wants a cross-set view (e.g. an archive-wide audit) has a
-    /// real use for it. `OsoCliEngine::fingerprints` MUST NOT call this one.
+    /// Resolves `topic`/`partition` against EVERY manifest under this store's
+    /// prefix, for a caller that wants a cross-set view (an archive-wide
+    /// audit); no caller in this workspace does. `OsoCliEngine::fingerprints`
+    /// MUST NOT call this one.
     pub fn segment_keys_for(
         &self,
         topic: &str,
@@ -1902,12 +1767,10 @@ impl Store {
         Ok(out)
     }
 
-    /// Task 12 fix (post-review): the set-scoped sibling of `segment_keys_for`.
-    /// Reads exactly the ONE manifest named by `manifest_key` — never lists or
-    /// touches any other manifest under this store's prefix — so two backup
-    /// sets sharing a topic/partition with an overlapping window can no
-    /// longer merge: `fingerprints()` calls this, passing
-    /// `sel.set.manifest_key`, instead of `segment_keys_for`.
+    /// The set-scoped sibling of `segment_keys_for`. Reads exactly the ONE
+    /// manifest named by `manifest_key`, never any other manifest under this
+    /// store's prefix, so two backup sets sharing a topic/partition with an
+    /// overlapping window cannot merge: `fingerprints()` calls this.
     pub fn segment_keys_for_set(
         &self,
         manifest_key: &str,
@@ -1924,11 +1787,10 @@ impl Store {
 
     /// Global Constraint 6: `PutMode::Create` everywhere, under `logweir/` only.
     pub fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<PutOutcome, StoreError> {
-        // Controller amendment: checked before anything else, including the
-        // LOGWEIR_ROOT assertion below. A handle from `read_only_from_url` is
-        // built over the OSO archive prefix precisely so it CAN read that
-        // prefix, so it must never reach an assertion that would panic on
-        // that same prefix — it must simply refuse to put, every time.
+        // Checked before anything else, including the LOGWEIR_ROOT assertion
+        // below: a handle from `read_only_from_url` is built over the OSO
+        // archive prefix, so it must refuse to put rather than reach an
+        // assertion that panics on that prefix.
         if self.read_only {
             return Err(StoreError::ReadOnly(key.to_string()));
         }
@@ -1989,23 +1851,13 @@ impl Store {
                         return Err(StoreError::AlreadyExists(key.to_string()));
                     }
                     // The backend does not implement conditional put. Fall
-                    // through to HEAD-then-PUT and RECORD that we did.
-                    //
-                    // Two distinct object_store variants mean this, not one:
-                    // `NotSupported` is what a backend that never implements
-                    // conditional put at all would return (object_store 0.14.1
-                    // only actually produces it for copy-if-not-exists
-                    // [VERIFIED object_store-0.14.1/src/aws/mod.rs:399]).
-                    // `NotImplemented` is what `AmazonS3` ACTUALLY returns for
-                    // `PutMode::Create` when `AWS_CONDITIONAL_PUT=disabled` (or
-                    // the equivalent builder config) — reachable through
-                    // `AmazonS3Builder::from_env()` on a real S3-compatible
-                    // endpoint [VERIFIED
-                    // object_store-0.14.1/src/aws/mod.rs:186-192]. Without this
-                    // arm the put fails closed with `StoreError::Io` instead of
-                    // falling back — safe, but it means
-                    // `create_only_enforced: false` could only ever be
-                    // observed against the in-memory test double, never
+                    // through to HEAD-then-PUT and RECORD that we did. Two
+                    // variants mean this: `NotSupported` (a backend that never
+                    // implements conditional put) and `NotImplemented`, which
+                    // `AmazonS3` returns for `PutMode::Create` when
+                    // `AWS_CONDITIONAL_PUT=disabled` (object_store 0.14.1
+                    // `aws/mod.rs:186-192`). Without the second,
+                    // `create_only_enforced: false` could never be observed
                     // against the real backend this fallback exists for.
                     Err(object_store::Error::NotSupported { .. })
                     | Err(object_store::Error::NotImplemented { .. }) => {}
@@ -2031,12 +1883,12 @@ impl Store {
 /// One key's history in a [`VersionLog`]: `(version id, bytes)`, oldest first.
 type VersionHistory = Vec<(String, Vec<u8>)>;
 
-/// TEST DOUBLE ONLY (FX-7): the version history of [`Store::in_memory_versioned`].
+/// TEST DOUBLE ONLY: the version history of [`Store::in_memory_versioned`].
 ///
 /// Every write appends `(version id, bytes)` to its key's history, and the
 /// current version is the last entry — S3's model of a versioned bucket, less
 /// the delete marker, which this crate does not model because it names no
-/// object-store delete at all (G-RET, `scripts/check-no-archive-write.sh`).
+/// object-store delete at all (`scripts/check-no-archive-write.sh`).
 #[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct VersionLog {
@@ -2044,15 +1896,15 @@ pub struct VersionLog {
     state: std::sync::Mutex<std::collections::BTreeMap<String, VersionHistory>>,
     /// When set, every read BY VERSION fails with this text as `Io` — a
     /// principal without `s3:GetObjectVersion`, or a transport failure on the
-    /// one extra read a reader makes (FX-7 fix round). Never set by a
+    /// one extra read a reader makes. Never set by a
     /// production path.
     version_read_fault: std::sync::Mutex<Option<String>>,
 }
 
 /// The id counter EVERY [`VersionLog`] in this process draws from.
 ///
-/// **A version id is a property of one object in ONE bucket** (FX-7 fix round,
-/// review H-1), and a real store never issues an id another bucket issued. A
+/// **A version id is a property of one object in ONE bucket**, and a real store
+/// never issues an id another bucket issued. A
 /// per-bucket counter would: two doubles written in the same order hand out
 /// the same ids, and a byte-for-byte COPY of a pinned point would then find
 /// its pin among the copy's own versions by coincidence — a test of "the pin
@@ -2108,7 +1960,7 @@ impl VersionLog {
     }
 }
 
-/// TEST DOUBLE ONLY (FX-7): a second writer on a [`Store::in_memory_versioned`]
+/// TEST DOUBLE ONLY: a second writer on a [`Store::in_memory_versioned`]
 /// bucket — the engine's unconditional manifest put — which the `Store`
 /// itself, being create-only, cannot be.
 #[doc(hidden)]
@@ -2158,7 +2010,7 @@ impl VersionedBucket {
     }
 }
 
-/// TEST DOUBLE ONLY (FX-31): how many body bytes readers took from a
+/// TEST DOUBLE ONLY: how many body bytes readers took from a
 /// [`Store::in_memory_misreporting_size`] store's GET streams, in total.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
@@ -2172,67 +2024,42 @@ impl StreamMeter {
     }
 }
 
-// ===========================================================================
-// EXPLICIT STORE CONSTRUCTION (decision D2 W2)
-// ===========================================================================
-// Explicit store construction (decision D2 W2, §3.5, §3.10, §4.2).
+// Explicit store construction.
 //
-// # Why this module exists
+// `AmazonS3Builder::from_env()` evaluates EVERY `AWS_*` variable in the process
+// environment (object_store 0.14.1 `aws/builder.rs:606-617`), so a forwarded
+// `AWS_ALLOW_HTTP=true` would enable plaintext transport even when the approved
+// plan says `allow_http: false`. A global setting must never override approved
+// execution inputs. So this module adds a SECOND way to build a store, beside
+// `from_url` / `read_only_from_url` (which still read the environment and serve
+// legacy inline objects):
 //
-// `AmazonS3Builder::from_env()` evaluates EVERY `AWS_*` variable in the
-// process environment (object_store 0.14.1 `aws/builder.rs:606-617`). That is
-// the right default for a single-destination installation and the wrong one
-// for anything else, and it is the mechanism behind tracker defect
-// **SEC-ENVHTTP**: a forwarded `AWS_ALLOW_HTTP=true` enables plaintext
-// transport even when the approved plan says `allow_http: false`. A global
-// setting must never override approved execution inputs (D-SEAMS S5).
-//
-// So this module adds a SECOND way to build a store, beside the existing
-// `from_url` / `read_only_from_url` (which are unchanged, still read the
-// environment, and still serve legacy inline objects):
-//
-// * [`CredentialSource`] says exactly where the credential comes from —
-//   explicit static values, static values read from three NAMED variables and
-//   nothing else, an injected workload identity ONLY, or today's ambient
-//   chain.
+// * [`CredentialSource`] says exactly where the credential comes from: explicit
+//   static values, static values read from three NAMED variables and nothing
+//   else, an injected workload identity ONLY, or the ambient chain.
 // * every addressing and transport value comes from the [`StorageUrl`] the
 //   caller passes, and overrides whatever the environment says.
 // * [`StoreOptions::pin_instance_metadata`] points the instance-metadata
 //   endpoint at a dead loopback address, so a missing workload identity can
-//   never fall back to the node's instance role (D2 G16).
+//   never fall back to the node's instance role.
 // * [`StoreOptions::root_certificates`] carries a destination's private CA.
 //
-// # How the guarantee is testable without a socket
+// [`s3_effective`] is the ONE function that decides what a store will be built
+// with, and [`Store::from_url_with`] builds the client by consuming its output,
+// so a test reads the decision rather than modelling it a second time.
 //
-// [`s3_effective`] is the ONE function that decides what a store will be
-// built with, and [`Store::from_url_with`] builds the client by
-// consuming its output. A test can therefore read the decision directly
-// rather than modelling it a second time — a parallel model is exactly how a
-// test comes to assert something the production path does not do.
-//
-// The claim holds for EVERY credential source, including
-// [`CredentialSource::Ambient`], and that is a fix: the first version of this
-// module built `Ambient` from `AmazonS3Builder::from_env()`, which reads every
-// `AWS_*` variable, so a destination naming no endpoint inherited
-// `AWS_ENDPOINT_URL` from the controller's own environment while
-// `s3_effective` reported `endpoint: None`. D2 §3.10 builds the
-// `ControllerIdentity` evidence cache with exactly that source, so a
-// `BackupDestination` on plain AWS S3 would have had its evidence read from
-// the controller's MinIO bucket — G2's "global configuration leakage", the
-// defect PLAT-08.1 exists to close, arriving through the fix for it.
-//
-// No source calls `from_env()` now. Every source starts from
+// No source calls `from_env()`, `Ambient` included: every source starts from
 // `AmazonS3Builder::new()` and takes its location and route from the
-// `StorageUrl` alone; what differs between them is WHICH NAMED credential
-// variables they are allowed to read, and `S3Effective::environment_variables_read`
-// lists exactly those. `from_url` and `read_only_from_url` are untouched and
-// still read the whole environment — they are the legacy inline path.
+// `StorageUrl` alone, or a destination naming no endpoint would inherit the
+// controller's own `AWS_ENDPOINT_URL`. What differs between sources is WHICH
+// NAMED credential variables they may read, and
+// `S3Effective::environment_variables_read` lists exactly those.
 
 use std::time::Duration;
 
 /// The message prefix a refusal carries when a `WorkloadIdentity` store finds
-/// no injected identity. D2 §3.5: the runner fails CLOSED rather than falling
-/// through to a node role.
+/// no injected identity: the runner fails CLOSED rather than falling through
+/// to a node role.
 pub const WORKLOAD_IDENTITY_NOT_INJECTED: &str = "WorkloadIdentityNotInjected";
 
 /// A dead loopback address. Port 1 is `tcpmux`, which nothing in a runner or
@@ -2243,11 +2070,9 @@ pub const DEAD_METADATA_ENDPOINT: &str = "http://127.0.0.1:1";
 /// Where the object-store credential comes from.
 ///
 /// `Debug` is HAND-WRITTEN below: the `Static` variant holds a secret access
-/// key and a session token, and `StoreOptions` derives `Debug`, so one
-/// `tracing` `?opts` or one `expect(&format!("{opts:?}"))` in W4, W7 or W10
-/// would put an AWS secret into a runner or controller log. The struct went
-/// out of its way to keep the secret out of [`S3Effective`]; this is the other
-/// door.
+/// key and a session token, and `StoreOptions` derives `Debug`, so one `?opts`
+/// in a log line would otherwise put an AWS secret into a runner or controller
+/// log.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum CredentialSource {
     /// object_store's own credential ORDER — static keys, then web identity,
@@ -2255,7 +2080,7 @@ pub enum CredentialSource {
     /// credential variables ([`STATIC_CREDENTIAL_VARS`],
     /// [`WORKLOAD_IDENTITY_VARS`], [`AMBIENT_METADATA_VAR`]) and over nothing
     /// else. What the controller's allowlisted `ControllerIdentity` evidence
-    /// reads use (D2 §3.10).
+    /// reads use.
     ///
     /// It is a CREDENTIAL source and not a configuration source: location,
     /// region, addressing and transport come from the `StorageUrl` even here.
@@ -2266,7 +2091,7 @@ pub enum CredentialSource {
     Ambient,
     /// Explicit values the caller already holds — the shape the restore
     /// runner's evidence store uses when its grant differs from the archive
-    /// grant (`LOGWEIR_EVIDENCE_AWS_*`, D2 §3.5).
+    /// grant (`LOGWEIR_EVIDENCE_AWS_*`).
     Static {
         access_key_id: String,
         secret_access_key: String,
@@ -2346,12 +2171,9 @@ pub struct StoreOptions {
     pub request_timeout: Option<Duration>,
     /// `Some(0)` disables retries. `None` keeps object_store's default of 10.
     ///
-    /// Setting this does NOT shorten the retry window on its own: the window
-    /// is [`StoreOptions::retry_timeout`], which defaults to object_store's
-    /// own 180 s. The first version of this struct silently overwrote the
-    /// window with `request_timeout` (or 30 s) whenever `max_retries` was set,
-    /// which is a coupling a caller reading the field name could not have
-    /// guessed.
+    /// Setting this does NOT shorten the retry window on its own: the window is
+    /// [`StoreOptions::retry_timeout`], which defaults to object_store's own
+    /// 180 s.
     pub max_retries: Option<usize>,
     /// The maximum time from the initial request after which no further retry
     /// is attempted. `None` keeps object_store's default of 180 s. Only read
@@ -2520,7 +2342,7 @@ pub struct S3Effective {
     pub environment_variables_read: Vec<&'static str>,
 }
 
-/// The three variables a projected static credential occupies (D2 §3.5).
+/// The three variables a projected static credential occupies.
 pub const STATIC_CREDENTIAL_VARS: [&str; 3] = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
@@ -2584,9 +2406,9 @@ pub fn workload_identity_from_env() -> Option<WorkloadIdentity> {
 /// a store will carry.
 ///
 /// Refuses a non-S3 `StorageUrl` with an explicit credential source: a
-/// `BackupDestination` is S3-only (D2 §3.1 `provider: S3`), and silently
-/// ignoring an explicit credential on an Azure or filesystem URL would build a
-/// store with a credential nobody asked for.
+/// `BackupDestination` is S3-only, and silently ignoring an explicit credential
+/// on an Azure or filesystem URL would build a store with a credential nobody
+/// asked for.
 pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, StoreError> {
     let StorageUrl::S3 {
         bucket,
@@ -2603,8 +2425,8 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
             backend_name(u)
         )));
     };
-    // FX-20 fix round (review F1): the builder below takes the region as it
-    // is, and with no endpoint the region is the host.
+    // The builder below takes the region as it is, and with no endpoint the
+    // region is the host.
     refuse_invalid_region(region.as_deref())?;
 
     // Which NAMED variables this source may read, and what the credential
@@ -2725,7 +2547,7 @@ pub fn s3_effective(u: &StorageUrl, opts: &StoreOptions) -> Result<S3Effective, 
     })
 }
 
-/// **FX-20 fix round (review F1), the store's backstop.** A region that is not
+/// **The store's backstop.** A region that is not
 /// a region name ([`logweir_core::engine::S3_REGION_PATTERN`]) builds no
 /// client: on an endpoint-less S3 location `object_store` interpolates it
 /// into the host (`s3.<region>.amazonaws.com`), so `x@attacker/` would carry
@@ -2757,7 +2579,7 @@ fn backend_name(u: &StorageUrl) -> &'static str {
     }
 }
 
-/// **FX-31 — the two fences of a capped read**, over one GET's answer:
+/// **The two fences of a capped read**, over one GET's answer:
 /// [`Store::get_capped`] and [`Store::get_version_capped`] both end here.
 ///
 /// `key` is what a `TooLarge` names; `at` is how an I/O error names the read
@@ -2802,7 +2624,7 @@ async fn read_within(
                 observed: OverCap::Streamed { reported, read },
             });
         }
-        // THE BUFFER NEVER GROWS PAST THE CAP (review F10). A store that
+        // THE BUFFER NEVER GROWS PAST THE CAP. A store that
         // reported less than it streams outgrows the reservation made from
         // its report, and `Vec`'s own doubling could then take up to twice the
         // cap. So it grows the way `Vec` would, doubling, but never past the
@@ -2819,12 +2641,11 @@ async fn read_within(
     Ok(out)
 }
 
-/// **FX-7 — what a failed read of ONE VERSION means.** [`Store::get_version_capped`]'s
+/// **What a failed read of ONE VERSION means.** [`Store::get_version_capped`]'s
 /// error mapping, kept beside the classifier because it reads the same text.
 ///
-/// A store says "I hold no such version" in TWO ways, and both are measured on
-/// the e2e stack (`artifacts/fx-7/fix-round/live/foreign-id-probe/answers.txt`
-/// in the FX-7 fix round):
+/// A store says "I hold no such version" in TWO ways, both measured on the e2e
+/// stack:
 ///
 /// * `404 NoSuchVersion` for an id it could have issued — SeaweedFS for every
 ///   foreign id, MinIO for a UUID-shaped one. `object_store` already answers
@@ -2845,7 +2666,7 @@ async fn read_within(
 fn version_read_error(key: &str, version: &str, error: object_store::Error) -> StoreError {
     let at = format!("{key}?versionId={version}");
     match error {
-        // C6: a 404 that is about the credential is not an absence.
+        // A 404 that is about the credential is not an absence.
         object_store::Error::NotFound { .. } if refuses_the_credential(&error) => {
             StoreError::Io(format!("{at}: {error}"))
         }
@@ -2857,34 +2678,27 @@ fn version_read_error(key: &str, version: &str, error: object_store::Error) -> S
     }
 }
 
-/// **C6: whether a 404's own answer says the CREDENTIAL was refused**, not
-/// that the object is absent.
+/// **Whether a 404's own answer says the CREDENTIAL was refused**, not that the
+/// object is absent.
 ///
-/// `object_store` maps every HTTP 404 to `Error::NotFound`, and S3 answers an
-/// unknown access key id with 403 `InvalidAccessKeyId`, so on S3, MinIO,
-/// SeaweedFS and RustFS a 404 is always about the object. versitygw answers
-/// an unknown key id with `404 XAdminUserNotFound` (measured on v1.8.0,
-/// PROD-01.5 §3.1). Read as an absence, that turned "this credential is
-/// wrong" into "this receipt, manifest or segment does not exist": a missing
-/// backup set, an empty catalog, a point reported gone.
+/// `object_store` maps every HTTP 404 to `Error::NotFound`. On S3, MinIO,
+/// SeaweedFS and RustFS a 404 is always about the object, but versitygw answers
+/// an unknown key id with `404 XAdminUserNotFound` (measured on v1.8.0); read
+/// as an absence, that turns "this credential is wrong" into a missing backup
+/// set or a point reported gone.
 ///
 /// **Decided from the answer's own `<Code>`, and from nothing else**
-/// ([`Answer::of`]). PROD-01.2's review, M1: the first version of this
-/// function scanned the error's whole text for credential words, and that
-/// text echoes the request: MinIO's `404 NoSuchKey` body carries `<Key>`,
-/// `<BucketName>` and `<Resource>`, and `object_store` prints the path and
-/// the URL in front of it. A backup id, a prefix or a bucket containing
-/// `expiredtoken` or `invalidsecurity` therefore turned every "this object is
-/// not there yet" into a refused credential, and every backup to it exited 4.
-/// The codes are [`code_class`]'s, so a credential code the table learns is
-/// honoured here with no second list.
+/// ([`Answer::of`]): the error's text echoes the request (key, bucket, URL), so
+/// a search of it would let a backup id containing `expiredtoken` turn every
+/// absence into a refused credential. The codes are [`code_class`]'s, so a
+/// credential code the table learns is honoured here with no second list.
 fn refuses_the_credential(error: &object_store::Error) -> bool {
     Answer::of(error).and_then(|a| a.code_class()) == Some(StoreErrorClass::InvalidCredentials)
 }
 
 /// A read's failure as [`StoreError`]: `NotFound` for a 404 about the object,
-/// `Io` for everything else, **including a 404 about the credential** (C6,
-/// [`refuses_the_credential`]). `Io` keeps the store's text, so
+/// `Io` for everything else, **including a 404 about the credential**
+/// ([`refuses_the_credential`]). `Io` keeps the store's text, so
 /// [`StoreErrorClass::classify`] names it `InvalidCredentials`.
 ///
 /// Every read that turns `object_store`'s `NotFound` into ours ends here: a
@@ -2914,8 +2728,6 @@ fn names_a_version_never_issued(error: &object_store::Error) -> bool {
     })
 }
 
-// ------------------------------------------------- the backend's own answer
-
 /// `object_store`'s words for an answer whose status is not 2xx
 /// (`RequestError::Status`'s `Display`, object_store 0.14.1
 /// `src/client/retry.rs:116`): the status, a colon, and the response body
@@ -2935,7 +2747,7 @@ const RESPONSE_LINE: &str = "Server returned error response: ";
 const REQUEST_LINE: &str = "Error performing ";
 
 /// **What a backend said about a request, apart from everything that echoes
-/// the request** (PROD-01.2 review, M1).
+/// the request.**
 ///
 /// An object store's error reaches this crate as text that is mostly an echo.
 /// `object_store` prints the path it asked for and the URL it sent; an S3
@@ -3038,7 +2850,7 @@ impl Answer {
     /// spells one whole (`Error performing GET x in 1ms - Server returned
     /// non-2xx status code: 403 Forbidden: `) is then the only one and is
     /// read. It needs spaces and a colon, which no `BackupDestination` admits
-    /// in a bucket or a prefix (R5, R6) and no Logweir key layout adds. The
+    /// in a bucket or a prefix and no Logweir key layout adds. The
     /// sites that DECIDE something on a raw error ([`not_found_or_io`],
     /// [`version_read_error`], [`StoreErrorClass::classify_object_store`])
     /// use [`Answer::of`], which reads no text a key is printed in.
@@ -3226,8 +3038,8 @@ fn code_class(code: &str) -> Option<StoreErrorClass> {
         ("ExpiredToken", C::InvalidCredentials),
         ("TokenRefreshRequired", C::InvalidCredentials),
         ("InvalidSecurity", C::InvalidCredentials),
-        // C6 (PROD-01.5, closed by PROD-01.2): versitygw's code for an access
-        // key id it does not know, answered with **404** (measured on v1.8.0).
+        // versitygw's code for an access key id it does not know, answered with
+        // **404** (measured on v1.8.0).
         ("XAdminUserNotFound", C::InvalidCredentials),
         // A wrong region answers 301 `PermanentRedirect` (path-style) or 400
         // `AuthorizationHeaderMalformed` naming the expected region.
@@ -3263,9 +3075,7 @@ pub fn answered_status(e: &StoreError) -> Option<u16> {
     }
 }
 
-// ------------------------------------------------------- error classification
-
-/// The CLOSED store-side code vocabulary of D2 §4.2, so a caller can map a
+/// The CLOSED store-side code vocabulary, so a caller can map a
 /// failure to a check code without ever printing the raw error.
 ///
 /// The spellings are the ones `logweir_core::check_contract::CheckCode` uses;
@@ -3332,7 +3142,7 @@ impl StoreErrorClass {
     /// text, read as `classify_text` reads one.
     ///
     /// **A store's answer is read from its status and its code, never found
-    /// by searching** (PROD-01.2 review, M1): the text echoes the key, the
+    /// by searching**: the text echoes the key, the
     /// bucket and the URL, so a word somewhere in it says nothing. Only a
     /// failure with no answer in it at all (a transport error, a TLS failure,
     /// `object_store`'s own wording for a local backend) is matched against
@@ -3346,7 +3156,7 @@ impl StoreErrorClass {
             StoreError::NotFound(_) => Self::ObjectNotFound,
             StoreError::AlreadyExists(_) | StoreError::ReadOnly(_) => Self::StoreErrorUnclassified,
             StoreError::NotAManifest(_, _) => Self::StoreErrorUnclassified,
-            // FX-31: an object over its reader's cap is a fact about the
+            // An object over its reader's cap is a fact about the
             // object, and the closed vocabulary has no code for it. It is
             // STRUCTURAL, so its text — which names a key an adopter chose —
             // is never token-scanned into a code it does not mean.
@@ -3367,7 +3177,7 @@ impl StoreErrorClass {
             // A `NoSuchBucket` arrives as NotFound too, and "the bucket is
             // not there" is a different remedy from "the key is not there".
             // So does a credential refusal on a store that answers one with
-            // 404 (C6, `refuses_the_credential`).
+            // 404 (`refuses_the_credential`).
             object_store::Error::NotFound { .. } => named.unwrap_or(Self::ObjectNotFound),
             // A wrong key is not a missing grant: `SignatureDoesNotMatch`
             // arrives as a 403.
@@ -3432,7 +3242,7 @@ fn classify_text(text: &str) -> StoreErrorClass {
 /// echo of the request. When it printed none (a builder error, a local backend, a
 /// message some caller composed) the text may still name a path, and these
 /// words would be found in one; none of them is a code, and a
-/// `BackupDestination`'s bucket and prefix (R5, R6: no space) can spell only
+/// `BackupDestination`'s bucket and prefix (no space) can spell only
 /// the bare word `timeout`, which is therefore matched as a word of its own.
 fn wording_class(own: &str) -> StoreErrorClass {
     let lower = without_urls(own).to_ascii_lowercase();
@@ -3506,11 +3316,10 @@ fn without_urls(text: &str) -> String {
 /// back off `AmazonS3Builder` itself.
 ///
 /// [`s3_effective`] states the decision; this states what the object_store
-/// builder ended up holding. They are two different claims, and the gap
-/// between them is precisely where F2 lived: `s3_effective` reported
-/// `endpoint: None` while `from_env()` had already put `AWS_ENDPOINT_URL` into
-/// the builder. A test that reads only the decision cannot see that; this
-/// function makes the second claim checkable with no socket.
+/// builder ended up holding. They are two different claims, and a test that
+/// reads only the decision cannot see a gap between them (an `AWS_ENDPOINT_URL`
+/// the builder picked up on its own); this makes the second claim checkable
+/// with no socket.
 ///
 /// Returns `(key, value)` pairs for the location and route keys, sorted. The
 /// secret access key is NEVER included — `AccessKeyId` is the public half.
@@ -3538,7 +3347,7 @@ pub fn s3_builder_config(
     Ok(out)
 }
 
-/// `true` when this refusal is D2 §3.5's fail-closed "no injected identity".
+/// `true` when this refusal is the fail-closed "no injected identity".
 #[must_use]
 pub fn is_workload_identity_not_injected(e: &StoreError) -> bool {
     matches!(e, StoreError::Backend(m) if m.starts_with(WORKLOAD_IDENTITY_NOT_INJECTED))
@@ -3546,11 +3355,10 @@ pub fn is_workload_identity_not_injected(e: &StoreError) -> bool {
 
 #[cfg(test)]
 mod version_read_tests {
-    //! FX-7 fix round: [`version_read_error`] over the answers the e2e stack
-    //! MEASURED (`artifacts/fx-7/fix-round/live/foreign-id-probe/answers.txt`).
-    //! The text is the shape `object_store` 0.14.1 prints for a non-2xx answer:
-    //! `RetryError`'s "Error performing GET … - " and then
-    //! `RequestError::Status`'s "Server returned non-2xx status code: …".
+    //! [`version_read_error`] over the answers the e2e stack measured, in the
+    //! shape `object_store` 0.14.1 prints for a non-2xx answer: `RetryError`'s
+    //! "Error performing GET … - " and then `RequestError::Status`'s "Server
+    //! returned non-2xx status code: …".
     use super::*;
 
     const KEY: &str = "fx7/set-1/manifest.json";
@@ -3598,7 +3406,7 @@ mod version_read_tests {
     }
 
     /// versitygw v1.8.0's answer to an unknown access key id, as `object_store`
-    /// carries it (the text is PROD-01.5's recorded run, request id removed).
+    /// carries it (a recorded run, request id removed).
     const VERSITYGW_UNKNOWN_KEY: &str = "Server returned non-2xx status code: 404 Not Found: \
         <?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>XAdminUserNotFound</Code>\
         <Message>No user exists with the provided access key ID.</Message></Error>";
@@ -3610,7 +3418,7 @@ mod version_read_tests {
         }
     }
 
-    /// **C6: a 404 about the credential is never an absence**, at each place a
+    /// **A 404 about the credential is never an absence**, at each place a
     /// read turns `object_store`'s `NotFound` into ours: a plain read, a
     /// bounded read and a `HEAD` (all three through `not_found_or_io`) and a
     /// read by version id.
@@ -3677,9 +3485,8 @@ mod version_read_tests {
         ));
     }
 
-    /// The seven words the first classifier matched as substrings: six S3
-    /// credential codes or phrases and versitygw's. Lower case, as it matched
-    /// them, and as a bucket name must be.
+    /// Seven credential words: six S3 credential codes or phrases and
+    /// versitygw's. Lower case, as a bucket name must be.
     const CREDENTIAL_WORDS: [&str; 7] = [
         "invalidaccesskeyid",
         "signaturedoesnotmatch",
@@ -3694,7 +3501,8 @@ mod version_read_tests {
     /// `object_store` 0.14.1 hands over: the retry error's request line with
     /// the URL, the status line, and MinIO's body with its `<Key>`,
     /// `<BucketName>` and `<Resource>` (captured on the compose stack by
-    /// PROD-01.2's review; the ids are placeholders).
+    /// `<BucketName>` and `<Resource>` (captured on the compose stack; the ids
+    /// are placeholders).
     fn minio_no_such_key(bucket: &str, key: &str) -> object_store::Error {
         let url_key = key.replace(' ', "%20");
         object_store::Error::NotFound {
@@ -3711,15 +3519,10 @@ mod version_read_tests {
         }
     }
 
-    /// **PROD-01.2 review, M1: an absent object is absent, whatever it is
-    /// called.** A `404 NoSuchKey` whose text echoes a key, a prefix and a
-    /// bucket spelling EACH of the seven credential words is `NotFound` at
-    /// every read site, and its class is `ObjectNotFound`.
-    ///
-    /// The first classifier matched those words anywhere in the lowercased
-    /// text, so a backup id containing `expiredtoken` made the "is this set
-    /// new?" read answer `Io`, and every backup to it exited 4
-    /// (`ExecutionClaimUnproven`), with a remedy about IAM grants.
+    /// **An absent object is absent, whatever it is called.** A `404 NoSuchKey`
+    /// whose text echoes a key, a prefix and a bucket spelling EACH of the
+    /// seven credential words is `NotFound` at every read site, and its class
+    /// is `ObjectNotFound`.
     ///
     /// CONTROL: the same shape with versitygw's own code still refuses, under
     /// the same echoing names, so the row is not passing because nothing is

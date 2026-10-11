@@ -89,26 +89,26 @@ pub enum RenderError {
     /// which of the two claims is true today.
     #[error("auth mode `{0}` is not supported by this build; it renders PLAINTEXT, SASL/SCRAM-SHA-512, SASL/SCRAM-SHA-256, SASL/PLAIN over TLS and TLS client certificates (mtls) and no other. A plan that asked for it is REFUSED rather than rendered unauthenticated — an unauthenticated document from a plan that named a SASL mode would be a downgrade performed on the operator's behalf")]
     UnsupportedAuthMode(String),
-    /// A TLS CA file attached to a connection whose transport is not TLS
-    /// (PLAT-07.1). Refused rather than rendered without the key: a document
+    /// A TLS CA file attached to a connection whose transport is not TLS.
+    /// Refused rather than rendered without the key: a document
     /// that silently dropped the trust anchor would dial in the clear a
     /// connection its author configured to verify.
     #[error("a TLS CA file (ssl_ca_location) was attached to a connection whose security protocol is not TLS; the CA is refused rather than dropped, because dropping it would dial without TLS a connection configured to be verified")]
     TlsCaWithoutTls,
-    /// **PROD-01.3.** SASL/PLAIN on a connection that is not TLS. Refused,
+    /// SASL/PLAIN on a connection that is not TLS. Refused,
     /// never rendered: PLAIN sends the password itself, and a document with
     /// `SASL_PLAINTEXT` + `PLAIN` would put it on the wire in the clear. The
     /// named reason is `PlainWithoutTls`, the runner's refusal of the same
     /// spec before any plan exists.
     #[error("PlainWithoutTls: auth mode `plain` (SASL/PLAIN) on a connection without TLS; PLAIN sends the password itself, so it is rendered only over SASL_SSL and this document is refused rather than rendered")]
     PlainWithoutTls,
-    /// **PROD-01.3.** `mtls` on a connection that is not TLS.
+    /// `mtls` on a connection that is not TLS.
     #[error("auth mode `mtls` on a connection without TLS; a client certificate is presented in a TLS handshake, so this document is refused rather than rendered")]
     MtlsWithoutTls,
-    /// **PROD-01.3.** `mtls` with no client-certificate pair attached.
+    /// `mtls` with no client-certificate pair attached.
     #[error("auth mode `mtls` with no client certificate and key attached; the engine would dial with no identity to present, so this document is refused rather than rendered")]
     ClientCertificateMissing,
-    /// **C15** (PROD-00.3f): an S3 storage block whose endpoint is plain
+    /// **C15**: an S3 storage block whose endpoint is plain
     /// `http://` while `allow_http` is false. Engine 0.22.0 and later derive
     /// plaintext transport from the endpoint's scheme on the YAML path, so the
     /// rendered `allow_http: false` would not stop a plaintext dial. Refused
@@ -117,7 +117,7 @@ pub enum RenderError {
     /// endpoint is operator input and is never echoed.
     #[error("the storage endpoint is a plain http:// endpoint but allow_http is false; the pinned engine (kafka-backup 0.22.0 and later) derives plaintext transport from an http:// endpoint whatever allow_http says, so this document would dial the archive in the clear (C15). Refused rather than rendered")]
     PlaintextEndpointWithoutAllowHttp,
-    /// **PROD-11.1.** A caller asked for THE restore document of a plan whose
+    /// A caller asked for THE restore document of a plan whose
     /// partition subsets need more than one engine run (the engine's
     /// `source_partitions` applies to every topic of a run). Refused rather
     /// than rendering one run's document as if it were the plan's: the caller

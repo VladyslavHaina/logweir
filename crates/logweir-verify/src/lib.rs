@@ -71,7 +71,7 @@ pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
 /// contains none of them.
 pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
     "application/vnd.logweir.backup-receipt+json;version=1.0.0";
-/// The RECOVERY CATALOG POINT record (decision D3 §5.2, PLAT-15.1) — the
+/// The RECOVERY CATALOG POINT record — the
 /// signed, durable, append-only description of one recovery point, written
 /// under `logweir/catalog/v1/points/<pointId>/record.json`.
 ///
@@ -86,8 +86,8 @@ pub const PAYLOAD_TYPE_BACKUP_RECEIPT: &str =
 /// **What a signature under this type proves, and what it does not.** It
 /// proves the bytes were signed by the holder of a key. It is NOT a claim
 /// that the point is available, that its archive is readable, or that its
-/// facts are true: the receipt's own signature is the verification root
-/// (D3 §5.2 rule 3), and `logweir drill verify --payload-type catalog-point`
+/// facts are true: the receipt's own signature is the verification root,
+/// and `logweir drill verify --payload-type catalog-point`
 /// and `docs/verify_scorecard.py --payload-type catalog-point` both report
 /// SIGNATURE-ONLY for exactly that reason.
 pub const PAYLOAD_TYPE_CATALOG_POINT: &str =

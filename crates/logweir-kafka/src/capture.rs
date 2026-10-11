@@ -15,7 +15,7 @@
 //! 3. **Read the named topics' partitions** (metadata), the set every
 //!    position is asked for.
 //! 4. **Fetch the positions** of every described group over exactly those
-//!    partitions: one RequireStable fetch per group (PROD-04.0a), so a pending
+//!    partitions: one RequireStable fetch per group, so a pending
 //!    transactional offset commit never yields the pre-transaction position.
 //! 5. **Read the marks** (log start and high watermark, READ_UNCOMMITTED) of
 //!    exactly those partitions, AFTER the positions: a position the group

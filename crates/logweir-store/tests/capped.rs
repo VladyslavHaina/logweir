@@ -271,7 +271,7 @@ fn too_large_is_unclassified_and_names_the_cap_through_engine_error() {
 /// through a relay; every controller cap is at most its runner twin; the probe
 /// reads no body.
 ///
-/// FX-33: a RECEIPT has one cap for the controller, the relay and the catalog
+/// A RECEIPT has one cap for the controller, the relay and the catalog
 /// walk, and it is the topic budget's sum; a scorecard keeps the 1 MiB every
 /// document had.
 #[test]
@@ -645,8 +645,8 @@ fn call_arguments(after_open: &str) -> (&str, usize) {
 /// "far too large" (review F4: per crate, and by shape).
 ///
 /// - In `crates/weirkeeper/src`, the SHARED controller, a read may name only
-///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_RECEIPT`
-///   (FX-33), `CONTROLLER_MANIFEST`, `SIDECAR`, `PROBE`, or the cap its own
+///   the controller's own rows: `CONTROLLER_DOCUMENT`, `CONTROLLER_RECEIPT`,
+///   `CONTROLLER_MANIFEST`, `SIDECAR`, `PROBE`, or the cap its own
 ///   payload type selects (`controller_cap_for`, which answers one of the
 ///   first two and nothing else: `weirkeeper`'s
 ///   `the_controllers_document_cap_is_one_of_its_two_rows`).

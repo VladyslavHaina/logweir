@@ -60,7 +60,7 @@ pub struct RdKafkaReader {
     /// two clients above already do inside librdkafka; this type has no
     /// `Debug` and never prints it.
     base: ClientConfig,
-    /// The bound of one positions fetch or commit wait (PROD-04.0a).
+    /// The bound of one positions fetch or commit wait.
     position_bound: Duration,
     /// The bound of one admin call through `logweir-rdkafka-ffi`
     /// (PROD-04.0b; `crate::rdkafka_admin`).
@@ -73,7 +73,7 @@ pub struct RdKafkaReader {
     /// protection was "the caller passed the right names" (see
     /// `delete_topics`'s doc comment for the fuller rationale).
     scratch_prefix: Option<String>,
-    /// **PROD-15.1.** Names `delete_topics` refuses WHATEVER the prefix: the
+    /// Names `delete_topics` refuses WHATEVER the prefix: the
     /// source topics' own names, set by the drill via
     /// [`RdKafkaReader::with_protected_names`]. An original topic name may
     /// start with the scratch prefix (a source topic called `drill-orders`
@@ -89,7 +89,7 @@ pub struct RdKafkaReader {
 /// default (`https`) and this pins it, so an upgrade cannot quietly turn it
 /// off. There is deliberately no override — the engine's rustls client
 /// verifies the broker hostname with no way to turn that off, and the two
-/// clients must agree (PLAT-07.1). [VERIFIED rdkafka-sys 4.10.0+2.12.1's
+/// clients must agree. [VERIFIED rdkafka-sys 4.10.0+2.12.1's
 /// vendored librdkafka/CONFIGURATION.md: ssl.endpoint.identification.algorithm
 /// `none, https`, default `https`.]
 ///
@@ -142,7 +142,7 @@ impl RdKafkaReader {
             // name that does not exist
             // [VERIFIED rdkafka-sys librdkafka/CONFIGURATION.md:63].
             .set("allow.auto.create.topics", "false");
-        // One SASL arm for the three SASL mechanisms (PROD-01.3): the keys are
+        // One SASL arm for the three SASL mechanisms: the keys are
         // the same, only `sasl.mechanism` differs — librdkafka's spellings,
         // two hyphens for SCRAM, where the engine writes one.
         let sasl = |base: &mut ClientConfig,
@@ -288,7 +288,7 @@ impl RdKafkaReader {
         })
     }
 
-    /// **PROD-15.1.** Names this reader's `delete_topics` never deletes,
+    /// Names this reader's `delete_topics` never deletes,
     /// whatever the scratch prefix: a drill passes its source topics, so no
     /// teardown, probe clean-up or later caller can delete a topic under its
     /// ORIGINAL name — the one name a restore under the original names writes.
@@ -305,7 +305,7 @@ impl RdKafkaReader {
     }
 
     /// The connection the reader dialled with, for `crate::rdkafka_capture`'s
-    /// READ_UNCOMMITTED marks handle (PROD-04.1). Holds the password; never
+    /// READ_UNCOMMITTED marks handle. Holds the password; never
     /// printed.
     pub(crate) fn base_config(&self) -> &ClientConfig {
         &self.base
@@ -316,7 +316,7 @@ impl RdKafkaReader {
         &self.consumer
     }
 
-    /// The bound of one admin call (PROD-04.0b).
+    /// The bound of one admin call.
     pub(crate) fn admin_bound(&self) -> Duration {
         self.admin_bound
     }
@@ -339,7 +339,7 @@ impl RdKafkaReader {
         Ok(self)
     }
 
-    /// **PROD-04.0a.** The committed positions of `group` on exactly
+    /// The committed positions of `group` on exactly
     /// `partitions`, read with ONE RequireStable OffsetFetch from a fresh
     /// handle that carries the group's id and can never subscribe, join or
     /// commit implicitly (`rdkafka_positions`), dropped before this returns.
@@ -377,7 +377,7 @@ impl RdKafkaReader {
             .committed_positions(partitions, listing)
     }
 
-    /// **PROD-04.0a.** Commits `positions` for `group` in ONE synchronous
+    /// Commits `positions` for `group` in ONE synchronous
     /// OffsetCommit from a non-member (generation −1, empty member id), from a
     /// fresh handle that can never subscribe or join, dropped before this
     /// returns.
@@ -543,7 +543,7 @@ impl RdKafkaReader {
     }
 }
 
-/// **FX-18.** The broker and client codes a topic answers with while its
+/// The broker and client codes a topic answers with while its
 /// creation is still propagating, and nothing else: `UnknownTopicOrPartition`
 /// (the answering broker's metadata does not hold it yet) and its two
 /// client-side spellings, `LeaderNotAvailable` (no leader elected yet) and
@@ -562,7 +562,7 @@ fn creation_in_progress(code: rdkafka::error::RDKafkaErrorCode) -> bool {
     )
 }
 
-/// **FX-18.** How [`RdKafkaReader::created_topic_configs`] reads one answer of
+/// How [`RdKafkaReader::created_topic_configs`] reads one answer of
 /// the configuration read it repeats: the configuration is done;
 /// `TopicNotFound` and `NotAuthorized` are a creation still propagating
 /// (`NotAuthorized` here is T13's inference from an EMPTY DescribeConfigs
@@ -594,7 +594,7 @@ fn settling_on<T>(code: rdkafka::error::RDKafkaErrorCode, error: KafkaError) -> 
 }
 
 impl ClusterReader for RdKafkaReader {
-    /// PROD-04.1: `crate::rdkafka_capture`.
+    /// `crate::rdkafka_capture`.
     fn observe_consumer_groups(
         &self,
         selected: &[String],
@@ -603,7 +603,7 @@ impl ClusterReader for RdKafkaReader {
         self.capture_consumer_groups(selected, topics)
     }
 
-    /// PROD-04.1: `crate::rdkafka_capture`.
+    /// `crate::rdkafka_capture`.
     fn partition_marks(&self, topics: &[String]) -> BTreeMap<String, crate::capture::TopicMarks> {
         self.read_partition_marks(topics)
     }
@@ -711,7 +711,7 @@ impl ClusterReader for RdKafkaReader {
         Ok(out)
     }
 
-    /// FX-18: metadata first (the topic, every partition, every leader), then
+    /// Metadata first (the topic, every partition, every leader), then
     /// one ListOffsets per partition through the leader, which is the read
     /// that failed in CI run 37753000930. One attempt is two kinds of request;
     /// [`settle`] repeats it while the answers are those of a creation in
@@ -778,7 +778,7 @@ impl ClusterReader for RdKafkaReader {
         })
     }
 
-    /// FX-18: as the default, and ALSO waits out [`KafkaError::NotAuthorized`],
+    /// As the default, and ALSO waits out [`KafkaError::NotAuthorized`],
     /// because here that error is T13's inference from an EMPTY DescribeConfigs
     /// answer ([`empty_topic_config_answer`]), never a code the broker sent
     /// (rdkafka 0.36.2 does not read the per-resource error). Kafka answers a
@@ -948,7 +948,7 @@ impl ClusterReader for RdKafkaReader {
         Ok(out)
     }
 
-    /// **PROD-15.1.** [`Self::broker_configs`]'s read, for EVERY broker id
+    /// [`Self::broker_configs`]'s read, for EVERY broker id
     /// the metadata lists, in ONE DescribeConfigs request; each broker's
     /// answer is held to T13 exactly as the one-broker read is (an empty
     /// answer is a refused read, an error), so `None` means only "this broker
@@ -1204,7 +1204,7 @@ pub fn new_topics_for(specs: &[NewTopicSpec]) -> Vec<rdkafka::admin::NewTopic<'_
         .collect()
 }
 
-/// **PROD-15.1.** Whether a per-topic `create_topics` failure is the
+/// Whether a per-topic `create_topics` failure is the
 /// broker's `TOPIC_ALREADY_EXISTS` — the exclusive create losing to a name
 /// that appeared after phase 0 proved it absent.
 ///
@@ -1216,7 +1216,7 @@ pub fn is_topic_already_exists(error: &str) -> bool {
     error == rdkafka::types::RDKafkaErrorCode::TopicAlreadyExists.to_string()
 }
 
-/// **FX-44.** Whether a per-topic `delete_topics` failure is the broker's
+/// Whether a per-topic `delete_topics` failure is the broker's
 /// `TOPIC_AUTHORIZATION_FAILED`: the principal lacks `Delete` on that topic.
 /// Compared against the code's own rendering, as [`is_topic_already_exists`].
 #[must_use]
@@ -1385,7 +1385,7 @@ impl TopicDeleter for RdKafkaReader {
     }
 }
 
-/// **PROD-05.1.** A topic's replication factor from its partitions' replica
+/// A topic's replication factor from its partitions' replica
 /// counts: the SMALLEST. A partition mid-reassignment lists the replicas being
 /// added beside the ones being removed, so the largest count can exceed the
 /// topic's factor; the smallest never does. `None` for a topic with no
@@ -1666,7 +1666,7 @@ mod tests {
         assert!(matches!(reset, RdErr::MessageConsumption(c) if c == Code::AutoOffsetReset));
     }
 
-    /// **FX-18.** Exactly the answers of a creation in progress are waited
+    /// Exactly the answers of a creation in progress are waited
     /// out by `await_served`; an authorization failure, a timeout and a
     /// transport failure are not, because waiting cannot change them and a
     /// wait on them would only delay the refusal by `CREATED_TOPIC_SETTLE`.
@@ -1775,7 +1775,7 @@ mod tests {
         );
     }
 
-    /// **PROD-15.1.** A source topic's own name is never handed to the
+    /// A source topic's own name is never handed to the
     /// broker's delete, even inside the scratch namespace (a source named
     /// `drill-orders` under the scratch prefix `drill-`): refused per name,
     /// before any broker call — `127.0.0.1:1` is never dialled, so a name
@@ -2016,7 +2016,7 @@ mod tests {
         );
     }
 
-    /// **FX-44.** The per-topic answer a broker gives a delete the principal
+    /// The per-topic answer a broker gives a delete the principal
     /// may not make is named as such, and no other answer is.
     #[test]
     fn a_topic_authorization_refusal_is_told_from_other_delete_failures() {

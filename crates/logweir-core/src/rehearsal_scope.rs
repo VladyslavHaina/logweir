@@ -1,4 +1,4 @@
-//! The scope a standing rehearsal authorization signs over (decision D3 §4.3).
+//! The scope a standing rehearsal authorization signs over.
 //!
 //! # Types only — and the predicate LANDED, in `execution_contract`
 //!
@@ -73,7 +73,7 @@ pub const MODE_SCRATCH: &str = "scratch";
 /// it keeps format 1.1.0 a MINOR (`docs/stability.md`).
 pub const COMPLETE_SCOPE_MAX_PARTITIONS: u32 = 0;
 
-/// What a standing rehearsal authorization permits (D3 §4.3).
+/// What a standing rehearsal authorization permits.
 ///
 /// EXACT VALUES, NOT PATTERNS, except for the one prefix the mode requires.
 /// A scope written with wildcards is a scope nobody can read back and check,
@@ -154,7 +154,7 @@ impl RehearsalScope {
     }
 
     /// Whether the scope carries a field defined only from document format
-    /// 1.1.0 (PROD-08.1a), so its document must declare at least that minor.
+    /// 1.1.0, so its document must declare at least that minor.
     #[must_use]
     pub fn needs_coverage_format(&self) -> bool {
         self.coverage.is_some() || self.complete_max_records.is_some()

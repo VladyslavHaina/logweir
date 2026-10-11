@@ -1,4 +1,4 @@
-//! FX-20: the credential binding for EVERY credential reference, not only a
+//! The credential binding for EVERY credential reference, not only a
 //! Kafka connection's.
 //!
 //! # The class this closes
@@ -97,7 +97,7 @@ pub const EVIDENCE_READ_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_EVIDENCE_READ_CR
 pub const EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
     "LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED";
 
-/// FX-20c: the `(projected, expected)` pair a CHECK pod carries for one
+/// The `(projected, expected)` pair a CHECK pod carries for one
 /// Secret-backed grant its plan lists in
 /// [`crate::check_contract::DestinationPlan::grant_bindings`] — the grant's
 /// Secret's [`CREDENTIAL_BINDING_KEY`] as an OPTIONAL `secretKeyRef`, and the
@@ -348,7 +348,7 @@ pub fn check_pair(
     )
 }
 
-/// FX-20c: compare one LISTED grant's binding ([`grant_binding_env`]) through
+/// Compare one LISTED grant's binding ([`grant_binding_env`]) through
 /// a lookup — [`check_pair`]'s rule with one difference. A grant the plan
 /// lists is a grant the controller said it projected, so an ABSENT or blank
 /// expectation is not "a hand-run process" but a pod that lost the
@@ -573,7 +573,7 @@ mod tests {
         );
     }
 
-    /// FX-20c: a LISTED grant's binding is compared fail-closed — an absent
+    /// A LISTED grant's binding is compared fail-closed — an absent
     /// expectation is a refusal, not a hand-run pass — and each role has its
     /// own pair, distinct from every credential pair.
     ///

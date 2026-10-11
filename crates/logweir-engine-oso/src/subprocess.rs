@@ -47,7 +47,7 @@ pub const LOGWEIR_STREAM: &str = "logweir";
 ///
 /// The pinned engine takes no CA argument for its object-store client. What it
 /// is claimed to honour — `[UNVERIFIED — U1: whether the engine honours a custom CA file]`
-/// (D2 §3.5) — is `SSL_CERT_FILE`, through
+/// — is `SSL_CERT_FILE`, through
 /// rustls-platform-verifier on Linux. Until that is measured on a recorded
 /// engine digest the controller REFUSES a destination carrying a `caBundle`
 /// for engine-driven runs (`weirkeeper::controllers::backup::ENGINE_CUSTOM_CA_VERIFIED`),

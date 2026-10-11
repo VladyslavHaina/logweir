@@ -1,4 +1,4 @@
-//! FX-33: `ReceiptFacts::fold` reads what the `serde_json::Value` walk read.
+//! `ReceiptFacts::fold` reads what the `serde_json::Value` walk read.
 //!
 //! The controller used to parse a receipt into a `Value` and read five things
 //! from it. The fold reads the same five as the bytes stream past. A verdict

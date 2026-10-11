@@ -24,7 +24,7 @@
 //! more (arms 6-11) that read only the 1.1.0 `config_coverage` block. Spec §7:
 //! "new payload types, not new scorecard fields."
 //!
-//! # 1.1.0: topic-configuration capture coverage (FX-4)
+//! # 1.1.0: topic-configuration capture coverage
 //!
 //! The engine captures topic configuration non-fatally (`backup/engine.rs:
 //! 382-393` in the pinned source): a denied DescribeConfigs leaves the
@@ -37,7 +37,7 @@
 //! every topic, never `captured`; [`SourceConfigCoverage`] is the one reader
 //! of the block and cannot answer anything stronger for an absent entry.
 //!
-//! # 1.2.0: the manifest's version id, pinned (FX-7)
+//! # 1.2.0: the manifest's version id, pinned
 //!
 //! On a bucket with versioning enabled, `archive.manifest_version_id` names
 //! WHICH VERSION of the manifest key the run read back; a receipt that carries
@@ -47,7 +47,7 @@
 //! `catalog::pin`), and a 1.1.0 reader, which ignores unknown fields inside
 //! major 1, reads a 1.2.0 receipt as the 1.1.0 document under it.
 //!
-//! # 1.3.0: the topic configuration model (PROD-05.1)
+//! # 1.3.0: the topic configuration model
 //!
 //! `topic_configuration` records, per named topic, the source's partition
 //! count as the archive's manifest records it, its replication factor as
@@ -61,7 +61,7 @@
 //! Every receipt this build signs carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] ([`format_version_for`]).
 //!
-//! # 1.5.0: schema dependency (PROD-03.0)
+//! # 1.5.0: schema dependency
 //!
 //! `schema_dependency` records, per named topic, whether the archived keys and
 //! values carry Confluent wire-format framing (magic byte 0 and a schema id),
@@ -74,7 +74,7 @@
 //! carries it, so every one is written as
 //! [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`] or later.
 //!
-//! # 1.6.0: the topic's ID before and after the engine (PROD-01.4a)
+//! # 1.6.0: the topic's ID before and after the engine
 //!
 //! `generations` records, per named topic, the topic ID (KIP-516) Logweir's
 //! own DescribeTopics read returned immediately before the engine
@@ -91,7 +91,7 @@
 //! PROD-02.1 extends the same block with the offset observation and the
 //! lineage of decision §3.2.
 //!
-//! # 1.8.0: the source's watermarks, and the empty capture (PROD-02.1)
+//! # 1.8.0: the source's watermarks, and the empty capture
 //!
 //! `source_watermarks` records, per named topic, each partition's low and
 //! high watermark as Logweir read them once before the engine. ABSENT (every
@@ -100,7 +100,7 @@
 //! source that held no record (every partition `low == high`) is an EMPTY
 //! CAPTURE: `covered` is the empty window `[t, t)`, which covers no record.
 //! Arms 41-45 read the block, and arm 4 admits the empty window only beside
-//! it — an older reader refuses an empty capture, the safer verdict (OD-7).
+//! it — an older reader refuses an empty capture, the safer verdict.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -443,7 +443,7 @@ impl SchemaDependency {
     }
 }
 
-/// **PROD-03.0.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `schema_dependency` — the MINOR after PROD-01.3's 1.4.0. Every receipt this
 /// build signs carries the block, so every one is 1.5.0 or later
 /// ([`format_version_for`]); 1.5.0 defines every earlier minor's fields and
@@ -458,7 +458,7 @@ pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 /// keeps them coherent.
 pub const SCHEMA_DEPENDENCY_SINCE_MINOR: u64 = 5;
 
-/// **PROD-04.1.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `consumer_positions` — a MINOR bump over [`FORMAT_VERSION_WITH_GENERATIONS`]
 /// (PROD-01.4a's 1.6.0) under OD-7 (a): arms 30-35 read only the new optional
 /// block, so every document without it is decided exactly as before, and an
@@ -473,7 +473,7 @@ pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
 /// keeps them coherent.
 pub const CONSUMER_POSITIONS_SINCE_MINOR: u64 = 7;
 
-/// **PROD-02.1.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `source_watermarks` — a MINOR bump over
 /// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] under OD-7: arms 41-45 read only
 /// the new block, and arm 4 admits an empty window only beside it, so every
@@ -557,7 +557,7 @@ pub const CONFIG_SOURCES: [&str; 6] = [
     "unknown",
 ];
 
-/// **PROD-05.1.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `topic_configuration` — the MINOR after FX-7's 1.2.0. Every receipt this
 /// build signs carries the block, pinned or not; until PROD-01.4a that made
 /// every one 1.3.0, and since then every one is
@@ -762,7 +762,7 @@ impl ConfigCoverage {
 /// bound to a recovery point) and a receipt without the 1.1.0 block both
 /// answer [`ConfigCoverage::Unknown`] for every topic.
 ///
-/// **FX-21.** It also lends the receipt's own record of each source topic's
+/// It also lends the receipt's own record of each source topic's
 /// replication factor ([`SourceConfigCoverage::replication_factor`], from
 /// `topic_configuration`, format 1.3.0), which a parity check reads where the
 /// archive's manifest records none: engine 0.23.3 records the factor in the
@@ -803,7 +803,7 @@ impl SourceConfigCoverage {
         }
     }
 
-    /// **FX-21.** The source `topic`'s replication factor as the receipt
+    /// The source `topic`'s replication factor as the receipt
     /// records it (`topic_configuration`, format 1.3.0), or `None` when it
     /// records none — NOT RECORDED, never a default.
     #[must_use]
@@ -926,7 +926,7 @@ pub struct ReceiptArchive {
     pub prefix: String,
 }
 
-/// **FX-7.** The `format_version` a receipt carries when it pins
+/// The `format_version` a receipt carries when it pins
 /// `archive.manifest_version_id`: a MINOR bump over [`RECEIPT_FORMAT_VERSION`]
 /// (FX-4's 1.1.0, which merged first), because the field is optional and a
 /// 1.1.0 or 1.0.0 reader, which ignores unknown fields inside major 1, still
@@ -935,7 +935,7 @@ pub struct ReceiptArchive {
 /// document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
-/// **PROD-01.3.** The `format_version` of a receipt whose `source.auth.mode`
+/// The `format_version` of a receipt whose `source.auth.mode`
 /// is one of the modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — a
 /// MINOR bump over [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] (PROD-05.1's
 /// 1.3.0, which merged first), because the change is new content in an
@@ -952,7 +952,7 @@ pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 /// `docs/verify_scorecard.py`'s `RECEIPT_AUTH_MODES_SINCE_MINOR` follows it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 4;
 
-/// **PROD-01.4a.** The `format_version` of a receipt that carries
+/// The `format_version` of a receipt that carries
 /// `generations` — a MINOR bump over [`FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`]
 /// (PROD-03.0's 1.5.0) under OD-7 (a): arms 36-40 read only the new optional
 /// block, so every document without it is decided exactly as before, and an
@@ -989,19 +989,19 @@ pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
 /// [`FORMAT_VERSION_WITH_AUTH_MODES`] when the auth mode is one
 /// PROD-01.3 added (it also defines PROD-05.1's `topic_configuration` and
 /// FX-7's pin), else [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`] when it
-/// carries `topic_configuration` (PROD-05.1),
+/// carries `topic_configuration`,
 /// else
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] when it pins the manifest's
 /// version, else [`RECEIPT_FORMAT_VERSION`] — FX-4's 1.1.0. The ONE place a
 /// writer decides it.
 ///
-/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] (PROD-04.1) comes first: a
+/// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`] comes first: a
 /// receipt carrying `consumer_positions` is 1.7.0, which defines every earlier
-/// minor's fields. [`FORMAT_VERSION_WITH_GENERATIONS`] (PROD-01.4a) comes
+/// minor's fields. [`FORMAT_VERSION_WITH_GENERATIONS`] comes
 /// next: a receipt carrying `generations` is 1.6.0, which defines every
 /// earlier minor's fields. Every receipt this build signs carries
 /// `generations`, so every one is at least 1.6.0.
-/// [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] (PROD-02.1) comes before both.
+/// [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`] comes before both.
 #[must_use]
 pub fn format_version_for(
     archive: &ReceiptArchive,
@@ -1115,7 +1115,7 @@ impl BackupReceipt {
     ///    no spelling for. LAST of the 1.0.0 arms on purpose — the four
     ///    consistency arms are what an auditor reads first, and a receipt that
     ///    contradicts itself should say so before it is told its auth mode is
-    ///    unknown. Since 1.4.0 (PROD-01.3) it is three statements: 5a, the
+    ///    unknown. Since 1.4.0 it is three statements: 5a, the
     ///    closed two below 1.4.0 (unchanged); 5b, a PROD-01.3 mode under a
     ///    version that predates it; 5c, the closed five from 1.4.0.
     ///
@@ -1303,7 +1303,7 @@ impl BackupReceipt {
         // conversion is stated once, there, and nothing else in the tree
         // converts between the two conventions.
         //
-        // PROD-02.1 (1.8.0): the EMPTY window `[t, t)` is an empty capture —
+        // The EMPTY window `[t, t)` is an empty capture —
         // an archive that holds no record, which an empty range is exactly
         // right for — and is admitted only beside `source_watermarks`, whose
         // arm 45 then proves it. Without the block (every older document) the
@@ -2123,7 +2123,7 @@ impl BackupReceipt {
         Ok(())
     }
 
-    /// **PROD-02.1.** Whether this receipt is an EMPTY CAPTURE: a backup whose
+    /// Whether this receipt is an EMPTY CAPTURE: a backup whose
     /// source held no record in any selected partition, so its archive holds
     /// none and its `covered` window is the empty `[t, t)`. Meaningful on a
     /// receipt `validate_invariants` accepted (arm 4 admits the empty window
@@ -2485,7 +2485,7 @@ pub fn empty_capture_contradiction(
     })
 }
 
-/// **PROD-02.1.** The partitions that held no record at capture (`low ==
+/// The partitions that held no record at capture (`low ==
 /// high`), as `(topic, partition)` in topic name order, then index.
 #[must_use]
 pub fn empty_partitions(watermarks: &BTreeMap<String, Vec<[u64; 2]>>) -> Vec<(String, usize)> {

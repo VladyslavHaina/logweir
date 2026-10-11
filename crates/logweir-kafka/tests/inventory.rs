@@ -165,7 +165,7 @@ fn double_underscore_is_internal() {
             "{internal} must be internal"
         );
     }
-    // THE NAMES THAT ARE NOT GUESSED (D2 §5.3). A single underscore, a
+    // THE NAMES THAT ARE NOT GUESSED. A single underscore, a
     // Confluent convention and a Connect topic all have configurable names, and
     // a wrong "this is internal" silently drops a user's topic from a listing.
     for user in [
@@ -867,7 +867,7 @@ fn a_create_validation_result_maps_to_the_topic_create_row() {
 
 /// **The guard a double cannot express.** `validate_only(true)` is the only
 /// thing standing between a restore preflight and a preflight that CREATES
-/// every mapped target topic (D2 §6.7, G12). A fake probe never sends the
+/// every mapped target topic. A fake probe never sends the
 /// request, so the assertion is over the source.
 #[test]
 fn validate_only_is_set_on_every_create_request() {
@@ -1295,7 +1295,7 @@ fn a_tls_ca_file_reaches_the_check_clients_ssl_ca_location() {
     assert_eq!(cfg.get("ssl.endpoint.identification.algorithm"), None);
 
     // 4. PLAINTEXT: no TLS keys at all. A check never upgrades a transport
-    //    because a CA happens to be around (D-SEAMS S5).
+    //    because a CA happens to be around.
     let cfg = check_client_config(&settings(
         AuthConfig::from_spec(&logweir_core::spec::AuthSpec::Plaintext, None)
             .expect("interface I1"),

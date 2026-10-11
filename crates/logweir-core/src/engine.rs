@@ -291,7 +291,7 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
     (lower, lower + straddling)
 }
 
-/// **FX-23.** The count bound of ONE partition over `[floor_ms, pit_ms]`,
+/// The count bound of ONE partition over `[floor_ms, pit_ms]`,
 /// both ends inclusive: `(lower, upper)`, read from that partition's own
 /// segments.
 ///
@@ -307,7 +307,7 @@ pub fn expected_restored_count(facts: &BackupSetFacts, floor_ms: i64, pit_ms: i6
 /// cannot add 2: a segment with BOTH ends inside is wholly inside) and its
 /// whole `record_count` to `upper`, exactly as before.
 ///
-/// # Why per partition (FX-23)
+/// # Why per partition
 ///
 /// The aggregate bound is one sum over every mapped topic, and a sum has
 /// slack: a restore an engine stopped early (a SIGTERM is seen between
@@ -345,7 +345,7 @@ pub fn partition_count_bound(p: &PartitionFacts, floor_ms: i64, pit_ms: i64) -> 
     (lower, lower + straddling)
 }
 
-/// **FX-23.** What the engine's own offset report says it restored, read by
+/// What the engine's own offset report says it restored, read by
 /// the engine adapter after a restore that exited 0 and handed to phase 7.
 ///
 /// The pinned engine writes the report only from the `Ok` arm of a completed
@@ -412,7 +412,7 @@ pub struct TopicFacts {
 }
 
 impl TopicFacts {
-    /// **FX-8.** The newest record timestamp the manifest RECORDS for this
+    /// The newest record timestamp the manifest RECORDS for this
     /// topic: the maximum, over every segment of every partition, of the
     /// segment's first AND last record timestamp. `None` when the manifest
     /// records no segment for the topic.
@@ -423,7 +423,7 @@ impl TopicFacts {
     ///
     /// A LOWER bound on the newest archived timestamp, never the value itself:
     /// a record inside a segment can be later than both ends, which only
-    /// decoding the segment shows (PROD-01.1b). `crate::time_basis` reads it
+    /// decoding the segment shows. `crate::time_basis` reads it
     /// both ways, and only one is certain (review L-1): a window END below it
     /// certainly excludes an archived record, so that window is a time
     /// selection; a window end at or after it excludes nothing THE MANIFEST
@@ -488,7 +488,7 @@ pub struct RestorePlan {
     /// release) that `ArchiveManifest` implies `time_window.0` equals the
     /// manifest floor it just computed, and refuses exit 3 otherwise.
     pub window_floor_source: WindowFloorSource,
-    /// **PROD-11.1.** Per-topic source partition subsets, keyed by SOURCE
+    /// Per-topic source partition subsets, keyed by SOURCE
     /// topic, each list sorted and unique (`restore.partitions` in the spec,
     /// validated by `crate::replay_selection::ReplaySelection`). A mapped topic
     /// not named here restores every partition. EMPTY for every plan that
@@ -550,7 +550,7 @@ pub struct RestorePlan {
 ///
 /// The CA certificate file a TLS connection's brokers are verified against,
 /// when it is not in the engine's bundled roots — rendered as the engine's
-/// `ssl_ca_location` (PLAT-07.1). It is a POD-LOCAL PATH to a file projected
+/// `ssl_ca_location`. It is a POD-LOCAL PATH to a file projected
 /// from the saved connection, never certificate text, and it is attached by the
 /// runner from `crate::connection::{SOURCE,TARGET}_TLS_CA_FILE_ENV` after the
 /// plan is built, exactly as the password placeholder is: a trust anchor is a
@@ -795,14 +795,14 @@ pub struct PreflightReport {
 /// Logweir-measured, never engine-reported: `restore` has no --format
 /// [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/main.rs:47-51]. The one
 /// engine artifact carried here, `engine_report`, is its offset-mapping file,
-/// read only for what it LACKS (FX-23).
+/// read only for what it LACKS.
 #[derive(Debug, Clone)]
 pub struct RestoreFacts {
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
     pub exit_code: i32,
     pub unknown_key_warnings: Vec<String>,
-    /// **FX-23.** The engine's offset report as the adapter read it after the
+    /// The engine's offset report as the adapter read it after the
     /// restore exited 0 ([`EngineReport`]). `Absent` from an engine that
     /// writes none.
     pub engine_report: EngineReport,

@@ -60,7 +60,7 @@ pub struct DrillSpec {
 }
 
 /// Spec §3.2 `Restore.spec`'s restore block — the recovery POINT, which is the
-/// half of the window every spec states, and (PROD-11.1) the optional replay
+/// half of the window every spec states, and the optional replay
 /// selection: an inclusive window START and per-topic partition subsets.
 ///
 /// # The window start: absent is the archive's floor (guard G-WIN, amended)
@@ -99,7 +99,7 @@ pub struct DrillSpec {
 /// reason: a key an older build would ignore cannot carry a narrowing. A plan
 /// that states no start keeps the instant form byte for byte.
 ///
-/// # Partition subsets ride on the same mechanism (PROD-11.1b)
+/// # Partition subsets ride on the same mechanism
 ///
 /// `restore.partitions` IS a key of its own, which a runner built before
 /// PROD-11.1 ignores. So a plan stating one must write its point in time in an
@@ -125,7 +125,7 @@ pub struct DrillSpec {
 #[derive(Debug, Clone, Default)]
 pub struct RestoreSpecBlock {
     pub point_in_time: Option<DateTime<Utc>>,
-    /// **FX-8.** Which clock this plan accepts for its time selection over a
+    /// Which clock this plan accepts for its time selection over a
     /// `LogAppendTime` source topic.
     ///
     /// The archive holds each record's PRODUCER timestamp — the pinned engine
@@ -153,7 +153,7 @@ pub struct RestoreSpecBlock {
     /// byte-identical to what it was before the field existed when it states
     /// none.
     pub time_basis: Option<TimeBasis>,
-    /// **PROD-11.1.** The restore window's INCLUSIVE start: a record whose
+    /// The restore window's INCLUSIVE start: a record whose
     /// timestamp equals it is restored, as one equal to the end is. On the
     /// wire it is the first half of `point_in_time: "<start>/<end>"` (above);
     /// it is never a key of its own.
@@ -186,7 +186,7 @@ pub struct RestoreSpecBlock {
     /// subset, so each plan has one spelling. Empty for every plan that states
     /// none, which keeps its bytes.
     pub partitions: BTreeMap<String, Vec<i32>>,
-    /// **PROD-01.1a.** `true` restores an archive whose restored partitions
+    /// `true` restores an archive whose restored partitions
     /// hold records shaped like transaction markers, which is otherwise
     /// refused before phase 2 (`TransactionMarkersInArchive`,
     /// `crate::transaction_markers`); the run then skips the check and its
@@ -284,7 +284,7 @@ impl<'de> Deserialize<'de> for RestoreSpecBlock {
                 (start, Some(end), Some(form))
             }
         };
-        // PROD-11.1b: a partition subset is carried ONLY beside a point in
+        // A partition subset is carried ONLY beside a point in
         // time an older runner cannot parse, so no runner that would ignore
         // the key ever restores every partition of a narrowed plan; and the
         // open-start form is a subset plan's alone, so one plan has one
@@ -343,7 +343,7 @@ impl Serialize for RestoreSpecBlock {
         use serde::ser::Error;
         let instant = |t: DateTime<Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
         let point_in_time = match (self.window_start, self.point_in_time) {
-            // PROD-11.1b: a subset with no stated start is the OPEN-START
+            // A subset with no stated start is the OPEN-START
             // interval, the one form its parse accepts.
             (None, Some(end)) if !self.partitions.is_empty() => Some(PointInTimeOut::Interval(
                 format!("{OPEN_INTERVAL_START}/{}", instant(end)),
@@ -387,7 +387,7 @@ impl RestoreSpecBlock {
     }
 }
 
-/// **FX-8.** `restore.time_basis`'s closed value set: an unsupported spelling
+/// `restore.time_basis`'s closed value set: an unsupported spelling
 /// does not parse, so it can never be mistaken for an opt-in (the
 /// [`Anchor`] rule).
 ///
@@ -571,7 +571,7 @@ pub struct SourceSpec {
     #[serde(default = "latest")]
     pub backup: String,
     pub topics: Vec<String>,
-    /// **Execution contract v2** (decision D3 §5.5): the recovery point this
+    /// **Execution contract v2**: the recovery point this
     /// plan is bound to, re-verified by the runner against the archive before
     /// any data-plane work.
     ///
@@ -761,8 +761,7 @@ pub struct TopicNaming {
 }
 
 /// `target.topic_naming.original_name` — what the approver states about an
-/// original-name restore that the runner cannot observe for itself
-/// (PROD-15.1).
+/// original-name restore that the runner cannot observe for itself.
 ///
 /// `deny_unknown_fields`: a misspelt `owner_path` silently read as `false`
 /// would refuse the plan for the wrong reason, and a misspelt `owners` would
@@ -860,7 +859,7 @@ pub struct SampleSpec {
     pub anchor: Anchor,
     #[serde(default)]
     pub max_partitions: Option<u32>,
-    /// **PROD-08.1.** How much of the restore phase 7 verifies: `sampled`
+    /// How much of the restore phase 7 verifies: `sampled`
     /// (the default, and every plan written before this field) or `complete`
     /// — every archived segment of every restored partition hashed and
     /// decoded, the expected output computed from each record's OWN timestamp,
@@ -875,7 +874,7 @@ pub struct SampleSpec {
     /// every reader prints as "coverage not recorded", never as complete.
     #[serde(default, skip_serializing_if = "Coverage::is_sampled")]
     pub coverage: Coverage,
-    /// **PROD-08.1.** The bound on a `complete` verification: the most
+    /// The bound on a `complete` verification: the most
     /// archived records it decodes, summed over every restored partition.
     /// Absent means no bound. When the next partition would take the total
     /// past it, that partition and every later one are NOT compared, and the
@@ -890,7 +889,7 @@ fn n25() -> usize {
     25
 }
 
-/// **PROD-08.1.** How much of a restore phase 7 verifies — `sample.coverage`
+/// How much of a restore phase 7 verifies — `sample.coverage`
 /// in the plan, `integrity.verification.coverage` in the signed scorecard
 /// (format 1.4.0).
 ///
@@ -1062,7 +1061,7 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
-    /// **PROD-01.3.** SASL/SCRAM-SHA-256: the same exchange as `scramSha512`
+    /// SASL/SCRAM-SHA-256: the same exchange as `scramSha512`
     /// with SHA-256, over TLS or not. The engine spells the mechanism
     /// `SCRAM-SHA256` and librdkafka `SCRAM-SHA-256`.
     ScramSha256 {
@@ -1070,7 +1069,7 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
-    /// **PROD-01.3.** SASL/PLAIN — Confluent Cloud's API keys and Azure Event
+    /// SASL/PLAIN — Confluent Cloud's API keys and Azure Event
     /// Hubs' connection strings use it. **Over TLS only**: PLAIN sends the
     /// password itself, so `tls: false` (or absent) is refused with
     /// [`crate::connection::PlainWithoutTls`] by
@@ -1083,7 +1082,7 @@ pub enum AuthSpec {
         #[serde(default)]
         tls: bool,
     },
-    /// **PROD-01.3.** A TLS client certificate and no SASL (`security.protocol`
+    /// A TLS client certificate and no SASL (`security.protocol`
     /// `SSL`). There is no username: the identity is the certificate, which
     /// reaches the runner as a projected file pair
     /// ([`crate::connection::ClientCertificateFiles`]) and never through a
@@ -1259,7 +1258,7 @@ pub struct BackupSourceSpec {
     /// "everything" to the engine, and a mandatory allowlist whose absence
     /// means "all topics" is not an allowlist.
     pub topics: Vec<String>,
-    /// **PROD-05.1.** Topics whose configuration a declarative owner manages
+    /// Topics whose configuration a declarative owner manages
     /// outside Kafka's admin API — a Strimzi `KafkaTopic`, Terraform, a GitOps
     /// repository — declared by the plan. Each names one of `topics`, a kind
     /// (`strimzi` or `external`) and where its desired state lives; phase −1
@@ -1274,7 +1273,7 @@ pub struct BackupSourceSpec {
     /// declared owner, and it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_owners: Option<Vec<crate::topic_configuration::DeclaredOwner>>,
-    /// **PROD-04.1.** The consumer groups whose positions this backup records
+    /// The consumer groups whose positions this backup records
     /// as evidence, by exact id: never a pattern, never "all groups". Each
     /// gets one outcome in the receipt's `consumer_positions` block (captured,
     /// excluded with a reason, or failed); phase −1 refuses a blank, repeated

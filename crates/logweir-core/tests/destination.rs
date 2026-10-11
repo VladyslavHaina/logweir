@@ -1,4 +1,4 @@
-//! The pure destination model (decision D2 §3.1-§3.4), rule by rule.
+//! The pure destination model, rule by rule.
 //!
 //! Every rule here is asserted in BOTH directions — a violating value is
 //! refused AND a neighbouring legal value is accepted. A one-directional test
@@ -322,7 +322,7 @@ fn custom_endpoint_requires_path_style_for_engine() {
     let mut loc = tls_minio();
     loc.addressing = Addressing::VirtualHosted;
     let message = engine_compatible(&loc).expect_err("refused on the 0.23.3 pin too");
-    // A-C16-1 (PROD-00.3f): the message names the behaviour and NO engine
+    // A-C16-1: the message names the behaviour and NO engine
     // version, so it does not go stale at the next bump.
     assert!(
         message.contains("path-style") && message.contains("endpoint"),
@@ -433,7 +433,7 @@ fn the_location_digest_covers_place_and_not_route() {
     assert_eq!(aws_a.host_identity(), "aws/eu-west-1");
 }
 
-/// The digest is a value other tasks freeze into recovery points (D2 §3.7) and
+/// The digest is a value other tasks freeze into recovery points and
 /// compare on restore (§3.12), so its bytes are pinned here. A change to the
 /// preimage is a change to that contract and must be a reviewed diff.
 #[test]

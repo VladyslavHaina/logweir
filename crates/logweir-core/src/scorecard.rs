@@ -222,7 +222,7 @@ impl SelectionLabel {
     /// The `replay selection:` sentence, ending in what the document proves:
     /// about records of the OTHER partitions of a narrowed topic
     /// ([`OutsideTheSubset`], a 2.0.0 block only) and about records BEFORE a
-    /// stated start (review N1, [`BeforeTheStart`]). The same words in the
+    /// stated start ([`BeforeTheStart`]). The same words in the
     /// writer's `sample.coverage_note` ([`Self::coverage_note`]) and in the
     /// line both readers print (`logweir::verify::selection_lines`,
     /// `docs/verify_scorecard.py::_selection_lines`).
@@ -264,7 +264,7 @@ impl SelectionLabel {
     }
 
     /// The sentence that opens the writer's `sample.coverage_note`, naming
-    /// the selection in an EXISTING field (PROD-11.1 §5.2). Written before
+    /// the selection in an EXISTING field. Written before
     /// phase 7 judges anything, so it claims only what the plan's lane can say
     /// then: a sampled lane says it cannot show that no record before the
     /// start was restored; a complete lane says only that none was expected
@@ -285,7 +285,7 @@ impl SelectionLabel {
 }
 
 /// What a 2.0.0 document proves about the OTHER partitions of a topic its
-/// selection narrowed (PROD-11.1b). A verification whose `integrity.result` is
+/// selection narrowed. A verification whose `integrity.result` is
 /// `pass` shows that none of them holds a restored record, on either lane:
 /// the sampled lane holds every target partition the plan did not select to
 /// empty (a record there is a finding, `fail`), and the complete lane lists
@@ -326,7 +326,7 @@ impl OutsideTheSubset {
 }
 
 /// What a document from a stated start proves about the records BEFORE that
-/// start (PROD-11.1 review N1). Only a COMPLETE verification whose
+/// start. Only a COMPLETE verification whose
 /// `integrity.result` is `pass` shows that none was restored: there a
 /// restored record below the start is `unexpected`, and IV-6 holds a
 /// complete pass to no unexpected record in any partition. A SAMPLED check
@@ -427,8 +427,8 @@ pub struct TimeBasisLabel {
     pub not_recorded: Vec<String>,
 }
 
-/// The first minor of scorecard format 1 that defines `source.time_basis`
-/// (FX-8), which arm TB-1 enforces. **A renumber changes this and
+/// The first minor of scorecard format 1 that defines `source.time_basis`,
+/// which arm TB-1 enforces. **A renumber changes this and
 /// [`crate::FORMAT_VERSION`] together**; TB-1's message is built from it,
 /// `docs/verify_scorecard.py`'s `SCORECARD_TIME_BASIS_SINCE_MINOR` must equal
 /// it (`docs/test_verify_scorecard.py::
@@ -436,71 +436,66 @@ pub struct TimeBasisLabel {
 /// `the_written_version_defines_time_basis` keeps the pair coherent.
 pub const TIME_BASIS_SINCE_MINOR: u64 = 3;
 
-/// **PROD-01.3.** The first minor of scorecard format 1 whose
+/// The first minor of scorecard format 1 whose
 /// `target.auth.mode` may be one of `crate::connection::PROD_01_3_AUTH_MODES`
 /// (`scramSha256`, `plain`, `mtls`). **A renumber changes this and
 /// [`FORMAT_VERSION_WITH_AUTH_MODES`] together**, and
 /// `docs/verify_scorecard.py`'s `SCORECARD_AUTH_MODES_SINCE_MINOR` follows it.
 pub const AUTH_MODES_SINCE_MINOR: u64 = 5;
 
-/// **PROD-01.3.** The `format_version` of a scorecard whose `target.auth.mode`
-/// is one of the modes PROD-01.3 added — a MINOR bump over
+/// The `format_version` of a scorecard whose `target.auth.mode` is
+/// `scramSha256`, `plain` or `mtls`: a MINOR bump over
 /// [`crate::FORMAT_VERSION`] (1.4.0) for new content in an existing field that
 /// an older reader can only refuse (OD-7, third case). Written only for those
 /// modes ([`format_version_for_target`]), so every scorecard of a restore into
 /// a `plaintext` or `scramSha512` target is the 1.4.0 document it was.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.5.0";
 
-/// **FX-23.** The first minor of scorecard format 1 that defines
+/// The first minor of scorecard format 1 that defines
 /// `sample.unsampled_topics`, which arm US-1 enforces. **A renumber changes
 /// this and [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] together**, and
 /// `docs/verify_scorecard.py`'s `SCORECARD_UNSAMPLED_TOPICS_SINCE_MINOR`
 /// follows it.
 pub const UNSAMPLED_TOPICS_SINCE_MINOR: u64 = 6;
 
-/// **FX-23.** The `format_version` of every SAMPLED-lane scorecard a build
-/// with FX-23's checks signs, and of every one that carries
-/// `sample.unsampled_topics` — a MINOR bump for a new optional field, under
-/// OD-7: arms US-1 to US-3 read only that field and can only refuse. Written
-/// for every sampled document so the version marks the fixed build (the
-/// orchestrator's decision on review M2, 2026-10-08): a 1.4.0 or 1.5.0
-/// document is otherwise the same bytes whichever build signed it. A
-/// complete verification's scorecard is the 1.4.0 or 1.5.0 document it was
-/// ([`format_version_with_sample`]). The newest minor: the current schema
-/// file is this version's.
+/// The `format_version` of every SAMPLED-lane scorecard a build with the
+/// per-topic sampled-lane checks signs, and of every one that carries
+/// `sample.unsampled_topics`: a MINOR bump for a new optional field, under
+/// OD-7, since arms US-1 to US-3 read only that field and can only refuse.
+/// Written for every sampled document so the version marks the fixed build: a
+/// 1.4.0 or 1.5.0 document is otherwise the same bytes whichever build signed
+/// it. A complete verification's scorecard is the 1.4.0 or 1.5.0 document it
+/// was ([`format_version_with_sample`]).
 pub const FORMAT_VERSION_WITH_UNSAMPLED_TOPICS: &str = "1.6.0";
 
-/// **PROD-11.1.** The first minor of scorecard format 1 that defines
+/// The first minor of scorecard format 1 that defines
 /// `source.selection`, which arm SEL-1 enforces. **A renumber changes this and
 /// [`FORMAT_VERSION_WITH_SELECTION`] together**, and
 /// `docs/verify_scorecard.py`'s `SCORECARD_SELECTION_SINCE_MINOR` follows it.
 pub const SELECTION_SINCE_MINOR: u64 = 7;
 
-/// **PROD-11.1.** The `format_version` of a scorecard that carries
-/// `source.selection` (a stated window start) — a MINOR bump for a new
-/// optional block, under OD-7: arms SEL-1 to SEL-3 read only that block, or
-/// judge an existing field against it and can only refuse. Written only for a
-/// restore that states a start ([`format_version_with_selection`]), so every
-/// other document is the one it was. The newest minor: the current schema
-/// file is this version's.
+/// The `format_version` of a scorecard that carries `source.selection` (a
+/// stated window start): a MINOR bump for a new optional block, under OD-7,
+/// since arms SEL-1 to SEL-3 read only that block, or judge an existing field
+/// against it, and can only refuse. Written only for a restore that states a
+/// start ([`format_version_with_selection`]), so every other document is the
+/// one it was.
 pub const FORMAT_VERSION_WITH_SELECTION: &str = "1.7.0";
 
-/// **PROD-15.1.** The first minor of scorecard format 1 that defines
+/// The first minor of scorecard format 1 that defines
 /// `target.original_name`, which arm ON-1 enforces. **A renumber changes this
 /// and [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] together**, and
 /// `docs/verify_scorecard.py`'s `SCORECARD_ORIGINAL_NAME_SINCE_MINOR` follows
 /// it.
 pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
 
-/// **PROD-15.1.** The `format_version` of a scorecard that carries
-/// `target.original_name` — a restore under the source's ORIGINAL topic names
-/// into absent topics (OD-2). A MINOR bump for a new optional block, under
-/// OD-7 (a): arms ON-1 to ON-14 read only that block (ON-2, ON-3, ON-7,
-/// ON-13 and ON-14 judge existing fields against it) and can only refuse.
-/// Written only for an original-name restore
-/// ([`format_version_with_original_name`]), so every other document is the
-/// one it was. The newest minor of FORMAT 1:
-/// `schemas/logweir-drill-scorecard-1.8.0.json` is this version's file
+/// The `format_version` of a scorecard that carries `target.original_name`: a
+/// restore under the source's ORIGINAL topic names into absent topics. A MINOR
+/// bump for a new optional block, under OD-7 (a): arms ON-1 to ON-14 read only
+/// that block (ON-2, ON-3, ON-7, ON-13 and ON-14 judge existing fields against
+/// it) and can only refuse. Written only for an original-name restore
+/// ([`format_version_with_original_name`]), so every other document is the one
+/// it was. Its schema is `schemas/logweir-drill-scorecard-1.8.0.json`
 /// ([`crate::schema::scorecard_format_1_schema`]).
 ///
 /// **The block is format 1's only.** An original-name restore restores whole
@@ -512,7 +507,7 @@ pub const ORIGINAL_NAME_SINCE_MINOR: u64 = 8;
 pub const FORMAT_VERSION_WITH_ORIGINAL_NAME: &str = "1.8.0";
 
 /// The `format_version` a scorecard is written with once its target block is
-/// known (PROD-15.1): at least [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] when it
+/// known: at least [`FORMAT_VERSION_WITH_ORIGINAL_NAME`] when it
 /// carries `target.original_name`, else `current` unchanged. 1.8.0 defines
 /// everything 1.7.0 does. Monotonic: never lowers `current` — so a `current`
 /// of 2.0.0 (a partition subset) stays 2.0.0, and such a document is then
@@ -530,29 +525,20 @@ pub fn format_version_with_original_name<'a>(
     }
 }
 
-// ---------------------------------------------------------------------------
-// THE APPROVAL-MODE VOCABULARY — ONE DEFINITION (PROD-16.2)
-//
-// How a run was authorised, in the words a scorecard signs. A closed set
-// inside signed evidence: every holder of it is listed here, and the two that
-// cannot share this definition are held to it by a row.
-//
-// * the runner's writer takes its words from here
-//   (`logweir::drill::phase1_approval::APPROVAL_MODE_*` are these constants);
-// * `logweir_core::approval_policy::ApprovalRoute::approval_mode` maps a
+// The approval-mode vocabulary: how a run was authorised, in the words a
+// scorecard signs. A closed set inside signed evidence, held in exactly these
+// places:
+// * the runner's writer (`logweir::drill::phase1_approval::APPROVAL_MODE_*` are
+//   these constants);
+// * `logweir_core::approval_policy::ApprovalRoute::approval_mode`, which maps a
 //   policy's row to its word;
-// * this file's arms ON-5, ON-11 and CA-2, CA-8 read the set;
-// * `docs/verify_scorecard.py` holds its own copy (it shares no code with
-//   this crate, on purpose), and
-//   `crates/logweir/tests/two_reader_parity.rs` reads that copy out of the
-//   script and compares it with this one, member for member;
-// * the JSON schemas type both fields as strings and enumerate nothing;
-// * nothing else holds it: the controller copies no approval mode into
-//   `Restore.status`, the product API and the console show the POLICY's mode
-//   (`confirm`, `two-person`, `strict`; `Governed`, `Ordinary` in the audit
-//   record), which is `logweir_core::approval_policy`'s vocabulary, and no
-//   metric is labelled with either.
-// ---------------------------------------------------------------------------
+// * this file's arms ON-5, ON-11, CA-2 and CA-8;
+// * `docs/verify_scorecard.py`'s own copy, which
+//   `crates/logweir/tests/two_reader_parity.rs` compares with this one, member
+//   for member.
+// The JSON schemas enumerate nothing. The controller, the product API, the
+// console and the metrics carry the POLICY's mode (`approval_policy`'s
+// vocabulary), never this one.
 
 /// A per-run approval document v1: an approver's personal key, through the
 /// CLI or in a namespace on `legacy-governed-v1`.
@@ -561,9 +547,9 @@ pub const APPROVAL_MODE_V1: &str = "v1Approval";
 /// personal `GovernedApproval` key countersigns (`strict`).
 pub const APPROVAL_MODE_GOVERNED: &str = "governed";
 /// An authorization document v2 under an `Ordinary` policy: the requester's
-/// own confirmation in the console (`confirm`; OD-10).
+/// own confirmation in the console (`confirm`).
 pub const APPROVAL_MODE_ORDINARY: &str = "ordinary";
-/// **PROD-16.2.** An authorization document v2 under a `Governed` policy
+/// An authorization document v2 under a `Governed` policy
 /// whose `approverSignature` is `Console`: a second person signed in to the
 /// console and approved, and the console signed who and when
 /// (`two-person`). Defined from scorecard format 1.9.0 (and 2.1.0): never
@@ -585,23 +571,21 @@ pub const APPROVAL_MODES: [&str; 5] = [
 ];
 
 /// `target.original_name.approval_mode`'s closed set (arm ON-5): the approval
-/// document phase 1 verified — a per-run approval document v1 (the CLI, or a
-/// namespace on `legacy-governed-v1`), or an authorization document v2 under
-/// a `Governed` policy (a personal key, or — PROD-16.2, from 1.9.0 — a second
-/// person in the console) or an `Ordinary` one. A standing rehearsal
-/// authorization never authorises an original-name restore.
+/// document phase 1 verified: a per-run approval document v1 (the CLI, or a
+/// namespace on `legacy-governed-v1`), or an authorization document v2 under a
+/// `Governed` policy (a personal key or, from 1.9.0, a second person in the
+/// console) or an `Ordinary` one. A standing rehearsal authorization never
+/// authorises an original-name restore.
 ///
 /// **The set is four from 1.9.0, and was three at 1.8.0**
 /// ([`ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0`]): [`APPROVAL_MODE_CONSOLE`] is
-/// the member PROD-16.2 added, a value of 1.9.0 and later. ON-5 is split by
-/// version, as PROD-01.3 split `target.auth.mode`'s arm: under 1.8.0 the new
-/// member is refused as a value that version does not define (the sentence
-/// names the version), every 1.8.0 document is judged exactly as before, and
-/// from 1.9.0 the closed set is these four. A reader built at 1.8.0 refuses a
-/// 1.9.0 document naming the new member through its own closed-set sentence
-/// (the safer verdict: OD-7's third case), and this build accepts the member
-/// only beside the `approval.console` block that says who approved (arm
-/// CA-8).
+/// the member 1.9.0 added. ON-5 is split by version: under 1.8.0 the new member
+/// is refused as a value that version does not define (the sentence names the
+/// version), every 1.8.0 document is judged exactly as before, and from 1.9.0
+/// the closed set is these four. A reader built at 1.8.0 refuses a 1.9.0
+/// document naming the new member through its own closed-set sentence (the
+/// safer verdict: OD-7's third case), and this build accepts the member only
+/// beside the `approval.console` block that says who approved (arm CA-8).
 pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 4] = [
     APPROVAL_MODE_V1,
     APPROVAL_MODE_GOVERNED,
@@ -609,30 +593,29 @@ pub const ORIGINAL_NAME_APPROVAL_MODES: [&str; 4] = [
     APPROVAL_MODE_CONSOLE,
 ];
 
-/// `target.original_name.approval_mode`'s closed set under scorecard 1.8.0,
-/// PROD-15.1's: every member of [`ORIGINAL_NAME_APPROVAL_MODES`] but the one
-/// 1.9.0 added.
+/// `target.original_name.approval_mode`'s closed set under scorecard 1.8.0:
+/// every member of [`ORIGINAL_NAME_APPROVAL_MODES`] but the one 1.9.0 added.
 pub const ORIGINAL_NAME_APPROVAL_MODES_AT_1_8_0: [&str; 3] = [
     APPROVAL_MODE_V1,
     APPROVAL_MODE_GOVERNED,
     APPROVAL_MODE_ORDINARY,
 ];
 
-/// **PROD-16.2.** The first minor of scorecard format 1 that defines
+/// The first minor of scorecard format 1 that defines
 /// `approval.console` (arm CA-1). A renumber changes this and
 /// [`FORMAT_VERSION_WITH_CONSOLE_APPROVAL`] together, and
 /// `docs/verify_scorecard.py`'s `SCORECARD_CONSOLE_APPROVAL_SINCE_MINOR`
 /// follows it.
 pub const CONSOLE_APPROVAL_SINCE_MINOR: u64 = 9;
 
-/// **PROD-16.2.** The first minor of scorecard format 2 that defines
+/// The first minor of scorecard format 2 that defines
 /// `approval.console`. Format 2 is a partition-subset restore's, and such a
 /// restore may be approved in the console like any other, so the block is
 /// defined in BOTH lines: this is the 2.x minor that "moves with" 1.9.0
 /// (`docs/stability.md`).
 pub const CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2: u64 = 1;
 
-/// **PROD-16.2.** The `format_version` of a scorecard that carries
+/// The `format_version` of a scorecard that carries
 /// `approval.console` — a restore a second person approved in the console —
 /// when it is a format 1 document. A MINOR bump for a new optional block and
 /// one new member of an existing closed set, under OD-7: arms CA-1 to CA-8
@@ -644,7 +627,7 @@ pub const CONSOLE_APPROVAL_SINCE_MINOR_OF_MAJOR_2: u64 = 1;
 /// `schemas/logweir-drill-scorecard-1.9.0.json`.
 pub const FORMAT_VERSION_WITH_CONSOLE_APPROVAL: &str = "1.9.0";
 
-/// **PROD-16.2.** The same, for a PARTITION-SUBSET restore approved in the
+/// The same, for a PARTITION-SUBSET restore approved in the
 /// console: format 2's first minor. 2.1.0 is 2.0.0's fields plus the
 /// optional block, and is written only for that pair.
 /// `schemas/logweir-drill-scorecard-2.1.0.json`.
@@ -665,7 +648,7 @@ pub fn defines_console_approval(format_version: &str) -> bool {
 }
 
 /// The `format_version` a scorecard is written with once its approval is
-/// known (PROD-16.2): when it carries `approval.console`, at least
+/// known: when it carries `approval.console`, at least
 /// [`FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`] for a major-2 document
 /// (a partition subset) and at least [`FORMAT_VERSION_WITH_CONSOLE_APPROVAL`]
 /// for any other; else `current` unchanged. Monotonic within the major: it
@@ -914,16 +897,14 @@ impl OriginalNameInfo {
     }
 }
 
-/// **PROD-11.1b (the owner's decision OD-9 (a), 2026-10-09).** The
-/// `format_version` of a scorecard whose restore stated a PARTITION SUBSET —
+/// The `format_version` of a scorecard whose restore stated a PARTITION SUBSET:
 /// the format's first MAJOR. It is 1.7.0's fields with the subset meaning:
 /// `source.selection.partitions` is required (arm PS-1), and the existing
-/// `integrity.verification.complete.partitions[]` and the sampled lane's
-/// fields name the SELECTED partitions only, which a 1.x reader would read as
-/// every partition. So every reader before it refuses it as an unsupported
-/// major, and it is written ONLY for a subset restore
-/// ([`format_version_with_selection`]): every other document stays 1.x, byte
-/// for byte. The newest version: the current schema file is this version's.
+/// `integrity.verification.complete.partitions[]` and the sampled lane's fields
+/// name the SELECTED partitions only, which a 1.x reader would read as every
+/// partition. So every reader before it refuses it as an unsupported major, and
+/// it is written ONLY for a subset restore ([`format_version_with_selection`]):
+/// every other document stays 1.x, byte for byte.
 pub const FORMAT_VERSION_WITH_PARTITION_SUBSETS: &str = "2.0.0";
 
 /// The major of [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]: the newest major
@@ -932,7 +913,7 @@ pub const PARTITION_SUBSETS_MAJOR: u64 = 2;
 
 /// Whether a document of `format_version` defines a field format 1 added at
 /// minor `since_minor`: a 1.x document from that minor on, and every document
-/// of major 2, which is 1.7.0's fields plus the subset meaning (PROD-11.1b).
+/// of major 2, which is 1.7.0's fields plus the subset meaning.
 /// `false` for a version that does not parse or names another major.
 #[must_use]
 pub fn defines_format_1_minor(format_version: &str, since_minor: u64) -> bool {
@@ -944,7 +925,7 @@ pub fn defines_format_1_minor(format_version: &str, since_minor: u64) -> bool {
 }
 
 /// Whether a document of `format_version` defines `target.original_name`
-/// (arm ON-1, PROD-15.1): a 1.x document from 1.8.0 on, and NO document of
+/// (arm ON-1): a 1.x document from 1.8.0 on, and NO document of
 /// another major. Unlike [`defines_format_1_minor`], major 2 does not define
 /// it: a 2.x document is a partition-subset restore's, and a restore under
 /// the original topic names restores whole topics (arm ON-14).
@@ -964,10 +945,10 @@ fn known_major(format_version: &str) -> bool {
     )
 }
 
-/// The NEWER of two scorecard versions, by major and then minor (PROD-11.1
-/// review: every version step takes the max, so a later version is never
-/// downgraded by an earlier step; PROD-11.1b: a 2.0.0 chosen for a subset is
-/// never lowered to a 1.x minor). A version this build cannot parse is kept
+/// The NEWER of two scorecard versions, by major and then minor. Every version
+/// step takes the max, so a later version is never downgraded by an earlier
+/// step, and a 2.0.0 chosen for a subset is never lowered to a 1.x minor. A
+/// version this build cannot parse is kept
 /// as it is, so a malformed value is never silently replaced.
 #[must_use]
 pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
@@ -981,11 +962,11 @@ pub fn newer_format_version<'a>(a: &'a str, b: &'a str) -> &'a str {
 }
 
 /// The `format_version` a scorecard is written with once its plan's replay
-/// selection is known (PROD-11.1): [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]
-/// (2.0.0) when its `source.selection` names a partition subset
-/// (PROD-11.1b), at least [`FORMAT_VERSION_WITH_SELECTION`] when it carries a
-/// start-only block, else `current` unchanged. 1.7.0 defines everything 1.6.0
-/// does, and 2.0.0 everything 1.7.0 does. Monotonic: never lowers `current`.
+/// selection is known: [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`] (2.0.0) when
+/// its `source.selection` names a partition subset, at least
+/// [`FORMAT_VERSION_WITH_SELECTION`] when it carries a start-only block, else
+/// `current` unchanged. 1.7.0 defines everything 1.6.0 does, and 2.0.0
+/// everything 1.7.0 does. Monotonic: never lowers `current`.
 #[must_use]
 pub fn format_version_with_selection<'a>(
     current: &'a str,
@@ -1000,8 +981,8 @@ pub fn format_version_with_selection<'a>(
     }
 }
 
-/// **FX-23 review M2.** Whether a scorecard's `format_version` shows that a
-/// build with FX-23's sampled-lane checks signed it: major 1, minor 1.6 or
+/// Whether a scorecard's `format_version` shows that a build with the
+/// per-topic sampled-lane checks signed it: major 1, minor 1.6 or
 /// later. Only such a build writes 1.6.0. A 1.4.0 or 1.5.0 document is
 /// byte-for-byte the same whichever build signed it, so its sampled `pass`
 /// proves only what such a pass always proved: the canary and one count
@@ -1010,26 +991,26 @@ pub fn format_version_with_selection<'a>(
 /// `docs/verify_scorecard.py::_sampled_pass_lines`).
 #[must_use]
 pub fn proves_fx23_sampled_checks(format_version: &str) -> bool {
-    // PROD-11.1b: a 2.0.0 document is written only by a build with FX-23's
-    // checks, which it holds over the selected partitions.
+    // A 2.0.0 document is written only by a build with these checks, which it
+    // holds over the selected partitions.
     defines_format_1_minor(format_version, UNSAMPLED_TOPICS_SINCE_MINOR)
 }
 
 /// The `format_version` a scorecard is written with once its plan's coverage
-/// and its `sample` block are known (FX-23):
-/// [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`] for a SAMPLED verification — so
-/// a sampled `pass` reads with the guarantees only an FX-23 build gives — and
-/// for any block naming an unsampled topic; else `current`, the version
-/// [`format_version_for_target`] chose, unchanged (a complete verification).
-/// 1.6.0 defines everything 1.5.0 does, so a sampled document of a PROD-01.3
-/// auth mode is 1.6.0 too. Monotonic: it never lowers `current`.
+/// and its `sample` block are known: [`FORMAT_VERSION_WITH_UNSAMPLED_TOPICS`]
+/// for a SAMPLED verification (so a sampled `pass` reads with the guarantees
+/// only such a build gives) and for any block naming an unsampled topic; else
+/// `current`, the version [`format_version_for_target`] chose, unchanged (a
+/// complete verification). 1.6.0 defines everything 1.5.0 does, so a sampled
+/// document of a 1.5.0 auth mode is 1.6.0 too. Monotonic: it never lowers
+/// `current`.
 #[must_use]
 pub fn format_version_with_sample<'a>(
     current: &'a str,
     sample: &SampleInfo,
     coverage: crate::spec::Coverage,
 ) -> &'a str {
-    // MONOTONIC (the PROD-11.1 review): at least 1.6.0, never lower than the
+    // At least 1.6.0, never lower than the
     // version handed in, so a later minor a step before this one chose (1.7.0
     // for a stated window start) is never written over.
     if coverage == crate::spec::Coverage::Sampled || sample.unsampled_topics.is_some() {
@@ -1040,8 +1021,8 @@ pub fn format_version_with_sample<'a>(
 }
 
 /// The `format_version` a scorecard is written with, given its
-/// `target.auth` block: [`FORMAT_VERSION_WITH_AUTH_MODES`] for a PROD-01.3
-/// mode, else [`crate::FORMAT_VERSION`].
+/// `target.auth` block: [`FORMAT_VERSION_WITH_AUTH_MODES`] for a
+/// `scramSha256`, `plain` or `mtls` target, else [`crate::FORMAT_VERSION`].
 #[must_use]
 pub fn format_version_for_target(auth: Option<&AuthSummary>) -> &'static str {
     match auth {
@@ -1575,7 +1556,7 @@ pub struct PartitionVerification {
 }
 
 /// The first minor of scorecard format 1 that defines
-/// `integrity.verification` (PROD-08.1), which arm IV-1 enforces. **A
+/// `integrity.verification`, which arm IV-1 enforces. **A
 /// renumber changes this and [`crate::FORMAT_VERSION`] together**; IV-1's
 /// message is built from it, `docs/verify_scorecard.py`'s
 /// `SCORECARD_VERIFICATION_SINCE_MINOR` must equal it.
@@ -1753,7 +1734,7 @@ pub struct TopicParity {
 }
 
 /// The first minor of scorecard format 1 that defines
-/// `topic_parity.not_reconstructed` (FX-3), which arm NR-1 of
+/// `topic_parity.not_reconstructed`, which arm NR-1 of
 /// `validate_invariants` enforces. **A renumber changes this and
 /// [`crate::FORMAT_VERSION`] together**; NR-1's message is built from it,
 /// `docs/verify_scorecard.py`'s `TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR`
@@ -1763,7 +1744,7 @@ pub struct TopicParity {
 pub const NOT_RECONSTRUCTED_SINCE_MINOR: u64 = 2;
 
 /// The four settings a restore's own topic creation DECIDES instead of copying
-/// from the source (FX-3): `cleanup.policy` (left to the target broker),
+/// from the source: `cleanup.policy` (left to the target broker),
 /// `retention.ms` (`-1`), and the partition count and replication factor (the
 /// manifest's and the plan's). They are the only `<key>`s phase 7 can write
 /// into `intentionally_deviated` (a scratch drill) or `not_reconstructed` (a
@@ -1924,8 +1905,7 @@ fn major_version(v: &str) -> Option<u64> {
 
 /// The second dot-separated component of a semver string, parsed as an
 /// integer; `None` when there is none or it does not parse. Read by the arms
-/// that ask whether a document's version defines a field added in a minor
-/// (FX-3's NR-1, FX-8's TB-1).
+/// that ask whether a document's version defines a field added in a minor.
 fn minor_version(v: &str) -> Option<u64> {
     v.split('.').nth(1)?.parse().ok()
 }
@@ -1964,26 +1944,18 @@ impl Scorecard {
     /// `format_version` whose major is newer than the one this binary
     /// understands, and must ignore unknown fields.
     ///
-    /// Public, and separate from `validate_invariants`, because Logweir ships
-    /// THREE readers and the rule belongs to all of them. It used to be an
-    /// inlined first block of `validate_invariants`, which meant `drill
-    /// verify` honoured it (it calls that function) and `drill show` did not
-    /// (it never did) — a `format_version: "2.0.0"` document rendered its full
-    /// table, header reading `v2.0.0`, `outcome Pass`, and exited 0. A rule the
-    /// README states and the project keeps in one place out of three is not a
-    /// rule. `docs/verify_scorecard.py` is the third reader and implements the
-    /// same comparison against its own `FORMAT_VERSION` constant.
-    ///
+    /// Public, and separate from `validate_invariants`, because all three
+    /// readers apply it: `drill verify`, `drill show`, and
+    /// `docs/verify_scorecard.py` against its own `FORMAT_VERSION` constant.
     /// The comparison is against [`FORMAT_VERSION_WITH_PARTITION_SUBSETS`]'s
     /// major ([`PARTITION_SUBSETS_MAJOR`]), never re-derived some other way.
     ///
-    /// **Major 2 is read for ONE shape** (PROD-11.1b, the owner's OD-9 (a)):
-    /// a partition-subset restore's document, which carries
-    /// `source.selection.partitions`. A major-2 document without it is
-    /// refused here (arm PS-1), before any other rule reads it, so a reader
-    /// never applies 1.x meanings to a 2.x document whose shape it does not
-    /// know. `docs/verify_scorecard.py` makes the same two refusals, in this
-    /// order, with the same words.
+    /// **Major 2 is read for ONE shape**: a partition-subset restore's
+    /// document, which carries `source.selection.partitions`. A major-2
+    /// document without it is refused here (arm PS-1), before any other rule
+    /// reads it, so a reader never applies 1.x meanings to a 2.x document whose
+    /// shape it does not know. `docs/verify_scorecard.py` makes the same two
+    /// refusals, in this order, with the same words.
     pub fn refuse_unreadable_major(&self) -> Result<(), InvariantError> {
         let doc_major = major_version(&self.format_version).ok_or_else(|| {
             InvariantError(format!(
@@ -2016,29 +1988,25 @@ impl Scorecard {
         Ok(())
     }
 
-    /// The invariants spec §6.1 and §9.3 phase 8 state in prose. Called before
-    /// signing (Task 20) and by `drill verify` (Task 6), so no signed document
-    /// can carry a self-contradicting claim.
+    /// The document's invariants. Called before signing and by `drill verify`,
+    /// so no signed document can carry a self-contradicting claim.
     pub fn validate_invariants(&self) -> Result<(), InvariantError> {
         // Checked FIRST, so a document from a future major bump is rejected
         // before any other invariant is evaluated against fields that build
         // may have changed the meaning of.
         self.refuse_unreadable_major()?;
-        // T0-2: the four post-put fields are zeroed BEFORE signing
+        // The four post-put fields are zeroed BEFORE signing
         // (`crate::drill::phase8_score` zeroes them unconditionally), because
-        // they describe an upload that has not happened yet. This is a
-        // RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format change: no
-        // byte of the format changes, the accepted set narrows, and because the
-        // writer's zeroing is unconditional, no document Logweir has ever
-        // written is refused. GC12 holds — format_version stays 1.0.0.
-        // Scoped to major 1 so a future major may redefine the block.
+        // they describe an upload that has not happened yet. A RETROACTIVE
+        // TIGHTENING of the 1.0.0 reader, not a format change: the accepted set
+        // narrows, and no document Logweir has written is refused.
         //
         // Field order is the struct's own declaration order, and
         // `docs/verify_scorecard.py::check_invariants` mirrors this arm in the
         // same position with the same order and the same words, so a document
-        // violating two fields gets the SAME message from both readers.
-        // PROD-11.1b: and major 2, which is 1.7.0's fields plus the subset
-        // meaning, so every arm of major 1 holds for it.
+        // violating two fields gets the SAME message from both readers. Major 2
+        // is 1.7.0's fields plus the subset meaning, so every arm of major 1
+        // holds for it.
         if known_major(&self.format_version) {
             if self.evidence.version_id.is_some() {
                 return Err(InvariantError(
@@ -2060,30 +2028,23 @@ impl Scorecard {
                     "evidence.create_only_enforced is true but the four post-put fields are zeroed before signing".into(),
                 ));
             }
-            // `evidence.offset_report_*` (Task 9b — Global Constraint 12's
-            // price for two nested optional fields). ABSENT IS LEGAL and means
-            // this run recorded no offset-mapping report; the arm fires only
-            // on a document carrying ONE of the pair.
+            // `evidence.offset_report_*`: ABSENT IS LEGAL and means this run
+            // recorded no offset-mapping report; the arm fires only on a
+            // document carrying ONE of the pair. Both directions: a key with no
+            // digest names bytes nothing binds, and a digest with no key binds
+            // bytes nobody can fetch. `phase8_score::run` sets both from one
+            // `Option`, so this arm is for the documents this tree did not
+            // write.
             //
-            // BOTH DIRECTIONS, one statement, because the incoherence is
-            // symmetric: a key with no digest names bytes nothing binds, and a
-            // digest with no key binds bytes nobody can fetch. Neither is a
-            // document Logweir can write — `phase8_score::run` sets both from
-            // one `Option` — so this arm exists for the documents this tree
-            // did not write, which is every document a reader is handed.
+            // BLANK COUNTS AS ABSENT (`trim().is_empty()` here, `.strip()` in
+            // `docs/verify_scorecard.py`), or the two readers would split on
+            // `""`.
             //
-            // BLANK COUNTS AS ABSENT (ruling R-A: `trim().is_empty()` here,
-            // `.strip()` in `docs/verify_scorecard.py`). Without it the two
-            // readers would disagree on `""`: Rust's `is_some()` is true for
-            // `Some("")` while Python's truthiness test is false, which is
-            // exactly the class of split the parity gate exists to catch.
-            //
-            // Scoped to major 1 like the four arms above, so a future major
-            // may redefine the block. NOT INTERPOLATED: the message is joined
-            // to `index.json`'s `arm` field by literal substring
-            // (`crates/logweir/tests/two_reader_parity.rs::
-            // every_invariant_arm_has_a_corpus_case`), and a key in a refusal
-            // line would be an adopter-influenced string in a refusal line.
+            // NOT INTERPOLATED: the message is joined to `index.json`'s `arm`
+            // field by literal substring
+            // (`crates/logweir/tests/two_reader_parity.rs::every_invariant_arm_has_a_corpus_case`),
+            // and a key would put an adopter-influenced string in a refusal
+            // line.
             let offset_key_named = self
                 .evidence
                 .offset_report_key
@@ -2101,35 +2062,22 @@ impl Scorecard {
                 ));
             }
             // `target.marker_topic` is the SCRATCH SEGREGATION PROOF and
-            // nothing else (review F1, fix round 1). Its own doc comment says
-            // what carrying it means — `cluster_id ∈ allowedClusterIds` AND
-            // this topic exists, both verified at phase 0 — and in `newTopic`
-            // mode neither is verified, because they are skipped checks 1 and
-            // 3 of the mode branch. So the field is optional and `mode` is
-            // what says which run this was.
+            // nothing else: carrying it means `cluster_id ∈ allowedClusterIds`
+            // AND this topic exists, both verified at phase 0, and in
+            // `newTopic` mode neither is verified. So the field is optional and
+            // `mode` says which run this was.
             //
-            // ARMED IN ONE DIRECTION ONLY, and deliberately. An ABSENT marker
-            // requires `mode: newTopic`: a scratch document with no marker
-            // claims the proof phase 0 makes while omitting the thing the
-            // proof was made about. The other direction is NOT an invariant —
-            // a document may carry both `newTopic` and a marker topic — and
-            // the reason is that a reader must not refuse a document a
-            // FUTURE writer could legitimately produce (`TargetSpec::marker_topic`
-            // is a required spec field that a `newTopic` spec still carries,
-            // so recording it as an unverified echo is a coherent choice).
-            // What THIS tree writes is narrower than what its readers accept,
-            // which is the standing rule for every optional field in this
-            // format, and the narrower claim is a WRITER-side test:
-            // `crates/logweir/tests/restore_mode.rs::
-            // a_new_topic_scorecard_carries_the_mode_and_no_marker_topic`.
+            // ARMED IN ONE DIRECTION ONLY. An ABSENT marker requires
+            // `mode: newTopic`: a scratch document with no marker claims the
+            // proof phase 0 makes while omitting the thing the proof was made
+            // about. A `newTopic` document carrying a marker is NOT refused,
+            // because a future writer could legitimately record it as an
+            // unverified echo (`TargetSpec::marker_topic` is a required spec
+            // field). That this tree writes none is a writer-side test:
+            // `crates/logweir/tests/restore_mode.rs::a_new_topic_scorecard_carries_the_mode_and_no_marker_topic`.
             //
-            // BLANK COUNTS AS ABSENT (ruling R-A): `trim().is_empty()` here,
-            // `.strip()` in `docs/verify_scorecard.py`, so the two readers
-            // cannot split on `""` the way T0-6 found them splitting.
-            //
-            // Scoped to major 1 like every arm above. NOT INTERPOLATED: the
-            // message is joined to `index.json`'s `arm` field by literal
-            // substring.
+            // BLANK COUNTS AS ABSENT, as above. NOT INTERPOLATED: the message
+            // is joined to `index.json`'s `arm` field by literal substring.
             let marker_named = self
                 .target
                 .marker_topic
@@ -2142,16 +2090,11 @@ impl Scorecard {
                 ));
             }
         }
-        // Ruling R-A / T0-6: `.is_none()` accepted `""` and `"   "`, which
-        // `docs/verify_scorecard.py`'s truthiness test refuses — the two
-        // readers disagreed in the very file whose docstring claims (`ARM FOR
-        // ARM, IN ORDER`) that they cannot. Trimmed-empty is the strict side:
-        // it narrows the accepted set and changes no byte of the format, so it
-        // is a RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format change
-        // (GC12). No document Logweir has written carries a blank reason —
-        // `crate::drill::phase7_verify` builds it as `(!notes.is_empty())
-        // .then(|| notes.join("; "))`, so it is either absent or says
-        // something.
+        // A `Partial` result needs a reason that is not blank: trimmed-empty,
+        // like `docs/verify_scorecard.py`'s truthiness test, so both readers
+        // refuse `""` and `"   "`. A RETROACTIVE TIGHTENING of the 1.0.0
+        // reader, not a format change (GC12): `crate::drill::phase7_verify`
+        // writes the reason only when it says something.
         //
         // The message is byte-identical to `docs/verify_scorecard.py`'s and is
         // not to be reworded: `crates/logweir/tests/two_reader_parity.rs`
@@ -2239,18 +2182,11 @@ impl Scorecard {
             ));
         }
         // Every seconds-valued gap in the document is non-negative. These are
-        // the format's only signed integers, and each has a direction that,
-        // until now, only one call site enforced: `measured.rpo_seconds` by
-        // the clamp in `crate::drill::phase8_score::compute_measured`,
-        // `objectives.rpo_seconds` by nothing at all (it travels straight from
-        // adopter YAML into the signed document), and
-        // `measured.rpo_source_relative_seconds` by a writer that does not
-        // exist yet (`--from-cluster`). Stating the rule here, in the
-        // scorecard's own validator, converts a property guaranteed by one
-        // call site into one guaranteed by the type — including for phases not
-        // yet written. Checked field by field so the message names the
-        // offender. The four RTO figures need no equivalent: they are `u64`,
-        // so negative is already unrepresentable.
+        // the format's only signed integers, and no single writer guarantees
+        // the direction: `objectives.rpo_seconds` travels straight from adopter
+        // YAML into the signed document. Checked field by field so the message
+        // names the offender. The four RTO figures are `u64`, so negative is
+        // unrepresentable.
         for (name, value) in [
             ("measured.rpo_seconds", self.measured.rpo_seconds),
             (
@@ -2273,16 +2209,10 @@ impl Scorecard {
                 "records_sampled_matching exceeds records_sampled".into(),
             ));
         }
-        // T0-4: `outcome` is not a label, it is a claim entailed by the rest of
-        // the document. Until this block existed, `self.outcome` appeared in no
-        // arm of either reader, so a document saying `pass` beside its own
-        // contradicting evidence was accepted, signed and verified at exit 0 —
-        // `outcome: "pass"` with `integrity.partial_reason` naming an
-        // unreconciled topic, and `outcome: "pass"` with
-        // `records_sampled_matching: 50` against `records_sampled: 100`, were
-        // both live and falsifiable. A RETROACTIVE TIGHTENING of the 1.0.0
-        // reader, not a format change (GC12): no field is added and the
-        // accepted set only narrows.
+        // `outcome` is not a label, it is a claim entailed by the rest of the
+        // document, so `pass` beside contradicting evidence is refused. A
+        // RETROACTIVE TIGHTENING of the 1.0.0 reader, not a format change
+        // (GC12): no field is added and the accepted set only narrows.
         //
         // Mirrored arm for arm, in this order, with this wording, in
         // `docs/verify_scorecard.py::check_invariants`. The messages are not to
@@ -2293,9 +2223,9 @@ impl Scorecard {
                 "outcome is 'pass' but integrity.result is not 'pass'".into(),
             ));
         }
-        // The converse of the `Partial => partial_reason` arm above, using Task
-        // 4's trimmed-empty predicate (ruling R-A) so `""` and `"   "` count as
-        // absent in both readers.
+        // The converse of the `Partial => partial_reason` arm above, with the
+        // same trimmed-empty predicate, so `""` and `"   "` count as absent in
+        // both readers.
         if self.outcome == Outcome::Pass
             && !self
                 .integrity
@@ -2336,17 +2266,11 @@ impl Scorecard {
                 self.integrity.records_sampled, self.sample.records_expected
             )));
         }
-        // Ruling R-F, DISCHARGED against
-        // `logweir::drill::phase8_score::matrix_verdict_for` (phase8_score.rs —
-        // NOT phase7_verify.rs, which the backlog named and where the function
-        // does not exist): that function returns `Pass` on exactly one path,
-        // `(Outcome::Pass, IntegrityLevel::ByteFingerprint)`, reachable only
-        // when the phase-5 readback was itself `Pass`. Every other path returns
-        // `PassDegraded`, `Fail`, or the observed non-`Pass` value unchanged.
-        // The predicate therefore holds for every value the producer can emit,
-        // and this arm states it as a property of the DOCUMENT rather than of
-        // one call site. `pass-degraded` is the correct value for a pass at a
-        // reduced integrity level.
+        // `logweir::drill::phase8_score::matrix_verdict_for` returns `Pass`
+        // only for `(Outcome::Pass, IntegrityLevel::ByteFingerprint)`,
+        // reachable only when the phase-5 readback was itself `Pass`; this arm
+        // states that as a property of the DOCUMENT. `pass-degraded` is the
+        // correct value for a pass at a reduced integrity level.
         if self.engine.matrix_verdict == MatrixVerdict::Pass
             && !(self.outcome == Outcome::Pass
                 && self.integrity.level == IntegrityLevel::ByteFingerprint)
@@ -2373,40 +2297,27 @@ impl Scorecard {
         if !(-1..=9).contains(&self.last_phase_completed) {
             return Err(InvariantError("last_phase_completed outside -1..=9".into()));
         }
-        // `target.auth` (Task 5b — Global Constraint 12's price for one nested
-        // optional block). ABSENT IS LEGAL and means plaintext; these two arms
-        // fire only on a block that IS present.
+        // `target.auth`: ABSENT IS LEGAL and means plaintext; these arms fire
+        // only on a block that IS present.
         //
-        // BLANK IS NOT PLAINTEXT (ruling R-A: `trim().is_empty()` here,
-        // `.strip()` in `docs/verify_scorecard.py`). A blank mode read as
-        // "plaintext" would let a SCRAM run be recorded as an unauthenticated
-        // one by omission — the one direction an auditor must never have to
-        // guess at — and a `username` beside a blank mode is a principal
-        // recorded without the mechanism it authenticated with, which is the
-        // same defect with more evidence that it was not an accident.
+        // BLANK IS NOT PLAINTEXT (`trim().is_empty()` here, `.strip()` in
+        // `docs/verify_scorecard.py`). A blank mode read as "plaintext" would
+        // let a SCRAM run be recorded as an unauthenticated one by omission,
+        // and a `username` beside a blank mode is a principal recorded without
+        // the mechanism it authenticated with.
         //
-        // NEITHER MESSAGE INTERPOLATES. `docs/verify_scorecard.py` mirrors
-        // both word for word and `crates/logweir/tests/two_reader_parity.rs::
-        // every_invariant_arm_has_a_corpus_case` joins `index.json`'s `arm`
-        // field against this body by literal substring — a username in the
-        // message would make that join impossible and would additionally put
-        // an adopter-supplied string into a refusal line.
+        // NEITHER MESSAGE INTERPOLATES. `docs/verify_scorecard.py` mirrors both
+        // word for word and
+        // `crates/logweir/tests/two_reader_parity.rs::every_invariant_arm_has_a_corpus_case`
+        // joins `index.json`'s `arm` field against this body by literal
+        // substring; a username would also put an adopter-supplied string into
+        // a refusal line.
         //
-        // THE VALUE SET IS CLOSED (third arm, Task 5b fix round 1 — the
-        // controller's one-spelling ruling). `mode` is a `String` on the wire
-        // so that a reader can REPORT a value it refuses, but the accepted
-        // set is exactly `AuthSpec`'s two serde tags. Before the third arm a
-        // scorecard carrying `{"mode": "totally-made-up"}` verified 0/0 at
-        // both readers — proved by execution in Task 5b's review — which made
-        // the agreement between this block and `AuthSpec` an assertion about
-        // serde in one test file rather than a property of the document
-        // (Task 6's review, finding F-2).
-        //
-        // Task 6 FILLS this field from `AuthSpec::mode_str()`, whose return
-        // type is `&'static str` over exactly those two literals, so no
-        // scorecard this tree writes can reach the third arm; it exists for
-        // the documents this tree did not write, which is every document a
-        // reader is handed.
+        // THE VALUE SET IS CLOSED (the third arm). `mode` is a `String` on the
+        // wire so that a reader can REPORT a value it refuses, but the accepted
+        // set is exactly `AuthSpec`'s serde tags. The writer fills it from
+        // `AuthSpec::mode_str()`, so the arm is for the documents this tree did
+        // not write.
         if let Some(auth) = &self.target.auth {
             let mode_blank = auth.mode.trim().is_empty();
             let username_named = auth
@@ -2426,30 +2337,21 @@ impl Scorecard {
                 ));
             }
             // NOT INTERPOLATED, like the two arms above it and unlike the
-            // receipt's arm 5: the value here is `AuthSummary.mode`, and
-            // these three messages are joined to `index.json`'s `arm` field
-            // by LITERAL substring against this body
-            // (`crates/logweir/tests/two_reader_parity.rs::
-            // every_invariant_arm_has_a_corpus_case`). A placeholder would
-            // make that join a pattern match, and it would put an
-            // adopter-supplied string into a scorecard refusal line, which is
-            // the rule this block already states above.
-            // The EXACT wire value, not a trimmed one: the accepted set is two
-            // exact literals, the blank arm above has already refused a
-            // whitespace-only mode, and `" plaintext "` is a value no writer
-            // in this tree produces. Both documents use the same rule —
-            // `ReceiptAuth::mode`'s arm 5 does not trim either — so one
-            // spelling means one comparison as well as one string.
+            // receipt's arm 5: these three messages are joined to
+            // `index.json`'s `arm` field by LITERAL substring against this
+            // body. The EXACT wire value, not a trimmed one: the blank arm
+            // above has already refused a whitespace-only mode, and
+            // `ReceiptAuth::mode`'s arm 5 does not trim either, so one spelling
+            // means one comparison.
             //
-            // PROD-01.3 (format 1.5.0) SPLITS THIS ARM BY VERSION and leaves
-            // every document below 1.5.0 judged exactly as before: the three
-            // modes PROD-01.3 adds are values of 1.5.0 and later, so under an
-            // older minor they are refused as a value no writer of that
+            // Format 1.5.0 SPLITS THIS ARM BY VERSION and leaves every document
+            // below 1.5.0 judged exactly as before: under an older minor the
+            // three modes 1.5.0 adds are refused as a value no writer of that
             // version produced (the second statement below, which names the
             // version and never the mode), and from 1.5.0 the closed set is
             // five (the third). An older reader refuses a 1.5.0 scorecard
-            // naming a new mode through the first statement — the SAFER
-            // verdict, OD-7's third case — so the change is MINOR.
+            // naming a new mode through the first statement (the SAFER verdict,
+            // OD-7's third case), so the change is MINOR.
             let five_defined = defines_format_1_minor(&self.format_version, AUTH_MODES_SINCE_MINOR);
             if crate::connection::is_prod_01_3_auth_mode(&auth.mode) {
                 if !five_defined {
@@ -2472,17 +2374,14 @@ impl Scorecard {
                 ));
             }
         }
-        // `topic_parity.not_reconstructed` (format 1.2.0, FX-3): arms NR-1
-        // to NR-5. They fire ONLY on a document that CARRIES the block,
-        // so every document without it — every 1.0.0 and 1.1.0 scorecard, and
-        // a 1.2.0 one whose phase 7 never ran — is decided exactly as before.
-        // Each judges the new block, against `format_version` (NR-1) or the
-        // two lists every reader already shows (NR-2 to NR-5; NR-4 and NR-5
-        // only in a `newTopic` document), the way the receipt's FX-4 arms 6
-        // and 7 judge `config_coverage` against `format_version` and
-        // `source.topics`: MINOR under the owner's OD-7 (a)
-        // (`docs/stability.md`, "The v0.1.0 tag is the compatibility
-        // boundary"). Each can only refuse.
+        // `topic_parity.not_reconstructed` (format 1.2.0): arms NR-1 to NR-5.
+        // They fire ONLY on a document that CARRIES the block, so every
+        // document without it (every 1.0.0 and 1.1.0 scorecard, and a 1.2.0 one
+        // whose phase 7 never ran) is decided exactly as before. Each judges
+        // the block against `format_version` (NR-1) or the two lists every
+        // reader already shows (NR-2 to NR-5; NR-4 and NR-5 only in a
+        // `newTopic` document) and can only refuse: MINOR under OD-7 (a)
+        // (`docs/stability.md`).
         //
         // NOT INTERPOLATED, except NR-1's version: an entry names a topic, an
         // adopter-influenced string, and the messages are joined to
@@ -2508,7 +2407,7 @@ impl Scorecard {
             // NR-2. THE FAIL-SAFE TWIN: what makes the 1.2.0 move safe for an
             // older reader. It reads only the two lists it always had, so a
             // deviation named here and missing there would be SILENCE to it,
-            // which reads as parity — the defect FX-4's review M5 named.
+            // which reads as parity.
             if not_reconstructed
                 .iter()
                 .any(|e| !self.topic_parity.unexpected_divergence.contains(e))
@@ -2529,15 +2428,14 @@ impl Scorecard {
                         .into(),
                 ));
             }
-            // NR-4 and NR-5 (FX-3 review F1). In a `newTopic` document the
-            // block is the claim, so the two existing lists must agree with
-            // it, or a writer that regressed to the scratch labels (the mode
-            // lost on its way to phase 7) would sign `not_reconstructed: []`
-            // beside intended deviations: "nothing was left unreconstructed",
-            // a stronger claim than the pre-1.2.0 defect's, which both readers
-            // at least re-read as not reconstructed. Each fires only on a
-            // document that carries the block (so at 1.2.0 or later, NR-1) and
-            // whose `target.mode` is `newTopic`, and each can only refuse.
+            // NR-4 and NR-5. In a `newTopic` document the block is the claim,
+            // so the two existing lists must agree with it, or a writer that
+            // lost the mode on its way to phase 7 would sign
+            // `not_reconstructed: []` beside intended deviations: "nothing was
+            // left unreconstructed", a stronger claim than an older reader's
+            // re-read. Each fires only on a document that carries the block (so
+            // at 1.2.0 or later, NR-1) and whose `target.mode` is `newTopic`,
+            // and each can only refuse.
             if self.target.mode == TargetMode::NewTopic {
                 // NR-4. A `newTopic` restore labels nothing intended.
                 if !self.topic_parity.intentionally_deviated.is_empty() {
@@ -2560,13 +2458,11 @@ impl Scorecard {
                 }
             }
         }
-        // `source.time_basis` (format 1.3.0, FX-8): arms TB-1 to TB-4. They
-        // fire ONLY on a document that CARRIES the block and judge the block
-        // alone (TB-1 against `format_version`, as the receipt's FX-4 arm 6
-        // judges `config_coverage`), so every document without it — every
-        // scorecard before 1.3.0 — is decided exactly as before: MINOR under
-        // the owner's OD-7 (a) (`docs/stability.md`, "The v0.1.0 tag is the
-        // compatibility boundary").
+        // `source.time_basis` (format 1.3.0): arms TB-1 to TB-4. They fire ONLY
+        // on a document that CARRIES the block and judge the block alone (TB-1
+        // against `format_version`), so every document without it (every
+        // scorecard before 1.3.0) is decided exactly as before: MINOR under
+        // OD-7 (a) (`docs/stability.md`).
         //
         // NOT INTERPOLATED, except TB-1's version: the lists name topics, an
         // adopter-influenced string, and the messages are joined to
@@ -2622,18 +2518,15 @@ impl Scorecard {
                 ));
             }
         }
-        // `integrity.verification` (format 1.4.0, PROD-08.1): arms IV-1 to
-        // IV-7. They fire ONLY on a document that CARRIES the block and judge
-        // the block, or an existing field against it (IV-6, as NR-2 to NR-5
-        // judge the existing parity lists against `not_reconstructed`), so
-        // every document without it — every scorecard before 1.4.0 — is
-        // decided exactly as before: MINOR under the owner's OD-7 (a)
-        // (`docs/stability.md`, "The v0.1.0 tag is the compatibility
-        // boundary"). Each can only refuse.
+        // `integrity.verification` (format 1.4.0): arms IV-1 to IV-7. They fire
+        // ONLY on a document that CARRIES the block and judge the block, or an
+        // existing field against it (IV-6), so every document without it (every
+        // scorecard before 1.4.0) is decided exactly as before: MINOR under
+        // OD-7 (a) (`docs/stability.md`). Each can only refuse.
         //
         // NOT INTERPOLATED, except IV-1's version: the block names topics and
-        // segment keys, adopter-influenced strings, and the messages are
-        // joined to `index.json`'s `arm` fields by literal substring.
+        // segment keys, adopter-influenced strings, and the messages are joined
+        // to `index.json`'s `arm` fields by literal substring.
         //
         // Mirrored arm for arm, in this order and this position (after
         // `source.time_basis`, before `redactions`, which stays last), in
@@ -2693,11 +2586,10 @@ impl Scorecard {
                 // IV-6. THE RULE ITSELF, in the signed document: a pass over a
                 // complete verification is a verification that covered every
                 // partition, verified every segment and found the restored
-                // output exactly the expected one — in total AND in every
-                // partition, over at least one partition (review L-2: a pass
-                // whose partitions are inexact but whose sums happen to be
-                // exact, and a covered pass over no partition at all, were
-                // accepted by both readers; the writer produces neither).
+                // output exactly the expected one, in total AND in every
+                // partition, over at least one partition. Exact sums over
+                // inexact partitions are not a pass; the writer produces
+                // neither shape.
                 if self.integrity.result == IntegrityResult::Pass {
                     let clean = c.covered
                         && !c.partitions.is_empty()
@@ -2745,11 +2637,11 @@ impl Scorecard {
                 }
             }
         }
-        // `sample.unsampled_topics` (format 1.6.0, FX-23): arms US-1 to US-3.
-        // They fire ONLY on a document that CARRIES the field, so every
-        // document without it is decided exactly as before: MINOR under the
-        // owner's OD-7 (a). US-3 judges an existing field against it (as IV-6
-        // does) and can only refuse.
+        // `sample.unsampled_topics` (format 1.6.0): arms US-1 to US-3. They
+        // fire ONLY on a document that CARRIES the field, so every document
+        // without it is decided exactly as before: MINOR under OD-7 (a). US-3
+        // judges an existing field against it (as IV-6 does) and can only
+        // refuse.
         //
         // NOT INTERPOLATED, except US-1's version: the list names topics, an
         // adopter-influenced string, and the messages are joined to
@@ -2800,19 +2692,18 @@ impl Scorecard {
                 ));
             }
         }
-        // `source.selection` (format 1.7.0, PROD-11.1): arms SEL-1 to SEL-3.
-        // They fire ONLY on a document that CARRIES the block, so every
-        // document without it is decided exactly as before: MINOR under the
-        // owner's OD-7 (a). SEL-3 judges an existing field (the 1.4.0 complete
-        // block's window) against it, as IV-6 does, and can only refuse.
+        // `source.selection` (format 1.7.0): arms SEL-1 to SEL-3. They fire
+        // ONLY on a document that CARRIES the block, so every document without
+        // it is decided exactly as before: MINOR under OD-7 (a). SEL-3 judges
+        // an existing field (the 1.4.0 complete block's window) against it, as
+        // IV-6 does, and can only refuse.
         //
-        // PROD-11.1b (format 2.0.0, the owner's OD-9 (a)): arms PS-2 to PS-5.
-        // PS-1, that a major-2 document carries partition subsets, is
-        // `refuse_unreadable_major`'s. PS-2 holds a format-1 block to the
-        // 1.7.0 shape (a start and its end, nothing else), so a subset never
-        // rides in a document an older reader would read as a full restore;
-        // PS-3 to PS-5 read only a 2.0.0 block's own fields, or judge the
-        // complete block against it, and can only refuse.
+        // Format 2.0.0 adds arms PS-2 to PS-5. PS-1, that a major-2 document
+        // carries partition subsets, is `refuse_unreadable_major`'s. PS-2 holds
+        // a format-1 block to the 1.7.0 shape (a start and its end, nothing
+        // else), so a subset never rides in a document an older reader would
+        // read as a full restore; PS-3 to PS-5 read only a 2.0.0 block's own
+        // fields, or judge the complete block against it, and can only refuse.
         //
         // NOT INTERPOLATED, except SEL-1's version, so the messages join
         // `index.json`'s `arm` fields by literal substring.
@@ -2833,7 +2724,7 @@ impl Scorecard {
             }
             // PS-2. A format-1 block is a window start and its end, nothing
             // else: a subset in a document an older reader accepts would be
-            // read as every partition (OD-9).
+            // read as every partition.
             if major_version(&self.format_version) == Some(1)
                 && (selection.window_start_ms.is_none()
                     || selection.partitions.is_some()
@@ -2930,12 +2821,12 @@ impl Scorecard {
                 }
             }
         }
-        // `target.original_name` (format 1.8.0, PROD-15.1): arms ON-1 to
-        // ON-14. They fire ONLY on a document that CARRIES the block, so every
-        // document without it is decided exactly as before: MINOR under the
-        // owner's OD-7 (a). ON-2, ON-3, ON-7, ON-13 and ON-14 judge existing
-        // fields (`target`, `source.selection`, `integrity.verification`, the
-        // outcome) against the block and can only refuse.
+        // `target.original_name` (format 1.8.0): arms ON-1 to ON-14. They fire
+        // ONLY on a document that CARRIES the block, so every document without
+        // it is decided exactly as before: MINOR under OD-7 (a). ON-2, ON-3,
+        // ON-7, ON-13 and ON-14 judge existing fields (`target`,
+        // `source.selection`, `integrity.verification`, the outcome) against
+        // the block and can only refuse.
         //
         // NOT INTERPOLATED, except ON-1's version, so the messages join
         // `index.json`'s `arm` fields by literal substring.
@@ -3001,8 +2892,8 @@ impl Scorecard {
                         .into(),
                 ));
             }
-            // ON-5. PROD-16.2 (format 1.9.0) SPLITS THIS ARM BY VERSION, as
-            // PROD-01.3 split `target.auth.mode`'s, and leaves every document
+            // ON-5. Format 1.9.0 SPLITS THIS ARM BY VERSION and leaves every
+            // document
             // below 1.9.0 judged exactly as before: `consoleApproval` is a
             // value of 1.9.0 and later, so under an older minor it is refused
             // as a value that version does not define (the first statement,
@@ -3097,7 +2988,7 @@ impl Scorecard {
                         .into(),
                 ));
             }
-            // ON-11 (OD-10). A one-person confirmation is signed only with the
+            // ON-11. A one-person confirmation is signed only with the
             // topic names typed, and nothing else claims a typed confirmation.
             let typed = on.confirmation.as_deref()
                 == Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES);
@@ -3149,14 +3040,14 @@ impl Scorecard {
                 ));
             }
         }
-        // `approval.console` (format 1.9.0, and 2.1.0; PROD-16.2): arms CA-1
-        // to CA-8. CA-1 to CA-7 fire ONLY on a document that CARRIES the
-        // block, so every document without it is decided exactly as before:
-        // MINOR under the owner's OD-7 (a). CA-5, CA-6 and CA-7 judge existing
-        // fields (`approval.approver`, `approval.key_id`,
-        // `approval.approved_at`) against the block and can only refuse. CA-8
-        // ties the block to `target.original_name.approval_mode`, whose new
-        // member only this build writes.
+        // `approval.console` (format 1.9.0, and 2.1.0): arms CA-1 to CA-8. CA-1
+        // to CA-7 fire ONLY on a document that CARRIES the block, so every
+        // document without it is decided exactly as before: MINOR under OD-7
+        // (a). CA-5, CA-6 and CA-7 judge existing fields (`approval.approver`,
+        // `approval.key_id`, `approval.approved_at`) against the block and can
+        // only refuse. CA-8 ties the block to
+        // `target.original_name.approval_mode`, whose new member only this
+        // build writes.
         //
         // NOT INTERPOLATED, except CA-1's version: no message carries a
         // principal, an instant or a key id from the document, so the
@@ -3259,31 +3150,22 @@ impl Scorecard {
                 ));
             }
         }
-        // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
-        // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
-        // now nothing enforced it and no surface displayed it — a third party
-        // could hand an auditor a scorecard carrying
-        // `redactions: [{"path": "/measured/rpo_seconds", …}]` and both readers
-        // printed VALID while the document itself said a field the auditor
-        // reads first had been removed.
-        //
-        // v0.1 has no writer that can produce a redaction (`redactions` is
-        // only ever constructed as `vec![]`), so a non-empty one means the
-        // document was edited after signing-time construction or came from a
-        // reader-incompatible producer. Like the evidence arm above, this is a
-        // RETROACTIVE TIGHTENING of the 1.0.0 reader rather than a format
-        // change (GC12): no byte of the format changes, the accepted set
-        // narrows, and no document Logweir has ever written is refused.
+        // `docs/formats/drill-scorecard.md` states that `redactions` is "Always
+        // `[]` in v0.1" as a PROPERTY OF THE FORMAT: a non-empty list would
+        // tell an auditor that a field they read first had been removed, and
+        // v0.1 has no writer that can produce one. A RETROACTIVE TIGHTENING of
+        // the 1.0.0 reader rather than a format change (GC12): no byte of the
+        // format changes, the accepted set narrows, and no document Logweir has
+        // ever written is refused.
         //
         // LAST on purpose, and mutant-tested for it: a document violating this
         // and an earlier arm must report the earlier arm's message, from BOTH
         // readers. `docs/verify_scorecard.py::check_invariants` mirrors this
         // arm in the same position with the same words, and the message
         // interpolates the DOCUMENT's own `format_version` so a 1.0.1 document
-        // reads correctly. A 2.x document is already refused above by
-        // `refuse_unreadable_major`. When 0.1.1 adds `--redact`, this arm is
-        // REPLACED by a path whitelist (`/target/cluster_id`,
-        // `/approval/approver`) — it is not deleted.
+        // reads correctly. When `--redact` lands, this arm becomes a path
+        // whitelist (`/target/cluster_id`, `/approval/approver`); it is not
+        // deleted.
         if !self.redactions.is_empty() {
             return Err(InvariantError(format!(
                 "redactions is non-empty but format_version {} has no way to produce one; \
@@ -3299,7 +3181,7 @@ impl Scorecard {
 mod tests {
     //! Direct coverage of `Scorecard::validate_invariants`'s per-arm behaviour.
     //! `crates/logweir-core/tests/scorecard_golden.rs` is frozen at exactly
-    //! four tests (addendum ruling A1), so this coverage lives here instead.
+    //! four tests, so this coverage lives here instead.
     //! Every test asserts the SPECIFIC error message, not a bare `is_err()`,
     //! so deleting or merging an arm makes exactly one test fail.
     use super::*;
@@ -3439,12 +3321,10 @@ mod tests {
             .expect("the test baseline itself must satisfy every invariant");
     }
 
-    // --- the evidence block is zeroed before signing (T0-2) ---------------
-    //
-    // One test per field, each asserting the SPECIFIC message, so deleting a
-    // single clause makes exactly that field's test fail. The field order
-    // matches the struct's declaration order and the Python mirror's, so a
-    // document violating two fields gets the same message from both readers.
+    // The evidence block is zeroed before signing: one test per field, each
+    // asserting the SPECIFIC message, so deleting a single clause makes exactly
+    // that field's test fail. The field order matches the struct's declaration
+    // order and the Python mirror's.
 
     #[test]
     fn invariants_refuse_non_zeroed_evidence() {
@@ -3502,13 +3382,10 @@ mod tests {
         );
     }
 
-    /// The arm is SCOPED to major 1, and the scope is observable only on a
-    /// LOWER major: on a higher one `refuse_unreadable_major` has already
-    /// returned, so dropping the guard changes nothing there (brief §7 M8/M9
-    /// are equivalent mutants for a 9.9.9 document — this is the test that is
-    /// not). A future major may redefine the `evidence` block, and
-    /// `docs/verify_scorecard.py` must agree: its mirrored arm carries the same
-    /// `doc_major == 1` guard, and
+    /// The arm is SCOPED to the known majors, and the scope is observable only
+    /// on a LOWER major: on a higher one `refuse_unreadable_major` has already
+    /// returned. `docs/verify_scorecard.py` must agree: its mirrored arm
+    /// carries the same guard, and
     /// `test_a_lower_major_with_a_non_zeroed_evidence_block_is_accepted` is
     /// this test's other half.
     #[test]
@@ -3522,14 +3399,12 @@ mod tests {
             .expect("the evidence arm is scoped to major 1 and must not fire on a 0.x document");
     }
 
-    // --- the offset report's key and digest travel together (Task 9b) ----
-    //
-    // GC12's price for two nested optional fields, this reader's per-arm
-    // coverage. The corpus's own README names these unit tests as the only
-    // thing that survives a fully coordinated deletion across
-    // `docs/verify_scorecard.py`, `e2e/fixtures/invariants/` and the pytest
-    // suite — so BOTH directions get a row and each asserts the SPECIFIC
-    // message, byte-identically with the Python mirror's.
+    // The offset report's key and digest travel together. The corpus's own
+    // README names these unit tests as the only thing that survives a fully
+    // coordinated deletion across `docs/verify_scorecard.py`,
+    // `e2e/fixtures/invariants/` and the pytest suite, so BOTH directions get a
+    // row and each asserts the SPECIFIC message, byte-identically with the
+    // Python mirror's.
 
     #[test]
     fn invariants_refuse_an_offset_report_key_without_its_sha256() {
@@ -3557,10 +3432,9 @@ mod tests {
         );
     }
 
-    /// Ruling R-A: BLANK counts as ABSENT, on both sides, so the two readers
-    /// cannot disagree on `""` — Rust's `is_some()` is true for `Some("")`
-    /// while Python's truthiness test is false, and that split is exactly what
-    /// T0-6 found in the `partial_reason` arm.
+    /// BLANK counts as ABSENT, on both sides, so the two readers cannot
+    /// disagree on `""`: Rust's `is_some()` is true for `Some("")` while
+    /// Python's truthiness test is false.
     #[test]
     fn a_blank_offset_report_pair_counts_as_absent() {
         let mut sc = valid_scorecard();
@@ -3579,7 +3453,7 @@ mod tests {
 
     #[test]
     fn invariants_accept_both_offset_report_fields_or_neither() {
-        // Neither — every scorecard this tree wrote before Task 9b.
+        // Neither: every scorecard written before the two fields existed.
         valid_scorecard()
             .validate_invariants()
             .expect("an absent pair is the state of every document written before it existed");
@@ -3615,9 +3489,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // `target.mode` / `target.marker_topic` (fix round 1, review F1)
-    // -----------------------------------------------------------------
+    // `target.mode` / `target.marker_topic`
 
     /// The arm, in the direction that matters to an auditor: a `scratch`
     /// document with no marker topic claims the phase-0 segregation proof
@@ -3633,8 +3505,8 @@ mod tests {
             e.0,
             "target.marker_topic is absent but target.mode is scratch; the marker topic is the segregation proof phase 0 verified, and a scratch document that omits it claims a check nothing recorded"
         );
-        // BLANK COUNTS AS ABSENT — ruling R-A, the same predicate
-        // `docs/verify_scorecard.py` applies with `.strip()`.
+        // BLANK COUNTS AS ABSENT: the same predicate `docs/verify_scorecard.py`
+        // applies with `.strip()`.
         for blank in ["", "   "] {
             let mut sc = valid_scorecard();
             sc.target.marker_topic = Some(blank.into());
@@ -3728,13 +3600,10 @@ mod tests {
             .expect("a fully zeroed evidence block is what every Logweir scorecard carries");
     }
 
-    // --- T0-6: `partial_reason` must be non-BLANK, not merely non-null ----
-    //
-    // The message text below is byte-identical to
-    // `docs/verify_scorecard.py::check_invariants`'s. That is not a
-    // coincidence and must not be "improved": the two readers are documented
-    // as reaching the same verdict with the same words, and
-    // `crates/logweir/tests/two_reader_parity.rs` compares the two strings.
+    // `partial_reason` must be non-BLANK, not merely non-null. The message text
+    // below is byte-identical to `docs/verify_scorecard.py::check_invariants`'s
+    // and must not be "improved": `crates/logweir/tests/two_reader_parity.rs`
+    // compares the two strings.
 
     #[test]
     fn invariants_refuse_null_partial_reason() {
@@ -3784,18 +3653,13 @@ mod tests {
 
     #[test]
     fn invariants_accept_a_real_partial_reason() {
-        // The control for the three above: the arm narrows the accepted set,
-        // it does not close it. A document that says WHY it is partial is
-        // exactly what the format asks for.
-        //
-        // T0-4: the other three fields are what a `partial` integrity result
-        // ACTUALLY travels with in a document Logweir can produce.
-        // `crate::drill::phase8_score::decide` maps a non-`pass` integrity
-        // result to `fail-integrity`, and `matrix_verdict_for` then returns
-        // `fail` carrying that sentence as its reason. Until the outcome arms
-        // existed this control left `outcome: Pass` standing beside
-        // `result: Partial` — a document no writer emits — and both readers
-        // accepted it.
+        // The control for the three above: the arm narrows the accepted set, it
+        // does not close it. A document that says WHY it is partial is exactly
+        // what the format asks for. The other three fields are what a `partial`
+        // integrity result travels with in a document Logweir writes
+        // (`crate::drill::phase8_score::decide` maps it to `fail-integrity`,
+        // and `matrix_verdict_for` to `fail` with that sentence), so the
+        // outcome arms stay quiet.
         let mut sc = valid_scorecard();
         sc.outcome = Outcome::FailIntegrity;
         sc.integrity.result = IntegrityResult::Partial;
@@ -3806,8 +3670,6 @@ mod tests {
         sc.validate_invariants()
             .expect("a partial result that names its reason is a valid document");
     }
-
-    // --- Global Constraint 18(a), true branch -----------------------------
 
     #[test]
     fn captured_by_logweir_true_rejects_last_phase_completed_below_neg1() {
@@ -3859,8 +3721,6 @@ mod tests {
         );
     }
 
-    // --- Global Constraint 18(a), false branch ------------------------------
-
     #[test]
     fn captured_by_logweir_false_rejects_a_source_relative_rpo() {
         let mut sc = valid_scorecard();
@@ -3894,11 +3754,9 @@ mod tests {
         );
     }
 
-    // --- Non-negativity of the format's three signed integers ---------------
-    //
-    // One test per field, each asserting the SPECIFIC message, so collapsing
-    // the loop to cover fewer fields makes exactly the dropped field's test
-    // fail.
+    // One test per signed integer, each asserting the SPECIFIC message, so
+    // collapsing the loop to cover fewer fields makes exactly the dropped
+    // field's test fail.
 
     #[test]
     fn measured_rpo_seconds_may_not_be_negative() {
@@ -3959,8 +3817,6 @@ mod tests {
             .expect("zero is a legitimate gap — the archive covers the requested point");
     }
 
-    // --- Finiteness of the format's two float fields ------------------------
-
     #[test]
     fn objectives_pass_rate_must_be_finite() {
         let mut sc = valid_scorecard();
@@ -3986,28 +3842,19 @@ mod tests {
         );
     }
 
-    // --- Global Constraint 12: refuse a higher-major format_version --------
-
     #[test]
     fn format_version_with_a_higher_major_is_refused() {
         let mut sc = valid_scorecard();
         sc.format_version = "9.9.9".into();
-        // Deliberately ALSO violating the T0-2 evidence arm. The evidence arm
-        // is scoped to the known majors (1, and 2 since PROD-11.1b), so on this
-        // document it is skipped whichever
-        // side of `refuse_unreadable_major` it sits on — the two orders are
-        // behaviourally identical and the reorder alone is an equivalent
-        // mutant (brief §7 M8). What this line does kill is the COMBINED
-        // mutant "drop the `Some(1)` scope guard AND move the arm first",
-        // which would return the evidence message here instead of the
-        // major-version one.
+        // Deliberately ALSO violating the evidence arm, which is scoped to the
+        // known majors: this kills the COMBINED mutant "drop the scope guard
+        // AND move the arm first", which would return the evidence message here
+        // instead of the major-version one.
         sc.evidence.create_only_enforced = true;
-        // Task 4 addendum A4: a non-empty `redactions` makes the POSITION of
-        // the redactions arm load-bearing here. Unlike the evidence arm it
-        // carries no major scoping, so moving it above
-        // `refuse_unreadable_major()?;` makes this document return the
-        // redactions message and the `assert_eq!` below fails at assertion
-        // time (brief §7 M7). Without this line that mutant survives.
+        // A non-empty `redactions` makes the POSITION of the redactions arm
+        // load-bearing here: it carries no major scoping, so moving it above
+        // `refuse_unreadable_major()?;` returns the redactions message and the
+        // `assert_eq!` below fails.
         sc.redactions = vec![Redaction {
             path: "/target/cluster_id".into(),
             reason: "addendum A4 mutant surface".into(),
@@ -4049,8 +3896,6 @@ mod tests {
             "format_version \"not-a-semver\" is not a parseable semver"
         );
     }
-
-    // --- T0-3: `redactions` is documented as always `[]` in v0.1 ----------
 
     #[test]
     fn invariants_refuse_non_empty_redactions() {
@@ -4103,18 +3948,12 @@ mod tests {
         assert!(valid_scorecard().validate_invariants().is_ok());
     }
 
-    // --- Two pre-existing arms that `uncovered-arms.json` records as carried
-    // by unit tests in BOTH readers. Fix round 1, F1: each was carried by a
-    // pytest case only — neither had a Rust unit test, so that file's own
-    // coverage claim was a written guarantee no code delivered, in the one
-    // file whose job is honest coverage accounting.
-    //
-    // The corpus walker cannot stand in for these.
+    // Two arms that `uncovered-arms.json` records as carried by unit tests in
+    // BOTH readers. The corpus walker cannot stand in for these:
     // `every_invariant_arm_has_a_corpus_case` counts `return Err(...)`
     // STATEMENTS and asserts `covered + uncovered == n`, so deleting an arm
-    // together with its entry drops both sides by one and the arithmetic
-    // re-balances silently. The per-arm unit test is the only thing that kills
-    // that mutant.
+    // together with its entry re-balances silently. The per-arm unit test is
+    // the only thing that kills that mutant.
 
     #[test]
     fn invariants_refuse_a_met_objective_at_a_reduced_integrity_level() {
@@ -4137,10 +3976,10 @@ mod tests {
 
     #[test]
     fn invariants_refuse_more_matching_records_than_were_sampled() {
-        // The base direction of the sampling pair: Task 5 added the CONVERSE
-        // (`matching != sampled` under a `pass`) and gave it a corpus case,
-        // but this older arm had no Rust test at all. `records_expected` moves
-        // with `records_sampled` so the coverage arm cannot be the reason the
+        // The base direction of the sampling pair (the converse is
+        // `matching != sampled` under a `pass`). `records_expected` moves with
+        // `records_sampled` so the coverage arm cannot be the reason the
+        // document is refused. Python sibling:
         // document is refused. Python sibling:
         // `docs/test_verify_scorecard.py::test_more_matching_records_than_sampled_is_refused`.
         let mut sc = valid_scorecard();
@@ -4153,22 +3992,11 @@ mod tests {
         assert_eq!(err.0, "records_sampled_matching exceeds records_sampled");
     }
 
-    // --- Task 5c: the three arms that were RUST-BARE ------------------------
-    //
-    // Task 5's re-review measured each of the three messages below occurring
-    // exactly ONCE in this crate — the arm itself — with only a pytest case
-    // behind it. That is the same defect the two tests above closed, and it is
-    // not one the corpus walker can close for us:
-    // `every_invariant_arm_has_a_corpus_case` counts `return Err(...)`
-    // STATEMENTS and asserts `covered + uncovered == n`, so deleting an arm
-    // together with its `uncovered-arms.json` entry (or flipping that entry to
-    // `occurrences: 0`) drops both sides by one and the arithmetic re-balances
-    // in silence. Measured under mutation, the walker, the corpus shell gate
-    // and pytest all stayed green on such a deletion; the per-arm assertion on
-    // the exact refusal text is the only thing that kills it. Each of the
-    // three now also has a corpus case, which is what turns a SILENT deletion
-    // into a walker-visible two-reader disagreement — the two protections
-    // answer different mutants and neither replaces the other.
+    // Three arms that each also carry a corpus case. The per-arm assertion on
+    // the exact refusal text kills a deletion of the arm together with its
+    // `uncovered-arms.json` entry, which the walker, the corpus gate and pytest
+    // all miss; the corpus case turns a SILENT deletion into a walker-visible
+    // two-reader disagreement. The two protections answer different mutants.
 
     #[test]
     fn invariants_refuse_a_matrix_fail_without_a_reason() {
@@ -4194,13 +4022,11 @@ mod tests {
         // there is nothing to measure it from, so a number there is a claim
         // the drill was not in a position to make.
         //
-        // `matrix_verdict` moves to `pass-degraded` because the matrix arm
-        // sits EARLIER in `validate_invariants` and would otherwise fire
-        // first: a `pass` matrix verdict at a reduced integrity level is
-        // exactly what that arm refuses. `pass-degraded` is the honest value
-        // for this document, not a weakening — the same override the corpus
-        // case `pass_rate_measured_without_byte_fingerprint` carries, and the
-        // same one Task 5 had to make to keep the pytest case isolated.
+        // `matrix_verdict` moves to `pass-degraded` because the matrix arm sits
+        // EARLIER in `validate_invariants` and would otherwise fire first.
+        // `pass-degraded` is the honest value for this document, and the same
+        // override the corpus case
+        // `pass_rate_measured_without_byte_fingerprint` carries.
         // Python sibling:
         // `docs/test_verify_scorecard.py::test_a_pass_rate_measured_without_byte_fingerprint_is_refused`.
         let mut sc = valid_scorecard();
@@ -4252,12 +4078,10 @@ mod tests {
         }
     }
 
-    // --- T0-4: `outcome` is a claim entailed by the rest of the document ---
-    //
-    // One test per arm, each asserting the SPECIFIC message, so deleting a
-    // single arm makes exactly one test fail. Every case moves ONLY the fields
-    // that trip its own arm off `valid_scorecard()`, and each is mirrored by a
-    // document in `e2e/fixtures/invariants/` so
+    // `outcome` is a claim entailed by the rest of the document. One test per
+    // arm, each asserting the SPECIFIC message and moving ONLY the fields that
+    // trip its own arm off `valid_scorecard()`; each is mirrored by a document
+    // in `e2e/fixtures/invariants/` so
     // `crates/logweir/tests/two_reader_parity.rs` decides the same case with
     // BOTH readers.
 
@@ -4280,8 +4104,7 @@ mod tests {
 
     #[test]
     fn invariants_refuse_pass_with_partial_reason() {
-        // T0-4's first documented "before" case, verbatim: this document made
-        // `drill verify` exit 0 under both readers.
+        // A `pass` whose own partial reason names an unreconciled topic.
         let mut sc = valid_scorecard();
         sc.integrity.partial_reason = Some("orders/7 never reconciled".into());
         let err = sc
@@ -4295,10 +4118,9 @@ mod tests {
 
     #[test]
     fn a_pass_with_a_blank_partial_reason_is_still_accepted() {
-        // Ruling R-A's trimmed-empty predicate, reused verbatim by the arm
-        // above: `""` and `"   "` count as ABSENT in both readers, so a blank
-        // reason is not the contradiction a named topic is. Dropping `.trim()`
-        // from the new arm makes this test fail.
+        // The trimmed-empty predicate: `""` and `"   "` count as ABSENT in both
+        // readers, so a blank reason is not the contradiction a named topic is.
+        // Dropping `.trim()` from the arm makes this test fail.
         for blank in ["", "   ", "\t\n "] {
             let mut sc = valid_scorecard();
             sc.integrity.partial_reason = Some(blank.into());
@@ -4335,8 +4157,8 @@ mod tests {
 
     #[test]
     fn invariants_refuse_pass_with_incomplete_sample() {
-        // T0-4's second documented "before" case. `records_expected` is raised
-        // to 100 so the coverage arm below cannot fire first.
+        // `records_expected` is raised to 100 so the coverage arm below cannot
+        // fire first.
         let mut sc = valid_scorecard();
         sc.integrity.records_sampled = 100;
         sc.integrity.records_sampled_matching = 50;
@@ -4446,12 +4268,10 @@ mod tests {
         assert!(sc.validate_invariants().is_ok());
     }
 
-    // --- FX-3: `topic_parity.not_reconstructed` (format 1.2.0) -------------
-    //
-    // One test per arm, each asserting the EXACT message, plus the accept
-    // controls and the order row. `docs/verify_scorecard.py` mirrors the three
-    // arms in the same position and words; the corpus cases under
-    // `e2e/fixtures/invariants/` hold both readers to that.
+    // `topic_parity.not_reconstructed` (format 1.2.0): one test per arm, each
+    // asserting the EXACT message, plus the accept controls and the order row.
+    // The corpus cases under `e2e/fixtures/invariants/` hold
+    // `docs/verify_scorecard.py` to the same position and words.
 
     /// A `newTopic` document as phase 7 writes it from 1.2.0: the four kinds
     /// leave `intentionally_deviated`, and each is in `unexpected_divergence`
@@ -4573,10 +4393,9 @@ mod tests {
         );
     }
 
-    /// NR-4 (FX-3 review F1): the document a writer signs when the mode is
-    /// lost on its way to phase 7: the scratch labels beside the claim `[]`.
-    /// Without NR-4 it was VALID under both readers and printed no
-    /// reconstruction line, a stronger claim than the pre-1.2.0 defect.
+    /// NR-4: the document a writer signs when the mode is lost on its way to
+    /// phase 7: the scratch labels beside the claim `[]`, which would otherwise
+    /// verify and print no reconstruction line.
     #[test]
     fn invariants_refuse_a_new_topic_document_that_labels_its_deviations_intended() {
         let mut sc = new_topic_not_reconstructed();
@@ -4610,11 +4429,11 @@ mod tests {
             .expect("absent is not recorded: decided as before");
     }
 
-    /// NR-5 (FX-3 review F1, the converse of NR-2): a `newTopic` document's
-    /// deviation on a setting the restore decides is one it did not
-    /// reconstruct, so `not_reconstructed: []`, or a list missing it, beside
-    /// it is refused. Any other key, and FX-4's fail-safe marker, stays a
-    /// plain unexpected divergence.
+    /// NR-5 (the converse of NR-2): a `newTopic` document's deviation on a
+    /// setting the restore decides is one it did not reconstruct, so
+    /// `not_reconstructed: []`, or a list missing it, beside it is refused. Any
+    /// other key, and the fail-safe marker, stays a plain unexpected
+    /// divergence.
     #[test]
     fn invariants_refuse_a_decided_setting_in_unexpected_divergence_that_not_reconstructed_omits() {
         let message = "topic_parity.unexpected_divergence names a setting the restore decides \
@@ -4653,7 +4472,7 @@ mod tests {
         other
             .validate_invariants()
             .expect("a key the restore does not decide is not 'not reconstructed'");
-        // FX-21: the fail-safe twin of a partition count or replication factor
+        // The fail-safe twin of a partition count or replication factor
         // the source's record lacks names neither setting as its `<key>`, so a
         // newTopic document carrying it is accepted without the twin in
         // `not_reconstructed` (the restore's deviation on it is unknown).
@@ -4741,12 +4560,9 @@ mod tests {
         );
     }
 
-    /// **The version pair a renumber must move together** (FX-4's
-    /// `the_written_version_defines_config_coverage`, for the scorecard). The
-    /// scorecard this build WRITES must be one that may carry
-    /// `not_reconstructed`, or phase 8 would refuse to sign every document
-    /// phase 7 produces (its own NR-1). Should another scorecard field take
-    /// 1.2.0 first, FX-3 becomes 1.3.0: both constants move.
+    /// **The version pair a renumber must move together.** The scorecard this
+    /// build WRITES must be one that may carry `not_reconstructed`, or phase 8
+    /// would refuse to sign every document phase 7 produces (its own NR-1).
     #[test]
     fn the_written_version_defines_not_reconstructed() {
         assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
@@ -4758,8 +4574,6 @@ mod tests {
             NOT_RECONSTRUCTED_SINCE_MINOR
         );
     }
-
-    // --- FX-8: `source.time_basis`, arms TB-1 to TB-4 ----------------------
 
     fn time_basis(plan: Option<&str>, producer: &[&str], unknown: &[&str]) -> TimeBasisLabel {
         TimeBasisLabel {
@@ -4878,7 +4692,7 @@ mod tests {
     #[test]
     fn the_written_version_defines_time_basis() {
         assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
-        // `>=`, not `==` (review L-6): a later MINOR still defines the
+        // `>=`, not `==`: a later MINOR still defines the
         // field; the literal pin of the writer's version is `lib.rs`'s.
         assert!(
             minor_version(crate::FORMAT_VERSION)
@@ -4891,8 +4705,6 @@ mod tests {
             TIME_BASIS_PRODUCER_TIME
         );
     }
-
-    // --- PROD-08.1: `integrity.verification`, arms IV-1 to IV-7 -----------
 
     fn sampled_verification() -> Verification {
         Verification {
@@ -5156,14 +4968,14 @@ mod tests {
             ("a partition not compared", |c| {
                 c.partitions[1].compared = false
             }),
-            // Review L-2 (a): every partition inexact, the sums exact.
+            // Every partition inexact, the sums exact.
             ("partitions inexact, totals exact", |c| {
                 c.partitions[0].replay.restored += 1;
                 c.partitions[0].replay.matching += 1;
                 c.partitions[1].replay.restored -= 1;
                 c.partitions[1].replay.matching -= 1;
             }),
-            // Review L-2 (b): a covered pass over no partition at all.
+            // A covered pass over no partition at all.
             ("no partition", |c| {
                 c.partitions.clear();
                 c.archive.segments = 0;
@@ -5266,7 +5078,7 @@ mod tests {
         assert_eq!(back.integrity.verification, Some(complete_verification()));
     }
 
-    /// Review L-1: ruling R-A's "blank" is `str::trim().is_empty()`, and
+    /// "Blank" is `str::trim().is_empty()`, and
     /// `trim` strips `char::is_whitespace`. `docs/verify_scorecard.py`'s
     /// `RUST_WHITESPACE` is that set, code point for code point (pinned there
     /// by `test_the_blank_set_is_the_rust_readers`); this pins it here, so a
@@ -5288,8 +5100,6 @@ mod tests {
             "U+001F is not blank to this reader"
         );
     }
-
-    // ---- FX-23: `sample.unsampled_topics`, arms US-1 to US-3 ----
 
     /// A sampled scorecard at 1.6.0 that names `topics` as unsampled.
     fn with_unsampled(topics: &[&str]) -> Scorecard {
@@ -5342,9 +5152,9 @@ mod tests {
             .is_ok());
     }
 
-    /// FX-23 review M2: only 1.6.0 and later prove an FX-23 build signed the
-    /// document — and every 2.x document (PROD-11.1b), which only a build
-    /// with FX-23's checks writes. KILLS: comparing against the wrong minor;
+    /// Only 1.6.0 and later prove that a build with the per-topic sampled
+    /// checks signed the document, and so does every 2.x document, which only
+    /// such a build writes. KILLS: comparing against the wrong minor;
     /// accepting a major this build does not read.
     #[test]
     fn only_1_6_0_and_later_prove_the_fx23_sampled_checks() {
@@ -5448,8 +5258,6 @@ mod tests {
             .starts_with("sample.unsampled_topics is present"));
     }
 
-    // ---- PROD-11.1: `source.selection`, arms SEL-1 to SEL-3 ----
-
     /// A sampled 1.7.0 scorecard narrowed to a window starting at `start`.
     fn with_selection(start: i64) -> Scorecard {
         let mut sc = with_verification(sampled_verification());
@@ -5483,9 +5291,9 @@ mod tests {
         assert!(proves_fx23_sampled_checks(FORMAT_VERSION_WITH_SELECTION));
     }
 
-    /// **The version steps are MONOTONIC** (the PROD-11.1 review): each takes
-    /// the newer of what it was handed and its own minor, so FX-23's sampled
-    /// step can never write 1.6.0 over a 1.7.0 a step before it chose, and the
+    /// **The version steps are MONOTONIC**: each takes the newer of what it was
+    /// handed and its own minor, so the sampled step can never write 1.6.0 over
+    /// a 1.7.0 a step before it chose, and the
     /// selection step never lowers a later minor. KILLS: either step returning
     /// its own constant unconditionally.
     #[test]
@@ -5511,7 +5319,7 @@ mod tests {
         assert_eq!(newer_format_version("1.6.0", "1.7.0"), "1.7.0");
         assert_eq!(newer_format_version("1.7.0", "1.6.0"), "1.7.0");
         assert_eq!(newer_format_version("1.x.0", "1.6.0"), "1.x.0");
-        // PROD-11.1b: a major outranks every minor, in both directions.
+        // A major outranks every minor, in both directions.
         assert_eq!(newer_format_version("1.7.0", "2.0.0"), "2.0.0");
         assert_eq!(newer_format_version("2.0.0", "1.9.0"), "2.0.0");
     }
@@ -5600,7 +5408,7 @@ mod tests {
     }
 
     /// The `sample.coverage_note` sentence names the window, and claims about
-    /// the records before the start only what the lane can show (review N1):
+    /// the records before the start only what the lane can show:
     /// the writer's note never says none was restored — a sampled lane says it
     /// cannot show it, a complete lane says only that none was expected, its
     /// verdict being the complete block's. KILLS: the sampled note claiming
@@ -5624,8 +5432,6 @@ mod tests {
                 .contains("was restored or expected"));
         }
     }
-
-    // ---- PROD-15.1: `target.original_name` (format 1.8.0), ON-1 to ON-14 ----
 
     fn original_name_block() -> OriginalNameInfo {
         OriginalNameInfo {
@@ -5688,7 +5494,7 @@ mod tests {
         block.source_cluster_id = None;
         block.kafka_topic_resources_sha256 = Some(RESOURCES_DIGEST.into());
         assert!(owned.validate_invariants().is_ok());
-        // OD-10: a one-person confirmation, with the names typed.
+        // A one-person confirmation, with the names typed.
         let mut typed = with_original_name();
         let block = typed.target.original_name.as_mut().unwrap();
         block.approval_mode = "ordinary".into();
@@ -5863,7 +5669,7 @@ mod tests {
                 "target.original_name.approval_subject is not \"originalName\"; an original-name restore is authorised only by its own approval subject"
             );
         }
-        // PROD-16.2: ON-5 is split by version. A 1.8.0 document (what
+        // ON-5 is split by version. A 1.8.0 document (what
         // `on_err` builds) is judged exactly as before, in the same words...
         for mode in ["standing", "Governed", "", "consoleapproval", "two-person"] {
             assert_eq!(
@@ -5973,7 +5779,7 @@ mod tests {
         );
     }
 
-    /// ON-11 (OD-10) and ON-12. KILLS: a one-person confirmation signed
+    /// ON-11 and ON-12. KILLS: a one-person confirmation signed
     /// without the typed names; a typed confirmation claimed for a mode with a
     /// second person; an unknown confirmation; a resources file looked in
     /// without its digest, or a digest for a file nobody looked in.
@@ -6129,7 +5935,7 @@ mod tests {
             lines[1],
             "original name: declarative owners looked for in plan: orders (strimzi kafka/orders, from plan); the approved plan chose the owner path"
         );
-        // OD-10 and the resources digest, each in its line.
+        // The typed confirmation and the resources digest, each in its line.
         let mut typed = original_name_block();
         typed.approval_mode = "ordinary".into();
         typed.confirmation = Some(crate::original_name::CONFIRMATION_TYPED_TOPIC_NAMES.into());
@@ -6148,7 +5954,7 @@ mod tests {
         );
     }
 
-    /// **Review N1, the reader's predicate, a row per lane.** Only a complete
+    /// **The reader's predicate, a row per lane.** Only a complete
     /// verification whose integrity passed proves no record before the start
     /// was restored (IV-6: no unexpected record anywhere); a sampled one
     /// never does, pass or not; a complete one that did not pass, and a
@@ -6185,8 +5991,6 @@ mod tests {
         }
     }
 
-    // ---- PROD-11.1b: partition subsets, format 2.0.0 (OD-9 (a)), PS-1 to PS-5 ----
-
     /// A 2.0.0 scorecard narrowed to `orders` [0, 2] (from the floor when
     /// `start` is `None`), restored by one run, over a sampled verification.
     fn with_subset(start: Option<i64>) -> Scorecard {
@@ -6213,7 +6017,7 @@ mod tests {
 
     const PS1: &str = "is the format of a partition-subset restore, and this document carries no source.selection.partitions; a reader reads major 2 only for that shape";
 
-    /// **The version choice** (OD-9 (a)): 2.0.0 EXACTLY when the block names
+    /// **The version choice**: 2.0.0 EXACTLY when the block names
     /// a partition subset — with or without a start, whatever the version
     /// before — and never for a start-only block or no block, which stay the
     /// 1.x they were. The steps after it keep it (monotonic). KILLS: 2.0.0
@@ -6306,7 +6110,7 @@ mod tests {
     }
 
     /// **2.0.0 is 1.7.0's fields**: every arm of major 1 holds for it — the
-    /// evidence arm (once scoped to major 1), and the arms that ask whether a
+    /// evidence arm, and the arms that ask whether a
     /// version defines a field (IV-1, US-1 and SEL-1 accept a 2.0.0 block).
     /// KILLS: an arm left scoped to `Some(1)`, which a 2.0.0 document would
     /// pass silently.
@@ -6514,8 +6318,6 @@ mod tests {
             "replay selection: every partition of every restored topic, from epoch-ms 1760000001000 (the plan's stated window start, inclusive) to epoch-ms 1760000005000 (inclusive); no record before the start was expected"
         );
     }
-
-    // ---- PROD-16.2: `approval.console` (format 1.9.0 and 2.1.0), CA-1 to CA-8 ----
 
     fn instant(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)

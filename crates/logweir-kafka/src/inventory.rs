@@ -446,7 +446,7 @@ pub trait InventoryProbe {
         specs: &[crate::reader::NewTopicSpec],
     ) -> Result<Vec<TopicCreateOutcome>, CheckFailure>;
 
-    /// **PROD-01.2.** The Kafka API versions EVERY broker of this cluster
+    /// The Kafka API versions EVERY broker of this cluster
     /// serves, as each answered ApiVersions to this client
     /// ([`crate::api_versions`]): what a capability row holds the engine's
     /// fixed request versions against.
@@ -528,7 +528,7 @@ impl ProbeTimeouts {
     }
 
     /// How long the targeted expected-topic probe may run in total — 40 % of
-    /// the check's budget (D2 §5.2 step 5).
+    /// the check's budget.
     #[must_use]
     pub fn targeted_budget(total: Duration) -> Duration {
         total * TARGETED_BUDGET_NUMERATOR / TARGETED_BUDGET_DENOMINATOR
@@ -573,7 +573,7 @@ pub struct Inventory {
     /// exactly these, in this order.
     pub entries: Vec<TopicEntry>,
     /// Counts, signals and digests. Carries **no** visibility verdict: that is
-    /// the controller's, because only it holds the attestation (D-SEAMS S3).
+    /// the controller's, because only it holds the attestation.
     pub result: InventoryResult,
 }
 
@@ -597,7 +597,7 @@ pub fn missing_expected(listing: &Listing, expected: &[String]) -> Vec<String> {
 }
 
 /// The bytes one entry costs against the relay budget: its canonical TSV line
-/// plus the topic frame's prefix (D2 §5.5).
+/// plus the topic frame's prefix.
 #[must_use]
 pub fn relay_cost(entry: &TopicEntry) -> u64 {
     (TOPIC_FRAME_PREFIX.len() + entry.tsv_line().len()) as u64

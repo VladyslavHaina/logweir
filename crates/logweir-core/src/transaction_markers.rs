@@ -1,4 +1,4 @@
-//! **PROD-01.1a.** A restore of an archive that holds Kafka transaction
+//! A restore of an archive that holds Kafka transaction
 //! control records is refused unless its plan allows them.
 //!
 //! The pinned engine captures `READ_UNCOMMITTED` and archives every commit

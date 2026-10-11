@@ -68,7 +68,7 @@ fn run(flags: &[&str]) -> i32 {
 
     // THE DELETER. Built from the destination's own frozen addressing and the
     // explicitly named credential — never `from_env()`, so no ambient
-    // `AWS_ENDPOINT_URL` can relocate a deletion (D-SEAMS S5).
+    // `AWS_ENDPOINT_URL` can relocate a deletion.
     let reaper = match ArchiveReaper::new(
         &admitted.archive_url(),
         admitted.archive_keys.as_ref().map(as_credentials).as_ref(),

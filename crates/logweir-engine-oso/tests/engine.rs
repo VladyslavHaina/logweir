@@ -345,7 +345,7 @@ fn read_engine_report_answers_absent_unreadable_or_the_entries() {
 
 const NONE_KBAK_RELATIVE: &str = "b1/topics/orders/partition=0/segment-00000000000000000100.bin";
 
-/// A consumer-groups snapshot the pinned engine wrote (FX-1); provenance in
+/// A consumer-groups snapshot the pinned engine wrote; provenance in
 /// `e2e/fixtures/README.md`.
 const REAL_SNAPSHOT: &str = "../../e2e/fixtures/consumer-groups-snapshot.json";
 
@@ -390,7 +390,7 @@ fn seed_archive(dir: &Path) {
     std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
     std::fs::write(&manifest_path, manifest).unwrap();
 
-    // FX-1: the engine's REAL, non-empty snapshot (four groups), not the
+    // The engine's REAL, non-empty snapshot (four groups), not the
     // invented `captured_at`/`state`/list shape that stood here before and
     // that no engine writes.
     std::fs::copy(REAL_SNAPSHOT, dir.join("b1/consumer-groups-snapshot.json")).unwrap();
@@ -497,7 +497,7 @@ fn describe_reports_an_error_when_the_snapshot_sibling_is_unreadable_not_none() 
     // primary manifest read, which must have already succeeded for this
     // point to be reached at all).
     assert!(err.to_string().contains("storage:"), "{err}");
-    // FX-1: the typed read shares the one object reader, so it cannot report
+    // The typed read shares the one object reader, so it cannot report
     // an object it could not read as absent or as unreadable content either.
     let err = engine.consumer_group_snapshot(&set).unwrap_err();
     assert!(err.to_string().contains("storage:"), "{err}");

@@ -1,4 +1,4 @@
-//! Pure names for the saved-connection runner contract (PLAT-07.1).
+//! Pure names for the saved-connection runner contract.
 //!
 //! `weirkeeper::connection` resolves a `KafkaCluster` into the environment and
 //! mounts a runner Job carries; the `logweir` runner reads them back by these
@@ -59,20 +59,20 @@ impl std::fmt::Display for TlsCaWithoutTls {
 impl std::error::Error for TlsCaWithoutTls {}
 
 // ---------------------------------------------------------------------------
-// PROD-01.3: the auth-mode vocabulary, and the two transport refusals.
+// The auth-mode vocabulary, and the two transport refusals.
 // ---------------------------------------------------------------------------
 
 /// `plaintext`: no SASL, no TLS.
 pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
 /// `scramSha512`: SASL/SCRAM-SHA-512, over TLS or not.
 pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
-/// `scramSha256`: SASL/SCRAM-SHA-256, over TLS or not (PROD-01.3).
+/// `scramSha256`: SASL/SCRAM-SHA-256, over TLS or not.
 pub const AUTH_MODE_SCRAM_SHA_256: &str = "scramSha256";
-/// `plain`: SASL/PLAIN, over TLS ONLY (PROD-01.3). PLAIN sends the password
+/// `plain`: SASL/PLAIN, over TLS ONLY. PLAIN sends the password
 /// itself on the wire, so a `plain` connection without TLS is refused
 /// ([`PlainWithoutTls`]) rather than dialled.
 pub const AUTH_MODE_PLAIN: &str = "plain";
-/// `mtls`: a TLS client certificate and no SASL (PROD-01.3). TLS by
+/// `mtls`: a TLS client certificate and no SASL. TLS by
 /// definition, and still switched on by `tls: true` like every other mode: a
 /// `mtls` connection with `tls: false` is refused ([`MtlsWithoutTls`]).
 pub const AUTH_MODE_MTLS: &str = "mtls";
@@ -263,7 +263,7 @@ pub const CREDENTIAL_BINDING_KEY: &str = "logweir-binding";
 /// the controller's terminal state and the probe's condition reason.
 pub const CREDENTIAL_BINDING_MISMATCH: &str = "CredentialBindingMismatch";
 
-/// FX-20c (review LOW-2): what EVERY `CredentialBindingMismatch` refusal tells
+/// What EVERY `CredentialBindingMismatch` refusal tells
 /// an operator to do — one sentence, so no surface can say otherwise.
 ///
 /// **It never says "write this object's binding into the Secret".** On a
@@ -335,7 +335,7 @@ pub struct CredentialBindingRefusal {
 
 impl std::fmt::Display for CredentialBindingRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // FX-20: the same refusal guards object-store credentials; their
+        // The same refusal guards object-store credentials; their
         // wording names what they are bound to. A Kafka connection's text is
         // PROD-01.3's, byte for byte.
         let other = if self.binding_env.starts_with("LOGWEIR_ARCHIVE_")
@@ -536,7 +536,7 @@ mod tests {
         assert!(!foreign.absent);
         // The message names neither binding.
         assert!(!foreign.to_string().contains("v1:a") && !foreign.to_string().contains("v1:b"));
-        // FX-20: several bindings, one of them this one — accepted; none of
+        // Several bindings, one of them this one — accepted; none of
         // them this one, or a mere prefix of it — refused.
         assert_eq!(
             check_credential_binding(env, Some("v1:a"), Some("v1:x\nv1:a")),
@@ -552,7 +552,7 @@ mod tests {
         assert!(check_credential_binding(env, Some("v1:abc"), Some("v1:ab")).is_err());
         assert!(check_credential_binding(env, Some("v1:abc"), Some("v1:x,v1:ab")).is_err());
         assert!(check_credential_binding(env, Some("v1:a"), Some("v1:x\nv1:b")).is_err());
-        // FX-20: the fail-closed expectation is refused even when a Secret
+        // The fail-closed expectation is refused even when a Secret
         // carries the very same string.
         assert!(
             check_credential_binding(env, Some("unbound:no-uid"), Some("unbound:no-uid")).is_err(),

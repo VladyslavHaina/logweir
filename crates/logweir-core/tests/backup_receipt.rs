@@ -697,7 +697,7 @@ fn the_checked_in_receipt_fixture_parses_and_satisfies_its_invariants() {
 }
 
 // ---------------------------------------------------------------------------
-// FX-4: format 1.1.0's `config_coverage` block and arms 6-11
+// Format 1.1.0's `config_coverage` block and arms 6-11
 // ---------------------------------------------------------------------------
 
 fn coverage(value: &str, reason: Option<&str>, ts: Option<(&str, &str)>) -> TopicConfigCoverage {
@@ -1096,7 +1096,7 @@ fn a_1_0_0_receipt_round_trips_byte_for_byte_through_the_1_1_0_type() {
 }
 
 // ---------------------------------------------------------------------------
-// PROD-05.1: format 1.3.0's `topic_configuration` block and arms 12-21
+// Format 1.3.0's `topic_configuration` block and arms 12-21
 // ---------------------------------------------------------------------------
 
 fn entry(value: Option<&str>, source: &str, portability: &str) -> ConfigEntry {
@@ -1611,7 +1611,7 @@ fn the_written_version_defines_topic_configuration() {
 }
 
 // ===========================================================================
-// PROD-03.0: format 1.5.0, `schema_dependency` (arms 22-29)
+// Format 1.5.0, `schema_dependency` (arms 22-29)
 // ===========================================================================
 
 use logweir_core::backup_receipt::{SchemaDependency, SideFraming, TopicSchemaDependency};
@@ -2160,7 +2160,7 @@ fn a_1_4_0_receipt_round_trips_byte_for_byte_through_the_1_5_0_type() {
 }
 
 // ---------------------------------------------------------------------------
-// PROD-01.4a: format 1.6.0's `generations` block and arms 36-40
+// Format 1.6.0's `generations` block and arms 36-40
 // ---------------------------------------------------------------------------
 
 /// Two topic IDs as `kafka-topics.sh --describe` printed them (PROD-01.4's
@@ -2653,7 +2653,7 @@ fn neither_a_sentinel_nor_a_missing_after_read_makes_two_points_the_same() {
 }
 
 // ===========================================================================
-// PROD-04.1: format 1.7.0, `consumer_positions` (arms 30-35) and the
+// Format 1.7.0, `consumer_positions` (arms 30-35) and the
 // positions document it binds (CP-1 to CP-14)
 // ===========================================================================
 

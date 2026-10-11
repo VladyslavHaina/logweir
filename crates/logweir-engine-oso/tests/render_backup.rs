@@ -583,7 +583,7 @@ fn a_logweir_backup_never_asks_the_engine_for_a_consumer_group_snapshot() {
     );
 }
 
-/// **FX-27.** The engine's Prometheus server defaults on, unauthenticated, at
+/// The engine's Prometheus server defaults on, unauthenticated, at
 /// `0.0.0.0:8080`; the backup document turns it off with a top-level
 /// `metrics:` block (column 0, so not nested under `backup:`), exactly once.
 #[test]

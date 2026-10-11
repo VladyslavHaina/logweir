@@ -111,7 +111,7 @@ impl RdKafkaReader {
             .collect()
     }
 
-    /// **PROD-04.1.** Per named topic, its partitions and each one's marks,
+    /// Per named topic, its partitions and each one's marks,
     /// read now (`ClusterReader::partition_marks`).
     pub fn read_partition_marks(&self, topics: &[String]) -> BTreeMap<String, TopicMarks> {
         let handle = match self.marks_handle() {
@@ -130,7 +130,7 @@ impl RdKafkaReader {
             .collect()
     }
 
-    /// **PROD-04.1.** One capture of `selected` over the partitions of
+    /// One capture of `selected` over the partitions of
     /// `topics`, in `crate::capture`'s order.
     pub fn capture_consumer_groups(
         &self,

@@ -122,11 +122,10 @@ pub struct ScopeRecovery {
     pub point_in_time: DateTime<Utc>,
     /// Whether the plan states `restore.point_in_time` itself.
     pub point_in_time_stated: bool,
-    /// The inclusive start of the replayed window, when the plan narrows it
-    /// (PROD-11.1). Absent restores from the archive's floor.
+    /// The inclusive start of the replayed window, when the plan narrows it.
+    /// Absent restores from the archive's floor.
     pub window_start: Option<DateTime<Utc>>,
-    /// `producerTime` when the plan accepts producer time for its selection
-    /// (FX-8).
+    /// `producerTime` when the plan accepts producer time for its selection.
     pub time_basis: Option<&'static str>,
 }
 
@@ -157,7 +156,7 @@ pub struct ScopeTarget {
     /// such a run writes — the console gives the runner nothing else to look
     /// in. Absent for every other restore.
     pub owner_statement: Option<ScopeOwnerStatement>,
-    /// `restore.allow_transaction_markers` (PROD-01.1a): the run restores an
+    /// `restore.allow_transaction_markers`: the run restores an
     /// archive's transaction markers, and the records of aborted
     /// transactions, as ordinary data instead of being refused.
     pub allow_transaction_markers: bool,
@@ -195,7 +194,7 @@ pub struct ScopeTopic {
     pub source: String,
     /// The topic written on the target.
     pub target: String,
-    /// Whether this is a write under the source's ORIGINAL name (PROD-15.1):
+    /// Whether this is a write under the source's ORIGINAL name:
     /// the plan opts in and the two names are the same.
     pub original_name: bool,
     /// The partitions restored, when the plan narrows this topic to a subset;

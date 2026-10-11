@@ -45,7 +45,7 @@
 //! `logweir_verify::verify_detached`'s answer, and whether the key that
 //! produced it is still trusted is this module's. Keeping them apart is what
 //! lets the controller re-evaluate a revocation against evidence it does not
-//! re-fetch (D3 §7.4, "re-evaluation without re-fetching").
+//! re-fetch.
 //!
 //! # Who calls this
 //!
@@ -58,7 +58,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// What a key is allowed to be used for (D3 §7.3).
+/// What a key is allowed to be used for.
 ///
 /// SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs
 /// evidence and authorises restores is a key whose holder can approve their
@@ -79,7 +79,7 @@ pub enum KeyUsage {
     GovernedApproval,
     /// The console confirmation signature of PLAT-19.2's ordinary mode.
     ///
-    /// NEVER SYNTHESISED FROM THE LEGACY ROSTER (D3 §7.3): an old controller
+    /// NEVER SYNTHESISED FROM THE LEGACY ROSTER: an old controller
     /// reached by rollback must not be able to mistake an ordinary
     /// confirmation for a governed approval, so the legacy roster produces
     /// only [`Self::EvidenceSigning`] and [`Self::GovernedApproval`] keys.
@@ -193,8 +193,8 @@ impl TrustedKey {
             KeyState::Revoked => match self.reason() {
                 RevocationReason::KeyCompromise => None,
                 RevocationReason::Superseded | RevocationReason::Unspecified => {
-                    // "treated as retirement at `revocationEffectiveFrom`"
-                    // (D3 §7.4). A revocation with no effective instant — which
+                    // "treated as retirement at `revocationEffectiveFrom`".
+                    // A revocation with no effective instant — which
                     // the CRD's G5 rule makes impossible on a live object and
                     // which a hand-built spec can still express — falls back to
                     // `revokedAt` and then to the window, never to "no bound".
@@ -274,7 +274,7 @@ impl VerificationUse {
     }
 }
 
-/// `status.evidence.verification.trust.keyState` (D3 §7.4).
+/// `status.evidence.verification.trust.keyState`.
 ///
 /// FIVE VALUES, AND THEY ARE NOT [`EffectiveState`]'s SIX. A verdict about a
 /// stored document reports the key's lifecycle as the verifier saw it —
@@ -310,7 +310,7 @@ impl TrustKeyState {
     }
 }
 
-/// `status.evidence.verification.trust.basis` (D3 §7.4).
+/// `status.evidence.verification.trust.basis`.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrustBasis {
     /// The key was active and the evidence was signed inside its window.
@@ -655,7 +655,7 @@ impl EvidenceClaim {
         }
     }
 
-    /// **FX-33.** [`Self::from_document`] for a backup receipt whose facts
+    /// [`Self::from_document`] for a backup receipt whose facts
     /// were folded from its bytes instead of parsed into a tree
     /// (`crate::receipt_facts::ReceiptFacts::fold`): `None` is bytes that are
     /// not JSON, which is `Unparseable`. The same claim, by the same rule —
@@ -789,7 +789,7 @@ impl SigningRefusal {
 }
 
 /// **May this key sign something new?** `Active` ∧ `notBefore ≤ now < notAfter`
-/// ∧ the usage matches (D3 §7.4).
+/// ∧ the usage matches.
 ///
 /// APPROVAL VERIFICATION AT ADMISSION IS A NEW USE. An `Approval` object that
 /// arrives today, carrying a signature by a key retired last week, is asking
@@ -1038,7 +1038,7 @@ const BACKUP_RECEIPT: &str = "application/vnd.logweir.backup-receipt+json";
 /// Whether `payload_type` is a backup receipt's media type — on the base
 /// type, for the reason [`BACKUP_RECEIPT`] gives.
 ///
-/// **FX-33.** A reader that holds a receipt under its own bound and takes its
+/// A reader that holds a receipt under its own bound and takes its
 /// facts without building a tree (`crate::receipt_facts`) asks this to know
 /// that the document in hand is one. Every other type keeps the smaller
 /// bound and the whole parse.
@@ -1056,7 +1056,7 @@ const APPROVAL: &str = "application/vnd.logweir.drill-approval+json";
 /// See [`BACKUP_RECEIPT`].
 const CATALOG_POINT: &str = "application/vnd.logweir.catalog-point+json";
 
-/// The document's own latest pre-signature timestamp (D3 §7.4).
+/// The document's own latest pre-signature timestamp.
 ///
 /// | `payloadType` | field |
 /// |---|---|

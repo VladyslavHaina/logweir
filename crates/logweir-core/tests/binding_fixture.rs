@@ -1,4 +1,4 @@
-//! FX-20 (and its fix round, review F1/F2): every credential binding form is
+//! Every credential binding form is
 //! computed in two places — the product (`logweir_core::credential_binding`
 //! and, for a `KafkaCluster`, `logweir_core::connection::credential_binding`:
 //! what the controller publishes and every runner Job expects) and the

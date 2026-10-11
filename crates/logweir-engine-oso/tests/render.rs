@@ -576,7 +576,7 @@ fn restore_document_renders_strip_offset_headers_false() {
     );
 }
 
-/// **FX-27.** The restore twin of
+/// The restore twin of
 /// `render_backup.rs::the_backup_document_turns_the_engine_metrics_server_off`,
 /// through `render_all`, the path the engine's `preflight` and `restore` take.
 #[test]

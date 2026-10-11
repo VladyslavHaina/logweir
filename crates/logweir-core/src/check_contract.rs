@@ -1,9 +1,9 @@
 //! The PURE contract shared by every Logweir check: the plan a runner is
 //! handed, the result frames it prints, the closed code vocabulary both sides
 //! name, the redactor every message passes through, the visibility policy and
-//! the binding digest (decision D2 §4.1).
+//! the binding digest.
 //!
-//! ONE runner, not two (D-SEAMS S1). `logweir check run` serves topic
+//! ONE runner, not two. `logweir check run` serves topic
 //! inventory, operation readiness, restore preflight, destination access and
 //! evidence fetch; the controller side (`weirkeeper::check`) and the API read
 //! the same frames through the same decoder. Everything here is pure: no I/O,
@@ -17,8 +17,7 @@
 //!    message field is capped at [`MESSAGE_MAX_CHARS`].
 //! 2. **A successful Kafka listing never means "all topics".** [`visibility`]
 //!    can answer `attestedComplete` only from an administrator attestation
-//!    that matches the observed cluster id and principal and has not expired
-//!    (D-SEAMS S3).
+//!    that matches the observed cluster id and principal and has not expired.
 
 use crate::destination::DestinationRole;
 use chrono::{DateTime, Utc};
@@ -43,7 +42,7 @@ pub const FRAME_MAX_BYTES: usize = 4096;
 pub const PART_MAX_BASE64_CHARS: usize = 3000;
 /// Messages and remedies are capped here, after redaction.
 pub const MESSAGE_MAX_CHARS: usize = 512;
-/// The default relay budget for topic lines (D2 §5.5): 6 MiB.
+/// The default relay budget for topic lines: 6 MiB.
 pub const DEFAULT_RELAY_BUDGET_BYTES: usize = 6 * 1024 * 1024;
 /// `spec.request.expectedTopics` maxItems.
 pub const MAX_EXPECTED_TOPICS: usize = 500;
@@ -56,16 +55,13 @@ pub const MAX_EVIDENCE_OBJECTS: usize = 3;
 /// `evidenceFetch` payload CEILING — the most bytes of one signed document a
 /// plan may ask a check Job to relay, whatever the document is.
 ///
-/// **FX-33: [`crate::topic_budget::MAX_RECEIPT_BYTES`]** (5,131,072), the
-/// largest backup receipt Logweir writes; it was 1 MiB, which a receipt of
-/// about 300 topics passed, and such a run was never verified. The relay
-/// decides the number, not the reverse: base64 in
-/// [`PART_MAX_BASE64_CHARS`]-character frames turns this payload into about
-/// 6.6 MiB of pod log, inside the 8 MiB the controller reads
+/// [`crate::topic_budget::MAX_RECEIPT_BYTES`] (5,131,072), the largest backup
+/// receipt Logweir writes. The relay decides the number, not the reverse:
+/// base64 in [`PART_MAX_BASE64_CHARS`]-character frames turns this payload into
+/// about 6.6 MiB of pod log, inside the 8 MiB the controller reads
 /// (`weirkeeper::check::relay::RELAY_LIMIT_BYTES`, itself below the kubelet's
-/// default 10 MiB log rotation); a 6 MiB payload would be 8.1 MiB and would
-/// not arrive. `weirkeeper`'s `the_largest_receipt_fits_the_relay` holds the
-/// two together.
+/// default 10 MiB log rotation). `weirkeeper`'s
+/// `the_largest_receipt_fits_the_relay` holds the two together.
 ///
 /// `weirkeeper` asks for, and measures the relayed document against, the cap
 /// of the document kind it expects (`verification::controller_cap_for`):
@@ -73,7 +69,7 @@ pub const MAX_EVIDENCE_OBJECTS: usize = 3;
 /// [`MAX_EVIDENCE_SCORECARD_BYTES`] for a scorecard, which it does.
 pub const MAX_EVIDENCE_PAYLOAD_BYTES: u64 = crate::topic_budget::MAX_RECEIPT_BYTES;
 /// The cap of a relayed document that is NOT a backup receipt — a drill
-/// scorecard: 1 MiB, the cap every evidence fetch had before FX-33. The
+/// scorecard: 1 MiB. The
 /// controller parses such a document into a `serde_json::Value` (about 37
 /// times its size at worst), so it is not raised with the receipt's. Applied
 /// by the controller to the bytes it receives, and asked for in the plan.
@@ -81,7 +77,7 @@ pub const MAX_EVIDENCE_SCORECARD_BYTES: u64 = 1024 * 1024;
 const _: () = assert!(MAX_EVIDENCE_SCORECARD_BYTES <= MAX_EVIDENCE_PAYLOAD_BYTES);
 /// `evidenceFetch` sidecar cap: 64 KiB.
 pub const MAX_EVIDENCE_SIDECAR_BYTES: u64 = 64 * 1024;
-/// A result carries at most this many per-check entries (D2 §6.4).
+/// A result carries at most this many per-check entries.
 pub const MAX_CHECK_ENTRIES: usize = 64;
 
 /// The ceiling on [`CheckPlan::timeout_seconds`] for the five probe kinds.
@@ -95,12 +91,10 @@ pub const MAX_CHECK_TIMEOUT_SECONDS: u32 = 600;
 ///
 /// THIRTY MINUTES, AND IT IS A DIFFERENT NUMBER ON PURPOSE. A catalog sync is
 /// not a probe: it is a paged walk of an adopter's own bucket, whose cost is
-/// set by how many recovery points they hold and not by how fast one endpoint
-/// answers. `weirkeeper::controllers::recovery_catalog::SYNC_TIMEOUT_SECONDS`
-/// is 900, which the single 600-second ceiling would have refused at step 4
-/// with `CheckContractMismatch` — every sync Job, on every cadence, before a
-/// credential was read. `the_controllers_sync_plan_is_one_the_runner_accepts`
-/// is the guard that would have caught it.
+/// set by how many recovery points they hold.
+/// `weirkeeper::controllers::recovery_catalog::SYNC_TIMEOUT_SECONDS` must fit
+/// under it; `the_controllers_sync_plan_is_one_the_runner_accepts` holds the
+/// two together.
 pub const MAX_CATALOG_SYNC_TIMEOUT_SECONDS: u32 = 1800;
 
 /// `spec.sync.viewLimit`'s range, as the CRD's `schemars(range)` states it.
@@ -121,8 +115,6 @@ pub const PART_FRAME_PREFIX: &str = "logweir-check-part=";
 /// See [`TOPIC_FRAME_PREFIX`].
 pub const END_FRAME_PREFIX: &str = "logweir-check-end=";
 
-// ---------------------------------------------------------------- vocabulary
-
 /// A macro for the two closed vocabularies below.
 ///
 /// Both the code table and the id table are CLOSED on purpose: a controller
@@ -130,8 +122,7 @@ pub const END_FRAME_PREFIX: &str = "logweir-check-end=";
 /// `metav1.Condition.reason` (which Kubernetes validates against
 /// `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`) and into a UI that has no
 /// remedy text for it. Generating `as_str`, `FromStr` and `ALL` from ONE list
-/// means the three can never disagree — the defect a hand-written second match
-/// arm always eventually has.
+/// means the three can never disagree.
 macro_rules! closed_vocabulary {
     ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
         $(#[$meta])*
@@ -199,7 +190,7 @@ closed_vocabulary! {
     /// Every spelling is CamelCase so it can be a `metav1.Condition.reason`
     /// verbatim; `every_code_is_a_valid_condition_reason` asserts it.
     CheckCode {
-        // -- object store (D2 §4.2) --------------------------------------
+        // Object store.
         AccessDenied => "AccessDenied",
         InvalidCredentials => "InvalidCredentials",
         BucketNotFound => "BucketNotFound",
@@ -209,7 +200,7 @@ closed_vocabulary! {
         RegionMismatch => "RegionMismatch",
         Timeout => "Timeout",
         StoreErrorUnclassified => "StoreErrorUnclassified",
-        // -- Kafka (D2 §4.2) ---------------------------------------------
+        // Kafka.
         BrokerUnreachable => "BrokerUnreachable",
         AuthenticationFailed => "AuthenticationFailed",
         TlsHandshakeFailed => "TlsHandshakeFailed",
@@ -217,7 +208,7 @@ closed_vocabulary! {
         ClusterAuthorizationFailed => "ClusterAuthorizationFailed",
         TopicAuthorizationFailed => "TopicAuthorizationFailed",
         UnknownTopicOrPartition => "UnknownTopicOrPartition",
-        // -- pod / Job waiting classification (D2 §4.3) ------------------
+        // Pod / Job waiting classification.
         CredentialSecretNotFound => "CredentialSecretNotFound",
         CredentialSecretKeyMissing => "CredentialSecretKeyMissing",
         TrustBundleNotFound => "TrustBundleNotFound",
@@ -231,7 +222,7 @@ closed_vocabulary! {
         PodCreateRejected => "PodCreateRejected",
         DisruptedMidCheck => "DisruptedMidCheck",
         ForeignPodIgnored => "ForeignPodIgnored",
-        // -- ready codes (D2 §6.3) ---------------------------------------
+        // Ready codes.
         Resolved => "Resolved",
         Projected => "Projected",
         Authenticated => "Authenticated",
@@ -252,7 +243,7 @@ closed_vocabulary! {
         PlanMatchesReferences => "PlanMatchesReferences",
         MappedNamesLegal => "MappedNamesLegal",
         RecoveryPointSucceeded => "RecoveryPointSucceeded",
-        // PLAT-15.2: the catalog lists the point selectable, no `Backup`
+        // The catalog lists the point selectable, no `Backup`
         // verdict refuses its receipt, and the plan is bound to it.
         CatalogPointSelectable => "CatalogPointSelectable",
         ManifestReadable => "ManifestReadable",
@@ -266,12 +257,12 @@ closed_vocabulary! {
         ApprovalVerified => "ApprovalVerified",
         ApproverKeyValid => "ApproverKeyValid",
         Valid => "Valid",
-        // FX-20c: every Secret-backed grant a check stands for carries the
+        // Every Secret-backed grant a check stands for carries the
         // `logweir-binding` its destination expects
         // (`destination.credentialBound`). Compared in the check pod; nothing
         // is dialled to find out.
         CredentialBound => "CredentialBound",
-        // PROD-01.2: the three capability rows' ready codes. The endpoint
+        // The three capability rows' ready codes. The endpoint
         // serves every request version the engine sends without negotiating
         // (`*.engineProtocol`); it answers DescribeConfigs for every selected
         // topic (`connection.topicConfigsReadable`); its group listing names
@@ -280,11 +271,11 @@ closed_vocabulary! {
         TopicConfigsReadable => "TopicConfigsReadable",
         GroupTypesListed => "GroupTypesListed",
         Succeeded => "Succeeded",
-        // -- notReady codes (D2 §6.3, §3.3, §3.4) ------------------------
+        // NotReady codes.
         ConnectionNotFound => "ConnectionNotFound",
         ConnectionInvalid => "ConnectionInvalid",
         CredentialReferenceMissing => "CredentialReferenceMissing",
-        // FX-20: a projected object-store credential whose Secret's
+        // A projected object-store credential whose Secret's
         // `logweir-binding` is absent or names another object or endpoint, so
         // the runner refused it before building a client
         // (`logweir_core::credential_binding`). The same string as PROD-01.3's
@@ -328,7 +319,7 @@ closed_vocabulary! {
         RecoveryPointNotSucceeded => "RecoveryPointNotSucceeded",
         RecoveryPointUidChanged => "RecoveryPointUidChanged",
         RecoveryPointLocationMismatch => "RecoveryPointLocationMismatch",
-        // PLAT-15.2 (D3 §5.5 step 5): a restore readiness check about a
+        // A restore readiness check about a
         // CATALOG point re-reads the catalog row when it runs. The row is not
         // restorable (availability or verification), the controller reached a
         // refusal on a `Backup` of the same receipt, or the plan's
@@ -336,21 +327,21 @@ closed_vocabulary! {
         CatalogPointNotSelectable => "CatalogPointNotSelectable",
         CatalogPointRefusedByController => "CatalogPointRefusedByController",
         CatalogPointBindingMismatch => "CatalogPointBindingMismatch",
-        // The PLAT-15.2 review's M-2 (D3 §5.5 step 5): the row's signer is
+        // The row's signer is
         // judged again against the namespace's CURRENT trust when the check
         // runs, so a key revoked or retired after the last catalog sync
         // refuses the point instead of riding on the sync-time verdict.
         CatalogPointSignerUntrusted => "CatalogPointSignerUntrusted",
         BackupSetNotFound => "BackupSetNotFound",
         ManifestUnreadable => "ManifestUnreadable",
-        // FX-14: a restore preflight over a plan bound to a recovery point
+        // A restore preflight over a plan bound to a recovery point
         // (`source.point`) judges the manifest it read the way the runner's
         // point binding will (`drill::binding::verify_point_binding`). The
         // bound point's receipt pins a manifest version the bucket still holds
         // and that is no longer the current one: the set was written again
-        // after the point was signed (FX-7's superseded pin).
+        // after the point was signed (a superseded pin).
         ManifestSuperseded => "ManifestSuperseded",
-        // FX-14: the plan's point binding is not this archive's — a malformed
+        // The plan's point binding is not this archive's — a malformed
         // binding, a receipt key outside the plan's own set's receipts (refused
         // before anything is read), a receipt that is absent, whose bytes are
         // not the bound digest, or that is over the receipt's read cap (ONE
@@ -362,7 +353,7 @@ closed_vocabulary! {
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
         PointInTimeAfterCoverage => "PointInTimeAfterCoverage",
         TopicNotInBackupSet => "TopicNotInBackupSet",
-        // PROD-11.1: a plan's replay selection (window start (`restore.point_in_time: "<start>/<end>"`),
+        // A plan's replay selection (window start (`restore.point_in_time: "<start>/<end>"`),
         // `restore.partitions`) that the plan itself states wrongly, or that
         // the archive cannot satisfy as stated. Each is refused, never widened
         // (`logweir_core::replay_selection::SelectionRefusal`).
@@ -386,12 +377,12 @@ closed_vocabulary! {
         ApprovalSubjectMismatch => "ApprovalSubjectMismatch",
         ApproverKeyExpiresBeforeDeadline => "ApproverKeyExpiresBeforeDeadline",
         ArchiveUrlUnreadable => "ArchiveUrlUnreadable",
-        // RECEIPT-DUP: the evidence store accepted a create-only put without
+        // The evidence store accepted a create-only put without
         // enforcing it — conditional put unsupported (HEAD-then-PUT), or a
         // second create of the readiness marker SUCCEEDED. Every backup to
         // such a store exits 4 `ExecutionClaimUnproven` before its engine.
         ConditionalCreateUnsupported => "ConditionalCreateUnsupported",
-        // PROD-01.2: a capability the endpoint was SEEN not to have. The
+        // A capability the endpoint was SEEN not to have. The
         // endpoint's own ApiVersions answer excludes a request version the
         // engine sends (the engine never negotiates, so the operation cannot
         // work there); a selected topic's DescribeConfigs is refused (the
@@ -402,7 +393,7 @@ closed_vocabulary! {
         TopicConfigsNotReadable => "TopicConfigsNotReadable",
         GroupTypesNotListed => "GroupTypesNotListed",
         NotReady => "NotReady",
-        // -- unknown / execution-only codes (D2 §6.3) --------------------
+        // Unknown / execution-only codes.
         PodNotStarted => "PodNotStarted",
         BlockedByPrerequisite => "BlockedByPrerequisite",
         ClusterIdentityNotObserved => "ClusterIdentityNotObserved",
@@ -419,23 +410,20 @@ closed_vocabulary! {
         BrokerConfigsNotReadable => "BrokerConfigsNotReadable",
         LogAppendTimeOverrideVerifiedOnlyAtExecution => "LogAppendTimeOverrideVerifiedOnlyAtExecution",
         ApprovalPending => "ApprovalPending",
-        // D2 §6.3's `approval.keyValidity`, Unknown column — added 2026-09-21
-        // at APPROVAL-KEY-WINDOW-UNPUBLISHED's fix. The row compares a
-        // restore's deadline against the approver key's window as the
-        // `Approval` publishes it; when no window is published there is
-        // nothing to compare, and PLAT-19.1's acceptance is explicit that
-        // unevaluated or stale expiry information is UNKNOWN and not valid.
-        // A `ready/ApproverKeyValid` in that case would be the whole defect
-        // wearing a green badge.
+        // `approval.keyValidity`'s Unknown column: the row compares a restore's
+        // deadline against the approver key's window as the `Approval`
+        // publishes it, and with no window published there is nothing to
+        // compare. Unevaluated expiry information is UNKNOWN, never valid.
         ApproverKeyWindowUnknown => "ApproverKeyWindowUnknown",
         SubjectNotCreated => "SubjectNotCreated",
         RecoveryPointLocationUnknown => "RecoveryPointLocationUnknown",
-        // PLAT-15.2: the catalog's view could not be read in full -- expired,
+        // The catalog's view could not be read in full -- expired,
         // a page gone, a page whose digest does not match, or the `Backup`
         // verdicts could not all be listed -- so "is this point restorable"
         // has no answer, and a blocking row with no answer is never `ready`.
         CatalogPointViewUnavailable => "CatalogPointViewUnavailable",
-        // M-2's Unknown column: the namespace's trust could not be resolved
+        // The signer re-check's Unknown column: the namespace's trust could not
+        // be resolved
         // (two policies claim it, none does, or the read failed), or the row
         // names no signer key, so the re-check has no answer.
         CatalogPointSignerUnknown => "CatalogPointSignerUnknown",
@@ -445,7 +433,7 @@ closed_vocabulary! {
         // trust could not be READ (the `TrustPolicy` list failed): which trust
         // governs has no answer, and the roster's answer is not it.
         TrustUnknown => "TrustUnknown",
-        // PROD-01.2: the endpoint's ApiVersions answer was not observed on
+        // The endpoint's ApiVersions answer was not observed on
         // this connection, so a row that reads it has no answer (never
         // `ready`); and the target's broker configuration answered WITHOUT
         // either record-timestamp bound key, so `target.timestampBound` has
@@ -453,7 +441,7 @@ closed_vocabulary! {
         // not declared that it has none.
         ApiVersionsNotObserved => "ApiVersionsNotObserved",
         TimestampBoundNotReported => "TimestampBoundNotReported",
-        // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
+        // Framework / phase codes.
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",
         DeadlineExceeded => "DeadlineExceeded",
@@ -466,7 +454,7 @@ closed_vocabulary! {
 }
 
 closed_vocabulary! {
-    /// The CLOSED check-id vocabulary (D2 §6.3). Dotted `category.name`, so
+    /// The CLOSED check-id vocabulary. Dotted `category.name`, so
     /// [`CheckId::category`] is the part before the dot and needs no second
     /// table.
     CheckId {
@@ -476,7 +464,7 @@ closed_vocabulary! {
         ConnectionClusterIdentity => "connection.clusterIdentity",
         ConnectionTopicsDescribable => "connection.topicsDescribable",
         ConnectionTopicsReadable => "connection.topicsReadable",
-        // PROD-01.2: the three source-side capability rows. Emitted only
+        // The three source-side capability rows. Emitted only
         // when the plan asks for them (`capabilityChecks`), so an older
         // controller never receives an id it cannot read.
         ConnectionEngineProtocol => "connection.engineProtocol",
@@ -488,7 +476,7 @@ closed_vocabulary! {
         DestinationEvidenceWritable => "destination.evidenceWritable",
         DestinationArchivePrefixWritable => "destination.archivePrefixWritable",
         DestinationEvidenceReadable => "destination.evidenceReadable",
-        // FX-20c: whether each Secret-backed grant the run would present is
+        // Whether each Secret-backed grant the run would present is
         // bound to its destination — answered for EVERY such grant, including
         // `archiveWrite`, which no check may probe with a request.
         DestinationCredentialBound => "destination.credentialBound",
@@ -508,7 +496,7 @@ closed_vocabulary! {
         TargetTopicCreate => "target.topicCreate",
         TargetTimestampBound => "target.timestampBound",
         TargetLogAppendTime => "target.logAppendTime",
-        // PROD-01.2: the target-side capability row (`capabilityChecks`).
+        // The target-side capability row (`capabilityChecks`).
         TargetEngineProtocol => "target.engineProtocol",
         PlanParse => "plan.parse",
         PlanBindings => "plan.bindings",
@@ -533,7 +521,7 @@ impl CheckId {
         }
     }
 
-    /// PROD-01.2: whether this id is a CAPABILITY row — one a runner emits
+    /// Whether this id is a CAPABILITY row — one a runner emits
     /// only when the plan lists it in `capabilityChecks`.
     #[must_use]
     pub fn is_capability(self) -> bool {
@@ -541,7 +529,7 @@ impl CheckId {
     }
 }
 
-/// PROD-01.2: every capability row, in catalogue order.
+/// Every capability row, in catalogue order.
 ///
 /// A capability row answers "does this endpoint HAVE what the operation
 /// needs", from the endpoint's own answers, before the operation starts. It
@@ -556,7 +544,7 @@ pub const CAPABILITY_CHECKS: [CheckId; 4] = [
     CheckId::TargetEngineProtocol,
 ];
 
-/// PROD-01.2: the capability rows that exist for one operation — what a
+/// The capability rows that exist for one operation — what a
 /// controller lists in `capabilityChecks`, and the only ids a plan for that
 /// operation may list there.
 ///
@@ -578,7 +566,7 @@ pub fn capability_checks_for(operation: CheckOperation) -> &'static [CheckId] {
     }
 }
 
-/// A per-check state (D2 §4.1).
+/// A per-check state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckState {
@@ -588,7 +576,7 @@ pub enum CheckState {
     Skipped,
 }
 
-/// Whether a check's verdict gates the operation (D2 §6.3 legend).
+/// Whether a check's verdict gates the operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Gating {
@@ -614,7 +602,7 @@ pub enum Authority {
     PodStatus,
 }
 
-/// The aggregate of a result (D2 §6.4).
+/// The aggregate of a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OverallState {
@@ -633,8 +621,7 @@ pub struct CheckScope {
     pub uid: Option<String>,
 }
 
-/// One per-check record — the shape D2 §6.4 publishes in
-/// `status.result.checks[]`.
+/// One per-check record, as `status.result.checks[]` publishes it.
 ///
 /// `message` and `remedy` are REDACTED and capped by [`CheckOutcome::new`];
 /// the struct's fields are public so a decoder can round-trip a record it
@@ -672,8 +659,7 @@ pub struct CheckOutcome {
 impl CheckOutcome {
     /// The ONE construction site. It fills `category` from the id, redacts and
     /// caps `message` and `remedy`, and forces an execution-only check to
-    /// `unknown` — D2 §6.3: "E checks are always reported `unknown` with a
-    /// note".
+    /// `unknown`.
     #[must_use]
     pub fn new(
         id: CheckId,
@@ -745,7 +731,7 @@ impl CheckOutcome {
     }
 }
 
-/// D2 §6.4's aggregation, and nothing else:
+/// The aggregation, and nothing else:
 ///
 /// - `notReady` if any BLOCKING check is `notReady`;
 /// - otherwise `unknown` if any BLOCKING check is `unknown` or `skipped`;
@@ -776,7 +762,7 @@ pub fn aggregate(checks: &[CheckOutcome]) -> OverallState {
     OverallState::Ready
 }
 
-/// The minimum `expiresAt` over non-skipped checks (D2 §6.4). `None` when no
+/// The minimum `expiresAt` over non-skipped checks. `None` when no
 /// non-skipped check carries one.
 #[must_use]
 pub fn aggregate_expires_at(checks: &[CheckOutcome]) -> Option<DateTime<Utc>> {
@@ -797,9 +783,7 @@ pub fn advisory_warnings(checks: &[CheckOutcome]) -> Vec<&CheckOutcome> {
         .collect()
 }
 
-// --------------------------------------------------------------- check plan
-
-/// Which of the seven plan kinds a request is (D2 §4.2, D2-SOURCECHECK, D3 §5.3).
+/// Which of the seven plan kinds a request is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckPlanKind {
@@ -808,15 +792,15 @@ pub enum CheckPlanKind {
     RestorePreflight,
     DestinationAccess,
     EvidenceFetch,
-    /// D2-SOURCECHECK's source-connectivity check: dial ONE connection and say
+    /// The source-connectivity check: dial ONE connection and say
     /// whether it answers. No destination, no signer, no plan and no topic —
     /// which is the whole difference from [`Self::OperationReadiness`], whose
     /// request cannot be rendered without a destination and whose Backup
     /// catalogue asks four more questions than "does this connection work".
     SourceConnection,
-    /// D3 §5.3's `RecoveryCatalog` sync: one bounded, read-only walk of the
-    /// durable catalog in object storage, relayed as the body
-    /// `docs/kubernetes.md` §7d grammars.
+    /// The `RecoveryCatalog` sync: one bounded, read-only walk of the durable
+    /// catalog in object storage, relayed as the body `docs/kubernetes.md`,
+    /// *The recovery catalog*, describes.
     CatalogSync,
 }
 
@@ -824,10 +808,8 @@ impl CheckPlanKind {
     /// The wire spelling.
     ///
     /// `const fn` so a caller that needs the string in a CONSTANT position can
-    /// derive it from this table rather than writing a second literal —
-    /// `weirkeeper::catalog_view::PLAN_KIND` is exactly that caller, and it
-    /// spent D3 W8 as a hand-written `"catalogSync"` because this was not
-    /// `const`.
+    /// derive it from this table rather than writing a second literal:
+    /// `weirkeeper::catalog_view::PLAN_KIND` is that caller.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -841,7 +823,7 @@ impl CheckPlanKind {
         }
     }
 
-    /// The two-letter Job-name discriminator of D2 §4.3 (`td`, `rd`, `rp`,
+    /// The two-letter Job-name discriminator (`td`, `rd`, `rp`,
     /// `da`, `ev`, `cs`, `sc`). It lives here so the controller and any tooling
     /// that has to recognise a check Job by name read one table.
     ///
@@ -876,7 +858,7 @@ pub enum CheckOperation {
     Backup,
     Restore,
     DestinationAccess,
-    /// D2-SOURCECHECK: the connection itself, and nothing that uses it.
+    /// The connection itself, and nothing that uses it.
     SourceConnection,
 }
 
@@ -902,19 +884,19 @@ pub struct ConnectionPlan {
     /// A path inside the pod, e.g. `/check/source-ca.pem`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca_file: Option<String>,
-    /// **PROD-01.3, `mtls` only.** The in-pod path of the projected client
+    /// **`mtls` only.** The in-pod path of the projected client
     /// certificate — a path, never PEM text. Absent for every other mode, so a
     /// plan for any connection that predates `mtls` serialises exactly as it
     /// did (and `deny_unknown_fields` on an older runner only ever meets it on
     /// an `mtls` plan, which that runner could not dial anyway).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_cert_file: Option<String>,
-    /// **PROD-01.3, `mtls` only.** The in-pod path of the projected client
+    /// **`mtls` only.** The in-pod path of the projected client
     /// private key. A path: no plan, ConfigMap or status ever carries key
     /// material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_key_file: Option<String>,
-    /// `User:<name>` or `User:ANONYMOUS` (D2 §5.4); for `mtls`,
+    /// `User:<name>` or `User:ANONYMOUS`; for `mtls`,
     /// `mtls:secret/<name>` — the client certificate's subject is the Kafka
     /// principal, and the controller, which reads no Secret, cannot know it.
     pub principal: String,
@@ -937,7 +919,7 @@ pub struct DestinationPlan {
     /// the kubelet projected", `workloadIdentity` means "use the injected web
     /// identity only", `ambient` means the object_store chain.
     pub credentials: CredentialMode,
-    /// FX-20c: every `SecretKeys` grant of this destination whose binding the
+    /// Every `SecretKeys` grant of this destination whose binding the
     /// runner compares for `destination.credentialBound` — the grants a run
     /// this check stands for would present (every configured grant, for a
     /// `destinationAccess`). REFERENCES ONLY: a role and a Secret name. The
@@ -945,40 +927,38 @@ pub struct DestinationPlan {
     /// [`crate::credential_binding::grant_binding_env`] pair, and no
     /// credential value is projected for an entry here.
     ///
-    /// Empty — and then absent from the bytes, so a plan with no Secret-backed
-    /// grant is byte-identical to every plan rendered before it existed — when
-    /// the destination has no such grant, or the controller predates FX-20c.
+    /// Empty, and then absent from the bytes, when the destination has no such
+    /// grant: a plan with no Secret-backed grant is byte-identical to one
+    /// rendered before the field existed.
     /// An older runner refuses a plan that carries it (`deny_unknown_fields`,
     /// exit 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_bindings: Vec<GrantBindingRef>,
 }
 
-/// FX-20c: one Secret-backed grant whose binding a check compares without
+/// One Secret-backed grant whose binding a check compares without
 /// using its credential — see [`DestinationPlan::grant_bindings`].
 ///
 /// # Why the binding of a grant nobody probes is still compared
 ///
-/// `destination.archivePrefixWritable` is execution-only (a check may not
-/// write into an adopter's archive), so before FX-20c a destination whose only
-/// grant was an `archiveWrite` Secret written for another destination tested
-/// READY — `destination.credentialProjected` said `Projected` — while every
-/// backup of it was refused `CredentialBindingMismatch` (PoC batch 4, FX-20
-/// F6). The binding is a public value compared in the pod; comparing it sends
-/// nothing anywhere, so it is checked for every grant whether or not the grant
-/// is probed.
+/// `destination.archivePrefixWritable` is execution-only (a check may not write
+/// into an adopter's archive), so without this a destination whose only grant
+/// is an `archiveWrite` Secret written for another destination would test READY
+/// while every backup of it is refused `CredentialBindingMismatch`. The binding
+/// is a public value compared in the pod, so it is checked for every grant
+/// whether or not the grant is probed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GrantBindingRef {
     /// Which grant: `spec.access.<role>` (a role that falls back to
     /// `archiveWrite` names `archiveWrite`'s Secret).
     pub role: DestinationRole,
-    /// The Secret that grant names. A public reference (D2 §6.5).
+    /// The Secret that grant names. A public reference.
     pub secret_name: String,
 }
 
-/// How the store credential reaches the process (D2 §3.5,
-/// `LOGWEIR_ARCHIVE_CREDENTIALS`).
+/// How the store credential reaches the process
+/// (`LOGWEIR_ARCHIVE_CREDENTIALS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CredentialMode {
@@ -1011,8 +991,8 @@ pub enum GrantCredentials {
     /// The pod's injected workload identity ONLY. Static keys in the
     /// environment (the destination grant's) are ignored.
     WorkloadIdentity,
-    /// `evidenceRead` only: the controller's own allowlisted identity
-    /// (D2 §3.10). A check pod holds no such credential, so the row is
+    /// `evidenceRead` only: the controller's own allowlisted identity.
+    /// A check pod holds no such credential, so the row is
     /// answered `unknown` and never by another principal.
     ControllerIdentity,
     /// `evidenceRead` only: the destination configures no such grant
@@ -1030,7 +1010,7 @@ pub struct GrantEnv {
 }
 
 /// The `evidenceWrite` grant's variables — the SAME spellings the execution
-/// runner's store contract reads for a Restore's evidence store (D2 §3.5), so
+/// runner's store contract reads for a Restore's evidence store, so
 /// a check pod and a Restore pod are projected one way.
 pub const EVIDENCE_WRITE_ENV: GrantEnv = GrantEnv {
     access_key_id: "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID",
@@ -1046,34 +1026,19 @@ pub const EVIDENCE_READ_ENV: GrantEnv = GrantEnv {
     session_token: "LOGWEIR_EVIDENCE_READ_AWS_SESSION_TOKEN",
 };
 
-/// A destination grant a check row must be answered AS, when it is NOT the
-/// one [`DestinationPlan::credentials`] describes — defects
-/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL and its class sweep (the
-/// `evidenceRead` row; D2 W5/W9, §6.3).
-///
-/// # Why this exists
-///
-/// A check plan's [`DestinationPlan`] carries ONE credential mode, and every
-/// handle the runner built used it. On a `BackupDestination` whose
+/// A destination grant a check row must be answered AS, when it is NOT the one
+/// [`DestinationPlan::credentials`] describes: on a `BackupDestination` whose
 /// `spec.access.evidenceWrite` or `spec.access.evidenceRead` names a different
-/// Secret or ServiceAccount than the grant the plan was resolved for, the
-/// `destination.evidenceWritable` / `destination.evidenceReadable` rows were
-/// answered by the WRONG PRINCIPAL — a green row about a principal the run
-/// never uses.
+/// Secret or ServiceAccount, the `destination.evidenceWritable` /
+/// `destination.evidenceReadable` rows are answered by that principal, not the
+/// plan's.
 ///
-/// # REFERENCES ONLY
-///
-/// Like everything else in a plan, this names a Secret or a ServiceAccount and
-/// never carries a value. The values reach the pod as `secretKeyRef`
-/// projections the kubelet performs; the names are here so the row can say
-/// WHICH principal it is about (D2 §6.5: Secret names are public references).
-///
-/// # Absent means "the same grant"
+/// REFERENCES ONLY: a Secret or a ServiceAccount name, never a value; the
+/// values reach the pod as `secretKeyRef` projections the kubelet performs.
 ///
 /// The controller renders one only when the role's grant differs from the
 /// plan's destination grant (or cannot be exercised by a check pod at all).
-/// Absent, the runner uses the destination grant, exactly as every earlier
-/// build did — which is then correct, because the two grants are one grant.
+/// Absent means the same grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GrantRef {
@@ -1267,7 +1232,7 @@ fn validate_evidence_read(
     grant.validate(field)
 }
 
-/// `topicInventory` (D2 §4.2, §5.2).
+/// `topicInventory`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TopicInventoryRequest {
@@ -1282,7 +1247,7 @@ pub struct TopicInventoryRequest {
     pub relay_budget_bytes: u64,
 }
 
-/// `operationReadiness` (D2 §4.2, §6.3).
+/// `operationReadiness`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct OperationReadinessRequest {
@@ -1312,7 +1277,7 @@ pub struct OperationReadinessRequest {
     pub evidence_read: Option<GrantRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
-    /// PROD-01.2: the capability rows this check answers
+    /// The capability rows this check answers
     /// ([`capability_checks_for`] its operation). Absent when empty, so a plan
     /// without one is byte-identical to every plan rendered before the field
     /// existed, and a runner emits no capability row for it; an older runner
@@ -1321,7 +1286,7 @@ pub struct OperationReadinessRequest {
     pub capability_checks: Vec<CheckId>,
 }
 
-/// `restorePreflight` (D2 §4.2, §6.7).
+/// `restorePreflight`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RestorePreflightRequest {
@@ -1340,7 +1305,7 @@ pub struct RestorePreflightRequest {
     pub checks: Vec<CheckId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
-    /// PROD-01.2: the capability rows this check answers — see
+    /// The capability rows this check answers — see
     /// [`OperationReadinessRequest::capability_checks`]. `checks` being empty
     /// ("every row this kind owns") never includes one: a capability row is
     /// listed here or not emitted.
@@ -1348,28 +1313,27 @@ pub struct RestorePreflightRequest {
     pub capability_checks: Vec<CheckId>,
 }
 
-/// `sourceConnection` (D2-SOURCECHECK, the addition D2 §4.2's table owes).
+/// `sourceConnection`.
 ///
 /// ONE FIELD, AND THE ABSENCES ARE THE CONTRACT. `deny_unknown_fields` on a
-/// struct that holds a connection and nothing else is what makes "this check
-/// reads no destination, loads no signer and names no topic" a property of the
-/// TYPE rather than of a convention the next caller may not read. A plan that
-/// tried to smuggle a destination into a connectivity test is refused in the
-/// runner's step 4, before a socket exists.
+/// struct that holds a connection and nothing else makes "this check reads no
+/// destination, loads no signer and names no topic" a property of the TYPE. A
+/// plan that tried to smuggle a destination into a connectivity test is refused
+/// before a socket exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SourceConnectionRequest {
     pub connection: ConnectionPlan,
 }
 
-/// `destinationAccess` (D2 §4.2).
+/// `destinationAccess`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DestinationAccessRequest {
     pub destination: DestinationPlan,
     pub roles: Vec<DestinationRole>,
     /// The optional create-only marker probe. `logweir/readiness/<uid>.json`
-    /// is the ONLY key a check may ever write (D2 §4.2).
+    /// is the ONLY key a check may ever write.
     #[serde(default)]
     pub write_probe: bool,
     /// The `evidenceWrite` grant the marker is written as, when it is not the
@@ -1393,7 +1357,7 @@ pub struct EvidenceObjectRequest {
     pub stream: Stream,
 }
 
-/// `evidenceFetch` (D2 §4.2, §3.9).
+/// `evidenceFetch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EvidenceFetchRequest {
@@ -1401,14 +1365,13 @@ pub struct EvidenceFetchRequest {
     pub objects: Vec<EvidenceObjectRequest>,
 }
 
-/// How much of the durable catalog one `catalogSync` walks (D3 §5.3).
+/// How much of the durable catalog one `catalogSync` walks.
 ///
 /// The wire spellings are `"Index"` and `"Full"` — PascalCase and NOT this
 /// module's usual `camelCase`, because they are the spellings
 /// `RecoveryCatalog.spec.sync.mode` already publishes in a CRD an operator
-/// edits. A plan that renamed them would make the controller translate between
-/// two spellings of one value, which is the defect every closed vocabulary in
-/// this file exists to avoid.
+/// edits, so the controller never translates between two spellings of one
+/// value.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
@@ -1433,7 +1396,7 @@ impl CatalogSyncMode {
     }
 }
 
-/// How hard a `catalogSync` checks each point it finds (D3 §5.3).
+/// How hard a `catalogSync` checks each point it finds.
 ///
 /// PascalCase for the reason [`CatalogSyncMode`] gives.
 #[derive(
@@ -1463,13 +1426,13 @@ impl CatalogDeepCheck {
     }
 }
 
-/// `catalogSync` (D3 §5.3, `docs/kubernetes.md` §7d).
+/// `catalogSync` (`docs/kubernetes.md`, *The recovery catalog*).
 ///
 /// It carries NO credential and NO endpoint of its own: `destination` is the
 /// resolved [`DestinationPlan`], and every `AWS_*` variable is projected onto
-/// the Job by `secretKeyRef` (D-SEAMS **S5**). The grant is `archiveRead` and
-/// the walk writes nothing at all — not even the create-only readiness marker
-/// a `destinationAccess` may write.
+/// the Job by `secretKeyRef`. The grant is `archiveRead` and the walk writes
+/// nothing at all, not even the create-only readiness marker a
+/// `destinationAccess` may write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CatalogSyncRequest {
@@ -1543,7 +1506,7 @@ impl CheckRequest {
         }
     }
 
-    /// FX-20c: the destinations whose [`DestinationPlan::grant_bindings`] this
+    /// The destinations whose [`DestinationPlan::grant_bindings`] this
     /// request's `destination.credentialBound` row compares, each with its
     /// field path — the source (or only) destination first.
     ///
@@ -1579,7 +1542,7 @@ impl CheckRequest {
         }
     }
 
-    /// PROD-01.2: the capability rows this request lists, and the operation
+    /// The capability rows this request lists, and the operation
     /// they are about. The ONE reading both the runner and the controller's
     /// expected-row mirror (`weirkeeper::controllers::preflight::job_rows`)
     /// take; empty for every kind that has none.
@@ -1609,7 +1572,7 @@ impl CheckRequest {
     }
 }
 
-/// FX-20c: the shape rules every [`DestinationPlan::grant_bindings`] obeys.
+/// The shape rules every [`DestinationPlan::grant_bindings`] obeys.
 ///
 /// * Only the three readiness kinds carry one ([`CheckRequest::
 ///   bound_destinations`]); a binding on an `evidenceFetch` or `catalogSync`
@@ -1658,7 +1621,7 @@ fn validate_grant_bindings(request: &CheckRequest) -> Result<(), CheckPlanError>
     Ok(())
 }
 
-/// PROD-01.2: the shape rules `capabilityChecks` obeys.
+/// The shape rules `capabilityChecks` obeys.
 ///
 /// * Every entry is a capability row OF THIS OPERATION
 ///   ([`capability_checks_for`]). A source-side row on a restore preflight,
@@ -1707,7 +1670,7 @@ fn validate_capability_checks(request: &CheckRequest) -> Result<(), CheckPlanErr
     Ok(())
 }
 
-/// The document mounted at `/check/check-plan.json` (D2 §4.2).
+/// The document mounted at `/check/check-plan.json`.
 ///
 /// `deny_unknown_fields` everywhere: a plan a newer controller wrote with a
 /// field this runner does not understand is refused BEFORE a client is built,
@@ -1765,13 +1728,11 @@ impl CheckPlanError {
 }
 
 impl CheckPlan {
-    /// Steps 2-4 of D2 §4.2's startup order, as ONE function so no caller can
-    /// do them out of order: hash the bytes, compare them against the digest
-    /// the Job env pins, parse strictly, check the subject UID, validate the
-    /// bounds.
-    ///
-    /// Nothing here opens anything. The caller reads the bytes (step 2) and
-    /// builds clients (step 5) only after this returns `Ok`.
+    /// Steps 2-4 of the runner's startup order, as ONE function so no caller
+    /// can do them out of order: hash the bytes, compare them against the
+    /// digest the Job env pins, parse strictly, check the subject UID, validate
+    /// the bounds. Nothing here opens anything; the caller builds clients only
+    /// after this returns `Ok`.
     pub fn parse_and_verify(
         bytes: &[u8],
         expected_sha256: &str,
@@ -1807,7 +1768,7 @@ impl CheckPlan {
         self.request.kind()
     }
 
-    /// Every bound D2 §4.2 states, checked on the READ side as well as the
+    /// Every plan bound, checked on the READ side as well as the
     /// write side. A controller that rendered 5,000 expected topics is a
     /// controller bug, and the runner must not act on it: the budgets are what
     /// make the relay, the etcd footprint and the Kafka call count bounded.
@@ -1940,13 +1901,9 @@ impl CheckPlan {
                     }
                 }
             }
-            // NOTHING TO BOUND, AND THAT IS NOT AN OMISSION. Every other
-            // request carries a list or a budget whose size a runner would
-            // otherwise spend the whole check on; this one carries a single
-            // connection, and `timeoutSeconds` above is the only ceiling it
-            // has. An empty arm is written out so that a field added here
-            // later is a compile error at a site that already asks "what
-            // bounds this?".
+            // Nothing to bound: one connection, and `timeoutSeconds` above is
+            // its only ceiling. The arm is written out so a field added here
+            // later is a compile error at a site that asks "what bounds this?".
             CheckRequest::SourceConnection(_) => {}
             CheckRequest::EvidenceFetch(r) => {
                 if r.objects.is_empty() || r.objects.len() > MAX_EVIDENCE_OBJECTS {
@@ -1999,12 +1956,10 @@ pub fn is_sha256_prefixed(s: &str) -> bool {
 
 /// `YYYY-MM-DD`, UTC — the day a catalog index shard names.
 ///
-/// SHAPE ONLY, and deliberately: `2026-02-30` passes. The runner turns this
-/// into a key prefix and a `chrono` date; what this guards is that a plan
-/// cannot carry `../` or an empty string into a listing, and a nonexistent
-/// calendar day simply lists nothing. A second calendar implementation here
-/// would be a second answer to a question `chrono` already answers on the
-/// side that actually needs the date.
+/// SHAPE ONLY, and deliberately: `2026-02-30` passes. What this guards is that
+/// a plan cannot carry `../` or an empty string into a listing; a nonexistent
+/// calendar day simply lists nothing, and `chrono` judges the date on the side
+/// that needs it.
 #[must_use]
 pub fn is_iso_day(day: &str) -> bool {
     day.len() == 10
@@ -2015,8 +1970,6 @@ pub fn is_iso_day(day: &str) -> bool {
             .enumerate()
             .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
 }
-
-// ------------------------------------------------------------------- frames
 
 /// The four relay streams. A closed enum, so an unknown stream name in a frame
 /// is `ResultUnreadable` rather than a silently dropped part.
@@ -2102,7 +2055,7 @@ impl TopicEntry {
         }
     }
 
-    /// D2 §5.3: a topic is internal IFF its name starts with `__`. Kafka's
+    /// A topic is internal IFF its name starts with `__`. Kafka's
     /// reserved-name convention, and the ONLY rule — `_schemas`,
     /// `_confluent-*` and Connect internal topics have configurable names and
     /// are never guessed (a wrong "this is internal" silently drops a user's
@@ -2133,7 +2086,7 @@ impl TopicEntry {
         }
     }
 
-    /// The canonical TSV line, `name \t partitions \t flags \n` (D2 §5.5).
+    /// The canonical TSV line, `name \t partitions \t flags \n`.
     /// This is the ONE rendering: the relay frame carries it after a prefix,
     /// the result `ConfigMap` chunks store it verbatim, and `topicsSha256` is
     /// taken over it. Three consumers, one function, so they cannot disagree
@@ -2212,13 +2165,10 @@ impl CheckRelay {
     /// The `result` stream, parsed, bounds-checked and REDACTED. `None` when
     /// the check relayed none (an evidence fetch does not).
     ///
-    /// The error type is [`FrameError`], not `serde_json::Error`, so the
-    /// "every malformation is `ResultUnreadable`" property that
-    /// `FrameError::code()` guarantees for the frames also holds for the
-    /// document inside them — the caller gets one code instead of having to
-    /// re-establish it. And the document is sanitised before it is returned,
-    /// so a controller cannot forget: the decoded fields are whatever the
-    /// runner wrote, and nothing else in the pure layer redacts them.
+    /// The error is [`FrameError`], so a malformed document is
+    /// `ResultUnreadable` like a malformed frame. The document is REDACTED
+    /// before it is returned: nothing else in the pure layer redacts the
+    /// runner's fields, so a controller cannot forget.
     pub fn result(&self) -> Option<Result<CheckResult, FrameError>> {
         self.stream(Stream::Result).map(|bytes| {
             let mut doc: CheckResult = serde_json::from_slice(bytes)
@@ -2283,7 +2233,7 @@ pub enum FrameError {
 }
 
 impl FrameError {
-    /// Always [`CheckCode::ResultUnreadable`] (D2 §4.3).
+    /// Always [`CheckCode::ResultUnreadable`].
     #[must_use]
     pub fn code(&self) -> CheckCode {
         CheckCode::ResultUnreadable
@@ -2403,7 +2353,7 @@ pub mod frames {
     ///
     /// Lines that are not frames are IGNORED: the `KafkaCluster` probe prints
     /// its own I14 lines on the same stdout, and a decoder that refused them
-    /// could not be reused there (D2 §4.5).
+    /// could not be reused there.
     #[derive(Debug)]
     pub struct Decoder {
         topics: Vec<TopicEntry>,
@@ -2520,7 +2470,7 @@ pub mod frames {
         /// Requires the end frame, its contract, its plan digest, its subject
         /// UID, every declared part, every declared stream digest and the
         /// topic-line count and digest. Any mismatch is an error, which the
-        /// caller reports as `ResultUnreadable` (D2 §4.3).
+        /// caller reports as `ResultUnreadable`.
         pub fn finish(self, expect: &FrameExpectations) -> Result<CheckRelay, FrameError> {
             let end = self.end.ok_or(FrameError::MissingEndFrame)?;
             if end.contract != CHECK_RESULT_CONTRACT {
@@ -2642,9 +2592,7 @@ pub mod frames {
     }
 }
 
-// ------------------------------------------------------------ result stream
-
-/// How one expected topic resolved (D2 §5.2 step 5).
+/// How one expected topic resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExpectedTopicState {
@@ -2668,7 +2616,7 @@ pub struct ExpectedTopicResult {
     pub state: ExpectedTopicState,
 }
 
-/// The counts D2 §5.1 publishes under `status.result.expected`.
+/// The counts `status.result.expected` publishes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExpectedSummary {
@@ -2693,7 +2641,7 @@ pub struct InventoryCounts {
 
 /// The inventory half of a check result. Carries SIGNALS, never a visibility
 /// verdict: [`visibility`] is computed by the controller, which is the only
-/// side that holds the administrator attestation (D2 §5.2 step 6).
+/// side that holds the administrator attestation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct InventoryResult {
@@ -2707,7 +2655,7 @@ pub struct InventoryResult {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncation_reason: Option<TruncationReason>,
-    /// (i) of D2 §5.4: a listing entry carried `TopicAuthorizationFailed`.
+    /// A listing entry carried `TopicAuthorizationFailed`.
     #[serde(default)]
     pub topic_authorization_error_in_listing: bool,
     pub expected: ExpectedSummary,
@@ -2736,7 +2684,7 @@ pub struct EvidenceObjectResult {
     pub code: Option<CheckCode>,
     /// `true` when the object was longer than the request's `maxBytes`.
     ///
-    /// A runner since FX-31 never reads such an object past the cap and relays
+    /// This runner never reads such an object past the cap and relays
     /// NO bytes for it (`sha256` and `bytes` absent); an earlier runner relayed
     /// a prefix, whose digest was NOT the object's. The controller refuses a
     /// truncated object either way ("the cap is a refusal, not a prefix"), so
@@ -2778,12 +2726,8 @@ impl CheckResult {
         crate::det_json::to_deterministic_json(self)
     }
 
-    /// D2 §6.4's "≤ 64 entries", ENFORCED rather than declared.
-    ///
-    /// [`MAX_CHECK_ENTRIES`] existed as a constant with no reader, so a W4 or
-    /// W9 bug that emitted 400 outcomes would have written a half-megabyte
-    /// status and nothing would have refused it. A declared bound is not a
-    /// bound.
+    /// The "≤ 64 entries" bound, ENFORCED rather than declared: a runner bug
+    /// that emitted 400 outcomes would otherwise write a half-megabyte status.
     pub fn validate(&self) -> Result<(), CheckResultError> {
         if self.checks.len() > MAX_CHECK_ENTRIES {
             return Err(CheckResultError::TooManyChecks(self.checks.len()));
@@ -2799,10 +2743,9 @@ impl CheckResult {
     /// The fields of [`CheckOutcome`] are public and `Deserialize`d directly,
     /// so a document decoded from a relay carries whatever the runner wrote:
     /// `redact` and `cap` run inside `with_message` / `with_remedy` /
-    /// `with_fact`, which a decoder never calls. D2 §4.1 applies redaction "to
-    /// every relayed status message", i.e. on the controller side too, so the
-    /// controller needs ONE call here rather than a hand-rolled walk in
-    /// `weirkeeper::check::relay`. `CheckRelay::result` already calls it.
+    /// `with_fact`, which a decoder never calls. Redaction applies to every
+    /// relayed status message, on the controller side too; `CheckRelay::result`
+    /// calls this.
     pub fn sanitise(&mut self) {
         for c in &mut self.checks {
             c.message = redact(&c.message);
@@ -2824,8 +2767,6 @@ pub enum CheckResultError {
     #[error("the result document does not parse")]
     Parse,
 }
-
-// ---------------------------------------------------------------- redaction
 
 /// One redaction rule. The rules are a LIST rather than one function body so
 /// that a test can run every rule BUT ONE and observe the secret survive —
@@ -2884,7 +2825,7 @@ pub fn redaction_rules() -> &'static [RedactionRule] {
 
 /// THE chokepoint. Every `message`, `remedy`, relayed status message and
 /// relayed fact passes through it before it can reach a `ConfigMap`, a status,
-/// a log line or an API response (D2 §4.1, §6.5).
+/// a log line or an API response.
 ///
 /// It removes URL userinfo, AWS access key ids, secret/password/token value
 /// forms, PEM blocks, S3 XML bodies (keeping only `<Code>`) and unstructured
@@ -2963,10 +2904,8 @@ fn redact_s3_xml(s: &str) -> String {
     // kept: `Message`, `RequestId` and `HostId` carry the request's own
     // identifiers and sometimes the key, and no remedy needs them.
     //
-    // EVERY block, not the first. S3 and MinIO return several `<Error>`
-    // elements in one body for `DeleteObjects` and multipart completion, and
-    // the first version of this rule re-emitted everything after the first
-    // `</Error>` untouched.
+    // EVERY block, not the first: S3 and MinIO return several `<Error>`
+    // elements in one body for `DeleteObjects` and multipart completion.
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find("<Error>") {
@@ -3032,13 +2971,14 @@ enum KeywordForm {
     /// `k=v`, `k: v`, `k => v`, `"k": "v"`, `k v`.
     Any,
     /// The quoted-key form ONLY: `"k": v` / `'k': v`. Used for the bare word
-    /// `secret`, which in prose names a Kubernetes Secret — D2 §6.5 says a
-    /// Secret NAME may appear in a message, so `secret \`logweir-s3\` key
+    /// `secret`, which in prose names a Kubernetes Secret, and a Secret NAME
+    /// may
+    /// appear in a message, so `secret \`logweir-s3\` key
     /// \`access-key-id\`` must survive while `{"secret":"…"}` must not.
     QuotedKeyOnly,
 }
 
-/// The keyword set of D2 §4.1 — `aws_secret_access_key`,
+/// The keyword set: `aws_secret_access_key`,
 /// `secret[_-]?access[_-]?key`, `password`, `sasl.password`, `token` — plus
 /// the bare `secret` in its quoted-key form, ordered LONGEST FIRST so the more
 /// specific spelling wins.
@@ -3058,41 +2998,25 @@ const SECRET_KEYWORDS: [(&str, KeywordForm); 8] = [
 ///
 /// # The shapes, and why each one is here
 ///
-/// - `password=hunter2`, `password: hunter2`, `password => hunter2` — config
-///   and log forms.
-/// - `{"password":"hunter2"}`, `"sasl.password": "hunter2"` — JSON and
-///   quoted-key YAML. **This is the form the first version missed**: it
-///   skipped only spaces and tabs after the keyword and then required a
-///   separator, so the `"` between the two abandoned the match and the value
-///   was copied verbatim. W5's `waiting.rs` relays an admission-webhook or
-///   API-server body — which is JSON — through `redact` into a status message,
-///   so a short password in that body reached the `Preflight` status, the
-///   details `ConfigMap`, the API and the UI. Values of 40+ base64/hex
-///   characters were still caught by the long-run rule; `password` and
-///   `sasl.password` are exactly the short ones.
-/// - `--token hunter2` — a bare whitespace separator, **argv form only**: the
-///   keyword must sit in flag position, immediately after a `-`. An earlier
-///   version accepted whitespace after ANY occurrence of the keyword, so the
-///   kubelet's own `couldn't find key password in Secret <ns>/<name>` lost the
-///   word `in` and became `key password [redacted] Secret …`. That sentence is
-///   the one an operator acts on, the following word is English and not a
-///   value, and a credential written as bare prose (`password hunter2`, no
-///   flag, no separator) is not a form any config, log or API body uses.
-/// - `sessionToken=abcdef` — the keyword as a SUFFIX of a longer identifier.
-///   The first version required the preceding byte to be non-alphanumeric and
-///   its comment claimed `mypassword` was caught; it was not. Matching a
-///   suffix over-redacts (`notoken=1` loses its `1`), which is the safe
-///   direction.
-/// - `password=[redacted]` — a value that is ALREADY the marker is copied
-///   whole. Without that clause the `]` terminated the value one byte early,
-///   the scanner re-wrote `[redacted` as `[redacted]` and left the old `]`
-///   behind, so every extra pass grew another bracket. [`redact`] runs at
-///   least twice on any published row — once in `CheckOutcome::with_message`
-///   and again when the controller renders the entry — which is how live
-///   statuses came to read `key password [redacted]]] Secret`.
+/// - `password=hunter2`, `password: hunter2`, `password => hunter2`: config and
+///   log forms.
+/// - `{"password":"hunter2"}`, `"sasl.password": "hunter2"`: JSON and
+///   quoted-key YAML. A relayed admission-webhook or API-server body is JSON,
+///   and `password` and `sasl.password` values are too short for the long-run
+///   rule.
+/// - `--token hunter2`: a bare whitespace separator, **argv form only**: the
+///   keyword must sit in flag position, immediately after a `-`. Otherwise the
+///   kubelet's own `couldn't find key password in Secret <ns>/<name>` would
+///   lose the word `in`, and that sentence is the one an operator acts on.
+/// - `sessionToken=abcdef`: the keyword as a SUFFIX of a longer identifier.
+///   Matching a suffix over-redacts (`notoken=1` loses its `1`), which is the
+///   safe direction.
+/// - `password=[redacted]`: a value that is ALREADY the marker is copied whole,
+///   so a second pass ([`redact`] runs at least twice on a published row) is a
+///   no-op rather than another `]`.
 ///
-/// The keyword must NOT be a prefix of a longer identifier — `tokenizer` is a
-/// word, not a key — which is what keeps `the tokenizer failed` intact.
+/// The keyword must NOT be a prefix of a longer identifier: `tokenizer` is a
+/// word, not a key, which is what keeps `the tokenizer failed` intact.
 fn redact_key_values(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
     let bytes = s.as_bytes();
@@ -3229,14 +3153,12 @@ const LONG_RUN_MIN: usize = 40;
 /// A run of 40 or more characters from the base64 / hex alphabet that carries
 /// no PUBLIC structure.
 ///
-/// The threshold is an AWS secret access key's length; the EXEMPTION is D2
-/// §6.5's other half. A key id, a content digest, an image id, a backup set's
-/// UUID, an object key and a segment path are all longer than forty characters
-/// and all public — they are on the `TrustRoster`, in the manifest, in the
-/// bucket listing — and a remedy that names none of them ("do not restore
-/// until `[redacted]` is recovered") cannot be acted on. Redaction is by key
-/// NAME ([`redact_key_values`]) and by known secret SHAPE (PEM, S3 bodies,
-/// URL userinfo, AWS access key ids); "any long token" is not a shape.
+/// The threshold is an AWS secret access key's length. A key id, a content
+/// digest, an image id, a backup set's UUID, an object key and a segment path
+/// are all longer than forty characters and all public, and a remedy that names
+/// none of them cannot be acted on. Redaction is by key NAME
+/// ([`redact_key_values`]) and by known secret SHAPE (PEM, S3 bodies, URL
+/// userinfo, AWS access key ids); "any long token" is not a shape.
 fn redact_long_runs(s: &str) -> String {
     redact_runs_where(s, is_public_identifier)
 }
@@ -3246,10 +3168,9 @@ fn redact_long_runs(s: &str) -> String {
 /// [`is_object_key_shaped`].
 ///
 /// `redact_path`'s values are archive object keys and Kafka topic names, often
-/// already wrapped in a JSON line, so the decision has to be made RUN BY RUN
-/// exactly as [`redact`] makes it. Its previous spelling split the value on `/`
-/// and ran the rule over each piece, which lowered every piece below the
-/// threshold and let a `/`-bearing credential through whole.
+/// already wrapped in a JSON line, so the decision is made RUN BY RUN exactly
+/// as [`redact`] makes it. Splitting the value on `/` first would lower every
+/// piece below the threshold and let a `/`-bearing credential through whole.
 #[must_use]
 pub fn redact_long_runs_in_keys(s: &str) -> String {
     redact_runs_where(s, |run| {
@@ -3310,7 +3231,7 @@ fn is_uuid(c: &str) -> bool {
 /// A backup set id this product mints: a UUID (a manual run's — the `Backup`'s
 /// own UID) or a SCHEDULED run's [`is_scheduled_set_id`]. Every key predicate
 /// below that answers "is this component an identity" asks THIS, so the two
-/// spellings the controller writes are read the same way everywhere (FX-17).
+/// spellings the controller writes are read the same way everywhere.
 fn is_set_id(c: &str) -> bool {
     is_uuid(c) || is_scheduled_set_id(c)
 }
@@ -3324,21 +3245,13 @@ const SLOT_LEN: usize = 15;
 /// `<schedule uid>-<yyyymmdd>-<hhmmss>` for attempt 0 and
 /// `<schedule uid>-<yyyymmdd>-<hhmmss>-r<k>` for retry `k`.
 ///
-/// # Why it is an identity and not free text (FX-17)
-///
-/// It is 52 to 55 characters of lower-case hex, digits and `-`, so it was
-/// neither of the two forms the redactor knew: not a UUID, and not a public
-/// NAME, which stops at 39 characters. The catalog sync therefore published
-/// every scheduled point's `backupId` as `[redacted]`, its `receiptKey` as
-/// `[redacted].receipt.json` and its `manifestKey` as `[redacted].json`, and
-/// the console refused to offer any of them — the whole first page of the
-/// PoC's Catalog view, every nightly run — because a plan binding cannot be
-/// built from the redactor's output. A manual run's UUID set id was untouched,
-/// which is why the defect read as "some points are not offered".
-///
-/// It is exactly as public as the UUID it starts with: the schedule's UID is
-/// on the `BackupSchedule`, the slot is the run's own name, and the whole id is
-/// `Backup.status.backupId` and the archive prefix in the bucket listing.
+/// An identity, not free text: 52 to 55 characters, so neither a UUID nor a
+/// public NAME, and without this the catalog would publish every scheduled
+/// point's `backupId`, `receiptKey` and `manifestKey` as `[redacted]`, which no
+/// plan binding can be built from. It is exactly as public as the UUID it
+/// starts with: the schedule's UID is on the `BackupSchedule`, the slot is the
+/// run's own name, and the whole id is `Backup.status.backupId` and the archive
+/// prefix in the bucket listing.
 ///
 /// # How narrow
 ///
@@ -3401,99 +3314,42 @@ fn is_public_name(c: &str) -> bool {
 /// How long the ONE adopter-chosen component of an object key may be.
 ///
 /// TWENTY-FOUR. A backup set id (`20260915T030000Z`, a UUID, `MyBackupSet01`)
-/// and a Kafka topic name are what land here, and both conventions this product
-/// writes fit; a longer one is over-redacted, which is the safe direction.
+/// and a Kafka topic name are what land here; a longer one is over-redacted,
+/// which is the safe direction.
 ///
-/// It is a SECURITY bound, not a cosmetic one, and it was measured. Without it,
-/// a randomly generated AWS secret access key beside a set id is read as an
-/// object key **2.3% of the time** — its own `/` splits it, and one half being
-/// all lower case is not rare (`(38/64)^n` is only small for large `n`). At
-/// twenty-four the same measurement is 1.25e-5, and a bare key in prose is
-/// 0/400,000. Both figures are over 400,000 random keys; the script is in the
-/// worker report.
+/// A SECURITY bound, measured over 400,000 random AWS secret access keys:
+/// without it, such a key beside a set id is read as an object key 2.3% of the
+/// time (its own `/` splits it, and one half being all lower case is not rare);
+/// at twenty-four, 1.25e-5, and a bare key in prose 0/400,000.
 ///
-/// # It is a budget for adopter free TEXT, and an identity is not free text
+/// A run id is a 26-character ULID ([`crate::ids::format_run_id`]), two over
+/// this budget, and the stem of every receipt key a console binds a plan to.
+/// The budget is NOT raised to cover it (26 takes the measurement from 1.35e-5
+/// to 3.75e-5); a ULID is exempted BY SHAPE instead ([`is_ulid`]), which adds
+/// no accept in 4,000,000 random keys, and it still spends the ONE free slot.
 ///
-/// The cap is the reason `receiptKey` reached the API wire as
-/// `[redacted].receipt.json` (defect CATALOG-RECEIPTKEY-REDACTED). A receipt
-/// key is `<prefix>/<backup_id>/<run_id>.receipt.json`, `.` is not a run
-/// character, so the run the scanner sees is
-/// `<prefix>/<backup_id>/<run_id>` — anchored by the backup set's id, with
-/// the run id as its one free component. A run id is a ULID
-/// ([`crate::ids::format_run_id`]): **26** characters, two over this budget.
-/// So a key the console needs as a plan binding was destroyed while
-/// `receiptSha256` and the location beside it survived.
-///
-/// Because the run id takes the ONE free slot, the set id beside it must be a
-/// PUBLIC form for the key to survive at all. A UUID always was; a scheduled
-/// run's `<schedule uid>-<slot>` was not until FX-17 ([`is_scheduled_set_id`]),
-/// so every scheduled point's key went whole, by the long-run rule, before
-/// this budget was ever consulted.
-///
-/// The budget is NOT raised to cover it. Raising it to 26 admits any
-/// 26-character mixed-case component, and the same measurement goes from
-/// 1.35e-5 to 3.75e-5 — nearly 3x worse for a shape nothing needs. A ULID is
-/// instead exempted BY SHAPE ([`is_ulid`]): it is an identity this product
-/// minted, not text an adopter chose, and the same measurement with the
-/// exemption is 1.35e-5 — **not one extra accept in 4,000,000 random keys**.
-/// The exemption is narrow, and a ULID still spends the ONE free slot, so
-/// nothing may ride beside it. (The three figures are one 4,000,000-key run of
-/// the script in the worker report, which reproduces the 400,000-key figures
-/// above at the same caps.)
-///
-/// # How narrow, honestly — the alphabet matters
-///
-/// A random BASE64 component is ULID-shaped with probability
-/// `(8/64) * (32/64)^25 ≈ 4e-9`, which is why the AWS-shaped measurement above
-/// does not move. But base64 is not the alphabet that mints 26-character
-/// tokens, so that figure alone would be a misleading rationale. **BASE32 is.**
-/// An unpadded RFC 4648 base32 encoding of a 128-bit seed — a TOTP secret, a
-/// recovery seed — is exactly 26 characters, and RFC 4648's alphabet overlaps
-/// Crockford's in 28 of 32 positions, so such a secret is ULID-shaped
-/// `(6/32) * (28/32)^25 = 6.7e-3` of the time. One in 155, not one in 250
-/// million.
-///
-/// That is accepted, and it is only acceptable because of the other
-/// precondition: to reach this budget at all the component must be the SOLE
-/// free component of an ANCHORED run — a run carrying a UUID, a digest or a
-/// component this product itself writes into an archive key
-/// ([`at_most_one_free_component`]'s `ulid_exempt`). So the shape has to sit in
-/// the run-id slot of a key this product mints, not merely somewhere in an
-/// adopter-supplied string. Without that gate the same probe survives
-/// 2578/400,000 where it was 0/400,000; with it, 0/400,000.
-///
-/// (For 26 upper-case HEX characters the figure would be `1/2`, but nothing
-/// mints a 104-bit hex token; and the lower-case form of both already survives
-/// as a public NAME — [`is_public_name`], which is a wider pre-existing opening
-/// than this one and not a matter for this constant.)
+/// The shape is not harmless for every alphabet: an unpadded RFC 4648 base32
+/// encoding of a 128-bit seed (a TOTP secret) is 26 characters and ULID-shaped
+/// 6.7e-3 of the time. That is acceptable only because the exemption also
+/// requires the run to be ANCHORED (a UUID, a digest or an archive component
+/// this product writes; [`at_most_one_free_component`]'s `ulid_exempt`), which
+/// takes that probe from 2578/400,000 back to 0/400,000.
 const FREE_COMPONENT_MAX: usize = 24;
 
 /// A ULID as [`crate::ids::format_run_id`] mints one: exactly 26 characters of
-/// Crockford base32, the first of them `0`–`7`.
-///
-/// An IDENTITY, not adopter free text, which is why it is exempt from
-/// [`FREE_COMPONENT_MAX`] and nothing else is. Every `run_id` this product
-/// writes is one, and a run id is the stem of every receipt key and of every
-/// drill scorecard key, so the alternative to this predicate is redacting the
-/// plan binding a console needs (CATALOG-RECEIPTKEY-REDACTED).
+/// Crockford base32, the first of them `0`–`7`. An IDENTITY, not adopter free
+/// text, which is why it is exempt from [`FREE_COMPONENT_MAX`] and nothing else
+/// is: a run id is the stem of every receipt and scorecard key.
 ///
 /// Every clause is load-bearing and each has a row:
 ///
-/// * **26 characters exactly.** Not "up to 26": a 27-character component is
-///   still over the budget and still goes, and so is a 25-character one that
-///   is not a name (the budget covers it already).
-/// * **Crockford base32** — `0-9` and upper case less `I`, `L`, `O`, `U`, the
-///   alphabet `ulid` encodes with. This is 32 of the 64 base64 characters, so
-///   it refuses half of what a credential is drawn from at every position.
-/// * **first character `0`–`7`.** 26 characters carry 130 bits and a ULID is
-///   128, so the leading character encodes 3 bits and can be no larger. A
-///   component that is Crockford base32 but starts `8`–`Z` is not a ULID
-///   anything minted, and it is not exempt.
+/// * **26 characters exactly.**
+/// * **Crockford base32**: `0-9` and upper case less `I`, `L`, `O`, `U`, half
+///   of what a credential is drawn from at every position.
+/// * **first character `0`–`7`**: 26 characters carry 130 bits and a ULID is 128.
 ///
 /// Lower case is NOT accepted, and costs nothing: a 26-character all-lower-case
-/// component is already a public NAME ([`is_public_name`]) and never reached
-/// the budget. Keeping the exemption upper-case-only keeps it to the canonical
-/// spelling `Ulid::to_string` produces.
+/// component is already a public NAME ([`is_public_name`]).
 fn is_ulid(c: &str) -> bool {
     /// Crockford base32's encoding alphabet — `I`, `L`, `O` and `U` are not in
     /// it, which is the point.
@@ -3506,11 +3362,9 @@ fn is_ulid(c: &str) -> bool {
 /// A component Logweir itself writes into an archive key.
 ///
 /// These are ANCHORS in the same sense a UUID or a digest is: a run carrying
-/// one is an object key, whatever the adopter called their backup set. Without
-/// them `redact` blanked `team/prod/archives/20260915T030000Z/manifest.json`
-/// — D2-REDACT-OVERBROAD's own symptom, in the one place the tracker names it
-/// (`archive.backupSet`'s refusal message), for any set id that is not a UUID
-/// (review finding **F5**). A random credential never contains one.
+/// one is an object key, whatever the adopter called their backup set, so
+/// `team/prod/archives/20260915T030000Z/manifest.json` survives. A random
+/// credential never contains one.
 fn is_archive_component(c: &str) -> bool {
     const WORDS: [&str; 6] = [
         "manifest",
@@ -3556,10 +3410,9 @@ fn is_key_component(c: &str) -> bool {
 ///
 /// The VALUE half must be a digest or a UUID and NOTHING ELSE. Every fact
 /// `entry_of` folds into a message is one of those two (`signerKeyId`,
-/// `imageID`, `podUID`, `clusterId`), so the clause costs nothing; accepting a
-/// lower-case run as well let an unkeyed `k=v` credential ride out under any
-/// name an adopter's tool happens to print — `datadogapikey=<32 hex>` is 46
-/// characters, over the threshold, and was returned whole (review finding F2).
+/// `imageID`, `podUID`, `clusterId`); a lower-case value would let an unkeyed
+/// `k=v` credential ride out under any name an adopter's tool prints
+/// (`datadogapikey=<32 hex>`).
 const FACT_KEY_MAX: usize = 24;
 
 fn is_fact_pair(c: &str) -> bool {
@@ -3591,28 +3444,21 @@ fn is_fact_pair(c: &str) -> bool {
 ///   ([`is_archive_component`]) — which makes the run an object key rather than
 ///   a token. **At most one** of its remaining components may then be something
 ///   other than a public form, and that one is capped at
-///   [`FREE_COMPONENT_MAX`] unless it is a ULID ([`is_ulid`]), which is an
-///   identity this product minted rather than text an adopter chose — an
-///   exemption this arm may rely on precisely because it has already required
-///   the anchor. Kafka
-///   topic names may carry upper case, and the strict clause above would have
-///   redacted the whole segment path for `payments-EU`; a segment key has
-///   exactly ONE adopter-chosen component, which is that topic name or the
-///   backup set id, and a receipt key has exactly one free component, which is
-///   its run id.
+///   [`FREE_COMPONENT_MAX`] unless it is a ULID ([`is_ulid`]), an identity this
+///   product minted, which this arm may rely on because it has already required
+///   the anchor. A segment key has exactly ONE adopter-chosen component (its
+///   topic name, which may carry upper case, or the backup set id), and a
+///   receipt key has exactly one free component, its run id.
 ///
 /// # Why the anchored branch is capped at one
 ///
-/// Review finding **F1**, critical. Without the cap the branch asked only that
-/// every component be short and `[A-Za-z0-9._=-]` — which the canonical AWS
-/// secret access key satisfies component by component, because its own `/`
-/// characters split its 40 into 13, 7 and 18. So the moment a backup set id
-/// shared the token run, the credential was "an object key" and survived
-/// whole, where the unstructured rule had replaced it. A 40-character key with
-/// *n* internal slashes yields *n*+1 upper-case-bearing components, and at
-/// *n* = 0 the single component is 40 characters and already fails
-/// [`is_key_component`]'s length cap — so the whole family dies at one of the
-/// two clauses, while a real segment path keeps its one adopter-chosen name.
+/// The canonical AWS secret access key is short `[A-Za-z0-9._=-]` component by
+/// component, because its own `/` characters split its 40 into 13, 7 and 18;
+/// without the cap, a set id in the same run would make it "an object key". A
+/// 40-character key with *n* internal slashes yields *n*+1 upper-case-bearing
+/// components, and at *n* = 0 the single component fails [`is_key_component`]'s
+/// length cap, so the whole family dies at one of the two clauses while a real
+/// segment path keeps its one adopter-chosen name.
 ///
 /// An AWS secret access key satisfies no branch: its components carry upper
 /// case (and often `+`), nothing in it is a UUID or a digest, and it has more
@@ -3628,8 +3474,7 @@ fn is_public_identifier(run: &str) -> bool {
     // The anchor may itself be a digest: a digest component is a public form,
     // so it satisfies the `all` below through `public` rather than through
     // `is_key_component`, whose length cap no 64- or 128-character component
-    // can meet. Before that was made explicit the `is_hex_digest` disjunct in
-    // the anchor test was dead code.
+    // can meet.
     components
         .iter()
         .any(|c| is_set_id(c) || is_hex_digest(c) || is_archive_component(c))
@@ -3653,26 +3498,14 @@ fn is_public_identifier(run: &str) -> bool {
 ///
 /// # `ulid_exempt` is the ANCHOR, passed down
 ///
-/// The two callers do not share a precondition. [`is_public_identifier`] has
-/// already required an anchor — a set id ([`is_set_id`]), a digest, or a
-/// component this product writes into an archive key — before it reaches here, so its run is archive
-/// structure and the exemption is about the run-id SLOT of a key this product
-/// minted. [`is_object_key_shaped`] is that clause with the anchor requirement
-/// DROPPED, so without this parameter the exemption would ride on shape alone,
-/// and any `<adopter bucket name>/<26 Crockford characters>` would survive.
-///
-/// That is reachable and it is measurable. An unpadded RFC 4648 base32 encoding
-/// of a 128-bit seed — a TOTP secret, a recovery seed — is **exactly 26
-/// characters**, and base32's alphabet overlaps Crockford's in 28 of 32
-/// positions, so such a secret is ULID-shaped `(6/32)·(28/32)^25 = 6.7e-3` of
-/// the time: 1 in 155, measured at 2578/400,000, where before the exemption it
-/// was 0/400,000. Gating on the anchor takes that back to 0/400,000 while every
-/// key this product writes stays whole, because every one of them is anchored:
-/// `logweir/backups/<uuid>/<run id>` and `logweir/drills/<run id>` both carry
-/// `logweir` and `backups`/`blobs`-class components that
-/// [`is_archive_component`] names, and the adopter-prefixed spellings carry the
-/// backup set's id — a UUID, or a scheduled run's `<schedule uid>-<slot>`,
-/// which is anchored by the same UUID (FX-17).
+/// [`is_public_identifier`] has already required an anchor (a set id, a digest,
+/// or an archive component) before it reaches here, so the exemption is about
+/// the run-id SLOT of a key this product minted. [`is_object_key_shaped`] drops
+/// the anchor requirement, so without this parameter the exemption would ride
+/// on shape alone, and a 128-bit base32 secret is ULID-shaped 6.7e-3 of the
+/// time (see [`FREE_COMPONENT_MAX`]). Every key this product writes is anchored
+/// (`logweir/backups/<uuid>/<run id>`, `logweir/drills/<run id>`, or an adopter
+/// prefix carrying the set id), so none is lost.
 fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
     let public = |c: &str| {
         c.is_empty() || is_hex_digest(c) || is_set_id(c) || is_public_name(c) || is_fact_pair(c)
@@ -3709,15 +3542,9 @@ fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
 ///
 /// # The ULID exemption is NOT dropped along with the anchor
 ///
-/// The run id of a key this product minted is a 26-character ULID, two over
-/// [`FREE_COMPONENT_MAX`], and it is exempt — but only where the run is
-/// ANCHORED, which this function still measures even though it no longer
-/// REQUIRES it. Dropping the anchor and keeping the exemption would make any
-/// `<adopter bucket name>/<26 Crockford characters>` a key, and an unpadded
-/// 128-bit base32 secret is that shape 6.7e-3 of the time (see
-/// [`at_most_one_free_component`]). Every key this product writes is anchored,
-/// so nothing the exemption exists for is lost: the anchor is a precondition,
-/// not a second budget.
+/// A ULID run id is exempt only where the run is ANCHORED, which this function
+/// still measures even though it no longer REQUIRES it (see
+/// [`at_most_one_free_component`]).
 #[must_use]
 pub fn is_object_key_shaped(value: &str) -> bool {
     let components: Vec<&str> = value.split('/').collect();
@@ -3732,10 +3559,8 @@ pub fn is_object_key_shaped(value: &str) -> bool {
         && at_most_one_free_component(&components, anchored)
 }
 
-// --------------------------------------------------------------- visibility
-
 /// The completeness vocabulary — `unknown | limited | attestedComplete`, and
-/// nothing else, everywhere (D-SEAMS S3).
+/// nothing else, everywhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VisibilityState {
@@ -3780,7 +3605,7 @@ pub enum VisibilityBasis {
 }
 
 /// An administrator's attestation, read from the installation policy
-/// `ConfigMap` (D2 §4.4). Only a principal who can write that `ConfigMap` in
+/// `ConfigMap`. Only a principal who can write that `ConfigMap` in
 /// the release namespace can create one; a namespace operator cannot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -3798,7 +3623,7 @@ pub struct Attestation {
 
 /// What an attestation-backed result records. Never a claim Logweir verified:
 /// the UI renders "attested by <attestedBy> at <attestedAt>; not verified by
-/// Logweir" (D2 §5.4).
+/// Logweir".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AttestationRef {
@@ -3820,7 +3645,7 @@ pub struct VisibilitySignals {
     pub cluster_id: String,
     /// `User:<name>` or `User:ANONYMOUS`.
     pub principal: String,
-    /// (i) of D2 §5.4.
+    /// A listing entry carried `TopicAuthorizationFailed`.
     pub topic_authorization_error_in_listing: bool,
     pub expected: ExpectedSummary,
     pub truncated: bool,
@@ -3836,7 +3661,7 @@ pub struct Visibility {
     pub attestation: Option<AttestationRef>,
 }
 
-/// D2 §5.4's state algorithm, and NOTHING else may compute completeness.
+/// The state algorithm, and NOTHING else may compute completeness.
 ///
 /// ```text
 /// limited          if topicAuthorizationErrorInListing || expected.notAuthorized > 0
@@ -3928,8 +3753,6 @@ pub fn visibility(
     }
 }
 
-// ------------------------------------------------------------ binding digest
-
 /// One object a check result depends on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -3939,7 +3762,7 @@ pub struct Referent {
     pub name: String,
     pub uid: String,
     /// `None` for a kind whose generation is not meaningful (a `Backup` is
-    /// identified by UID alone in D2 §6.2's example).
+    /// identified by UID alone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<i64>,
 }
@@ -3971,7 +3794,7 @@ pub struct ApprovalRef {
     pub resource_version: String,
 }
 
-/// Everything a check result is bound to (D2 §6.6).
+/// Everything a check result is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingInputs {
     pub operation: CheckOperation,
@@ -4004,7 +3827,7 @@ struct CanonicalBinding<'a> {
     policy_digest: &'a String,
 }
 
-/// `sha256:` over the canonical JSON of [`BindingInputs`] (D2 §6.6).
+/// `sha256:` over the canonical JSON of [`BindingInputs`].
 ///
 /// The API recomputes this from CURRENT objects and compares it with the
 /// recorded one; any difference makes the stored result inapplicable. That is
@@ -4040,14 +3863,12 @@ pub fn inputs_digest(b: &BindingInputs) -> String {
     crate::ids::sha256_prefixed(&bytes)
 }
 
-/// Why a stored check result is no longer applicable (D2 §6.6).
+/// Why a stored check result is no longer applicable.
 ///
-/// D2's five reasons, plus [`StaleReason::InputsDigestChanged`]. The sixth is
-/// ADDITIVE and exists so this function can never report "stale" without
-/// saying why: the recorded and recomputed digests can differ through a field
-/// the other five do not name (the topic set of a Backup readiness request,
-/// for instance). A consumer that knows only D2's five renders it as a
-/// generic "the inputs changed", which is exactly what it means.
+/// Five named reasons, plus [`StaleReason::InputsDigestChanged`], so this
+/// function can never report "stale" without saying why: the recorded and
+/// recomputed digests can differ through a field the other five do not name
+/// (the topic set of a Backup readiness request, for instance).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StaleReason {
@@ -4073,15 +3894,13 @@ impl std::fmt::Display for StaleReason {
     }
 }
 
-/// The applicability test of D2 §6.6, as ONE function so the API and the UI
-/// cannot each implement half of it.
+/// The applicability test, as ONE function so the API and the UI cannot each
+/// implement half of it.
 ///
 /// `recorded` is the binding the check stored; `current` is the binding the
-/// caller recomputed from live objects. The returned list is EMPTY exactly
-/// when the result still applies, and every entry names a concrete reason:
-/// a stale flag with no reason is the defect PLAT-03.2 is about ("a green
-/// preview cannot bypass a later collision" needs the user to know WHY the
-/// preview went away).
+/// caller recomputed from live objects. The returned list is EMPTY exactly when
+/// the result still applies, and every entry names a concrete reason: a stale
+/// flag with no reason would hide WHY a preview went away.
 ///
 /// `now` is a parameter for the same reason it is in [`visibility`].
 #[must_use]
@@ -4134,12 +3953,9 @@ pub fn stale_reasons(
             .map_or_else(String::new, |a| a.uid.clone());
         out.push(StaleReason::ReferentChanged(format!("Approval/{uid}")));
     }
-    // Sorted on BOTH sides, exactly as `inputs_digest` sorts them. Comparing
-    // positionally made two bindings with the same digest report
-    // `caBundleChanged` forever: a two-destination restore preflight where the
-    // controller resolved source-then-evidence and the API recomputed from a
-    // map got the other order, so every GET answered `stale` and the restore
-    // could never be approved from the UI. It failed safe and was undiagnosable.
+    // Sorted on BOTH sides, exactly as `inputs_digest` sorts them: compared
+    // positionally, two bindings with the same digest but destinations in
+    // another order would be stale forever.
     let sorted = |v: &[CaBundleRef]| {
         let mut c: Vec<CaBundleRef> = v.to_vec();
         c.sort_by(|a, b| a.destination_uid.cmp(&b.destination_uid));

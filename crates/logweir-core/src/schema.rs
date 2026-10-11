@@ -75,7 +75,7 @@ pub fn scorecard_schema() -> String {
             _ => panic!("the scorecard schema's object has a {name} property"),
         }
     }
-    // PROD-15.1: `target.original_name` is format 1's (1.8.0) and never a
+    // `target.original_name` is format 1's (1.8.0) and never a
     // 2.x document's, so this file does not describe it (see the note above).
     let target = def(&mut root.definitions, "TargetInfo");
     assert!(
@@ -251,7 +251,7 @@ pub fn backup_receipt_schema() -> String {
     out
 }
 
-/// **PROD-04.1.** The JSON Schema of the consumer positions DOCUMENT
+/// The JSON Schema of the consumer positions DOCUMENT
 /// (`<run_id>.consumer-positions.json`, format
 /// [`crate::consumer_positions::DOCUMENT_FORMAT_VERSION`]) a 1.7.0 receipt
 /// binds by digest: `schemas/logweir-consumer-positions-1.0.0.json`, its `$id`

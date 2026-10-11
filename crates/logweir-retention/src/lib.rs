@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `logweir-retention` — the one supported enforcer (decision D3 §6.5).
+//! `logweir-retention` — the one supported enforcer.
 //!
 //! # Why this is its own binary
 //!
@@ -218,7 +218,7 @@ pub enum Refusal {
          unattributable deletion is not performed."
     )]
     NoRecordCredential,
-    /// FX-20: a projected credential — the delete-capable `AWS_*` key or the
+    /// A projected credential — the delete-capable `AWS_*` key or the
     /// `LOGWEIR_EVIDENCE_AWS_*` record key — whose Secret's `logweir-binding`
     /// is absent or names another policy, destination route or scope. The
     /// message opens with `CredentialBindingMismatch` and names variables,
@@ -230,14 +230,14 @@ pub enum Refusal {
     Port(String),
 }
 
-/// FX-20: the key line a refused run prints — `retention-refusal=<code>`, and
+/// The key line a refused run prints — `retention-refusal=<code>`, and
 /// for a refusal about one binding variable ` variable=<name>` after it — read
 /// by key name from a closed table
 /// (`weirkeeper::controllers::retention_policy::RETENTION_REFUSALS`) and put on
 /// the policy's status.
 pub const REFUSAL_LINE: &str = "retention-refusal=";
 
-/// FX-15: every code [`Refusal::code`] can return. The controller's
+/// Every code [`Refusal::code`] can return. The controller's
 /// `RETENTION_REFUSALS` must be this set, and
 /// `weirkeeper/tests/retention_policy_controller.rs` reads this array to hold
 /// it so.
@@ -267,7 +267,7 @@ pub const REFUSAL_CODES: [&str; 22] = [
 ];
 
 impl Refusal {
-    /// FX-15: the closed code the controller publishes for this refusal. Every
+    /// The closed code the controller publishes for this refusal. Every
     /// refusal has one, so a refused run's status says why without the pod log.
     #[must_use]
     pub fn code(&self) -> &'static str {
@@ -530,7 +530,7 @@ pub mod env {
 
 /// The seven variables a run cannot start without.
 ///
-/// The two ceilings joined the five on 2026-10-05 (FX-10): the controller has
+/// The two ceilings joined the five on 2026-10-05: the controller has
 /// projected both on every enforcement Job since the worker existed
 /// (`582ba14e`), so no supported pairing lacks them, and a run that would have
 /// to GUESS its own ceiling is a run that should not delete.
@@ -598,7 +598,7 @@ pub fn admit(
         .parse::<i64>()
         .map_err(|_| Refusal::GenerationNotANumber(raw_generation.clone()))?;
 
-    // THE CEILINGS ARE THE JOB'S, READ STRICTLY (FX-10). They used to fall back
+    // THE CEILINGS ARE THE JOB'S, READ STRICTLY. They used to fall back
     // to 50 and 20 000 on an absent or unparseable value, so a worker that
     // never read them passed the one row that set exactly those numbers.
     let binding = RunBinding {

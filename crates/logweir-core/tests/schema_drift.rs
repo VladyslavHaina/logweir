@@ -1,5 +1,5 @@
 /// The checked-in schema file of the CURRENT version of `name`, whose version
-/// is the writer's own constant (FX-4): a renumber moves the constant and
+/// is the writer's own constant: a renumber moves the constant and
 /// `just schema`, and every test below follows it.
 fn current_schema(name: &str, version: &str) -> String {
     let rel = format!("schemas/logweir-{name}-{version}.json");
@@ -69,7 +69,7 @@ fn checked_in_schema_matches_the_types() {
     );
 }
 
-/// FX-4: the 1.0.0 scorecard schema is FROZEN beside the 1.1.0 one, and still
+/// The 1.0.0 scorecard schema is FROZEN beside the 1.1.0 one, and still
 /// describes the documents written before the bump — `docs/stability.md`'s "a
 /// new schema file beside the old one". It is no longer regenerated, so this is
 /// the gate that it stays what it was: it names itself 1.0.0 and it has neither
@@ -127,7 +127,7 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
     );
 }
 
-/// FX-3: the 1.1.0 scorecard schema is FROZEN beside the 1.2.0 one, the way
+/// The 1.1.0 scorecard schema is FROZEN beside the 1.2.0 one, the way
 /// FX-4 froze the 1.0.0 one. It still describes every document written between
 /// the two bumps: it names itself 1.1.0, carries FX-4's two `not_assessed`
 /// fields and does NOT describe `topic_parity.not_reconstructed`. The current
@@ -167,7 +167,7 @@ fn the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema() {
     );
 }
 
-/// FX-8: the 1.1.0 scorecard schema is FROZEN beside the 1.3.0 one, the way
+/// The 1.1.0 scorecard schema is FROZEN beside the 1.3.0 one, the way
 /// FX-4 froze the 1.0.0 one. It still describes every document written before
 /// the bump: it names itself 1.1.0, carries FX-4's `not_assessed` and does NOT
 /// describe `source.time_basis`. The current schema does, as an OPTIONAL field
@@ -221,7 +221,7 @@ fn the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
-/// FX-8: the 1.2.0 scorecard schema (FX-3's) is FROZEN beside the 1.3.0 one.
+/// The 1.2.0 scorecard schema (FX-3's) is FROZEN beside the 1.3.0 one.
 /// It names itself 1.2.0, carries FX-3's `not_reconstructed` and does NOT
 /// describe `source.time_basis`.
 #[test]
@@ -427,7 +427,7 @@ fn backup_receipt_schema_has_no_drift() {
     );
 }
 
-/// **PROD-04.1.** The checked-in consumer positions DOCUMENT schema is exactly
+/// The checked-in consumer positions DOCUMENT schema is exactly
 /// what the generator emits, and names its own format: the document a 1.7.0
 /// receipt binds by digest (`schemas/logweir-consumer-positions-1.0.0.json`).
 #[test]
