@@ -3388,6 +3388,9 @@ OD-12); each part below did nothing v1 uses.
   `credentialBindings` status and the chart's `notify.allowInsecureSinks`.
   Health, the objectives, the alert ledger (`status.alerts`: open and
   resolved, no delivery state) and the console's `#/protection` page stay.
+  The page's three delivery columns and the product API's `notifications`,
+  `notifiedTransition` and `delivery` members, empty once this item lands,
+  are removed (PROD-17.1 C2's leftover).
   An upgraded install sees: a policy that still carries `spec.notifications`
   parses, the API server keeps the key and drops its contents, and the
   policy's `NotificationsDelivered` condition reads `False` /

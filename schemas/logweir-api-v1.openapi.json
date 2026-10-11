@@ -4745,34 +4745,6 @@
           }
         ]
       },
-      "AlertDeliveryView": {
-        "description": "How a transition was delivered, or why it was not.",
-        "type": "object",
-        "properties": {
-          "attempts": {
-            "description": "How many attempts.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "lastAttemptAt": {
-            "description": "When the last one was.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "lastError": {
-            "description": "The last error, redacted by the controller and bounded again here. Never a routing key and never a URL.",
-            "type": "string",
-            "nullable": true
-          },
-          "state": {
-            "description": "`Pending`, `Delivered`, `Failed` or `Suppressed`.",
-            "type": "string",
-            "nullable": true
-          }
-        }
-      },
       "AlertView": {
         "description": "One entry of the deduplication ledger.",
         "type": "object",
@@ -4782,11 +4754,6 @@
           "state"
         ],
         "properties": {
-          "delivery": {
-            "description": "How that delivery went.",
-            "$ref": "#/components/schemas/AlertDeliveryView",
-            "nullable": true
-          },
           "key": {
             "description": "The stable dedup key.",
             "type": "string"
@@ -4794,12 +4761,6 @@
           "kind": {
             "description": "What it is about.",
             "type": "string"
-          },
-          "notifiedTransition": {
-            "description": "The last transition a delivery was created for. `transition` ahead of this one is an alert whose latest state has not been delivered.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
           },
           "openedAt": {
             "description": "When it opened.",
@@ -9521,68 +9482,6 @@
           }
         }
       },
-      "NotificationRouteView": {
-        "description": "One configured alert destination — its name and which channels it has.\n\nTHE CHANNELS ARE BOOLEANS ON PURPOSE. A PagerDuty routing key, a webhook URL and a Slack webhook URL are each a credential; so is the name of the Secret that holds one, to a reader deciding what to try to read next.",
-        "type": "object",
-        "required": [
-          "name",
-          "pagerDuty",
-          "slack",
-          "webhook"
-        ],
-        "properties": {
-          "name": {
-            "description": "What status and logs call it.",
-            "type": "string"
-          },
-          "pagerDuty": {
-            "description": "Whether a PagerDuty channel is configured.",
-            "type": "boolean"
-          },
-          "slack": {
-            "description": "Whether a Slack channel is configured.",
-            "type": "boolean"
-          },
-          "webhook": {
-            "description": "Whether a webhook channel is configured.",
-            "type": "boolean"
-          }
-        }
-      },
-      "NotificationsView": {
-        "description": "Where alerts go, and which ones.",
-        "type": "object",
-        "required": [
-          "renotifyAfterSeconds",
-          "sendResolved"
-        ],
-        "properties": {
-          "kinds": {
-            "description": "Which alert kinds are sent. Absent means all of them.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "nullable": true
-          },
-          "renotifyAfterSeconds": {
-            "description": "How long before an open alert is re-sent; `0` disables re-notify.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "routes": {
-            "description": "The routes, at most four.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationRouteView"
-            }
-          },
-          "sendResolved": {
-            "description": "Whether a resolution is delivered too.",
-            "type": "boolean"
-          }
-        }
-      },
       "ObjectKeyRefRequest": {
         "description": "One key of a ConfigMap in this namespace.",
         "type": "object",
@@ -11652,11 +11551,6 @@
           "namespace": {
             "description": "The namespace.",
             "type": "string"
-          },
-          "notifications": {
-            "description": "Where alerts go. Absent means the verdict is reported here and delivered nowhere — a real choice, not a broken configuration.",
-            "$ref": "#/components/schemas/NotificationsView",
-            "nullable": true
           },
           "objectives": {
             "description": "What \"protected\" means.",

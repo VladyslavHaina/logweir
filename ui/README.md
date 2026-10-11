@@ -104,7 +104,7 @@ reaches it.
 | `pages/keys.js` | the cluster-scoped `TrustPolicy` (with `TrustRoster` as the named fallback), read-only, with the out-of-band fingerprint command and the evaluation column that reads `unknown` rather than `valid`. |
 | `operation-watch.js` | the reconnecting watch over ONE operation -- backoff, terminal stop, disposal with the route -- and the bounded D3 reads the four D3 surfaces make, with every route they can address in one frozen table. |
 | `pages/operation.js` | the durable operation view: state, reason, last update, the diagnoses, the result and the evidence rendered separately, and the completion panel. |
-| `pages/protection.js` | protection health beside schedule health, the newest available recovery point with its two instants labelled apart, and the alert ledger (its delivery columns stay empty: alert delivery is withdrawn). |
+| `pages/protection.js` | protection health beside schedule health, the newest available recovery point with its two instants labelled apart, and the alert ledger: each alert's kind, state and instants (alert delivery is withdrawn, so it has no delivery columns). |
 | `pages/catalog.js` | the recovery catalog: the connect-archive submission, the point list with availability and verification as two columns, and the untrusted-signer panel with no one-click trust. |
 | `style.css` | the design system, in one file: VMware Clarity's design language -- Clarity's token names and values, light and dark, and every component drawn to Clarity's anatomy. System fonts; no font is fetched from anywhere. See *The Clarity design language, the datagrid and focus*. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |

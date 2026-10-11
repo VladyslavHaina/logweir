@@ -26,11 +26,9 @@
 //      `newestRecordAt` is the newest archived record. An idle topic makes the
 //      second look old for a reason that is not a gap in protection, so they
 //      are never printed as one number (D3 section 3.2).
-//   3. A NOTIFICATION IS NOT EVIDENCE, AND A DELIVERY FAILURE IS NOT A RUN
-//      FAILURE. The alert ledger shows each alert's transition and what
-//      happened to its delivery; a `Failed` delivery changes nothing about a
-//      backup's own recorded result, and the page says so beside the ledger
-//      (D3 section 3.4, which makes the same claim structurally in the controller).
+//   3. THE ALERT LEDGER IS A LEDGER. Each alert's kind, state and instants;
+//      alert sinks are withdrawn (release notes, item 74), so nothing is
+//      delivered and the page shows no delivery state.
 //
 // IT SUBMITS NOTHING. There is no test-notification button here: D3 section 10 gives
 // that route an operator role and a rate limit, and a control that fired a
@@ -39,7 +37,6 @@
 
 import {
   ABSENT,
-  NOTIFICATION_NOT_EVIDENCE_SENTENCE,
   TWO_HEALTHS_SENTENCE,
   TWO_INSTANTS_SENTENCE,
   badge,
@@ -240,34 +237,25 @@ export function renderScheduleHealth(object, ns) {
   );
 }
 
-/** THE ALERT LEDGER AND ITS DELIVERY STATE.
- *
- *  `Suppressed` is a CONFIGURATION CHOICE and not a failure: it means no route
- *  carries this kind. It is rendered as itself. */
+/** THE ALERT LEDGER: each alert's kind, state and instants. */
 export function renderAlerts(object) {
   const alerts = Array.isArray(statusOf(object).alerts) ? statusOf(object).alerts : [];
   const rows = alerts.map((a) => {
     const alert = a || {};
-    const delivery = alert.delivery || {};
     return [
       cell(alert.kind),
       badge(alert.state === "Open" ? "unverified" : "green", String(alert.state || "")),
       when(alert.openedAt),
       when(alert.resolvedAt),
-      cell(alert.transition) + " / " + cell(alert.notifiedTransition),
-      cell(delivery.state) + " (" + cell(delivery.attempts) + ")",
-      cell(delivery.lastError),
     ];
   });
   return (
     "<section class=\"alerts\"><h3>Alerts</h3>" +
     table(
-      ["KIND", "STATE", "OPENED", "RESOLVED", "TRANSITION / NOTIFIED", "DELIVERY", "LAST ERROR"],
+      ["KIND", "STATE", "OPENED", "RESOLVED"],
       rows,
-      "This policy has opened no alert. An empty ledger is an empty ledger: it says nothing " +
-        "about whether a sink would accept one.",
+      "This policy has opened no alert.",
     ) +
-    "<p class=\"note\">" + esc(NOTIFICATION_NOT_EVIDENCE_SENTENCE) + "</p>" +
     "</section>"
   );
 }

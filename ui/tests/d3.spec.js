@@ -654,18 +654,25 @@ test("an_unevaluated_protection_is_unknown_and_Protected_Unknown_is_never_rounde
   assert.ok(NOT_EVALUATED_SENTENCE.length > 0);
 });
 
-test("the_alert_ledger_shows_its_delivery_state_and_says_a_notification_is_not_evidence", () => {
+test("the_alert_ledger_shows_kind_state_and_instants_and_no_delivery_columns", () => {
+  // PROD-17.1 (C2's leftover): alert sinks are withdrawn, so the ledger shows
+  // no delivery state. The fixture is a policy recorded before the
+  // withdrawal and still carries delivery facts; none of them is printed.
   const object = d3("protection-unknown.json");
   assert.equal(openAlerts(object.status).length, 1);
+  assert.ok(object.status.alerts.some((a) => a.delivery),
+    "CONTROL: the fixture carries delivery facts, so their absence below is the page's doing");
   const html = decode(renderAlerts(object));
   assert.match(html, /Staleness/);
-  assert.match(html, /Failed \(3\)/, "three attempts, and the state the controller recorded");
-  assert.match(html, /the webhook sink answered 503/);
-  assert.match(html, /a sink that refused it changes nothing about a backup's own recorded result/);
+  assert.match(html, /<th scope="col">KIND<\/th>/);
+  for (const gone of ["TRANSITION / NOTIFIED", "DELIVERY", "LAST ERROR", "Failed (3)",
+    "the webhook sink answered 503"]) {
+    assert.equal(html.indexOf(gone), -1, gone + " is not printed");
+  }
 
   const resolved = decode(renderAlerts(d3("protection-healthy.json")));
-  assert.match(resolved, /Delivered \(1\)/);
   assert.match(resolved, /badge-green">Resolved</);
+  assert.equal(resolved.indexOf("Delivered (1)"), -1);
 });
 
 test("the_protection_list_says_what_an_empty_namespace_means", () => {

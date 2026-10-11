@@ -3778,12 +3778,6 @@ export const TWO_INSTANTS_SENTENCE =
   "They are different numbers and an idle topic makes the second one look old for a reason " +
   "that is not a gap in protection.";
 
-/** A notification is not evidence, and a delivery failure is not a run
- *  failure. Both halves are rendered beside the alert ledger. */
-export const NOTIFICATION_NOT_EVIDENCE_SENTENCE =
-  "An alert is a notification and never evidence: the event document is unsigned, and a sink " +
-  "that refused it changes nothing about a backup's own recorded result.";
-
 /** The two axes a catalog entry carries, said before the table that shows
  *  them, because "available" and "verified" are routinely read as one word. */
 export const TWO_AXES_SENTENCE =
