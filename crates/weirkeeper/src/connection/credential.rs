@@ -1,15 +1,14 @@
-//! Write-only credential entry — the contract a product API (PLAT-17's
-//! `logweir-api`) uses to turn a password typed once into a Secret, without
-//! ever being able to read one back.
+//! Write-only credential entry: the contract the product API (`logweir-api`)
+//! uses to turn a password typed once into a Secret, without ever being able
+//! to read one back.
 //!
-//! # NOT CALLED BY THE CONTROLLER
+//! # Not called by the controller
 //!
 //! `weirkeeper` never builds, creates or reads a credential Secret; it only
 //! names one in a Job (`super::resolve`). This module lives here because the
-//! credential's key name, labels and the `auth.secretRef` it produces are the
-//! same contract the resolver consumes, and one crate holding both halves is
-//! what stops them drifting. `tests/connection.rs` asserts no controller calls
-//! it.
+//! key name, labels and the `auth.secretRef` it produces are the contract the
+//! resolver consumes, and one crate holding both halves stops them drifting
+//! (`tests/connection.rs` asserts no controller calls it).
 //!
 //! # The contract, version 1
 //!
@@ -29,13 +28,10 @@
 //! * **A custom `type`, deliberately.** `create` on Secrets is broad: in a
 //!   namespace it can mint a `kubernetes.io/service-account-token` Secret for
 //!   any ServiceAccount there. A distinct, immutable-after-create `type` is
-//!   what a ValidatingAdmissionPolicy scoped to the API's ServiceAccount could
-//!   require, so the API's create permission cannot be spent on anything but
-//!   this shape. NO SUCH POLICY SHIPS:
-//!   `config/samples/validatingadmissionpolicy.yaml` carries the one example
-//!   this tree has, and a policy for this type belongs with the product API
-//!   that creates the Secret (PLAT-17), not with the resolver that only names
-//!   one.
+//!   what the chart's ValidatingAdmissionPolicy
+//!   (`charts/logweir/templates/admission-policy.yaml`, when
+//!   `admissionPolicy.enabled`) requires of the API's ServiceAccount, so its
+//!   create permission cannot be spent on any other shape.
 //! * **Not `immutable`.** Rotation by an administrator or a secret manager
 //!   updates `data.password` in place, and the next Job uses it
 //!   (`super`'s header). The product API itself never updates.
@@ -124,20 +120,20 @@ pub struct NewKafkaCredential<'a> {
     pub password: WriteOnlyPassword,
     /// An opaque, non-secret correlation id from the caller's audit record.
     pub request_id: Option<&'a str>,
-    /// **PROD-01.3 security follow-up.** The connection's credential binding
+    /// The connection's credential binding
     /// (`super::ResolvedConnection::credential_binding`), written under
     /// `logweir-binding` so every runner can tell this credential was entered
-    /// for THIS connection. `None` builds an unbound Secret, which every
-    /// runner refuses (`CredentialBindingMismatch`) — kept only so a caller
-    /// that cannot know the UID yet fails closed rather than at compile time.
+    /// for this connection. `None` builds an unbound Secret, which every runner
+    /// refuses (`CredentialBindingMismatch`): a caller that cannot know the UID
+    /// yet fails closed.
     pub binding: Option<&'a str>,
     /// The `KafkaCluster`'s UID, for an owner reference: deleting the
     /// connection collects its credential.
     pub owner_uid: Option<&'a str>,
 }
 
-/// **PROD-01.3.** An `mtls` client certificate and key typed once. Neither
-/// half is printed by `Debug`; there is no `Display`, `Clone` or `Serialize`.
+/// An `mtls` client certificate and key typed once. Neither half is printed by
+/// `Debug`; there is no `Display`, `Clone` or `Serialize`.
 pub struct WriteOnlyClientCertificate {
     certificate_pem: String,
     private_key_pem: String,
@@ -160,7 +156,7 @@ impl std::fmt::Debug for WriteOnlyClientCertificate {
     }
 }
 
-/// **PROD-01.3.** One `mtls` client-certificate entry request.
+/// One `mtls` client-certificate entry request.
 #[derive(Debug)]
 pub struct NewKafkaClientCertificate<'a> {
     /// The namespace the Secret is created in — the connection's.
@@ -179,10 +175,10 @@ pub struct NewKafkaClientCertificate<'a> {
     pub owner_uid: Option<&'a str>,
 }
 
-/// The Secret `type` of an `mtls` client certificate the product creates
-/// (PROD-01.3) — distinct from [`CREDENTIAL_SECRET_TYPE`] for the same reason
-/// that one exists: a ValidatingAdmissionPolicy can require exactly the
-/// shapes the console may create.
+/// The Secret `type` of an `mtls` client certificate the product creates,
+/// distinct from [`CREDENTIAL_SECRET_TYPE`] for the same reason that one
+/// exists: the admission policy can require exactly the shapes the console may
+/// create.
 pub const CLIENT_CERTIFICATE_SECRET_TYPE: &str = "logweir.dev/kafka-client-certificate";
 /// [`CREDENTIAL_LABEL`]'s value on an `mtls` client-certificate Secret.
 pub const CLIENT_CERTIFICATE_LABEL_VALUE: &str = "kafka-client-certificate";
@@ -210,14 +206,13 @@ pub enum CredentialInputError {
     PasswordEdgeWhitespace,
     /// The password contains a character of this class that no run can use.
     PasswordCharacter(&'static str),
-    /// PROD-01.3: the client certificate is not PEM certificate text.
+    /// The client certificate is not PEM certificate text.
     CertificateNotPem,
-    /// PROD-01.3: the private key is not an unencrypted PEM private key.
+    /// The private key is not an unencrypted PEM private key.
     PrivateKeyNotPem,
-    /// PROD-01.3: the private key is encrypted; neither client takes a
-    /// passphrase.
+    /// The private key is encrypted; neither client takes a passphrase.
     PrivateKeyEncrypted,
-    /// PROD-01.3: either half is longer than [`MAX_PEM_BYTES`].
+    /// Either half is longer than [`MAX_PEM_BYTES`].
     PemTooLarge,
 }
 
@@ -316,7 +311,7 @@ impl CredentialSecret {
     }
 
     /// [`CredentialSecret::into_secret`] for a caller that may not name the
-    /// `Secret` type (PROD-01.3): the same metadata, type and bytes.
+    /// `Secret` type: the same metadata, type and bytes.
     #[must_use]
     pub fn into_parts(self) -> CredentialParts {
         let Secret {
@@ -478,11 +473,10 @@ fn owner_reference(
     ])
 }
 
-/// **PROD-01.3.** Validate an `mtls` entry and build the Secret the caller
-/// creates: type [`CLIENT_CERTIFICATE_SECRET_TYPE`], the two halves under
-/// `tls.crt` / `tls.key` (the keys `auth.clientCertificate` defaults to), and
-/// the binding. Nothing about either half is ever echoed: every refusal names
-/// a SHAPE.
+/// Validate an `mtls` entry and build the Secret the caller creates: type
+/// [`CLIENT_CERTIFICATE_SECRET_TYPE`], the two halves under `tls.crt` /
+/// `tls.key` (the keys `auth.clientCertificate` defaults to), and the binding.
+/// Every refusal names a shape and never echoes either half.
 ///
 /// # Errors
 ///
@@ -562,11 +556,11 @@ pub fn build_kafka_client_certificate_secret(
     }))
 }
 
-/// **PROD-01.3.** The SHAPE checks on an `mtls` entry, before anything is
-/// written: both halves are PEM text within [`MAX_PEM_BYTES`], the
-/// certificate carries a `CERTIFICATE` block, and the key a private-key block
-/// that is not encrypted. Not a cryptographic check — the brokers are — and
-/// never echoing either half.
+/// The shape checks on an `mtls` entry, before anything is written: both halves
+/// are PEM text within [`MAX_PEM_BYTES`], the certificate carries a
+/// `CERTIFICATE` block, and the key a private-key block that is not encrypted.
+/// Not a cryptographic check (the brokers do that), and never echoing either
+/// half.
 ///
 /// # Errors
 ///
@@ -615,11 +609,9 @@ pub fn check_password(password: &str) -> Result<(), CredentialInputError> {
     if password.starts_with(char::is_whitespace) || password.ends_with(char::is_whitespace) {
         return Err(CredentialInputError::PasswordEdgeWhitespace);
     }
-    // THE RUNNER'S OWN PREDICATE DECIDES, and the class is derived from the
-    // first offending character rather than parsed out of the refusal's prose
-    // (that prose explains the hazard and mentions several classes, so reading
-    // it would name the wrong one). Entry and execution therefore refuse
-    // exactly the same values: `logweir_core::guard` is the single rule.
+    // The runner's own predicate decides, and the class is derived from the
+    // first offending character rather than parsed out of the refusal's prose,
+    // so entry and execution refuse exactly the same values.
     if logweir_core::guard::credential_is_renderable(password).is_err() {
         let offender = password
             .chars()
