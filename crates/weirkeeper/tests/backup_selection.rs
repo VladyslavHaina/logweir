@@ -1,31 +1,29 @@
-//! Dynamic topic selection per run — D1 §7.2, PLAT-09.2.
+//! Dynamic topic selection per run.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST. Nothing
-//! dials a broker, nothing waits on a Job, nothing shells out, and the double
-//! PANICS on a request it was not given a route for — which is what turns "it
-//! created no runner Job", "it never read that impostor's log" and "it ran no
-//! second discovery" into assertions rather than absences of evidence.
+//! Every test here is a pure-function or `mock_client` test. The double
+//! PANICS on an unrouted request, which turns "it created no runner Job", "it
+//! never read that impostor's log" and "it ran no second discovery" into
+//! assertions rather than absences of evidence.
 //!
 //! READ THESE THREE FIRST, in this order:
 //!
-//! 1. [`refuse_policy_fails_discovery_incomplete_without_runner_job`] — the
+//! 1. [`refuse_policy_fails_discovery_incomplete_without_runner_job`]: the
 //!    honesty claim of the whole mode. Kafka silently omits topics a principal
 //!    cannot describe, so a clean listing is `unknown` and never proof; an
 //!    operator who asked for `Refuse` gets a failed run rather than a backup
 //!    labelled "all user topics" that quietly missed some.
-//! 2. [`an_impostor_pod_is_never_read`] — D-SEAMS **S6**, defect `SEC-PODLOG`.
-//!    A discovery pod's stdout becomes this run's ALLOWLIST, and
-//!    `batch.kubernetes.io/job-name` is writable by anything that can create a
-//!    pod.
-//! 3. [`the_discovery_job_ttl_is_patched_only_after_the_status_landed`] — the
+//! 2. [`an_impostor_pod_is_never_read`]: a discovery pod's stdout becomes
+//!    this run's ALLOWLIST, and `batch.kubernetes.io/job-name` is writable by
+//!    anything that can create a pod.
+//! 3. [`the_discovery_job_ttl_is_patched_only_after_the_status_landed`]: the
 //!    commit point. The relay lives on the pod and the TTL controller deletes a
 //!    Job and its pods together, so a TTL set before the freeze is recorded
 //!    lets garbage collection race a read a later pass may still have to make.
 //!
 //! **A FIXTURE `Backup` CARRIES `metadata.resourceVersion`.** Every status
-//! write on this path is a `resourceVersion`-preconditioned merge PATCH
-//! (D-SEAMS **S7**), so an object without one is refused by name rather than
-//! written without its precondition.
+//! write on this path is a `resourceVersion`-preconditioned merge PATCH, so an
+//! object without one is refused by name rather than written without its
+//! precondition.
 
 mod support;
 use support::{broker_failure, path};
@@ -57,9 +55,7 @@ use weirkeeper::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
 use weirkeeper::verification::unverified_evidence;
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 const NS: &str = "logweir-d1-w5";
 const NAME: &str = "logweir-backup-nightly-20260916-020000";
@@ -90,8 +86,7 @@ fn now() -> DateTime<Utc> {
         .expect("the fixture instant exists")
 }
 
-/// A dynamic `Backup`: `topics: []` beside `spec.allUserTopics` — D1 §7.1's
-/// second shape.
+/// A dynamic `Backup`: `topics: []` beside `spec.allUserTopics`.
 fn dynamic_backup(name: &str, uid: &str, exclude: Value, incomplete: &str) -> Backup {
     let mut all = json!({ "incompleteDiscovery": incomplete });
     if !exclude.is_null() {
@@ -194,7 +189,7 @@ fn backup_owner(name: &str, uid: &str) -> Value {
     }])
 }
 
-/// The runner Job the API server hands back from the create — the shape
+/// The runner Job the API server hands back from the create, in the shape
 /// `compatible_backup_job` demands, so a fixture never fails for the wrong
 /// reason.
 fn runner_job_body(name: &str, uid: &str) -> String {
@@ -472,11 +467,9 @@ fn finished_routes(
             status: 200,
             body: log,
         },
-        // RECORDED AND NEVER EXPECTED. A route the reconciler must not use is
-        // worth more than a missing one: without it an impostor read would
-        // panic as "no route", which is indistinguishable from a typo in the
-        // table. With it, reading the impostor SUCCEEDS and the assertion that
-        // it was never asked for is the property.
+        // RECORDED AND NEVER EXPECTED: without this route an impostor read would
+        // panic as "no route", indistinguishable from a typo in the table. With
+        // it, reading the impostor SUCCEEDS and never being asked is the property.
         Route {
             method: "GET",
             path_suffix: impostor_log,
@@ -489,9 +482,8 @@ fn finished_routes(
             status: 200,
             body: discovery_plan_config_map(uid, uid),
         },
-        // FX-11: a finished discovery Job with no provable pod has its Events
-        // read (by the Job's UID). None here: the classification is the one
-        // it was before Events were read.
+        // A finished discovery Job with no provable pod has its Events read (by
+        // the Job's UID). None here: the classification is the ordinary one.
         Route {
             method: "GET",
             path_suffix: "/events",
@@ -555,8 +547,8 @@ async fn reconcile_with(b: &Backup, routes: Vec<Route>) -> (Option<String>, Vec<
 }
 
 /// [`reconcile_with`] for a controller process that was handed an image and a
-/// pull policy — `main`'s `Context::runner_image`, which is what every
-/// installation that sets `LOGWEIR_RUNNER_IMAGE` has.
+/// pull policy (`main`'s `Context::runner_image`), as every installation that
+/// sets `LOGWEIR_RUNNER_IMAGE` has.
 async fn reconcile_with_runner_image(
     b: &Backup,
     routes: Vec<Route>,
@@ -655,19 +647,16 @@ fn observed(
     }
 }
 
-// ===========================================================================
-// Unit — the pure half of D1 §7.2
-// ===========================================================================
+// Unit: the pure half
 
 /// **THE RESOLUTION IS A PURE FUNCTION OF WHAT DISCOVERY SAW AND WHAT THE
-/// POLICY SAYS** — D1 §12's first PLAT-09.2 unit row.
+/// POLICY SAYS.**
 ///
 /// Two clusters that showed the same entries under the same policy resolve to
 /// the same names, the same counts and the same coverage, whatever ran in
 /// between; and a cluster that gained a topic since resolves to a list that
-/// contains it. That second half is the tracker's "a newly created user topic
-/// enters the next dynamic backup", stated where it can be asserted without a
-/// broker.
+/// contains it: a newly created user topic enters the next dynamic backup,
+/// asserted without a broker.
 ///
 /// KILLS: caching a resolution across observations; taking the coverage from
 /// anywhere but the visibility verdict and the policy; letting the observation
@@ -743,14 +732,13 @@ fn resolution_is_a_pure_function_of_discovery_and_policy() {
     }
 }
 
-/// **AN INTERNAL TOPIC IS EXCLUDED BY THE FLAG *AND* BY THE `__` RULE** —
-/// D1 §7.2 R5, §7.5.
+/// **AN INTERNAL TOPIC IS EXCLUDED BY THE FLAG *AND* BY THE `__` RULE.**
 ///
 /// Both, not either. The flag is the runner's reading of the same convention,
-/// and re-applying the rule in the controller is what makes an older or a lying
-/// runner unable to slip `__consumer_offsets` into somebody's backup — a topic
-/// whose contents are the cluster's own bookkeeping and whose restore would be
-/// actively harmful.
+/// and re-applying the rule in the controller makes an older or a lying runner
+/// unable to slip `__consumer_offsets` into somebody's backup, a topic whose
+/// contents are the cluster's own bookkeeping and whose restore would be
+/// harmful.
 ///
 /// KILLS: trusting `entry.internal` alone; trusting the `__` prefix alone;
 /// counting an internal topic as `excludedByRule` (which would make
@@ -785,13 +773,13 @@ fn internal_flag_and_double_underscore_are_excluded() {
     assert_eq!(c.visible, 4);
 }
 
-/// **AN EXCLUSION IS A LITERAL NAME OR A LITERAL PREFIX, AND NEVER A PATTERN**
-/// — D1 §7.1, guard **G-GLOB**.
+/// **AN EXCLUSION IS A LITERAL NAME OR A LITERAL PREFIX, AND NEVER A
+/// PATTERN.**
 ///
 /// `orders-` excludes `orders-eu` because it is a prefix; `orders` does not
 /// exclude `orders-eu`, because an exact name is an exact name. A `*` is not
 /// writable in either field (the CRD's character set has no glob characters),
-/// and one that somehow arrived excludes NOTHING rather than everything — the
+/// and one that somehow arrived excludes NOTHING rather than everything: the
 /// safe direction, since the other one silently drops a user's data.
 ///
 /// KILLS: treating `exclude.topics` as prefixes; treating `exclude.prefixes` as
@@ -839,14 +827,12 @@ fn exact_and_prefix_exclusions_are_literal() {
     );
 }
 
-/// **AN EMPTY RESOLUTION IS `SelectionEmpty`, AND NOT AN EMPTY ALLOWLIST** —
-/// D1 §7.2 R7, guard **G-GLOB**.
+/// **AN EMPTY RESOLUTION IS `SelectionEmpty`, AND NOT AN EMPTY ALLOWLIST.**
 ///
-/// The one outcome the mandatory allowlist exists to make impossible is an
-/// empty `source.topics` in `backup.yaml`, which the engine would read as "no
-/// allowlist, so everything". Every way of reaching an empty resolution — an
+/// An empty `source.topics` in `backup.yaml` would be read by the engine as "no
+/// allowlist, so everything". Every way of reaching an empty resolution (an
 /// empty cluster, a cluster of nothing but internal topics, exclusions that
-/// took the lot — ends in the same named terminal state.
+/// took the lot) ends in the same named terminal state.
 ///
 /// KILLS: returning `Ok` with an empty list; refusing with a different state;
 /// distinguishing "empty cluster" from "excluded everything" in a way that lets
@@ -882,15 +868,14 @@ fn empty_resolution_is_selection_empty() {
     }
 }
 
-/// **A TOPIC THE BROKER REFUSED TO DESCRIBE IS `limited`, NEVER `resolved`** —
-/// D1 §7.2 R5, §7.5, PLAT-09.2's "ACL limitation".
+/// **A TOPIC THE BROKER REFUSED TO DESCRIBE IS `limited`, NEVER `resolved`.**
 ///
 /// Kafka answers `TOPIC_AUTHORIZATION_FAILED` whether or not the topic exists,
 /// so the entry proves only that this principal cannot read it. Freezing the
 /// name would put a topic in `backup.yaml` that the run then fails on; dropping
 /// it silently would lose the one signal that says the coverage is incomplete.
-/// It goes in `limitedTopicCount`, which is what turns
-/// `VisibleUserTopicsOnly` from a label into a number.
+/// It goes in `limitedTopicCount`, which turns `VisibleUserTopicsOnly` from a
+/// label into a number.
 ///
 /// KILLS: resolving an errored entry; counting it as internal or as a rule
 /// exclusion; losing the count that makes the incompleteness visible.
@@ -934,16 +919,14 @@ fn authorization_failed_entries_are_limited_not_resolved() {
     );
 }
 
-/// **A RESULT DOCUMENT THAT DISAGREES WITH ITS OWN FRAMES IS NOT ADOPTED** —
-/// D1 §7.2 R3, and the discovery half of PLAT-09.2's "discovery/execution
-/// race".
+/// **A RESULT DOCUMENT THAT DISAGREES WITH ITS OWN FRAMES IS NOT ADOPTED.**
 ///
 /// The frames are the measured half: the decoder proved their count and their
 /// digest against what the plan pinned. A document claiming a different
 /// `counts.returned`, or a `topicsSha256` that is not the digest of the lines
-/// that arrived, is a document that describes a listing this run did not
-/// receive — a truncated log, a rotated one, or a runner that lied. Either way
-/// the answer is `DiscoveryResultUnreadable`, which is NOT retryable.
+/// that arrived, describes a listing this run did not receive (a truncated
+/// log, a rotated one, or a runner that lied). The answer is
+/// `DiscoveryResultUnreadable`, which is NOT retryable.
 ///
 /// KILLS: taking the counts from the document; copying `topicsSha256` instead
 /// of computing it; treating a malformed result as a retryable failure.
@@ -999,8 +982,7 @@ fn summary_count_and_digest_mismatch_is_unreadable() {
     }
 }
 
-/// **THE `v2` `selection` BLOCK IS CANONICAL, SORTED AND BOUNDED** — D1 §3.3,
-/// §7.2 R8, R9.
+/// **THE `v2` `selection` BLOCK IS CANONICAL, SORTED AND BOUNDED.**
 ///
 /// The names are byte-sorted and deduplicated, the block records counts and
 /// provenance rather than a second copy of the list, and the two name lists it
@@ -1085,18 +1067,16 @@ fn inputs_v2_selection_block_is_canonical_and_sorted() {
     assert_eq!(status.visibility.as_deref(), Some("unknown"));
 }
 
-/// **THE TWO SIZE BOUNDS ARE ENFORCED, AND A TRUNCATED LISTING IS REFUSED** —
-/// D1 §7.2 R8.
+/// **THE TWO SIZE BOUNDS ARE ENFORCED, AND A TRUNCATED LISTING IS REFUSED.**
 ///
-/// A run may freeze at most `MAX_RESOLVED_TOPICS` names — FX-33: the topic
-/// budget's maximum, 1,000, since a backup of more signs a receipt the
-/// recovery catalog cannot list and the controller cannot verify — and at
-/// most 256 KiB of them. A selection AT the maximum resolves; one name more
-/// is refused by name with both numbers, and nothing is truncated to fit.
-/// And a listing the
-/// runner had to CUT is refused outright: its names are a prefix of what the
-/// principal can see, and freezing a prefix while labelling the run "all user
-/// topics" is the silent claim this whole mode exists to avoid.
+/// A run may freeze at most `MAX_RESOLVED_TOPICS` names (the topic budget's
+/// maximum, 1,000: a backup of more signs a receipt the recovery catalog
+/// cannot list and the controller cannot verify) and at most 256 KiB of them.
+/// A selection AT the maximum resolves; one name more is refused by name with
+/// both numbers, and nothing is truncated to fit. A listing the runner had to
+/// CUT is refused outright: its names are a prefix of what the principal can
+/// see, and freezing a prefix while labelling the run "all user topics" is
+/// the silent claim this mode exists to avoid.
 ///
 /// KILLS: freezing a truncated listing; dropping either bound; reporting a
 /// too-large selection as `SelectionEmpty` or as a discovery failure.
@@ -1114,7 +1094,7 @@ fn an_oversized_or_truncated_listing_is_selection_too_large() {
     )
     .expect_err("over the count bound");
     assert_eq!(state, TERMINAL_STATE_SELECTION_TOO_LARGE, "{message}");
-    // FX-33: the bound IS the topic budget's, and the refusal says so.
+    // The bound IS the topic budget's, and the refusal says so.
     assert_eq!(
         sel::MAX_RESOLVED_TOPICS,
         logweir_core::topic_budget::MAX_BACKUP_TOPICS
@@ -1156,8 +1136,8 @@ fn an_oversized_or_truncated_listing_is_selection_too_large() {
     assert!(message.contains("PREFIX"), "{message}");
 }
 
-/// **THE DISCOVERY JOB'S NAME, DEADLINE AND SHAPE ARE D1 §7.2 R2's** — and the
-/// pod it runs in is the isolated check pod, not an execution pod.
+/// **THE DISCOVERY JOB'S NAME, DEADLINE AND SHAPE**, and the pod it runs in is
+/// the isolated check pod, not an execution pod.
 ///
 /// KILLS: naming the Job anything but `lwd-<backup uid>`; mounting a
 /// ServiceAccount token; mounting the signing key or an archive credential;
@@ -1185,8 +1165,8 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
         );
     }
     // A DEADLINE THAT CANNOT FUND A DISCOVERY HAS NO BUDGET, IT DOES NOT GET A
-    // ONE-SECOND ONE. A clamp here is how a run comes to die `DiscoveryFailed`
-    // with nothing naming the deadline as the cause.
+    // ONE-SECOND ONE: a clamp here would end a run `DiscoveryFailed` with
+    // nothing naming the deadline as the cause.
     for deadline in [sel::MIN_DYNAMIC_DEADLINE_SECONDS - 1, 60, 30, 1] {
         assert_eq!(
             sel::discovery_budget(deadline),
@@ -1254,12 +1234,11 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
     );
     assert_eq!(value["spec"]["activeDeadlineSeconds"], json!(300));
 
-    // AND THE CEILING BINDS WHERE IT ACTUALLY DIFFERS FROM THE FRAMEWORK'S OWN
-    // BUDGET-PLUS-MARGIN. At the smallest deadline a dynamic run may carry, D1
-    // §7.2 R2 says 120 and `cjob::runner_job_spec` would say 30 + 90 — the same
-    // number by construction, so the case that separates them is the one just
-    // above the floor, where the ceiling clamps at 300 and the framework would
-    // not.
+    // AND THE CEILING BINDS WHERE IT DIFFERS FROM THE FRAMEWORK'S OWN
+    // BUDGET-PLUS-MARGIN. At the smallest deadline a dynamic run may carry, the
+    // rule says 120 and `cjob::runner_job_spec` would say 30 + 90, the same
+    // number by construction, so the separating case is just above the floor,
+    // where the ceiling clamps at 300 and the framework would not.
     let (long_job, long_plan) = sel::discovery_budget(3600).expect("an hour funds a discovery");
     let mut long = spec.clone();
     long.timeout_seconds = i64::from(long_plan) + 45;
@@ -1290,13 +1269,12 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
 }
 
 /// **THE DISCOVERY PLAN CARRIES NO CREDENTIAL, ASKS FOR THE INTERNAL TOPICS AND
-/// NAMES NO EXPECTED TOPIC** — D1 §7.2 R2/R5 and D-SEAMS **S1**.
+/// NAMES NO EXPECTED TOPIC.**
 ///
 /// `includeInternal: true` is the opposite of an interactive discovery's
-/// default and is deliberate: D1 §3.3 requires the frozen block to record the
-/// internal topics BY NAME, and a runner that dropped them would leave the
-/// controller with a count and nothing to show. The exclusion itself is the
-/// controller's, twice over.
+/// default and is deliberate: the frozen block records the internal topics BY
+/// NAME, and a runner that dropped them would leave the controller with a
+/// count and nothing to show. The exclusion itself is the controller's.
 ///
 /// KILLS: a password, a Secret name or a CA body in a world-readable plan;
 /// asking the runner to exclude the internal topics (which would empty
@@ -1354,19 +1332,17 @@ fn the_discovery_plan_is_a_topic_inventory_with_no_credential() {
     assert_eq!(parsed.subject_uid, UID);
 }
 
-/// **A NAME NO KAFKA BROKER WOULD ACCEPT IS NOT ADOPTED** — D1 §3.3's
-/// "Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated before
-/// freeze", D1 §7.2 R3.
+/// **A NAME NO KAFKA BROKER WOULD ACCEPT IS NOT ADOPTED**: Kafka-legal names
+/// (`^[a-zA-Z0-9._-]{1,249}$`) are re-validated before the freeze.
 ///
 /// This list comes off a runner's stdout, not out of a CRD field the API
-/// server pattern-checked, and the glob rail covers six characters — not a
+/// server pattern-checked, and the glob rail covers six characters, not a
 /// space, a slash, a control character or a 250-character name. A name the
 /// cluster could not hold would otherwise freeze into an immutable plan and
 /// fail opaquely inside the engine.
 ///
-/// It is `DiscoveryResultUnreadable`, the NOT-retryable class: nothing is
-/// wrong with the selection the operator wrote; the runner's output is what
-/// did not verify.
+/// It is `DiscoveryResultUnreadable`, the NOT-retryable class: the selection
+/// the operator wrote is fine; the runner's output did not verify.
 ///
 /// KILLS: relying on the glob rail alone; accepting an over-length name;
 /// reporting it as `InvalidTopicSelection` (which would blame the spec) or as
@@ -1400,8 +1376,7 @@ fn a_relayed_name_that_is_not_kafka_legal_is_unreadable() {
             message.contains("^[a-zA-Z0-9._-]{1,249}$"),
             "the message names the grammar: {message}"
         );
-        // BOUNDED IN THE MESSAGE. A 250-character name is spec-derived text,
-        // not a credential, but a condition is not a place for an unbounded
+        // BOUNDED IN THE MESSAGE: a condition is not a place for an unbounded
         // string.
         assert!(
             message.len() < 512,
@@ -1437,16 +1412,14 @@ fn a_relayed_name_that_is_not_kafka_legal_is_unreadable() {
     );
 }
 
-/// **A `deadlineSeconds` THAT CANNOT FUND A DISCOVERY IS REFUSED UP FRONT** —
-/// D1 §7.2 R2, and the operability half of it.
+/// **A `deadlineSeconds` THAT CANNOT FUND A DISCOVERY IS REFUSED UP FRONT.**
 ///
 /// `spec.deadlineSeconds` has no `minimum` on the CRD, and the discovery Job's
 /// deadline is `min(300, spec.deadlineSeconds)` with ninety seconds of that
-/// spent on image pull, scheduling and container start. So `deadlineSeconds:
-/// 60` — entirely legal, and reasonable for a small cluster — leaves the runner
-/// under a second. Dispatching that Job produces `DiscoveryFailed` with nothing
-/// naming the deadline; raising the Job's own deadline would break R2's
-/// ceiling. The honest answer is to refuse, naming the field and the floor.
+/// spent on image pull, scheduling and container start, so `deadlineSeconds:
+/// 60` leaves the runner under a second. Dispatching that Job would produce
+/// `DiscoveryFailed` with nothing naming the deadline; the honest answer is to
+/// refuse, naming the field and the floor.
 ///
 /// KILLS: clamping the runner's budget to one second and dispatching anyway;
 /// refusing without naming `spec.deadlineSeconds`; creating the plan ConfigMap
@@ -1487,18 +1460,16 @@ async fn a_deadline_too_small_to_fund_a_discovery_is_refused_before_any_job() {
     assert_eq!(posted_jobs(&bodies).len(), 1);
 }
 
-/// **THE PROVENANCE NAMES ARE BOUNDED IN BYTES AS WELL AS IN COUNT** — D1 §3.3,
-/// and the plan `ConfigMap`'s one-MiB ceiling.
+/// **THE PROVENANCE NAMES ARE BOUNDED IN BYTES AS WELL AS IN COUNT**, within
+/// the plan `ConfigMap`'s one-MiB ceiling.
 ///
 /// `internalExcluded.names` and `excludedByRule.names` are a SAMPLE an operator
 /// reads to answer "which ones?", not a store. The count bounds alone (50 and
-/// 200) admit 250 names of 249 bytes — about 61 KiB of provenance beside a
-/// topic list already bounded at 256 KiB, inside a `ConfigMap` bounded at one
-/// MiB. The two lists therefore share one 16 KiB budget, spent in a fixed
-/// order, and `truncated` says when the sample was cut.
+/// 200) admit 250 names of 249 bytes, about 61 KiB beside a topic list already
+/// bounded at 256 KiB. The two lists therefore share one 16 KiB budget, spent
+/// in a fixed order, and `truncated` says when the sample was cut.
 ///
-/// **The counts stay exact whatever the sample does.** That is the property a
-/// reader depends on, and the one a byte cap must not damage.
+/// **The counts stay exact whatever the sample does.**
 ///
 /// KILLS: dropping the byte bound; dropping the count bound (a byte bound alone
 /// admits a hundred thousand one-character names); cutting the COUNT instead of
@@ -1593,12 +1564,10 @@ fn the_provenance_name_lists_are_bounded_in_bytes_and_in_count() {
     assert!(d.internal_excluded.truncated && d.excluded_by_rule.truncated);
 }
 
-// ===========================================================================
-// Double — the reconciler, over a route table that panics on a stray request
-// ===========================================================================
+// The reconciler, over a route table that panics on a stray request
 
 /// **A DYNAMIC RUN STARTS ONE DISCOVERY JOB, CREATES NO RUNNER JOB, AND SAYS SO
-/// ON THE OBJECT** — D1 §7.2 R2.
+/// ON THE OBJECT.**
 ///
 /// KILLS: creating the runner Job before the names exist; creating the Job
 /// before its plan `ConfigMap` (a pod that stalls in `ContainerCreating` until
@@ -1664,14 +1633,12 @@ async fn a_dynamic_run_starts_one_discovery_job_and_no_runner_job() {
     assert_eq!(condition["reason"], json!(REASON_DISCOVERY_RUNNING));
 }
 
-/// **TWO DYNAMIC `Backup`s FREEZE TWO INDEPENDENT DISCOVERY RESULTS** —
-/// D1 §12's "topic creation/deletion between runs".
+/// **TWO DYNAMIC `Backup`s FREEZE TWO INDEPENDENT DISCOVERY RESULTS.**
 ///
 /// Each run owns its own Job, its own plan and its own frozen list, named after
 /// its own UID. A topic that appeared between them is in the second run's list
-/// and in nothing the first run froze — which is the tracker's acceptance
-/// criterion, and the reason a dynamic run discovers afresh rather than reading
-/// a `TopicDiscovery` (D-SEAMS **S2**).
+/// and in nothing the first run froze, which is why a dynamic run discovers
+/// afresh rather than reading a `TopicDiscovery`.
 ///
 /// KILLS: sharing a discovery Job or a plan between runs; caching a resolution;
 /// naming either object after anything but the run's own UID.
@@ -1722,15 +1689,15 @@ async fn two_backups_freeze_two_discovery_results() {
 }
 
 /// **THE EXCLUDED AND INTERNAL COUNTS REACH BOTH THE FROZEN INPUTS AND THE
-/// STATUS** — D1 §3.3, §7.6, and D1 §12's "excluded/internal topic" row.
+/// STATUS.**
 ///
 /// The names live in the immutable inputs (bounded); the counts live in
-/// `status.selection`, which is what an operator and the console read. They are
-/// ONE projection of one block, so the two cannot disagree.
+/// `status.selection`, which an operator and the console read. They are ONE
+/// projection of one block, so the two cannot disagree.
 ///
 /// KILLS: writing the status counts from a second computation; leaving the
-/// internal or excluded names out of the frozen document; putting the (
-/// unbounded) names on the status.
+/// internal or excluded names out of the frozen document; putting the
+/// (unbounded) names on the status.
 #[tokio::test]
 async fn excluded_and_internal_counts_reach_inputs_and_status() {
     let b = dynamic_backup(
@@ -1801,8 +1768,7 @@ async fn excluded_and_internal_counts_reach_inputs_and_status() {
     );
 }
 
-/// **AN EMPTY RESOLUTION CREATES NO RUNNER JOB AND IS NOT RETRIED** —
-/// D1 §7.2 R7, §7.5.
+/// **AN EMPTY RESOLUTION CREATES NO RUNNER JOB AND IS NOT RETRIED.**
 ///
 /// KILLS: creating a runner Job with an empty allowlist; requeueing a refusal
 /// over a CEL-immutable spec; writing the refusal without saying why.
@@ -1843,13 +1809,12 @@ async fn selection_empty_creates_no_runner_job_and_is_not_retried() {
     );
 }
 
-/// **`Refuse` FAILS THE RUN RATHER THAN BACKING UP PART OF A CLUSTER** —
-/// D1 §7.2 R6, §7.4, PLAT-09.2's "ACL limitation".
+/// **`Refuse` FAILS THE RUN RATHER THAN BACKING UP PART OF A CLUSTER.**
 ///
 /// Kafka omits topics a principal cannot describe, so a successful listing
 /// alone is `unknown` and never proof. An operator who chose `Refuse` asked for
 /// a failed run rather than a backup labelled "all user topics" that quietly
-/// missed some; there is somebody who will restore from it.
+/// missed some; somebody will restore from it.
 ///
 /// KILLS: treating a clean listing as complete; running anyway and labelling it
 /// later; reaching `AllUserTopicsAttested` without an attestation.
@@ -1887,8 +1852,7 @@ async fn refuse_policy_fails_discovery_incomplete_without_runner_job() {
     );
 }
 
-/// **A VISIBLE-ONLY RUN IS LABELLED VISIBLE-ONLY, EVERYWHERE** — D1 §7.4,
-/// D-SEAMS **S3**.
+/// **A VISIBLE-ONLY RUN IS LABELLED VISIBLE-ONLY, EVERYWHERE.**
 ///
 /// The label is derived from the visibility verdict and nothing else, and
 /// `AllUserTopicsAttested` is the only value any surface may render as "all
@@ -1934,8 +1898,7 @@ async fn visible_only_policy_records_the_coverage_label() {
         .contains("completeness not established"));
 }
 
-/// **A SOURCE THAT MOVED UNDER THE RESOLUTION IS REFUSED** — D1 §7.2 R4, and
-/// PLAT-09.2's "discovery/execution race".
+/// **A SOURCE THAT MOVED UNDER THE RESOLUTION IS REFUSED.**
 ///
 /// Two ways for it to move, and both are checked: the broker answered with a
 /// different `clusterId` than the `KafkaCluster` has observed, or the saved
@@ -2000,14 +1963,12 @@ async fn source_change_between_discovery_and_freeze_is_refused() {
     assert!(posted_jobs(&bodies).is_empty());
 }
 
-/// **A DISCOVERY FAILURE IS RETRYABLE, AND THE RETRY REDISCOVERS** —
-/// D1 §7.2 R3, §7.7.
+/// **A DISCOVERY FAILURE IS RETRYABLE, AND THE RETRY REDISCOVERS.**
 ///
 /// "Retryable" for a `Backup` means a NEW `Backup`: `spec` is CEL-immutable and
-/// a terminal run is never restarted, so a retry is a fresh object — with a
+/// a terminal run is never restarted, so a retry is a fresh object with a
 /// fresh UID, and therefore a fresh discovery Job and a fresh listing. The
-/// second half of this row is what makes that concrete: the retry asks the
-/// cluster again rather than reusing anything.
+/// second half of this row asserts the retry asks the cluster again.
 ///
 /// KILLS: reporting an operational failure as `DiscoveryResultUnreadable`;
 /// re-reading the failed run's result; reusing the first run's discovery Job
@@ -2088,8 +2049,7 @@ async fn discovery_failure_is_retryable_and_the_retry_rediscovers() {
     );
 }
 
-/// **A FROZEN DYNAMIC `Backup` NEVER RUNS A SECOND DISCOVERY** — D1 §12,
-/// §7.2's call-site gate.
+/// **A FROZEN DYNAMIC `Backup` NEVER RUNS A SECOND DISCOVERY.**
 ///
 /// A pass that re-enters the create branch because the Job was collected reads
 /// the selection back out of the plan it was admitted with. Resolving again
@@ -2165,9 +2125,8 @@ async fn a_frozen_dynamic_backup_never_reruns_discovery() {
         "a frozen run continues from the plan it was admitted with: {:?}",
         calls(&bodies)
     );
-    // THE ROUTE TABLE IS THE PROOF: there is no route for the discovery Job, no
-    // route for a pod list and no route for a pod log, and the double PANICS on
-    // a request it was not given a route for.
+    // THE ROUTE TABLE IS THE PROOF: there is no route for the discovery Job, a
+    // pod list or a pod log, and the double PANICS on an unrouted request.
     assert!(
         !calls(&bodies)
             .iter()
@@ -2180,12 +2139,11 @@ async fn a_frozen_dynamic_backup_never_reruns_discovery() {
     assert_eq!(jobs[0]["metadata"]["name"], json!(NAME));
 }
 
-/// **NO GLOB AND NO EMPTY LIST EVER REACHES `backup.yaml`** — guard **G-GLOB**,
-/// D1 §3.3's freeze-boundary rails.
+/// **NO GLOB AND NO EMPTY LIST EVER REACHES `backup.yaml`.**
 ///
-/// The rails are at the freeze boundary because W5's list comes from a runner's
+/// The rails are at the freeze boundary because the list comes from a runner's
 /// stdout: whatever produced a `ResolvedSelection`, the last place to refuse an
-/// empty or patterned allowlist is the one every producer goes through. And the
+/// empty or patterned allowlist is the one every producer goes through. The
 /// rendered `backup.yaml` of a real dynamic run carries the exact frozen names
 /// and nothing that could be read as a pattern.
 ///
@@ -2261,13 +2219,11 @@ async fn no_glob_or_empty_list_reaches_backup_yaml() {
     );
 }
 
-/// **A NAMED ALLOWLIST IS UNTOUCHED, AND RECORDS `NamedTopics`** — D1 §7.1,
-/// §12's "preserve named allowlists" row.
+/// **A NAMED ALLOWLIST IS UNTOUCHED, AND RECORDS `NamedTopics`.**
 ///
-/// The one thing this whole task must not break. A named run reads no cluster
-/// for its selection, creates no discovery Job and claims nothing about the
-/// cluster — and the route table is the proof, because a discovery GET would
-/// panic as an unrecorded request.
+/// A named run reads no cluster for its selection, creates no discovery Job
+/// and claims nothing about the cluster, and the route table is the proof: a
+/// discovery GET would panic as an unrecorded request.
 ///
 /// KILLS: running discovery for a named run; changing the coverage a named run
 /// records; sorting or rewriting `spec.topics`.
@@ -2338,16 +2294,15 @@ async fn named_mode_records_named_topics_coverage() {
     );
 }
 
-/// **AN IMPOSTOR POD IS NEVER READ** — D-SEAMS **S6**, defect `SEC-PODLOG`.
+/// **AN IMPOSTOR POD IS NEVER READ.**
 ///
 /// `batch.kubernetes.io/job-name` is writable by anything that can create a
 /// pod, and a discovery pod's stdout becomes this run's ALLOWLIST and then a
 /// signed receipt's topic list. The controller `ownerReference` UID decides
 /// which pod may be read; the label only narrows the listing.
 ///
-/// The impostor's log HAS a route, and it answers 200. That is the point: the
-/// property is that the reconciler never asked for it, not that asking would
-/// have failed.
+/// The impostor's log HAS a route, and it answers 200: the property is that the
+/// reconciler never asked for it, not that asking would have failed.
 ///
 /// KILLS: matching a pod by label; falling back to the label when no owned pod
 /// is found; reading the newest pod that wears the label.
@@ -2384,7 +2339,7 @@ async fn an_impostor_pod_is_never_read() {
     assert!(posted_jobs(&bodies).is_empty(), "and nothing ran");
 }
 
-/// **A FOREIGN JOB AT THE DISCOVERY NAME IS NEVER OBSERVED** — the Job half of
+/// **A FOREIGN JOB AT THE DISCOVERY NAME IS NEVER OBSERVED**: the Job half of
 /// the same rule.
 ///
 /// KILLS: adopting a Job by name; reading the log of a pod owned by a Job this
@@ -2429,7 +2384,7 @@ async fn a_discovery_job_this_backup_does_not_control_is_refused() {
 }
 
 /// **THE DISCOVERY JOB'S TTL IS PATCHED ONLY AFTER THE FREEZE IS ON THE
-/// OBJECT** — D1 §7.2 R9, D-SEAMS **S7**.
+/// OBJECT.**
 ///
 /// The relay lives on the pod and the TTL controller deletes a Job and its pods
 /// together. A TTL set before `status.execution`/`status.selection` are
@@ -2498,21 +2453,17 @@ async fn the_discovery_job_ttl_is_patched_only_after_the_status_landed() {
     assert_eq!(condition["reason"], json!(REASON_RESOLVED));
 }
 
-/// **PROBE CHURN ON THE `KafkaCluster` IS NOT A SOURCE CHANGE** — D1 §7.2 R1
-/// and R4, and the one field the R4 digest must not pin.
+/// **PROBE CHURN ON THE `KafkaCluster` IS NOT A SOURCE CHANGE**, and the one
+/// field the resolution digest must not pin.
 ///
 /// `KafkaCluster.status.clusterId` is written asynchronously by ANOTHER
-/// controller, and `controllers::kafka_cluster` clears it to `None` on every
-/// probe pass that reports the cluster unreachable or whose output it could not
-/// read. So it flips `Some → None → Some` inside the ≤ 300 s a discovery Job
-/// runs. Hashing it into the resolution digest would refuse a perfectly good
-/// run as `SourceChangedDuringResolution` — with a message saying the saved
-/// connection changed when nothing about it had, no runner Job, and a new
-/// `Backup` needed.
+/// controller, which clears it to `None` on every probe pass that reports the
+/// cluster unreachable or unreadable, so it can flip `Some → None → Some`
+/// inside the ≤ 300 s a discovery Job runs. Hashed into the resolution
+/// digest, it would refuse a good run as `SourceChangedDuringResolution`.
 ///
 /// The repointed-endpoint case is still caught: `source_unchanged` compares the
-/// broker-reported id against the observed one whenever BOTH are present, which
-/// is the non-volatile form of the same rule.
+/// broker-reported id against the observed one whenever BOTH are present.
 ///
 /// KILLS: putting `status.clusterId` back into `SourceFacts`; making the
 /// cluster-id comparison fire when either side is absent.
@@ -2564,7 +2515,7 @@ async fn probe_churn_on_the_observed_cluster_id_is_not_a_source_change() {
 }
 
 /// **EVERY REFUSAL ARMS THE DISCOVERY JOB'S TTL, AND ONLY AFTER THE TERMINAL
-/// STATUS LANDED** — D1 §7.2 R9's ordering, applied to the paths that do not
+/// STATUS LANDED**: the same ordering, applied to the paths that do not
 /// freeze.
 ///
 /// A refused run has reached its conclusion, so the relay on the discovery pod
@@ -2664,13 +2615,13 @@ async fn every_refusal_leaves_the_discovery_job_collectable() {
 }
 
 /// **A FINISHED DISCOVERY WITH NO RECORDED FINISH INSTANT IS REFUSED, NOT
-/// DATED FROM THE CLOCK** — the freeze's byte-stability, D1 §3.3.
+/// DATED FROM THE CLOCK.**
 ///
 /// `selection.discovery.observedAt` goes into an IMMUTABLE plan, and the plan's
 /// digest is what `verify_frozen_config_map` compares on every later pass. A
 /// value taken from `now` would differ between the pass that POSTed the plan
-/// and any pass that re-renders it — turning a run that was fine into a
-/// terminal `PlanConfigMapConflict` for no reason but the passage of time.
+/// and any pass that re-renders it: a terminal `PlanConfigMapConflict` for no
+/// reason but the passage of time.
 ///
 /// KILLS: falling back to `now` in `recorded_finish`; taking the instant from
 /// anywhere the API server did not record it.
@@ -2720,14 +2671,13 @@ async fn a_discovery_with_no_recorded_finish_instant_is_refused() {
     assert!(posted_config_maps(&bodies).is_empty(), "nothing was frozen");
 }
 
-/// **A `v1`-FROZEN `Backup` IS UNTOUCHED BY ANY OF THIS** — D1 §3.3, §7.7.
+/// **A `v1`-FROZEN `Backup` IS UNTOUCHED BY ANY OF THIS.**
 ///
-/// A run frozen by a PLAT-06.1 controller carries a `v1` plan with no
-/// `selection` block at all. It keeps executing: `stored_selection` answers
-/// `None`, the shape check reads the named allowlist its `spec` still carries,
-/// and no discovery happens. The alternative — refusing it — would turn every
-/// in-flight `Backup` in the cluster terminal at the moment the new controller
-/// starts.
+/// A run frozen by an older controller carries a `v1` plan with no `selection`
+/// block. It keeps executing: `stored_selection` answers `None`, the shape
+/// check reads the named allowlist its `spec` still carries, and no discovery
+/// happens. Refusing it would turn every in-flight `Backup` terminal the
+/// moment the new controller starts.
 ///
 /// KILLS: requiring a `selection` block to execute a run; running discovery for
 /// a `v1` object; writing a coverage label onto a run that was frozen without
@@ -2766,28 +2716,18 @@ fn a_v1_frozen_backup_is_untouched() {
     assert!(fresh.discovery.is_none());
 }
 
-/// **THE DISCOVERY JOB RUNS THE IMAGE THE PROCESS WAS CONFIGURED WITH** —
-/// defect `D1-DISCOVERY-IMAGE`, measured live on 2026-09-18.
+/// **THE DISCOVERY JOB RUNS THE IMAGE THE PROCESS WAS CONFIGURED WITH.**
 ///
-/// `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY` reach the
-/// controller once, as `Context::runner_image`, and every Job this controller
-/// creates takes them. The discovery Job did not: `resolve` never received a
-/// `RunnerImage`, so `CheckJobSpec::{image, image_pull_policy}` were a
-/// hard-coded `None` pair and the Job named `job::RUNNER_IMAGE` — a
-/// compile-time digest — under `imagePullPolicy: Never`. On the lab that was
-/// `ErrImageNeverPull`, then `DeadlineExceeded`, then
-/// `TopicsResolved=False/DiscoveryFailed`, while the RUNNER Job of the same
-/// namespace, the same controller and the same minute ran `logweir:scram-local`
-/// and completed in four seconds. On a default chart install it is worse: the
-/// runner Job gets a pullable tag and the discovery Job an unpublished digest
-/// under `Never`, so PLAT-09.2's dynamic half is unusable everywhere.
+/// `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY` reach the controller
+/// once, as `Context::runner_image`, and every Job this controller creates
+/// takes them. A discovery Job that named the compile-time `job::RUNNER_IMAGE`
+/// digest under `imagePullPolicy: Never` would fail `ErrImageNeverPull` while
+/// the runner Job of the same run ran fine.
 ///
-/// **THE PROPERTY IS AN EQUALITY BETWEEN THE TWO JOBS, NOT A LITERAL.** Both
-/// Jobs are POSTed by the same reconciler for the same run; the defect was
-/// that they disagreed. So this reconciles twice with ONE `RunnerImage` — the
-/// pass that starts the discovery, and the pass that freezes and starts the
-/// runner — and holds the two containers to the same image and the same pull
-/// policy.
+/// **THE PROPERTY IS AN EQUALITY BETWEEN THE TWO JOBS, NOT A LITERAL.** This
+/// reconciles twice with ONE `RunnerImage` (the pass that starts the
+/// discovery, and the pass that freezes and starts the runner) and holds the
+/// two containers to the same image and the same pull policy.
 ///
 /// KILLS: `image: None` / `image_pull_policy: None` at the discovery
 /// `CheckJobSpec`; dropping either of the two threaded parameters; passing
@@ -2860,13 +2800,9 @@ async fn the_discovery_job_runs_the_configured_runner_image() {
 }
 
 /// The other half of [`the_discovery_job_runs_the_configured_runner_image`]:
-/// **an installation that configures NOTHING creates exactly the Job it
-/// created before the override existed.**
-///
+/// **an installation that configures NOTHING creates the Job on the pin.**
 /// `RunnerImage::default()` is `None`/`None`, and `None` means the compiled-in
-/// constant — so this is the backward-compatibility arm, and it is why every
-/// other row in this file (which reconciles through `reconcile_backup`) still
-/// describes the shipped behaviour.
+/// constant.
 ///
 /// KILLS: defaulting the threaded image to something other than the pin;
 /// making the override mandatory.
@@ -2893,33 +2829,22 @@ async fn an_unconfigured_controller_leaves_the_discovery_job_on_the_pin() {
     );
 }
 
-// ===========================================================================
-// A relayed classification is the reason — defect `D2-RESULTUNREADABLE`,
-// the dynamic-`Backup` twin of the `TopicDiscovery` fix
-// ===========================================================================
+// A relayed classification is the reason.
 //
-// `resolve` bound only `result.inventory` and then read "no inventory" as
-// `DiscoveryResultUnreadable`, discarding `result.checks` — the array the
-// runner puts its answer in. The D2 live run measured the consequence on the
-// `TopicDiscovery` path (S11's unreachable bootstrap, S12's rotated password);
-// a dynamic `Backup`'s discovery Job runs the SAME check kind through the SAME
-// relay, so it read the same way.
-//
-// FOR A `Backup` THE COST IS THE RETRYABILITY VERDICT, and it is worse than a
-// vague reason. `docs/kubernetes.md`'s terminal-state table says
-// `DiscoveryResultUnreadable` means "no, not without fixing the runner" and
-// `DiscoveryFailed` means "yes, a new Backup could succeed". An unreachable
-// broker and a rotated password are both squarely the second, and both used to
-// be reported as the first — so an operator whose broker was down was told
-// their RUNNER was broken and that retrying could not help.
+// A dynamic `Backup`'s discovery Job runs the same check kind through the
+// same relay as a `TopicDiscovery`, and the runner puts its answer in
+// `result.checks`. Reading "no inventory" as `DiscoveryResultUnreadable`
+// would discard it, and the retryability verdict is what that costs:
+// `DiscoveryResultUnreadable` means "not without fixing the runner" and
+// `DiscoveryFailed` means "a new Backup could succeed". An unreachable broker
+// and a rotated password are both the second.
 
-/// S11's relayed sentence and remedy, from
-/// `artifacts/d2-live/20260918T030840Z/objects/s11/td-timeout-relayed.json`.
+/// The runner's relayed sentence and remedy for an unreachable bootstrap.
 const S11_MESSAGE: &str = "all-topics metadata reported BrokerUnreachable";
 const S11_REMEDY: &str = "Check that the bootstrap addresses resolve from this namespace and \
                           that a NetworkPolicy or mesh policy allows egress to the broker port.";
-/// S12's, from `results.json#S12.relayedCheckResult`, shortened past the
-/// bootstrap URL the live frame quotes.
+/// The runner's relayed sentence and remedy for a rotated password,
+/// shortened past the bootstrap URL the frame quotes.
 const S12_MESSAGE: &str = "fetch_cluster_id reported MetadataTimeout, but the client's error \
                            callback observed AuthenticationFailed first: SASL authentication \
                            error with SCRAM-SHA-512";
@@ -2939,7 +2864,7 @@ fn gated_failure(gating: Gating, state: CheckState, code: CheckCode) -> CheckOut
     .with_message("a row that must not decide this run")
 }
 
-/// A complete, verifiable relay for a check that produced NO inventory — the
+/// A complete, verifiable relay for a check that produced NO inventory, the
 /// shape `logweir::check::kinds::inventory` emits for a broker it could not
 /// reach: a result document with `checks` and no `inventory` block, and an end
 /// frame whose `topicLines` summary is ABSENT, because "the inventory did not
@@ -2988,17 +2913,16 @@ async fn resolve_failure_relay(
     (terminal, condition, bodies)
 }
 
-/// **S11's UNREACHABLE BROKER IS RETRYABLE, AND THE MESSAGE SAYS WHY** —
-/// defect `D2-RESULTUNREADABLE`.
+/// **AN UNREACHABLE BROKER IS RETRYABLE, AND THE MESSAGE SAYS WHY.**
 ///
 /// `BrokerUnreachable` is a `notReady` code on a BLOCKING row, so it is
-/// projected, mapped through `discovery_failure_state` to `DiscoveryFailed` —
-/// the retryable class — and named in the message with the runner's own
+/// projected, mapped through `discovery_failure_state` to `DiscoveryFailed`
+/// (the retryable class), and named in the message with the runner's own
 /// sentence and remedy.
 ///
-/// MUTANT: bind `result.inventory` instead of the whole document (the `b7b7ac6`
-/// behaviour). The terminal state goes back to `DiscoveryResultUnreadable` and
-/// this row fails on its first assertion.
+/// MUTANT: bind `result.inventory` instead of the whole document. The terminal
+/// state goes back to `DiscoveryResultUnreadable` and this row fails on its
+/// first assertion.
 #[tokio::test]
 async fn a_relayed_broker_unreachable_is_retryable_and_carries_its_remedy() {
     let row = broker_failure(
@@ -3044,8 +2968,7 @@ async fn a_relayed_broker_unreachable_is_retryable_and_carries_its_remedy() {
     );
 }
 
-/// **S12's ROTATED PASSWORD IS A DIFFERENT ANSWER FROM S11's** — and the two
-/// being indistinguishable is the whole consequence the defect row records.
+/// **A ROTATED PASSWORD IS A DIFFERENT ANSWER FROM AN UNREACHABLE BROKER.**
 ///
 /// MUTANT: project a constant code instead of the failing row's; project only
 /// the first check whatever its state.
@@ -3069,8 +2992,7 @@ async fn a_relayed_authentication_failure_is_told_apart_from_an_unreachable_brok
         "with the remedy that actually fixes it: {message}"
     );
 
-    // AND THE TWO ARE NOT THE SAME STRING. Before the fix both read
-    // `DiscoveryResultUnreadable` with one shared sentence.
+    // AND THE TWO ARE NOT THE SAME STRING.
     let (_, other, _) = resolve_failure_relay(vec![broker_failure(
         CheckCode::BrokerUnreachable,
         CheckState::NotReady,
@@ -3086,9 +3008,8 @@ async fn a_relayed_authentication_failure_is_told_apart_from_an_unreachable_brok
 
 /// **AN `unknown` CODE IS PROJECTED TOO, AND `notReady` OUTRANKS IT.**
 ///
-/// `MetadataTimeout` is an `unknown` code and one of the two reasons D2 §14.4
-/// S11 accepts, so a rule that read only `notReady` would leave the very
-/// timeout this fixes unclassified. The precedence is
+/// `MetadataTimeout` is an `unknown` code, so a rule that read only `notReady`
+/// would leave the timeout unclassified. The precedence is
 /// `check_contract::aggregate`'s and holds whatever the document order.
 ///
 /// MUTANT: drop the `unknown`/`skipped` arm; invert the precedence so
@@ -3132,19 +3053,19 @@ async fn an_unknown_code_is_projected_and_a_not_ready_row_outranks_it() {
     }
 }
 
-/// **A ROW THAT IS NOT `Blocking` NEVER DECIDES THIS RUN** — the gating filter,
+/// **A ROW THAT IS NOT `Blocking` NEVER DECIDES THIS RUN**: the gating filter,
 /// both ways.
 ///
-/// An ADVISORY row is a warning by definition (D2 §6.4) and a terminal reason
-/// taken from a warning would name the wrong cause. An `executionOnly` row is
-/// `unknown` by construction and describes a run that has not happened (D2
-/// §6.3); projecting it would refuse this `Backup` for a check that never ran.
-/// Both fall through to `DiscoveryResultUnreadable`, which is the honest answer
-/// for a document that measured nothing.
+/// An ADVISORY row is a warning, and a terminal reason taken from a warning
+/// would name the wrong cause. An `executionOnly` row is `unknown` by
+/// construction and describes a run that has not happened; projecting it would
+/// refuse this `Backup` for a check that never ran. Both fall through to
+/// `DiscoveryResultUnreadable`, the honest answer for a document that measured
+/// nothing.
 ///
 /// MUTANT: relax the filter to `!= Gating::Advisory` (admits `executionOnly`)
 /// or to `!= Gating::ExecutionOnly` (admits advisory). Each arm below kills one
-/// of those, which is why they are two arms and not one.
+/// of those.
 #[tokio::test]
 async fn only_a_blocking_row_can_be_the_terminal_reason() {
     for gating in [Gating::Advisory, Gating::ExecutionOnly] {
@@ -3208,8 +3129,7 @@ async fn a_document_with_nothing_to_project_is_still_result_unreadable() {
         "a `ready` row is not a finding: {ready}"
     );
 
-    // AND A RELAY THAT DID NOT VERIFY AT ALL is the arm that was always right,
-    // and is untouched.
+    // AND A RELAY THAT DID NOT VERIFY AT ALL is unchanged.
     let routes = finished_routes(
         NAME,
         UID,
@@ -3229,9 +3149,7 @@ async fn a_document_with_nothing_to_project_is_still_result_unreadable() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-11 — a discovery pod the namespace refuses at creation
-// ---------------------------------------------------------------------------
+// A discovery pod the namespace refuses at creation
 
 /// The admission's words for a quota-refused discovery pod, as the Job
 /// controller records them on its `FailedCreate` Event.
@@ -3303,14 +3221,12 @@ fn discovery_cancels(bodies: &[SeenBody]) -> usize {
         .count()
 }
 
-/// **FX-11: A QUOTA-REFUSED DISCOVERY POD ENDS THE `Backup` AT ONCE, NAMING THE
+/// **A QUOTA-REFUSED DISCOVERY POD ENDS THE `Backup` AT ONCE, NAMING THE
 /// QUOTA.** The discovery Job is 90 s old and has no pod, and the Job
 /// controller's `FailedCreate` Event says the namespace's `ResourceQuota`
-/// refused it. The `Backup` ends `PodCreationForbidden` — the state its runner
-/// reaches for the same refusal — with the admission's words on the status,
-/// the discovery Job is cancelled, and no runner Job is ever created. Before
-/// FX-11 this read `Resolving` until the Job's deadline and then ended
-/// `DiscoveryFailed`, without the quota.
+/// refused it. The `Backup` ends `PodCreationForbidden` (the state its runner
+/// reaches for the same refusal) with the admission's words on the status,
+/// the discovery Job is cancelled, and no runner Job is ever created.
 ///
 /// KILLS: the Events read dropped (`events: &[]` again); the message not
 /// propagated; the refusal mapped back to `DiscoveryFailed`; the early cancel
@@ -3371,10 +3287,10 @@ async fn fx11_a_discovery_pod_the_quota_refuses_ends_the_backup_pod_creation_for
     );
 }
 
-/// **FX-11 NEGATIVE CONTROL: no `FailedCreate` Event, no early verdict.** The
-/// same Job with no pod, and an Events list that says nothing: the `Backup`
-/// stays `Resolving`, nothing is cancelled, and the Job's own deadline is the
-/// only clock — exactly the path before FX-11.
+/// **NEGATIVE CONTROL: no `FailedCreate` Event, no early verdict.** The same
+/// Job with no pod, and an Events list that says nothing: the `Backup` stays
+/// `Resolving`, nothing is cancelled, and the Job's own deadline is the only
+/// clock.
 #[tokio::test]
 async fn fx11_control_no_event_leaves_the_discovery_resolving() {
     let (terminal, bodies) = reconcile_with(
@@ -3403,10 +3319,10 @@ async fn fx11_control_no_event_leaves_the_discovery_resolving() {
     assert_eq!(discovery_cancels(&bodies), 0);
 }
 
-/// **FX-11, THE GRACE AND THE COST BOUND.** A discovery Job 15 s old with no
-/// pod is not judged, even with a refusal Event on record — the 30 s grace
-/// `Preflight` uses — and NO events list is made at all: the read happens only
-/// when the classifier could use it.
+/// **THE GRACE AND THE COST BOUND.** A discovery Job 15 s old with no pod is
+/// not judged, even with a refusal Event on record (the 30 s grace), and NO
+/// events list is made at all: the read happens only when the classifier
+/// could use it.
 ///
 /// KILLS: the grace period ignored; an events list per pass regardless.
 #[tokio::test]
@@ -3426,8 +3342,8 @@ async fn fx11_inside_the_grace_period_nothing_is_read_or_decided() {
     );
 }
 
-/// **FX-11: the mapping, pure.** Both `FailedCreate` codes project onto the
-/// runner kind's `PodCreationForbidden`; a deadline is still `DiscoveryFailed`.
+/// **The mapping, pure.** Both `FailedCreate` codes project onto the runner
+/// kind's `PodCreationForbidden`; a deadline is still `DiscoveryFailed`.
 #[test]
 fn fx11_a_refused_discovery_pod_maps_to_pod_creation_forbidden() {
     for code in [
@@ -3446,12 +3362,11 @@ fn fx11_a_refused_discovery_pod_maps_to_pod_creation_forbidden() {
     );
 }
 
-/// **FX-11, THE FINISHED END.** A discovery Job that died on its own deadline
-/// without ever having a pod — the pass that would have caught it at 30 s never
-/// ran, say across a controller restart — is still `PodCreationForbidden`,
-/// quoting the quota, when its `FailedCreate` Event says why: the finished
-/// path reads the Events through the same classifier row. Without the Event
-/// it is the `DiscoveryFailed` it always was.
+/// **THE FINISHED END.** A discovery Job that died on its own deadline without
+/// ever having a pod (the pass that would have caught it at 30 s never ran,
+/// say across a controller restart) is still `PodCreationForbidden`, quoting
+/// the quota, when its `FailedCreate` Event says why. Without the Event it is
+/// `DiscoveryFailed`.
 ///
 /// KILLS: the Events read dropped on the finished path.
 #[tokio::test]
