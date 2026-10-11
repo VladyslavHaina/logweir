@@ -3078,9 +3078,9 @@ fn the_stability_rule_carries_the_owners_od_7_rulings_for_the_entry_phase_7_writ
     };
     let stability = flat("docs/stability.md");
     let rule = stability
-        .split("### The first post-tag addition")
+        .split("## The signed formats")
         .next()
-        .expect("docs/stability.md states the rule before FX-4's section");
+        .expect("docs/stability.md states the rule before its list of signed formats");
     for ruled in [
         "The owner's decision [OD-7](to-do/product-expansion.md#owner-decisions), taken on \
          2026-10-05, rules two cases MINOR",
@@ -3501,9 +3501,10 @@ fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
 /// fields; the owner ruled it MINOR on 2026-10-07 as OD-7's third, general
 /// case (it can only move a reader's verdict to the safer side).
 /// `docs/stability.md`'s rule states that case and names FX-3's move (the
-/// text integration batch 3 landed), its FX-3 section states the ruling, and
-/// no document or FX-3 source comment still says the classification awaits
-/// it.
+/// text integration batch 3 landed), the FX-3 section (in
+/// `docs/formats/drill-scorecard.md` since PROD-17.1 B12) states the ruling,
+/// and no document or FX-3 source comment still says the classification
+/// awaits it.
 ///
 /// Negative controls: [`FX3_PENDING_BULLET_OF_2026_10_05`] must trip
 /// [`fx3_stale_wording`] (asserted first, so the check cannot go blind), and
@@ -3528,11 +3529,11 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
     };
     let stability = flat("docs/stability.md");
     // The rule itself carries the third case and names FX-3's move, so the
-    // section's "the rule above" points at a ruling that is there.
+    // FX-3 section's link to the rule points at a ruling that is there.
     let rule = stability
-        .split("### The first post-tag addition")
+        .split("## The signed formats")
         .next()
-        .expect("docs/stability.md states the rule before FX-4's section");
+        .expect("docs/stability.md states the rule before its list of signed formats");
     for ruled in [
         "On 2026-10-07 the owner added a third, general case",
         "**A new cause for an existing value, or new content in an existing field, is MINOR \
@@ -3546,16 +3547,19 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
             "docs/stability.md's MINOR/MAJOR rule no longer says: {ruled}"
         );
     }
-    let section = stability
-        .split("### Format 1.2.0 (FX-3)")
+    // The per-version sections moved to each format's own page in PROD-17.1
+    // (B12): FX-3's classification lives with the field it classifies.
+    let scorecard = flat("docs/formats/drill-scorecard.md");
+    let section = scorecard
+        .split("### `topic_parity` in a `newTopic` restore: not reconstructed (1.2.0)")
         .nth(1)
-        .expect("docs/stability.md has FX-3's format section")
+        .expect("docs/formats/drill-scorecard.md has FX-3's `not_reconstructed` section")
         .split(" ### ")
         .next()
         .expect("the section");
     for said in [
         "**The content of the two existing lists is MINOR: the owner ruled it on 2026-10-07, \
-         OD-7's third case** (the rule above).",
+         OD-7's third case** ([the rule](../stability.md#the-v010-tag-is-the-compatibility-boundary)).",
         "It makes no verdict stronger",
         "**The field and its five arms are MINOR** under the owner's OD-7 (a)",
         "**NR-4 and NR-5 are MINOR under OD-7 too**",
@@ -3563,13 +3567,14 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
     ] {
         assert!(
             section.contains(said),
-            "docs/stability.md's FX-3 section no longer says: {said}"
+            "docs/formats/drill-scorecard.md's FX-3 section no longer says: {said}"
         );
     }
     // FX-3 review F3: this build's readers DO have `topic_parity` arms.
     assert!(
         !section.contains("because no reader has a `topic_parity` arm"),
-        "docs/stability.md's FX-3 section says no reader has a topic_parity arm; NR-1 to NR-5 are"
+        "docs/formats/drill-scorecard.md's FX-3 section says no reader has a topic_parity arm; \
+         NR-1 to NR-5 are"
     );
     for doc in [
         "docs/stability.md",
