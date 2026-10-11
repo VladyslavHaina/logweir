@@ -777,9 +777,11 @@ each judged against the partition's marks and the archive's offsets
 - **The receipt stays bounded.** Its block depends on the selection only —
   at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
   selection whose summary could exceed it as JSON writes it (escapes
-  counted) is refused by name before anything runs — never on partitions, so
-  the catalog's 256 KiB read and the evidence fetch's 1 MiB hold; the
-  positions grow in their own document, which neither reads.
+  counted) is refused by name before anything runs — never on partitions;
+  the positions grow in their own document, which neither the catalog's
+  256 KiB read nor the evidence fetch's 1 MiB reads. (Since 1.8.0 the
+  receipt does grow on partitions, by `source_watermarks`, within a 32 KiB
+  budget: see below.)
 - **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
   MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
   document without it changes verdict; the document's run only when a reader
@@ -806,6 +808,21 @@ each judged against the partition's marks and the archive's offsets
   for documents: the 1.7.0 receipts, their positions documents and the records
   already written stay valid. An older controller refuses a frozen run that
   carries `consumerGroups` (`PlanConfigMapConflict`).
+
+### Receipt format 1.8.0: `source_watermarks` and the empty capture (PROD-02.1)
+
+PROD-02.1 adds one optional block, `source_watermarks` (per named topic, each
+partition's `[low, high]` watermark read before the engine), and the EMPTY
+CAPTURE: the empty window `[t, t)` beside it, for a backup of a source whose
+records all expired
+([the receipt format](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180)).
+Arms 41–45 read only the block and arm 4 admits the empty window only beside
+it, so it is MINOR under OD-7: an older reader refuses an empty capture (the
+safer verdict) and reads an ordinary 1.8.0 receipt as the 1.7.0 one under it.
+Absent is coverage NOT RECORDED, never complete. The block grows with the
+partition count and the writer caps it at **32 KiB** (32,768 bytes, about
+430–650 partitions); over that it is not recorded, so it never pushes a
+receipt over the catalog's 256 KiB read. `verify_scorecard.py` is 1.29.0.
 
 ### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
 

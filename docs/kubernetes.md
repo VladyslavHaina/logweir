@@ -1011,7 +1011,9 @@ a pass:
 
 **The limit this sets, measured.** A receipt is two-space pretty JSON. With
 FX-4's configuration coverage, PROD-05.1's 14 semantic entries and PROD-03.0's
-schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic,
+schema-dependency block per topic, a 1.5.0 receipt is about 3.4 KB per topic
+(plus, since 1.8.0, `source_watermarks` at about 40–75 bytes per partition,
+capped at 32 KiB and then not recorded),
 so 1 MiB holds about **250–300 topics**: about 300 with no overrides (a
 300-topic receipt measured 1,034,994 bytes through the runner's own
 serializer), and fewer with per-topic configuration overrides (about 250 with
@@ -5039,7 +5041,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **0** | `Succeeded` | `ok` | `Complete=True`, reason `EmptyCapture` | An empty capture (PROD-02.1): every selected partition was empty at capture, so the verified receipt records no record; no `windowCovered`, not a recovery point. Set only after the receipt verifies. |
+| **0** | `Succeeded` | `ok` | `Complete=True`, reason `EmptyCapture` | An empty capture (PROD-02.1): every selected partition was empty at capture, so the verified receipt records no record; no `windowCovered`, not a recovery point (a `ProtectionPolicy` does not count it). Set only after the receipt verifies. |
 | **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line, or `TargetTopicAppeared` / `CreatedTopicsLeft` off a restore runner's (a stopped creation step: §12, "Restoring under the original topic names") | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. The condition's message ends with the runner's own reason: see "What a refused run says about why" below. |

@@ -806,8 +806,9 @@ fn execute_with_signer(
     if let Err(why) = &source_watermarks {
         tracing::warn!(
             error = %why,
-            "the source's watermarks could not be read before the engine; the receipt records \
-             its coverage as not recorded"
+            "the source's watermarks were not recorded before the engine (a read that did not \
+             answer for every partition, or a block over its budget); the receipt records its \
+             coverage as not recorded"
         );
     }
 

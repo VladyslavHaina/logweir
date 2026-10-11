@@ -2860,12 +2860,16 @@ signed receipt counts no record and carries the empty window `[t, t)`, no
 catalog point is written (`catalog sync` counts it `empty-capture`), and the
 `Backup` completes with reason `EmptyCapture`, set only after the controller
 verifies the receipt, with no `windowCovered`. An empty capture is not a
-recovery point; a restore of its set is refused by name, exit 3, before
+recovery point: a `ProtectionPolicy` never counts it (it ages from the last
+real point), and a restore of its set is refused by name, exit 3, before
 anything runs. A partly empty source is an ordinary backup whose summary and
 receipt name the empty partitions. Nothing captured over a partition that
 held records, or with the watermarks unread, is still exit 1. Both verifiers
 (`verify_scorecard.py` 1.29.0) check arms 41–45 and print "coverage not
-recorded" for every receipt without the block, never complete.
+recorded" for every receipt without the block, never complete. The block grows
+with the partition count and is recorded only up to 32 KiB (about 430–650
+partitions); a larger source's receipt reads "coverage not recorded", and an
+empty capture of it stays exit 1.
 
 **Scope:** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
 shipped engine `0.23.3+logweir.2`), `crates/logweir/tests/backup_run.rs`,

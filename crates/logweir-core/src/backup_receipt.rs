@@ -488,6 +488,31 @@ pub const FORMAT_VERSION_WITH_SOURCE_WATERMARKS: &str = "1.8.0";
 /// together.
 pub const SOURCE_WATERMARKS_SINCE_MINOR: u64 = 8;
 
+/// **PROD-02.1 (review F1).** The most bytes a writer lets `source_watermarks`
+/// take in a receipt: 32 KiB, measured as the block encoded exactly as the
+/// receipt encodes it (`crate::det_json`, nested at the receipt's depth; see
+/// [`source_watermarks_encoded_len`]). One partition takes 36 bytes plus its
+/// two offsets' digits, so the budget holds about 430 partitions at 20-digit
+/// offsets and about 650 at 9-digit ones. Over it the writer records no block
+/// (coverage NOT RECORDED), so the block can never push a receipt over the
+/// catalog's 256 KiB read. Readers do not check it: an absent block is always
+/// legal.
+pub const SOURCE_WATERMARKS_BUDGET_BYTES: usize = 32 * 1024;
+
+/// The bytes `block` takes as a receipt's `source_watermarks`, encoded as the
+/// receipt encodes it: the one-key document `{"source_watermarks": block}`,
+/// whose key sits at the receipt's own depth.
+///
+/// # Errors
+///
+/// The encoder's error, which a block of integers never produces.
+pub fn source_watermarks_encoded_len(
+    block: &BTreeMap<String, Vec<[u64; 2]>>,
+) -> Result<usize, crate::det_json::DetJsonError> {
+    crate::det_json::to_deterministic_json(&serde_json::json!({ "source_watermarks": block }))
+        .map(|bytes| bytes.len())
+}
+
 /// The `format_version` this build WRITES for a receipt that pins no manifest
 /// version (a pinned one is [`FORMAT_VERSION_WITH_MANIFEST_VERSION`]; see
 /// [`format_version_for`]). A reader accepts any `1.x.y` (arm 1); a document

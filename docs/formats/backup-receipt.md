@@ -513,6 +513,16 @@ before the engine, and records them:
 Per named topic, one `[low, high]` pair per partition; the list's index is the
 partition id. A partition with `low == high` held no record at capture.
 
+**The block is budgeted (review F1).** It grows with the partition count — 36
+bytes per partition plus the two offsets' digits, as the receipt encodes it —
+so a writer records it only up to **32 KiB** (`SOURCE_WATERMARKS_BUDGET_BYTES`,
+32,768 bytes, measured as the block encodes in the receipt): about 430
+partitions at 20-digit offsets, about 650 at 9-digit ones. Over the budget the
+block is absent and the receipt reads "coverage not recorded"; an empty
+capture over it cannot be proved and stays exit 1, naming the budget. So the
+block never pushes a receipt over the catalog's 256 KiB read. The receipt's
+growth with topics (about 3.4 KB each) is unchanged.
+
 - **Absent means coverage NOT RECORDED**, never complete: every receipt before
   1.8.0, and a run whose watermark read did not answer for every partition.
   Both readers print `source_watermarks: coverage not recorded, …` for it, and
@@ -523,8 +533,9 @@ partition id. A partition with `low == high` held no record at capture.
   0, and `covered` the empty window `[t, t)` (`t` the engine's start), which
   covers no record. It is not a recovery point: it gets no catalog point
   (`logweir catalog sync` counts it `empty-capture`), no
-  `Backup.status.windowCovered`, and its `Backup` completes with reason
-  `EmptyCapture` once the controller has verified the receipt. A restore of
+  `Backup.status.windowCovered`, its `Backup` completes with reason
+  `EmptyCapture` once the controller has verified the receipt, and a
+  `ProtectionPolicy` never counts it as a recovery point. A restore of
   its set is refused by name, exit 3, before anything runs. Nothing captured
   over a partition with `low < high`, or with the watermarks unread, is still
   exit 1 and signs nothing.

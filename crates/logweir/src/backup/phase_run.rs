@@ -573,9 +573,10 @@ pub fn run(
 /// **PROD-02.1.** The receipt's `source_watermarks` from ONE marks read taken
 /// before the engine (`ClusterReader::partition_marks`), or why there is
 /// none. Every named topic must answer with partitions `0..n` (n ≥ 1), each
-/// with its marks; anything else — a failed metadata or marks read, a gap in
-/// the ids — leaves the block absent, which a reader takes as coverage NOT
-/// RECORDED.
+/// with its marks, and the block must fit
+/// `SOURCE_WATERMARKS_BUDGET_BYTES` (review F1); anything else — a failed
+/// metadata or marks read, a gap in the ids, a block over the budget — leaves
+/// the block absent, which a reader takes as coverage NOT RECORDED.
 pub fn source_watermarks(
     topics: &[String],
     marks: &BTreeMap<String, logweir_kafka::capture::TopicMarks>,
@@ -611,6 +612,19 @@ pub fn source_watermarks(
         }
         block.insert(topic.clone(), pairs);
     }
+    // PROD-02.1 (review F1): the block grows with the partition count, and a
+    // receipt over the catalog's 256 KiB read reads Unreadable. Over its
+    // budget it is NOT recorded — and an empty capture then stays exit 1.
+    let budget = logweir_core::backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES;
+    let encoded = logweir_core::backup_receipt::source_watermarks_encoded_len(&block)
+        .map_err(|e| format!("the source_watermarks block could not be encoded: {e}"))?;
+    if encoded > budget {
+        let partitions: usize = block.values().map(Vec::len).sum();
+        return Err(format!(
+            "the source_watermarks block of {partitions} partition(s) would take {encoded} bytes \
+             of the receipt, over its {budget}-byte budget"
+        ));
+    }
     Ok(block)
 }
 
@@ -629,7 +643,7 @@ pub fn empty_capture_window(
 ) -> Result<(i64, i64), BackupError> {
     let why = match watermarks {
         Err(e) => format!(
-            "the source's watermarks could not be read before the engine ({e}), so whether it \
+            "the source's watermarks were not recorded before the engine ({e}), so whether it \
              held any record is not known"
         ),
         Ok(block) => {
