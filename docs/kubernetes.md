@@ -2818,6 +2818,12 @@ back:
 - **Let in-flight `Backup`s finish.** An older runner without the execution
   claim re-runs the engine over a re-created Job's set, and an older controller
   cannot read a `v2` frozen plan (`PlanConfigMapConflict`).
+- **Bound credential Secrets keep working.** An older controller and runner
+  ignore the `logweir-binding` pair.
+- **Rolling the CRDs back** (not needed: they are additive) prunes
+  `spec.target.topicNaming.originalName` and `status.targetTopicsAppeared` from
+  stored `Restore`s; their plans are unchanged, and an older runner refuses an
+  original-name plan at phase 0.
 - **Set every `RetentionPolicy` to `mode: Report`**, wait for `status.lease` to
   clear and enforcement Jobs to finish. An older worker records delete markers
   as deletions on a versioned bucket and refuses a plan with `co_point_ids`.

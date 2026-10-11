@@ -1,20 +1,15 @@
 # The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name` and `notifications`
 
-**This is not yet a complete drill-spec reference.** It documents exactly seven
-things — the top-level `name` key, `source.point`, `restore.time_basis`,
-`sample.coverage` with its bound, the replay selection (a window start,
-`restore.point_in_time: "<start>/<end>"`), a restore under the original topic
-names (`target.topic_naming.original_name`) and the `notifications` block —
-because those are what Task 14, decision D3, FX-8, PROD-08.1, PROD-11.1 and
-PROD-15.1 created and changed. Every other key of a drill spec is
-described today only by the commented example at
+**This is not a complete drill-spec reference.** It documents the keys Task 14,
+decision D3, FX-8, PROD-08.1, PROD-11.1 and PROD-15.1 created or changed.
+Every other key of a drill spec is described by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
-[`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs). A
-full reference is a separate piece of work; a partial document that says so is
-more use than none, and less use than one that pretends to be complete.
-
+[`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs).
 Every key on this page is **snake_case**, matching the rest of the spec
-(`pagerduty_routing_key`, `slack_webhook`, `engine_overrides`).
+(`pagerduty_routing_key`, `slack_webhook`, `engine_overrides`). Every key below
+is inside `plan_hash`: it is part of the plan bytes an approver signs, so an
+approval minted over a plan without it does not authorise the same plan with
+it, and the reverse.
 
 ---
 
@@ -30,9 +25,8 @@ item 74); it still parses.
 
 `name` is **spec-side only**. It is never written to a scorecard. An
 artifact-side drill identity is backlog **T1-8**, assigned to decision **O16**
-with default *not funded*; see
-[`docs/stability.md`](../stability.md#known-limitations-of-v01) for the
-residual.
+with default *not funded*
+([the limitations](../stability.md#known-limitations-of-v01)).
 
 ---
 
@@ -117,7 +111,8 @@ refuses for this receipt. A receipt or manifest that is **missing or
 unreadable** is **exit 1**: the archive did not answer, and that may be a
 rotated credential or a briefly unavailable bucket, so telling an operator to
 change an approved document would be the wrong repair. See
-[`docs/stability.md`](../stability.md) for the whole stdout and exit contract.
+[reference.md](../reference.md#exit-codes) for the whole stdout and exit
+contract.
 
 **The evidence keyring (`--evidence-keys`).** Inside a cluster the controller
 renders it into the Job's approval bundle as `evidence-keys.json` and pins its
@@ -173,15 +168,11 @@ so a typo can never be read as consent. The key is snake_case like
 `point_in_time`; the value is camelCase like `target.mode`'s `newTopic`.
 
 **Why it exists.** The pinned engine archives each record's **producer**
-timestamp: it reads a batch's first timestamp plus the record's delta and
-discards the batch's max timestamp, the only place a broker on
-`message.timestamp.type=LogAppendTime` writes its append time. Every selection
-by time therefore reads producer time. For a `CreateTime` topic that is the
-topic's own clock; for a `LogAppendTime` topic it is not — PROD-01.1 restored,
-at a recovery point in 2001, six records the broker had appended in 2026, and
-the drill passed, because phase 7 compares the restored topic with the archive
-and both carry producer time
-([`docs/stability.md`](../stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
+timestamp (it discards the batch's max timestamp, the only place a broker on
+`message.timestamp.type=LogAppendTime` writes its append time), so every
+selection by time reads producer time. For a `LogAppendTime` topic that is not
+the topic's own clock, and the drill cannot notice
+([the limitation](../stability.md#a-point-in-time-over-a-logappendtime-source-is-refused-unless-the-plan-selects-by-producer-time)).
 
 **What the runner does.** After the archive is described and before phase 2 —
 so before any target topic of the restore is created and before the engine
@@ -214,10 +205,6 @@ The refusal names every refused topic and the record that made it
 `LogAppendTime`, and the runner's final stdout line is
 `refusal-reason=PointInTimeByProducerTime`, so a `Restore` object's
 `status.exitReason` carries it.
-
-**It is inside `plan_hash`.** The field is part of the plan bytes an approver
-signs, so an approval minted over a plan without it does not authorise the same
-plan with it, and the reverse.
 
 **Absent field, old plans, old runners.** Every plan written before FX-8 lacks
 the field and means "no time selection by producer time is accepted". A runner
@@ -297,8 +284,7 @@ the plan does not say; the console's restore wizard offers it as an advanced
 choice with this cost beside it (PROD-08.1a,
 [kubernetes.md](../kubernetes.md) §12).
 
-**It is inside `plan_hash`.** The fields are part of the plan bytes an approver
-signs. Both are omitted from the serialised plan at their defaults, so a plan
+Both fields are omitted from the serialised plan at their defaults, so a plan
 that does not ask for complete coverage is byte-identical to one written before
 the fields existed.
 
@@ -351,8 +337,7 @@ Optional. Each topic named restores ONLY the partitions listed; a topic in
 OD-9 (a) on 2026-10-09: a restore that states a subset signs scorecard format
 **2.0.0**, which every verifier before it refuses as an unsupported major
 instead of reading it as a restore of every partition
-([the scorecard format](drill-scorecard.md#sourceselection-format-170-and-200);
-[stability](../stability.md)).
+([the scorecard format](drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
 **Only beside the interval form of `point_in_time`.** `restore.partitions` is
 written beside `"<start>/<end>"` or, for a window from the archive's floor,
@@ -432,8 +417,7 @@ function: its `archive.coverage` row reports `WindowStartBeforeCoverage` or
 selection reads, and `plan.parse` reports `SelectionInvalid` for a start at or
 after the end.
 
-**It is inside `plan_hash`.** A plan without a selection serialises exactly as
-one written before PROD-11.1.
+A plan without a selection serialises exactly as one written before PROD-11.1.
 
 **Old plans, old runners.** A plan without a selection restores the full
 window, exactly as before. A runner built BEFORE PROD-11.1 reads
@@ -470,7 +454,7 @@ exist** — the recovery of a deleted topic, or of a lost cluster onto a
 replacement, without renaming anything. Every other restore maps each topic to
 a new, prefixed name, and an empty `prefix` without this block is still
 refused (`maps onto itself`). The owner's decision OD-2 narrowed
-[`stability.md`](../stability.md)'s Never #1 to a LIVE topic: the restored
+[`stability.md`](../stability.md#never--four-entries)'s Never #1 to a LIVE topic: the restored
 topic is created by this run, exclusively, and is a new generation of the name
 (a new Kafka topic id), never the original topic.
 
@@ -558,12 +542,12 @@ and who writes to it before you remove it"). Each list carries at most 100
 names and its full count, and the error message names every one. No code path
 deletes a topic under an original name: Kafka has no conditional delete, so a
 record a producer wrote between any check and the delete would be lost with
-it. Those two lines are the last two the runner prints, and every error text
+it (`crates/logweir/tests/no_topic_delete_inventory.rs` pins that the one broker
+delete call is the scratch-scoped deleter's). Those two lines are the last two the runner prints, and every error text
 it prints is on one line, so nothing a plan or a broker says can start a line
 of its output.
 
-**It is inside `plan_hash`.** A plan without the block serialises exactly as
-before.
+A plan without the block serialises exactly as before.
 
 **Old plans, old runners.** A runner built before PROD-15.1 ignores the block
 and sees the empty prefix, which maps every topic onto itself: it refuses the

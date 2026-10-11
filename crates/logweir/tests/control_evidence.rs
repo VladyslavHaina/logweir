@@ -455,7 +455,7 @@ impl Doc {
             Doc::BackupReceipt => "formats/backup-receipt.md",
             Doc::CatalogPoint => "formats/catalog-point.md",
             Doc::StandingAuthorization => {
-                "stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"
+                "formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110"
             }
             Doc::Restore => "../charts/logweir/crds/restores.yaml",
         }

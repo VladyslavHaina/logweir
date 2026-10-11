@@ -69,7 +69,7 @@ is the companion to this page.
 | Put receipt | The same key | What the store reported when the scorecard was uploaded | [The storage receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document) |
 | Backup receipt | The same key | One completed backup run: the source cluster, the topics, per-topic record counts, the covered window, the manifest digest and, from format 1.1.0, per-topic configuration capture coverage | [Backup receipt format](formats/backup-receipt.md) |
 | Catalog point | The key named in its `signing.key_id`; the backup receipt it points at is the verification root | One recovery point: when its capture started, its window, where its archive is and, from format 1.1.0, a copy of each topic's configuration capture coverage | [Catalog point format](formats/catalog-point.md) |
-| Standing authorization | An approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule could run, for at most 90 days, before v1 withdrew scheduled rehearsals ([key custody](#key-custody)) | [The standing rehearsal authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature) |
+| Standing authorization | An approver's key with usage `GovernedApproval` | The scope inside which one rehearsal schedule could run, for at most 90 days, before v1 withdrew scheduled rehearsals ([key custody](#key-custody)) | [The standing rehearsal authorization](formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110) |
 | Restore | Nothing: Kubernetes status written by the controller | One restore run under Kubernetes: its exit code, how it ended and, when it signed a scorecard, where that is | [CRD schema](../charts/logweir/crds/restores.yaml), described in [Kubernetes, *Admission*](kubernetes.md#admission-what-is-checked-before-any-pod) |
 
 Four reading notes:
@@ -114,7 +114,7 @@ results of tests".
 |---|---|
 | A restore from a named archive was tested at a recorded time, and the test recorded its own outcome. | [Scorecard](formats/drill-scorecard.md): `run_id`, `requested_at`, `outcome`, `source.backup_id`, `source.manifest_sha256` |
 | The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes. The approving key differs from the evidence-signing key where `approval.self_attested` reads `false`. | [Scorecard](formats/drill-scorecard.md): `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`, `approval.self_attested` |
-| A rehearsal that ran before v1 (scheduled rehearsals are withdrawn) ran a plan proven to fall inside a scope signed for that one schedule by a key with usage `GovernedApproval`. | [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
+| A rehearsal that ran before v1 (scheduled rehearsals are withdrawn) ran a plan proven to fall inside a scope signed for that one schedule by a key with usage `GovernedApproval`. | [Standing authorization](formats/approval-documents.md#the-standing-rehearsal-authorization-format-100-and-110): `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
 | The restore software is identified by version and digest (Logweir's build-input digest, or OSO's image digest for its release), so tests before and after a change to it can be told apart. | [Scorecard](formats/drill-scorecard.md): `engine.version`, `engine.digest` |
 
 **What it does not show**

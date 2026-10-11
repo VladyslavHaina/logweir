@@ -201,7 +201,7 @@ package and fixture READMEs stay beside the files they describe.
 | See what the evidence shows for backup and restore-testing controls | [Control-evidence mapping](docs/control-evidence.md) |
 | Generate, pin and rotate keys | [Signing keys](docs/keys.md) |
 | Collect metrics | [Metrics](docs/metrics.md) |
-| Interpret document fields | [Scorecard](docs/formats/drill-scorecard.md), [backup receipt](docs/formats/backup-receipt.md), [drill spec](docs/formats/drill-spec.md), [protection event](docs/formats/protection-event.md) |
+| Interpret document fields | [Scorecard](docs/formats/drill-scorecard.md), [backup receipt](docs/formats/backup-receipt.md), [catalog point](docs/formats/catalog-point.md), [approval documents](docs/formats/approval-documents.md), [drill spec](docs/formats/drill-spec.md), [protection event](docs/formats/protection-event.md) |
 | Understand architecture and decisions | [Architecture](docs/architecture.md) |
 | Check compatibility and limitations | [Support matrix and compatibility contract](docs/support-matrix.md), [stability](docs/stability.md) |
 | Build, test and contribute | [Contributing](CONTRIBUTING.md), [gate reference](docs/gates.md) |

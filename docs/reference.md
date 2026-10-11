@@ -83,7 +83,7 @@ condition's reason.
 | `ApprovalBundleMaterializationFailed` | Held: a bundle key cannot sign anything new under its usage |
 | `WindowNotCovered` | Exit 2: the archive did not cover the requested window |
 | `TargetTopicConfigRefused`, `CredentialNotRenderable`, `PointInTimeByProducerTime`, `TransactionMarkersInArchive`, `PlainWithoutTls`, `CredentialBindingMismatch` | Exit 3 runner refusals, by `refusal-reason=` |
-| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message |
+| `PointBindingMismatch`, `PointUntrusted`, `PointBindingSetMismatch` | Exit 3, read as `GuardRefused`; the name opens the message. `logweir_core::guard::TERMINAL_STATES` is a closed list, so these (and `AuthorizationInvalid`, `AuthorizationExpired`, `RehearsalScopeViolation`) are carried as the message's first token, not as declared states. A bound point whose receipt or manifest is missing or unreadable is exit 1 |
 
 Plus the no-exit-code states of the `Backup` table, `PodOwnershipContested`,
 `JobNameConflict` and `PlanConfigMapConflict`. `Admitted` is its own condition
@@ -124,9 +124,52 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 
 The evidence keys (interface I8) are the final lines of a run that signed a
 scorecard, in that order, with nothing after them; `teardown-key=` comes before
-them. A run that signed nothing prints no key line. Exit 2 prints the keys of
-its signed failure: read the exit code for success, the keys only to find the
-document.
+them, as `catalog-key=` comes before interface I7's two. A run that signed
+nothing prints no key line. Exit 2 prints the keys of its signed failure: read
+the exit code for success, the keys only to find the document
+([the amendment](stability.md#interface-i8-is-amended-exit-2-prints-the-signed-failures-keys-too)).
+
+- **`offset-report-key=` is conditional.** The engine writes its offset report
+  only from a completed restore, and its own write failure is a warning, so a
+  finished restore can leave nothing at the path: the run then records no
+  offset-report key or digest in the scorecard, uploads nothing, logs a
+  warning and still exits 0 with two key lines. A scorecard without the
+  `evidence.offset_report_*` pair (present or absent together) is well-formed.
+  Scan for a key by NAME and treat the third as optional.
+- **`teardown-key=` is conditional in the same way**: printed when, and only
+  when, phase 9's create-only put of the signed teardown attestation
+  succeeded, at exit 0 or exit 2. It rides on the phase-9 record, pushed after
+  phase 8 signed, so nothing that delivers it reaches the signed bytes.
+- **`teardown-failed=`** is printed once, by phase 9 or by the teardown of a run
+  that failed after its creation step, whenever a teardown left a topic:
+  Kafka-legal names only, each `error` at most 256 characters on one line,
+  before the summary line. The controller copies the last one in its tail, held
+  to the Restore's mapped target names; an older controller ignores it.
+- **The progress channel is optional and bounded.** `progress-contract=<n>` is
+  printed once, before the first `progress-phase=` line: the execution contract
+  version the controller stamped (a v1 invocation prints `1`), else the version
+  the binary implements (`logweir_core::execution_contract::VERSION`, `"2"`), as
+  for `backup run`, whose Job carries no contract. Lines come from a closed
+  vocabulary (the ten restore phase names, the five backup step names), and
+  anything else is silence, never a sanitised half-truth. A runner that
+  predates the channel prints nothing, which is not an error.
+- **`failure-reason=` states are closed per kind**
+  (`logweir_core::guard::RESTORE_FAILURE_REASONS`: `TargetTopicAppeared` and
+  `CreatedTopicsLeft`, exit 1; `BACKUP_FAILURE_REASONS`:
+  `ExecutionAlreadyClaimed`, exit 1, and `ExecutionClaimUnproven`, exit 4), so
+  one kind's log never lifts the other kind's state, and only beside its own
+  exit code. The controller lifts `target-topics-appeared=` and
+  `failure-reason=` only from the log's last two non-empty lines, in that
+  order, reading the last 256 lines; it refuses a value over 76 KB before
+  parsing it and keeps only the names (and counts) its own plan maps. An older
+  controller reads `appeared` and `left` only; one older still reports a plain
+  exit 1. The place rule cannot tell the runner's own last lines from text an
+  OLDER runner image was made to print last, so with such an image check the
+  names against the cluster before acting.
+- **Every error text the runner prints is on one line**
+  (`logweir::exit::one_line` escapes every line break), so no plan- or
+  broker-chosen string can start a line a controller reads by key. The Kafka
+  client's own stderr logging is not escaped.
 
 ### Refusal detail
 
@@ -140,9 +183,30 @@ at most 2048 bytes:
 | `code` | A member of the run kind's closed set (below), or `GuardRefused` |
 | `message` | The refusal's sentence, cleaned: printable ASCII and `§ – — … →`; whitespace and controls become one space, other runs one `U+FFFD`; URLs lose query and userinfo; credential shapes read `[redacted]`; at most 760 bytes, a cut one ends `…` |
 
-The state on the following `refusal-reason=` line is the detail's code or
-`GuardRefused`, and must agree with it. A run with nothing to say prints
-`the refusal carried no sentence`.
+The state on the following `refusal-reason=` line is the detail's code (when
+the code is one of the terminal states and the sentence named it with `: `) or
+`GuardRefused`, and must agree with it. The `code` is the name the refusal's
+sentence opens with (`<Code>: ` or `<Code>. `) when that name is in the kind's
+set, else `GuardRefused`: ASCII letters and digits, a letter first, at most 64
+bytes. A run with nothing to say prints `the refusal carried no sentence`. At
+2048 bytes, CRI's 16 KiB line split never divides the line.
+
+**The line token.** `--line-token <hex>` is a flag of `restore run`, `drill
+run` and `backup run`: 32 to 128 lower-case hex digits; a malformed value or
+the flag given twice is a usage error (exit 1). `weirkeeper` writes 40 digits
+(160 bits) from the operating system's random source, fresh for each Job, as
+the runner container's last two arguments. It is not a credential, but it is
+treated as one in output: it appears in the pod template and the runner's one
+line and nowhere else. A reader honours only the LAST `refusal-detail=` line
+whose `token` equals the Job's (compared in constant time) and ignores every
+other; a Job with no token has no line read. The line it takes must be at most
+2048 bytes, carry a code of the kind's set and agree with `refusal-reason=`,
+and its sentence is cleaned again; a line that carries the token and fails one
+of those reads as no readable reason, and no other line is used in its place.
+`logweir_core::refusal_detail` implements both sides. A code added to a set is
+additive: a reader that predates it shows that the runner gave no readable
+reason. `logweir check run` and `logweir-retention` print no `refusal-detail=`
+and take no token.
 
 | Run | Codes |
 |---|---|
@@ -165,16 +229,63 @@ env:  LOGWEIR_CHECK_CONTRACT_VERSION=1
       RUST_LOG=warn        TMPDIR=/work
 ```
 
-Six plan kinds share it: `topicInventory`, `operationReadiness`,
-`restorePreflight`, `destinationAccess`, `evidenceFetch` and `catalogSync`. The
-plan's digest and subject UID are checked, and the plan parsed strictly, before
-any client exists. A `catalogSync` may ask for up to 1800 s, the others 600 s.
-Stdout carries frames only: `logweir-check-topic=`, `logweir-check-part=` and
-one final `logweir-check-end=` declaring each stream's part count and SHA-256,
-each line at most 4,096 bytes. A relay that does not verify is
-`ResultUnreadable`. A runner without the `check` subcommand exits 1 with a usage
-error, read as `RunnerContractUnsupported`. A check writes nothing except the
-optional readiness marker, and never creates or deletes a topic.
+The **one** check runner (decision D2 §4.2): six plan kinds share it,
+`topicInventory`, `operationReadiness`, `restorePreflight`,
+`destinationAccess`, `evidenceFetch` and `catalogSync`, and only the controller
+writes the invocation. The plan's SHA-256 and subject UID are checked, and the
+plan parsed strictly (`deny_unknown_fields`), before any client exists, so a
+plan swapped under a running Job, or written by a newer controller with a field
+this runner does not know, is refused. The version handshake is in argv **and**
+the environment. A `catalogSync` may ask for up to 1800 s (the `RecoveryCatalog`
+controller asks for 900), the others 600 s. Stdout carries frames only:
+`logweir-check-topic=`, `logweir-check-part=` and one final
+`logweir-check-end=` declaring each stream's part count and SHA-256 and the
+topic-line count and digest, each line at most 4,096 bytes. A relay that does
+not verify is `ResultUnreadable`, and its content is never published. A runner
+without the `check` subcommand exits 1 with a usage error, read as
+`RunnerContractUnsupported`. **Do not read a bare exit 0 as "everything
+passed"**: read the relayed result.
+
+What a check may do:
+
+- It **never invokes the engine** (`scripts/check-no-oso.sh`), and **never
+  creates, alters or deletes a topic**: the restore preflight's collision
+  answer is targeted metadata plus a `CreateTopics` with `validate_only =
+  true`.
+- It **never writes**, except the optional create-only readiness marker
+  `logweir/readiness/<destinationUid>.json`. "Already exists" counts as
+  write-authorised (S3 and MinIO authorise a `PUT` before the `If-None-Match`
+  precondition) and is reported `MarkerAlreadyPresent`, not `MarkerWritten`.
+  The marker is written as the destination's `evidenceWrite` grant, from
+  `LOGWEIR_EVIDENCE_AWS_*` or the injected identity only; a missing projected
+  variable is `CredentialSecretKeyMissing`, never a fall-back. The evidence-read
+  probe follows the same rule (`LOGWEIR_EVIDENCE_READ_AWS_*`; a
+  `controllerIdentity` or `notConfigured` grant is `unknown`,
+  `EvidenceReadNotConfigured`, with no request). A plan lists the `SecretKeys`
+  grants whose binding it compares as `grantBindings: [{role, secretName}]`
+  (FX-20c), absent when empty; each arrives as
+  `LOGWEIR_<ROLE>_GRANT_BINDING[_EXPECTED]` with no credential beside it. An
+  older runner refuses a plan carrying `evidenceWrite` or `grantBindings`
+  (exit 3).
+- An `evidenceFetch` object may name only `evidence.payload` or
+  `evidence.sidecar`, and no two objects the same one (a named refusal, exit 3).
+  `catalogSync` writes nothing at all, reports a signature verdict and a signer
+  key id but never a trust decision, and relays **no body** when its walk could
+  not start.
+- It **never prints a credential**: every message passes
+  `logweir_core::check_contract::redact` and a 512-character cap, and no broker
+  or object-store error string is interpolated; a key path gets the shape rules
+  over the whole string and the long-run rule per `/` segment. Exactly one field
+  is written verbatim, an `evidenceFetch` result's `key`.
+- It **never dials TLS without SASL**: `auth.mode: plaintext` with `tls: true`
+  is refused, as `logweir cluster-probe` and the controller refuse it.
+- **Every network call is bounded** by the plan's `timeoutSeconds`.
+- **An empty inventory and a failed one differ**: a `topicInventory` against a
+  cluster showing no topic declares `topicLines: {"count": 0, …}`; one whose
+  broker never answered declares no `topicLines` block and carries a
+  `connection.authenticated` row with the classified code. A Kafka listing never
+  proves full visibility: the broker omits topics the principal cannot
+  `DESCRIBE`.
 
 A `catalogSync` body, inside the `details` stream:
 
@@ -211,6 +322,15 @@ retention-point=lwp1-… state=Orphaned objects=3 code=AccessDenied
 retention-record=logweir/retention/<policyUid>/<runId>.json sha256=sha256:…
 retention-result=deleted=2 failed=1 objects=10
 ```
+
+The contract version is checked before the plan is read; the scope arrives
+twice (environment and plan) and a disagreement is a refusal. Exit 3 means
+**zero objects deleted**: a digest that is not the approved one, an unknown
+field, another media type, policy or generation, a widened scope, a key outside
+`<scope>/<backupId>/` or under `logweir/`, a plan over a ceiling, or no record
+sink. Per point it writes the intent tombstone, then deletes the **manifest**
+(so an interrupted run leaves a set the catalog reports `Missing`, never a
+plausible `Partial`), then the segments, then writes the completion tombstone.
 
 `retention-refusal=<code>` names the one refusal the controller reads
 (`CredentialBindingMismatch`). A key is tried three times, waiting 1 s and 4 s,

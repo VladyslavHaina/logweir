@@ -6,25 +6,9 @@ The machine-readable schema is
 [`schemas/logweir-catalog-point-1.7.0.json`](../../schemas/logweir-catalog-point-1.7.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
-drift apart silently. A MINOR bump is a new schema file beside the old one: the
-[`1.6.0` schema](../../schemas/logweir-catalog-point-1.6.0.json) (PROD-01.4a,
-`topics[].identity`), which describes the records written before PROD-04.1
-and every later one without consumer positions, the
-[`1.5.0` schema](../../schemas/logweir-catalog-point-1.5.0.json) (PROD-03.0,
-`topics[].schema_dependency`), which describes the records written before
-PROD-01.4a, the
-[`1.4.0` schema](../../schemas/logweir-catalog-point-1.4.0.json) (PROD-01.3's
-auth modes) and the [`1.3.0` schema](../../schemas/logweir-catalog-point-1.3.0.json)
-(PROD-05.1, `topics[].configuration`), which describe the records written
-before PROD-03.0, the
-[`1.2.0` schema](../../schemas/logweir-catalog-point-1.2.0.json) (FX-7,
-`archive.manifest_version_id`) and the
-[`1.1.0` schema](../../schemas/logweir-catalog-point-1.1.0.json) (FX-4,
-`topics[].config_coverage`), which describe the records written before
-PROD-05.1, and the
-[`1.0.0` schema](../../schemas/logweir-catalog-point-1.0.0.json), which
-describes every record written before format 1.1.0, are frozen beside it and
-never regenerated.
+drift apart silently. Every older schema, `-1.0.0.json` to `-1.6.0.json`, is
+frozen beside it and never regenerated; [Versions](#versions) says which
+records each describes.
 
 If you are verifying a document rather than producing one, read
 [../verify-a-scorecard.md](../verify-a-scorecard.md) for the mechanics of a
@@ -145,7 +129,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; this build writes `1.7.0` for a record that carries `consumer_positions` (PROD-04.1), else `1.6.0` for a record whose receipt carries `generations` (PROD-01.4a: every receipt it signs), else `1.5.0` for a record whose receipt carries `schema_dependency` (PROD-03.0), else `1.4.0` for a record whose `source.auth_mode` is `scramSha256`, `plain` or `mtls` (PROD-01.3), else `1.3.0` for a record whose receipt carries `topic_configuration`, else `1.2.0` for a record that carries `archive.manifest_version_id`, else `1.1.0`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`; a record is written with the newest minor whose fields it carries, `1.1.0` to `1.7.0`: see [Versions](#versions). |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -251,20 +235,15 @@ and "which shard is it in" are one number.
    `covered`, `capture` and `archive.manifest_key`/`manifest_sha256` are
    recomputed from the verified receipt, and a record whose copies disagree is
    reported as a mismatch (availability `Conflict`) rather than believed.
-   `topics[].config_coverage` (1.1.0) is receipt-derived too, one way: a record
-   may carry LESS than its receipt (an older writer copies nothing) but never a
-   coverage the receipt does not carry — `captured` beside a `captureDenied`
-   receipt, or any coverage beside a 1.0.0 receipt, is a `RecordMismatch`. Two
-   records of one point conflict on it only where both carry an entry.
-   `topics[].configuration` and `topics[].partitions` (1.3.0) follow the same
-   one-way rule: a model or a count the receipt does not back — an override
-   added, an owner dropped, a class changed — is a `RecordMismatch`, and so is
-   an `owner_detection` the receipt does not carry (a record claiming the run
-   looked for owners it never looked for). Two records conflict on either only
-   where both carry it. `topics[].identity` (1.6.0) follows the same rule: a
-   topic ID the receipt does not back — one swapped, a recreation during the
-   capture hidden, IDs beside a receipt that records none — is a
-   `RecordMismatch`, and two records conflict on it only where both carry it.
+   Every per-topic copy and `owner_detection` (1.1.0, 1.3.0, 1.5.0, 1.6.0,
+   1.7.0) is receipt-derived too, **one way**: a record may carry LESS than its
+   receipt (an older writer copies nothing) but never a value the receipt does
+   not back — `captured` beside a `captureDenied` receipt, any coverage beside
+   a 1.0.0 receipt, an override added, an owner dropped, a class changed, an
+   `owner_detection` the run never looked in, a topic ID swapped, a recreation
+   during the capture hidden, IDs beside a receipt that records none, or a
+   positions summary the receipt does not back — each is a `RecordMismatch`.
+   Two records of one point conflict on such a field only where both carry it.
 5. **Nothing under `logweir/` is ever rewritten.** Every put is create-only. A
    correction is a new record under a new point id; a removal is a tombstone.
    An existing object at a record key is "already there", which is a success,
@@ -351,53 +330,11 @@ none of them.
 * **Refusal is per entry, not per catalog.** A `v1` reader meeting a major-2
   record marks that entry and keeps going.
 * **A minor bump adds optional fields only.** Unknown fields inside major 1 are
-  ignored, so a 1.0.0 reader reads a 1.1.0 record. **1.1.0 (FX-4)** is the first:
-  `topics[].config_coverage`. The day-sharded index entry did not change and
-  stays `format_version: 1.0.0`. An older `logweir` writing records from a
-  1.1.0 receipt writes them without the field (coverage unknown), which
-  `cross_check` accepts; a 1.0.0 record read by this build has no coverage and
-  is never upgraded to `captured`. **1.2.0 (FX-7)** is the second:
-  `archive.manifest_version_id`, written only for a point whose receipt pins
-  its manifest's version; every other record this build writes stays 1.1.0. A
-  record without it (an older writer, or an unversioned bucket) is unknown, and
-  `cross_check` accepts it; one whose copy differs from the receipt's is a
-  mismatch. **1.3.0 (PROD-05.1)** is the third: `topics[].configuration`, and
-  the existing `topics[].partitions` filled, from a receipt that carries
-  `topic_configuration` — every receipt a build from PROD-05.1 signs, so every
-  record such a build writes is 1.3.0 or later, pinned or not (1.5.0 from
-  PROD-03.0, 1.6.0 from PROD-01.4a and 1.7.0 for a PROD-04.1 consumer
-  selection, below). A record backfilled from an older receipt
-  keeps the format it would have had. The catalog's view lists a point's topics
-  with their recorded layout from these fields (`PointView.topics[]` in the
-  product API) for an `Available` point only.
-  **1.4.0 (PROD-01.3)** is the fourth: no new field, three new values of
-  `source.auth_mode` (`scramSha256`, `plain`, `mtls`), written only for a
-  point whose receipt names one (and so is itself 1.4.0); every other record
-  stays as above. No verifier evaluates a catalog record's invariants, so an
-  older reader still reads it; the receipt it names is what an older verifier
-  refuses.
-  **1.5.0 (PROD-03.0)** is the fifth: `topics[].schema_dependency`, copied from
-  a receipt that carries the block — every receipt PROD-03.0's builds sign, so
-  every record they write is 1.5.0. A record backfilled from an older receipt keeps the
-  format it would have had, and its topics' schema dependency is not assessed.
-  The catalog's view lists each topic's verdict, the dependent sides and their
-  schema ids (`PointView.topics[].schemaDependency` in the product API) for an
-  `Available` point only.
-  **1.6.0 (PROD-01.4a)** is the sixth: `topics[].identity`, the receipt's topic
-  IDs before and after the engine, from a receipt that carries `generations` —
-  every receipt this build signs, so every record it writes is at least 1.6.0
-  (1.7.0 with PROD-04.1's summary, below). A record
-  backfilled from an older receipt keeps the format it would have had, and its
-  topics' generations read unknown. The view and the product API do not show
-  the IDs yet (PROD-02.1's lineage is their first consumer).
-  **1.7.0 (PROD-04.1)** is the seventh: `consumer_positions`, written only for a
-  point whose receipt carries the block (a backup that selected consumer
-  groups); every other record stays as above. The catalog's view lists it for
-  an `Available` point — the snapshot's freshness and, per group (at most 32,
-  else counted), its outcome and position counts — and the product API
-  publishes it as `PointView.consumerPositions`, with
-  `observedBeforeRecoveryPointMs`. A catalog synced by an older runner lists no
-  summary.
+  ignored, so a 1.0.0 reader reads a 1.7.0 record. No verifier evaluates a
+  catalog record's invariants beyond its topic IDs (above), so an older reader
+  still reads every minor; the receipt it names is what an older verifier may
+  refuse. A record backfilled from an older receipt keeps the format it would
+  have had, and its absent fields read as below.
 * **A major bump** is for a change a `1.x` reader could misread — a field whose
   meaning changed, or a required field removed. It writes under a new key path.
 * **Absent optional fields are unknown**, in every version.
@@ -410,6 +347,29 @@ none of them.
 * **Rollback**: an older `logweir` ignores `logweir/catalog/` entirely and keeps
   writing receipts as before. The records already written stay valid and stay
   verifiable; they simply stop being added to.
+
+## Versions
+
+The day-sharded index entry did not change with any of these: it stays
+`format_version: 1.0.0`.
+
+| Version | Task | Adds | Written for |
+|---|---|---|---|
+| 1.0.0 | PLAT-15.1 | the format | every record before FX-4 |
+| 1.1.0 | FX-4 | `topics[].config_coverage` | a record from a receipt with `config_coverage`, until PROD-05.1. An older `logweir` writing records from a 1.1.0 receipt writes them without the field (coverage unknown), which `cross_check` accepts; a 1.0.0 record is never upgraded to `captured` |
+| 1.2.0 | FX-7 | `archive.manifest_version_id` | a record whose receipt pins its manifest's version; every other record stays 1.1.0. A record without it (an older writer, or an unversioned bucket) is unknown, and `cross_check` accepts it; one whose copy differs from the receipt's is a mismatch |
+| 1.3.0 | PROD-05.1 | `topics[].configuration` and `owner_detection`, and the existing `topics[].partitions` filled | a record from a receipt that carries `topic_configuration`, pinned or not. The catalog's view lists a point's topics with their recorded layout (`PointView.topics[]` in the product API) for an `Available` point only |
+| 1.4.0 | PROD-01.3 | no field: three new values of `source.auth_mode` (`scramSha256`, `plain`, `mtls`) | a record whose receipt names one (and so is itself 1.4.0) |
+| 1.5.0 | PROD-03.0 | `topics[].schema_dependency` | a record from a receipt that carries the block. The view lists each topic's verdict, the dependent sides and their schema ids (`PointView.topics[].schemaDependency`) for an `Available` point only |
+| 1.6.0 | PROD-01.4a | `topics[].identity` | a record from a receipt that carries `generations`: every record this build writes is at least 1.6.0. The view and the product API do not show the IDs yet |
+| 1.7.0 | PROD-04.1 | `consumer_positions`, the summary bound by the receipt block's digest | a record whose receipt carries the block (a backup that selected consumer groups). The view lists the snapshot's freshness and, per group (at most 32, else counted), its outcome and position counts; the product API publishes it as `PointView.consumerPositions`, with `observedBeforeRecoveryPointMs`. A catalog synced by an older runner lists no summary |
+
+Readers built before FX-7 that know the `catalog-point` payload type accept a
+1.2.0 record (measured with a `logweir` at `b8b9263f` and scripts 1.14.0 and
+1.15.0); the released `v0.1.5` `logweir` has no `catalog-point` payload type
+at all. A catalog synced by a runner before
+PROD-05.1 lists no topics for a point (the console then says the source's
+layout is not published).
 
 ## The operator commands
 
