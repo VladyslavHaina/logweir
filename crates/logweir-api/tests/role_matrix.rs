@@ -362,13 +362,6 @@ fn probes() -> Vec<Probe> {
             action: Action::ManageDestinations,
         },
         Probe {
-            label: "adopt a legacy location",
-            method: "POST",
-            path: "/destinations:from-legacy",
-            body: from_legacy,
-            action: Action::ManageDestinations,
-        },
-        Probe {
             label: "list discoveries",
             method: "GET",
             path: "/connections/conn-1/topic-discoveries",
@@ -480,15 +473,6 @@ fn destination() -> String {
 fn rotation() -> String {
     serde_json::json!({
         "expectedGeneration": 1,
-        "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
-    })
-    .to_string()
-}
-
-fn from_legacy() -> String {
-    serde_json::json!({
-        "name": "adopted-1",
-        "sourceSchedule": "sched-1",
         "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
     })
     .to_string()

@@ -176,7 +176,6 @@ export const CONSOLE_FIXTURES = Object.freeze({
   "manual-backup-replayed.json": { schema: "ManualBackupResponse" },
   "problem-validation.json": { schema: "Problem" },
   "problem-conflict.json": { schema: "Problem" },
-  "problem-legacy-unknown.json": { schema: "Problem" },
   "problem-rotation-conflict.json": { schema: "Problem" },
   "problem-policy-changed.json": { schema: "Problem" },
   "destination.json": { schema: "DestinationResponse" },

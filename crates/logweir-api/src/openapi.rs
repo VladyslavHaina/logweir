@@ -612,21 +612,6 @@ fn paths() -> Value {
             ],
         ),
         (
-            "/api/v1/namespaces/{ns}/destinations:from-legacy",
-            vec![Op {
-                method: "post",
-                operation_id: "createDestinationFromLegacy",
-                summary: "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination. THIS BUILD ALWAYS REFUSES with legacy_location_unknown: a legacy archive.url carries the bucket and the prefix and nothing else, and the two sources that record the endpoint, region, addressing and transport — the frozen execution inputs of a succeeded Backup and the installation policy ConfigMap — are not readable here. Guessing them would move the location, and locationDigest is computed over exactly those fields. Create the destination explicitly until W11 lands. Existing objects are never mutated.",
-                parameters: vec![ns(), idempotency_key(), origin()],
-                request: Some("DestinationFromLegacyRequest"),
-                success: vec![
-                    ("201", "Created. No source this build can read produces one yet; see the summary.", "DestinationResponse"),
-                    ("200", "Replayed an identical earlier request.", "DestinationResponse"),
-                ],
-                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, DESTINATION, &[ProblemCode::LegacyLocationUnknown, ProblemCode::LegacyLocationMismatch, ProblemCode::NotFound]]),
-            }],
-        ),
-        (
             "/api/v1/namespaces/{ns}/destinations/{name}",
             vec![get_one("getDestination", "One destination, with the last explicit access test.", "DestinationResponse")],
         ),
@@ -1105,7 +1090,6 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<crate::routes::trust::TrustPolicyResponse>();
     let _ = generator.subschema_for::<c::CreateDestinationRequest>();
     let _ = generator.subschema_for::<c::UpdateDestinationAccessRequest>();
-    let _ = generator.subschema_for::<c::DestinationFromLegacyRequest>();
     let _ = generator.subschema_for::<c::TestDestinationRequest>();
     let _ = generator.subschema_for::<c::DestinationList>();
     let _ = generator.subschema_for::<c::DestinationResponse>();

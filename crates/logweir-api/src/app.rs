@@ -299,10 +299,6 @@ pub fn router(state: AppState) -> Router {
             get(destinations::list).post(destinations::create),
         )
         .route(
-            "/api/v1/namespaces/{ns}/destinations:from-legacy",
-            axum::routing::post(destinations::from_legacy),
-        )
-        .route(
             "/api/v1/namespaces/{ns}/destinations/{name}",
             get(destinations::get_one).post(destinations::command),
         )

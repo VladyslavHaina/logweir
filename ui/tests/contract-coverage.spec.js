@@ -410,8 +410,8 @@ test("every_console_fixture_is_listed_is_an_instance_and_survives_its_decoder", 
   }
   // AN EQUALITY, NOT A FLOOR: a fixture deleted with the row that used it is
   // exactly the change this arm exists to notice.
-  assert.equal(documents, 89, "the console fixture set");
-  assert.equal(files.length, 90);
+  assert.equal(documents, 88, "the console fixture set");
+  assert.equal(files.length, 89);
 });
 
 test("a_document_of_the_first_sixteen_members_alone_is_refused_by_the_operation_page", () => {
@@ -602,7 +602,6 @@ const ANSWERS = Object.freeze({
   "GET /api/v1/namespaces/{ns}/approvals/{name}/packet": "approval-packet.json",
   "GET /api/v1/namespaces/{ns}/destinations": "destinations-list.json",
   "POST /api/v1/namespaces/{ns}/destinations": "destination.json",
-  "POST /api/v1/namespaces/{ns}/destinations:from-legacy": "destination.json",
   "GET /api/v1/namespaces/{ns}/destinations/{name}": "destination.json",
   "POST /api/v1/namespaces/{ns}/destinations/{name}:update-access": "destination.json",
   "POST /api/v1/namespaces/{ns}/destinations/{name}:test": "preflight-pending.json",
@@ -723,7 +722,6 @@ async function everyRead() {
       storage: { provider: "s3", bucket: "kafka-backups", addressing: "pathStyle" },
       transport: { security: "tls" }, access: ACCESS,
     }),
-    () => api.destinationFromLegacy(NS, { name: "primary", access: ACCESS }),
     () => api.updateDestinationAccess(NS, "primary", { expectedGeneration: 1, access: ACCESS }),
     () => api.testDestination(NS, "primary", {}),
     () => api.destinationUsage(NS, "primary"),
@@ -826,7 +824,7 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   assert.deepEqual(badRequests, [],
     "a body the console builds must be an instance of the request schema the document " +
       "publishes for the route it is sent to:\n" + badRequests.join("\n"));
-  assert.equal(requests, 15, "the row held every create and update body the console builds");
+  assert.equal(requests, 14, "the row held every create and update body the console builds");
 
   // EACH ANSWER, AND THE DECODE THAT READ IT. An answer is matched to its
   // decode by the document itself: the transport served these exact bytes and

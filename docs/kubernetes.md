@@ -707,9 +707,8 @@ runner whose approved plan says `allow_http: false`.
 inline-`archive` runs, by design.** Those four variables are how every existing
 installation points its runners at MinIO or Ceph; removing them would close the
 defect by breaking every upgrade at the moment of the upgrade. The route out is
-per object and not per release: create a `BackupDestination` (§3.12's
-`destinations:from-legacy` derives one from a succeeded run's own frozen
-inputs), then point the schedule at it. Until an operator does that for a given
+per object and not per release: create a `BackupDestination`, then point the
+schedule at it. Until an operator does that for a given
 object, a controller-level `AWS_ALLOW_HTTP=true` is a cluster-wide setting that
 overrides that object's approved plan.
 
@@ -8612,15 +8611,10 @@ destination and **none** of the controller's own — §7b is the rule and
 
 **And the same four values are published**, read-only, in the installation
 policy `ConfigMap`'s `legacyArchiveAddressing` block (§22.2), from the same
-chart values and behind the same "only when an endpoint is set" guard. That
-block is reserved for `POST …/destinations:from-legacy` (D2 §3.12 branch (b)),
-which is to derive a legacy object's location from configuration it has
-actually READ and label the result `installationConfig`. **That route does not
-read the block yet:** it cannot read a policy `ConfigMap` it does not own, so it
-takes branch (c) and refuses. Today the block's only reader is the restore
-readiness check over a `legacySourceArchive` point (§21.8), which takes
-`endpoint` and `region` from it when the plan leaves them out; `allowHttp` and
-`virtualHostedStyle` are published and read by nothing until the route lands
+chart values and behind the same "only when an endpoint is set" guard. Its
+only reader is the restore readiness check over a `legacySourceArchive` point
+(§21.8), which takes `endpoint` and `region` from it when the plan leaves them
+out; `allowHttp` and `virtualHostedStyle` are published and read by nothing
 (the runner gets both from the controller's own environment, above). An
 install that forwards no addressing publishes an empty block — not
 `allowHttp: true` — because transport security is never derived (D-SEAMS S5).
@@ -8745,7 +8739,7 @@ Three surfaces landed with D2 and none of them is reachable through
 
 | tab | routes it uses |
 |---|---|
-| `#/destinations` | `GET/POST .../destinations`, `.../destinations/{name}`, `:update-access`, `:test`, `:from-legacy`, `/usage` |
+| `#/destinations` | `GET/POST .../destinations`, `.../destinations/{name}`, `:update-access`, `:test`, `/usage` |
 | `#/clusters` (a connection's detail) | `.../connections/{name}/topic-discoveries`, `.../topic-discoveries/{id}`, `/topics`, `:cancel` |
 | `#/schedules` and `#/restore` step 5 | `POST .../preflights`, `.../preflights/{id}`, `/details`, `:cancel` |
 
@@ -11090,7 +11084,7 @@ renders none is a supported install, not a degraded one.
 | `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
 | `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
 | `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults (4 and 2), so a document written before the block keeps bounding manual runs — and the chart renders the block **only** when a value differs from those defaults. |
-| `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only and reserved for `POST …/destinations:from-legacy` (D2 §3.12 branch (b)), which does not read it yet and refuses with branch (c) (§15.5). The restore readiness check over a `legacySourceArchive` point reads `endpoint` and `region` from it; `allowHttp` and `virtualHostedStyle` are read by nothing until that route lands. |
+| `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only (§15.5). The restore readiness check over a `legacySourceArchive` point reads `endpoint` and `region` from it; `allowHttp` and `virtualHostedStyle` are read by nothing. |
 
 **Who may write it is the access-control statement.** `create`/`update` on a
 ConfigMap in the release namespace is a chart or cluster administrator;

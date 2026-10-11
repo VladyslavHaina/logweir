@@ -38,19 +38,16 @@ install rolls the controller image back with the chart, never alone.
 
 THE `legacyArchiveAddressing` BLOCK IS THE SAME `archive.s3.*` VALUES
 `deployment.yaml` renders as `AWS_ENDPOINT_URL` / `AWS_REGION` /
-`AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, and it exists for D2
-§3.12 (b): `destinations:from-legacy` may label a derived location
-`installationConfig` only when it has actually READ the installation's
-addressing. Before this template existed the route could not read it and
-therefore never emitted that provenance (the amendment of 2026-09-17). The two
-are derived from ONE pair of helpers so they cannot drift.
+`AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, which the Preflight
+controller reads for a legacy plan. The two are derived from ONE pair of
+helpers so they cannot drift.
 
 THE `if $endpoint` GUARD IS THE WHOLE POINT OF THE BLOCK, not a tidiness.
 `deployment.yaml` renders `AWS_ALLOW_HTTP` ONLY inside `{{ if $endpoint }}`, so
 an install with no endpoint at all (plain Amazon S3) forwards no addressing
 env and its `allowHttp` is not `true` — it does not exist. Copying the bare
 `ternary` out of that block would publish `allowHttp: true` for exactly that
-install and hand `:from-legacy` a plaintext-HTTP fact nobody configured, which
+install and publish a plaintext-HTTP fact nobody configured, which
 is D-SEAMS S5 (transport security is never derived) failing in the one
 direction that matters.
 */ -}}

@@ -158,7 +158,6 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. A new value is written to a new bound Secret; `secret.existing` may name only a Secret the destination already names (FX-20). |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight` for every configured grant; `202` with it. On a destination with `writeProbe: createOnlyMarker` the test creates the one readiness marker `logweir/readiness/<uid>.json` **as the `evidenceWrite` grant**, and `destination.evidenceWritable` is that principal's answer (its fact `grant` says `evidenceWrite` or `destination`); with `disabled` nothing is written and the row is `WriteNotProbed`. `destination.evidenceReadable` is likewise the `evidenceRead` grant's answer (`grant=evidenceRead`), or `unknown` for a grant no check pod holds. `destination.archivePrefixWritable` is never probed and never green. `destination.credentialBound` (FX-20c, blocking) compares the `logweir-binding` of every `SecretKeys` grant the destination declares, whichever roles are exercised and `archiveWrite` included, with no request: a grant whose Secret is unbound or bound to another object is `notReady`/`CredentialBindingMismatch`, named in the message by its `spec.access` field, destination and Secret, so the verdict is never `ready` for a destination a backup would refuse ([kubernetes.md](kubernetes.md) §20.10). |
-| `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Adopt a legacy `BackupSchedule` or `Backup`'s location. **This build always refuses** — see below. |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
 | `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
 | `POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | Start a bounded inventory: `202`, or `200` with `reused: true` for a fresh identical result. |
@@ -1326,26 +1325,8 @@ destination_location_immutable`. A CA bundle on a plaintext destination is `409
 transport_downgrade_forbidden`, because the transport can never be changed and a
 CA means nothing without TLS.
 
-**Adopting a legacy location needs a source that recorded it, and this build has
-none.** A legacy `archive.url` carries the bucket and the prefix. A destination
-also needs the endpoint, the region, the addressing and the transport — and an
-installation whose runs used MinIO over a custom endpoint with path-style
-addressing writes *exactly the same URL* as one that used AWS S3. The two places
-that record the difference are the frozen `execution-inputs.json` of a succeeded
-`Backup` (PLAT-06.1) and the installation's legacy addressing in the policy
-`ConfigMap` (D2 W11); the adapter reads a `ConfigMap` only when a **check** owns
-it, and neither of those is a check result. `locationDigest` — which restore
-selection and catalog indexing compare — is computed over exactly the fields
-that would have to be guessed, so a guess does not produce an approximate
-destination, it produces a different one that looks derived from facts.
-
-So `:from-legacy` takes D2 §3.12's third branch: it validates the request, reads
-the legacy object, and answers `404 legacy_location_unknown` naming the bucket
-and prefix it *did* recover so you can paste them into an explicit `POST
-.../destinations` with the endpoint your runs actually used. **Adoption from the
-installation config arrives with W11**, and `addressingSource` — the field that
-will say which source a derived location came from — is deliberately absent from
-the response until a route can fill it honestly.
+`POST .../destinations:from-legacy`, which could only refuse, was withdrawn in
+v1 (release-notes item 73): create the destination explicitly.
 
 **Connection credentials are entered, never named (PROD-01.3).** A connection
 create carries its credential in `auth.credential` — `password` for
@@ -1367,8 +1348,7 @@ a CA certificate is public and is only ever a local trust anchor.
 
 **Destination credentials are entered, never named (FX-20).** A create
 refuses `access.<role>.secret.existing` with `422 destination_invalid`, code
-`existing_credential_refused` on `access.<role>.secret.existing` (so does
-`:from-legacy`): no existing Secret can carry the binding of a destination that
+`existing_credential_refused` on `access.<role>.secret.existing`: no existing Secret can carry the binding of a destination that
 does not exist yet, and a destination that could name any Secret could make
 Logweir sign requests with another team's key and send them — the access key
 id, a replayable signature and any session token — to an endpoint of its

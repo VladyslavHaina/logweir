@@ -881,9 +881,6 @@ const CONSOLE_OPERATION_KINDS = Object.freeze([
 // is the same wish, so a key there would be a second answer to a question that
 // already has one -- which is why the product API answers 400 for it.
 const CONSOLE_ACTIONS = Object.freeze({
-  "destinations:from-legacy": Object.freeze({
-    plural: "destinations", named: false, suffix: ":from-legacy", key: true,
-  }),
   "destinations:update-access": Object.freeze({
     plural: "destinations", named: true, suffix: ":update-access", key: false,
   }),

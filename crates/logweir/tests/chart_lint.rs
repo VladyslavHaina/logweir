@@ -4712,12 +4712,9 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
 /// env, and it is ABSENT-SHAPED when the Deployment forwards none** — D2
 /// §3.12 (b).
 ///
-/// WHY THIS PAIRING IS THE WHOLE POINT. `destinations:from-legacy` may label a
-/// derived location `installationConfig` only when it has actually read the
-/// installation's addressing; before this template existed the route could not
-/// read it and therefore never emitted that provenance. A block that said
-/// something the Deployment does not is worse than no block at all — it is a
-/// provenance label naming a source that was never read.
+/// WHY THIS PAIRING IS THE WHOLE POINT. A block that said something the
+/// Deployment does not is worse than no block at all: a reader would take it
+/// for the installation's addressing when it was never configured.
 ///
 /// MUTANT: copy `deployment.yaml`'s bare `ternary .Values.archive.s3.allowHttp
 /// true $explicit` out of its `{{ if $endpoint }}` guard. An install with no

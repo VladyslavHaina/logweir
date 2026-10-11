@@ -2558,7 +2558,6 @@ const legacyChecks = Object.freeze({
   updateDestinationAccess() { return Promise.reject(consoleOnly("Rotating destination access")); },
   testDestination() { return Promise.reject(consoleOnly("Testing destination access")); },
   destinationUsage() { return Promise.reject(consoleOnly("What uses a destination")); },
-  destinationFromLegacy() { return Promise.reject(consoleOnly("Adopting a legacy archive")); },
   latestDiscoveries() { return Promise.reject(consoleOnly("Topic discovery")); },
   startDiscovery() { return Promise.reject(consoleOnly("Topic discovery")); },
   discovery() { return Promise.reject(consoleOnly("Topic discovery")); },
@@ -2640,16 +2639,6 @@ const consoleChecks = Object.freeze({
     requireDomain(ns, "destinations");
     const decoded = decodeDestinationUsage(await consoleSub(ns, "destinations", name, "usage", options));
     return decoded.value;
-  },
-  async destinationFromLegacy(ns, request) {
-    requireOperator(ns, "destinations", "adopt a legacy archive as a destination");
-    const answer = await consoleAction(
-      ns, "destinations:from-legacy", null,
-      sending("destinations:from-legacy", request),
-      { idempotencyKey: idempotencyKey("destinations:from-legacy", ns, request.name), token: tokenNow() },
-    );
-    const decoded = decodeConsoleItem("destinations", answer);
-    return { item: decoded.value.item, replayed: decoded.value.replayed === true };
   },
   async latestDiscoveries(ns, connection, options) {
     requireDomain(ns, "topic-discoveries");
@@ -3234,9 +3223,6 @@ export function apiClient() {
     },
     destinationUsage(ns, name, options) {
       return dispatchChecks((api) => api.destinationUsage(ns, name, options));
-    },
-    destinationFromLegacy(ns, request) {
-      return dispatchChecks((api) => api.destinationFromLegacy(ns, request));
     },
     latestDiscoveries(ns, connection, options) {
       return dispatchChecks((api) => api.latestDiscoveries(ns, connection, options));

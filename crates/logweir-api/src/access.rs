@@ -201,11 +201,6 @@ pub const ROUTES: &[RouteAccess] = &[
         ns(&[Action::ManageDestinations]),
     ),
     route(
-        "POST",
-        "/api/v1/namespaces/{ns}/destinations:from-legacy",
-        ns(&[Action::ManageDestinations]),
-    ),
-    route(
         "GET",
         "/api/v1/namespaces/{ns}/destinations/{name}",
         ns(&[Action::ReadDestinations]),

@@ -2083,7 +2083,7 @@ endpoint, a region, an addressing flag and a Secret of their own.
 
 | surface | where | what it does |
 |---|---|---|
-| destinations | `#/destinations` | list, create, rotate access (`:update-access`), test access (`:test`), `/usage`, adopt a legacy archive (`:from-legacy`) |
+| destinations | `#/destinations` | list, create, rotate access (`:update-access`), test access (`:test`), `/usage` |
 | topic discovery | `#/clusters?...&name=<connection>` | start, cancel, the two slots, the searchable paged inventory with its filters |
 | backup readiness | `#/schedules` | a `Preflight` of operation `backup` over a chosen connection, destination and topic list |
 | restore readiness | `#/restore` step 5 | a `Preflight` of operation `restore`, bound to the exact plan hash on screen |

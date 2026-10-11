@@ -2262,6 +2262,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a catalog's window holds the newest points",
             "It is a partial view",
         ),
+        // PROD-17.1 (2026-10-11, item 73): the v1 cut's withdrawals; the
+        // route an API client may still call.
+        (
+            "surfaces withdrawn for the v1 cut",
+            "destinations:from-legacy",
+        ),
     ];
     assert_eq!(
         items.len(),

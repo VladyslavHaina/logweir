@@ -68,7 +68,6 @@ import {
   renderDestinationForm,
   renderDestinationList,
   renderLastTest,
-  renderLegacyRefusal,
   renderPreflight,
   renderRotateForm,
   renderUsage,
@@ -201,19 +200,6 @@ test("the_usage_list_renders_its_basis_beside_an_empty_answer", () => {
   assert.match(empty, /Nothing labelled by this service names it/);
   assert.match(empty, /id="usage-basis"/,
     "an empty list without its basis would read as 'nothing uses this'");
-});
-
-test("a_legacy_adoption_refusal_is_rendered_as_what_it_is_and_not_as_not_found", () => {
-  const problem = console_("problem-legacy-unknown.json");
-  const error = new Error(problem.detail);
-  error.code = problem.code;
-  const html = renderLegacyRefusal(error);
-  assert.match(html, /id="legacy-location-unknown"/);
-  assert.match(html, /The object was found/);
-  assert.match(html, /refuses to derive a destination from a guess/);
-  assert.doesNotMatch(html, /does not exist/);
-  assert.equal(renderLegacyRefusal({ code: "not_found" }), "",
-    "and any other code is left to the ordinary error box");
 });
 
 // ---------------------------------------------- the credential, and the draft

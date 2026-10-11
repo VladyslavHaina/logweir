@@ -1783,12 +1783,6 @@ const TEST_DESTINATION_REQUEST = shapeOf(
   { roles: listOf(oneOf(DESTINATION_ROLES)) },
 );
 
-const DESTINATION_FROM_LEGACY_REQUEST = shapeOf(
-  "DestinationFromLegacyRequest",
-  { name: str, access: objectOf(ACCESS_REQUEST) },
-  { description: str, sourceSchedule: str, sourceBackup: str },
-);
-
 const CREATE_TOPIC_DISCOVERY_REQUEST = shapeOf(
   "CreateTopicDiscoveryRequest",
   {},
@@ -1860,7 +1854,6 @@ export const CONSOLE_REQUESTS = Object.freeze({
   preflights: CREATE_PREFLIGHT_REQUEST,
   "destinations:update-access": UPDATE_DESTINATION_ACCESS_REQUEST,
   "destinations:test": TEST_DESTINATION_REQUEST,
-  "destinations:from-legacy": DESTINATION_FROM_LEGACY_REQUEST,
   "connections:topic-discoveries": CREATE_TOPIC_DISCOVERY_REQUEST,
   // D1 W7. The policy replace is keyed by the route it is sent to; the manual
   // run is keyed by the plural, because it goes through `consoleCreate`.
@@ -2043,7 +2036,6 @@ export const CONSOLE_SHAPES = Object.freeze({
   CreateDestinationRequest: CREATE_DESTINATION_REQUEST,
   UpdateDestinationAccessRequest: UPDATE_DESTINATION_ACCESS_REQUEST,
   TestDestinationRequest: TEST_DESTINATION_REQUEST,
-  DestinationFromLegacyRequest: DESTINATION_FROM_LEGACY_REQUEST,
   CreateTopicDiscoveryRequest: CREATE_TOPIC_DISCOVERY_REQUEST,
   RecoveryPointRequest: RECOVERY_POINT_REQUEST,
   CatalogPointRequest: CATALOG_POINT_REQUEST,
