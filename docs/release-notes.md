@@ -3310,9 +3310,15 @@ OD-12); each part below did nothing v1 uses.
   implemented it, so every drill logged a WARN that it "failed or could not
   be run", and nothing read the result. No verdict changes, and
   `engine_subreport` stays `null`.
+- **The ACL read is gone** (item 37's `DescribeAcls` capture and its `unsafe`
+  wrapper). Nothing called it: no run reads or records ACLs. The
+  consumer-group and cluster reads behind the same crate are unchanged, and
+  consumer positions are still written, read and documented.
 
-**Do:** nothing for this part.
-**Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone).
+**Do:** nothing for these parts.
+**Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone);
+the unsafe-scope gate over the smaller crate; the e2e group rows (the three
+ACL rows are removed with the read).
 **Rollback:** roll back the runner; an older runner logs the warning again.
 
 ### Required operator actions after `v0.2.0-rc.1`

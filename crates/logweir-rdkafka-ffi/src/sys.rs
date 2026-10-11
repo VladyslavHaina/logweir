@@ -85,20 +85,4 @@ extern "C" {
         result: *const rd::rd_kafka_DescribeCluster_result_t,
         cntp: *mut usize,
     ) -> *const c_int;
-
-    /// `rd_kafka_ResourceType_t rd_kafka_AclBinding_restype(...)`.
-    #[link_name = "rd_kafka_AclBinding_restype"]
-    pub(crate) fn acl_resource_type(acl: *const rd::rd_kafka_AclBinding_t) -> c_uint;
-
-    /// `rd_kafka_ResourcePatternType_t rd_kafka_AclBinding_resource_pattern_type(...)`.
-    #[link_name = "rd_kafka_AclBinding_resource_pattern_type"]
-    pub(crate) fn acl_pattern_type(acl: *const rd::rd_kafka_AclBinding_t) -> c_uint;
-
-    /// `rd_kafka_AclOperation_t rd_kafka_AclBinding_operation(...)`.
-    #[link_name = "rd_kafka_AclBinding_operation"]
-    pub(crate) fn acl_operation(acl: *const rd::rd_kafka_AclBinding_t) -> c_uint;
-
-    /// `rd_kafka_AclPermissionType_t rd_kafka_AclBinding_permission_type(...)`.
-    #[link_name = "rd_kafka_AclBinding_permission_type"]
-    pub(crate) fn acl_permission_type(acl: *const rd::rd_kafka_AclBinding_t) -> c_uint;
 }

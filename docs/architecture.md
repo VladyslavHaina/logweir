@@ -204,7 +204,7 @@ lint`) enforces the perimeter, the lint table and the attribute, and scans
 the tree for `unsafe` outside the perimeter as a second layer.
 
 The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
-DescribeCluster and DescribeAcls, the legacy group listing
+DescribeCluster, the legacy group listing
 (`rd_kafka_list_groups`, for the names of every group type: rust-rdkafka
 0.36.2's wrapper builds a member slice from a NULL pointer for a group without
 members and hides each group's error), and DescribeTopics (PROD-01.4a: each

@@ -1,6 +1,5 @@
 //! `rd_kafka_DescribeCluster` with the caller's authorized operations
-//! (KIP-430): the probe that says whether a group listing is complete (T14)
-//! and whether a principal may describe ACLs (T9's second probe).
+//! (KIP-430): the probe that says whether a group listing is complete (T14).
 use crate::raw::{array, run, text};
 use crate::{sys, CText, CallError};
 use rdkafka::bindings as rd;
