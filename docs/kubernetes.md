@@ -184,7 +184,7 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | Kind | Scope | What it is |
 |---|---|---|
 | `KafkaCluster` | Namespaced | A saved connection (contract v1, §20): bootstrap servers, `auth{mode, username, secretRef, tls, tlsCa}`, role, and the marker topic that proves a scratch target. The password and the private CA are REFERENCES into this namespace, never values. `status.clusterId` is read from the broker, never from the spec. |
-| `BackupSchedule` | Namespaced | A recurring backup of a topic set — a **named** allowlist (no wildcard, no glob metacharacter), or `topics: []` with an `allUserTopics` block resolved per run. `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`. **Every field is editable except `sourceRef`**, which is sealed by CEL; each created `Backup` copies the policy and records `spec.scheduleRef {uid, generation, runPolicySha256}`, so an edit reaches the next run and never a run that exists. `spec.timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry` and `activeDeadlineSeconds` are optional and absent means today's behaviour. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
+| `BackupSchedule` | Namespaced | A recurring backup of a topic set — a **named** allowlist (no wildcard, no glob metacharacter), or `topics: []` with an `allUserTopics` block resolved per run. `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`. **Every field is editable except `sourceRef`**, which is sealed by CEL; each created `Backup` copies the policy and records `spec.scheduleRef {uid, generation, runPolicySha256}`, so an edit reaches the next run and never a run that exists. `spec.timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry` and `activeDeadlineSeconds` are optional and absent means today's behaviour. `spec.retention` is withdrawn: it is ignored and named by a `RetentionReportWithdrawn` condition (§9). |
 | `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
 | `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
@@ -922,15 +922,10 @@ same reason.
   evidence-fetch Job relaying the receipt — has reached a `Valid` verdict over
   it. A run whose verdict is `NotAttempted` keeps a blank column, which is the
   honest answer rather than a zero.
-- **A destination-backed `BackupSchedule` gets no evaluated retention
-  report.** The controller's one global archive handle is for objects without
-  a `destinationRef`; a report computed through it would describe another
-  bucket's catalogue while printing `aws s3 rm` commands naming keys in this
-  one. Such a schedule's `status.retentionReport` carries only a `note` saying
-  so, with every list empty, and a legacy schedule whose archive is not the
-  handle's gets the same shape with its own note — §9, *A schedule on another
-  bucket is now told so*. A `RetentionPolicy` (§7f) is the per-destination
-  answer.
+- **A `BackupSchedule` has no retention report.** The per-schedule report is
+  withdrawn (release notes, item 77): `spec.retention` is ignored and named by
+  a `RetentionReportWithdrawn` condition. A `RetentionPolicy` (§7f) is the
+  per-destination answer.
 
 ### 7b.4 Every object-store read has a size cap (FX-31)
 
@@ -957,7 +952,6 @@ Every read now names a cap. Nothing in the tree can read an object whole:
 | Backup receipt | the controller, an evidence relay, the catalog walk | **5,131,072 bytes**: the largest receipt Logweir writes (§7b.5), one number for all three |
 | Scorecard, and every other signed document | the controller, an evidence relay | **1 MiB** |
 | DSSE sidecar | everyone | **64 KiB**, the relay's sidecar cap |
-| Engine manifest | the controller's retention report | **64 MiB**, parsed as a stream |
 | Catalog record | the catalog walk | **6,131,072 bytes**: the largest record Logweir writes (§7b.5) |
 | Receipt, scorecard, catalog record | runner, CLI | 64 MiB |
 | Engine manifest | runner, CLI, check Jobs | 256 MiB |
@@ -985,25 +979,18 @@ the sum of the record counts) are folded from the bytes as they are read, and
 nothing is kept per topic. What it holds of a receipt is the bytes, and one
 more copy of them while the signature is checked.
 
-A manifest is never parsed into a tree. The window is folded as the bytes
-stream past, so the retention report holds at most the 64 MiB it read.
-
 **Concurrent reads share one budget.** A cap bounds one read, and the
-controller runs reconciles concurrently: every schedule reconcile evaluates
-its retention report, and a controller start reconciles every schedule at
-once. So every controller read reserves its worst case out of one
+controller runs reconciles concurrently: a controller start reconciles every
+object at once. So every controller read reserves its worst case out of one
 process-wide **128 MiB** budget (a quarter of the chart's 512Mi limit) before
 it reads, and holds the reservation until its bytes and its parse are freed:
 
 - a receipt or scorecard reserves 40 MiB: a scorecard's 1 MiB cap plus the
   parse, and a backup receipt's 5,131,072 bytes, held twice while its
-  signature is checked and never parsed into a tree;
-- a manifest reserves 64 MiB.
+  signature is checked and never parsed into a tree.
 
 A read that does not fit waits. Measured in `crates/weirkeeper/tests/read_caps.rs`:
-- eight retention evaluations of 60 MiB manifests at once add 126 MB of peak
-  memory under the budget, and 504 MB without it;
-- sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
+sixteen 1 MB scorecards add 122 MB under the budget, and 413 MB without it.
 
 And in `crates/weirkeeper/tests/topic_budget.rs`, over a valid receipt of 1,000
 topics and 5,092,802 bytes (within one percent of the cap): the controller's
@@ -1034,17 +1021,12 @@ a pass:
 |---|---|
 | `Backup` and `Restore` `status.evidence.verification` | `NotAttempted`, with the detail `<key> is larger than the <cap>-byte cap weirkeeper reads (the store reports <n> bytes); nothing was verified`. The verdict is **final**: the object will not shrink, so it is not read again on the retry schedule. A new controller process reads it once more, and that read is refused on the size alone. |
 | The relay path (`evidenceFetch`) | The Job reports the object `present` and `truncated` and relays **no** bytes. The controller records `<key> is larger than the <cap>-byte cap an evidence fetch relays; nothing was verified`, as before. A pod that relays more than the cap anyway is refused by the controller with the same sentence, and it is final too: no second Job is started for an object that will not shrink. |
-| A `BackupSchedule`'s retention report (`status.retentionReport.skipped`) | The set is listed under `skipped`, and the reason names the cap. It is neither kept nor listed as removable. A `RetentionPolicy` works from the catalog view and reads no manifest here. |
 | `Preflight` restore check (`archive.backupSet`) | Not ready. The message ends `…could not be read: <code>: it is larger than the 268435456-byte read cap for a manifest`. |
 | `Preflight` restore check of a plan bound to a recovery point, the bound receipt (`archive.backupSet`) | Not ready, `PointBindingMismatch`: the answer of a receipt that is absent or has other bytes, because a preflight runs before any approval and must not say whether an object exists at a key the plan chose (§21.8). The message gives the three causes together, `…it is absent, its bytes do not hash to the bound digest, or it is larger than the 67108864-byte read cap for a receipt`, and never the object's size. The runner's binding, after approval, fails operationally (exit 1) and names the cap. |
 | Drill, `backup run`, `catalog sync` | An operational failure (exit 1) or an `Unreadable` point. The message names the cap. |
 
 **A manifest has a limit too.** An engine manifest is about 540 bytes per
-segment, so the retention report's 64 MiB holds about 124,000 segments. At
-Logweir's default 10 MiB segment that is about 1.2 TB in one backup set, and
-about 15 TB at the engine's 128 MiB default. A set whose manifest is larger is
-listed under `skipped` on every report, naming the cap, and is never listed as
-removable. Runner-side reads, such as a drill or a restore preflight, take a
+segment. Runner-side reads, such as a drill or a restore preflight, take a
 manifest of up to 256 MiB.
 
 ### 7b.5 One backup names at most 1,000 topics (FX-33)
@@ -3761,9 +3743,9 @@ refused `ApprovalPolicyMismatch` (never admitted as v1), and a document with
 stays (an older controller reads it; its evidence keys keep verifying), and so
 do both retained key Secrets.
 
-## 9. Schedules, and a schedule's retention report (which deletes nothing)
+## 9. Schedules, and a schedule's withdrawn retention report
 
-A schedule's `spec.retention` only ever **reports**. The one component that can
+A schedule's `spec.retention` no longer reports. The one component that can
 delete archive objects is a `RetentionPolicy` in `mode: Enforce`, run by a
 separately linked worker under its own credential and an administrator's
 approved plan — §7f is that boundary, and nothing in this section changes it.
@@ -3821,14 +3803,6 @@ destination into the created `Backup`, `Backup.spec` is sealed whole, and
 PLAT-06.1 freezes the resolved settings into an immutable ConfigMap before any
 Job exists — so an edit reaches the next admission and **cannot** move a run
 that is already going, its inputs or its Job.
-
-One operator-facing consequence, because it is reachable by an edit. The
-schedule's retention report evaluates the **current** `archive.url`, so after a
-move the old destination's sets stop being reported. The wrong-bucket report
-this edit used to be able to produce (defect **RET-WRONGBUCKET**) is closed
-since PLAT-16.1: a schedule whose archive is not the controller's handle now
-gets a `note` and empty lists instead (*A schedule on another bucket is now
-told so*, below).
 
 Re-pointing a schedule at a different `KafkaCluster` is refused:
 
@@ -4004,7 +3978,7 @@ section used to carry is gone with the ownerReference that made it necessary.
 ### What retained history costs, and how to prune it
 
 No `Backup`, plan ConfigMap or Job is deleted by Logweir — see *A schedule's
-retention report reports*, below, and the explicit rules under it. Retaining
+retention report is withdrawn*, below, and the explicit rules under it. Retaining
 history is therefore an etcd cost you choose:
 
 Per retained run: the `Backup` CR is roughly 4–6 KiB (spec, status with three
@@ -4490,14 +4464,12 @@ status edited by hand (clearing a stale reservation, say) is read at the next
 requeue.
 
 **What it writes.** Nothing, when the status it computes is the one the object
-already carries. The three "when" fields move only with what they time:
+already carries. The two "when" fields move only with what they time:
 
 - `status.lastSlot.decidedAt` is when the decision recorded beside it was
   reached. It moves when the slot, `dueAt`, the attempt, the disposition, the
   reason or the `backupRef` moves, and never on a reconcile that reaches the
   same decision again.
-- `status.retentionReport.evaluatedAt` is when the report's findings were first
-  reached; an evaluation that finds the same keeps it.
 - `status.policy.evaluatedAt` is when the status last moved.
 
 One write is not about a decision: `status.history.inventoriedAt` moves once
@@ -4523,25 +4495,27 @@ schedule that is spinning stops when it is suspended
 (`kubectl patch backupschedule <name> --type merge -p '{"spec":{"suspend":true}}'`)
 or when its next slot is decided.
 
-### A schedule's retention report reports. It never deletes
+### A schedule's retention report is withdrawn
 
-`spec.retention{keepLast, keepDays}` is evaluated by the controller on every
-reconcile against the manifests it lists, and the result goes into
-`status.retentionReport`: which sets it would keep, which sets it **would**
-remove and why, and **the exact commands an operator would run**, rendered as
-strings.
+`spec.retention{keepLast, keepDays}` no longer reports (release notes, item 77).
+The per-schedule report only ever printed removal commands and deleted
+nothing; retention is a `RetentionPolicy`'s (§7f). A schedule that still sets
+the field keeps backing up, the controller ignores the field, and the
+schedule's status names it once:
 
 ```bash
 kubectl --context docker-desktop get backupschedule nightly \
-  -o jsonpath='{.status.retentionReport.awsCli[*]}'
-# aws s3 rm 's3://kafka-backups/mvp-demo/backup-001/' --recursive
+  -o jsonpath='{.status.conditions[?(@.type=="RetentionReportWithdrawn")].message}'
+# spec.retention no longer reports; use a RetentionPolicy
 ```
 
-**Logweir prints them. An operator runs them.** Nothing in the report was
-deleted, nothing that computes it can delete, and **no Logweir component in
-tag 1 holds any delete capability against object storage** (since Amendment H
-the one exception is §7f's separately linked worker — the version-scoped form
-below) — the controller's archive handle is built with the
+Remove the field to clear the condition. `status.retentionReport` is no longer
+written, and the product API and the console no longer show it.
+
+The report deleted nothing, and **no Logweir component in tag 1 holds any
+delete capability against object storage** (since Amendment H the one exception
+is §7f's separately linked worker — the version-scoped form below) — the
+controller's archive handle (`LOGWEIR_ARCHIVE_URL`) is built with the
 read-only constructor, which refuses every write before it checks anything
 else, and guard **G-RET** (`scripts/check-no-archive-write.sh`, in `just
 lint`) fails the build if a source file in the control plane names the
@@ -4553,8 +4527,7 @@ in and not a proof: a raw HTTP `DELETE` issued through some crate that is not
 in the dependency graph would pass it, and what actually makes that
 unwritable is the type — `Store` exposes no delete method and its inner
 object-store handle is private — together with Global Constraint 38, which
-closes the graph. The adopter's own bucket lifecycle policy does the deleting.
-Retention never touches a Kafka topic, in any tag.
+closes the graph. Retention never touches a Kafka topic, in any tag.
 
 #### The version-scoped form of that claim (ADR 0008 Amendment H)
 
@@ -4582,85 +4555,6 @@ The CRD's own rails, at admission rather than at 04:17 in a Job log:
 fields that decide *where* deletion could happen are immutable, and `mode` and
 its block travel together in both directions — a delete-capable credential
 configured under a mode that never deletes is a credential mounted for nothing.
-
-The rendered commands are **shell-quoted**. A backup id, bucket or prefix is
-whatever the archive's own keys say it is, and an S3 key may legally contain a
-space, a `$`, a backtick, a newline — or a `;`. Every interpolated value is
-therefore rendered as one single-quoted POSIX shell word, so the command you
-paste acts on exactly one path and a key like `a;rm -rf ~` is a path and not a
-second command.
-
-An unreadable manifest under the prefix is **skipped, not fatal**. A sibling
-JSON object the `manifest.json` filter picked up used to cost the whole
-report; it now lands in `status.retentionReport.skipped` with the key and the
-reason, and every other backup set is still evaluated:
-
-```bash
-kubectl --context docker-desktop get backupschedule nightly \
-  -o jsonpath='{.status.retentionReport.skipped[*].key}'
-```
-
-A skipped set is in neither `setsKept` nor `setsThatWouldBeRemoved`, and ranks
-are counted over the sets that were read — so a partly unreadable archive
-under-reports what would be removed and never over-reports it.
-
-#### A schedule on another bucket is now told so, instead of shown someone else's catalog
-
-The controller holds **one** archive handle, built from `LOGWEIR_ARCHIVE_URL`,
-and the report renders removal commands for the schedule's own
-`spec.archive.url`. When those are two different locations the old report listed
-one bucket's manifests under the other bucket's `aws s3 rm` lines — defect
-**RET-WRONGBUCKET**, and since `destinationRef` became editable it is reachable
-by an edit between runs, not only by creating a schedule elsewhere.
-
-The report is now **replaced**, not corrected:
-
-```bash
-kubectl --context docker-desktop get backupschedule nightly \
-  -o jsonpath='{.status.retentionReport.note}'
-# the controller's archive handle points at a different destination; this
-# schedule's retention is not evaluated here — create a RetentionPolicy
-```
-
-`setsKept`, `setsThatWouldBeRemoved`, `awsCli`, `mcCli` and `skipped` are all
-**empty**, and the empty lists are the point: "not evaluated" and "nothing to
-remove" are different claims, and only one of them is true here. The remedy is a
-`RetentionPolicy` (§7f), which reads its own destination's catalog view and
-therefore cannot make this mistake at all.
-
-The report is a union of the two rules, and it says which one applies:
-`reason` is `BeyondKeepLast` with the set's `rank`, or `OlderThanKeepDays`
-with the configured `days`. When both rules select one set the report says
-`OlderThanKeepDays`, because a set that is too old stays too old however the
-count changes. With neither field set, `note` reads *no retention rule is
-configured; nothing would be removed* and nothing is listed as removable.
-
-**The controller reads the archive only if you tell it where the archive is.**
-The one read-only handle is built once, at controller start, from the
-environment variable **`LOGWEIR_ARCHIVE_URL`** (`s3://…`, `gs://…`, `az://…`
-or `file://…`; region, endpoint and credentials come from the object store's
-own environment chain). With it unset the controller holds no archive handle,
-writes no `retentionReport` at all, and logs one line saying so — schedules
-still fire, because a report is not a backup. An absent `retentionReport`
-block therefore means *no evaluation has happened*; an empty
-`setsThatWouldBeRemoved` means *the evaluation found nothing to remove*, and
-they are different answers.
-
-**Which locations count as the handle's, exactly.** The comparison is on the
-bucket **and** the prefix after normalisation, so `s3://b/p` and `s3://b/p/` are
-one location and `s3://b/p` and `s3://b/pp` are two
-(`retention_plan::legacy_report_applies`). An earlier revision of this section
-said a different prefix in the same bucket still reported and a mismatch was an
-omitted report with an INFO line; neither is what this build does — the
-mismatch gets the `note` above, and the controller logs it at `WARN`.
-
-**A destination-backed schedule gets a note too, never an evaluation**, even
-at the same bucket: the global handle's credential is not the destination's,
-and a report produced with the wrong principal under-reports whatever that
-principal cannot list. Its `status.retentionReport.note` says the schedule
-writes to a saved `BackupDestination` and that a `RetentionPolicy` reports
-retention there; every list is empty. That is the documented behaviour and not a
-failure.
 
 ## 10. The exit-code contract, as the `Backup` reconciler makes it visible
 

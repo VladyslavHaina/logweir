@@ -516,25 +516,6 @@ const CONNECTION = shapeOf(
 
 const RETENTION = shapeOf("RetentionView", {}, { keepLast: int, keepDays: int });
 
-const REMOVABLE_SET = shapeOf(
-  "RemovableSetView",
-  { backupId: str, newestRecordAt: str, reason: str },
-  { days: int, rank: int },
-);
-
-const RETENTION_REPORT = shapeOf(
-  "RetentionReportView",
-  {
-    setsKept: listOf(str),
-    setsThatWouldBeRemoved: listOf(objectOf(REMOVABLE_SET)),
-    removalCommands: listOf(str),
-    mcRemovalCommands: listOf(str),
-    skippedManifests: int,
-    truncated: bool,
-  },
-  { evaluatedAt: str, keepLast: int, keepDays: int, note: str },
-);
-
 // ---------------------------------------------- D1 W7: the cadence policy
 //
 // THE FOUR CLOSED SETS BELOW ARE THE CONTROLLER'S OWN SPELLINGS. `nextRuns[]`
@@ -606,7 +587,7 @@ const SCHEDULE_STATUS = shapeOf(
     lastSlot: objectOf(LAST_SLOT), missedSlots: objectOf(MISSED_SLOTS),
     lastFireTime: str, nextFireTime: str, lastMissedSlot: str,
     activeBackup: str, pendingBackup: str,
-    ready: objectOf(CONDITION), retentionReport: objectOf(RETENTION_REPORT),
+    ready: objectOf(CONDITION),
     // D1 W7. `activeRuns` ABSENT means "not yet computed", never "none are
     // running", and `ui/pages/schedules.js` renders those two differently.
     observedGeneration: int, policy: objectOf(SCHEDULE_POLICY),
@@ -1894,8 +1875,6 @@ export const CONSOLE_SHAPES = Object.freeze({
   ReachabilityView: REACHABILITY,
   Connection: CONNECTION,
   RetentionView: RETENTION,
-  RemovableSetView: REMOVABLE_SET,
-  RetentionReportView: RETENTION_REPORT,
   ScheduleStatusView: SCHEDULE_STATUS,
   LastSlotView: LAST_SLOT,
   MissedSlotView: MISSED_SLOT,

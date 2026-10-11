@@ -414,7 +414,7 @@ the adapter records what it cannot supply on every object it projects, under
 | kind | absent in console mode |
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` (connection contract v1's data-key reference, which `ConnectionAuthView` does not carry; the CA reference and the mTLS Secret name it does, since PROD-01.3) |
-| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
+| `BackupSchedule` | `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
 | `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
 | `Restore` | `status.integrity.result` and `status.integrity.partialReason`, `status.objectives`, `status.measured`, `status.topicPreflight`, `status.oldTopics` and `status.jobRef`, which no route of the product API publishes; in a LIST, also `status.integrity.level`, `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first, and, for a restore that passed (the controller writes a completion for no other), its `completion.integrityLevel` under `status.integrity.level` (FX-48); a failed or partial restore's level is not published. The coverage and the selection of the integrity block ARE projected, on a list too |
 
@@ -2917,9 +2917,11 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   verbatim when it is `True` -- a held deletion and an inherited compromise as
   complaints, a guarded record as a note (TRUSTPOLICY-DELETE-DROPS-REVOCATION,
   [`docs/keys.md`](../docs/keys.md)).
-* **`#/schedules`' retention panel.** It reads `status.enforcement`, which is
+* **`#/schedules`' retention panel.** A schedule's own retention report is
+  withdrawn (PROD-17.1 B1), so the panel first says retention is a
+  RetentionPolicy's. It reads `status.enforcement`, which is
   what is HAPPENING, and not `spec.mode`, which is what was asked for.
-  `RETENTION_SENTENCE` is kept verbatim for a schedule report and for
+  `RETENTION_SENTENCE` is kept verbatim with no policy and for
   `RecommendationOnly` and is replaced by the mode's own sentence otherwise;
   printing "Logweir never deletes from your archive" beside a policy that
   deletes nightly would be the most consequential false sentence this console
@@ -2949,15 +2951,13 @@ compared); it is rendered only for a run whose SIGNED scorecard recorded
   printed with or without the accounting, with the sentence under it; "the
   whole archive, the catalog said" for `false` beside a recorded accounting;
   and "not recorded" for an absent member or a `false` beside counts that are
-  not recorded. **The covering policy is named only by the schedule report's
-  `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
-  owed), so where the report names none and a RetentionPolicy in the namespace
-  is not recommendation-only, the panel says it cannot tell which destination
-  that policy governs, lists the policies, and prints neither the no-deletion
-  sentence nor "this schedule's own recommendation and nothing else". **A
+  not recorded. **Nothing records which policy covers a schedule**, so where
+  a RetentionPolicy in the namespace is not recommendation-only, the panel says
+  it cannot tell which destination that policy governs, lists the policies,
+  and does not print the no-deletion sentence. **A
   failed read of the namespace's RetentionPolicies is not an empty list**
   (FX-42): a refusal, a 5xx or an answer the decoder rejects makes the panel
-  say the read failed and why, and print neither line either.
+  say the read failed and why, and print no sentence either.
 
 **The four D3 kinds are not in the legacy in-cluster UI's ClusterRole.** The
 chart's role is unchanged by this change, so under the Helm UI the three D3 tabs

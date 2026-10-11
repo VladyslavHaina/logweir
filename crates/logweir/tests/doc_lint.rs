@@ -2220,6 +2220,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the Helm chart is the only install",
             "-l app.kubernetes.io/name=logweir",
         ),
+        // PROD-17.1 B1 (2026-10-11, item 77): a schedule's `spec.retention`
+        // stops reporting; the condition a schedule that still sets it carries.
+        (
+            "a schedule's spec.retention stops reporting",
+            "RetentionReportWithdrawn",
+        ),
     ];
     assert_eq!(
         items.len(),

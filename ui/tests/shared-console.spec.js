@@ -46,7 +46,6 @@ import { operationFacts, renderCompletion, renderOperation } from "../pages/oper
 import { renderRestoreDetail } from "../pages/history.js";
 import {
   COMPLETION_INSTANT_NOT_PUBLISHED,
-  REPORT_TRUNCATED_SENTENCE,
   RETENTION_COVERAGE_UNKNOWN_SENTENCE,
   RETENTION_POLICIES_UNREAD_SENTENCE,
   policyForSchedule,
@@ -568,13 +567,9 @@ test("sweep_a_shared_console_restore_detail_shows_the_scope_the_api_published", 
   }
 });
 
-/** The console schedule fixture with a retention report the API bounded. */
-async function consoleSchedule(mutateReport) {
+/** The console schedule fixture, through the console's own client. */
+async function consoleSchedule() {
   const list = con("schedules-list.json");
-  const item = list.items[0];
-  if (typeof mutateReport === "function") {
-    mutateReport(item.status.retentionReport);
-  }
   const wire = transport((u) =>
     u.indexOf("/api/v1/namespaces/team-a/schedules") === 0 ? { status: 200, body: list } : undefined);
   try {
@@ -583,34 +578,6 @@ async function consoleSchedule(mutateReport) {
     wire.restore();
   }
 }
-
-test("sweep_a_shared_console_retention_report_keeps_its_note_its_cut_and_its_skipped_count",
-  async () => {
-    // The API publishes `note`, `truncated` and `skippedManifests`; the
-    // projection dropped all three, so a cut list read as the whole report, a
-    // report with unreadable manifests read as one with none, and "why nothing
-    // would be removed" read `-`.
-    await sharedConsole();
-    const schedule = await consoleSchedule((report) => {
-      report.note = "every set is inside keepLast";
-      report.truncated = true;
-      report.skippedManifests = 2;
-    });
-    const panel = decode(renderRetentionPanel(schedule, null, []));
-    assert.equal(factOf(panel, "note"), "every set is inside keepLast", "THE DEFECT: `-`");
-    assert.ok(panel.indexOf(REPORT_TRUNCATED_SENTENCE) !== -1, "the cut is said");
-    assert.match(panel, /data-skipped-manifests="2">2 manifests could not be read/,
-      "and the unreadable manifests are counted");
-
-    // CONTROL: an uncut report with nothing skipped says neither.
-    const plain = await consoleSchedule((report) => {
-      report.truncated = false;
-      report.skippedManifests = 0;
-    });
-    const quiet = decode(renderRetentionPanel(plain, null, []));
-    assert.equal(quiet.indexOf(REPORT_TRUNCATED_SENTENCE), -1);
-    assert.equal(quiet.indexOf("Manifests that could not be read"), -1);
-  });
 
 test("sweep_no_deletion_is_never_claimed_beside_a_policy_that_deletes", async () => {
   // `policyForSchedule` reads `status.retentionReport.supersededBy`, which no

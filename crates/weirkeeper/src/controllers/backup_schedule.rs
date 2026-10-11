@@ -110,11 +110,10 @@ use crate::conditions::{
 use crate::crds::backup::{Backup, BackupSpec, ScheduleRef, Trigger, TriggerKind};
 use crate::crds::backup_schedule::{
     ActiveRun, BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, LastSlot, MissedSlot,
-    MissedSlots, NextRun, PendingRun, PolicyStatus, Retention,
+    MissedSlots, NextRun, PendingRun, PolicyStatus,
 };
 use crate::crds::{Condition, LocalRef};
 use crate::identity::is_run_of_schedule;
-use crate::retention::RetentionReport;
 use crate::slot::{scheduled_backup_name, slot_name, CronError, SlotError};
 use logweir_core::destination::FieldError;
 
@@ -2013,8 +2012,8 @@ fn status_patch_with_preconditions(
 /// fresh transition timestamps a day on a schedule that never changed state
 /// (fix round 1, review finding MED-1), which is both a lie about the
 /// condition and 2,880 `resourceVersion` bumps every watcher in the cluster
-/// has to receive. `retentionReport.evaluatedAt` and `lastSlot.decidedAt` obey
-/// the same rule through [`crate::conditions::keep_instant_unless_changed`],
+/// has to receive. `lastSlot.decidedAt` obeys the same rule through
+/// [`crate::conditions::keep_instant_unless_changed`],
 /// and every struct block is sent through [`crate::conditions::replacing`] so
 /// that a field which became `None` is cleared rather than left behind (FX-29).
 #[must_use]
@@ -2024,37 +2023,8 @@ pub fn status_patch(
     created: Option<&str>,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
-    status_patch_with_retention(schedule, decision, created, None, now)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingRefUpdate {
-    Keep,
-    Clear,
-}
-
-/// [`status_patch`], plus the retention report (Task 19).
-///
-/// `None` OMITS THE KEY ENTIRELY, and that is deliberate. A `Merge` patch
-/// carrying `retentionReport: null` would DELETE a report the controller had
-/// already written, so a controller that lost its archive handle — an
-/// unmounted credential, a removed environment variable — would erase the last
-/// good report rather than leave it standing. An absent key says "this
-/// reconcile has nothing to say about retention"; an absent BLOCK on the
-/// object says "no evaluation has ever happened".
-#[must_use]
-pub fn status_patch_with_retention(
-    schedule: &BackupSchedule,
-    decision: &SlotDecision,
-    created: Option<&str>,
-    retention: Option<&RetentionReport>,
-    now: DateTime<Utc>,
-) -> serde_json::Value {
     let work = Reconcile {
         history: None,
-        // A rendered status patch is not a reconcile: it evaluates nothing, so
-        // there is no handle whose location could disagree with anything.
-        controller_archive_url: None,
         created: created.map(str::to_string),
         already_existed: false,
         fired_due: None,
@@ -2075,7 +2045,13 @@ pub fn status_patch_with_retention(
             .and_then(|s| s.missed_slots.clone()),
         status_write_base: schedule.clone(),
     };
-    status_patch_with_refs(schedule, decision, &work, retention, now)
+    status_patch_with_refs(schedule, decision, &work, now)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingRefUpdate {
+    Keep,
+    Clear,
 }
 
 /// The `status.policy` block this reconcile should carry, and whether
@@ -2163,7 +2139,6 @@ fn status_patch_with_refs(
     schedule: &BackupSchedule,
     decision: &SlotDecision,
     work: &Reconcile,
-    retention: Option<&RetentionReport>,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     let mut status = serde_json::Map::new();
@@ -2199,18 +2174,6 @@ fn status_patch_with_refs(
         replacing(json!(policy_status(schedule, now)), stored_block("policy")),
     );
     status.insert("nextRuns".to_string(), json!(next_runs(schedule, decision)));
-    if let Some(report) = retention {
-        // `evaluatedAt` IS KEPT WHEN THE FINDINGS ARE THE SAME — plan erratum
-        // E11(d), review finding M-1. `evaluatedAt` is a "when computed" field,
-        // so writing `now` into it on every pass made the whole status differ
-        // on every pass, bumped `resourceVersion`, woke this reconciler's own
-        // watch and spun it. A rule that is now cleared (`keepLast` removed
-        // from the spec, a `note` that no longer applies) is sent as `null`,
-        // or the stale value would make the findings differ on every pass.
-        let mut next = replacing(json!(report.to_status()), stored_block("retentionReport"));
-        keep_instant_unless_changed(stored_block("retentionReport"), &mut next, "evaluatedAt");
-        status.insert("retentionReport".to_string(), next);
-    }
     status.insert(
         "nextFireTime".to_string(),
         match decision.next_fire_time() {
@@ -2363,6 +2326,25 @@ fn status_patch_with_refs(
             }
         }
     }
+    // PROD-17.1 B1: `spec.retention` no longer reports. A schedule that still
+    // sets it backs up as before and says so here, by name; without the field
+    // there is no condition.
+    if schedule.spec.retention.is_some() {
+        conditions.push(merge_condition(
+            current_condition(
+                schedule.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                crate::conditions::CONDITION_RETENTION_REPORT_WITHDRAWN,
+            ),
+            Condition {
+                r#type: crate::conditions::CONDITION_RETENTION_REPORT_WITHDRAWN.to_string(),
+                status: "True".to_string(),
+                observed_generation: schedule.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(crate::conditions::REASON_USE_RETENTION_POLICY.to_string()),
+                message: Some(crate::conditions::RETENTION_REPORT_WITHDRAWN_MESSAGE.to_string()),
+            },
+        ));
+    }
     status.insert("conditions".to_string(), json!(conditions));
     json!({ "status": serde_json::Value::Object(status) })
 }
@@ -2514,34 +2496,12 @@ pub async fn reconcile_schedule(
     reconcile_schedule_with_archive(schedule, client, None, now).await
 }
 
-/// [`reconcile_schedule`], plus the controller's ONE read-only archive handle.
+/// [`reconcile_schedule`], with the controller's archive handle.
 ///
-/// TASK 19. The retention **report** is refreshed on every reconcile, from the
-/// same status write the slot decision produces, so
-/// `kubectl get backupschedule -o yaml` shows both and the UI reads them with
-/// no extra call. `archive` is `None` on a controller with no archive
-/// configured, and then no `retentionReport` key is written at all — an absent
-/// block says "no evaluation happened", which is a different claim from an
-/// empty `setsThatWouldBeRemoved`.
-///
-/// TWO ENTRY POINTS AND NOT A FOURTH PARAMETER ON ONE, because
-/// [`reconcile_schedule`]'s three-argument shape is Task 18's tested contract
-/// and eight of its tests name it. This is the same function with the handle
-/// threaded through; the three-argument form is it with `None`.
-///
-/// EVERY STORE CALL IS INSIDE `spawn_blocking` — interface **I13**, and the
-/// property `no_store_call_is_made_outside_spawn_blocking` reads out of this
-/// file's source. `Store` drives its own current-thread runtime, and
-/// `Runtime::block_on` from a thread already driving one panics with *Cannot
-/// start a runtime from within a runtime*; `kube`'s `Controller` drives this
-/// function ON a runtime. Without the closure the code compiles cleanly and
-/// dies at the first retention reconcile.
-///
-/// A RETENTION FAILURE IS NOT A RECONCILE FAILURE. An unreadable archive — a
-/// lapsed credential, a prefix pointing at objects that are not manifests —
-/// must not stop a schedule from firing its next slot, so the report is
-/// logged at `warn` and omitted, and the slot decision is written regardless.
-/// Retention is a REPORT; a schedule is a backup.
+/// THE SCHEDULE CONTROLLER READS NO ARCHIVE (PROD-17.1 B1). The handle was
+/// threaded here for the per-schedule retention report, which is withdrawn;
+/// the parameter stays so the reconcile entry points keep the shape their
+/// tests pin, and it is not read.
 ///
 /// # Errors
 ///
@@ -2552,24 +2512,11 @@ pub async fn reconcile_schedule_with_archive(
     archive: Option<&Arc<Store>>,
     now: DateTime<Utc>,
 ) -> Result<ScheduleOutcome, ScheduleError> {
-    // THE HANDLE'S OWN LOCATION, read here and compared in `finish` — D3 §6.3
-    // and defect RET-WRONGBUCKET. `main` built `archive` from exactly this
-    // variable; `Store` exposes no accessor for the URL it was built from, so
-    // the one read lives beside the one construction.
-    let configured =
-        crate::retention::configured_archive_url(std::env::var(crate::retention::ARCHIVE_URL_ENV));
-    reconcile_schedule_with_archive_at(schedule, client, archive, configured.as_deref(), now).await
+    reconcile_schedule_with_archive_at(schedule, client, archive, None, now).await
 }
 
-/// [`reconcile_schedule_with_archive`] with the controller's archive LOCATION
-/// passed in rather than read from the environment.
-///
-/// Two entry points and not a fifth parameter on one, for the reason the pair
-/// above records: `reconcile_schedule_with_archive`'s four-argument shape is
-/// Task 19's tested contract and many of its tests name it. This is the same
-/// function with the location threaded through, and it is what the
-/// wrong-bucket rows call so that "the handle is over another destination" is a
-/// property a test can construct without touching process-global state.
+/// [`reconcile_schedule_with_archive`] with the controller's archive location.
+/// Neither the handle nor the location is read (PROD-17.1 B1); see above.
 ///
 /// # Errors
 ///
@@ -2577,8 +2524,8 @@ pub async fn reconcile_schedule_with_archive(
 pub async fn reconcile_schedule_with_archive_at(
     schedule: &BackupSchedule,
     client: &kube::Client,
-    archive: Option<&Arc<Store>>,
-    controller_archive_url: Option<&str>,
+    _archive: Option<&Arc<Store>>,
+    _controller_archive_url: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<ScheduleOutcome, ScheduleError> {
     let name = schedule.name_any();
@@ -2623,7 +2570,6 @@ pub async fn reconcile_schedule_with_archive_at(
     let backups_api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
     let mut work = Reconcile {
         history: None,
-        controller_archive_url: controller_archive_url.map(str::to_string),
         created: None,
         already_existed: false,
         fired_due: None,
@@ -2727,10 +2673,7 @@ pub async fn reconcile_schedule_with_archive_at(
                     work.last_slot =
                         Some(last_slot_for(&decision, &reserved.plan, reserved.due, now));
                 }
-                return finish(
-                    schedule, client, archive, &namespace, &name, decision, work, now,
-                )
-                .await;
+                return finish(client, &namespace, &name, decision, work, now).await;
             }
         }
     }
@@ -2743,18 +2686,12 @@ pub async fn reconcile_schedule_with_archive_at(
             | SlotDecision::Missed { .. }
             | SlotDecision::AlreadyFired { .. }
     ) {
-        return finish(
-            schedule, client, archive, &namespace, &name, decision, work, now,
-        )
-        .await;
+        return finish(client, &namespace, &name, decision, work, now).await;
     }
 
     // ---- step 5: the latest due slot, and what was skipped to reach it ----
     let Some((due, slot)) = due_slot(&decision) else {
-        return finish(
-            schedule, client, archive, &namespace, &name, decision, work, now,
-        )
-        .await;
+        return finish(client, &namespace, &name, decision, work, now).await;
     };
 
     // ---- step 6: the attempt chain of S ----------------------------------
@@ -2785,10 +2722,7 @@ pub async fn reconcile_schedule_with_archive_at(
         let attempt_index = u32::try_from(chain.attempts.len()).unwrap_or(0);
         work.record_slot(&decision, &slot, due, attempt_index, None, now);
         work.account_skipped(schedule, &decision, &slot, due, now, true);
-        return finish(
-            schedule, client, archive, &namespace, &name, decision, work, now,
-        )
-        .await;
+        return finish(client, &namespace, &name, decision, work, now).await;
     }
     let blocked = blocking_runs(schedule, &work.active);
 
@@ -2813,10 +2747,7 @@ pub async fn reconcile_schedule_with_archive_at(
             work.already_existed = true;
             work.record_slot(&decision, &slot, due, attempt, Some(run), now);
             work.account_skipped(schedule, &decision, &slot, due, now, true);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::InProgress {
             name: run, attempt, ..
@@ -2831,10 +2762,7 @@ pub async fn reconcile_schedule_with_archive_at(
             work.already_existed = true;
             work.fired_due = Some(due);
             work.account_skipped(schedule, &decision, &slot, due, now, false);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::NotRetryable {
             name: run, attempt, ..
@@ -2850,10 +2778,7 @@ pub async fn reconcile_schedule_with_archive_at(
             work.already_existed = true;
             work.record_slot(&decision, &slot, due, attempt, Some(run), now);
             work.account_skipped(schedule, &decision, &slot, due, now, true);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::Exhausted {
             attempt,
@@ -2873,10 +2798,7 @@ pub async fn reconcile_schedule_with_archive_at(
             work.already_existed = last.is_some();
             work.record_slot(&decision, &slot, due, attempt, last, now);
             work.account_skipped(schedule, &decision, &slot, due, now, true);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::Pending { attempt, due_at } => {
             decision = SlotDecision::RetryPending {
@@ -2889,18 +2811,12 @@ pub async fn reconcile_schedule_with_archive_at(
             work.created = chain.attempts.last().map(|a| a.name.clone());
             work.already_existed = work.created.is_some();
             work.account_skipped(schedule, &decision, &slot, due, now, false);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::NameTooLong { error } => {
             decision = SlotDecision::RetryNamesTooLong { error };
             work.account_skipped(schedule, &decision, &slot, due, now, false);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
         AttemptDecision::Retry { plan, .. } => {
             if !blocked.is_empty() {
@@ -2912,10 +2828,7 @@ pub async fn reconcile_schedule_with_archive_at(
                 };
                 work.fired_due = Some(due);
                 work.account_skipped(schedule, &decision, &slot, due, now, false);
-                return finish(
-                    schedule, client, archive, &namespace, &name, decision, work, now,
-                )
-                .await;
+                return finish(client, &namespace, &name, decision, work, now).await;
             }
             admit(
                 &backups_api,
@@ -2931,10 +2844,7 @@ pub async fn reconcile_schedule_with_archive_at(
                 now,
             )
             .await?;
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
+            return finish(client, &namespace, &name, decision, work, now).await;
         }
     }
 
@@ -2956,10 +2866,7 @@ pub async fn reconcile_schedule_with_archive_at(
             next_fire_time: decision.next_fire_time(),
         };
         work.account_skipped(schedule, &decision, &slot, due, now, true);
-        return finish(
-            schedule, client, archive, &namespace, &name, decision, work, now,
-        )
-        .await;
+        return finish(client, &namespace, &name, decision, work, now).await;
     }
 
     match &decision {
@@ -3029,10 +2936,7 @@ pub async fn reconcile_schedule_with_archive_at(
         _ => {}
     }
 
-    finish(
-        schedule, client, archive, &namespace, &name, decision, work, now,
-    )
-    .await
+    finish(client, &namespace, &name, decision, work, now).await
 }
 
 /// `status.lastSlot.disposition` values (D1 §4.8). A closed set, spelled once.
@@ -3065,14 +2969,6 @@ struct Reconcile {
     /// and `None` when this builder was reached through the pure `status_patch`
     /// helpers, which observe nothing.
     history: Option<crate::crds::backup_schedule::ScheduleHistory>,
-    /// The location the controller's ONE archive handle is over —
-    /// `LOGWEIR_ARCHIVE_URL`, as `main` read it. **D3 W9 / RET-WRONGBUCKET.**
-    ///
-    /// Carried here rather than read inside [`finish`] so the decision is a
-    /// pure comparison a test can drive: a decision behind `std::env::var` in
-    /// an `async fn` is reachable from no test at all, which is the same ruling
-    /// `retention::configured_archive_url` already records.
-    controller_archive_url: Option<String>,
     created: Option<String>,
     already_existed: bool,
     fired_due: Option<DateTime<Utc>>,
@@ -3683,167 +3579,17 @@ async fn admit(
     Ok(())
 }
 
-/// The `retentionReport.note` a destination-backed schedule carries — D2 §3.10.
-///
-/// DISTINCT FROM `retention_plan::LEGACY_DESTINATION_MISMATCH_NOTE`, which is
-/// about a legacy schedule whose bucket is not the handle's. This one is about
-/// a schedule that named a saved `BackupDestination`, where the controller's
-/// global handle is not merely pointing elsewhere but is the WRONG MECHANISM:
-/// D2 §3.10 confines it to objects without a `destinationRef`. An operator told
-/// "the handle points at a different destination" would go looking for a
-/// misconfiguration that does not exist.
-pub const DESTINATION_BACKED_RETENTION_NOTE: &str =
-    "this schedule writes to a saved BackupDestination, and the controller's single archive \
-     handle only evaluates schedules that do not name one; retention for this destination is \
-     reported by a RetentionPolicy";
-
-/// D1 §4.5 step 8: the retention report, the final status write and the
-/// outcome.
-#[allow(clippy::too_many_arguments)]
+/// D1 §4.5 step 8: the final status write and the outcome.
 async fn finish(
-    schedule: &BackupSchedule,
     client: &kube::Client,
-    archive: Option<&Arc<Store>>,
     namespace: &str,
     name: &str,
     decision: SlotDecision,
     work: Reconcile,
     now: DateTime<Utc>,
 ) -> Result<ScheduleOutcome, ScheduleError> {
-    // THE RETENTION REPORT. Between the create and the status write, so the
-    // report travels in the same patch as the slot decision — one write, one
-    // resourceVersion bump.
-    //
-    // INSIDE `spawn_blocking`, AND THAT IS INTERFACE I13. Every `Store` method
-    // drives its own current-thread runtime, and this function is driven ON a
-    // runtime by `kube`'s `Controller`; a direct call panics with *Cannot start
-    // a runtime from within a runtime*.
-    let retention_report = match archive {
-        None => None,
-        // THE DESTINATION-BACKED ARM (D2 §3.10, guard G14). The arm below
-        // compares the controller's handle with `spec.archive.url`; on a
-        // destination-backed schedule that URL is the
-        // `logweir-destination://<name>` SENTINEL, which is not a location at
-        // all, so the comparison cannot be the thing that withholds the report.
-        // D2 §3.10 settles it from the spec instead: the controller's ONE
-        // global handle is for objects WITHOUT a `destinationRef`, and a
-        // destination-backed schedule gets no report from it until PLAT-16.1
-        // adds the per-destination archive-inventory check kind.
-        //
-        // The SHAPE is the arm below's — a note and EMPTY set lists — because
-        // "not evaluated here" and "nothing to remove" are different claims and
-        // the empty lists are what keep them apart. One shape for one
-        // situation, not two.
-        Some(_)
-            if matches!(
-                crate::destination::retention_scope(
-                    &schedule.spec.archive.url,
-                    work.controller_archive_url.as_deref(),
-                    schedule.spec.destination_ref.is_some(),
-                ),
-                crate::destination::RetentionScope::DestinationBacked
-            ) =>
-        {
-            info!(
-                schedule = %name,
-                namespace = %namespace,
-                "no retention report through the global handle: this schedule is \
-                 destination-backed, and that handle is for objects without a destinationRef \
-                 (D2 §3.10). The per-destination archive-inventory check reports these"
-            );
-            Some(RetentionReport {
-                evaluated_at: now,
-                keep_last: None,
-                keep_days: None,
-                sets_kept: Vec::new(),
-                sets_that_would_be_removed: Vec::new(),
-                aws_cli: Vec::new(),
-                mc_cli: Vec::new(),
-                skipped: Vec::new(),
-                note: Some(DESTINATION_BACKED_RETENTION_NOTE.to_string()),
-            })
-        }
-        // THE WRONG-BUCKET ARM (D3 §6.3, defect RET-WRONGBUCKET). The handle
-        // below is the controller's ONE read-only store, built from
-        // `LOGWEIR_ARCHIVE_URL`; the commands this report renders name
-        // `spec.archive.url`. When those are two different locations the
-        // evaluation would list one bucket's manifests and print the other
-        // bucket's `aws s3 rm` lines, which is the defect. It is replaced by a
-        // note and EMPTY set lists — "not evaluated" is a different claim from
-        // "nothing to remove", and the empty lists are what say so.
-        Some(_)
-            if !crate::retention_plan::legacy_report_applies(
-                &schedule.spec.archive.url,
-                work.controller_archive_url.as_deref(),
-            ) =>
-        {
-            warn!(
-                schedule = %name,
-                namespace = %namespace,
-                "the controller's archive handle is over a different location from this \
-                 schedule's archive URL; the retention report is replaced by a note and no \
-                 manifest is listed"
-            );
-            Some(RetentionReport {
-                evaluated_at: now,
-                keep_last: None,
-                keep_days: None,
-                sets_kept: Vec::new(),
-                sets_that_would_be_removed: Vec::new(),
-                aws_cli: Vec::new(),
-                mc_cli: Vec::new(),
-                skipped: Vec::new(),
-                note: Some(crate::retention_plan::LEGACY_DESTINATION_MISMATCH_NOTE.to_string()),
-            })
-        }
-        Some(store) => {
-            let store = Arc::clone(store);
-            let archive_url = schedule.spec.archive.url.clone();
-            let prefix = crate::retention::bucket_and_prefix(&archive_url).1;
-            let retention = schedule.spec.retention.clone().unwrap_or(Retention {
-                keep_last: None,
-                keep_days: None,
-            });
-            let joined = tokio::task::spawn_blocking(move || {
-                crate::retention::evaluate(&store, &archive_url, &prefix, &retention, now)
-            })
-            .await;
-            match joined {
-                Ok(Ok(report)) => Some(report),
-                // A REPORT IS NOT A BACKUP. An unreadable archive must not stop
-                // a schedule from firing, so this is a `warn` and an omitted
-                // block, never an error the reconcile returns.
-                Ok(Err(e)) => {
-                    warn!(
-                        schedule = %name,
-                        namespace = %namespace,
-                        error = %e,
-                        "could not evaluate retention against the archive; the report is omitted \
-                         and the slot decision is written regardless"
-                    );
-                    None
-                }
-                Err(e) => {
-                    warn!(
-                        schedule = %name,
-                        namespace = %namespace,
-                        error = %e,
-                        "the retention evaluation task did not complete; the report is omitted"
-                    );
-                    None
-                }
-            }
-        }
-    };
-
     let api: Api<BackupSchedule> = Api::namespaced(client.clone(), namespace);
-    let patch = status_patch_with_refs(
-        &work.status_write_base,
-        &decision,
-        &work,
-        retention_report.as_ref(),
-        now,
-    );
+    let patch = status_patch_with_refs(&work.status_write_base, &decision, &work, now);
     // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding M-1.
     // On a 30 s requeue a bump-on-every-write is 2,880 API writes a day per
     // schedule that never changed state.
@@ -4054,9 +3800,8 @@ pub fn schedule_trigger_stream(
 /// controller per cluster, no fleet).
 ///
 /// `archive` is the controller's ONE read-only archive handle, built once in
-/// `main` before the tokio runtime exists and shared as `Arc<Store>` —
-/// interface **I13**. `None` is a controller with no archive configured; it
-/// writes no retention report and the schedule half is unaffected.
+/// `main` and shared as `Arc<Store>` — interface **I13**. The schedule
+/// controller does not read it (PROD-17.1 B1).
 pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,

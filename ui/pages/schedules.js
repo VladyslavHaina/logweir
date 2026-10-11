@@ -11,14 +11,10 @@
 // that the api.js identifiers reachable from any page module are exactly the
 // six readers and writers this product has.
 //
-// THE RETENTION PANEL REPORTS AND NEVER DELETES. Logweir holds no delete
-// capability of any kind against an archive: the controller's archive handle
-// is opened read-only and its evidence credential is read-only (Global
-// Constraint 6). What `status.retentionReport` carries is an EVALUATION -- the
-// sets a policy keeps, the sets it would remove and why -- plus the exact
-// removal command for each set, in the CLI of that archive's own scheme, as a
-// string. The panel prints those strings verbatim. It runs none of them, and
-// nothing in this product runs any of them.
+// THE RETENTION PANEL POINTS AT A RetentionPolicy. A schedule's own retention
+// report is withdrawn (PROD-17.1 B1): `spec.retention` no longer reports, and
+// the panel says so, then what it can tell about the namespace's
+// RetentionPolicies.
 //
 // BOTH WRITES SHARE ONE MUTATION STATE (PLAT-13.2). The create keeps its draft
 // through every recoverable failure and is idempotent by name; the toggle
@@ -72,11 +68,9 @@ import {
   GUARANTEE_WORDS,
   IRREVERSIBLE_SENTENCE,
   RETENTION_SENTENCE,
-  SUPERSEDED_SENTENCE,
   VIEW_INCOMPLETE_SENTENCE,
   badge,
   cell,
-  copyBlock,
   destinationVerdict,
   detailLink,
   disableKeepingFocus,
@@ -391,126 +385,39 @@ export function renderSuspendStatus(object, state) {
   });
 }
 
-/** One removable set as a line an operator can read. */
-function removableLine(set) {
-  const s = set || {};
-  const why = [];
-  if (typeof s.reason === "string") {
-    why.push(s.reason);
-  }
-  if (typeof s.days === "number") {
-    why.push("keepDays " + s.days);
-  }
-  if (typeof s.rank === "number") {
-    why.push("rank " + s.rank);
-  }
-  return (
-    cell(s.backupId) +
-    " (newest record " + when(s.newestRecordAt) + ")" +
-    (why.length === 0 ? "" : " -- " + esc(why.join(", ")))
-  );
-}
-
-/** THE RETENTION PANEL for one schedule.
- *
- *  The kept sets, the sets that WOULD be removed with their reason, and the
- *  removal commands the status carries -- `awsCli` in that archive's own
- *  scheme and `mcCli` in `mc`'s spelling -- printed verbatim in a block a
- *  viewer copies, above the sentence that says who would be running them. */
+/** THE RETENTION PANEL for one schedule: where its retention is set, and what
+ *  this page can tell about the namespace's RetentionPolicies. */
 export function renderRetentionPanel(object, policy, policies) {
-  const status = (object && object.status) || {};
-  const report = status.retentionReport;
   // "LOGWEIR NEVER DELETES" IS NOT PRINTED WHERE THIS PAGE CANNOT PROVE IT
-  // (console class sweep). The covering policy is read from
-  // `status.retentionReport.supersededBy` and from nothing else -- and no
-  // BackupSchedule CRD in this tree has that field, no controller writes it
-  // and the product API does not project it (the D3 W0 fields are still
-  // owed). So `policy` is always null today, and this panel printed the
-  // no-deletion sentence beside a namespace whose RetentionPolicy is deleting
-  // nightly. Where the report names no covering policy and a policy in this
-  // namespace is not recommendation-only, the panel says that it cannot tell,
-  // names the policies, and prints neither the "own recommendation and
-  // nothing else" line nor the no-deletion sentence.
+  // (console class sweep). Nothing records which RetentionPolicy covers a
+  // schedule's destination, so where a policy in this namespace is not
+  // recommendation-only the panel says that it cannot tell, names the
+  // policies, and does not print the no-deletion sentence.
   // FX-42: a failed read of the namespace's policies is not "no policy". The
-  // panel says the read failed and prints neither line above.
+  // panel says the read failed and prints no sentence either.
   const readFailed = policies !== null && typeof policies === "object" &&
     !Array.isArray(policies);
-  const unproven = (policy === null || policy === undefined) &&
-    !(((report || {}).supersededBy || {}).name)
-    ? deletingPolicies(policies)
-    : [];
+  const unproven = policy === null || policy === undefined ? deletingPolicies(policies) : [];
   const enforcement = readFailed
     ? renderPoliciesUnread(policies.readFailed)
     : unproven.length > 0
       ? renderCoverageUnknown(unproven)
-      : renderEnforcement(report, policy);
-  const sentence = readFailed || unproven.length > 0 ? "" : retentionSentenceFor(report, policy);
-  if (!report) {
-    return (
-      "<section class=\"retention\"><h3>Retention</h3>" +
-      "<p class=\"note\">No retention evaluation has been recorded for this schedule.</p>" +
-      enforcement +
-      sentence + "</section>"
-    );
-  }
-  const kept = Array.isArray(report.setsKept) ? report.setsKept : [];
-  const removable = Array.isArray(report.setsThatWouldBeRemoved)
-    ? report.setsThatWouldBeRemoved
-    : [];
-  const skipped = Array.isArray(report.skipped) ? report.skipped : [];
-  const awsCli = Array.isArray(report.awsCli) ? report.awsCli : [];
-  const mcCli = Array.isArray(report.mcCli) ? report.mcCli : [];
-
-  const keptList = kept.length === 0
-    ? "<p class=\"note\">none</p>"
-    : "<ul class=\"sets\">" + kept.map((id) => "<li>" + esc(id) + "</li>").join("") + "</ul>";
-  const removableList = removable.length === 0
-    ? "<p class=\"note\">none</p>"
-    : "<ul class=\"sets\">" +
-      removable.map((s) => "<li>" + removableLine(s) + "</li>").join("") +
-      "</ul>";
-  // THE SHARED CONSOLE HOLDS A COUNT AND NOT THE KEYS (console class sweep).
-  // The product API publishes how many manifests could not be read and not
-  // which, so a projection with a non-zero count and no `skipped[]` says the
-  // count and where the keys are, rather than printing no section at all --
-  // which read as "every manifest was read".
-  const skippedCount = typeof report.__skippedManifests === "number"
-    ? report.__skippedManifests
-    : 0;
-  const skippedList = skipped.length === 0
-    ? (skippedCount > 0
-      ? "<h4>Manifests that could not be read</h4><p class=\"note\" data-skipped-manifests=\"" +
-        esc(String(skippedCount)) + "\">" + esc(skippedCountSentence(skippedCount)) + "</p>"
-      : "")
-    : "<h4>Manifests that could not be read</h4><ul class=\"sets\">" +
-      skipped
-        .map((s) => "<li>" + cell((s || {}).key) + " -- " + cell((s || {}).reason) + "</li>")
-        .join("") +
-      "</ul>";
-  const truncated = report.__truncated === true
-    ? "<p class=\"note\" data-report-truncated=\"true\">" + esc(REPORT_TRUNCATED_SENTENCE) +
-      "</p>"
-    : "";
-
+      : renderEnforcement(null, policy);
+  const sentence = readFailed || unproven.length > 0 ? "" : retentionSentenceFor(null, policy);
   return (
     "<section class=\"retention\"><h3>Retention</h3>" +
+    "<p class=\"note\" data-retention-pointer=\"true\">" + esc(RETENTION_POINTER_SENTENCE) +
+    "</p>" +
     enforcement +
-    facts([
-      ["evaluated at", when(report.evaluatedAt)],
-      ["keepLast applied", cell(report.keepLast)],
-      ["keepDays applied", cell(report.keepDays)],
-      ["note", cell(report.note)],
-    ]) +
-    "<h4>Kept</h4>" + keptList +
-    "<h4>Would be removed -- still in the archive</h4>" + removableList +
-    skippedList +
-    "<h4>The commands</h4>" +
-    truncated +
-    copyBlock(awsCli.concat(mcCli)) +
-    sentence +
-    "</section>"
+    sentence + "</section>"
   );
 }
+
+/** Where a schedule's retention is set, now that its own report is withdrawn
+ *  (PROD-17.1 B1). */
+export const RETENTION_POINTER_SENTENCE =
+  "Retention for this schedule's destination is reported by a RetentionPolicy. A schedule's " +
+  "own spec.retention no longer reports.";
 
 /** The RetentionPolicies in `policies` whose recorded enforcement is not
  *  recommendation-only: the ones that delete, or declare that a bucket rule
@@ -526,8 +433,7 @@ export function deletingPolicies(policies) {
  *  no-deletion sentence and the "own recommendation" line, when a policy in
  *  its namespace deletes and nothing records which destination it covers. */
 export const RETENTION_COVERAGE_UNKNOWN_SENTENCE =
-  "This schedule's retention report does not record which RetentionPolicy covers its " +
-  "destination (status.retentionReport.supersededBy is not written by this build), and a " +
+  "Nothing records which RetentionPolicy covers this schedule's destination, and a " +
   "RetentionPolicy in this namespace is not recommendation-only. So this page does not say " +
   "that Logweir never deletes from this schedule's archive: check which destination each " +
   "policy below governs.";
@@ -564,20 +470,6 @@ export function renderPoliciesUnread(why) {
   );
 }
 
-/** Why a shared-console retention report shows a count of unreadable
- *  manifests and not their keys. */
-export function skippedCountSentence(count) {
-  return String(count) + (count === 1 ? " manifest" : " manifests") + " could not be read " +
-    "when this report was evaluated. The product API publishes the count and not the keys; " +
-    "status.retentionReport.skipped on the schedule object names each key and why.";
-}
-
-/** Why a shared-console retention report may not be the whole report. */
-export const REPORT_TRUNCATED_SENTENCE =
-  "The product API cut at least one list in this report at 100 entries, so the sets and " +
-  "commands shown are not all of them. status.retentionReport on the schedule object carries " +
-  "the whole report.";
-
 // ===========================================================================
 // D3 (PLAT-16.1, PLAT-16.2): WHICH SENTENCE THIS PANEL IS ALLOWED TO PRINT
 // ===========================================================================
@@ -593,15 +485,10 @@ export const REPORT_TRUNCATED_SENTENCE =
 // `spec.mode`, WHICH IS WHAT WAS ASKED FOR. A policy in `mode: Enforce` whose
 // destination will not resolve reports `RecommendationOnly`, and this panel
 // says the thing that is true of it.
-//
-// AND THE LEGACY REPORT SAYS WHAT IT IS. A schedule's own
-// `status.retentionReport` is a per-schedule RECOMMENDATION and nothing else;
-// once a RetentionPolicy covers the same destination the report carries
-// `supersededBy` and this panel says which evaluation counts.
 
 /** The one sentence this panel prints about deletion, chosen by what is
- *  actually happening. `RETENTION_SENTENCE` verbatim for a schedule-level
- *  report and for `RecommendationOnly`; the mode's own sentence otherwise. */
+ *  actually happening. `RETENTION_SENTENCE` verbatim with no policy and for
+ *  `RecommendationOnly`; the mode's own sentence otherwise. */
 export function retentionSentenceFor(report, policy) {
   const state = enforcementOf(policy);
   if (state === null || state === "RecommendationOnly") {
@@ -611,26 +498,15 @@ export function retentionSentenceFor(report, policy) {
     esc(ENFORCEMENT_SENTENCES[state] || "") + "</p>";
 }
 
-/** WHICH RetentionPolicy COVERS THIS SCHEDULE, FROM THE CONTROLLER'S OWN
- *  ANSWER AND NOT FROM A GUESS.
+/** WHICH RetentionPolicy COVERS THIS SCHEDULE: nothing records it, so none.
  *
- *  `status.retentionReport.supersededBy` is written by the schedule controller
- *  when a RetentionPolicy covers the same destination (D3 section 6.3). Matching on
- *  anything else -- a destination name, a bucket prefix -- would be this page
- *  deciding which policy governs a schedule, which is a decision with two
- *  possible answers (two policies for one destination are a `Conflict` and
- *  NEITHER evaluates) and one authority, and the authority is not a browser. */
+ *  The covering policy was to be named by the schedule's own retention report
+ *  (`supersededBy`, D3 section 6.3), which no controller wrote and which is
+ *  withdrawn (PROD-17.1 B1). Matching on anything else -- a destination name,
+ *  a bucket prefix -- would be this page deciding which policy governs a
+ *  schedule, a decision with one authority, and the authority is not a
+ *  browser. */
 export function policyForSchedule(object, policies) {
-  const superseded = (((object || {}).status || {}).retentionReport || {}).supersededBy;
-  const name = (superseded || {}).name;
-  if (typeof name !== "string" || name.length === 0) {
-    return null;
-  }
-  for (const policy of Array.isArray(policies) ? policies : []) {
-    if (((policy || {}).metadata || {}).name === name) {
-      return policy;
-    }
-  }
   return null;
 }
 
@@ -725,20 +601,11 @@ export function renderEvaluationCounts(evaluation) {
  *  approved and then superseded by a later evaluation, which is the case the
  *  two-step approval exists for. */
 export function renderEnforcement(report, policy) {
-  const superseded = (report || {}).supersededBy || null;
   const state = enforcementOf(policy);
   if (policy === null || policy === undefined) {
     return (
       "<p class=\"note\" data-enforcement=\"none\">" +
-      esc(report && report.enforcement
-        ? "This schedule's own report is " + String(report.enforcement) + ": a recommendation " +
-          "about this schedule's sets and nothing more."
-        : "No RetentionPolicy was read for this schedule's destination, so what is below is " +
-          "this schedule's own recommendation and nothing else.") +
-      (superseded === null
-        ? ""
-        : " " + esc(SUPERSEDED_SENTENCE) + " The policy is " + cell(superseded.name) + ".") +
-      "</p>"
+      esc("No RetentionPolicy was read for this schedule's destination.") + "</p>"
     );
   }
   const status = policy.status || {};
@@ -752,7 +619,6 @@ export function renderEnforcement(report, policy) {
   return (
     "<div class=\"enforcement\" data-enforcement=\"" + esc(String(state)) + "\">" +
     "<h4>Enforcement</h4>" +
-    (superseded === null ? "" : "<p class=\"note\">" + esc(SUPERSEDED_SENTENCE) + "</p>") +
     facts([
       ["policy", cell(((policy.metadata || {}).name))],
       ["mode asked for", cell(spec.mode)],
@@ -3663,9 +3529,9 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
         inline + "</details>"
       : inline) +
     policyNumber(name, values, errors, "keepLast", "retention keepLast",
-      "How many sets a retention evaluation keeps. It reports; it never deletes.") +
+      "Withdrawn: spec.retention no longer reports; use a RetentionPolicy.") +
     policyNumber(name, values, errors, "keepDays", "retention keepDays",
-      "How many days of sets it keeps.") +
+      "Withdrawn, as keepLast.") +
     "</fieldset>"
   );
 }

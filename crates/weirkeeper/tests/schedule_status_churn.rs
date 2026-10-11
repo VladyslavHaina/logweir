@@ -21,7 +21,7 @@
 //!    `decidedAt: now`, and the write that followed could never make the two
 //!    agree. Rows: `the_poc_schedule_settles_after_one_write`,
 //!    `a_missed_slot_after_an_admitted_one_settles_and_names_no_backup`, and
-//!    the twins of the same class in `retentionReport` and `history`.
+//!    the twin of the same class in `history`.
 //! 2. **The reconciler woke on its own `/status` writes.** `Controller::new`
 //!    triggers on every event of the object. Row:
 //!    `the_watch_triggers_on_identity_and_spec_revision_only`.
@@ -38,15 +38,12 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use futures::StreamExt as _;
 use kube::runtime::controller::Action;
-use weirkeeper::conditions::{
-    apply_merge_patch, keep_instant_unless_changed, replacing, status_unchanged,
-};
+use weirkeeper::conditions::{apply_merge_patch, keep_instant_unless_changed, replacing};
 use weirkeeper::controllers::backup_schedule::{
     decide, error_action, reconcile_pass, reconcile_schedule, reconcile_trigger, schedule_action,
-    schedule_triggers, status_patch_with_retention, SlotDecision, REQUEUE_SECS,
+    schedule_triggers, SlotDecision, REQUEUE_SECS,
 };
 use weirkeeper::crds::backup_schedule::BackupSchedule;
-use weirkeeper::retention::RetentionReport;
 use weirkeeper::slot::{scheduled_backup_name, slot_name};
 use weirkeeper::testing::{mock_client_with_store, ObjectStore, Route, SharedStore};
 
@@ -998,97 +995,98 @@ async fn a_due_slot_fires_from_the_requeue_alone() {
     );
 }
 
-/// **The same class in `retentionReport`.** A rule removed from the spec
-/// (`keepDays: 7` → none) yields a report with no `keepDays`; sent as an absent
-/// key it would stay on the object, the findings would differ from it on every
-/// pass, and `evaluatedAt` would be restamped on every pass — the same loop on
-/// a schedule with an archive handle (Task 16b measured ~3,850 bumps in 90 s
-/// for its own variant). Pure-function passes, each fed the object the last
-/// one produced.
+/// **PROD-17.1 B1: a schedule that still sets the withdrawn `spec.retention`
+/// keeps backing up, and says so once.** Its 10-08 slot fires; the status
+/// carries `RetentionReportWithdrawn=True` with the message naming the field,
+/// and no `retentionReport`; and twenty settled passes write nothing more.
 ///
-/// CONTROL: before this fix the second pass's patch carried no `keepDays`, and
-/// passes 3..12 each wrote a new `evaluatedAt`.
-#[test]
-fn a_cleared_retention_rule_is_cleared_on_the_object_and_settles() {
-    let report = |at: DateTime<Utc>, keep_days: Option<u32>| RetentionReport {
-        evaluated_at: at,
-        keep_last: None,
-        keep_days,
-        sets_kept: vec!["set-a".to_string()],
-        sets_that_would_be_removed: vec![],
-        aws_cli: vec![],
-        mc_cli: vec![],
-        skipped: vec![],
-        note: keep_days
-            .is_none()
-            .then(|| "no retention rule is configured".to_string()),
+/// CONTROL: the same schedule without `spec.retention` fires the same slot and
+/// carries no such condition. Mutants: the condition written unconditionally
+/// (the control fails), never written (the row fails), or stamped without
+/// `merge_condition` (`lastTransitionTime` moves, so the settled passes write).
+#[tokio::test]
+async fn a_schedule_that_still_sets_retention_backs_up_and_names_the_withdrawal() {
+    use weirkeeper::conditions::{
+        CONDITION_RETENTION_REPORT_WITHDRAWN, REASON_USE_RETENTION_POLICY,
+        RETENTION_REPORT_WITHDRAWN_MESSAGE,
     };
-    let mut schedule: BackupSchedule = serde_json::from_value(nightly(true, 4)).expect("typed");
-    let decision = decide("nightly", &schedule.spec, utc(2026, 10, 9, 0, 0, 0));
-    let mut stored = serde_json::Value::Null;
-    let mut store_patch = |schedule: &mut BackupSchedule, patch: &serde_json::Value| -> bool {
-        let current = schedule
-            .status
-            .as_ref()
-            .map(|s| serde_json::to_value(s).expect("serialises"));
-        let unchanged = status_unchanged(current.as_ref(), patch);
-        apply_merge_patch(&mut stored, &patch["status"]);
-        schedule.status = Some(serde_json::from_value(stored.clone()).expect("a status"));
-        !unchanged
-    };
-
-    let t0 = utc(2026, 10, 9, 0, 0, 0);
-    let first =
-        status_patch_with_retention(&schedule, &decision, None, Some(&report(t0, Some(7))), t0);
-    assert!(store_patch(&mut schedule, &first));
-
-    let t1 = t0 + Duration::hours(1);
-    let second =
-        status_patch_with_retention(&schedule, &decision, None, Some(&report(t1, None)), t1);
-    assert_eq!(
-        second["status"]["retentionReport"]["keepDays"],
-        serde_json::Value::Null,
-        "the cleared rule is sent as an explicit null"
-    );
-    assert!(
-        second["status"]["retentionReport"]
-            .as_object()
-            .expect("an object")
-            .contains_key("keepDays"),
-        "…and not omitted, which a merge patch reads as \"leave it alone\""
-    );
-    assert!(
-        store_patch(&mut schedule, &second),
-        "the findings changed: one write"
-    );
-    assert!(
-        schedule
-            .status
-            .as_ref()
-            .and_then(|s| s.retention_report.as_ref())
-            .and_then(|r| r.keep_days)
-            .is_none(),
-        "the object no longer claims keepDays"
-    );
-
-    let mut writes = 0;
-    for k in 2..12 {
-        let now = t0 + Duration::hours(k);
-        let patch =
-            status_patch_with_retention(&schedule, &decision, None, Some(&report(now, None)), now);
-        if store_patch(&mut schedule, &patch) {
-            writes += 1;
+    for with_retention in [true, false] {
+        let mut object = nightly(false, 4);
+        if with_retention {
+            object["spec"]["retention"] = serde_json::json!({ "keepLast": 7, "keepDays": 30 });
         }
+        let store = store_with(SCHEDULE_KEY, object);
+        let fire = utc(2026, 10, 8, 0, 0, 0);
+        let key = run_key("nightly", &slot_name(fire));
+        store.lock().expect("writable").remove(&key);
+        let decision = pass(&store, SCHEDULE_KEY, vec![list_route(vec![])], fire).await;
+        assert!(
+            matches!(decision, SlotDecision::Due { .. }),
+            "retention {with_retention}: the slot is due: {decision:?}"
+        );
+        assert_eq!(
+            creates(&store),
+            1,
+            "retention {with_retention}: the slot fired"
+        );
+
+        let status = stored_value(&store, SCHEDULE_KEY)["status"].clone();
+        assert!(
+            status.get("retentionReport").is_none(),
+            "no report is written: {status}"
+        );
+        let withdrawn: Vec<&serde_json::Value> = status["conditions"]
+            .as_array()
+            .expect("the status carries conditions")
+            .iter()
+            .filter(|c| c["type"] == CONDITION_RETENTION_REPORT_WITHDRAWN)
+            .collect();
+        if with_retention {
+            assert_eq!(
+                withdrawn.len(),
+                1,
+                "one condition names the field: {status}"
+            );
+            assert_eq!(withdrawn[0]["status"], "True");
+            assert_eq!(withdrawn[0]["reason"], REASON_USE_RETENTION_POLICY);
+            assert_eq!(withdrawn[0]["message"], RETENTION_REPORT_WITHDRAWN_MESSAGE);
+        } else {
+            assert!(
+                withdrawn.is_empty(),
+                "CONTROL: without spec.retention there is no condition: {status}"
+            );
+        }
+
+        // The run finishes; one pass records it, and the passes after it are
+        // settled.
+        let mut run = stored_value(&store, &key);
+        run["status"] = serde_json::json!({ "phase": "Succeeded" });
+        store.lock().expect("writable").put(&key, run.clone());
+        let settle = fire + Duration::minutes(5);
+        pass(
+            &store,
+            SCHEDULE_KEY,
+            vec![list_route(vec![run.clone()])],
+            settle,
+        )
+        .await;
+        let writes = status_writes(&store, "nightly");
+        for k in 1..=20 {
+            let now = settle + Duration::seconds(30 * k);
+            pass(
+                &store,
+                SCHEDULE_KEY,
+                vec![list_route(vec![run.clone()])],
+                now,
+            )
+            .await;
+        }
+        assert_eq!(
+            status_writes(&store, "nightly"),
+            writes,
+            "retention {with_retention}: twenty settled passes write nothing"
+        );
     }
-    assert_eq!(
-        writes, 0,
-        "the same findings write nothing, ten passes running"
-    );
-    assert_eq!(
-        stored["retentionReport"]["evaluatedAt"],
-        serde_json::json!(t1),
-        "evaluatedAt names the evaluation whose findings these are"
-    );
 }
 
 /// **The same class in `history`.** A migration that WAS blocked and no longer

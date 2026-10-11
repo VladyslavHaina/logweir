@@ -29,13 +29,9 @@
 # shape is `topics: []` with an `allUserTopics` block, which resolves the list
 # per run and labels the run's coverage honestly.
 #
-# RETENTION **REPORTS AND NEVER DELETES** (GC6, guard **G-RET**). `keepLast`
-# and `keepDays` produce a `status.retentionReport` naming what WOULD be
-# removed, and the exact removal command for each set — in the CLI of the
-# archive's OWN scheme: `aws s3 rm` for `s3://`, `gsutil -m rm -r` for `gs://`,
-# `az storage blob delete-batch` for `az://`, `rm -rf` for `file://` (Task 24a,
-# plan erratum E18b), plus the `mc` spelling for every scheme `mc` addresses.
-# No Logweir component holds any object-store delete capability in tag 1.
+# RETENTION IS A `RetentionPolicy`'S. `spec.retention` is withdrawn: a schedule
+# that still sets it backs up as before and carries a `RetentionReportWithdrawn`
+# condition (PROD-17.1 B1).
 ---
 apiVersion: logweir.dev/v1alpha1
 kind: BackupSchedule
@@ -79,6 +75,4 @@ spec:
     delaySeconds: 300
   # The Job deadline every created Backup carries. Omitting it means 3600.
   activeDeadlineSeconds: 3600
-  retention:
-    keepLast: 7
   suspend: false

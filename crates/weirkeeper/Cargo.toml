@@ -205,10 +205,7 @@ logweir-verify = { path = "../logweir-verify" }
 # so `scripts/check-one-signer.sh`'s check 1 still computes {logweir, e2e}.
 logweir-core = { path = "../logweir-core" }
 # TASK 19 — THE READ-ONLY ARCHIVE HANDLE, AND NOTHING ELSE FROM THIS CRATE.
-# `src/retention.rs` needs `Store`, `Store::read_only_from_url`,
-# `Store::list_manifest_keys` and `Store::manifest_facts` (interface I12) to
-# report what retention WOULD remove; `src/main.rs` builds the one handle at
-# controller start (interface I13). Guard G-RET is that the handle this crate
+# `src/main.rs` builds the one handle at controller start (interface I13). Guard G-RET is that the handle this crate
 # can construct is the read-only one: `scripts/check-no-archive-write.sh`
 # refuses `Store::from_url` and every put/delete token anywhere under
 # `crates/weirkeeper/src/`, so taking this edge does not take the ability to

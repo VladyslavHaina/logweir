@@ -505,11 +505,9 @@ export const BUCKET_FOOTER =
   "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
   "archive even if the object listed here is deleted.";
 
-/** The retention panel's sentence. Logweir holds no delete capability of any
- *  kind against an archive (Global Constraint 6): the panel reports, and the
- *  commands beside it are the operator's to run. */
+/** The retention panel's sentence where no RetentionPolicy deletes. */
 export const RETENTION_SENTENCE =
-  "Logweir never deletes from your archive. These are the commands you would run.";
+  "Logweir never deletes from your archive.";
 
 /** The word a badge carries when it is not green. Never "pass", never
  *  "verified in your browser": this page verified nothing. */
@@ -3745,12 +3743,6 @@ export const VIEW_INCOMPLETE_SENTENCE =
   "view. A view is cut at the newest sync.viewLimit points, and also when entries do not fit " +
   "its pages or duplicate rows are merged, so raising viewLimit brings the missing points in " +
   "only in the first case.";
-
-/** The sentence the legacy schedule retention report carries once a
- *  RetentionPolicy covers the same destination. */
-export const SUPERSEDED_SENTENCE =
-  "A RetentionPolicy now covers this schedule's destination, and it is the evaluation that " +
-  "counts. This report is the legacy per-schedule one and is kept for continuity.";
 
 /** Health as a badge kind, by `ProtectionPolicy.status.health`. STRUCTURAL:
  *  the caption is the recorded word and the kind is a class suffix. */

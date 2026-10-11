@@ -853,6 +853,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_LEGACY_OWNER_REFERENCES_REMAIN,
     REASON_ACTIVE_LEGACY_RUNS_OWNED,
     REASON_MIGRATION_BLOCKED,
+    REASON_USE_RETENTION_POLICY,
     REASON_CAUGHT_UP,
     REASON_CATCH_UP_BLOCKED,
     REASON_RETRY_SCHEDULED,
@@ -970,6 +971,18 @@ pub const REASON_ACTIVE_LEGACY_RUNS_OWNED: &str = "ActiveLegacyRunsOwned";
 /// `HistoryRetained=False`: the migration cannot proceed.
 pub const REASON_MIGRATION_BLOCKED: &str = "MigrationBlocked";
 
+/// The condition a `BackupSchedule` carries while it still sets the withdrawn
+/// `spec.retention` (PROD-17.1 B1). `True` names the field; the schedule backs
+/// up as before.
+pub const CONDITION_RETENTION_REPORT_WITHDRAWN: &str = "RetentionReportWithdrawn";
+
+/// [`CONDITION_RETENTION_REPORT_WITHDRAWN`]'s reason.
+pub const REASON_USE_RETENTION_POLICY: &str = "UseRetentionPolicy";
+
+/// [`CONDITION_RETENTION_REPORT_WITHDRAWN`]'s message.
+pub const RETENTION_REPORT_WITHDRAWN_MESSAGE: &str =
+    "spec.retention no longer reports; use a RetentionPolicy";
+
 /// `BackupSchedule` `Ready` reason: every missed slot has been caught up.
 pub const REASON_CAUGHT_UP: &str = "CaughtUp";
 /// `Ready` reason: a catch-up is due but something blocks it.
@@ -1017,6 +1030,7 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
     CONDITION_TOPICS_RESOLVED,
     CONDITION_HISTORY_RETAINED,
+    CONDITION_RETENTION_REPORT_WITHDRAWN,
     CONDITION_RUNNER_READY,
 ];
 

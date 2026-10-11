@@ -44,44 +44,6 @@
           "name": "orders-hourly-20260912-120000"
         },
         "lastMissedSlot": "20260910-030000",
-        "retentionReport": {
-          "evaluatedAt": "2026-09-12T12:05:02Z",
-          "keepLast": 3,
-          "keepDays": 7,
-          "setsKept": [
-            "01JB7Z0000000000000000000B",
-            "01JB7Y0000000000000000000A",
-            "01JB7X00000000000000000009"
-          ],
-          "setsThatWouldBeRemoved": [
-            {
-              "backupId": "01JB7A00000000000000000001",
-              "newestRecordAt": "2026-09-01T10:15:00Z",
-              "reason": "OlderThanKeepDays",
-              "days": 7
-            },
-            {
-              "backupId": "01JB7B00000000000000000002",
-              "newestRecordAt": "2026-09-08T10:15:00Z",
-              "reason": "BeyondKeepLast",
-              "rank": 4
-            }
-          ],
-          "awsCli": [
-            "aws s3 rm 's3://kafka-backups/orders/01JB7A00000000000000000001/' --recursive",
-            "aws s3 rm 's3://kafka-backups/orders/01JB7B00000000000000000002/' --recursive"
-          ],
-          "mcCli": [
-            "mc rm --recursive --force 'local/kafka-backups/orders/01JB7A00000000000000000001/'",
-            "mc rm --recursive --force 'local/kafka-backups/orders/01JB7B00000000000000000002/'"
-          ],
-          "skipped": [
-            {
-              "key": "orders/stray/manifest.json",
-              "reason": "is not a backup manifest"
-            }
-          ]
-        },
         "conditions": [
           {
             "type": "Ready",

@@ -167,10 +167,8 @@ import { backupBadge, greenLabel, validVerification } from "../pages/backups.js"
 import { renderRestoreDetail, restoreBadge, scopeOf } from "../pages/history.js";
 import {
   enforcementOf,
-  policyForSchedule,
   renderEnforcement,
   renderEvaluationCounts,
-  renderRetentionPanel,
   retentionSentenceFor,
 } from "../pages/schedules.js";
 
@@ -1377,21 +1375,6 @@ test("an_external_lifecycle_policy_says_logweir_cannot_read_the_rule_back", () =
   assert.match(html, /expiring objects after 7 day\(s\)/);
   assert.match(html, /Logweir cannot read a bucket lifecycle configuration back/);
   assert.match(html, /every guarantee above that says so is a DECLARATION/);
-});
-
-test("the_policy_covering_a_schedule_comes_from_the_controllers_own_supersededBy", () => {
-  const policy = d3("retention-report.json");
-  const schedule = {
-    status: { retentionReport: { supersededBy: { kind: "RetentionPolicy", name: "keep-a" } } },
-  };
-  assert.equal(policyForSchedule(schedule, [policy]), policy);
-  assert.equal(policyForSchedule({ status: {} }, [policy]), null,
-    "with no supersededBy this page names no policy rather than matching on a destination");
-  assert.equal(policyForSchedule(schedule, []), null);
-
-  const panel = decode(renderRetentionPanel(schedule, policy));
-  assert.match(panel, /A RetentionPolicy now covers this schedule's destination/);
-  assert.match(panel, /This report is the legacy per-schedule one/);
 });
 
 // ===========================================================================

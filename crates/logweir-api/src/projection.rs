@@ -21,10 +21,9 @@ use crate::contract::{
     BackupDestinationRefView, CadenceAdjustment, CadencePreset, CatchUpPolicy, ConcurrencyPolicy,
     Connection, ConnectionAuthMode, ConnectionAuthView, IncompleteDiscoveryPolicy, LastSlotView,
     LastTestView, MissedSlotView, MissedSlotsView, NameRef, NextRunView, ObservedAuthView,
-    ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
-    RetentionReportView, RetentionView, RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView,
-    ScheduleStatusView, SubjectRefView, TlsCaView, TopicExclusions, TriggerKind, TriggerView,
-    VerifiedSubjectView, WindowCoveredView,
+    ReachabilityState, ReachabilityView, Restore, RestoreMode, RestoreTargetView, RetentionView,
+    RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView,
+    TlsCaView, TopicExclusions, TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
 use crate::validate::redact_url_userinfo;
@@ -124,53 +123,6 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
 #[must_use]
 pub fn schedule(object: &BackupSchedule) -> Schedule {
     let status = object.status.as_ref();
-    let report = status.and_then(|s| s.retention_report.as_ref()).map(|r| {
-        let mut truncated = false;
-        let mut cut = |len: usize| {
-            if len > MAX_LIST_ENTRIES {
-                truncated = true;
-            }
-            len.min(MAX_LIST_ENTRIES)
-        };
-        let kept = r.sets_kept.clone().unwrap_or_default();
-        let kept_len = cut(kept.len());
-        let removable = r.sets_that_would_be_removed.clone().unwrap_or_default();
-        let removable_len = cut(removable.len());
-        let aws = r.aws_cli.clone().unwrap_or_default();
-        let aws_len = cut(aws.len());
-        let mc = r.mc_cli.clone().unwrap_or_default();
-        let mc_len = cut(mc.len());
-        RetentionReportView {
-            evaluated_at: r.evaluated_at,
-            keep_last: r.keep_last,
-            keep_days: r.keep_days,
-            sets_kept: kept.into_iter().take(kept_len).collect(),
-            sets_that_would_be_removed: removable
-                .into_iter()
-                .take(removable_len)
-                .map(|s| RemovableSetView {
-                    backup_id: s.backup_id,
-                    newest_record_at: s.newest_record_at,
-                    reason: s.reason,
-                    days: s.days,
-                    rank: s.rank,
-                })
-                .collect(),
-            removal_commands: aws
-                .into_iter()
-                .take(aws_len)
-                .map(|c| redact_url_userinfo_in(&c))
-                .collect(),
-            mc_removal_commands: mc
-                .into_iter()
-                .take(mc_len)
-                .map(|c| redact_url_userinfo_in(&c))
-                .collect(),
-            skipped_manifests: r.skipped.as_ref().map_or(0, Vec::len),
-            note: r.note.clone(),
-            truncated,
-        }
-    });
     Schedule {
         name: object.name_any(),
         namespace: object.namespace().unwrap_or_default(),
@@ -275,7 +227,6 @@ pub fn schedule(object: &BackupSchedule) -> Schedule {
                 .and_then(|s| s.conditions.as_ref())
                 .and_then(|cs| cs.iter().find(|c| c.r#type == "Ready"))
                 .map(condition_view),
-            retention_report: report,
         },
     }
 }
@@ -337,21 +288,6 @@ pub fn all_user_topics(spec: &weirkeeper::crds::selection::AllUserTopics) -> All
             }
         },
     }
-}
-
-fn redact_url_userinfo_in(command: &str) -> String {
-    command
-        .split(' ')
-        .map(|word| {
-            let quoted = word.trim_matches('\'');
-            if quoted.contains("://") && quoted.contains('@') {
-                word.replace(quoted, &redact_url_userinfo(quoted))
-            } else {
-                word.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// WHERE A RECOVERY POINT IS, published from the two fields that record it and
