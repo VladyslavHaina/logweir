@@ -11,12 +11,10 @@
 //!
 //! # RET-WRONGBUCKET closes here, by construction
 //!
-//! The defect (`backup_schedule.rs:1417`) is that the legacy report lists
-//! manifests through the controller's ONE global store while rendering removal
-//! commands for the schedule's own URL, so a schedule writing to another bucket
-//! is reported against `LOGWEIR_ARCHIVE_URL`'s catalog. Since D1 W2 made
-//! `destinationRef` editable the same mismatch is reachable by an edit between
-//! runs.
+//! The defect was that the legacy per-schedule report (withdrawn, PROD-17.1 B1)
+//! listed manifests through the controller's ONE global store while rendering
+//! removal commands for the schedule's own URL, so a schedule writing to
+//! another bucket was reported against `LOGWEIR_ARCHIVE_URL`'s catalog.
 //!
 //! This module cannot make that mistake, and not because it is careful:
 //! [`Located`] is a private newtype whose ONLY constructor is
@@ -1356,65 +1354,4 @@ pub fn run_id(policy_uid: &str, plan_sha256: &str, slot: i64) -> String {
         "r{}",
         &logweir_core::ids::sha256_hex(material.as_bytes())[..16]
     )
-}
-
-// ---------------------------------------------------------------------------
-// The legacy `BackupSchedule` report's honesty note — D3 §6.3
-// ---------------------------------------------------------------------------
-
-/// What replaces a legacy retention report when the controller's one archive
-/// handle points somewhere else — decision D3 §6.3, defect **RET-WRONGBUCKET**.
-///
-/// The defect: `controllers/backup_schedule.rs` lists manifests through
-/// `Context::archive` (built once from `LOGWEIR_ARCHIVE_URL`) while rendering
-/// `aws s3 rm` / `mc rm` commands for `spec.archive.url`. A schedule writing to
-/// another bucket therefore got a report of the CONTROLLER's bucket wearing its
-/// own bucket's commands — and since D1 W2 made `destinationRef` editable, the
-/// mismatch is also reachable by an edit between runs.
-///
-/// The fix for a destination-backed archive is a `RetentionPolicy`, which reads
-/// its own destination's catalog view. The fix for a legacy schedule is this:
-/// say so, and report nothing.
-pub const LEGACY_DESTINATION_MISMATCH_NOTE: &str =
-    "the controller's archive handle points at a different destination; this schedule's \
-     retention is not evaluated here — create a RetentionPolicy";
-
-/// Whether the controller's one archive handle is over the same location the
-/// schedule names.
-///
-/// Compared on the CONTAINER AND THE PREFIX after
-/// [`crate::retention::bucket_and_prefix`] has normalised both, so
-/// `s3://b/p` and `s3://b/p/` are one location and `s3://b/p` and `s3://b/pp`
-/// are two.
-///
-/// # An UNKNOWN controller location answers `true`, and here is why
-///
-/// `None` means the caller could not say where the handle points. In the
-/// SHIPPED BINARY that pairing cannot occur: `main` builds the handle only when
-/// [`crate::retention::configured_archive_url`] returned `Some`, and the
-/// schedule reconciler re-reads the same process variable, which cannot change
-/// under a running process. So `Some(handle)` with `None` location is reachable
-/// only from a test that constructs the two inconsistently — an in-memory
-/// `Store` with no `LOGWEIR_ARCHIVE_URL` — and answering `false` there would
-/// replace a REPORT that a landed test asserts with a mismatch note about a
-/// mismatch nobody can be in.
-///
-/// The polarity is therefore "evaluate, as before, unless the two locations are
-/// both known and differ". `the_legacy_report_is_replaced_when_the_handle_is_
-/// elsewhere` is the row that drives the real mismatch, with both locations
-/// named.
-#[must_use]
-pub fn legacy_report_applies(schedule_url: &str, controller_url: Option<&str>) -> bool {
-    let Some(controller_url) = controller_url.filter(|u| !u.is_empty()) else {
-        return true;
-    };
-    let scheme_of = |u: &str| u.split_once("://").map(|(s, _)| s.to_string());
-    if scheme_of(schedule_url) != scheme_of(controller_url) {
-        return false;
-    }
-    let mine = crate::retention::bucket_and_prefix(schedule_url);
-    let theirs = crate::retention::bucket_and_prefix(controller_url);
-    let norm =
-        |(container, prefix): (String, String)| (container, prefix.trim_matches('/').to_string());
-    norm(mine) == norm(theirs)
 }

@@ -7361,52 +7361,6 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **A RETENTION REPORT IS NEVER ABOUT ANOTHER DESTINATION'S CATALOGUE** —
-/// defect RET-WRONGBUCKET, grounding G14.
-///
-/// The reconciler LISTS through the controller's one global handle and RENDERS
-/// `aws s3 rm` commands naming the SCHEDULE's own URL. On two buckets that is a
-/// report about bucket A printed as if it described bucket B, with commands
-/// naming keys in B that were listed in A.
-///
-/// KILLS: `retention_scope` returning `GlobalHandleApplies` unconditionally,
-/// and the `destination_backed` arm dropped (a destination-backed schedule then
-/// gets a report computed from a handle that cannot see its bucket).
-#[test]
-fn a_retention_report_is_withheld_when_it_would_describe_another_bucket() {
-    use weirkeeper::destination::{retention_scope, RetentionScope};
-
-    assert!(
-        retention_scope("s3://kb/team-a", Some("s3://kb"), false).reports(),
-        "two prefixes of ONE bucket are both describable by a handle on that bucket — the \
-         listing is prefix-scoped by the report itself"
-    );
-    match retention_scope("s3://team-b-bucket/x", Some("s3://kb"), false) {
-        RetentionScope::WrongBucket {
-            schedule_bucket,
-            handle_bucket,
-        } => {
-            assert_eq!(schedule_bucket, "team-b-bucket");
-            assert_eq!(handle_bucket, "kb");
-        }
-        other => panic!("a different bucket withholds the report; got {other:?}"),
-    }
-    assert!(
-        !retention_scope("s3://kb/team-a", Some("s3://kb"), true).reports(),
-        "a destination-backed schedule gets NO report until PLAT-16.1's per-destination \
-         archive-inventory check: the global handle is for objects without a destinationRef"
-    );
-    assert!(
-        !retention_scope("s3://kb/team-a", None, false).reports(),
-        "and a controller with no handle reports nothing at all"
-    );
-    assert!(
-        !retention_scope("logweir-destination://dest-a", Some("s3://kb"), true).reports(),
-        "the sentinel URL is not a bucket, and an unreadable URL is never the same bucket as \
-         anything — the safe direction"
-    );
-}
-
 /// **THE ENVIRONMENT A DESTINATION-BACKED JOB CARRIES DRIVES THE REAL RUNNER
 /// PAST ITS STORE BUILDERS** — the independent review's **C1**, closed
 /// end-to-end.

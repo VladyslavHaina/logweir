@@ -30,7 +30,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- /*
 The archive settings, with `minio.enabled` supplying the defaults an empty value
 leaves open. Each helper returns "" when there is nothing to render, which is
-the shipped install: no archive handle, no retention report, no addressing env.
+the shipped install: no archive handle, no addressing env.
 */ -}}
 {{- define "logweir.archive.url" -}}
 {{- if .Values.archive.url -}}

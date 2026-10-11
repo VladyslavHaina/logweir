@@ -516,25 +516,6 @@ const CONNECTION = shapeOf(
 
 const RETENTION = shapeOf("RetentionView", {}, { keepLast: int, keepDays: int });
 
-const REMOVABLE_SET = shapeOf(
-  "RemovableSetView",
-  { backupId: str, newestRecordAt: str, reason: str },
-  { days: int, rank: int },
-);
-
-const RETENTION_REPORT = shapeOf(
-  "RetentionReportView",
-  {
-    setsKept: listOf(str),
-    setsThatWouldBeRemoved: listOf(objectOf(REMOVABLE_SET)),
-    removalCommands: listOf(str),
-    mcRemovalCommands: listOf(str),
-    skippedManifests: int,
-    truncated: bool,
-  },
-  { evaluatedAt: str, keepLast: int, keepDays: int, note: str },
-);
-
 // ---------------------------------------------- D1 W7: the cadence policy
 //
 // THE FOUR CLOSED SETS BELOW ARE THE CONTROLLER'S OWN SPELLINGS. `nextRuns[]`
@@ -606,7 +587,7 @@ const SCHEDULE_STATUS = shapeOf(
     lastSlot: objectOf(LAST_SLOT), missedSlots: objectOf(MISSED_SLOTS),
     lastFireTime: str, nextFireTime: str, lastMissedSlot: str,
     activeBackup: str, pendingBackup: str,
-    ready: objectOf(CONDITION), retentionReport: objectOf(RETENTION_REPORT),
+    ready: objectOf(CONDITION),
     // D1 W7. `activeRuns` ABSENT means "not yet computed", never "none are
     // running", and `ui/pages/schedules.js` renders those two differently.
     observedGeneration: int, policy: objectOf(SCHEDULE_POLICY),
@@ -1894,8 +1875,6 @@ export const CONSOLE_SHAPES = Object.freeze({
   ReachabilityView: REACHABILITY,
   Connection: CONNECTION,
   RetentionView: RETENTION,
-  RemovableSetView: REMOVABLE_SET,
-  RetentionReportView: RETENTION_REPORT,
   ScheduleStatusView: SCHEDULE_STATUS,
   LastSlotView: LAST_SLOT,
   MissedSlotView: MISSED_SLOT,
@@ -2379,13 +2358,6 @@ export const ALERT_KINDS = Object.freeze([
 /** An alert ledger entry's own state. */
 export const ALERT_STATES = Object.freeze(["Open", "Resolved"]);
 
-/** What happened to the delivery of one transition. `Suppressed` means no sink
- *  was configured for the kind, which is a configuration choice and not a
- *  failure (D3 section 3.4). */
-export const DELIVERY_STATES = Object.freeze([
-  "Pending", "Delivered", "Failed", "Suppressed",
-]);
-
 /** A catalog entry's availability axis (D3 section 5.4) -- the BEST of its
  *  locations. */
 export const AVAILABILITY_STATES = Object.freeze([
@@ -2707,19 +2679,10 @@ const D3_SCHEDULE_HEALTH = shapeOf(
   { suspended: bool, ready: str, nextFireTime: str, lastMissedSlot: str },
 );
 
-const D3_DELIVERY = shapeOf(
-  "AlertDeliveryView",
-  {},
-  { state: str, attempts: int, lastAttemptAt: str, lastError: str },
-);
-
 const D3_ALERT = shapeOf(
   "AlertView",
   { key: str, kind: str, state: str },
-  {
-    openedAt: str, resolvedAt: str, transition: int, notifiedTransition: int,
-    delivery: objectOf(D3_DELIVERY),
-  },
+  { openedAt: str, resolvedAt: str, transition: int },
 );
 
 const D3_OBJECTIVES = shapeOf(
@@ -2741,20 +2704,6 @@ const D3_PROTECTS = shapeOf(
   },
 );
 
-/** One notification route, as BOOLEANS. The three sinks say only whether one
- *  is CONFIGURED: no URL, no routing key and no Secret value crosses this
- *  boundary, which is why they are required and why they are not strings. */
-const D3_NOTIFICATION_ROUTE = shapeOf(
-  "NotificationRouteView",
-  { name: str, pagerDuty: bool, webhook: bool, slack: bool },
-);
-
-const D3_NOTIFICATIONS = shapeOf(
-  "NotificationsView",
-  { sendResolved: bool, renotifyAfterSeconds: int },
-  { routes: listOf(objectOf(D3_NOTIFICATION_ROUTE)), kinds: listOf(str) },
-);
-
 const D3_PROTECTION = shapeOf(
   "ProtectionPolicyView",
   {
@@ -2764,7 +2713,6 @@ const D3_PROTECTION = shapeOf(
   },
   {
     createdAt: str, generation: int,
-    notifications: objectOf(D3_NOTIFICATIONS),
     observedGeneration: int, evaluatedAt: str,
     health: str, availabilityBasis: str,
     lastAvailablePoint: objectOf(D3_LAST_POINT),
@@ -3180,13 +3128,10 @@ export const D3_SHAPES = Object.freeze({
   ProtectionPolicyList: D3_PROTECTION_LIST,
   ProtectedSubjectView: D3_PROTECTS,
   ObjectivesView: D3_OBJECTIVES,
-  NotificationsView: D3_NOTIFICATIONS,
-  NotificationRouteView: D3_NOTIFICATION_ROUTE,
   AvailablePointView: D3_LAST_POINT,
   LastAttemptView: D3_LAST_ATTEMPT,
   ScheduleHealthView: D3_SCHEDULE_HEALTH,
   AlertView: D3_ALERT,
-  AlertDeliveryView: D3_DELIVERY,
   CatalogView: D3_CATALOG,
   CatalogResponse: D3_CATALOG_RESPONSE,
   CatalogList: D3_CATALOG_LIST,
@@ -3253,7 +3198,6 @@ export const D3_WORDS = Object.freeze({
   pointEvidence: POINT_EVIDENCE,
   alertKind: ALERT_KINDS,
   alertState: ALERT_STATES,
-  deliveryState: DELIVERY_STATES,
   pointAvailability: AVAILABILITY_STATES,
   pointVerification: CATALOG_VERIFICATIONS,
   retentionEnforcement: ENFORCEMENT_STATES,

@@ -71,9 +71,10 @@ and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
 changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
 authorizations withdrawn), 74 (PROD-17.1, four parts v1 does not use are
 withdrawn), 75 (PROD-17.1, surfaces withdrawn for the v1 cut), 76
-(PROD-17.1, the Helm chart is the only install) and 77 (PROD-17.1 B5, an
-unparseable restore plan refused before its approval is read) so far. Items continue the
-next entry's
+(PROD-17.1, the Helm chart is the only install), 77 (PROD-17.1 B5, an
+unparseable restore plan refused before its approval is read) and 78
+(PROD-17.1 B1, a schedule's `spec.retention` stops reporting) so far. Items
+continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3390,6 +3391,9 @@ OD-12); each part below did nothing v1 uses.
   `credentialBindings` status and the chart's `notify.allowInsecureSinks`.
   Health, the objectives, the alert ledger (`status.alerts`: open and
   resolved, no delivery state) and the console's `#/protection` page stay.
+  The page's three delivery columns and the product API's `notifications`,
+  `notifiedTransition` and `delivery` members, empty once this item lands,
+  are removed (PROD-17.1 C2's leftover).
   An upgraded install sees: a policy that still carries `spec.notifications`
   parses, the API server keeps the key and drops its contents, and the
   policy's `NotificationsDelivered` condition reads `False` /
@@ -3551,6 +3555,34 @@ admission, bundle and Job row unchanged.
 **Rollback:** roll the controller back; an older controller waits for the
 approval again and refuses such a plan later, as before.
 
+#### 78. A `spec.retention` on a BackupSchedule stops reporting; use a RetentionPolicy (PROD-17.1 B1)
+
+**Changed.** `BackupSchedule.spec.retention{keepLast, keepDays}` stops
+reporting, and `status.retentionReport` is no longer written. The report only
+ever printed `aws s3 rm` and `mc rm` suggestions and deleted nothing; v1's
+deletion path is a `RetentionPolicy` (OD-12). A schedule that still sets the
+field keeps backing up: the field stays in the CRD so the object parses, the
+controller ignores it, and the schedule carries one condition,
+`RetentionReportWithdrawn=True`, reason `UseRetentionPolicy`, message
+`spec.retention no longer reports; use a RetentionPolicy`. The product API's
+schedule view no longer has `status.retentionReport` (the `RetentionReportView`
+schema is gone); the create and edit routes still accept `retention`, which is
+stored and ignored. The console's retention panel says retention is a
+RetentionPolicy's instead of printing the report.
+**What an upgraded install sees.** After the CRD upgrade the API server drops
+a stored `status.retentionReport`. A schedule that sets `spec.retention` gets
+the condition on its next reconcile; one that does not sees no change.
+**Do:** nothing is required. For pruning advice on a destination, create a
+`RetentionPolicy` in `mode: Report` ([kubernetes.md](kubernetes.md) §7f).
+Remove `spec.retention` from a schedule to clear the condition.
+**Scope:** a controller row over the recording store (a schedule that sets
+`spec.retention` fires its slot, carries the condition, and writes nothing more
+over twenty settled passes; the control without the field carries none), a
+console row (the panel prints the pointer and none of an old report the fixture
+still carries), and the regenerated CRDs and OpenAPI document. [UNVERIFIED — no live install has run this build's condition yet; PROD-14.1's clean install carries it.]
+**Rollback:** roll the chart's CRDs, the controller and the console back
+together; the older controller writes the report again on its next reconcile.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3675,7 +3707,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76 and 77, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77 and 78, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3766,7 +3798,8 @@ withdraws what its own section lists; item 75 changes the product API, the
 console, the chart and the published image set, and needs any `ui` block
 removed from values files first; item 76 changes no image, and a bundle
 install moves to the chart once; item 77 changes the controller only and
-needs nothing. To roll back to
+needs nothing; item 78 changes the CRDs, the controller, the
+product API and the console, and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

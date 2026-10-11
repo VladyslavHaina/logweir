@@ -278,8 +278,8 @@ trusted, and the restore's completion panel appears.
 
 ### 10. Retention: reported by default, deleted only by decision
 
-A schedule's retention settings only **report** what would be removed. A
-`RetentionPolicy` starts in `mode: Report`. Moving it to `Enforce` is a
+A schedule's own retention settings are withdrawn; retention is a
+`RetentionPolicy`'s. A `RetentionPolicy` starts in `mode: Report`. Moving it to `Enforce` is a
 retention administrator's decision that also needs a separate delete-capable
 credential with `s3:GetObject`, an unversioned bucket, the `logweir-retention`
 ServiceAccount, and an administrator's approval of each plan digest

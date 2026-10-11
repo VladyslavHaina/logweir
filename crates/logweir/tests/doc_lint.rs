@@ -2223,6 +2223,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // PROD-17.1 B5 (2026-10-11, item 77): an unparseable plan is refused
         // before its approval is read.
         ("an unparseable plan refused early", "PlanUnparseable"),
+        // PROD-17.1 B1 (2026-10-11, item 78): a schedule's `spec.retention`
+        // stops reporting; the condition a schedule that still sets it carries.
+        (
+            "a schedule's spec.retention stops reporting",
+            "RetentionReportWithdrawn",
+        ),
     ];
     assert_eq!(
         items.len(),

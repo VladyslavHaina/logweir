@@ -51,8 +51,7 @@
 //! store cache. **W10** wires [`ResolvedDestination::job_env`] and
 //! [`ResolvedDestination::plan_storage`] into `controllers/backup.rs` and
 //! `controllers/restore.rs`, freezes [`ResolvedDestinationSnapshot`] into
-//! PLAT-06.1's `execution-inputs.json` (seam **S4**), and applies
-//! [`retention_scope`] in `controllers/backup_schedule.rs` (D2 §3.10, G14).
+//! PLAT-06.1's `execution-inputs.json` (seam **S4**).
 
 use std::collections::BTreeSet;
 
@@ -2020,113 +2019,7 @@ impl ResolvedDestinationSnapshot {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The retention guard (D2 §3.10, G14)
-// ---------------------------------------------------------------------------
-
-/// Whether the controller's ONE global archive handle may be used to report
-/// retention for a schedule — D2 §3.10, grounding **G14**.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RetentionScope {
-    /// The schedule's archive is the global handle's archive. Report as today.
-    GlobalHandleApplies,
-    /// The schedule names a DIFFERENT bucket. No report, and one INFO line
-    /// naming both buckets.
-    WrongBucket {
-        /// The bucket the schedule writes to.
-        schedule_bucket: String,
-        /// The bucket the controller's handle reads.
-        handle_bucket: String,
-    },
-    /// The schedule is destination-backed. No report until PLAT-16.1 adds the
-    /// per-destination archive-inventory check kind.
-    DestinationBacked,
-    /// No global handle is configured at all.
-    NoHandle,
-}
-
-impl RetentionScope {
-    /// Whether a retention report may be written.
-    #[must_use]
-    pub fn reports(&self) -> bool {
-        matches!(self, Self::GlobalHandleApplies)
-    }
-}
-
-/// Decide whether a schedule's retention report may be computed through the
-/// global handle — the guard defect **RET-WRONGBUCKET** needs.
-///
-/// # The defect, exactly
-///
-/// `controllers/backup_schedule.rs` lists manifests through the controller's
-/// ONE global handle while rendering `aws s3 rm` / `mc rm` commands for the
-/// SCHEDULE's own `archive.url`. On an installation with two buckets that is a
-/// report about bucket A printed as if it described bucket B — and the commands
-/// it prints name keys in B that were listed in A. An operator who runs them
-/// deletes the wrong objects, or nothing, and either way the report was never
-/// about their catalogue.
-///
-/// # Why the comparison is the BUCKET and not the whole URL
-///
-/// A schedule's `archive.url` carries a prefix; the handle's URL carries the
-/// root the operator configured. Two schedules writing `s3://kb/team-a` and
-/// `s3://kb/team-b` through a handle on `s3://kb` are both describable by that
-/// handle — the listing is prefix-scoped by the report itself. A different
-/// BUCKET is the case where the listing cannot be about the schedule at all.
-///
-/// # Arguments
-///
-/// `schedule_archive_url` is `BackupSchedule.spec.archive.url`;
-/// `handle_archive_url` is [`crate::retention::ARCHIVE_URL_ENV`]'s value, or
-/// `None` when this controller holds no handle; `destination_backed` is whether
-/// the schedule carries a `destinationRef`.
-///
-/// **W10 wires this into `controllers/backup_schedule.rs`.** It is a pure
-/// function here so the property has a test that names a bucket rather than a
-/// route table.
-#[must_use]
-pub fn retention_scope(
-    schedule_archive_url: &str,
-    handle_archive_url: Option<&str>,
-    destination_backed: bool,
-) -> RetentionScope {
-    if destination_backed {
-        return RetentionScope::DestinationBacked;
-    }
-    let Some(handle) = handle_archive_url else {
-        return RetentionScope::NoHandle;
-    };
-    let schedule_bucket = bucket_of(schedule_archive_url);
-    let handle_bucket = bucket_of(handle);
-    if !schedule_bucket.is_empty() && schedule_bucket == handle_bucket {
-        RetentionScope::GlobalHandleApplies
-    } else {
-        RetentionScope::WrongBucket {
-            schedule_bucket,
-            handle_bucket,
-        }
-    }
-}
-
-/// The bucket (or container, or filesystem root) an object-store URL names.
-///
-/// Derived from [`crate::retention::storage_url_for`] rather than re-parsed, so
-/// the two cannot disagree about which bucket a URL names — which is the exact
-/// failure class this guard exists to close.
-fn bucket_of(url: &str) -> String {
-    match crate::retention::storage_url_for(url) {
-        Ok(u) => storage_bucket(&u).1,
-        // AN UNREADABLE URL IS NOT THE SAME BUCKET AS ANYTHING. Returning the
-        // empty string here makes `retention_scope` answer `WrongBucket`, which
-        // withholds the report — the safe direction. The `Backup` path reports
-        // the URL itself as `ArchiveUrlUnreadable`; a retention REPORT is not
-        // the place to raise it a second time.
-        Err(_) => String::new(),
-    }
-}
-
-/// `(backend, bucket)` of a parsed location — [`bucket_of`]'s arms, over a
-/// `StorageUrl` a plan already carries.
+/// `(backend, bucket)` of a parsed location.
 ///
 /// THE BACKEND IS HALF OF THE ANSWER. `s3://kb` and `gs://kb` are two buckets
 /// that happen to share a name, and a guard comparing names alone would read
@@ -2149,7 +2042,7 @@ fn storage_bucket(u: &StorageUrl) -> (&'static str, String) {
 // ---------------------------------------------------------------------------
 
 /// Whether the controller's ONE global handle can read an inline-archive run's
-/// EVIDENCE — the evidence twin of [`retention_scope`].
+/// EVIDENCE.
 ///
 /// # The defect this closes (legacy-point-restore, PoC P5)
 ///
@@ -2170,10 +2063,9 @@ fn storage_bucket(u: &StorageUrl) -> (&'static str, String) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LegacyEvidenceScope {
     /// The caller did not state where the handle points — the reconcile entry
-    /// points tests drive with in-memory oracles. Evaluated AS BEFORE, which is
-    /// [`crate::retention_plan::legacy_report_applies`]'s polarity and for its
-    /// reason: in the shipped binary a handle exists only when
-    /// `LOGWEIR_ARCHIVE_URL` names one, and then the caller passes it.
+    /// points tests drive with in-memory oracles. Evaluated AS BEFORE: in the
+    /// shipped binary a handle exists only when `LOGWEIR_ARCHIVE_URL` names
+    /// one, and then the caller passes it.
     HandleLocationUnstated,
     /// The evidence is in the handle's bucket: read it through the handle.
     GlobalHandleApplies,
@@ -2222,7 +2114,7 @@ impl LegacyEvidenceScope {
 /// at `evidence` — a restore plan's `evidence:` block, or a backup's archive
 /// (its receipt goes under the archive's own bucket, D2 grounding G7).
 ///
-/// Compared on the BACKEND AND THE BUCKET, like [`retention_scope`]: every key
+/// Compared on the BACKEND AND THE BUCKET: every key
 /// a runner prints is bucket-relative, so the bucket is the whole question.
 /// The ENDPOINT is not compared — the handle's comes from the controller's own
 /// environment — so a same-named bucket on another endpoint is read and found
@@ -2249,7 +2141,7 @@ pub fn legacy_evidence_scope(
             LegacyEvidenceScope::GlobalHandleApplies
         }
         // AN UNREADABLE HANDLE URL IS NOT THE SAME BUCKET AS ANYTHING — the
-        // safe direction, as in `bucket_of`.
+        // safe direction.
         _ => LegacyEvidenceScope::Elsewhere {
             evidence: evidence_at,
             handle: handle.to_string(),

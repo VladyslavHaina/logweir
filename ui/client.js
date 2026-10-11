@@ -712,8 +712,6 @@ const ABSENT_IN_CONSOLE = Object.freeze({
   // one means the controller has recorded nothing yet -- the console and the
   // API ship in one image, so there is no older API behind a newer page.
   backupschedules: Object.freeze([
-    "status.retentionReport.skipped[].key",
-    "status.retentionReport.skipped[].reason",
     "status.pendingRun",
     "status.history",
   ]),
@@ -989,52 +987,12 @@ function projectSchedule(item) {
   if (view.ready !== null) {
     status.conditions = [condition(view.ready)];
   }
-  if (view.retentionReport !== null) {
-    const r = view.retentionReport;
-    const report = {
-      setsKept: r.setsKept.slice(),
-      setsThatWouldBeRemoved: r.setsThatWouldBeRemoved.map(removable),
-      awsCli: r.removalCommands.slice(),
-      mcCli: r.mcRemovalCommands.slice(),
-    };
-    // `note` IS THE CRD's OWN FIELD AND THE API PUBLISHES IT (console class
-    // sweep): "why nothing would be removed". It used to be dropped here, so a
-    // shared console printed `note: -` for a report that said why.
-    for (const field of ["evaluatedAt", "keepLast", "keepDays", "note"]) {
-      if (r[field] !== null && r[field] !== undefined) {
-        report[field] = r[field];
-      }
-    }
-    // AND TWO FACTS THE CUSTOM RESOURCE HAS NO FIELD FOR, carried beside it
-    // under projection names (like `__summary`). The API bounds every list to
-    // 100 entries and says so in `truncated`; it publishes how many manifests
-    // could not be read (`skippedManifests`) and not their keys, which the
-    // CRD keeps in `skipped[]`. Dropping both made a cut list read as the
-    // whole report and a report with unreadable manifests read as one with
-    // none. `schedules.js` `renderRetentionPanel` says each.
-    report.__truncated = r.truncated === true;
-    if (typeof r.skippedManifests === "number") {
-      report.__skippedManifests = r.skippedManifests;
-    }
-    status.retentionReport = report;
-  }
   object.status = status;
   return object;
 }
 
 function activeRun(run) {
   return { name: run.name, kind: run.kind, attempt: run.attempt };
-}
-
-function removable(set) {
-  const out = { backupId: set.backupId, newestRecordAt: set.newestRecordAt, reason: set.reason };
-  if (set.days !== null) {
-    out.days = set.days;
-  }
-  if (set.rank !== null) {
-    out.rank = set.rank;
-  }
-  return out;
 }
 
 function condition(view) {

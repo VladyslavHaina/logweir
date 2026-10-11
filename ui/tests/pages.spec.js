@@ -49,6 +49,7 @@ import {
 import { renderClusterList } from "../pages/clusters.js";
 import {
   NO_POINTS_SENTENCE,
+  RETENTION_POINTER_SENTENCE,
   renderRecoveryPoints,
   renderRetentionPanel,
   renderScheduleList,
@@ -498,32 +499,24 @@ test("every_list_view_carries_the_bucket_footer", () => {
   assert.ok(views[3][1].includes("orders-drill-a") && views[3][1].includes("Backup"));
 });
 
-test("the_retention_panel_says_logweir_never_deletes", () => {
-  assert.equal(
-    RETENTION_SENTENCE,
-    "Logweir never deletes from your archive. These are the commands you would run.",
-  );
+test("the_retention_panel_points_at_a_retention_policy_and_prints_no_report", () => {
+  // PROD-17.1 B1: a schedule's own retention report is withdrawn. The panel
+  // points at a RetentionPolicy and prints none of a report -- not even the
+  // one this fixture still carries from a controller before the withdrawal.
+  assert.equal(RETENTION_SENTENCE, "Logweir never deletes from your archive.");
   const object = fixture("schedule-retention.json");
-  const out = renderRetentionPanel(object);
-  assert.ok(
-    out.includes("Logweir never deletes from your archive. These are the commands you would run."),
-  );
-  assert.ok(out.includes("aws s3 rm"), "the scheme's own removal command is printed");
-  assert.ok(out.includes("mc rm"), "and the mc spelling of the same removal");
-
+  const report = object.status.retentionReport;
+  assert.ok(report.awsCli.length > 0 && report.setsKept.length > 0,
+    "CONTROL: the fixture carries a report, so its absence below is the panel's doing");
+  const out = renderRetentionPanel(object, null, []);
   const text = decode(out);
-  for (const command of object.status.retentionReport.awsCli) {
-    assert.ok(text.includes(command), "the awsCli command is printed verbatim: " + command);
+  assert.ok(text.includes(RETENTION_POINTER_SENTENCE), "the pointer is printed");
+  assert.ok(text.includes(RETENTION_SENTENCE), "no policy deletes, so the sentence stands");
+  for (const command of report.awsCli.concat(report.mcCli)) {
+    assert.ok(!text.includes(command), "no removal command is printed: " + command);
   }
-  for (const command of object.status.retentionReport.mcCli) {
-    assert.ok(text.includes(command), "the mcCli command is printed verbatim: " + command);
-  }
-  for (const set of object.status.retentionReport.setsThatWouldBeRemoved) {
-    assert.ok(out.includes(set.backupId), "the set that would be removed is named");
-    assert.ok(out.includes(set.reason), "and why");
-  }
-  for (const kept of object.status.retentionReport.setsKept) {
-    assert.ok(out.includes(kept), "the kept set is named");
+  for (const kept of report.setsKept) {
+    assert.ok(!out.includes(kept), "no kept set is listed: " + kept);
   }
 });
 

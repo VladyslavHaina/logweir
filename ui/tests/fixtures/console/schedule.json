@@ -31,32 +31,6 @@
         "reason": "Reachable",
         "status": "True",
         "type": "Complete"
-      },
-      "retentionReport": {
-        "evaluatedAt": "2026-09-12T12:05:02Z",
-        "keepDays": 7,
-        "keepLast": 3,
-        "mcRemovalCommands": [
-          "mc rm --recursive --force 'local/kafka-backups/orders/01JB7A00000000000000000001/'"
-        ],
-        "removalCommands": [
-          "aws s3 rm 's3://kafka-backups/orders/01JB7A00000000000000000001/' --recursive"
-        ],
-        "setsKept": [
-          "01JB7Z0000000000000000000B",
-          "01JB7X00000000000000000009"
-        ],
-        "setsThatWouldBeRemoved": [
-          {
-            "backupId": "01JB7X00000000000000000009",
-            "days": 7,
-            "newestRecordAt": "2026-09-01T10:15:00Z",
-            "rank": 4,
-            "reason": "Reachable"
-          }
-        ],
-        "skippedManifests": 1,
-        "truncated": true
       }
     },
     "suspended": false,

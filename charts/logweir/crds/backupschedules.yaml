@@ -43,7 +43,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. Retention REPORTS what it would remove and deletes nothing.
+        description: A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. A `RetentionPolicy` governs retention; `spec.retention` is withdrawn and ignored.
         properties:
           spec:
             description: '`BackupSchedule.spec`. Every field is editable except `sourceRef` — see the module header.'
@@ -154,16 +154,16 @@ spec:
                 - name
                 type: object
               retention:
-                description: '`{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.'
+                description: 'Withdrawn: ignored, and named by the `RetentionReportWithdrawn` condition. Use a `RetentionPolicy`.'
                 nullable: true
                 properties:
                   keepDays:
-                    description: Keep backup sets newer than N days; older sets are REPORTED as removable.
+                    description: Ignored (withdrawn).
                     format: int64
                     nullable: true
                     type: integer
                   keepLast:
-                    description: Keep the most recent N backup sets; older sets are REPORTED as removable.
+                    description: Ignored (withdrawn).
                     format: int64
                     nullable: true
                     type: integer
@@ -593,100 +593,6 @@ spec:
                 - runPolicySha256
                 - timeZone
                 - tzdb
-                type: object
-              retentionReport:
-                description: What retention WOULD remove. Nothing was deleted — see [`RetentionReport`].
-                nullable: true
-                properties:
-                  awsCli:
-                    description: |-
-                      The exact removal command for each set above, one per set, in the same order, **in the CLI of that archive's own scheme** — `aws s3 rm` for `s3://`, `gsutil -m rm -r` for `gs://`, `az storage blob delete-batch` for `az://` and `rm -rf` for `file://`. **Reported, never executed.**
-
-                      THE FIELD NAME SAYS `aws` AND THREE OF THE FOUR SCHEMES DO NOT, and the name is deliberately unchanged (Task 24a, plan erratum **E18(b)**): renaming a status field an adopter may already read, to fix a description, would cost more than the description was worth. What was actually broken is what the field CONTAINED — it printed `aws s3 rm 'file:///…'` for a filesystem archive, a string an operator runs and which does nothing — and that is fixed. This sentence is the description catching up with the value.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  evaluatedAt:
-                    description: When an evaluation first reached the findings below. Later evaluations that find the same keep this instant, so it is when the findings last changed, not when the controller last looked.
-                    format: date-time
-                    nullable: true
-                    type: string
-                  keepDays:
-                    description: '`spec.retention.keepDays`, as it was applied.'
-                    format: int64
-                    nullable: true
-                    type: integer
-                  keepLast:
-                    description: '`spec.retention.keepLast`, **as it was applied**. Absent when no rule was configured, or when the configured value was not a non-negative count and was therefore not applied.'
-                    format: int64
-                    nullable: true
-                    type: integer
-                  mcCli:
-                    description: The same commands in `mc`'s spelling. Reported, never executed.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  note:
-                    description: Why the evaluation removed nothing, when the reason is not "there is nothing to remove" — set when no retention rule is configured.
-                    nullable: true
-                    type: string
-                  setsKept:
-                    description: The `backupId`s the policy keeps, newest first.
-                    items:
-                      type: string
-                    nullable: true
-                    type: array
-                  setsThatWouldBeRemoved:
-                    description: The sets the policy WOULD remove, newest first. They are still in the archive; Logweir deleted nothing.
-                    items:
-                      description: One set retention WOULD remove. **It is still in the archive.**
-                      properties:
-                        backupId:
-                          description: The backup set's id — the manifest key's parent directory.
-                          type: string
-                        days:
-                          description: The configured `keepDays`, when `reason` is `OlderThanKeepDays`.
-                          format: int64
-                          nullable: true
-                          type: integer
-                        newestRecordAt:
-                          description: The set's newest record instant, read from the manifest BODY and never from the key string, which carries no timestamp.
-                          format: date-time
-                          type: string
-                        rank:
-                          description: The set's 1-based rank in newest-first order, when `reason` is `BeyondKeepLast`.
-                          format: int64
-                          nullable: true
-                          type: integer
-                        reason:
-                          description: '`OlderThanKeepDays` or `BeyondKeepLast`. `OlderThanKeepDays` when both rules select the set, because age is the reason an operator acts on.'
-                          type: string
-                      required:
-                      - backupId
-                      - newestRecordAt
-                      - reason
-                      type: object
-                    nullable: true
-                    type: array
-                  skipped:
-                    description: 'The manifest keys under the prefix that could not be read, and why. Each was SKIPPED: it is in neither `setsKept` nor `setsThatWouldBeRemoved`, and the rest of the archive was still evaluated. An empty list means every manifest under the prefix was read.'
-                    items:
-                      description: One manifest key the evaluation could not read. **Task 19 review, F-5.**
-                      properties:
-                        key:
-                          description: The manifest key, exactly as the archive listed it.
-                          type: string
-                        reason:
-                          description: Why it could not be read — `is not a backup manifest` for a sibling JSON object the `/manifest.json` filter picked up, or the storage error's own message.
-                          type: string
-                      required:
-                      - key
-                      - reason
-                      type: object
-                    nullable: true
-                    type: array
                 type: object
             type: object
         required:

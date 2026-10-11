@@ -4,7 +4,7 @@
 //! receipt, a scorecard, a sidecar and a manifest WHOLE, so one tenant's
 //! multi-gigabyte object at an evidence key could OOM-kill the controller that
 //! serves every namespace, and each restart read it again. These rows hold the
-//! controller's five read paths to their caps:
+//! controller's read paths to their caps:
 //!
 //! * `verify_evidence` — the document under the cap of what it is (FX-33:
 //!   `caps::CONTROLLER_RECEIPT` for a backup receipt, `caps::CONTROLLER_DOCUMENT`,
@@ -12,14 +12,16 @@
 //! * `observe_archive` — the receipt under the receipt cap, the sidecar's
 //!   presence by `HEAD`;
 //! * `observe_scorecard` — the scorecard under the document cap;
-//! * `read_signing_time` — the document under its own kind's cap;
-//! * the retention report — each manifest under `caps::CONTROLLER_MANIFEST`.
+//! * `read_signing_time` — the document under its own kind's cap.
+//!
+//! (The per-schedule retention report was a fifth path; it is withdrawn,
+//! PROD-17.1 B1.)
 //!
 //! Over the cap: `NotAttempted` (or "not observed", or `skipped`) NAMING the
 //! cap — never a crash and never a pass — and FINAL, so the object is not read
 //! again on the schedule. A normal document still verifies.
 //!
-//! The last row measures the peak resident set of all five paths in a CHILD
+//! The last row measures the peak resident set of all these paths in a CHILD
 //! process over a 512 MiB object (`getrusage`, as
 //! `crates/logweir-engine-oso/tests/offset_report_memory.rs` does), with
 //! controls that show the meter sees a whole read.
@@ -35,7 +37,6 @@ use logweir_core::ids::sha256_prefixed;
 use logweir_store::{caps, Store};
 use weirkeeper::controllers::backup::{observe_archive, EvidenceKeys};
 use weirkeeper::controllers::restore::{observe_scorecard, split_refused};
-use weirkeeper::crds::backup_schedule::Retention;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRosterSpec};
 use weirkeeper::trust::ResolvedTrust;
 use weirkeeper::verification::{
@@ -291,49 +292,13 @@ fn the_signing_time_re_read_names_the_cap() {
 }
 
 // ===========================================================================
-// The retention report
-// ===========================================================================
-
-/// A manifest over the controller's manifest cap is SKIPPED with the sentence
-/// naming the cap — neither kept nor removable — and the rest is reported.
-#[test]
-fn the_retention_report_skips_an_oversized_manifest_naming_the_cap() {
-    let (store, meter) = Store::in_memory_misreporting_size("logweir/", 5 << 30);
-    put(
-        &store,
-        "logweir/archive/b1/manifest.json",
-        br#"{"topics":[{"partitions":[{"segments":[{"start_timestamp":1,"end_timestamp":2}]}]}]}"#,
-    );
-    let report = weirkeeper::retention::evaluate(
-        &store,
-        "s3://bucket/logweir/archive/",
-        "logweir/archive/",
-        &Retention {
-            keep_last: Some(1),
-            keep_days: None,
-        },
-        Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
-    )
-    .expect("the listing answers");
-    assert_eq!(report.skipped.len(), 1, "{report:?}");
-    assert!(
-        report.skipped[0]
-            .reason
-            .contains(&format!("{}-byte read cap", caps::CONTROLLER_MANIFEST)),
-        "the reason names the cap: {}",
-        report.skipped[0].reason
-    );
-    assert_eq!(meter.streamed(), 0, "the manifest's body was not read");
-}
-
-// ===========================================================================
 // Peak resident memory, measured in a child process
 // ===========================================================================
 
 /// How big the planted objects are.
 const PLANTED: u64 = 512 << 20;
 
-/// The most resident memory the five capped read paths may add, together, to
+/// The most resident memory the capped read paths may add, together, to
 /// a baseline child running the same paths over small objects.
 const BOUND: u64 = 16 << 20;
 
@@ -376,16 +341,10 @@ fn self_peak_rss() -> u64 {
     }
 }
 
-/// A filesystem evidence tree: each of the five objects at `size` bytes,
-/// SPARSE (no disk is spent on the zeros), plus the manifest under the
-/// retention prefix.
+/// A filesystem evidence tree: each object at `size` bytes, SPARSE (no disk
+/// is spent on the zeros).
 fn plant(root: &Path, size: u64) {
-    for key in [
-        PAYLOAD_KEY,
-        SIDECAR_KEY,
-        "logweir/drills/r2.scorecard.json",
-        "logweir/archive/b1/manifest.json",
-    ] {
+    for key in [PAYLOAD_KEY, SIDECAR_KEY, "logweir/drills/r2.scorecard.json"] {
         let path = root.join(key);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let f = std::fs::File::create(&path).unwrap();
@@ -494,18 +453,6 @@ fn run_child(mode: &str, root: &Path) {
                     payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
                 },
             );
-            let report = weirkeeper::retention::evaluate(
-                &store,
-                "file:///archive",
-                "logweir/archive/",
-                &Retention {
-                    keep_last: Some(1),
-                    keep_days: None,
-                },
-                Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
-            )
-            .expect("the listing answers");
-            assert_eq!(report.skipped.len(), 1, "{report:?}");
             if mode == "capped" {
                 // What each path SAID, for the record a live run keeps.
                 println!(
@@ -518,10 +465,6 @@ fn run_child(mode: &str, root: &Path) {
                 );
                 println!("{CHILD_LINE} observe_scorecard: read_refused {refused:?}");
                 println!("{CHILD_LINE} read_signing_time: {signing_time:?}");
-                println!(
-                    "{CHILD_LINE} retention skipped: {:?}",
-                    report.skipped[0].reason
-                );
                 assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
                 // FX-33: the receipt under its own cap, the scorecard under
                 // the document cap.
@@ -535,9 +478,6 @@ fn run_child(mode: &str, root: &Path) {
                 assert!(
                     matches!(&signing_time, SigningTime::OverCap(d) if names(d, caps::CONTROLLER_RECEIPT))
                 );
-                assert!(report.skipped[0]
-                    .reason
-                    .contains(&format!("{}-byte read cap", caps::CONTROLLER_MANIFEST)));
             }
         }
         "uncapped" => {
@@ -566,36 +506,6 @@ fn run_child(mode: &str, root: &Path) {
                 .expect("within the cap");
             let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
             assert!(v["pad"].is_array());
-        }
-        "conc-manifests" | "conc-manifests-free" => {
-            let free = weirkeeper::read_budget::ReadBudget::new(u64::MAX);
-            let budget = if mode.ends_with("-free") {
-                &free
-            } else {
-                weirkeeper::read_budget::ReadBudget::controller()
-            };
-            let start = std::sync::Barrier::new(CONC_MANIFESTS);
-            std::thread::scope(|scope| {
-                for i in 0..CONC_MANIFESTS {
-                    let (store, start) = (&store, &start);
-                    scope.spawn(move || {
-                        start.wait();
-                        let report = weirkeeper::retention::evaluate_within(
-                            budget,
-                            store,
-                            "file:///archive",
-                            &format!("logweir/conc/p{i}/"),
-                            &Retention {
-                                keep_last: Some(1),
-                                keep_days: None,
-                            },
-                            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
-                        )
-                        .expect("the listing answers");
-                        assert_eq!(report.skipped, Vec::new(), "every manifest folds");
-                    });
-                }
-            });
         }
         "conc-documents" | "conc-documents-free" => {
             let free = weirkeeper::read_budget::ReadBudget::new(u64::MAX);
@@ -675,7 +585,7 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
         .unwrap_or_else(|| panic!("the {mode} child printed no {PEAK_LINE} line:\n{stdout}"))
 }
 
-/// **Peak RSS is bounded.** All five controller read paths over 512 MiB
+/// **Peak RSS is bounded.** All the controller read paths over 512 MiB
 /// objects add at most [`BOUND`] to a child running them over 1 KiB objects;
 /// the control — the same `Store` reading the receipt under a cap far too
 /// large — adds the object, which shows the meter sees a whole read.
@@ -685,7 +595,7 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
 /// fold, against the same bytes parsed as a `serde_json::Value` — what
 /// `manifest_facts` did before FX-31.
 ///
-/// KILLS: "a cap far too large" in any of the five paths (that child holds
+/// KILLS: "a cap far too large" in any of the paths (that child holds
 /// 512 MiB); "`manifest_facts` parses into a `Value`" (the stream child holds
 /// the control's many-times-the-bytes). "No head check" is NOT this row's: a
 /// filesystem stream would still stop at the running cap (1 MiB), under the
@@ -713,7 +623,7 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
     let capped = child_peak("capped", &big);
     let added = capped.saturating_sub(baseline);
     eprintln!(
-        "[fx31-mem] baseline child {baseline} B; five capped paths over {PLANTED} B objects \
+        "[fx31-mem] baseline child {baseline} B; the capped paths over {PLANTED} B objects \
          {capped} B (adds {added} B, bound {BOUND} B)"
     );
     // THE CONTROL READS INCOMPRESSIBLE BYTES (review F9): the sparse objects
@@ -763,7 +673,7 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
     );
 }
 
-/// **LIVE (FX-31), against the compose MinIO: the controller's five read paths
+/// **LIVE (FX-31), against the compose MinIO: the controller's read paths
 /// over 768 MiB objects in a real S3 bucket.** `#[ignore]`d: it needs the
 /// stack and objects seeded out of process. Run it as
 /// `claude/fx-31.result.md` §5 does:
@@ -806,7 +716,7 @@ fn the_controller_read_paths_hold_bounded_memory_against_minio() {
     let added = capped.saturating_sub(baseline);
     let whole = uncapped.saturating_sub(baseline);
     eprintln!(
-        "[fx31-live] S3 objects of {size} B: baseline child {baseline} B; five capped paths \
+        "[fx31-live] S3 objects of {size} B: baseline child {baseline} B; the capped paths \
          {capped} B (adds {added} B, bound {BOUND} B); control under a cap far too large \
          {uncapped} B (adds {whole} B)"
     );
@@ -824,52 +734,18 @@ fn the_controller_read_paths_hold_bounded_memory_against_minio() {
 // Concurrent reads share ONE budget (FX-31 review F2)
 // ===========================================================================
 
-/// How many retention evaluations, and how many scorecard reads, run at once.
-const CONC_MANIFESTS: usize = 8;
+/// How many scorecard reads run at once.
 const CONC_DOCUMENTS: usize = 16;
 
-/// A tree for the concurrency row: [`CONC_MANIFESTS`] archive prefixes, each
-/// holding ONE manifest (a hard link to one file of `manifest_bytes`), and
-/// [`CONC_DOCUMENTS`] scorecards (hard links to one document of
-/// `document_bytes`).
+/// A tree for the concurrency row: [`CONC_DOCUMENTS`] scorecards (hard links to
+/// one document of `document_bytes`).
 ///
-/// The manifest is a VALID one whose segment keys are pseudo-random text, so
-/// its fold takes long enough that the reads overlap, and the buffered bytes
-/// do not compress. The scorecard is `{"pad":[0,0,…]}`: valid, and the shape
-/// whose `serde_json::Value` is largest per byte.
-fn plant_concurrency(root: &Path, manifest_bytes: usize, document_bytes: usize) {
+/// The scorecard is `{"pad":[0,0,…]}`: valid, and the shape whose
+/// `serde_json::Value` is largest per byte.
+fn plant_concurrency(root: &Path, document_bytes: usize) {
     use std::io::Write as _;
     let pool = root.join("pool");
     std::fs::create_dir_all(&pool).unwrap();
-    let manifest = pool.join("manifest.json");
-    {
-        let mut w = std::io::BufWriter::new(std::fs::File::create(&manifest).unwrap());
-        w.write_all(br#"{"topics":[{"partitions":[{"segments":["#)
-            .unwrap();
-        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
-        let mut written = 0usize;
-        let mut first = true;
-        while first || written < manifest_bytes {
-            let mut key = [0u8; 96];
-            for b in &mut key {
-                x ^= x >> 12;
-                x ^= x << 25;
-                x ^= x >> 27;
-                *b =
-                    alphabet[usize::try_from(x.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58).unwrap()];
-            }
-            let entry = format!(
-                r#"{}{{"key":"{}","start_timestamp":1,"end_timestamp":2}}"#,
-                if first { "" } else { "," },
-                std::str::from_utf8(&key).unwrap()
-            );
-            w.write_all(entry.as_bytes()).unwrap();
-            written += entry.len();
-            first = false;
-        }
-        w.write_all(b"]}]}]}").unwrap();
-    }
     let document = pool.join("scorecard.json");
     {
         let mut w = std::io::BufWriter::new(std::fs::File::create(&document).unwrap());
@@ -878,11 +754,6 @@ fn plant_concurrency(root: &Path, manifest_bytes: usize, document_bytes: usize) 
             w.write_all(b",0").unwrap();
         }
         w.write_all(b"]}").unwrap();
-    }
-    for i in 0..CONC_MANIFESTS {
-        let at = root.join(format!("logweir/conc/p{i}/b1/manifest.json"));
-        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        std::fs::hard_link(&manifest, &at).unwrap();
     }
     for i in 0..CONC_DOCUMENTS {
         let at = root.join(format!("logweir/conc/s{i}.scorecard.json"));
@@ -894,11 +765,10 @@ fn plant_concurrency(root: &Path, manifest_bytes: usize, document_bytes: usize) 
 /// **The caps bound each read; the budget bounds them TOGETHER** (FX-31 review
 /// F2).
 ///
-/// In child processes:
-/// - [`CONC_MANIFESTS`] retention evaluations, each over a 60 MiB manifest
-///   (under the 64 MiB cap), start together;
-/// - [`CONC_DOCUMENTS`] scorecard observations, each over a document just
-///   under the 1 MiB cap that parses into about 37 MiB, start together.
+/// In child processes, [`CONC_DOCUMENTS`] scorecard observations, each over a
+/// document just under the 1 MiB cap that parses into about 37 MiB, start
+/// together. (Concurrent retention evaluations were the other half; the
+/// per-schedule report is withdrawn, PROD-17.1 B1.)
 ///
 /// Under the controller's budget, peak RSS stays within the budget plus a
 /// fixed slack, whatever the number of readers. The control runs the same
@@ -906,8 +776,8 @@ fn plant_concurrency(root: &Path, manifest_bytes: usize, document_bytes: usize) 
 /// and must add more than twice the budget, which shows the meter sees
 /// concurrent reads.
 ///
-/// KILLS: "no reservation" in `retention::evaluate` or `observe_scorecard`
-/// (the budgeted child holds the control's memory); "a budget far too large".
+/// KILLS: "no reservation" in `observe_scorecard` (the budgeted child holds the
+/// control's memory); "a budget far too large".
 #[test]
 fn concurrent_reads_share_one_budget() {
     use weirkeeper::read_budget::CONTROLLER_READ_BUDGET_BYTES as BUDGET;
@@ -922,37 +792,22 @@ fn concurrent_reads_share_one_budget() {
     ));
     let small = scratch.join("small");
     let big = scratch.join("big");
-    plant_concurrency(&small, 1, 16);
-    plant_concurrency(&big, 60 << 20, 1_040_000);
+    plant_concurrency(&small, 16);
+    plant_concurrency(&big, 1_040_000);
     let slack: u64 = 32 << 20;
 
-    let m_base = child_peak("conc-manifests", &small);
-    let m_budget = child_peak("conc-manifests", &big).saturating_sub(m_base);
-    let m_free = child_peak("conc-manifests-free", &big).saturating_sub(m_base);
     let d_base = child_peak("conc-documents", &small);
     let d_budget = child_peak("conc-documents", &big).saturating_sub(d_base);
     let d_free = child_peak("conc-documents-free", &big).saturating_sub(d_base);
     let _ = std::fs::remove_dir_all(&scratch);
     eprintln!(
-        "[fx31-conc] {CONC_MANIFESTS} evaluations of 60 MiB manifests: under the budget add \
-         {m_budget} B, with no budget {m_free} B; {CONC_DOCUMENTS} scorecards of 1,040,000 B: \
-         under the budget {d_budget} B, with no budget {d_free} B (budget {BUDGET} B, slack \
-         {slack} B)"
-    );
-    assert!(
-        m_budget < BUDGET + slack,
-        "{CONC_MANIFESTS} concurrent retention evaluations added {m_budget} bytes; the budget \
-         holds them to {BUDGET} plus {slack}"
+        "[fx31-conc] {CONC_DOCUMENTS} scorecards of 1,040,000 B: under the budget {d_budget} B, \
+         with no budget {d_free} B (budget {BUDGET} B, slack {slack} B)"
     );
     assert!(
         d_budget < BUDGET + slack,
         "{CONC_DOCUMENTS} concurrent scorecard reads added {d_budget} bytes; the budget holds \
          them to {BUDGET} plus {slack}"
-    );
-    assert!(
-        m_free > 2 * BUDGET,
-        "the control's evaluations added only {m_free} bytes; the meter cannot see concurrent \
-         reads at this size"
     );
     assert!(
         d_free > 2 * BUDGET,
@@ -962,12 +817,12 @@ fn concurrent_reads_share_one_budget() {
 }
 
 /// **Every controller read path reserves from the ONE budget before it reads**
-/// (FX-31 review F2). With the whole controller budget held, each of the five
-/// paths waits; released, each one finishes.
+/// (FX-31 review F2). With the whole controller budget held, each path waits;
+/// released, each one finishes.
 ///
 /// KILLS: "no reservation" in any one of `verify_evidence`, `observe_archive`,
-/// `observe_scorecard`, `read_signing_time` and `retention::evaluate` (that
-/// path finishes while the budget is held).
+/// `observe_scorecard` and `read_signing_time` (that path finishes while the
+/// budget is held).
 #[test]
 fn every_controller_read_path_waits_for_the_budget() {
     use std::sync::mpsc;
@@ -1014,31 +869,11 @@ fn every_controller_read_path_waits_for_the_budget() {
                 );
             }),
         ),
-        (
-            "retention::evaluate",
-            Box::new(|s| {
-                let _ = weirkeeper::retention::evaluate(
-                    s,
-                    "s3://bucket/logweir/archive/",
-                    "logweir/archive/",
-                    &Retention {
-                        keep_last: Some(1),
-                        keep_days: None,
-                    },
-                    Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
-                );
-            }),
-        ),
     ];
     for (name, path) in paths {
         let store = Store::in_memory("logweir/");
         put(&store, PAYLOAD_KEY, &receipt);
         put(&store, SIDECAR_KEY, b"{}");
-        put(
-            &store,
-            "logweir/archive/b1/manifest.json",
-            br#"{"topics":[{"partitions":[{"segments":[{"start_timestamp":1,"end_timestamp":2}]}]}]}"#,
-        );
         let budget = ReadBudget::controller();
         let held = budget.reserve(budget.total());
         let (done, finished) = mpsc::channel();

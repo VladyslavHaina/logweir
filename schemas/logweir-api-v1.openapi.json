@@ -4745,34 +4745,6 @@
           }
         ]
       },
-      "AlertDeliveryView": {
-        "description": "How a transition was delivered, or why it was not.",
-        "type": "object",
-        "properties": {
-          "attempts": {
-            "description": "How many attempts.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "lastAttemptAt": {
-            "description": "When the last one was.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "lastError": {
-            "description": "The last error, redacted by the controller and bounded again here. Never a routing key and never a URL.",
-            "type": "string",
-            "nullable": true
-          },
-          "state": {
-            "description": "`Pending`, `Delivered`, `Failed` or `Suppressed`.",
-            "type": "string",
-            "nullable": true
-          }
-        }
-      },
       "AlertView": {
         "description": "One entry of the deduplication ledger.",
         "type": "object",
@@ -4782,11 +4754,6 @@
           "state"
         ],
         "properties": {
-          "delivery": {
-            "description": "How that delivery went.",
-            "$ref": "#/components/schemas/AlertDeliveryView",
-            "nullable": true
-          },
           "key": {
             "description": "The stable dedup key.",
             "type": "string"
@@ -4794,12 +4761,6 @@
           "kind": {
             "description": "What it is about.",
             "type": "string"
-          },
-          "notifiedTransition": {
-            "description": "The last transition a delivery was created for. `transition` ahead of this one is an alert whose latest state has not been delivered.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
           },
           "openedAt": {
             "description": "When it opened.",
@@ -7980,7 +7941,7 @@
             "nullable": true
           },
           "retention": {
-            "description": "Retention reporting.",
+            "description": "Withdrawn; see [`RetentionRequest`].",
             "default": null,
             "$ref": "#/components/schemas/RetentionRequest",
             "nullable": true
@@ -9518,68 +9479,6 @@
           "localTime": {
             "description": "The same instant in the schedule's zone, offset included — `2026-10-25T02:30:00+02:00`. The offset is what distinguishes the two occurrences of a repeated hour.",
             "type": "string"
-          }
-        }
-      },
-      "NotificationRouteView": {
-        "description": "One configured alert destination — its name and which channels it has.\n\nTHE CHANNELS ARE BOOLEANS ON PURPOSE. A PagerDuty routing key, a webhook URL and a Slack webhook URL are each a credential; so is the name of the Secret that holds one, to a reader deciding what to try to read next.",
-        "type": "object",
-        "required": [
-          "name",
-          "pagerDuty",
-          "slack",
-          "webhook"
-        ],
-        "properties": {
-          "name": {
-            "description": "What status and logs call it.",
-            "type": "string"
-          },
-          "pagerDuty": {
-            "description": "Whether a PagerDuty channel is configured.",
-            "type": "boolean"
-          },
-          "slack": {
-            "description": "Whether a Slack channel is configured.",
-            "type": "boolean"
-          },
-          "webhook": {
-            "description": "Whether a webhook channel is configured.",
-            "type": "boolean"
-          }
-        }
-      },
-      "NotificationsView": {
-        "description": "Where alerts go, and which ones.",
-        "type": "object",
-        "required": [
-          "renotifyAfterSeconds",
-          "sendResolved"
-        ],
-        "properties": {
-          "kinds": {
-            "description": "Which alert kinds are sent. Absent means all of them.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "nullable": true
-          },
-          "renotifyAfterSeconds": {
-            "description": "How long before an open alert is re-sent; `0` disables re-notify.",
-            "type": "integer",
-            "format": "int32"
-          },
-          "routes": {
-            "description": "The routes, at most four.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NotificationRouteView"
-            }
-          },
-          "sendResolved": {
-            "description": "Whether a resolution is delivered too.",
-            "type": "boolean"
           }
         }
       },
@@ -11653,11 +11552,6 @@
             "description": "The namespace.",
             "type": "string"
           },
-          "notifications": {
-            "description": "Where alerts go. Absent means the verdict is reported here and delivered nowhere — a real choice, not a broken configuration.",
-            "$ref": "#/components/schemas/NotificationsView",
-            "nullable": true
-          },
           "objectives": {
             "description": "What \"protected\" means.",
             "$ref": "#/components/schemas/ObjectivesView"
@@ -11874,42 +11768,6 @@
             "description": "The UID at the time of the check.",
             "type": "string",
             "nullable": true
-          }
-        }
-      },
-      "RemovableSetView": {
-        "description": "One set retention would remove. It is still in the archive.",
-        "type": "object",
-        "required": [
-          "backupId",
-          "newestRecordAt",
-          "reason"
-        ],
-        "properties": {
-          "backupId": {
-            "description": "The backup set ID.",
-            "type": "string"
-          },
-          "days": {
-            "description": "The configured keepDays, for `OlderThanKeepDays`.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "newestRecordAt": {
-            "description": "The newest record instant in the set.",
-            "type": "string",
-            "format": "date-time"
-          },
-          "rank": {
-            "description": "The newest-first rank, for `BeyondKeepLast`.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "reason": {
-            "description": "`OlderThanKeepDays` or `BeyondKeepLast`.",
-            "type": "string"
           }
         }
       },
@@ -12839,83 +12697,8 @@
           }
         }
       },
-      "RetentionReportView": {
-        "description": "The controller's retention report, bounded to 100 entries per list.",
-        "type": "object",
-        "required": [
-          "mcRemovalCommands",
-          "removalCommands",
-          "setsKept",
-          "setsThatWouldBeRemoved",
-          "skippedManifests",
-          "truncated"
-        ],
-        "properties": {
-          "evaluatedAt": {
-            "description": "When retention was last evaluated.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "keepDays": {
-            "description": "keepDays as applied.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "keepLast": {
-            "description": "keepLast as applied.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "mcRemovalCommands": {
-            "description": "The same commands in `mc` spelling.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "note": {
-            "description": "Why nothing would be removed, when that is not \"nothing to remove\".",
-            "type": "string",
-            "nullable": true
-          },
-          "removalCommands": {
-            "description": "Removal commands in the archive scheme's own CLI. Reported, never run.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "setsKept": {
-            "description": "Kept set IDs, newest first.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "setsThatWouldBeRemoved": {
-            "description": "Sets that would be removed, newest first. Nothing was deleted.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RemovableSetView"
-            }
-          },
-          "skippedManifests": {
-            "description": "How many manifests could not be read.",
-            "type": "integer",
-            "format": "uint",
-            "minimum": 0.0
-          },
-          "truncated": {
-            "description": "Whether any list above was cut at 100 entries.",
-            "type": "boolean"
-          }
-        }
-      },
       "RetentionRequest": {
-        "description": "Retention reporting settings. Logweir deletes nothing.",
+        "description": "Withdrawn (PROD-17.1 B1): stored as `spec.retention` and ignored; the controller names it with a `RetentionReportWithdrawn` condition. Retention is a RetentionPolicy's (`.../retention-policies`).",
         "type": "object",
         "properties": {
           "keepDays": {
@@ -12936,7 +12719,7 @@
         "additionalProperties": false
       },
       "RetentionView": {
-        "description": "Retention settings of a stored schedule.",
+        "description": "A stored schedule's `spec.retention`. Withdrawn (PROD-17.1 B1): stored as `spec.retention` and ignored; the controller names it with a `RetentionReportWithdrawn` condition. Retention is a RetentionPolicy's (`.../retention-policies`).",
         "type": "object",
         "properties": {
           "keepDays": {
@@ -13159,7 +12942,7 @@
             "type": "string"
           },
           "retention": {
-            "description": "Retention reporting settings.",
+            "description": "Withdrawn; see [`RetentionView`].",
             "$ref": "#/components/schemas/RetentionView",
             "nullable": true
           },
@@ -13472,11 +13255,6 @@
           "ready": {
             "description": "The `Ready` condition.",
             "$ref": "#/components/schemas/ConditionView",
-            "nullable": true
-          },
-          "retentionReport": {
-            "description": "The retention report.",
-            "$ref": "#/components/schemas/RetentionReportView",
             "nullable": true
           }
         }
@@ -15149,7 +14927,7 @@
             "format": "int64"
           },
           "retention": {
-            "description": "Retention reporting. Logweir deletes nothing.",
+            "description": "Withdrawn; see [`RetentionRequest`].",
             "default": null,
             "$ref": "#/components/schemas/RetentionRequest",
             "nullable": true

@@ -33,7 +33,7 @@
 //! | M3 | `secret_grant` drops its object-name check | 34 / 1 | [`a_cross_namespace_secret_reference_is_refused`] |
 //! | M4 | `StoreCache::get_or_build` builds outside `spawn_blocking` | 47 / 1 | `retention::no_store_call_is_made_outside_spawn_blocking`, naming `evidence_store.rs:339` |
 //! | M5 | `StoreCache::record` drops the eviction loop | 34 / 1 | [`the_store_cache_is_bounded`] |
-//! | M6 | `retention_scope` returns `GlobalHandleApplies` unconditionally | 33 / 2 | [`retention_is_withheld_when_the_schedule_names_another_bucket`], [`a_destination_backed_schedule_gets_no_global_report`] |
+//! | M6 | `retention_scope` returns `GlobalHandleApplies` unconditionally | 33 / 2 | rows withdrawn with the per-schedule retention report (PROD-17.1 B1) |
 //!
 //! Review round (2026-09-17) added three more, for the three findings that were
 //! fixes rather than documentation:
@@ -58,9 +58,9 @@ use weirkeeper::check::policy::{EvidencePolicy, IdentityLocation, Policy};
 use weirkeeper::controllers::backup_destination::{reconcile_destination, status_for};
 use weirkeeper::crds::backup_destination::BackupDestination;
 use weirkeeper::destination::{
-    self, retention_scope, CaObservation, DestinationRole, ResolvedDestination, ResolvedGrant,
-    RetentionScope, AWS_ALLOW_HTTP_ENV, AWS_ENDPOINT_URL_ENV, AWS_METADATA_ENDPOINT_ENV,
-    AWS_REGION_ENV, AWS_VIRTUAL_HOSTED_ENV, DESTINATION_CONDITION_REASONS,
+    self, CaObservation, DestinationRole, ResolvedDestination, ResolvedGrant, AWS_ALLOW_HTTP_ENV,
+    AWS_ENDPOINT_URL_ENV, AWS_METADATA_ENDPOINT_ENV, AWS_REGION_ENV, AWS_VIRTUAL_HOSTED_ENV,
+    DESTINATION_CONDITION_REASONS,
 };
 use weirkeeper::evidence_store::{CacheKey, StoreCache, MAX_CACHED_STORES};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route};
@@ -1851,73 +1851,6 @@ async fn the_store_cache_refuses_what_it_may_not_build() {
         "the refusal says which path DOES serve this grant: {}",
         wrong_grant.message
     );
-}
-
-// ===========================================================================
-// §3.10 — the G14 retention guard (defect RET-WRONGBUCKET)
-// ===========================================================================
-
-/// **M6.** A schedule on another bucket gets no retention report.
-///
-/// The defect: `controllers/backup_schedule.rs` lists manifests through the
-/// controller's ONE global handle while rendering `aws s3 rm` / `mc rm`
-/// commands for the SCHEDULE's own `archive.url`. On an installation with two
-/// buckets that is a report about bucket A printed as if it described bucket B,
-/// with commands naming keys in B that were listed in A.
-#[test]
-fn retention_is_withheld_when_the_schedule_names_another_bucket() {
-    let scope = retention_scope("s3://lw-b/team-a", Some("s3://lw-a"), false);
-    assert!(
-        !scope.reports(),
-        "a report about another bucket's catalogue is worse than no report: an operator who \
-         runs its commands deletes the wrong objects, or nothing"
-    );
-    match scope {
-        RetentionScope::WrongBucket {
-            schedule_bucket,
-            handle_bucket,
-        } => {
-            assert_eq!(schedule_bucket, "lw-b");
-            assert_eq!(handle_bucket, "lw-a");
-        }
-        other => panic!("expected WrongBucket, got {other:?}"),
-    }
-}
-
-/// …and the same bucket with different prefixes still reports, because the
-/// listing is prefix-scoped by the report itself.
-#[test]
-fn retention_applies_when_the_buckets_match() {
-    for (schedule, handle) in [
-        ("s3://lw-a/team-a", "s3://lw-a"),
-        ("s3://lw-a", "s3://lw-a/anything"),
-        ("s3://lw-a/team-a", "s3://lw-a/team-b"),
-    ] {
-        assert!(
-            retention_scope(schedule, Some(handle), false).reports(),
-            "{schedule} through a handle on {handle} is the same bucket"
-        );
-    }
-}
-
-/// A destination-backed schedule gets no GLOBAL retention report at all, and no
-/// handle means no report either.
-#[test]
-fn a_destination_backed_schedule_gets_no_global_report() {
-    assert_eq!(
-        retention_scope("s3://lw-a/team-a", Some("s3://lw-a"), true),
-        RetentionScope::DestinationBacked,
-        "the global handle's credential is not the destination's, so even the same bucket is \
-         the wrong principal; PLAT-16.1 supplies the per-destination replacement"
-    );
-    assert_eq!(
-        retention_scope("s3://lw-a", None, false),
-        RetentionScope::NoHandle
-    );
-    // AN UNREADABLE URL WITHHOLDS THE REPORT — the safe direction. The sentinel
-    // `logweir-destination://` is exactly that shape for an old controller.
-    assert!(!retention_scope("logweir-destination://dest-a", Some("s3://lw-a"), false).reports());
-    assert!(!retention_scope("s3://lw-a", Some("not-a-url"), false).reports());
 }
 
 // ===========================================================================

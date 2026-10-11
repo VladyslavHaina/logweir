@@ -163,23 +163,16 @@ pub const SPEC_RULES: [SpecRule; 3] = [
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
 ];
 
-/// `{keepLast, keepDays}` — **reporting only**, in every tag.
-///
-/// Evaluated by the controller against the manifests it lists; the result —
-/// which sets *would* be removed, plus the exact removal command — goes into
-/// [`BackupScheduleStatus::retention_report`] and the UI. **The adopter's own
-/// bucket lifecycle policy does the deleting.** Guard **G-RET**: the retention
-/// path's archive handle is read-only and performs zero object-store writes,
-/// and retention never touches a Kafka topic.
+/// `{keepLast, keepDays}` — **withdrawn** (PROD-17.1 B1). Kept so an object
+/// that sets it still parses and backs up; the controller ignores it and says
+/// so with the `RetentionReportWithdrawn` condition. Use a `RetentionPolicy`.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Retention {
-    /// Keep the most recent N backup sets; older sets are REPORTED as
-    /// removable.
+    /// Ignored (withdrawn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_last: Option<i64>,
-    /// Keep backup sets newer than N days; older sets are REPORTED as
-    /// removable.
+    /// Ignored (withdrawn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_days: Option<i64>,
 }
@@ -270,127 +263,6 @@ impl RetrySpec {
     }
 }
 
-/// What a retention evaluation found. **Nothing here was deleted.**
-// TASK 19 SHAPED THIS FIELD SET AGAINST THE STRUCT THAT PRODUCES IT.
-// `crate::retention::RetentionReport` is the whole evaluation, and this is the
-// typed status block that carries it, field for field, so
-// `kubectl get backupschedule -o yaml` shows the report and the UI reads it
-// with no extra call. The one divergence is `RemovableSetReport` — see the
-// note above it for why a Rust enum cannot be a structural-schema field.
-// A `//` comment for the reason `crds::Condition`'s is: doc comments become
-// the shipped CRD's `description`.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RetentionReport {
-    /// When an evaluation first reached the findings below. Later evaluations
-    /// that find the same keep this instant, so it is when the findings last
-    /// changed, not when the controller last looked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evaluated_at: Option<Time>,
-    /// `spec.retention.keepLast`, **as it was applied**. Absent when no rule
-    /// was configured, or when the configured value was not a non-negative
-    /// count and was therefore not applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_last: Option<i64>,
-    /// `spec.retention.keepDays`, as it was applied.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keep_days: Option<i64>,
-    /// The `backupId`s the policy keeps, newest first.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sets_kept: Option<Vec<String>>,
-    /// The sets the policy WOULD remove, newest first. They are still in the
-    /// archive; Logweir deleted nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sets_that_would_be_removed: Option<Vec<RemovableSetReport>>,
-    /// The exact removal command for each set above, one per set, in the same
-    /// order, **in the CLI of that archive's own scheme** — `aws s3 rm` for
-    /// `s3://`, `gsutil -m rm -r` for `gs://`, `az storage blob delete-batch`
-    /// for `az://` and `rm -rf` for `file://`. **Reported, never executed.**
-    ///
-    /// THE FIELD NAME SAYS `aws` AND THREE OF THE FOUR SCHEMES DO NOT, and the
-    /// name is deliberately unchanged (Task 24a, plan erratum **E18(b)**):
-    /// renaming a status field an adopter may already read, to fix a
-    /// description, would cost more than the description was worth. What was
-    /// actually broken is what the field CONTAINED — it printed
-    /// `aws s3 rm 'file:///…'` for a filesystem archive, a string an operator
-    /// runs and which does nothing — and that is fixed. This sentence is the
-    /// description catching up with the value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aws_cli: Option<Vec<String>>,
-    /// The same commands in `mc`'s spelling. Reported, never executed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mc_cli: Option<Vec<String>>,
-    /// The manifest keys under the prefix that could not be read, and why.
-    /// Each was SKIPPED: it is in neither `setsKept` nor
-    /// `setsThatWouldBeRemoved`, and the rest of the archive was still
-    /// evaluated. An empty list means every manifest under the prefix was
-    /// read.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skipped: Option<Vec<SkippedManifestReport>>,
-    /// Why the evaluation removed nothing, when the reason is not "there is
-    /// nothing to remove" — set when no retention rule is configured.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-}
-
-/// One manifest key the evaluation could not read. **Task 19 review, F-5.**
-// WHY A SKIP IS A REPORTED FACT AND NOT AN ERROR.
-// `retention::evaluate` used to return `Err` on the first manifest that did
-// not parse, so an archive of fifty good backup sets plus one stray
-// `x/manifest.json` yielded NO `retentionReport` at all — the controller
-// warned and omitted the whole block, which is indistinguishable in the status
-// from "no evaluation has happened". Skipping the one key and naming it here
-// keeps the other forty-nine reportable and makes the gap visible.
-//
-// Kept out of the doc comment because `schemars` publishes doc comments as
-// `description` in the shipped CRD — the same reason `crds::Condition`'s own
-// provenance note is a `//` comment.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SkippedManifestReport {
-    /// The manifest key, exactly as the archive listed it.
-    pub key: String,
-    /// Why it could not be read — `is not a backup manifest` for a sibling
-    /// JSON object the `/manifest.json` filter picked up, or the storage
-    /// error's own message.
-    pub reason: String,
-}
-
-/// One set retention WOULD remove. **It is still in the archive.**
-// WHY `reason` IS A STRING AND NOT AN ENUM WITH DATA.
-// `crate::retention::RemovalReason` is a Rust enum carrying `days` or `rank`,
-// and `schemars` renders any data-carrying enum as `oneOf` with a `type`
-// inside each branch. A Kubernetes STRUCTURAL SCHEMA forbids `type` inside
-// `oneOf`/`anyOf`/`not`, so a faithfully typed `RemovalReason` in this status
-// block would be rejected by the API server's schema validation at
-// `kubectl apply` time — the CRD would not install at all. This is therefore
-// a FLAT projection: `reason` is the variant name (a closed set, enumerated by
-// `RemovalReason::name`, which is a `match` with no wildcard) and the
-// parameter travels in `days` or `rank` beside it.
-//
-// Kept out of the doc comment because `schemars` publishes doc comments as
-// `description` in the shipped CRD — the same reason `crds::Condition`'s own
-// provenance note is a `//` comment.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RemovableSetReport {
-    /// The backup set's id — the manifest key's parent directory.
-    pub backup_id: String,
-    /// The set's newest record instant, read from the manifest BODY and never
-    /// from the key string, which carries no timestamp.
-    pub newest_record_at: Time,
-    /// `OlderThanKeepDays` or `BeyondKeepLast`. `OlderThanKeepDays` when both
-    /// rules select the set, because age is the reason an operator acts on.
-    pub reason: String,
-    /// The configured `keepDays`, when `reason` is `OlderThanKeepDays`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub days: Option<i64>,
-    /// The set's 1-based rank in newest-first order, when `reason` is
-    /// `BeyondKeepLast`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rank: Option<i64>,
-}
-
 /// `BackupSchedule.spec`. Every field is editable except `sourceRef` — see the
 /// module header.
 #[derive(kube::CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -398,7 +270,7 @@ pub struct RemovableSetReport {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "BackupSchedule",
-    doc = "A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. Retention REPORTS what it would remove and deletes nothing.",
+    doc = "A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. A `RetentionPolicy` governs retention; `spec.retention` is withdrawn and ignored.",
     plural = "backupschedules",
     singular = "backupschedule",
     namespaced,
@@ -529,7 +401,8 @@ pub struct BackupScheduleSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 60, max = 86400))]
     pub active_deadline_seconds: Option<i64>,
-    /// `{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.
+    /// Withdrawn: ignored, and named by the `RetentionReportWithdrawn`
+    /// condition. Use a `RetentionPolicy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
     /// Stop admitting new slots, catch-ups and retries. Runs that already
@@ -867,10 +740,6 @@ pub struct BackupScheduleStatus {
     /// correct implementation is distinguishable from a broken schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_missed_slot: Option<String>,
-    /// What retention WOULD remove. Nothing was deleted — see
-    /// [`RetentionReport`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention_report: Option<RetentionReport>,
     /// What the history inventory last found: how much history this schedule
     /// has, and how much of it is still owned by the schedule object (D1 §6).
     ///
