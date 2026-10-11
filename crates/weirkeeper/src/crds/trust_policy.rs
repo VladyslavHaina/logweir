@@ -57,20 +57,15 @@ pub const KEY_ID_PATTERN: &str = "^[0-9a-f]{64}$";
 /// A namespace name — a DNS-1123 label.
 pub const NAMESPACE_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
 
-/// G1 — every key that existed still exists.
+/// G1: every key that existed still exists.
 ///
-/// # Why this is the ONLY object-level rule, and why it compares key ids alone
+/// # The only object-level rule, comparing key ids alone
 ///
-/// It is the only one that cannot be asked of an item: a key that has been
-/// REMOVED has no `self` to attach a rule to. So it is a quadratic walk, and
-/// the only thing it compares is the 64-character `keyId` — the per-key
-/// material checks moved to [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`], which the
-/// API server evaluates once per item.
-///
-/// MEASURED, NOT GUESSED. The first shape of this rule did every comparison
-/// inside the quadratic walk, including `spkiPem` at `maxLength: 4096`, and a
-/// live `kubectl --context docker-desktop apply` on 2026-09-16 refused the
-/// whole CRD:
+/// A removed key has no `self` to attach a rule to, so this is a quadratic
+/// walk, and it compares only the 64-character `keyId`; the per-key material
+/// checks are [`G7_KEY_MATERIAL_IS_IMMUTABLE_RULE`], evaluated once per item.
+/// Doing every comparison inside the walk (including `spkiPem` at
+/// `maxLength: 4096`) makes a live API server refuse the whole CRD:
 ///
 /// ```text
 /// spec.validation.openAPIV3Schema.properties[spec].x-kubernetes-validations[0].rule:
@@ -79,23 +74,21 @@ pub const NAMESPACE_PATTERN: &str = "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
 ///   rule cost total for entire OpenAPIv3 schema exceeds budget by factor of 51.6x
 /// ```
 ///
-/// A CRD the API server will not install is a CRD that seals nothing, which is
-/// the same failure the map-form rule in
-/// [`super::backup_schedule`]'s header records. The split below is what makes
+/// A CRD the API server will not install seals nothing (as with the map-form
+/// rule [`super::backup_schedule`]'s header records); the split is what makes
 /// it installable.
 pub const G1_KEYS_ARE_APPEND_ONLY_RULE: &str =
     "oldSelf.keys.all(o, self.keys.exists(n, n.keyId == o.keyId))";
 /// G1's message.
 pub const G1_KEYS_ARE_APPEND_ONLY_MESSAGE: &str = "spec.keys is append-only: an existing keyId may not be removed — old archives still need the public material that signed them";
 
-/// G7 — a key's public material and identity are immutable.
+/// G7: a key's public material and identity are immutable.
 ///
-/// A TRANSITION RULE ON ONE ITEM OF AN ASSOCIATIVE LIST. `spec.keys` is
+/// A transition rule on one item of an associative list: `spec.keys` is
 /// `x-kubernetes-list-type: map` keyed by `keyId`, so the API server
-/// correlates `oldSelf` with the entry that has the same key and evaluates
-/// this once per item — O(n) rather than the O(n²) it replaced. A NEWLY added
-/// key has no `oldSelf` and the rule is simply not evaluated for it, which is
-/// exactly the append-only semantics wanted.
+/// correlates `oldSelf` with the same key's entry and evaluates this once per
+/// item. A newly added key has no `oldSelf` and is not evaluated, which is the
+/// append-only semantics wanted.
 ///
 /// `usages` is compared because a usage set that could be widened in place
 /// would let an evidence-signing key become an approval key without anybody
@@ -104,20 +97,20 @@ pub const G7_KEY_MATERIAL_IS_IMMUTABLE_RULE: &str = "self.spkiPem == oldSelf.spk
 /// G7's message.
 pub const G7_KEY_MATERIAL_IS_IMMUTABLE_MESSAGE: &str = "a key's spkiPem, algorithm, usages, principal.id and notBefore are immutable; issue a new keyId instead";
 
-/// G2 — `notAfter` may only move earlier. Per item, like G7.
+/// G2: `notAfter` may only move earlier. Per item, like G7.
 pub const G2_NOT_AFTER_ONLY_SHORTENS_RULE: &str = "self.notAfter <= oldSelf.notAfter";
 /// G2's message.
 pub const G2_NOT_AFTER_ONLY_SHORTENS_MESSAGE: &str =
     "a key's notAfter may only be brought forward, never extended";
 
-/// G3 — `state` is monotonic: `Active → Retired`, `Active|Retired → Revoked`.
+/// G3: `state` is monotonic: `Active → Retired`, `Active|Retired → Revoked`.
 /// Per item, like G7.
 pub const G3_STATE_IS_MONOTONIC_RULE: &str = "oldSelf.state == 'Active' ? true : (oldSelf.state == 'Retired' ? self.state != 'Active' : self.state == 'Revoked')";
 /// G3's message.
 pub const G3_STATE_IS_MONOTONIC_MESSAGE: &str =
     "a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards";
 
-/// G4 — the revocation instants are write-once. Per item, like G7.
+/// G4: the revocation instants are write-once. Per item, like G7.
 ///
 /// `revocationEffectiveFrom` is what decides whether stored evidence signed
 /// before a compromise is still trusted (§7.4). A field that could be moved
@@ -127,20 +120,15 @@ pub const G4_REVOCATION_IS_WRITE_ONCE_RULE: &str = "(!has(oldSelf.revokedAt) || 
 pub const G4_REVOCATION_IS_WRITE_ONCE_MESSAGE: &str =
     "revokedAt and revocationEffectiveFrom are immutable once written";
 
-/// G9 — a `KeyCompromise` revocation stays a compromise. Per item, like G7.
+/// G9: a `KeyCompromise` revocation stays a compromise. Per item, like G7.
 ///
-/// # The edit G3 and G4 left open (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`)
-///
-/// G3 keeps a revoked key revoked and G4 keeps its instants, but
-/// `revocationReason` was free: editing `KeyCompromise` to `Superseded` in
-/// place turns D3 §7.4's compromise row ("never green", the document's own
-/// claim not accepted) into a retirement at `revocationEffectiveFrom`, and
-/// every document the key signed before that instant re-verifies
-/// `Valid`/`Historical` — the same re-trust as deleting the policy, in one
-/// `kubectl apply`. So once a REVOKED key's reason is `KeyCompromise` it stays
-/// so. The other direction stays open on purpose: a key revoked as
-/// `Superseded` whose private half later turns out to be exposed must be
-/// escalatable.
+/// G3 keeps a revoked key revoked and G4 keeps its instants, but editing
+/// `revocationReason` from `KeyCompromise` to `Superseded` in place would turn
+/// D3 §7.4's compromise row ("never green") into a retirement at
+/// `revocationEffectiveFrom`, and every document the key signed before that
+/// instant would re-verify `Valid`/`Historical` in one `kubectl apply`. The
+/// other direction stays open: a key revoked as `Superseded` whose private
+/// half later turns out to be exposed must be escalatable.
 ///
 /// Guarded on `oldSelf.state == 'Revoked'` because the reason is read only
 /// for a revoked key; a `KeyCompromise` written beside `Active` records
@@ -149,56 +137,50 @@ pub const G9_COMPROMISE_IS_STICKY_RULE: &str = "oldSelf.state != 'Revoked' || !h
 /// G9's message.
 pub const G9_COMPROMISE_IS_STICKY_MESSAGE: &str = "a key revoked for KeyCompromise stays revoked for KeyCompromise: changing the reason would re-trust every document it signed before revocationEffectiveFrom";
 
-/// G5 — a `Revoked` key carries both revocation instants; a `Retired` one
+/// G5: a `Revoked` key carries both revocation instants; a `Retired` one
 /// carries `retiredAt`.
 pub const G5_LIFECYCLE_FIELDS_RULE: &str = "(self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))";
 /// G5's message.
 pub const G5_LIFECYCLE_FIELDS_MESSAGE: &str =
     "a Revoked key needs revokedAt and revocationEffectiveFrom; a Retired key needs retiredAt";
 
-/// G6 — validity runs forwards.
+/// G6: validity runs forwards.
 pub const G6_VALIDITY_ORDER_RULE: &str = "self.notBefore < self.notAfter";
 /// G6's message.
 pub const G6_VALIDITY_ORDER_MESSAGE: &str = "notBefore must be before notAfter";
 
-/// G8 — one key, one usage.
+/// G8: one key, one usage.
 ///
 /// # Why `size() == 1` is the whole of §7.3's three exclusions
 ///
-/// D3 §7.3 forbids `EvidenceSigning` with either approval usage and forbids
-/// `GovernedApproval` with `ConfirmationIssuer` (landed here as
-/// [`KeyUsage::ConsoleConfirmation`]). With exactly three enum values those
-/// three pairs are every pair there is, so "at most one usage" is EXACTLY
-/// equivalent to the pairwise form and costs the estimator one `size()` call
-/// instead of three list scans. `usages` already has `length(min = 1)`, so the
-/// rule reads as "exactly one".
+/// D3 §7.3 forbids `EvidenceSigning` with either approval usage and
+/// `GovernedApproval` with `ConfirmationIssuer` ([`KeyUsage::ConsoleConfirmation`]
+/// here). With three enum values those are every pair, so "at most one usage"
+/// is exactly the pairwise form at the cost of one `size()` call, and
+/// `length(min = 1)` makes it "exactly one".
 ///
-/// # A NON-TRANSITION rule, per item, and why the distinction matters
+/// # A non-transition rule, per item
 ///
-/// Beside G5 and G6, not beside G7. A transition rule is not evaluated for a
-/// newly added key, which would leave a dual-usage key creatable on the very
-/// path — appending to `spec.keys` — that G1 makes the only path there is.
+/// Beside G5 and G6, not G7: a transition rule is not evaluated for a newly
+/// added key, which would leave a dual-usage key creatable by appending to
+/// `spec.keys`, the only path G1 leaves.
 ///
-/// # Why it lands NOW rather than with its consumer
+/// # It cannot be added later
 ///
-/// **The window closes permanently the first time a policy is applied.** G7
-/// makes `usages` immutable and G1 makes `spec.keys` append-only, so a
-/// dual-usage key created before this rule exists can never be narrowed and
-/// never be removed — no Logweir role holds `delete` on `trustpolicies`. And
-/// adding the rule afterwards BRICKS that object: a per-item non-transition
-/// rule is evaluated on every write, so the policy becomes un-updatable and
-/// its keys can never be retired or revoked. A cluster today has no
-/// `TrustPolicy` at all, which is the only moment this costs nothing.
+/// G7 makes `usages` immutable and G1 makes `spec.keys` append-only, and no
+/// Logweir role holds `delete` on `trustpolicies`, so a dual-usage key stored
+/// before this rule could never be narrowed or removed; adding the rule then
+/// would brick the object (a per-item non-transition rule is evaluated on
+/// every write, so its keys could never be retired or revoked).
 ///
 /// # One key on two roster lists
 ///
-/// `logweir trust migrate-roster` REFUSES such a roster, naming the
+/// `logweir trust migrate-roster` refuses such a roster, naming the
 /// overlapping `keyId`s, rather than emitting an entry the API server would
-/// reject at `kubectl apply` time. `weirkeeper::trust::synthesize_legacy`
-/// still merges them in memory: it is never written as an object, this rule
-/// never sees it, and the merge is what keeps an unmigrated roster-only
-/// cluster working (§7.3 keeps the `selfAttestedRisk` LABEL for exactly those
-/// namespaces).
+/// reject. `weirkeeper::trust::synthesize_legacy` still merges them in memory:
+/// it is never written as an object, so this rule never sees it, and the merge
+/// keeps an unmigrated roster-only cluster working (§7.3 keeps the
+/// `selfAttestedRisk` label for those namespaces).
 pub const G8_ONE_USAGE_PER_KEY_RULE: &str = "self.usages.size() == 1";
 /// G8's message.
 pub const G8_ONE_USAGE_PER_KEY_MESSAGE: &str = "a key declares exactly one usage: EvidenceSigning, GovernedApproval and ConsoleConfirmation are mutually exclusive, because a key that both attests and authorises is a key whose holder can approve their own work — issue a separate keyId per usage";

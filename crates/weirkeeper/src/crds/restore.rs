@@ -42,11 +42,10 @@ pub const DESTINATION_SENTINEL_MESSAGE: &str = "with sourceDestinationRef, sourc
 
 /// The CEL rule that makes an unauthorised `Restore` unrepresentable.
 ///
-/// `approvalRef` used to be required, so "no authorisation" was refused by the
-/// structural schema. Making it optional to admit a standing authorisation
-/// would have opened exactly that hole; this rule closes it, and closes the
-/// other one too — carrying BOTH, where a per-run approval and a standing
-/// scope could disagree about what was authorised.
+/// `approvalRef` is optional (a standing authorisation may replace it), so the
+/// structural schema no longer refuses "no authorisation"; this rule does, and
+/// also refuses carrying both, where a per-run approval and a standing scope
+/// could disagree about what was authorised.
 pub const EXACTLY_ONE_AUTHORIZATION_RULE: &str = "has(self.approvalRef) != has(self.authorization)";
 
 /// The message [`EXACTLY_ONE_AUTHORIZATION_RULE`] travels with.
@@ -68,14 +67,14 @@ pub const COMPLETE_MAX_RECORDS_RULE: &str =
 pub const COMPLETE_MAX_RECORDS_MESSAGE: &str =
     "completeMaxRecords bounds a complete verification and is set only with coverage: complete";
 
-/// **PROD-15.1.** The CEL rule that keeps the original-name declaration
+/// The CEL rule that keeps the original-name declaration
 /// beside the only target it describes: `topicNaming.originalName: true` only
 /// in `newTopic` mode and only with the empty prefix — the identity mapping
 /// the plan's `topic_naming: {prefix: "", original_name: {…}}` is.
 ///
-/// ONE DIRECTION ONLY. An empty prefix WITHOUT the declaration is not refused
+/// One direction only. An empty prefix without the declaration is not refused
 /// here: such an object could have been stored before this rule existed, and
-/// the runner refuses its plan as it always has (a topic mapped onto itself).
+/// the runner refuses its plan (a topic mapped onto itself).
 /// The controller holds the declaration to the plan in both directions
 /// (`controllers::restore::original_name_agrees`) before anything runs.
 pub const ORIGINAL_NAME_RULE: &str = "!has(self.target.topicNaming.originalName) || !self.target.topicNaming.originalName || (self.target.mode == 'newTopic' && self.target.topicNaming.prefix == '')";
@@ -121,25 +120,19 @@ pub const SPEC_RULES: [SpecRule; 7] = [
 /// `k`, `M`, `G`, `T`, `P`, `E`), an optional binary SI suffix (`Ki`, `Mi`,
 /// `Gi`, `Ti`, `Pi`, `Ei`) or an optional decimal exponent (`e9`, `E-3`).
 ///
-/// # Two corrections, both from review finding F6
+/// `K` is not accepted: the decimal kilo suffix is lowercase `k`, and `Ki` is
+/// the binary one.
 ///
-/// The first form of this pattern was `(m|Ki|Mi|Gi|K|M|G)?`. It **refused legal
-/// quantities** an operator would reasonably write — `2Ti` for a scratch
-/// restore, `100n`, `1e9` — with a message that says only "should match", and
-/// it **accepted `K`**, which Kubernetes does not: the decimal kilo suffix is
-/// lowercase `k`, and `Ki` is the binary one.
+/// # What a pattern cannot say
 ///
-/// # What a pattern still cannot say
-///
-/// It cannot tell a cpu quantity from a memory one, so `cpu: 5Gi` and
-/// `memory: 100m` are both well-formed here and both nonsense. Nor can it
-/// express the numeric ceilings D3 §4.1 states (memory limit 8Gi, cpu limit 4):
-/// comparing quantities in CEL needs the `quantity` library, whose presence
-/// cannot be proved on the 1.29 floor Global Constraint 25 fixes — the same
-/// reason D2 R5 uses a regex instead of the CEL URL library. **Both are the
-/// controller's** — [`crate::runner_resources::validate`], since FX-2, which
-/// the `Restore` controller runs before anything else (such a `Restore` is
-/// refused `ExecutionSpecInvalid` before its Job exists).
+/// It cannot tell a cpu quantity from a memory one (`cpu: 5Gi` and
+/// `memory: 100m` are both well-formed here), nor express D3 §4.1's ceilings
+/// (memory limit 8Gi, cpu limit 4): comparing quantities in CEL needs the
+/// `quantity` library, whose presence cannot be proved on the 1.29 floor
+/// (Global Constraint 25). Both are the controller's
+/// ([`crate::runner_resources::validate`]), which the `Restore` controller runs
+/// before anything else, refusing such a `Restore` `ExecutionSpecInvalid`
+/// before its Job exists.
 pub const QUANTITY_PATTERN: &str =
     r"^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$";
 
@@ -722,8 +715,8 @@ pub struct RestoreEvidence {
     printcolumn = r#"{"name":"RTO","type":"integer","jsonPath":".status.measured.rtoSeconds"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND outcome pass"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#,
-    // PROD-11.1b: APPENDED after AGE, so no existing column moves (a runbook
-    // that reads a column by position keeps working).
+    // Appended after AGE, so no existing column moves (a runbook that reads a
+    // column by position keeps working).
     printcolumn = r#"{"name":"SELECTION","type":"string","jsonPath":".status.integrity.selection.scope","description":"partial when the signed scorecard records a replay selection (a partition subset or a window start; status.integrity.selection names it); empty is every partition of every topic"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -832,10 +825,9 @@ pub struct RestoreSpec {
 impl RestoreSpec {
     /// The per-run `Approval` this restore names, or `""`.
     ///
-    /// `""` IS THE SHAPE EVERY CALLER ALREADY HANDLED. Before `approvalRef`
-    /// became optional, an empty NAME was the "no authorisation" case and each
-    /// call site refused it terminally with `ApprovalNotReceived`. Collapsing
-    /// absent to `""` keeps those three refusals byte-identical.
+    /// `""` is the "no authorisation" case every call site refuses terminally
+    /// with `ApprovalNotReceived`, so collapsing absent to `""` keeps those
+    /// three refusals byte-identical.
     #[must_use]
     pub fn approval_ref_name(&self) -> &str {
         self.approval_ref.as_ref().map_or("", |r| r.name.as_str())

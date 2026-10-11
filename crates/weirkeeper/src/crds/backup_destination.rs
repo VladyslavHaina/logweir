@@ -40,13 +40,12 @@ use super::{Condition, Time};
 /// The scheme a `Backup`, `BackupSchedule` or `Restore` uses in its
 /// `archive.url` when it delegates the location to a `BackupDestination`.
 ///
-/// A SENTINEL, NOT AN ABSENT FIELD. `archive` stays required so an older
-/// controller can still DESERIALIZE the object — a missing required field
-/// fails the whole list/watch decode in `kube-runtime`'s reflector, which
-/// would stall every `Backup` reconcile after a rollback rather than refusing
-/// one object. With the sentinel the old controller decodes the object, fails
-/// to parse the unknown scheme and writes the terminal `ArchiveUrlUnreadable`
-/// before any POST.
+/// A sentinel, not an absent field: `archive` stays required so an older
+/// controller can still deserialize the object (a missing required field fails
+/// the whole list/watch decode in `kube-runtime`'s reflector, stalling every
+/// `Backup` reconcile after a rollback). With the sentinel the old controller
+/// decodes the object, fails to parse the unknown scheme and writes the
+/// terminal `ArchiveUrlUnreadable` before any POST.
 pub const DESTINATION_URL_SCHEME: &str = "logweir-destination://";
 
 /// A DNS-1123 subdomain — what a Secret or ConfigMap `metadata.name` must be.
@@ -61,9 +60,7 @@ pub const BUCKET_PATTERN: &str = r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$";
 /// `spec.storage.region` (D2 §3.1).
 pub const REGION_PATTERN: &str = r"^[a-z0-9-]{1,32}$";
 
-// ---------------------------------------------------------------------------
 // The CEL rules of D2 §3.2, verbatim, each beside the message it travels with.
-// ---------------------------------------------------------------------------
 
 /// R0 — the name budget, on the schema ROOT because that is the one place a
 /// rule may read `self.metadata.name`.
@@ -96,11 +93,11 @@ pub const R4_CA_REQUIRES_TLS_RULE: &str =
 /// R4's message.
 pub const R4_CA_REQUIRES_TLS_MESSAGE: &str = "transport.caBundle requires transport.security TLS";
 
-// R5 is regex-only ON PURPOSE. The CEL URL library cannot be proved present on
-// the 1.29 floor Global Constraint 25 fixes, and a rule the API server refuses
-// to compile is a CRD that does not install at all. Scheme, host and optional
-// port; no userinfo, path, query or fragment. `logweir_core::destination`'s
-// `endpoint_shape_ok` is the same shape hand-written for the pure layer.
+// R5 is regex-only: the CEL URL library cannot be proved present on the 1.29
+// floor (Global Constraint 25), and a rule the API server refuses to compile is
+// a CRD that does not install. Scheme, host and optional port; no userinfo,
+// path, query or fragment. `logweir_core::destination`'s `endpoint_shape_ok`
+// is the same shape hand-written for the pure layer.
 /// R5 — `spec.storage.endpoint` is an http(s) ORIGIN and nothing more.
 pub const R5_ENDPOINT_RULE: &str = concat!(
     "!has(self.endpoint) || self.endpoint.matches('",
