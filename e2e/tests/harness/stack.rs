@@ -57,6 +57,10 @@ pub const CP_OFFNET_PORT: &str = "LOGWEIR_E2E_CP_OFFNET_PORT";
 /// Profile `objectstore` (PROD-01.5; PROD-01.2 is its first Rust reader):
 /// SeaweedFS's S3 port.
 pub const OBJSTORE_PORT: &str = "LOGWEIR_E2E_OBJSTORE_PORT";
+/// Profile `faultproxy` (PROD-01.5d): the proxy's host port, which is the
+/// address `kafka-faulty` advertises, and the proxy's control port.
+pub const FAULTPROXY_PORT: &str = "LOGWEIR_E2E_FAULTPROXY_PORT";
+pub const FAULTPROXY_CTL_PORT: &str = "LOGWEIR_E2E_FAULTPROXY_CTL_PORT";
 /// Profile `cluster3` (FX-3 is its first Rust reader): the three nodes'
 /// host-side PLAINTEXT ports, each advertised as `localhost:<port>`.
 pub const C3_PORTS: [&str; 3] = [
@@ -349,6 +353,18 @@ pub fn bootstrap_confluent_offnet() -> String {
 /// reaches it.
 pub fn objectstore_endpoint() -> String {
     format!("http://localhost:{}", port(OBJSTORE_PORT))
+}
+
+/// Profile `faultproxy`: the host-side bootstrap of `kafka-faulty`, which is
+/// the fault proxy's address, so every request a client sends crosses it.
+pub fn bootstrap_faultproxy() -> String {
+    format!("localhost:{}", port(FAULTPROXY_PORT))
+}
+
+/// Profile `faultproxy`: the proxy's control port (`arm drop N`, `arm hold N
+/// MS`, `off`, `stats`; e2e/compose/profiles/faultproxy/faultproxy.py).
+pub fn faultproxy_control() -> String {
+    format!("localhost:{}", port(FAULTPROXY_CTL_PORT))
 }
 
 /// Profile `autocreate`: kafka-autocreate's host-side PLAINTEXT bootstrap, a

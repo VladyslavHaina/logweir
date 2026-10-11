@@ -57,6 +57,7 @@ objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-ev
 registry  registry: Karapace 6.2.3 (Schema-Registry-compatible) :9141, schemas in _schemas on kafka-broker-1; registry-rest: its REST proxy :9142 (Avro, JSON Schema and Protobuf producers)
 redpanda  redpanda: one Redpanda v26.2.4 node (not Apache Kafka); PLAINTEXT :9124, SASL_PLAINTEXT :9125 (SCRAM-SHA-256 as logweir, SCRAM-SHA-512 as logweir512)
 confluent kafka-cp: one Confluent Platform 8.3.2 broker (cp-kafka, the community image), PLAINTEXT :9128; OFFNET :9129 answers a bootstrap and advertises 127.0.0.1:1 (the advertised-address failure)
+faultproxy  kafka-faulty behind faultproxy: a single-node cluster reached only through a proxy :9143 that can drop or hold the Nth Produce response (control :9144)
 acl       kafka-acl: StandardAuthorizer; PLAINTEXT :9150 as ANONYMOUS (super user), SASL_PLAINTEXT/SCRAM-SHA-512 :9151 as logweir (restricted by the row's ACLs)
 "
 

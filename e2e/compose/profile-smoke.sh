@@ -537,6 +537,20 @@ smoke_confluent() {
 
 profiles=${*:-$(printf '%s' "${COMPOSE_PROFILES:-}" | tr ',' ' ')}
 [ -n "$profiles" ] || { echo "profile-smoke: no profile named and COMPOSE_PROFILES is empty" >&2; exit 2; }
+smoke_faultproxy() {
+  local p c out want
+  p=$(lw_e2e_port LOGWEIR_E2E_FAULTPROXY_PORT)
+  c=$(lw_e2e_port LOGWEIR_E2E_FAULTPROXY_CTL_PORT)
+  want=$(sed -n 's/^CLUSTER_ID=//p' "e2e/compose/slots/$LW_E2E_PROJECT/kafka-faulty.env")
+  out=$(hostside "$T/kafka-cluster.sh cluster-id --bootstrap-server localhost:$p")
+  if printf '%s' "$out" | grep -qx "Cluster ID: $want"; then pass faultproxy.forwards "localhost:$p reaches kafka-faulty ($want) through the proxy"; else fail faultproxy.forwards "wanted $want: $(printf '%s' "$out" | tail -1)"; fi
+  out=$(hostside "exec 3<>/dev/tcp/localhost/$c; echo stats >&3; cat <&3")
+  if printf '%s' "$out" | grep -q '"mode": "off"'; then pass faultproxy.control "stats: $(printf '%s' "$out" | tail -1)"; else fail faultproxy.control "$(printf '%s' "$out" | tail -1)"; fi
+  # Negative control: an ordinal the proxy cannot count to is refused.
+  out=$(hostside "exec 3<>/dev/tcp/localhost/$c; echo 'arm drop 0' >&3; cat <&3")
+  if printf '%s' "$out" | grep -q '"error"'; then pass faultproxy.bad-command-refused "$(printf '%s' "$out" | tail -1)"; else fail faultproxy.bad-command-refused "$(printf '%s' "$out" | tail -1)"; fi
+}
+
 echo "# profile smoke: project $LW_E2E_PROJECT, broker image $IMG, profiles: $profiles ($(date -u +%FT%TZ))"
 for p in $profiles; do
   case "$p" in
@@ -551,6 +565,7 @@ for p in $profiles; do
     streams-protocol) smoke_streams_protocol ;;
     redpanda) smoke_redpanda ;;
     confluent) smoke_confluent ;;
+    faultproxy) smoke_faultproxy ;;
     groups) smoke_groups ;;
     *) fail "$p" "no smoke defined for profile $p" ;;
   esac

@@ -1083,3 +1083,71 @@ services:
       interval: 2s
       timeout: 5s
       retries: 90
+
+  # --- profile `faultproxy`: a produce-response fault proxy (PROD-01.5d) ------
+  # The oracle for rows about a LOST ACKNOWLEDGEMENT: PROD-07.1's 07.1-R9 and
+  # PROD-00.3d's A-C5-1 (the record is decisions/PROD-07.1-resume-semantics.md
+  # §8). A single-node cluster whose host-facing listener PROXIED is advertised
+  # as the proxy's published address, so every connection a client makes to
+  # this broker crosses the proxy. The proxy forwards everything, and can drop,
+  # or hold, the response to the Nth Produce request since it was armed:
+  # profiles/faultproxy/faultproxy.py says how, over its control port. It shares
+  # the broker's network namespace, so PROXIED listens on the loopback only and
+  # the broker publishes the proxy's two ports and nothing else: from the host
+  # there is no way to the broker around the proxy. Its own CLUSTER_ID per
+  # stack, loaded like kafka-cluster2's. No marker topic: a drill row that
+  # restores here creates it.
+  kafka-faulty:
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}
+    hostname: kafka-faulty
+    profiles: [faultproxy]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_FAULTPROXY_PORT:-9143}:9190"
+      - "${LOGWEIR_E2E_FAULTPROXY_CTL_PORT:-9144}:9199"
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-faulty.env
+        required: true
+    environment:
+      KAFKA_NODE_ID: 6001
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 6001@kafka-faulty:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-faulty:9094,CONTROLLER://kafka-faulty:9093,PROXIED://127.0.0.1:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-faulty:9094,PROXIED://localhost:${LOGWEIR_E2E_FAULTPROXY_PORT:-9143}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PROXIED:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # One broker: the share-group state topic sized like kafka-broker-1's.
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-faulty:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # The proxy, in kafka-faulty's network namespace: :9190 forwards to PROXIED
+  # on 127.0.0.1:9092, :9199 is its control port. Python's standard library on
+  # the `registry` profile's image, which is pinned by digest and carries
+  # python3, so the profile pulls no image of its own.
+  faultproxy:
+    image: ghcr.io/aiven-open/karapace:6.2.3@sha256:6d5b1ff1b77c497108be8be8359c9072294847cba5aa0767fc168ec70632d78f
+    profiles: [faultproxy]
+    network_mode: "service:kafka-faulty"
+    depends_on:
+      kafka-faulty: { condition: service_healthy }
+    entrypoint: ["python3", "/faultproxy.py", "9190", "9199", "127.0.0.1:9092"]
+    volumes:
+      - ./profiles/faultproxy/faultproxy.py:/faultproxy.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s = socket.create_connection(('127.0.0.1', 9199), 3); s.sendall(b'stats\\n'); assert b'mode' in s.recv(65536)"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
