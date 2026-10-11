@@ -1172,6 +1172,7 @@ after `status.cursor.rescanStartAfter`.
 | Bound | Value |
 |---|---|
 | `spec.sync.viewLimit` | 100–5000, default 2000: how many newest points are materialised. The rest are counted, and `status.truncated` says the view is a window. |
+| `spec.sync.maxObjectsPerRun` | 1000–1000000, default 100000: the object budget of one sync Job; a walk that does not finish persists its cursor (`ScanIncomplete`, `catalogStoppedFor: objectBudget`) |
 | `status.pages[]` | at most 8 immutable `ConfigMap`s, entries one JSON per line under `entries.jsonl`, each with its `sha256` |
 | `status.indexConfigMap` | one fence-pointer `ConfigMap`: per page, the point-id and recovery-point ranges |
 | `status.histogram` | at most 400 days, over the whole walk |
@@ -1836,7 +1837,9 @@ The full list of retention reasons is in [reference.md](reference.md#retentionpo
 the set half is enforced), and `legalHold` stays `ProviderEnforcedUnverified`.
 
 On v1, an archive of more than 5000 points is never enforced, and nor is a
-`mode: Full` catalog whose walk does not finish in one sync: use `mode: Index`.
+`mode: Full` catalog whose walk does not finish in one sync: use `mode: Index`,
+or a `maxObjectsPerRun` that finishes in one sync (`spec.sync` is immutable:
+re-create the catalog).
 
 ### Versioned and Object Lock buckets
 
