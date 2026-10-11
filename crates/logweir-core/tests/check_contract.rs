@@ -81,6 +81,95 @@ fn the_code_table_is_closed_and_round_trips() {
     assert!(serde_json::from_str::<CheckCode>("\"NotACode\"").is_err());
 }
 
+/// **FX-47 (PROD-01.2's P15): an older controller is never sent a code it
+/// cannot read.** The vocabulary is closed on the reading side, so one unknown
+/// code makes a controller refuse the whole result (`ResultUnreadable`). The
+/// only sign a runner has that the controller is newer is a plan that lists
+/// `capabilityChecks`. So every code added since the last controller that
+/// sends none (main before PROD-01.2's merge, 168 codes) is either answered
+/// only on a capability row, which such a plan never asks for, or has a code
+/// from those 168 that a plan without the list gets instead
+/// (`TimestampBoundNotReported` → `BrokerConfigsNotReadable`, pinned by
+/// `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`).
+/// A new code fails here until it is listed below as one or the other.
+#[test]
+fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
+    enum ForAPlanWithoutCapabilityChecks {
+        NotAsked(&'static [CheckId]),
+        Instead(CheckId, CheckCode),
+    }
+    use ForAPlanWithoutCapabilityChecks::{Instead, NotAsked};
+    const READ_BY_THE_OLDEST_CONTROLLER: usize = 168;
+    const ENGINE: &[CheckId] = &[
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+    ];
+    const API_VERSIONS: &[CheckId] = &[
+        CheckId::ConnectionEngineProtocol,
+        CheckId::TargetEngineProtocol,
+        CheckId::ConnectionGroupTypes,
+    ];
+    let newer: &[(CheckCode, ForAPlanWithoutCapabilityChecks)] = &[
+        (CheckCode::EngineProtocolSupported, NotAsked(ENGINE)),
+        (CheckCode::EngineProtocolUnsupported, NotAsked(ENGINE)),
+        (CheckCode::ApiVersionsNotObserved, NotAsked(API_VERSIONS)),
+        (
+            CheckCode::TopicConfigsReadable,
+            NotAsked(&[CheckId::ConnectionTopicConfigsReadable]),
+        ),
+        (
+            CheckCode::TopicConfigsNotReadable,
+            NotAsked(&[CheckId::ConnectionTopicConfigsReadable]),
+        ),
+        (
+            CheckCode::GroupTypesListed,
+            NotAsked(&[CheckId::ConnectionGroupTypes]),
+        ),
+        (
+            CheckCode::GroupTypesNotListed,
+            NotAsked(&[CheckId::ConnectionGroupTypes]),
+        ),
+        (
+            CheckCode::TimestampBoundNotReported,
+            Instead(
+                CheckId::TargetTimestampBound,
+                CheckCode::BrokerConfigsNotReadable,
+            ),
+        ),
+    ];
+    let listed: std::collections::BTreeSet<CheckCode> = newer.iter().map(|(c, _)| *c).collect();
+    assert_eq!(listed.len(), newer.len(), "a code is listed twice");
+    assert_eq!(
+        CheckCode::ALL.len(),
+        READ_BY_THE_OLDEST_CONTROLLER + newer.len(),
+        "CheckCode has a member that is neither one of the {READ_BY_THE_OLDEST_CONTROLLER} an \
+         older controller reads nor listed here. Answer it only on a capability row (a plan \
+         lists those in `capabilityChecks`) and list it as `NotAsked`, or give a plan without \
+         `capabilityChecks` an older code on that row and list it as `Instead`"
+    );
+    for (code, older) in newer {
+        match older {
+            NotAsked(rows) => {
+                for row in *rows {
+                    assert!(
+                        row.is_capability(),
+                        "`{code}` is answered on `{row}`, which every plan asks for: an older \
+                         controller would receive it"
+                    );
+                }
+            }
+            Instead(row, instead) => {
+                assert!(!row.is_capability(), "`{code}` on `{row}` is `NotAsked`");
+                assert!(
+                    !listed.contains(instead),
+                    "`{code}` falls back to `{instead}`, which an older controller cannot read \
+                     either"
+                );
+            }
+        }
+    }
+}
+
 /// The check ids are dotted `category.name` and `category()` is derived from
 /// the spelling — one table, not two.
 #[test]

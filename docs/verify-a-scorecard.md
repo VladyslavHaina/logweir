@@ -304,8 +304,8 @@ name: Kafka assigns it a new topic id, and the document claims the name, not
 the original topic
 ([the format](formats/drill-scorecard.md#targetoriginal_name-format-180)).
 
-Backup receipts have their own shape and invariants — eleven arms since format
-1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
+Backup receipts have their own shape and invariants
+([the list](formats/backup-receipt.md#the-forty-five-arms-and-the-positions-documents-fourteen)). For an accepted
 receipt both readers print its configuration capture coverage in the same words:
 
 ```
