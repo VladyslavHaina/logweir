@@ -145,15 +145,15 @@ users:
 def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
     """The shipped ClusterRole's namespaced rules, as a Role in one namespace.
 
-    ONE DELTA FROM `config/rbac/role.yaml`, AND IT IS LISTED HERE. An earlier
+    ONE DELTA FROM THE SHIPPED ClusterRole, AND IT IS LISTED HERE. An earlier
     version of this function claimed to be "copied rule for rule" and was wider
     than a shipped install in SEVEN places (review R-12): `+get` on `secrets`,
     `+patch` on `restores`, `+get` on `pods`, `+watch` on `events`, `+list` on
     `configmaps`, `+get` on `preflights`/`topicdiscoveries`/
     `protectionpolicies`/`retentionpolicies`, and `+update` on the status
     subresources. Six of those seven are now gone; the `secrets` one was the
-    worst of them, because `config/rbac/role.yaml` carries a banner — "NO VERB
-    ON `secrets`, AT ALL, ANYWHERE IN THIS FILE" — and a fence that quietly
+    worst of them, because the shipped ClusterRole says "No verb on
+    `secrets`" (`charts/logweir/templates/clusterrole.yaml`) — and a fence that quietly
     broke a named product invariant is a fence that can launder a 403 into a
     pass.
 

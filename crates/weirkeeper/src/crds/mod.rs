@@ -888,12 +888,11 @@ const NUMERIC_BOUND_KEYS: [&str; 5] = [
 /// # Why this exists, and why it is not cosmetic
 ///
 /// `JSONSchemaProps::maximum` is an `f64`, so `serde_yaml` writes `600.0`.
-/// `kubectl kustomize` — the one renderer of `logweir.yaml` — round-trips the
-/// same document through its own YAML library and writes `600`. The two
-/// installs Logweir ships would then carry BYTE-DIFFERENT CRDs for the same
-/// kind, and `chart_lint_default_render_agrees_with_the_install_file` fails on
-/// it. Normalising here means both renderers see the same text, so neither has
-/// anything left to normalise.
+/// `kubectl kustomize` — which rendered the static bundle until v1 withdrew it
+/// (release-notes item 76) — round-trips the same document through its own
+/// YAML library and writes `600`, so two renderers would carry BYTE-DIFFERENT
+/// CRDs for the same kind. Normalising here means every renderer sees the same
+/// text, so none has anything left to normalise.
 ///
 /// JSON has one number type, so `600` and `600.0` are the same value to the
 /// API server; this changes the spelling and never the schema. A bound with a

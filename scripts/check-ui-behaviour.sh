@@ -43,13 +43,13 @@
 # mistaken for coverage.
 #
 # THE SECOND TOOL IS `emit-restore-body.js`, AND IT IS NOT RUN HERE (Task 28).
-# It builds the laptop walkthrough's `Restore` create body out of the page's own
+# It builds the chart walk's `Restore` create body out of the page's own
 # modules -- `renderPlanBytes`, `planHash` and `mintNames` from `ui/plan.js`,
 # and `restoreBody` from `ui/pages/restore-wizard.js` -- from a wizard state the
-# demo writes with the values of the archive it has just made. Its runner is
-# `scripts/laptop-demo.sh` step 10(a), which needs a live cluster, an archive
-# and a `kubectl proxy`, so it can be neither a `*.spec.js` suite (Global
-# Constraint 22) nor an arm of this gate. What holds it instead is
+# walk writes with the values of the archive it has just made. Its runner is
+# `scripts/helm-demo.sh` step 6, which needs a live cluster and an archive, so
+# it can be neither a `*.spec.js` suite (Global Constraint 22) nor an arm of
+# this gate. What holds it instead is
 # `crates/logweir/tests/laptop_demo_lint.rs::the_body_emitter_renders_the_plan_with_the_pages_own_renderer`,
 # in the DEFAULT test suite: it asserts the import from `../plan.js`, that all
 # three functions are CALLED and not merely imported, and that no key of the

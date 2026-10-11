@@ -59,7 +59,8 @@
 //! nothing. It creates exactly two objects — the discovery Job and its
 //! immutable plan `ConfigMap` — both owned by the `Backup` with
 //! `controller: true`, so the `Backup`'s own cascade collects them and no
-//! `delete` verb is needed (`config/rbac/role.yaml` grants it on nothing).
+//! `delete` verb is needed (`charts/logweir/templates/clusterrole.yaml` grants it only on the
+//! two transient check kinds).
 
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::batch::v1::Job;

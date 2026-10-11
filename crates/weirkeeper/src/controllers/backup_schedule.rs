@@ -1839,8 +1839,8 @@ pub fn backup_is_terminal(backup: &Backup) -> bool {
 /// CONCURRENCY ONE. `Api::replace_status` issues `PUT`, which the API server
 /// authorises as the verb `update` on `backupschedules/status`; the shipped
 /// ClusterRole grants `patch` on the status subresources and deliberately
-/// grants no `update` anywhere (`config/rbac/role.yaml`, and the chart and
-/// install-file copies of it). A reservation sent as a replace is therefore
+/// grants no `update` anywhere (`charts/logweir/templates/clusterrole.yaml`). A reservation sent as a
+/// replace is therefore
 /// **403 on every shipped install** — with the default `concurrencyPolicy:
 /// Forbid` that is every due slot of every schedule, so nothing is ever
 /// created. The compare-and-set is not lost by moving to a patch: Kubernetes

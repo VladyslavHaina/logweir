@@ -208,9 +208,8 @@ pub const ARCHIVE_SECRET_KEY: &str = "secret-access-key";
 /// **A VARIABLE THAT IS NOT SET IS NOT FORWARDED.** The default install sets
 /// none of them, so a default runner Job's env is exactly what it was before
 /// this task: `RUST_LOG` plus `job::build`'s own three. Nothing about the
-/// shipped `logweir.yaml` changes, which is what keeps it applyable by a
-/// stranger (Global Constraint 37); the demo's own kustomize patch is what
-/// sets them.
+/// default chart render changes; the chart's `archive.*` values are what set
+/// them.
 pub const ARCHIVE_ADDRESSING_ENV: [&str; 4] = [
     "AWS_ENDPOINT_URL",
     "AWS_REGION",
@@ -1077,7 +1076,7 @@ fn installation_policy_cache() -> &'static crate::check::policy::PolicyCache {
 ///   [`crate::check::policy::POLICY_CONFIGMAP_ENV`] nor
 ///   `LOGWEIR_INSTALLATION_NAMESPACE` on the controller Deployment, so
 ///   `configured_ref` is `None` and nothing is ever read. A hand-wired or
-///   embedded controller; the chart and `logweir.yaml` both set the pair.
+///   embedded controller; the chart sets the pair.
 /// * **Referenced and absent.** The variables are set and the `ConfigMap` is
 ///   not there — `get_opt` answered `None` and the load defaulted.
 ///

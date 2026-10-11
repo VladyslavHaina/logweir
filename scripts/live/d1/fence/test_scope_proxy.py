@@ -289,9 +289,9 @@ def test_role_delta_allows_update_on_status_and_nothing_else() -> None:
 def test_role_delta_catches_every_kind_of_widening() -> None:
     """The six undeclared grants review R-12 found, each on its own.
 
-    `secrets` is the one that matters most: `config/rbac/role.yaml` carries the
-    banner "NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE", so a fence
-    that grants one has broken a named product invariant.
+    `secrets` is the one that matters most: the shipped ClusterRole
+    (`charts/logweir/templates/clusterrole.yaml`) says "No verb on `secrets`",
+    so a fence that grants one has broken a named product invariant.
     """
     cases = {
         "core/secrets": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}],
@@ -315,7 +315,7 @@ def test_the_fenced_role_grants_no_verb_on_secrets() -> None:
     grants = fenced.rules_to_grants(fenced.namespaced_role("ns", {})["rules"])
     offenders = sorted(k for k in grants if k[1].split("/")[0] == "secrets")
     assert not offenders, (
-        "config/rbac/role.yaml: NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE — "
+        "charts/logweir/templates/clusterrole.yaml: no verb on `secrets` — "
         f"the fenced Role has {offenders}"
     )
 

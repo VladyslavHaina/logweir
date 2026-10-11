@@ -46,7 +46,7 @@
 //! and `Preflight.status.expiresAt` — so there is nothing to type the function
 //! against. It also needs an RBAC decision rather than a grant:
 //! `crates/logweir/tests/manifest_lint.rs` asserts twice, with the reason
-//! recorded in `config/rbac/role.yaml`'s header, that `delete` appears in NO
+//! recorded in `charts/logweir/templates/clusterrole.yaml`'s header, that `delete` appears in NO
 //! rule and that `Api::delete`/`delete_opt` is called NOWHERE under
 //! `crates/weirkeeper/src/`. `gc.rs` belongs to W8/W9 with W11.
 //!
@@ -421,7 +421,7 @@ pub fn ttl_patch() -> Value {
 ///
 /// `activeDeadlineSeconds: 1` and not `delete`: the weirkeeper `ClusterRole`
 /// grants `delete` on the two transient CHECK KINDS and on nothing else — no
-/// Job, ever (`config/rbac/role.yaml`'s own header) — and a deadline collapse
+/// Job, ever (`charts/logweir/templates/clusterrole.yaml`'s own header) — and a deadline collapse
 /// is the better mechanism anyway. The Job FAILS with `DeadlineExceeded`, its
 /// pods terminate, and it becomes finished, so the TTL applies and the object
 /// stays around long enough to say what happened; a delete would take the

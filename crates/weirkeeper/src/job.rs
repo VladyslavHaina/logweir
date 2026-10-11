@@ -17,7 +17,7 @@
 /// digest bump comes to update one call site and miss another.
 ///
 /// THE NAMESPACE IS THE LITERAL `docker.io/vladyslavhaina/…`, NOT A PLACEHOLDER
-/// (Global Constraint 24). A shipped `logweir.yaml` carrying
+/// (Global Constraint 24). A shipped manifest carrying
 /// `docker.io/<namespace>/…` is not applyable, which would make spec §16's
 /// first clause unsatisfiable. A trademark answer changes one string, here.
 ///

@@ -32,8 +32,8 @@
 //! # NOTHING HERE DELETES ANYTHING, AND THE GRANT SAYS SO
 //!
 //! §6.5: no Logweir component deletes a `Backup`, a ConfigMap or an archive
-//! object. `config/rbac/role.yaml` grants this controller `create` and `patch`
-//! on `backups` and no `delete` on any resource, and
+//! object. `charts/logweir/templates/clusterrole.yaml` grants this controller `create`
+//! and `patch` on `backups` and no `delete` on them or on ConfigMaps, and
 //! `scripts/check-no-archive-write.sh` plus `manifest_lint`'s two delete
 //! assertions keep that true. The one write this module makes is a metadata
 //! merge PATCH: it cannot reach a sealed `spec` (CEL would refuse it) and it

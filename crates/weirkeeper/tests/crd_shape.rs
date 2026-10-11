@@ -4211,7 +4211,7 @@ fn the_runner_image_is_named_once() {
     assert!(
         weirkeeper::job::RUNNER_IMAGE.starts_with(&needle),
         "RUNNER_IMAGE is under the literal docker.io/vladyslavhaina namespace (Global Constraint 24), \
-         never a `<org>` placeholder: a shipped logweir.yaml carrying one is not applyable. \
+         never a `<org>` placeholder: a shipped manifest carrying one is not applyable. \
          Got {}",
         weirkeeper::job::RUNNER_IMAGE
     );
