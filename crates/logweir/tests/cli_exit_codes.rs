@@ -12,11 +12,8 @@
 //! branches (`snapshot`/`diff` vs `plan`) that only `plan` had process-level
 //! coverage for before.
 
-use std::process::Command;
-
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+mod support;
+use support::bin;
 
 #[test]
 fn no_arguments_exits_operational_not_a_drill_result() {

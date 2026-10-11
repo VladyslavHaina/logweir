@@ -10,16 +10,14 @@
 //! `validate_invariants`'s own return value), so it proves the CLI's mapping
 //! end to end.
 
+mod support;
+use support::bin;
+
 use logweir_core::det_json::to_deterministic_json;
 use logweir_core::scorecard::Scorecard;
 use logweir_evidence::keys::SigningKey;
 use logweir_evidence::sign::sign_detached;
 use logweir_evidence::PAYLOAD_TYPE_SCORECARD;
-use std::process::Command;
-
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
 
 #[test]
 fn drill_verify_refuses_a_higher_major_format_version_even_when_well_signed() {

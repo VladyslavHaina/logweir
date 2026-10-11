@@ -16,6 +16,9 @@
 //! outcome rows call `execute_with` — its outcome-returning half — because a
 //! `BackupOutcome` FIELD is what they are about and an exit code cannot carry
 //! one. Both are the seam; neither names a client constructor.
+mod support;
+use support::assert_format_at_least;
+
 use logweir::backup::{execute_with, run_with, BackupError, BackupOutcome, BackupRunArgs};
 use logweir::exit::ExitCode;
 use logweir_core::backup_receipt::BackupReceipt;
@@ -531,26 +534,6 @@ fn guard_message(err: BackupError) -> String {
         BackupError::Guard(refusal) => refusal.0,
         other => panic!("expected a guard refusal (exit 3), got {other:?}"),
     }
-}
-
-/// A document's `format_version` is **at least** `min` — the minor that defines
-/// the field under test — rather than an exact pin. Receipt and catalog-point
-/// versions are renumbered when several format-bumping rows integrate together
-/// (PROD-01.3/01.4a/03.0/04.1), and a future renumber only raises the stamped
-/// version, so `>= min` survives it where `== min` would break a sibling's CI.
-fn assert_format_at_least(actual: &str, min: &str, what: &str) {
-    let triple = |v: &str| -> (u64, u64, u64) {
-        let mut it = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-        (
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-            it.next().unwrap_or(0),
-        )
-    };
-    assert!(
-        triple(actual) >= triple(min),
-        "{what}: format_version {actual:?} is below the minimum {min:?} that defines this field"
-    );
 }
 
 // ---------------------------------------------------------------------------

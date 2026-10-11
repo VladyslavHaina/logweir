@@ -26,17 +26,11 @@
 //! `crates/logweir/tests/extract_engine.rs` is the precedent for a test in this
 //! package that shells a repository script.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod support;
+use support::{repo_root, text, Overlay};
 
-/// The repository root, from this package's manifest directory.
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
+use std::path::Path;
+use std::process::{Command, Output};
 
 /// Run the gate. `root` is the working directory; `logweir_root`, when given,
 /// is exported as `LOGWEIR_ROOT` so the script walks an overlay instead of the
@@ -51,10 +45,6 @@ fn run_gate(script: &Path, cwd: &Path, logweir_root: Option<&Path>) -> Output {
         cmd.env("LOGWEIR_ROOT", r);
     }
     cmd.output().expect("the gate script can be spawned")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[test]
@@ -79,16 +69,6 @@ fn one_signer_script_is_green_on_this_tree() {
 /// deliberately omits `target/`, `.git/`, `.engine/`, `e2e/fixtures/` and
 /// `e2e/compose/` — so the copy is cheap, and so the script is exercised
 /// against a tree where some source roots are simply absent.
-struct Overlay {
-    path: PathBuf,
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 impl Overlay {
     fn new(tag: &str) -> Overlay {
         let root = repo_root();

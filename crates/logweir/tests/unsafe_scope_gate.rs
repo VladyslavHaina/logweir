@@ -25,18 +25,13 @@
 //! Every assertion reads the exit status from the child directly, never
 //! through a pipe.
 
-use std::path::{Path, PathBuf};
+mod support;
+use support::{repo_root, Overlay};
+
+use std::path::Path;
 use std::process::{Command, Output};
 
 const PERIMETER: &str = "crates/logweir-rdkafka-ffi";
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
 
 fn run_gate(cwd: &Path, root: Option<&Path>) -> Output {
     let mut cmd = Command::new("bash");
@@ -53,17 +48,6 @@ fn text(o: &Output) -> String {
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr)
     )
-}
-
-/// A throwaway copy of the workspace's manifests and sources, deleted on drop.
-struct Overlay {
-    path: PathBuf,
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }
 
 fn copy_tree(from: &Path, to: &Path) {
@@ -84,6 +68,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// A throwaway copy of the workspace's manifests and sources, deleted on drop.
 impl Overlay {
     fn new(tag: &str) -> Overlay {
         let root = repo_root();

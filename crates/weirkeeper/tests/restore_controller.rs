@@ -16,7 +16,13 @@
 //! Global Constraint 6's operator half — an unapproved plan creates NOTHING —
 //! is only assertable that way round.
 
-use chrono::{DateTime, TimeZone, Utc};
+mod support;
+use support::{
+    conditions_of, not_found_body, patched_statuses, path, posted_job, status_patch_count, utc,
+    workspace_root,
+};
+
+use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use http::{Request, Response};
 use http_body_util::BodyExt as _;
@@ -296,13 +302,6 @@ fn restore_new_topic() -> Restore {
     serde_json::from_value(value).expect("the mutated fixture is a Restore")
 }
 
-/// A UTC instant, spelled as five integers so a test reads like a calendar.
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
-
 fn now() -> DateTime<Utc> {
     utc(2026, 9, 10, 12, 0)
 }
@@ -424,14 +423,6 @@ fn roster() -> weirkeeper::crds::trust_roster::TrustRoster {
 /// legacy path still renders the same bytes.
 fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
     weirkeeper::trust::synthesize_legacy(&roster().spec)
-}
-
-/// A 404 `Status`, the shape `Api::get_opt` reads as "absent".
-fn not_found_body(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
-  "message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 /// A Job that exists and has not finished.
@@ -692,49 +683,12 @@ fn finished_routes(pods: String, log: String, job_condition: &str) -> Vec<Route>
 // Recording helpers
 // ---------------------------------------------------------------------------
 
-/// A recorded URI's PATH, without its query string.
-///
-/// `kube` appends a `?` to every request target it builds, empty query
-/// included, so an `ends_with("/status")` over the raw URI is false for every
-/// request the client actually makes.
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
-}
-
 /// How many `POST`s reached `suffix`.
 fn post_count(bodies: &[SeenBody], suffix: &str) -> usize {
     bodies
         .iter()
         .filter(|b| b.method == "POST" && path(&b.uri).ends_with(suffix))
         .count()
-}
-
-/// Every `PATCH …/status` body the double saw, as its `status` object.
-fn patched_statuses(bodies: &[SeenBody]) -> Vec<Value> {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
-        .map(|v| v["status"].clone())
-        .collect()
-}
-
-/// One status's conditions as `(type, status, reason)`, in array order.
-fn conditions_of(status: &Value) -> Vec<(String, String, String)> {
-    status["conditions"]
-        .as_array()
-        .map(|cs| {
-            cs.iter()
-                .map(|c| {
-                    (
-                        c["type"].as_str().unwrap_or_default().to_string(),
-                        c["status"].as_str().unwrap_or_default().to_string(),
-                        c["reason"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// The body of the one `POST …/configmaps`, as JSON.
@@ -746,15 +700,6 @@ fn posted_config_map(bodies: &[SeenBody]) -> Value {
     serde_json::from_str(&body.body).expect("a ConfigMap POST body is JSON")
 }
 
-/// The body of the one `POST …/jobs`, as JSON.
-fn posted_job(bodies: &[SeenBody]) -> Value {
-    let body = bodies
-        .iter()
-        .find(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
-        .expect("the reconciler POSTed a Job");
-    serde_json::from_str(&body.body).expect("a Job POST body is JSON")
-}
-
 /// This file's own source text, for the two source-reading assertions.
 fn this_module_source() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -762,15 +707,6 @@ fn this_module_source() -> String {
         .join("controllers")
         .join("restore.rs");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The workspace root: two levels above this crate's manifest directory.
-fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the workspace root is two levels above this crate")
-        .to_path_buf()
 }
 
 /// A YAML document from the workspace, parsed.
@@ -5859,14 +5795,6 @@ fn running_routes_with(pods: String, log: String) -> Vec<Route> {
             body: running_job_body(),
         },
     ]
-}
-
-/// How many `/status` `PATCH`es the double was asked for.
-fn status_patch_count(bodies: &[SeenBody]) -> usize {
-    bodies
-        .iter()
-        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
-        .count()
 }
 
 /// An already-created Job is the migration boundary. The controller observes

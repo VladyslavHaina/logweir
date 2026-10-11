@@ -22,14 +22,8 @@
 //! The bytes are built here from the same JSON shape the controller emits, so
 //! a writer-side change that this file does not know about fails it.
 
-use std::path::{Path, PathBuf};
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the workspace root is two levels above crates/logweir")
-}
+mod support;
+use support::repo;
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);

@@ -17,6 +17,9 @@
 //! No dial token: a filesystem archive URL and `kafka-broker-1:9094` only. No
 //! socket, no subprocess, no archive read; every row is in-memory.
 
+mod support;
+use support::{exit_of, guard_message};
+
 use logweir::drill::{
     build_plan, build_plan_with_floor, phase5_preflight, resolve_selection, DrillError, WindowFloor,
 };
@@ -127,20 +130,6 @@ fn facts() -> BackupSetFacts {
         manifest_version_id: None,
         consumer_group_snapshot_sha256: None,
         topics: vec![topic("audit"), topic("orders"), topic("payments")],
-    }
-}
-
-fn exit_of<T>(r: &Result<T, DrillError>) -> ExitCode {
-    match r {
-        Ok(_) => ExitCode::Ok,
-        Err(e) => e.exit_code(),
-    }
-}
-
-fn guard_message(e: &DrillError) -> String {
-    match e {
-        DrillError::Guard(g) => g.0.clone(),
-        other => panic!("expected a guard refusal, got {other:?}"),
     }
 }
 

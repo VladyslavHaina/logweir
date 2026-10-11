@@ -10,12 +10,10 @@
 //! own stdout and exit status. A library-only test cannot detect a missing
 //! dispatch arm; only this file can.
 
-use std::path::PathBuf;
-use std::process::Command;
+mod support;
+use support::bin;
 
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+use std::path::PathBuf;
 
 /// `e2e/fixtures/scorecard-pass.json`, resolved from this crate's manifest dir
 /// so the test does not depend on the working directory `cargo test` picks.

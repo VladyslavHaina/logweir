@@ -1,3 +1,6 @@
+mod support;
+use support::last_line;
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
@@ -146,16 +149,6 @@ fn run_with_spec_capturing_streams(spec: &str) -> (Option<i32>, String, String) 
         std::fs::read_to_string(&out_path).unwrap(),
         std::fs::read_to_string(&err_path).unwrap(),
     )
-}
-
-/// The last non-empty stdout line — what a controller tailing `pods/log`
-/// reads.
-fn last_line(stdout: &str) -> &str {
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .next_back()
-        .unwrap_or("")
 }
 
 fn spec_with_topics(topics: &str) -> String {

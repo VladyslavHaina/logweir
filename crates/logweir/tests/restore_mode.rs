@@ -17,6 +17,9 @@
 //! `no_network_in_unit_tests.rs`'s `ALLOWED` (chain N, STANDING RULE 18): they
 //! are DATA in a `DrillSpec`, handed to `ClusterReader`/`TopicCreator`/
 //! `TopicDeleter` doubles, and no client is ever constructed from them.
+mod support;
+use support::exit_of;
+
 mod fixtures;
 
 use logweir::drill::{self, phase0_admit, DrillError};
@@ -225,13 +228,6 @@ fn phase0(
         &creator,
         &deleter,
     )
-}
-
-fn exit_of<T>(r: &Result<T, DrillError>) -> ExitCode {
-    match r {
-        Ok(_) => ExitCode::Ok,
-        Err(e) => e.exit_code(),
-    }
 }
 
 fn message_of<T: std::fmt::Debug>(r: Result<T, DrillError>) -> String {

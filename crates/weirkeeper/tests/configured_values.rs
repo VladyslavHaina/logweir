@@ -31,8 +31,10 @@
 //! the loaded document fails the tuned half; a row whose premise was wrong fails
 //! the control.
 
+mod support;
+use support::{backup_request, leak, not_found, repo};
+
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::{Arc, Once};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -65,13 +67,6 @@ const DEST_A_UID: &str = "cafe0001-0000-4000-8000-0000000000a1";
 // ---------------------------------------------------------------------------
 // The chart's tuned render, and this process's environment
 // ---------------------------------------------------------------------------
-
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the repository root is above crates/weirkeeper")
-}
 
 /// Every document of one committed render.
 fn render(name: &str) -> Vec<serde_yaml::Value> {
@@ -155,10 +150,6 @@ fn policy_route(document: String) -> Route {
         })
         .to_string(),
     }
-}
-
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
 }
 
 fn utc(h: u32, m: u32, s: u32) -> DateTime<Utc> {
@@ -272,18 +263,6 @@ fn the_controllers_environment_is_the_charts_and_its_readers_read_the_tuned_valu
 
 fn now_pf() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap()
-}
-
-fn backup_request() -> Value {
-    json!({
-        "operation": "Backup",
-        "backup": {
-            "sourceRef": {"name": "source"},
-            "destinationRef": {"name": "primary"},
-            "topics": ["orders"]
-        },
-        "timeoutSeconds": 120
-    })
 }
 
 /// A terminal `Preflight` that is only there to make the reconcile reach the
@@ -435,12 +414,6 @@ fn manual(name: &str, uid: &str, created: DateTime<Utc>) -> Backup {
         }
     }))
     .expect("the fixture is a Backup")
-}
-
-fn not_found(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 /// Everything a CREATE pass of `b` may ask for, the policy included.

@@ -27,6 +27,9 @@
 //! **No private key is read by anything here.** `signing.pem` sits beside
 //! those files and this test never opens it.
 
+mod support;
+use support::repo_root;
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,14 +75,6 @@ use weirkeeper::verification::{
 /// this value, so a fixture without one is not an object this controller could
 /// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf()
-}
 
 fn read(rel: &str) -> String {
     let p = repo_root().join(rel);

@@ -18,15 +18,10 @@
 //! `kubectl explain` prints them, so the emitted CRDs are read as text below.
 //! Other doc comments, and the chart templates' YAML comments, are not.
 
-use std::path::{Path, PathBuf};
+mod support;
+use support::repo_root;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
+use std::path::{Path, PathBuf};
 
 /// The one file whose strings are documentation, not messages.
 const OUT_OF_SCOPE: &[&str] = &["crates/logweir-api/src/openapi.rs"];

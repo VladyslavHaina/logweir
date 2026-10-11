@@ -39,6 +39,9 @@
 //!
 //! [`evaluate`]: weirkeeper::controllers::approval::evaluate
 
+mod support;
+use support::{at, seen, sidecar};
+
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
@@ -60,9 +63,7 @@ use weirkeeper::crds::trust_policy::{
 };
 use weirkeeper::crds::trust_roster::TrustRosterStatus;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec};
-use weirkeeper::testing::{
-    mock_client_recording, mock_client_recording_bodies, Recorder, Route, SeenBody, SeenRequest,
-};
+use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 
 // ---------------------------------------------------------------------------
 // The out-of-tree signed material. See the module header.
@@ -198,16 +199,6 @@ fn one_good_key() -> TrustRosterSpec {
     roster_spec(vec![approver()], Vec::new())
 }
 
-/// A sidecar document, as the UTF-8 text `spec.sidecarBytes` carries.
-fn sidecar(payload_type: &str, signatures: &[(&str, &str)]) -> String {
-    let sigs = signatures
-        .iter()
-        .map(|(keyid, sig)| format!(r#"{{"keyid":"{keyid}","sig":"{sig}"}}"#))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(r#"{{"payloadType":"{payload_type}","signatures":[{sigs}]}}"#)
-}
-
 /// The sidecar the good key made, over [`APPROVAL_DOC`].
 fn good_sidecar() -> String {
     sidecar(PAYLOAD_TYPE_APPROVAL, &[(APPROVER_KEY_ID, APPROVER_SIG)])
@@ -312,21 +303,6 @@ fn not_found_body(message: &str) -> String {
         r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{message}",
              "reason":"NotFound","code":404}}"#
     )
-}
-
-/// Every request the double saw, method and path, query string dropped.
-fn seen(recorder: &Recorder) -> Vec<(String, String)> {
-    recorder
-        .lock()
-        .expect("the recorder mutex")
-        .iter()
-        .map(|SeenRequest { method, uri }| {
-            (
-                method.clone(),
-                uri.split('?').next().unwrap_or(uri).to_string(),
-            )
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,12 +2163,6 @@ fn policy_key(usages: Vec<SpecUsage>) -> SpecKey {
         revocation_reason: None,
         revocation_effective_from: None,
     }
-}
-
-fn at(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .expect("a fixture instant")
-        .with_timezone(&Utc)
 }
 
 /// One edit to a policy key, as a table row carries it.

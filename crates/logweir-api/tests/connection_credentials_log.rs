@@ -14,48 +14,7 @@ mod support;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use serde_json::{json, Value};
-use support::{TestApp, NS_A};
-
-/// The same seeded value `connection_credentials.rs` scans for.
-const SEEDED_PASSWORD: &str = "seeded-Pw-9c1f7e2a-never-echoed";
-
-fn connections() -> String {
-    format!("/api/v1/namespaces/{NS_A}/connections")
-}
-
-fn sasl_body(mode: &str, tls: bool) -> Value {
-    json!({
-        "role": "source",
-        "bootstrapServers": ["kafka.example:9093"],
-        "auth": {
-            "mode": mode,
-            "username": "logweir",
-            "credential": {"password": SEEDED_PASSWORD},
-            "tls": tls
-        }
-    })
-}
-
-fn pem(label: &str, body: &str) -> String {
-    format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
-}
-
-fn mtls_body(tls: bool) -> Value {
-    json!({
-        "role": "source",
-        "bootstrapServers": ["kafka.example:9094"],
-        "auth": {
-            "mode": "mtls",
-            "credential": {
-                "certificatePem": pem("CERTIFICATE", "TUlJQ2Zha2VDZXJ0aWZpY2F0ZQ=="),
-                "privateKeyPem": pem(concat!("PRIVATE", " KEY"), SEEDED_PASSWORD),
-            },
-            "tls": tls,
-            "tlsCa": {"configMapKeyRef": {"name": "kafka-ca", "key": "ca.crt"}}
-        }
-    })
-}
+use support::{connections, mtls_body, sasl_body, TestApp, SEEDED_PASSWORD};
 
 // ------------------------------------------------------------ log capture
 

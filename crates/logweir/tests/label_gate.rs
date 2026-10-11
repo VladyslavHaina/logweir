@@ -1,25 +1,12 @@
 //! Documentation label checks and reusable release-checklist consistency.
 //! These read local files; execution results belong in workflow summaries.
 
-use std::path::{Path, PathBuf};
+mod support;
+use support::{read, repo_root};
 
 /// The bracket token, assembled at compile time from two pieces so this file
 /// does not itself carry a mark that the gate would then have to judge.
 const TOKEN: &str = concat!("[", "UNVERIFIED");
-
-/// The repo-root idiom, from `crates/logweir/tests/extract_engine.rs`.
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
-
-fn read(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()))
-}
 
 /// Byte offsets of every occurrence of the bracket token in `text`.
 fn token_offsets(text: &str) -> Vec<usize> {

@@ -1,5 +1,7 @@
 //! Shared quality entrypoint and behavioral tests for development guard tools.
 
+use support::Overlay;
+
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -172,18 +174,6 @@ fn gate_lint_the_engine_allowlists_are_two_constants() {
 
 // ================================================ the derived primitive set
 
-/// A throwaway workspace overlay, so the signer gate can be run against a tree
-/// this test controls. Deleted on drop.
-struct Overlay {
-    path: PathBuf,
-}
-
-impl Drop for Overlay {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap_or_else(|e| panic!("mkdir {}: {e}", to.display()));
     for entry in std::fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display()))
@@ -200,6 +190,8 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// A throwaway workspace overlay, so the signer gate can be run against a tree
+/// this test controls. Deleted on drop.
 impl Overlay {
     fn new(tag: &str) -> Overlay {
         let root = repo_root();

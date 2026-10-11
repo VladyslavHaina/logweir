@@ -18,16 +18,7 @@ use base64::Engine as _;
 use logweir_api::auth::Actor;
 use logweir_api::authz::{Action, Authorizer};
 use serde_json::{json, Value};
-use support::{Options, TestApp, NS_A};
-
-/// A password value no fixture, golden or doc in the tree spells: every
-/// response, stored object and request body but the Secret's own is scanned for
-/// it (and for its base64).
-const SEEDED_PASSWORD: &str = "seeded-Pw-9c1f7e2a-never-echoed";
-
-fn connections() -> String {
-    format!("/api/v1/namespaces/{NS_A}/connections")
-}
+use support::{connections, mtls_body, pem, sasl_body, Options, TestApp, NS_A, SEEDED_PASSWORD};
 
 fn posts(app: &TestApp, plural: &str) -> Vec<(String, Value)> {
     app.fake
@@ -36,42 +27,6 @@ fn posts(app: &TestApp, plural: &str) -> Vec<(String, Value)> {
         .filter(|r| r.method == "POST" && r.path.ends_with(plural))
         .map(|r| (r.query.clone(), serde_json::from_str(&r.body).unwrap()))
         .collect()
-}
-
-fn sasl_body(mode: &str, tls: bool) -> Value {
-    json!({
-        "role": "source",
-        "bootstrapServers": ["kafka.example:9093"],
-        "auth": {
-            "mode": mode,
-            "username": "logweir",
-            "credential": {"password": SEEDED_PASSWORD},
-            "tls": tls
-        }
-    })
-}
-
-/// Test PEM shapes, assembled at run time so no source line carries a
-/// contiguous PEM block (WORKER-RULES, credential-shaped fixtures). Shape
-/// checks only: nothing here is parsed as X.509.
-fn pem(label: &str, body: &str) -> String {
-    format!("-----BEGIN {label}-----\n{body}\n-----END {label}-----\n")
-}
-
-fn mtls_body(tls: bool) -> Value {
-    json!({
-        "role": "source",
-        "bootstrapServers": ["kafka.example:9094"],
-        "auth": {
-            "mode": "mtls",
-            "credential": {
-                "certificatePem": pem("CERTIFICATE", "TUlJQ2Zha2VDZXJ0aWZpY2F0ZQ=="),
-                "privateKeyPem": pem(concat!("PRIVATE", " KEY"), SEEDED_PASSWORD),
-            },
-            "tls": tls,
-            "tlsCa": {"configMapKeyRef": {"name": "kafka-ca", "key": "ca.crt"}}
-        }
-    })
 }
 
 /// **Naming an existing Secret is refused**, before anything is written, with
