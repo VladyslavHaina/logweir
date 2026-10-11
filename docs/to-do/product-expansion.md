@@ -662,7 +662,7 @@ What it fixed:
   - `publish` needs every shard.
 - **Published and signed:** main run 38134054797 passed all four shards on main and signed `sha-5da3a395`.
 
-**PROD-17.1 — decided (OD-12, 2026-10-11); waves 1 and 2 merged (PRs #27, #28); wave 3 (docs) running with OD-13's chores.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
+**PROD-17.1 — decided (OD-12, 2026-10-11); waves 1 to 3 merged (PRs #27 to #29); OD-13's chores integrating; wave 4 (comments) next.** The proposal's waves, each one integration PR in which every item is its own commit, so `git revert` undoes one item:
 - **Wave 1, cuts:**
   - `s1-c1`: C1, with A4's `GET /rehearsal-schedules`. Tier A review, because admission and approval change.
   - `s1-notify`: C2's alert sinks, B2, A2 and A3's phase-7 call.
@@ -727,6 +727,16 @@ What it fixed:
 - **`w2-tests`:** B7 shared helpers and B6 one double per runner trait (36 of 74 fakes). The test-name set is identical.
 - **Size:** 156 files, −10,317 / +3,938. Test names went from 5,485 to 5,427, exactly the branches' adds and removes.
 - **Published and signed:** main run 38157455488 signed `sha-ae967d0b`.
+
+**PR #29 — merged (2026-10-11) as `b83d2242`: PROD-17.1 wave 3 (the docs).** Workflow `prod-17-1-wave-3-and-chores` (docs half). Each branch had a checklist review: ACCEPT-WITH-FIXES, with the fixes done. Integrated by `integrate-14`. PR checks: `check` 20 min, shards 22 to 25 min.
+- **B11 (`w3-notes`):** release notes went from 5,317 to about 2,800 lines. Each Scope is one line and names the live row its PoC upgrade still owes, and the upgrade and rollback lists are complete for items 1 to 78.
+- **B10 and B12 (`w3-guide`):**
+  - `kubernetes.md` went from 9,012 to about 2,500 lines, by task, with a new `docs/reference.md` (652 lines).
+  - `stability.md` went from 2,913 to 757 lines; every Never entry keeps its meaning.
+  - `docs/formats/` has one version table per format, and every version's reading rules are kept.
+  - The review's MEDIUM, a false sentence about which components link signing code, was fixed.
+- **B13 (`w3-surfaces`):** `ui/README.md` 3,130 → 305, `docs/api.md` 2,626 → 854, chart README 1,545 → 573. The console's schedule forms no longer offer `keepLast`/`keepDays`, and item 78 gained that sentence.
+- **Size:** 46 files, −25,904 / +8,529. B14 (install, quickstart, verify guide, keys) goes inside PROD-14.1.
 
 ## Carried over from the PLAT tracker
 
