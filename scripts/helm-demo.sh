@@ -275,7 +275,7 @@ helm status "$REL" -n "$SYS" --kube-context "$LOGWEIR_KUBE_CONTEXT" -o json > "$
 rc=$?
 set -e
 echo "    rc=$rc  (helm status $REL -n $SYS -o json)"
-[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $SYS. Install it first: helm install $REL $CHART -n $SYS --create-namespace -f $CHART/examples/demo.values.yaml --wait --timeout 10m"; }
+[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $SYS. Install it first: helm install $REL $CHART -n $SYS --create-namespace -f $CHART/examples/demo.values.yaml --set identity.installationTrust.enabled=false --wait --timeout 10m (this walk administers trust with its own TrustRoster, which a fresh install's default TrustPolicy would supersede)"; }
 release_status=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["status"])' "$OUT/helm-status.json")
 # The JSON is read and then REMOVED: it flattens the whole release manifest
 # onto one line, and `scripts/check-unverified-labels.sh` walks `.demo/` —
