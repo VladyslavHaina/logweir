@@ -8629,8 +8629,11 @@ fn fx20_a_legacy_source_check_expects_the_restore_jobs_location_binding() {
         Some(cb::UNBOUND_NO_UID)
     );
     // And it is the value the restore Job projects for the same plan.
-    let restore_env =
-        weirkeeper::controllers::restore::inline_restore_binding_env(LEGACY_SECRET, &plan, &[]);
+    let restore_env = weirkeeper::controllers::restore::inline_restore_binding_env(
+        LEGACY_SECRET,
+        &serde_yaml::from_str(&plan).unwrap(),
+        &[],
+    );
     assert_eq!(
         restore_env
             .literals

@@ -2220,6 +2220,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the Helm chart is the only install",
             "-l app.kubernetes.io/name=logweir",
         ),
+        // PROD-17.1 B5 (2026-10-11, item 77): an unparseable plan is refused
+        // before its approval is read.
+        ("an unparseable plan refused early", "PlanUnparseable"),
     ];
     assert_eq!(
         items.len(),

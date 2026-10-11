@@ -1305,13 +1305,26 @@ impl ResolvedConnection {
                 ),
             )
         })?;
+        self.check_restore_target(&view.target.bootstrap_servers, &view.target.auth)
+    }
+
+    /// [`Self::check_restore_plan`] over the target of a plan already read.
+    ///
+    /// # Errors
+    ///
+    /// [`TERMINAL_STATE_CONNECTION_PLAN_MISMATCH`].
+    pub fn check_restore_target(
+        &self,
+        bootstrap_servers: &[String],
+        auth: &AuthSpec,
+    ) -> Result<(), ConnectionRefusal> {
         let as_set = |servers: &[String]| {
             servers
                 .iter()
                 .map(|s| s.trim().to_string())
                 .collect::<std::collections::BTreeSet<_>>()
         };
-        if as_set(&view.target.bootstrap_servers) != as_set(&self.bootstrap_servers) {
+        if as_set(bootstrap_servers) != as_set(&self.bootstrap_servers) {
             return Err(refusal(
                 TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
                 "spec.planBytes.target.bootstrap_servers",
@@ -1320,14 +1333,11 @@ impl ResolvedConnection {
                      KafkaCluster {}/{} at {:?}; the runner would present that connection's \
                      credential to the plan's address. Build a plan from the saved connection \
                      and approve it",
-                    view.target.bootstrap_servers,
-                    self.namespace,
-                    self.cluster_name,
-                    self.bootstrap_servers
+                    bootstrap_servers, self.namespace, self.cluster_name, self.bootstrap_servers
                 ),
             ));
         }
-        if view.target.auth != self.auth {
+        if auth != &self.auth {
             return Err(refusal(
                 TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
                 "spec.planBytes.target.auth",
@@ -1336,7 +1346,7 @@ impl ResolvedConnection {
                      the runner authenticates with the connection's credential and CA, so the \
                      plan must name the same mode, username and TLS. Build a plan from the saved \
                      connection and approve it",
-                    describe_auth(&view.target.auth),
+                    describe_auth(auth),
                     self.namespace,
                     self.cluster_name,
                     describe_auth(&self.auth)

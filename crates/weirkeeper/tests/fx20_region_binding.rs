@@ -84,7 +84,11 @@ fn with_region(region: &str, both: bool) -> String {
 
 #[test]
 fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
-    let victim = inline_restore_binding_env("victim-s3", VICTIM_PLAN, &[]);
+    let victim = inline_restore_binding_env(
+        "victim-s3",
+        &serde_yaml::from_str(VICTIM_PLAN).unwrap(),
+        &[],
+    );
     let victim_archive = expected(&victim, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV)
         .expect("the source location's expectation");
     assert!(
@@ -95,8 +99,11 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
     // THE PROBE: same bucket, injected region, on the source and then also on
     // the evidence store. Neither expectation is the victim's any more.
     for both in [false, true] {
-        let attacker =
-            inline_restore_binding_env("victim-s3", &with_region("x@127.0.0.1:9/", both), &[]);
+        let attacker = inline_restore_binding_env(
+            "victim-s3",
+            &serde_yaml::from_str(&with_region("x@127.0.0.1:9/", both)).unwrap(),
+            &[],
+        );
         assert_ne!(
             expected(&attacker, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).as_deref(),
             Some(victim_archive.as_str()),
@@ -113,7 +120,11 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
     }
     // A real other region is another location too: the region is bound, not
     // merely validated.
-    let eu = inline_restore_binding_env("victim-s3", &with_region("eu-west-1", true), &[]);
+    let eu = inline_restore_binding_env(
+        "victim-s3",
+        &serde_yaml::from_str(&with_region("eu-west-1", true)).unwrap(),
+        &[],
+    );
     assert_ne!(
         expected(&eu, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).as_deref(),
         Some(victim_archive.as_str())
@@ -124,7 +135,11 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
     // the inequalities above are about the region and not about any edit.
     let other_prefix = VICTIM_PLAN.replacen("prefix: team-a", "prefix: team-b", 1);
     assert_ne!(other_prefix, VICTIM_PLAN);
-    let same = inline_restore_binding_env("victim-s3", &other_prefix, &[]);
+    let same = inline_restore_binding_env(
+        "victim-s3",
+        &serde_yaml::from_str(&other_prefix).unwrap(),
+        &[],
+    );
     assert_eq!(
         expected(&same, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).as_deref(),
         Some(victim_archive.as_str())
@@ -141,14 +156,15 @@ fn fx20_an_injected_region_beside_the_victims_bucket_expects_another_binding() {
     assert!(!unstated.contains("region"));
     let forwarded = inline_restore_binding_env(
         "victim-s3",
-        &unstated,
+        &serde_yaml::from_str(&unstated).unwrap(),
         &[("AWS_REGION".to_string(), "us-east-1".to_string())],
     );
     assert_eq!(
         expected(&forwarded, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).as_deref(),
         Some(victim_archive.as_str())
     );
-    let not_forwarded = inline_restore_binding_env("victim-s3", &unstated, &[]);
+    let not_forwarded =
+        inline_restore_binding_env("victim-s3", &serde_yaml::from_str(&unstated).unwrap(), &[]);
     assert_ne!(
         expected(&not_forwarded, cb::ARCHIVE_CREDENTIAL_BINDING_EXPECTED_ENV).as_deref(),
         Some(victim_archive.as_str())

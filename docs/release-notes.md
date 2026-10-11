@@ -70,8 +70,9 @@ points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
 changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
 authorizations withdrawn), 74 (PROD-17.1, four parts v1 does not use are
-withdrawn), 75 (PROD-17.1, surfaces withdrawn for the v1 cut) and 76
-(PROD-17.1, the Helm chart is the only install) so far. Items continue the
+withdrawn), 75 (PROD-17.1, surfaces withdrawn for the v1 cut), 76
+(PROD-17.1, the Helm chart is the only install) and 77 (PROD-17.1 B5, an
+unparseable restore plan refused before its approval is read) so far. Items continue the
 next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
@@ -3523,6 +3524,31 @@ the CRDs now read the chart's render and `charts/logweir/crds/`.
 **Rollback:** check out a tree before this item to get the bundle back; no
 image changes.
 
+#### 77. A restore plan that does not parse is refused before its approval is read (PROD-17.1 B5)
+
+**Changed.** The controller reads a `Restore`'s `spec.planBytes` once per
+reconcile and hands that one value to every check, the admission, the
+approval bundle and the Job. A plan that does not parse as a restore plan now
+ends the `Restore` `Failed`, reason `PlanUnparseable`, before its `Approval`
+is read and before any ConfigMap or Job exists; with `spec.coverage`,
+`spec.completeMaxRecords` or `spec.target.topicNaming.originalName` declared
+it is `ExecutionSpecInvalid`, as before. Until now such a `Restore` with
+nothing declared waited for its approval and was then refused later:
+destination-backed as `PlanUnparseable`, inline as `ConnectionPlanMismatch`
+when the plan had no readable target block, and otherwise its Job was created
+and the runner refused the plan at phase 0 (exit 3). The runner parses the
+same bytes into the same type, so no plan it could run is refused. A `Restore`
+whose Job already exists is observed as before.
+**Do:** nothing. A `Restore` refused this way needs a new one with a plan the
+runner accepts, as before.
+**Scope:** controller rows over a recording API double: both kinds of
+unparseable plan refused with no `POST` and no `Approval` read, and the
+control (the parseable plan admitted, its Job created); every existing
+admission, bundle and Job row unchanged.
+[UNVERIFIED — no live install has run this build's refusal yet.]
+**Rollback:** roll the controller back; an older controller waits for the
+approval again and refuses such a plan later, as before.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3647,7 +3673,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75 and 76, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76 and 77, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3737,7 +3763,8 @@ leaves the `RehearsalSchedule` CRD for the operator to delete; item 74
 withdraws what its own section lists; item 75 changes the product API, the
 console, the chart and the published image set, and needs any `ui` block
 removed from values files first; item 76 changes no image, and a bundle
-install moves to the chart once. To roll back to
+install moves to the chart once; item 77 changes the controller only and
+needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

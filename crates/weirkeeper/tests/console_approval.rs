@@ -29,8 +29,8 @@ use logweir_core::approval_policy::{
 };
 use weirkeeper::controllers::approval::{self, ApprovalRefusal, Verified};
 use weirkeeper::controllers::restore::{
-    admit_with_policy, approval_bundle_config_map_with_policy, PolicyAdmission, RestoreAdmission,
-    APPROVAL_POLICY_FILE, CONFIRMATION_KEY_FILE,
+    admit_with_policy, approval_bundle_config_map_with_policy, parse_plan, PolicyAdmission,
+    RestoreAdmission, APPROVAL_POLICY_FILE, CONFIRMATION_KEY_FILE,
 };
 use weirkeeper::crds::approval::Approval;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
@@ -676,6 +676,7 @@ fn admit(f: &Fixture, case: &str, bound: &ApprovalPolicy, now: DateTime<Utc>) ->
     let approval = approval_object(f, case, "planBytes", bound, &f.text("consoleKeyId"));
     admit_with_policy(
         &restore(f, "planBytes", false),
+        parse_plan(&restore(f, "planBytes", false)).ok().as_ref(),
         Some(&approval),
         Some(&cluster(f)),
         Some(&PolicyAdmission {
@@ -805,6 +806,7 @@ fn restore_admission_refuses_a_console_approval_under_any_other_policy() {
     // admitted exactly as before (admission reads no signature for it).
     let strict_ok = admit_with_policy(
         &restore(&f, "planBytes", false),
+        parse_plan(&restore(&f, "planBytes", false)).ok().as_ref(),
         Some(&approval_object(
             &f,
             "strict-request-countersigned",
@@ -831,6 +833,7 @@ fn restore_admission_holds_an_original_name_console_approval_to_the_plans_subjec
     let admit_original = |case: &str, plan: &str, original: bool| {
         admit_with_policy(
             &restore(&f, plan, original),
+            parse_plan(&restore(&f, plan, original)).ok().as_ref(),
             Some(&approval_object(
                 &f,
                 case,
@@ -893,6 +896,7 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
     let run = |case: &str, matched: &str, keys: Vec<SpecKey>| {
         approval_bundle_config_map_with_policy(
             &restore(&f, "planBytes", false),
+            &parse_plan(&restore(&f, "planBytes", false)).expect("the plan parses"),
             &approval_object(&f, case, "planBytes", &f.pair(), matched),
             &trust(&f, keys),
             &bound,
@@ -954,6 +958,7 @@ fn the_bundle_is_written_only_over_a_console_signature_that_verifies_now() {
     // and no signature is re-verified here for it.
     let strict = approval_bundle_config_map_with_policy(
         &restore(&f, "planBytes", false),
+        &parse_plan(&restore(&f, "planBytes", false)).expect("the plan parses"),
         &approval_object(
             &f,
             "strict-request-countersigned",
