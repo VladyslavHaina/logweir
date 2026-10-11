@@ -1,41 +1,28 @@
-//! The five checks, in order, and the two reconcilers around them.
+//! The approval checks, in order, and the two reconcilers around them: the
+//! order the checks run in and the status the cluster ends up with are read
+//! in one place.
 //!
-//! ONE FILE, BECAUSE THE PLAN NAMES ONE. Every pure-`evaluate` test in Task 16
-//! lives here beside the reconciler tests, so the order the checks run in and
-//! the status the cluster ends up with are read in one place.
-//!
-//! # Where the signed material comes from, and why it is `const` and not a file
+//! # Where the signed material comes from, and why it is `const`
 //!
 //! These tests need a signature that genuinely verifies, and this crate
-//! **cannot make one**. `scripts/check-one-signer.sh`'s check 3 greps
-//! `crates/*/tests` for the signing API and `weirkeeper` is on neither
-//! `ALLOWED_LINK` nor `ALLOWED_SOURCE` (Global Constraint 27): a test here that
-//! minted a key pair and signed with it would put the controller crate's test
-//! target on the signing side of the one boundary this crate exists to respect.
+//! **cannot make one**: `scripts/check-one-signer.sh`'s check 3 greps
+//! `crates/*/tests` for the signing API, and a test here that minted a key
+//! pair and signed with it would put the controller crate's test target on
+//! the signing side of the one boundary this crate exists to respect.
 //!
 //! So the material below was produced OUT OF TREE, once, by a throwaway
 //! Ed25519 key pair generated in a scratch process. **Only the public halves,
-//! the key ids and the base64 signatures were ever written down** — the private
-//! halves existed only in that process's memory and were never persisted
-//! anywhere, in this repository or outside it. Ed25519 rather than P-256
-//! because its signatures are deterministic and fixed-length, so a checked-in
-//! signature is reproducible rather than one sample of a randomised scheme.
+//! the key ids and the base64 signatures were ever written down**: the private
+//! halves existed only in that process's memory and were never persisted.
+//! Ed25519 because its signatures are deterministic and fixed-length, so a
+//! checked-in signature is reproducible. As `const`s, a reader gets the
+//! document, the key and the signature over it in one screen.
 //!
-//! They are `const` strings in this file rather than files under a `fixtures/`
-//! directory for one reason: Task 16's Files block names the files this task
-//! creates, and a test fixture tree is not one of them. Nothing is lost — the
-//! bytes are as fixed either way — and a reader gets the document, the key and
-//! the signature over it in one screen.
-//!
-//! # What each test is allowed to prove
-//!
-//! The pure tests call [`evaluate`] directly, with no client and no route
-//! table, because the property is an ORDER over bytes. The reconciler tests go
-//! through `weirkeeper::testing::mock_client_recording`, whose double panics on
-//! a request it was not given a route for — that panic is what makes "the
-//! reconciler asked for nothing else" an assertion rather than a hope. None of
-//! them dials a socket, waits on a Job, or comes near STANDING RULE 22's 15 s
-//! per-test bound.
+//! The pure tests call [`evaluate`] directly, with no client, because the
+//! property is an ORDER over bytes. The reconciler tests go through
+//! `weirkeeper::testing::mock_client_recording`, whose double panics on an
+//! unrouted request, which makes "the reconciler asked for nothing else" an
+//! assertion rather than a hope.
 //!
 //! [`evaluate`]: weirkeeper::controllers::approval::evaluate
 
@@ -65,9 +52,7 @@ use weirkeeper::crds::trust_roster::TrustRosterStatus;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec};
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 
-// ---------------------------------------------------------------------------
 // The out-of-tree signed material. See the module header.
-// ---------------------------------------------------------------------------
 
 /// The referent's `spec.planBytes`, byte-for-byte what was hashed into
 /// [`APPROVAL_DOC`]'s `plan_hash`.
@@ -117,20 +102,14 @@ const BAD_KEY_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbe
 /// different kind of document.
 const PAYLOAD_TYPE_SCORECARD: &str = logweir_verify::PAYLOAD_TYPE_SCORECARD;
 
-/// The namespace every namespaced route below is written against — STANDING
-/// RULE 13, `logweir-t<N>` for task 16.
+/// The namespace every namespaced route below is written against.
 const NS: &str = "logweir-t16";
 
-// ---------------------------------------------------------------------------
 // Builders
-// ---------------------------------------------------------------------------
 
-/// The `metadata.resourceVersion` every fixture object carries — the thing a
-/// watch always delivers and a hand-built fixture used not to.
-///
-/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
-/// this value, so a fixture without one is not an object this controller could
-/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+/// The `metadata.resourceVersion` every fixture object carries, as a watch
+/// always delivers: every `/status` write is a merge PATCH preconditioned on
+/// this value.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
 /// A fixed clock. Every expiry comparison in this file is relative to it, so
@@ -155,19 +134,11 @@ fn approver() -> KeyEntry {
     key(APPROVER_KEY_ID, APPROVER_PEM, None)
 }
 
-/// **`approval::evaluate`, given the trust a ROSTER-ONLY cluster resolves to.**
-///
-/// PLAT-19.1 moved `evaluate` from a `TrustRosterSpec` to the namespace's
-/// resolved trust (D3 §7.1). Every test below predates that and describes a
-/// cluster with no `TrustPolicy` at all — which is exactly what
-/// `weirkeeper::trust::synthesize_legacy` produces, and exactly what
-/// `approval::decide` reaches for such a cluster.
-///
-/// So this shim is not scaffolding to keep old tests compiling: it is what
-/// makes every one of them EVIDENCE FOR §7.5's byte-for-byte claim. Each
-/// assertion below was written against the roster walk and now runs through the
-/// resolution layer, unchanged, including the refusal messages — if the
-/// synthesis were not faithful, they would be the tests that said so.
+/// **`approval::evaluate`, given the trust a ROSTER-ONLY cluster resolves to**:
+/// `weirkeeper::trust::synthesize_legacy`, which is what `approval::decide`
+/// reaches for a namespace with no `TrustPolicy`. Every test below describes
+/// such a cluster and runs through the resolution layer, refusal messages
+/// included, so each one is evidence that the synthesis is faithful.
 fn evaluate(
     approval_bytes: &[u8],
     sidecar_bytes: &[u8],
@@ -211,8 +182,8 @@ fn approval_object(approval_bytes: &str, sidecar_bytes: &str, kind: SubjectKind)
             name: Some("a1".to_string()),
             namespace: Some(NS.to_string()),
             generation: Some(1),
-            // D-SEAMS S7: a watch always delivers one, and every `/status`
-            // write is preconditioned on it (defect STATUS-PATCH-NO-RV).
+            // A watch always delivers one, and every `/status` write is
+            // preconditioned on it.
             resource_version: Some(FIXTURE_RESOURCE_VERSION.to_string()),
             ..ObjectMeta::default()
         },
@@ -251,12 +222,11 @@ fn approver_entry_json() -> String {
 
 /// A `Restore` body the double answers `GET …/restores/r1` with.
 ///
-/// `status` CARRIES A `planHash` THAT IS NOT A FIELD OF `RestoreStatus`. That
-/// is deliberate and is the second arm of
-/// [`approval_recomputes_the_plan_hash_from_the_referent_bytes`]: serde drops
-/// unknown fields, so a status that names the *correct* hash cannot reach the
-/// controller at all, let alone rescue an approval. Both halves are asserted —
-/// the type has no such field, and the refusal still happens.
+/// `status` CARRIES A `planHash` THAT IS NOT A FIELD OF `RestoreStatus`, on
+/// purpose: serde drops unknown fields, so a status that names the *correct*
+/// hash cannot reach the controller at all, let alone rescue an approval
+/// ([`approval_recomputes_the_plan_hash_from_the_referent_bytes`]'s second
+/// arm).
 fn restore_body(plan_bytes: &str, status_plan_hash: &str) -> String {
     let plan = plan_bytes.replace('\n', "\\n");
     format!(
@@ -305,17 +275,11 @@ fn not_found_body(message: &str) -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
 // The fixtures are what they claim to be
-// ---------------------------------------------------------------------------
 
 /// The checked-in `PLAN_HASH` is what the shared hash function computes.
-///
-/// WITHOUT THIS, EVERY PLAN-HASH TEST BELOW COULD PASS VACUOUSLY. Check 7
-/// compares the document's `plan_hash` against `sha256_prefixed` of the
-/// referent's bytes; if the fixture's hash were wrong, the happy-path test
-/// would fail — but the MISMATCH tests would still pass, for the wrong reason.
-/// This pins the fixture to the live function.
+/// Without this, the MISMATCH tests below could pass for the wrong reason
+/// with a wrong fixture hash.
 #[test]
 fn the_fixture_plan_hash_is_what_sha256_prefixed_computes() {
     assert_eq!(sha256_prefixed(PLAN_BYTES.as_bytes()), PLAN_HASH);
@@ -325,12 +289,10 @@ fn the_fixture_plan_hash_is_what_sha256_prefixed_computes() {
     );
 }
 
-/// The payload type is byte-equal to the CLI's.
-///
-/// READ OUT OF THE OTHER FILE, NOT RESTATED. The same approval document is
-/// verified by `logweir drill approve`'s phase 1 and by this controller before
-/// a Job exists; two literals that are equal today and maintained separately
-/// are two literals that will differ.
+/// The payload type is byte-equal to the CLI's, READ OUT OF THE OTHER FILE:
+/// the same approval document is verified by `logweir drill approve`'s phase 1
+/// and by this controller, and two literals maintained separately will
+/// differ.
 #[test]
 fn the_payload_type_is_byte_equal_to_the_cli() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -390,9 +352,7 @@ fn the_subject_kind_strings_are_the_wire_spellings() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Check 0 and check 1 — the sidecar, before any key
-// ---------------------------------------------------------------------------
+// Check 0 and check 1: the sidecar, before any key
 
 /// An unparseable sidecar is `SignatureInvalid`, naming the parse error.
 #[test]
@@ -414,14 +374,13 @@ fn an_unparseable_sidecar_is_signature_invalid() {
     }
 }
 
-/// **Acceptance.** A sidecar for a different kind of document is refused as a
-/// payload-type mismatch, with both strings in full, **before any key is
-/// tried**.
+/// A sidecar for a different kind of document is refused as a payload-type
+/// mismatch, with both strings in full, **before any key is tried**.
 ///
-/// THE ROSTER PROVES THE ORDER, NOT A COMMENT. Its single entry carries an
-/// spkiPem that cannot parse, so an implementation that parsed the roster
-/// first — check 2 — would return `SignatureInvalid` instead. That is the
-/// mutant this test kills: *try the keys before comparing the payload type*.
+/// THE ROSTER PROVES THE ORDER: its single entry carries an spkiPem that
+/// cannot parse, so an implementation that parsed the roster first (check 2)
+/// would return `SignatureInvalid` instead. Kills *try the keys before
+/// comparing the payload type*.
 #[test]
 fn approval_refuses_a_wrong_payload_type() {
     let deliberately_unparseable =
@@ -446,15 +405,13 @@ fn approval_refuses_a_wrong_payload_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Check 2 and check 3 — the roster, before any signature
-// ---------------------------------------------------------------------------
+// Check 2 and check 3: the roster, before any signature
 
-/// **Acceptance.** A roster with one unparseable key refuses **every**
-/// approval, including one the other entry would have verified.
+/// A roster with one unparseable key refuses **every** approval, including
+/// one the other entry would have verified.
 ///
-/// Kills the mutant *skip an unparseable roster entry and continue*: with that
-/// change the good first entry verifies and the verdict becomes `Ok`.
+/// Kills *skip an unparseable roster entry and continue*: the good first
+/// entry would verify and the verdict become `Ok`.
 #[test]
 fn a_roster_with_one_unparseable_key_refuses_every_approval() {
     let partial = roster_spec(
@@ -504,7 +461,7 @@ fn a_roster_with_one_unparseable_key_refuses_every_approval() {
 
 /// A roster entry whose declared `keyId` is not the hash of its own key
 /// material is `KeyIdNotInRoster`, naming both, before any signature is
-/// checked — check 3.
+/// checked (check 3).
 #[test]
 fn a_roster_entry_that_disagrees_with_its_own_key_material_is_key_id_not_in_roster() {
     let lying = roster_spec(vec![key(BAD_KEY_ID, APPROVER_PEM, None)], vec![]);
@@ -528,13 +485,12 @@ fn a_roster_entry_that_disagrees_with_its_own_key_material_is_key_id_not_in_rost
     }
 }
 
-/// **Acceptance.** A key outside the roster is `KeyIdNotInRoster`, naming the
-/// sidecar's key ids — **not** `SignatureInvalid`.
+/// A key outside the roster is `KeyIdNotInRoster`, naming the sidecar's key
+/// ids, **not** `SignatureInvalid`.
 ///
-/// Kills the mutant *return `SignatureInvalid` for a key outside the roster
-/// instead of reaching step 4*. The signature in this sidecar is a genuine,
-/// verifying Ed25519 signature; the only thing wrong with it is who made it,
-/// and an operator has to be able to see that.
+/// Kills *return `SignatureInvalid` for a key outside the roster instead of
+/// reaching step 4*. The signature here genuinely verifies; the only thing
+/// wrong with it is who made it, and an operator has to be able to see that.
 #[test]
 fn approval_refuses_a_key_outside_the_roster() {
     let got = evaluate(
@@ -564,18 +520,15 @@ fn approval_refuses_a_key_outside_the_roster() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Check 5 — the matched key id, and nothing else
-// ---------------------------------------------------------------------------
+// Check 5: the matched key id, and nothing else
 
-/// **Acceptance.** With two signatures — index 0 by an unrostered key, index 1
-/// by a rostered one — `evaluate` reports the **matched** key id.
+/// With two signatures (index 0 by an unrostered key, index 1 by a rostered
+/// one), `evaluate` reports the **matched** key id.
 ///
-/// Kills the mutant *return `sidecar.signatures[0].keyid` instead of the
-/// matched one*. `verify_detached` returns the matched keyid
-/// (`crates/logweir-verify/src/verify.rs:60`) precisely so this is possible;
-/// a caller that ignores the return value and reports `signatures[0]` credits
-/// the attacker's key with an approval the honest key made.
+/// Kills *return `sidecar.signatures[0].keyid` instead of the matched one*:
+/// `verify_detached` returns the matched keyid, and a caller that reports
+/// `signatures[0]` credits the attacker's key with an approval the honest key
+/// made.
 #[test]
 fn approval_evaluate_returns_the_matched_key_id_not_signatures_zero() {
     let two = sidecar(
@@ -628,9 +581,7 @@ fn a_signature_that_does_not_verify_over_the_bytes_is_signature_invalid() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Check 6 — notAfter
-// ---------------------------------------------------------------------------
+// Check 6: notAfter
 
 /// **Acceptance.** A matched key one second past its `notAfter` is
 /// `KeyIdExpired`.
@@ -676,9 +627,7 @@ fn approval_refuses_an_expired_key() {
     .is_ok());
 }
 
-// ---------------------------------------------------------------------------
-// Check 7 — the plan hash, recomputed
-// ---------------------------------------------------------------------------
+// Check 7: the plan hash, recomputed
 
 /// **Acceptance, first arm.** The referent's `spec.planBytes` mutated by one
 /// byte after signing is `PlanHashMismatch`.
@@ -707,16 +656,15 @@ fn approval_recomputes_the_plan_hash_from_the_referent_bytes() {
     );
 }
 
-/// **Acceptance, second arm.** A referent whose `status` names the *correct*
-/// plan hash does not rescue an approval whose `spec.planBytes` were mutated.
+/// A referent whose `status` names the *correct* plan hash does not rescue an
+/// approval whose `spec.planBytes` were mutated.
 ///
-/// TWO HALVES, AND THE FIRST IS THE STRONGER ONE. `RestoreStatus` carries no
-/// `planHash` field at all, so the JSON below cannot reach the controller —
-/// serde drops it. That is asserted directly, and then the reconcile is run to
-/// show the refusal happens anyway. Kills the mutant *read `plan_hash` from
-/// the referent's `status.planHash`*: with that change there is no field to
-/// read, so the mutant cannot even be written without first adding one — and
-/// if it is added, this test's first half fails.
+/// `RestoreStatus` carries no `planHash` field at all, so the JSON below
+/// cannot reach the controller; that is asserted directly, and then the
+/// reconcile is run to show the refusal happens anyway. Kills *read
+/// `plan_hash` from the referent's `status.planHash`*: the mutant cannot be
+/// written without first adding the field, which fails this test's first
+/// half.
 #[tokio::test]
 async fn a_correct_status_plan_hash_does_not_rescue_a_mutated_plan() {
     let mutated = PLAN_BYTES.replacen("orders", "ordera", 1);
@@ -772,19 +720,15 @@ async fn a_correct_status_plan_hash_does_not_rescue_a_mutated_plan() {
 
 /// **The unsigned `spec.planHash` must name the plan that was signed.**
 ///
-/// `spec.planHash` is a plain CRD field beside the two documents: nothing in
+/// `spec.planHash` is a plain CRD field beside the two documents; nothing in
 /// checks 1-8 reads it, because authorisation rests on the hash INSIDE the
-/// signed bytes. But it is the value `kubectl get approval -o yaml`, the
-/// `SUBJECT` view and the UI all SHOW, and the CRD has always said a wrong one
-/// is a refusal. Without the comparison in `decide`, an `Approval` could be
-/// `Verified=True` while displaying a plan hash that is not the plan it
-/// authorises — so the one thing this field exists for, letting a reader
-/// compare, would be the one thing it could not be trusted for.
+/// signed bytes. But it is what `kubectl get approval -o yaml`, the `SUBJECT`
+/// view and the console SHOW, so an `Approval` must not be `Verified=True`
+/// while displaying a plan hash that is not the plan it authorises.
 ///
-/// Kills the mutant *drop the `spec.planHash` comparison*. The POSITIVE
-/// CONTROL runs first, over the same fixtures and the same routes, so this row
-/// can only pass because the comparison exists — never because the fixture
-/// stopped verifying at all.
+/// Kills *drop the `spec.planHash` comparison*. The POSITIVE CONTROL runs
+/// first, over the same fixtures and routes, so this row can only pass because
+/// the comparison exists.
 #[tokio::test]
 async fn a_forged_spec_plan_hash_is_refused_even_when_the_signed_document_matches() {
     let control = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
@@ -852,17 +796,12 @@ async fn a_forged_spec_plan_hash_is_refused_even_when_the_signed_document_matche
     );
 }
 
-// ---------------------------------------------------------------------------
-// Check 8 — the subject kind, from inside the signed bytes
-// ---------------------------------------------------------------------------
+// Check 8: the subject kind, from inside the signed bytes
 
-/// **Acceptance.** An approval that binds a `Restore` is refused for a
-/// `Backup`.
+/// An approval that binds a `Restore` is refused for a `Backup`.
 ///
-/// Kills the mutant *delete check 8*. Without it the second approval
-/// degenerates: "a valid signature by a rostered key exists in this namespace"
-/// is a property any approved restore already produced, and an `Approval`
-/// whose `planHash` matched a `Restore` would authorise a tag-2 `Switchover`.
+/// Kills *delete check 8*: without it, an `Approval` whose `planHash` matched
+/// a `Restore` would authorise any other kind.
 #[test]
 fn an_approval_for_a_restore_is_refused_for_another_kind() {
     assert!(
@@ -885,17 +824,11 @@ fn an_approval_for_a_restore_is_refused_for_another_kind() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The bytes are the document text
-// ---------------------------------------------------------------------------
 
-/// **Acceptance.** `approvalBytes` is the raw document text; a base64 of the
-/// same document is refused.
-///
-/// THE TWO PATHS ARE DISTINGUISHABLE, WHICH IS THE POINT. Kills the mutant
-/// *base64-decode `approvalBytes` before hashing*: under that change the
-/// raw-text arm stops verifying, because a decode of document text is not the
-/// document.
+/// `approvalBytes` is the raw document text; a base64 of the same document is
+/// refused. Kills *base64-decode `approvalBytes` before hashing*: under that
+/// change the raw-text arm stops verifying.
 #[test]
 fn approval_bytes_are_the_document_text_not_base64() {
     let verified = evaluate(
@@ -925,16 +858,12 @@ fn approval_bytes_are_the_document_text_not_base64() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// selfAttestedRisk — labelled, never refused
-// ---------------------------------------------------------------------------
+// selfAttestedRisk: labelled, never refused
 
 /// An approver key that is also a signing key is `selfAttestedRisk: true`, and
-/// is still verified.
-///
-/// `false` MEANS ONLY "TWO DIFFERENT KEY IDS". One operator holding both keys
-/// satisfies it (`design-operator.md:169-181`), which is why this is a label
-/// on the status and not an eighth refusal.
+/// is still verified. `false` means only "two different key ids": one operator
+/// holding both keys satisfies it, which is why this is a label and not a
+/// refusal.
 #[test]
 fn a_matched_approver_key_that_is_also_a_signing_key_is_self_attested_risk() {
     let both = roster_spec(vec![approver()], vec![approver()]);
@@ -965,17 +894,14 @@ fn a_matched_approver_key_that_is_also_a_signing_key_is_self_attested_risk() {
     assert!(!verified.self_attested_risk);
 }
 
-// ---------------------------------------------------------------------------
 // The reconciler
-// ---------------------------------------------------------------------------
 
-/// **Acceptance.** A missing roster names itself, and nothing else is touched.
+/// A missing roster names itself, and nothing else is touched.
 ///
-/// Kills the mutant *resolve a roster by any name the `Approval` supplies, or
-/// refuse silently when it is absent*. The route table answers 404 for
+/// Kills *resolve a roster by any name the `Approval` supplies, or refuse
+/// silently when it is absent*: the route table answers 404 for
 /// `…/trustrosters/default` and holds no other GET, so a reconciler that
-/// resolved a name from the object would panic the double instead of reaching
-/// the 404.
+/// resolved a name from the object would panic the double.
 #[tokio::test]
 async fn a_missing_roster_names_itself() {
     let (client, recorder) = mock_client_recording(vec![
@@ -1002,9 +928,8 @@ async fn a_missing_roster_names_itself() {
         ApprovalOutcome::Refused(ApprovalRefusal::RosterNotFound)
     );
 
-    // The condition the reconciler patched. `status_for` is the function that
-    // BUILDS the patch body, so asserting over it asserts the bytes that were
-    // sent — the double records methods and paths, not bodies.
+    // The condition the reconciler patched. `status_for` BUILDS the patch body,
+    // so asserting over it asserts the bytes that were sent.
     let status = approval::status_for(&approval, &outcome, now());
     assert_eq!(status.verified, Some(false));
     let conditions = status.conditions.expect("a condition is written");
@@ -1022,10 +947,9 @@ async fn a_missing_roster_names_itself() {
     assert_eq!(
         calls,
         vec![
-            // PLAT-19.1: resolution asks "does a TrustPolicy claim this
-            // namespace" BEFORE the roster, because the roster is the
-            // FALLBACK (D3 §7.1) — and the namespace is read off the object,
-            // never supplied by it.
+            // Resolution asks "does a TrustPolicy claim this namespace" BEFORE the
+            // roster, because the roster is the FALLBACK, and the namespace is read
+            // off the object, never supplied by it.
             (
                 "GET".to_string(),
                 "/apis/logweir.dev/v1alpha1/trustpolicies".to_string()
@@ -1050,12 +974,12 @@ async fn a_missing_roster_names_itself() {
     );
 }
 
-/// **Acceptance.** Exactly one `PATCH …/approvals/<name>/status`, and zero
-/// requests to `…/approvals/<name>` without the `/status` suffix.
+/// Exactly one `PATCH …/approvals/<name>/status`, and zero requests to
+/// `…/approvals/<name>` without the `/status` suffix.
 ///
-/// Kills the mutant *patch the `Approval`'s `spec`*: the double holds no route
-/// for the bare object, so such a patch panics it — and the recorder assertion
-/// below names the property even if a future route table is more generous.
+/// Kills *patch the `Approval`'s `spec`*: the double holds no route for the
+/// bare object, and the recorder assertion names the property even if a
+/// future route table is more generous.
 #[tokio::test]
 async fn approval_reconcile_patches_only_status() {
     let (client, recorder) = mock_client_recording(vec![
@@ -1207,12 +1131,9 @@ async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
     );
 }
 
-/// **Acceptance.** A refused `Approval` is not deleted.
-///
-/// Kills the mutant *delete a refused one*. A refused approval STAYS in the
-/// cluster: it is the audit trail of a rejected attempt, and an operator
-/// answering "who tried to approve this, and why was it turned down?" needs
-/// the object, not a controller log line that has rotated away.
+/// A refused `Approval` is not deleted: it is the audit trail of a rejected
+/// attempt, and "who tried to approve this, and why was it turned down?"
+/// needs the object, not a rotated log line.
 #[tokio::test]
 async fn a_refused_approval_is_not_deleted() {
     let (client, recorder) = mock_client_recording(vec![
@@ -1300,15 +1221,13 @@ async fn an_approval_whose_referent_is_absent_says_so() {
     assert_eq!(outcome.reason(), "ReferentNotFound");
 }
 
-/// In tag 1 a `Backup` referent carries no `spec.planBytes`, and the refusal
-/// says which field is missing.
+/// A `Backup` referent carries no `spec.planBytes`, and the refusal says which
+/// field is missing.
 ///
-/// NOT A DEGRADED CHECK 7. `Backup.spec` has no `planBytes`
-/// (`crates/weirkeeper/src/crds/backup.rs`) and check 7 recomputes the hash
-/// from the referent's own bytes, so there is nothing to hash. Refusing with a
-/// message that names the field is the alternative to hashing something nobody
-/// signed. `Backup` stays in `SubjectKind` because check 8 must be able to
-/// tell the two kinds apart.
+/// Check 7 recomputes the hash from the referent's own bytes, and
+/// `Backup.spec` has none, so refusing with a message that names the field is
+/// the alternative to hashing something nobody signed. `Backup` stays in
+/// `SubjectKind` because check 8 must be able to tell the two kinds apart.
 #[tokio::test]
 async fn a_backup_referent_carries_no_plan_bytes_in_tag_one() {
     let (client, _recorder) = mock_client_recording(vec![
@@ -1350,17 +1269,11 @@ async fn a_backup_referent_carries_no_plan_bytes_in_tag_one() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The TrustRoster reconciler
-// ---------------------------------------------------------------------------
 
-/// **Acceptance.** `status.expiredKeyIds` lists expired entries from
-/// **both** lists.
-///
-/// Kills a walk over `approverKeys` alone, which would look complete: the
-/// roster carries key material for both lists (interface **I17**), and a
-/// runner's lapsed signing key is exactly as invisible to an operator as a
-/// lapsed approver key.
+/// `status.expiredKeyIds` lists expired entries from **both** lists: a
+/// runner's lapsed signing key is as important to an operator as a lapsed
+/// approver key, and a walk over `approverKeys` alone would look complete.
 #[test]
 fn the_roster_reconciler_expires_keys_from_both_lists() {
     let past = now() - Duration::seconds(1);
@@ -1399,8 +1312,8 @@ fn a_roster_with_an_unparseable_pem_is_not_loaded_and_names_the_key_id() {
         verdict.message
     );
     // And the same rule from the other side: `evaluate` refuses every approval
-    // against a roster with one bad entry, which is what makes `Loaded=False`
-    // more than a cosmetic column.
+    // against a roster with one bad entry, which makes `Loaded=False` more than
+    // a cosmetic column.
     assert!(matches!(
         evaluate(
             APPROVAL_DOC.as_bytes(),
@@ -1427,9 +1340,8 @@ async fn the_roster_reconciler_patches_only_status_at_cluster_scope() {
         .await
         .expect("the reconcile completes");
     assert!(verdict.loaded);
-    // The LIST is a read of a different kind at cluster scope (PLAT-19.1); the
-    // only WRITE is still the one `/status` patch, which is what this test is
-    // named for.
+    // The LIST is a read of a different kind at cluster scope; the only WRITE
+    // is still the one `/status` patch.
     assert_eq!(
         seen(&recorder)
             .into_iter()
@@ -1443,34 +1355,20 @@ async fn the_roster_reconciler_patches_only_status_at_cluster_scope() {
     );
 }
 
-// ===========================================================================
-// TASK 16's REVIEW CARRIES, ROUTED TO TASK 20 AND WRITTEN HERE
-// ===========================================================================
-//
-// Both live BESIDE Task 16's tests rather than in
-// `tests/restore_controller.rs`, and the reason is the key material: the
-// `notAfter` boundary is reached only AFTER check 5's crypto verifies, so a
-// test of it needs a real signature by a real key over the real document —
-// `APPROVER_PEM`, `APPROVER_SIG` and `APPROVAL_DOC` are here and are the only
-// place in this crate they exist. Copying them into a second test file to keep
-// the tests beside their consumer would be two fixtures for one signature,
-// which is how one of them comes to be regenerated and the other not.
-// `load_roster`'s three states are here for the same reason: they are the
-// function's own contract, not the `Restore` reconciler's use of it.
+// `load_roster` and the `notAfter` boundary. They live here because the
+// boundary is reached only AFTER check 5's crypto verifies, and
+// `APPROVER_PEM`, `APPROVER_SIG` and `APPROVAL_DOC` exist only in this file:
+// two fixtures for one signature is how one comes to be regenerated and the
+// other not.
 
-/// **Task 16 review carry, routed to Task 20.** `load_roster`'s THREE states,
-/// each asserted, with the transport error kept distinguishable from the 404.
+/// `load_roster`'s THREE states, each asserted, with the transport error kept
+/// distinguishable from the 404.
 ///
-/// # Why three and not two
-///
-/// `RosterLoad` exists because a 404 and a connection reset must not become
-/// the same thing. A 404 is a VERDICT — the install skipped step 1 — and lands
-/// on `status.conditions` as `RosterNotFound`; a transport error is not a
-/// verdict about anybody's approval and must REQUEUE instead of stamping a
-/// refusal onto an object that may well be fine. A `Result<TrustRoster,
-/// ApprovalRefusal>` shape could not express the difference, and every
-/// consumer in chain O — `approval::decide` and `restore`'s argv builder —
-/// routes on it.
+/// A 404 is a VERDICT (the install has no roster) and lands on
+/// `status.conditions` as `RosterNotFound`; a transport error is not a verdict
+/// about anybody's approval and must REQUEUE instead of stamping a refusal
+/// onto an object that may well be fine. `approval::decide` and `restore`'s
+/// argv builder both route on the difference.
 #[tokio::test]
 async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
     // ---- FOUND ---------------------------------------------------------
@@ -1560,9 +1458,8 @@ async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
     );
     assert_eq!(
         seen(&recorder).len(),
-        // PLAT-19.1: TWO reads, not one — every `TrustPolicy` and then the
-        // roster. Neither is the referent, which is the property this arm
-        // asserts and which the resolution layer does not change.
+        // TWO reads, every `TrustPolicy` and then the roster. Neither is the
+        // referent, which is the property this arm asserts.
         2,
         "…and the referent is NEVER fetched: without a roster there is no set of keys any \
          signature could be checked against, so fetching it would be work performed to reach a \
@@ -1587,25 +1484,17 @@ async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
     );
 }
 
-/// **Task 16 review carry, routed to Task 20.** A key expiring EXACTLY at
-/// `now` does not authorise anything.
-///
-/// # The boundary, and why this arm was owed
+/// A key expiring EXACTLY at `now` does not authorise anything.
 ///
 /// Check 6 is `if *not_after <= now`, so the interval a key authorises over is
-/// **closed at the start and OPEN at the end**: `notAfter` is the first
-/// instant the key is dead, not the last instant it is alive.
-/// `approval_refuses_an_expired_key` asserts one second either side of the
-/// boundary and therefore passes under BOTH comparisons — `<=` and `<` — which
-/// leaves the boundary itself untested and the `<` mutant alive. This arm is
-/// the boundary: with `notAfter == now` the verdict must be `KeyIdExpired`.
+/// **closed at the start and OPEN at the end**: `notAfter` is the first instant
+/// the key is dead. `approval_refuses_an_expired_key` asserts one second either
+/// side and passes under both `<=` and `<`; this arm is the boundary.
 ///
 /// KILLS: `*not_after < now` in check 6.
 ///
-/// A KEY THAT EXPIRES AT MIDNIGHT IS NOT VALID AT MIDNIGHT. That is the
-/// reading an operator writing `notAfter: 2027-01-01T00:00:00Z` expects, and
-/// it is the safe direction: a one-instant window in which a retired key still
-/// authorises a restore is a window nobody can reason about.
+/// A KEY THAT EXPIRES AT MIDNIGHT IS NOT VALID AT MIDNIGHT: what an operator
+/// writing `notAfter: 2027-01-01T00:00:00Z` expects, and the safe direction.
 #[test]
 fn a_key_expiring_exactly_at_now_authorises_nothing() {
     let boundary = now();
@@ -1674,9 +1563,8 @@ fn a_key_expiring_exactly_at_now_authorises_nothing() {
     );
 
     // AND AN ABSENT `notAfter` IS NOT AN EXPIRY. A roster entry with no
-    // `notAfter` never expires, which is what `Option` means here — and a
-    // check that treated `None` as "expired at the epoch" would refuse every
-    // approval on a roster written without the field.
+    // `notAfter` never expires; treating `None` as "expired at the epoch" would
+    // refuse every approval on a roster written without the field.
     let never = roster_spec(vec![key(APPROVER_KEY_ID, APPROVER_PEM, None)], vec![]);
     assert!(
         evaluate(
@@ -1692,22 +1580,14 @@ fn a_key_expiring_exactly_at_now_authorises_nothing() {
     );
 }
 
-// ===========================================================================
-// TASK 16b — THE STEADY-OBJECT ROWS, plan erratum E11(d)
-// ===========================================================================
+// The steady-object rows.
 //
-// Task 15c's review measured these two reconcilers live on a cluster nobody
-// was touching: `trust_roster` 12,107 reconciles and 12,270 own
-// `resourceVersion` bumps in 91.2 s, `approval` 7,114 in 90.4 s. Neither owns
-// a child object. The engine of both was `last_transition_time: Some(now)`
-// written unconditionally in `status_for`: the patch changed, the object's own
-// watch fired, and the next pass wrote another changing patch.
-//
-// The rows below are route-table counts and not byte comparisons, because the
-// property is "NO REQUEST WAS MADE". Each second object is the first pass's own
-// patch applied to the first object exactly as the API server would apply it
-// (`conditions::apply_merge_patch`, RFC 7386), so no arm can pass by asserting
-// over a status the reconciler would never have produced.
+// Neither reconciler owns a child object, so a status that changed on
+// every pass (`last_transition_time: Some(now)`) would fire the object's
+// own watch and write again, forever. The rows below count requests, because
+// the property is "NO REQUEST WAS MADE". Each second object is the first
+// pass's own patch applied to the first object as the API server would
+// apply it (`conditions::apply_merge_patch`, RFC 7386).
 
 /// Every `/status` `PATCH` the double was asked for, as its `status` object.
 fn status_patches(bodies: &[SeenBody]) -> Vec<serde_json::Value> {
@@ -1754,12 +1634,10 @@ fn roster_carrying(patch: &serde_json::Value, spec_json: &str) -> TrustRoster {
 /// The one route a `TrustRoster` reconcile can take.
 fn roster_patch_route() -> Vec<Route> {
     vec![
-        // PLAT-19.1. The roster reconciler LISTS `TrustPolicy` now, because
-        // `Superseded` is a statement about which policy displaces this roster
-        // and that is not answerable from the roster alone — and because this
-        // reconciler is the one that CLEARS the condition when every policy is
-        // deleted (review finding F2). An empty list is the roster-only
-        // cluster, which is what every test in this file is about.
+        // The roster reconciler LISTS `TrustPolicy`: `Superseded` is a statement
+        // about which policy displaces this roster, and this reconciler CLEARS the
+        // condition when every policy is deleted. An empty list is the roster-only
+        // cluster every test in this file is about.
         empty_policy_list_route(),
         Route {
             method: "PATCH",
@@ -1790,8 +1668,7 @@ fn approver_entry_json_expiring(not_after: &str) -> String {
     format!(r#"{{"keyId":"{APPROVER_KEY_ID}","spkiPem":"{pem}","notAfter":"{not_after}"}}"#)
 }
 
-/// **Task 16b.** A steady `TrustRoster` is patched ONCE and then never again —
-/// finding **H-1**, the worst measured rate in the family.
+/// A steady `TrustRoster` is patched ONCE and then never again.
 #[tokio::test]
 async fn a_steady_trust_roster_issues_no_second_status_patch() {
     let body = roster_body(&approver_entry_json(), "");
@@ -1815,12 +1692,9 @@ async fn a_steady_trust_roster_issues_no_second_status_patch() {
         .await
         .expect("the second reconcile completes");
     assert!(verdict.loaded, "the verdict is still computed and returned");
-    // NO WRITE. PLAT-19.1 added one READ per pass — the `TrustPolicy` list the
-    // `Superseded` condition is computed from — and a read does not wake a
-    // watch, does not bump `resourceVersion` and does not feed the loop this
-    // test exists for. The property is, and always was, that a steady object
-    // is never PATCHED again. Measured live before the fix: 12,107 reconciles
-    // and 12,270 resourceVersion bumps in 91.2 s on one steady object.
+    // NO WRITE. Each pass makes one READ (the `TrustPolicy` list the
+    // `Superseded` condition is computed from), and a read does not wake a
+    // watch or bump `resourceVersion`. A steady object is never PATCHED again.
     assert_eq!(
         seen(&calls)
             .into_iter()
@@ -1837,20 +1711,16 @@ async fn a_steady_trust_roster_issues_no_second_status_patch() {
     );
 }
 
-/// **Task 16b.** A roster that really changes is patched exactly once, and the
-/// transition time obeys the `metav1.Condition` contract in both directions.
+/// A roster that really changes is patched exactly once, and the transition
+/// time obeys the `metav1.Condition` contract in both directions.
 ///
-/// # Two arms, because "a real state change" is two different things here
+/// ARM 1, **a key expires**: `status.expiredKeyIds` and the message change, so
+/// exactly one patch is sent; the condition's `status` is still `True` and its
+/// `reason` still `Loaded`, so `lastTransitionTime` is KEPT: the field names
+/// when the CONDITION last changed.
 ///
-/// ARM 1 — **a key expires.** `status.expiredKeyIds` and the message change, so
-/// exactly one patch is sent; but the condition's `status` is still `True` and
-/// its `reason` is still `Loaded`, so `lastTransitionTime` is KEPT. That is the
-/// contract, not an omission: the field names when the CONDITION last changed,
-/// and this condition did not. Moving it here is the same lie the hot loop was
-/// telling, once a day instead of 133 times a second.
-///
-/// ARM 2 — **a key stops parsing.** `Loaded=True/Loaded` becomes
-/// `Loaded=False/UnparseableKey`: a transition, and the timestamp moves.
+/// ARM 2, **a key stops parsing**: `Loaded=True/Loaded` becomes
+/// `Loaded=False/UnparseableKey`, a transition, and the timestamp moves.
 #[tokio::test]
 async fn a_roster_that_changes_is_patched_once_with_the_right_transition_time() {
     let body = roster_body(&approver_entry_json(), "");
@@ -1941,8 +1811,7 @@ fn approval_routes(referent: (u16, String)) -> Vec<Route> {
     ]
 }
 
-/// **Task 16b.** A steady `Approval` is patched ONCE and then never again —
-/// finding **H-2**.
+/// A steady `Approval` is patched ONCE and then never again.
 #[tokio::test]
 async fn a_steady_approval_issues_no_second_status_patch() {
     let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
@@ -1972,11 +1841,11 @@ async fn a_steady_approval_issues_no_second_status_patch() {
         !outcome.is_consumed(),
         "the fixture Restore carries no Admitted=True, so nothing consumed the verdict"
     );
-    // THE REFERENT FIRST, AND STILL ONLY ONCE (P9). A stored `Verified=True`
-    // verdict asks its Restore whether it was ADMITTED under it before
-    // anything is re-judged — an admitted run's authorization is a record, and
-    // the pass that first sees the admission must not be the one that
-    // withdraws it — and the same read is then the referent check 7 hashes.
+    // THE REFERENT FIRST, AND STILL ONLY ONCE. A stored `Verified=True` verdict
+    // asks its Restore whether it was ADMITTED under it before anything is
+    // re-judged (an admitted run's authorization is a record, and the pass that
+    // first sees the admission must not withdraw it), and the same read is the
+    // referent check 7 hashes.
     assert_eq!(
         seen(&calls),
         vec![
@@ -1999,13 +1868,10 @@ async fn a_steady_approval_issues_no_second_status_patch() {
     );
 }
 
-/// **Task 16b.** An `Approval` whose REFERENT changes is patched exactly once,
-/// with a new transition time.
-///
-/// The referent is the only thing that can change here: `Approval.spec` is
-/// sealed by an object-level CEL rule (`spec is immutable; create a new object
-/// instead`), so a `Verified=False` approval becomes `Verified=True` when the
-/// `Restore` it names appears — and never by an edit to itself.
+/// An `Approval` whose REFERENT changes is patched exactly once, with a new
+/// transition time. `Approval.spec` is sealed by an object-level CEL rule, so
+/// a `Verified=False` approval becomes `Verified=True` when the `Restore` it
+/// names appears, never by an edit to itself.
 #[tokio::test]
 async fn an_approval_whose_referent_appears_is_patched_once_with_a_new_transition_time() {
     let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
@@ -2052,19 +1918,17 @@ async fn an_approval_whose_referent_appears_is_patched_once_with_a_new_transitio
     );
 }
 
-// ===========================================================================
-// PROD-17.1 C1 (OD-12) — a standing RehearsalSchedule approval is refused
-// ===========================================================================
+// A standing RehearsalSchedule approval is refused
 
 /// **An `Approval` naming a `RehearsalSchedule` is refused BY NAME, before
 /// anything is read, and is never recorded `Verified`.** The route table can
-/// answer the trust, and the request is still refused with zero requests
-/// made — for a fresh object and for one whose stored status already says
-/// `Verified=True` (written by a build before v1).
+/// answer the trust, and the request is still refused with zero requests made,
+/// for a fresh object and for one whose stored status already says
+/// `Verified=True` (written by an older build).
 ///
 /// NEGATIVE CONTROL: removing the early check in `decide_with_policy_at` makes
-/// this row fail — the request then resolves the namespace's trust first
-/// (`GET …/trustpolicies`), so the zero-request assertion fails.
+/// this row fail: the request then resolves the namespace's trust first
+/// (`GET …/trustpolicies`).
 #[tokio::test]
 async fn an_approval_naming_a_rehearsal_schedule_is_refused_by_name_before_anything_is_read() {
     for stored_verified in [None, Some(true)] {
@@ -2132,14 +1996,11 @@ async fn an_approval_naming_a_rehearsal_schedule_is_refused_by_name_before_anyth
     }
 }
 
-// ===========================================================================
-// PLAT-19.1 — trust resolution in place of `load_roster` (D3 §7.1, §7.3, §7.4)
+// Trust resolution in place of `load_roster`.
 //
-// Every test above this line describes a roster-only cluster and now runs
-// through `trust::synthesize_legacy` unchanged — which is §13's "upgrade from
-// the default roster" row, proved by the whole file rather than by one
-// assertion. What follows is what only a POLICY-governed namespace can show.
-// ===========================================================================
+// Every test above describes a roster-only cluster and runs through
+// `trust::synthesize_legacy`. What follows is what only a POLICY-governed
+// namespace can show.
 
 /// One `TrustPolicy` key over the approver's PUBLIC half.
 fn policy_key(usages: Vec<SpecUsage>) -> SpecKey {
@@ -2206,17 +2067,16 @@ fn evaluate_under(keys: Vec<SpecKey>) -> Result<Verified, ApprovalRefusal> {
     )
 }
 
-/// **Admission is a NEW use (D3 §7.4).** A retired, revoked or not-yet-valid
-/// approver key authorises nothing — and each refusal says which, because they
-/// are three different things for an operator to do something about.
+/// **Admission is a NEW use.** A retired, revoked or not-yet-valid approver key
+/// authorises nothing, and each refusal says which: they are three different
+/// things for an operator to do something about.
 ///
-/// KILLS: "map every `SigningRefusal` to `KeyIdExpired`" — a compromised key
-/// would then be reported as an expiry and the operator would extend a
-/// `notAfter` instead of opening an investigation; "check only the validity
-/// window" — a `Retired` key's window is still open, so rows 2 and 3 would
-/// verify; "ask `decide` instead of `may_sign_new`" — a retired key verifies
-/// HISTORICALLY, which is the right answer for a stored archive and the wrong
-/// one for an approval arriving today.
+/// KILLS: "map every `SigningRefusal` to `KeyIdExpired`" (a compromised key
+/// would be reported as an expiry and the operator would extend a `notAfter`
+/// instead of opening an investigation); "check only the validity window" (a
+/// `Retired` key's window is still open, so rows 2 and 3 would verify); "ask
+/// `decide` instead of `may_sign_new`" (a retired key verifies HISTORICALLY,
+/// right for a stored archive and wrong for an approval arriving today).
 #[test]
 fn a_retired_or_revoked_approver_key_authorises_nothing_new() {
     // The good key, Active, still authorises — the control that makes every
@@ -2294,12 +2154,11 @@ fn a_retired_or_revoked_approver_key_authorises_nothing_new() {
     assert_eq!(unique.len(), reasons.len());
 }
 
-/// **Usage separation (§7.3).** The same key material, declared for evidence
-/// or for console confirmation, authorises no approval at all.
+/// **Usage separation.** The same key material, declared for evidence or for
+/// console confirmation, authorises no approval at all.
 ///
-/// KILLS: "offer every resolved key to the approval verifier" — the material
-/// below is byte-identical in all three rows and genuinely signed the document,
-/// so a verifier that ignored `usages` would return `Verified` for each.
+/// KILLS: "offer every resolved key to the approval verifier": the material is
+/// byte-identical in all three rows and genuinely signed the document.
 #[test]
 fn an_evidence_key_never_authorises_an_approval() {
     for usage in [SpecUsage::EvidenceSigning, SpecUsage::ConsoleConfirmation] {
@@ -2320,13 +2179,12 @@ fn an_evidence_key_never_authorises_an_approval() {
     }
 }
 
-/// **`selfAttestedRisk` is a LEGACY label, and G8 makes it structurally
-/// impossible under a policy (§7.3).**
+/// **`selfAttestedRisk` is a LEGACY label, and impossible under a policy.**
 ///
-/// KILLS: "drop the label when the roster path is replaced" — the first arm
-/// would stop reporting a genuine overlap on an unmigrated cluster; and
-/// "compare key ids instead of usages" — the second arm's policy carries the
-/// same id, so an id comparison would report a risk the CRD forbids.
+/// KILLS: "drop the label when the roster path is replaced" (the first arm
+/// would stop reporting a genuine overlap on an unmigrated cluster); "compare
+/// key ids instead of usages" (the second arm's policy carries the same id, so
+/// an id comparison would report a risk the CRD forbids).
 #[test]
 fn self_attested_risk_survives_for_the_roster_and_cannot_arise_under_a_policy() {
     // LEGACY: the same key on both roster lists is one key with both usages.
@@ -2358,10 +2216,9 @@ fn self_attested_risk_survives_for_the_roster_and_cannot_arise_under_a_policy() 
 /// A namespace two policies claim refuses every approval in it, and the refusal
 /// names both policies.
 ///
-/// KILLS: "resolve a contested namespace to the first policy" — the first
+/// KILLS: "resolve a contested namespace to the first policy": the first
 /// policy below carries the good approver key, so picking it would VERIFY this
-/// approval and a disagreement about authority would silently resolve in favour
-/// of whichever object the API server listed first.
+/// approval in favour of whichever object the API server listed first.
 #[tokio::test]
 async fn a_contested_namespace_refuses_every_approval() {
     let a = trust_policy(
@@ -2420,16 +2277,13 @@ async fn a_contested_namespace_refuses_every_approval() {
 }
 
 /// A policy-governed namespace verifies under ITS policy, and the condition
-/// message names which trust answered.
-///
-/// D3 §15's L10 reads `trustSource=` off this message to tell a migrated
+/// message names which trust answered (`trustSource=`), which tells a migrated
 /// cluster from an unmigrated one.
 ///
-/// KILLS: "keep resolving `TrustRoster/default` for every namespace" — the
-/// roster below carries no approver key at all, so an approval that still
-/// consulted it would be refused; and "report the roster's name whatever
-/// resolved" — `trustSource` would say `legacy-roster-v1` for a policy-governed
-/// namespace and the migration would be invisible.
+/// KILLS: "keep resolving `TrustRoster/default` for every namespace" (the
+/// roster below carries no approver key at all, so the approval would be
+/// refused); "report the roster's name whatever resolved" (`trustSource` would
+/// say `legacy-roster-v1` for a policy-governed namespace).
 #[tokio::test]
 async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
     let list = serde_json::json!({
@@ -2445,9 +2299,7 @@ async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
             status: 200,
             body: list.to_string(),
         },
-        // AN EMPTY ROSTER. Under the old code this alone refused every
-        // approval in the cluster; under §7.1 it is not consulted at all for a
-        // namespace a policy names.
+        // AN EMPTY ROSTER, not consulted at all for a namespace a policy names.
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -2463,9 +2315,8 @@ async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
     ]);
     let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
     // At `now()`, the fixed clock this file promises, and NOT through
-    // `approval::decide`, which reads the wall clock: this row VERIFIES, so
-    // it needs `policy_key`'s window open at the instant it is judged, and
-    // through the wall clock it failed from 2099-01-01 (FX-9's sweep).
+    // `approval::decide`, which reads the wall clock: this row VERIFIES, so it
+    // needs `policy_key`'s window open at the instant it is judged.
     // `decide` is `decide_with_policy` over the default set, so this is the
     // same decision with the clock handed in.
     let outcome = approval::decide_with_policy_at(
@@ -2492,16 +2343,12 @@ async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
     );
 }
 
-/// The subject binding is untouched by this change.
+/// The plan and subject bindings still refuse after trust resolution: checks
+/// 7 and 8 are about the DOCUMENT and the REFERENT, not the key, and both are
+/// asserted against a policy-governed namespace.
 ///
-/// PLAT-12.x's checks 7 and 8 are about the DOCUMENT and the REFERENT, not
-/// about the key, and replacing the roster walk with trust resolution must not
-/// weaken either. This asserts both halves against a policy-governed namespace
-/// — the path that did not exist before — so a refusal that used to come from
-/// the roster walk is not quietly lost with it.
-///
-/// KILLS: "return the verdict as soon as the signature verifies" — both arms
-/// below carry a genuine signature by a key the policy trusts.
+/// KILLS: "return the verdict as soon as the signature verifies": both arms
+/// carry a genuine signature by a key the policy trusts.
 #[test]
 fn the_plan_and_subject_bindings_still_refuse_after_trust_resolution() {
     let keys = vec![policy_key(vec![SpecUsage::GovernedApproval])];
@@ -2532,11 +2379,8 @@ fn the_plan_and_subject_bindings_still_refuse_after_trust_resolution() {
 }
 
 /// Every `ApprovalRefusal` reason is a valid `metav1.Condition` reason and
-/// explains itself.
-///
-/// THE SET GREW FROM SEVEN TO ELEVEN with PLAT-19.1, and the four new ones are
-/// interfaces the moment they reach a status. A table over the enum, so a
-/// twelfth cannot arrive as a `reason` nobody put on a list.
+/// explains itself. A table over the enum, so a new one cannot arrive as a
+/// `reason` nobody put on a list.
 #[test]
 fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
     let refusals = vec![
@@ -2607,18 +2451,15 @@ fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// TRUST-EXPIRY-LAG — the boundary is an instant, not an interval
-// ---------------------------------------------------------------------------
+// The expiry boundary is an instant, not an interval
 
 /// One simulated run of this controller across a key's `notAfter`.
 ///
 /// **THE VERDICT IS THE REAL ONE AND SO IS THE SCHEDULE.** Each wakeup calls
-/// `approval::evaluate` at that instant — check 6, `may_sign_new`, the whole
-/// chain — and the next wakeup is whatever
-/// `trust_policy::requeue_before(outcome.valid_until(), now)` asks for. Nothing
-/// about the boundary is modelled by hand, so a change to either side moves
-/// this simulation.
+/// `approval::evaluate` at that instant (check 6, `may_sign_new`, the whole
+/// chain), and the next wakeup is whatever
+/// `trust_policy::requeue_before(outcome.valid_until(), now)` asks for.
+/// Nothing about the boundary is modelled by hand.
 ///
 /// Returns the instants the controller woke at, each with the verdict it wrote.
 fn replay_across(not_after: DateTime<Utc>, until: DateTime<Utc>) -> Vec<(DateTime<Utc>, bool)> {
@@ -2658,19 +2499,15 @@ fn read_at(written: &[(DateTime<Utc>, bool)], sample: DateTime<Utc>) -> bool {
         .expect("the first reconcile precedes every sample")
 }
 
-/// **The row lab-refresh-4 measured.** Sampling every second across the
-/// approver key's `notAfter`, the object is never read as verified at or after
-/// that instant.
+/// **Sampling every second across the approver key's `notAfter`, the object is
+/// never read as verified at or after that instant.**
 ///
-/// The boundary is placed deliberately mid-heartbeat — `notAfter` at 13:07 with
-/// wakeups that would otherwise fall at 13:00, 13:05 and 13:10 — which is the
-/// shape of the live finding: **22 consecutive samples over 2 m 35 s read
-/// `verified: true` at one unchanged `resourceVersion`** after the key expired.
+/// The boundary is placed mid-heartbeat (`notAfter` at 13:07 with wakeups that
+/// would otherwise fall at 13:00, 13:05 and 13:10), so a controller that kept
+/// the heartbeat would read the 13:05 `Verified=True` for an expired key until
+/// 13:10. Stale expiry information is *unknown, not valid*.
 ///
-/// KILLS: "requeue at the heartbeat regardless" — the shipped behaviour. The
-/// samples between 13:07:00 and 13:10:00 then read the 13:05 verdict, which is
-/// `Verified=True` for an expired key, and PLAT-19.1's acceptance calls stale
-/// expiry information *unknown, not valid*.
+/// KILLS: "requeue at the heartbeat regardless".
 #[test]
 fn no_sample_at_or_after_not_after_reads_verified() {
     let not_after = now() + Duration::minutes(7);
@@ -2710,10 +2547,10 @@ fn no_sample_at_or_after_not_after_reads_verified() {
 
 /// **One wakeup at the boundary, and none earlier than needed.**
 ///
-/// KILLS: "requeue at the deadline every time" — a verdict that is not
-/// time-limited would then wake at `MIN_REQUEUE` for ever; and "shorten the
-/// heartbeat instead", which is the other way to close the lag and costs a
-/// write-free reconcile on every approval in the cluster for ever.
+/// KILLS: "requeue at the deadline every time" (a verdict that is not
+/// time-limited would wake at `MIN_REQUEUE` forever); and "shorten the
+/// heartbeat instead", which costs a write-free reconcile on every approval in
+/// the cluster forever.
 #[test]
 fn the_boundary_costs_exactly_one_extra_wakeup() {
     let not_after = now() + Duration::minutes(7);
@@ -2726,11 +2563,10 @@ fn the_boundary_costs_exactly_one_extra_wakeup() {
         1,
         "exactly one wakeup lands ON the boundary: {wakeups:?}"
     );
-    // THE WHOLE SCHEDULE, because it is deterministic and it is the claim.
-    // A bare heartbeat would wake at 13:00, 13:05, 13:10, 13:15, 13:20; the
+    // THE WHOLE SCHEDULE, because it is deterministic and it is the claim. A
+    // bare heartbeat would wake at 13:00, 13:05, 13:10, 13:15, 13:20; the
     // deadline replaces the 13:10 wakeup with one at 13:07 and the cadence
-    // resumes from there. So the boundary is not paid for with an extra
-    // reconcile at all over this span — it is paid for with a shifted one.
+    // resumes from there: a shifted reconcile, not an extra one.
     let expected: Vec<DateTime<Utc>> = ["13:00:00", "13:05:00", "13:07:00", "13:12:00", "13:17:00"]
         .iter()
         .map(|t| {
@@ -2831,15 +2667,12 @@ fn only_a_verified_outcome_is_time_limited() {
 
 /// The approval reconciler actually USES the deadline its outcome carries.
 ///
-/// A SOURCE SCAN, for the reason the policy's twin gives: `reconcile` is
-/// private and needs a client, and the property is structural. **It is here
-/// because the simulation above does not cover it** — `replay_across` drives
-/// `requeue_before` directly, so a reconciler that computed a deadline and then
-/// threw it away would leave every assertion in this file green while the live
-/// object lagged exactly as it did on lab-refresh-4. That is the shape of gap
-/// this defect came through.
+/// A SOURCE SCAN: `reconcile` is private and needs a client, and the property
+/// is structural. `replay_across` drives `requeue_before` directly, so a
+/// reconciler that computed a deadline and threw it away would leave every
+/// other assertion in this file green.
 ///
-/// KILLS: "`Ok(Action::requeue(Duration::from_secs(300)))`" — the shipped line.
+/// KILLS: "`Ok(Action::requeue(Duration::from_secs(300)))`".
 #[test]
 fn the_approval_reconcile_requeues_at_its_keys_not_after() {
     let src = std::fs::read_to_string(
@@ -2869,18 +2702,11 @@ fn the_approval_reconcile_requeues_at_its_keys_not_after() {
     );
 }
 
-// ===========================================================================
-// SEAM S7 — the verdict write carries its resourceVersion precondition
-// (defect STATUS-PATCH-NO-RV)
-// ===========================================================================
+// The verdict write carries its resourceVersion precondition
 
-/// **THE VERDICT WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**.
-///
-/// `charts/logweir/README.md:59-60` says every status write in this crate is a
-/// `resourceVersion`-preconditioned merge PATCH, and this one was not: it went
-/// out with no `metadata` at all. Two passes over one `Approval` can overlap —
-/// the `min(10 m, notAfter)` re-check is exactly what makes that likely — and
-/// the loser of that race used to win the write.
+/// **THE VERDICT WRITE CARRIES ITS PRECONDITION.** Two passes over one
+/// `Approval` can overlap (the `min(10 m, notAfter)` re-check makes that
+/// likely), and the loser of that race must not win the write.
 ///
 /// KILLS: dropping the `metadata` insert in
 /// `conditions::patch_status_preconditioned`; naming a different object in the
@@ -2949,9 +2775,7 @@ async fn a_conflicting_approval_verdict_write_is_surfaced() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// APPROVAL-KEY-WINDOW-UNPUBLISHED — the matched key's window reaches `/status`
-// ---------------------------------------------------------------------------
+// The matched key's window reaches `/status`
 
 /// The routes a policy-governed `Approval` reconcile takes, with `not_after`
 /// on the one approver key.
@@ -3019,20 +2843,16 @@ fn approval_carrying(previous: Option<&serde_json::Value>, patch: &serde_json::V
     approval
 }
 
-/// **Defect APPROVAL-KEY-WINDOW-UNPUBLISHED, deliverable 1.** The verdict and
-/// the window it rests on are written by the same pass, in the same body.
+/// The verdict and the window it rests on are written by the same pass, in the
+/// same body. The restore preflight relays this object's verdict and resolves
+/// nothing itself, so the matched key's window is knowable ONLY from what this
+/// controller publishes; `ApproverKeyExpiresBeforeDeadline` and the
+/// `min(10 m, notAfter)` re-check cap depend on it.
 ///
-/// Since PREFLIGHT-APPROVAL-ROSTER the restore preflight relays this object's
-/// verdict and resolves nothing itself, so the matched key's window is knowable
-/// ONLY from what this controller publishes. Two D2 §6.3 behaviours —
-/// `ApproverKeyExpiresBeforeDeadline` and the `min(10 m, notAfter)` re-check
-/// cap — are unreachable while it is absent.
-///
-/// KILLS: "publish the verdict and not the window" — the shipped behaviour and
-/// the defect itself; "publish a window with no key id on it", which a reader
-/// cannot tell apart from a window about some other approver key; "publish the
-/// `notAfter` and leave `notBefore` off", which D3 §7.6 stages a successor key
-/// through.
+/// KILLS: "publish the verdict and not the window"; "publish a window with no
+/// key id on it", which a reader cannot tell apart from a window about some
+/// other approver key; "publish the `notAfter` and leave `notBefore` off",
+/// which a successor key is staged through.
 #[tokio::test]
 async fn the_status_publishes_the_matched_keys_window_next_to_the_verdict() {
     // THE WALL CLOCK, NOT THE FIXTURE INSTANT: `decide` stamps `Utc::now()`
@@ -3067,8 +2887,8 @@ async fn the_status_publishes_the_matched_keys_window_next_to_the_verdict() {
     );
 
     // The window an operator reads and the instant this controller wakes at are
-    // ONE value. A status saying the key is good until 16:00 while the timer
-    // sleeps to 18:00 would be the expiry lag this field was added beside.
+    // ONE value: a status saying the key is good until 16:00 while the timer
+    // sleeps to 18:00 would be an expiry lag.
     let ApprovalOutcome::Verified(verified) = approval::decide(
         &approval,
         &mock_client_recording(policy_routes(not_after)).0,
@@ -3080,19 +2900,16 @@ async fn the_status_publishes_the_matched_keys_window_next_to_the_verdict() {
     assert_eq!(verified.valid_until(), not_after);
 }
 
-/// **Deliverable 1, second half: it is RE-DERIVED, not stamped once.**
+/// **The window is RE-DERIVED, not stamped once.** It is a projection of the
+/// resolved `TrustPolicy`, an object an operator edits, and it moves on
+/// exactly the events that move the `Verified` condition: both come out of the
+/// same [`approval::decide`] outcome and are written by the same patch. A
+/// `notAfter` may be brought FORWARD to expire a key in one namespace.
 ///
-/// The window is a projection of the resolved `TrustPolicy`, and a policy is an
-/// object an operator edits. It must move on exactly the events that move the
-/// `Verified` condition — which it does by construction here, because both come
-/// out of the same [`approval::decide`] outcome and are written by the same
-/// patch. G2 allows a `notAfter` to be brought FORWARD, which is how
-/// `e2e/k8s/d2`'s S18 expires a key in one namespace and nowhere else.
-///
-/// KILLS: "write the window once and keep it" — the second pass would publish
-/// the first pass's `notAfter` and a preflight would authorise a restore
-/// against a window the policy has already withdrawn; "read the window back off
-/// the object's own status instead of off the resolved trust".
+/// KILLS: "write the window once and keep it" (the second pass would publish
+/// the first pass's `notAfter`, and a preflight would authorise a restore
+/// against a window the policy has withdrawn); "read the window back off the
+/// object's own status instead of off the resolved trust".
 #[tokio::test]
 async fn a_trust_policy_edit_that_moves_not_after_moves_the_published_window() {
     let first_until = Utc::now() + Duration::hours(3);
@@ -3130,22 +2947,16 @@ async fn a_trust_policy_edit_that_moves_not_after_moves_the_published_window() {
     );
 }
 
-/// **Deliverable 1, third half: absent when no key matched — and CLEARED.**
+/// **Absent when no key matched, and CLEARED.** `status_for` computes `None`
+/// for the approver, the key id and the window when nothing verified, and a
+/// JSON **merge** patch leaves a key it does not carry (RFC 7386), so they
+/// must be written as `null`. A window stranded by a withdrawn verdict would
+/// read as an OPEN window for a key that authorises nothing.
 ///
-/// `status_for` has always computed `None` for the approver, the key id and now
-/// the window when nothing verified. It said so into a JSON **merge** patch,
-/// which leaves a key it does not carry (RFC 7386), so an `Approval` verified
-/// at 09:00 and refused at 09:05 kept all of them. For the window that is not
-/// untidiness: the preflight compares a deadline against it, and a window
-/// stranded by a withdrawn verdict reads as an OPEN window for a key that
-/// authorises nothing — the "absent means valid" failure the field exists to
-/// prevent, arriving as "present and stale" instead.
-///
-/// KILLS: "omit the field and let the merge sort it out" — the shipped
-/// `json!({"status": status})` body; "clear the window but keep the approver
-/// and the key id", which leaves an attacker-supplied name beside
-/// `Verified=False`; "clear `verifiedSubjectRef` too", which would unlatch the
-/// replay fence a recreated referent is refused by.
+/// KILLS: "omit the field and let the merge sort it out"; "clear the window
+/// but keep the approver and the key id", which leaves an attacker-supplied
+/// name beside `Verified=False`; "clear `verifiedSubjectRef` too", which would
+/// unlatch the replay fence a recreated referent is refused by.
 #[tokio::test]
 async fn a_refused_approval_publishes_no_window_and_clears_the_one_it_had() {
     let verified_status = reconcile_under_policy(
@@ -3191,20 +3002,15 @@ async fn a_refused_approval_publishes_no_window_and_clears_the_one_it_had() {
     assert!(after_status.verified_subject_ref.is_some());
 }
 
-/// **The published window is the MATCHED key's, not the first key's.**
+/// **The published window is the MATCHED key's, not the first key's.** A
+/// `TrustPolicy` may hold several `GovernedApproval` keys and only one signed
+/// this approval; any other key's window would be some other approver's
+/// rotation schedule, and the preflight would cap its re-check at an
+/// unrelated instant.
 ///
-/// A `TrustPolicy` may hold several `GovernedApproval` keys and only one of
-/// them signed this approval — check 6 is explicit that the lifecycle question
-/// is about the matched key. The window published beside the verdict has to
-/// follow the same rule, or an operator reading `status.approverKeyWindow`
-/// would be reading some other approver's rotation schedule, and the preflight
-/// would cap its re-check at an instant that has nothing to do with this
-/// approval.
-///
-/// The first key here is a REAL key pair that is simply not the one in the
-/// sidecar, and its window is deliberately much shorter: a `notAfter` an hour
-/// out instead of a century, so taking the wrong one is visible rather than
-/// merely wrong.
+/// The first key here is a REAL key pair that is not the one in the sidecar,
+/// with a much shorter window (an hour instead of a century), so taking the
+/// wrong one is visible.
 ///
 /// KILLS: "`trust.keys.first()`" and every other index-based shortcut;
 /// "publish the window of whichever key the roster lists first".
@@ -3241,30 +3047,20 @@ fn the_published_window_is_the_matched_keys_and_not_the_first_keys() {
 }
 
 /// **A `TrustPolicy` edit wakes this controller, rather than waiting out the
-/// heartbeat** — review MEDIUM-1's second half.
+/// heartbeat.** The verdict and the window beside it are functions of the
+/// namespace's resolved trust; five minutes is the wrong pace for "this key
+/// was revoked thirty seconds ago" and for a narrowed `notAfter` the operator
+/// just applied. The trigger maps over the controller's OWN store, so it
+/// costs no API call.
 ///
-/// The verdict AND the window beside it are functions of the namespace's
-/// resolved trust, and until now this reconciler did not watch `TrustPolicy` at
-/// all: an edit reached an `Approval` at the five-minute heartbeat, or sooner
-/// only at the matched key's own `notAfter` (which `TRUST-EXPIRY-LAG` armed).
-/// Five minutes is the right pace for "install the roster, then look again" and
-/// the wrong pace for "this key was revoked thirty seconds ago" — and for the
-/// published window, whose whole purpose is that a reader can see the narrowed
-/// `notAfter` the operator just applied. `controllers::backup` and
-/// `controllers::restore` have carried this trigger since D3 W10; this one now
-/// does too, over its OWN store, so the mapping costs no API call.
-///
-/// A SOURCE SCAN, for the reason the requeue row above gives: `controller()`
-/// returns a future that needs a live watch, and the property is structural.
+/// A SOURCE SCAN: `controller()` returns a future that needs a live watch.
 /// The mapping itself is `verification::targets_in_scope`, which
-/// `tests/verification.rs` covers generically — what cannot be covered there is
-/// whether this controller is wired to it at all, which is exactly what got
-/// lost.
+/// `tests/verification.rs` covers; this row covers whether this controller is
+/// wired to it at all.
 ///
-/// KILLS: "drop the `.watches()` arm" — the branch's own previous behaviour;
-/// "map with the policy's CURRENT scope only", which enqueues nothing in a
-/// namespace a policy just stopped governing, the one edit that certainly
-/// changed that namespace's resolution.
+/// KILLS: "drop the `.watches()` arm"; "map with the policy's CURRENT scope
+/// only", which enqueues nothing in a namespace a policy just stopped
+/// governing.
 #[test]
 fn a_trust_policy_event_enqueues_the_approvals_it_could_govern() {
     let src = std::fs::read_to_string(
@@ -3302,11 +3098,11 @@ fn a_trust_policy_event_enqueues_the_approvals_it_could_govern() {
 }
 
 /// **The `Verified` condition's message, byte for byte, for every shape the
-/// evaluators produce** (PROD-17.1, s1-c1 R7): a v1 approval document (no
-/// expiry, no provenance) names the plan hash; an authorization document v2
-/// names its policy; a consumed v1 verdict re-established at its admission
-/// quotes the v1 sentence. KILLS: the v1 sentence naming anything but the
-/// plan hash; the v2 arm losing its provenance.
+/// evaluators produce**: a v1 approval document (no expiry, no provenance)
+/// names the plan hash; an authorization document v2 names its policy; a
+/// consumed v1 verdict re-established at its admission quotes the v1
+/// sentence. KILLS: the v1 sentence naming anything but the plan hash; the v2
+/// arm losing its provenance.
 #[test]
 fn the_verified_message_is_pinned_for_every_shape_the_evaluators_produce() {
     use weirkeeper::controllers::approval::{Consumption, Standing};
