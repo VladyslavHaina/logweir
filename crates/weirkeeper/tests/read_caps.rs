@@ -1,24 +1,21 @@
-//! **FX-31 — the shared controller reads evidence under a cap.**
+//! **The shared controller reads evidence under a cap.**
 //!
-//! `weirkeeper` is one process for every namespace. Before FX-31 it read a
-//! receipt, a scorecard, a sidecar and a manifest WHOLE, so one tenant's
-//! multi-gigabyte object at an evidence key could OOM-kill the controller that
-//! serves every namespace, and each restart read it again. These rows hold the
-//! controller's read paths to their caps:
+//! `weirkeeper` is one process for every namespace: a receipt, scorecard,
+//! sidecar or manifest read WHOLE lets one tenant's multi-gigabyte object at an
+//! evidence key OOM-kill the controller that serves every namespace, and each
+//! restart read it again. These rows hold the controller's read paths to their
+//! caps:
 //!
-//! * `verify_evidence` — the document under the cap of what it is (FX-33:
-//!   `caps::CONTROLLER_RECEIPT` for a backup receipt, `caps::CONTROLLER_DOCUMENT`,
+//! * `verify_evidence`: the document under the cap of what it is
+//!   (`caps::CONTROLLER_RECEIPT` for a backup receipt, `caps::CONTROLLER_DOCUMENT`,
 //!   1 MiB, for everything else), the sidecar under `caps::SIDECAR` (64 KiB);
-//! * `observe_archive` — the receipt under the receipt cap, the sidecar's
+//! * `observe_archive`: the receipt under the receipt cap, the sidecar's
 //!   presence by `HEAD`;
-//! * `observe_scorecard` — the scorecard under the document cap;
-//! * `read_signing_time` — the document under its own kind's cap.
-//!
-//! (The per-schedule retention report was a fifth path; it is withdrawn,
-//! PROD-17.1 B1.)
+//! * `observe_scorecard`: the scorecard under the document cap;
+//! * `read_signing_time`: the document under its own kind's cap.
 //!
 //! Over the cap: `NotAttempted` (or "not observed", or `skipped`) NAMING the
-//! cap — never a crash and never a pass — and FINAL, so the object is not read
+//! cap, never a crash and never a pass, and FINAL, so the object is not read
 //! again on the schedule. A normal document still verifies.
 //!
 //! The last row measures the peak resident set of all these paths in a CHILD
@@ -27,7 +24,7 @@
 //! controls that show the meter sees a whole read.
 //!
 //! No socket: the in-memory backend, the misreporting double and a scratch
-//! filesystem tree (STANDING RULE 18's allow-list names this file).
+//! filesystem tree (the no-network lint's allow-list names this file).
 
 mod support;
 use support::{put, repo_root, self_peak_rss};
@@ -88,9 +85,7 @@ fn verify(store: &Store, digest: &str) -> weirkeeper::verification::Verification
     )
 }
 
-// ===========================================================================
 // verify_evidence
-// ===========================================================================
 
 /// **An oversized receipt is `NotAttempted` naming the cap, FINAL; a normal
 /// one verifies.**
@@ -112,8 +107,8 @@ fn an_oversized_receipt_is_not_attempted_naming_the_cap_while_a_normal_one_verif
         "the control verifies: {r:?}"
     );
 
-    // ONE BYTE over the cap — a RECEIPT's own (FX-33), which is what
-    // `verify` reads this document as.
+    // ONE BYTE over the cap: a RECEIPT's own, which is what `verify` reads
+    // this document as.
     let big = vec![b' '; usize::try_from(caps::CONTROLLER_RECEIPT).unwrap() + 1];
     let over = Store::in_memory("logweir/");
     put(&over, PAYLOAD_KEY, &big);
@@ -175,9 +170,7 @@ fn an_oversized_sidecar_is_not_attempted_naming_its_cap() {
     );
 }
 
-// ===========================================================================
 // observe_archive
-// ===========================================================================
 
 /// **The sidecar's presence is a `HEAD`, and an oversized receipt is PRESENT
 /// and unread.** Both objects are reported at five gibibytes.
@@ -222,9 +215,7 @@ fn observe_archive_sees_oversized_objects_present_and_reads_neither() {
     assert!(o.covered.is_some(), "the fixture's window is observed");
 }
 
-// ===========================================================================
 // observe_scorecard
-// ===========================================================================
 
 /// **An oversized scorecard is an observation carrying only the refusal**, and
 /// `split_refused` makes it NOT OBSERVED with the sentence beside it.
@@ -258,9 +249,7 @@ fn an_oversized_scorecard_is_not_observed_and_its_refusal_names_the_cap() {
     );
 }
 
-// ===========================================================================
 // read_signing_time
-// ===========================================================================
 
 #[test]
 fn the_signing_time_re_read_names_the_cap() {
@@ -272,7 +261,7 @@ fn the_signing_time_re_read_names_the_cap() {
         payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
     };
     match read_signing_time(Some(&store), &need) {
-        // Settled, not retried (review F8). The cap is the receipt's own.
+        // Settled, not retried. The cap is the receipt's own.
         SigningTime::OverCap(detail) => {
             assert!(names(&detail, caps::CONTROLLER_RECEIPT), "{detail}")
         }
@@ -281,9 +270,7 @@ fn the_signing_time_re_read_names_the_cap() {
     assert_eq!(meter.streamed(), 0);
 }
 
-// ===========================================================================
 // Peak resident memory, measured in a child process
-// ===========================================================================
 
 /// How big the planted objects are.
 const PLANTED: u64 = 512 << 20;
@@ -358,8 +345,8 @@ fn plant_tiny_values(root: &Path) -> u64 {
 /// `http://localhost:39000` on slot 3) to run the LIVE row: every child then
 /// reads the bucket [`LIVE_BUCKET`] through a read-only S3 handle instead of a
 /// filesystem tree, with the credential from the three named `AWS_*`
-/// variables. The objects are seeded OUT of this process (`claude/fx-31.result.md`
-/// §5 uses `curl --aws-sigv4` over a sparse file), at the keys [`plant`] uses.
+/// variables. The objects are seeded OUT of this process (for example
+/// `curl --aws-sigv4` over a sparse file), at the keys [`plant`] uses.
 const LIVE_ENDPOINT_ENV: &str = "FX31_LIVE_S3_ENDPOINT";
 const LIVE_BUCKET: &str = "kafka-backups";
 
@@ -424,8 +411,8 @@ fn run_child(mode: &str, root: &Path) {
                 println!("{CHILD_LINE} observe_scorecard: read_refused {refused:?}");
                 println!("{CHILD_LINE} read_signing_time: {signing_time:?}");
                 assert_eq!(r.result, VerificationVerdict::NotAttempted, "{r:?}");
-                // FX-33: the receipt under its own cap, the scorecard under
-                // the document cap.
+                // The receipt under its own cap, the scorecard under the document
+                // cap.
                 assert!(
                     r.detail
                         .as_deref()
@@ -456,8 +443,7 @@ fn run_child(mode: &str, root: &Path) {
             let r = store.manifest_facts(TINY_VALUES_KEY, caps::CONTROLLER_MANIFEST);
             assert!(r.is_err(), "the body declares no segment: {r:?}");
         }
-        // The control: the same bytes as a `serde_json::Value`, which is what
-        // `manifest_facts` built before FX-31.
+        // The control: the same bytes as a `serde_json::Value`.
         "value" => {
             let (bytes, _) = store
                 .get_capped(TINY_VALUES_KEY, caps::CONTROLLER_MANIFEST)
@@ -506,13 +492,13 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
     cmd.args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, mode)
         .env(ROOT_ENV, root)
-        // THE METER MEASURES LIVE MEMORY, NOT AN ALLOCATOR'S CACHE (review F2).
-        // macOS's libmalloc keeps freed large blocks resident in its large
-        // cache: measured here, SIXTEEN parses of a 1 MB document in ONE
-        // thread, one after the other, peaked at 602 MB, and at 39 MB with the
-        // cache off. glibc's dynamic mmap threshold does the same in kind. The
-        // controller's bound is on what is live at once, so each child turns
-        // both off; each variable is ignored by the other platform's allocator.
+        // THE METER MEASURES LIVE MEMORY, NOT AN ALLOCATOR'S CACHE. macOS's
+        // libmalloc keeps freed large blocks resident in its large cache:
+        // sixteen parses of a 1 MB document in ONE thread, one after the
+        // other, peaked at 602 MB, and at 39 MB with the cache off. glibc's
+        // dynamic mmap threshold does the same in kind. The controller's bound
+        // is on what is live at once, so each child turns both off; each
+        // variable is ignored by the other platform's allocator.
         .env("MallocLargeCache", "0")
         .env("MALLOC_MMAP_THRESHOLD_", "131072");
     match live {
@@ -545,13 +531,12 @@ fn child_peak_over(mode: &str, root: &Path, live: Option<&str>) -> u64 {
 
 /// **Peak RSS is bounded.** All the controller read paths over 512 MiB
 /// objects add at most [`BOUND`] to a child running them over 1 KiB objects;
-/// the control — the same `Store` reading the receipt under a cap far too
-/// large — adds the object, which shows the meter sees a whole read.
+/// the control (the same `Store` reading the receipt under a cap far too
+/// large) adds the object, which shows the meter sees a whole read.
 ///
 /// The second half measures the PARSE: a 16 MiB manifest of tiny values,
 /// within the controller's manifest cap, through `manifest_facts`' streaming
-/// fold, against the same bytes parsed as a `serde_json::Value` — what
-/// `manifest_facts` did before FX-31.
+/// fold, against the same bytes parsed as a `serde_json::Value`.
 ///
 /// KILLS: "a cap far too large" in any of the paths (that child holds
 /// 512 MiB); "`manifest_facts` parses into a `Value`" (the stream child holds
@@ -584,9 +569,9 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
         "[fx31-mem] baseline child {baseline} B; the capped paths over {PLANTED} B objects \
          {capped} B (adds {added} B, bound {BOUND} B)"
     );
-    // THE CONTROL READS INCOMPRESSIBLE BYTES (review F9): the sparse objects
-    // read as zeros, which macOS compresses under memory pressure, so a whole
-    // read of one measured anywhere from 171 MB to 536 MB.
+    // THE CONTROL READS INCOMPRESSIBLE BYTES: the sparse objects read as
+    // zeros, which macOS compresses under memory pressure, so a whole read
+    // of one measured anywhere from 171 MB to 536 MB.
     write_random(&big.join(RANDOM_KEY), RANDOM_BYTES);
     let uncapped = child_peak("uncapped", &big);
     let whole = uncapped.saturating_sub(baseline);
@@ -631,10 +616,9 @@ fn the_controller_read_paths_hold_bounded_memory_over_a_512_mib_object() {
     );
 }
 
-/// **LIVE (FX-31), against the compose MinIO: the controller's read paths
-/// over 768 MiB objects in a real S3 bucket.** `#[ignore]`d: it needs the
-/// stack and objects seeded out of process. Run it as
-/// `claude/fx-31.result.md` §5 does:
+/// **LIVE, against the compose MinIO: the controller's read paths over
+/// 768 MiB objects in a real S3 bucket.** `#[ignore]`d: it needs the stack
+/// and objects seeded out of process ([`LIVE_ENDPOINT_ENV`]). Run it as:
 ///
 /// ```text
 /// FX31_LIVE_S3_ENDPOINT=http://localhost:39000 AWS_ACCESS_KEY_ID=… \
@@ -688,9 +672,7 @@ fn the_controller_read_paths_hold_bounded_memory_against_minio() {
     );
 }
 
-// ===========================================================================
-// Concurrent reads share ONE budget (FX-31 review F2)
-// ===========================================================================
+// Concurrent reads share ONE budget
 
 /// How many scorecard reads run at once.
 const CONC_DOCUMENTS: usize = 16;
@@ -720,13 +702,11 @@ fn plant_concurrency(root: &Path, document_bytes: usize) {
     }
 }
 
-/// **The caps bound each read; the budget bounds them TOGETHER** (FX-31 review
-/// F2).
+/// **The caps bound each read; the budget bounds them TOGETHER.**
 ///
 /// In child processes, [`CONC_DOCUMENTS`] scorecard observations, each over a
 /// document just under the 1 MiB cap that parses into about 37 MiB, start
-/// together. (Concurrent retention evaluations were the other half; the
-/// per-schedule report is withdrawn, PROD-17.1 B1.)
+/// together.
 ///
 /// Under the controller's budget, peak RSS stays within the budget plus a
 /// fixed slack, whatever the number of readers. The control runs the same
@@ -774,9 +754,9 @@ fn concurrent_reads_share_one_budget() {
     );
 }
 
-/// **Every controller read path reserves from the ONE budget before it reads**
-/// (FX-31 review F2). With the whole controller budget held, each path waits;
-/// released, each one finishes.
+/// **Every controller read path reserves from the ONE budget before it
+/// reads.** With the whole controller budget held, each path waits; released,
+/// each one finishes.
 ///
 /// KILLS: "no reservation" in any one of `verify_evidence`, `observe_archive`,
 /// `observe_scorecard` and `read_signing_time` (that path finishes while the
@@ -852,9 +832,9 @@ fn every_controller_read_path_waits_for_the_budget() {
     }
 }
 
-/// **The budget fits the controller it runs in** (FX-31 review F2): at most a
-/// quarter of the chart's controller memory limit, room for one manifest
-/// read, and a document read costs its cap plus the measured 37× parse.
+/// **The budget fits the controller it runs in**: at most a quarter of the
+/// chart's controller memory limit, room for one manifest read, and a document
+/// read costs its cap plus the measured 37× parse.
 ///
 /// KILLS: "a budget far too large"; "a document read that reserves only its
 /// bytes".
