@@ -533,11 +533,13 @@ naming both. A restore check names `recoveryPoint` or `catalogPoint`, not both
 (`422 exactly_one`); a `pointId` that is not `lwp1-` plus 32 lowercase hex is
 `422 invalid_point_id`. `applicable`, `stale` and `staleReasons` are recomputed
 on every read against the `?planHash=` you send; the verdict is advisory.
-Anything the API could not compare is `unverifiable`, never applicable. The
-installation policy digest is compared by the controller (`staleBasis`
-`policyDigest:byController`). A readiness key replays only while its check can
-still be the answer; send a new key once it is expired, inapplicable, `failed`
-or `cancelled`, and one per click for a connectivity test.
+`caBundleChanged` and `inputsDigestChanged` are reserved: nothing emits them,
+so do not branch on them. Anything the API could not compare is
+`unverifiable`, never applicable. The installation policy digest is compared
+by the controller (`staleBasis` `policyDigest:byController`). A readiness key
+replays only while its check can still be the answer; send a new key once it
+is expired, inapplicable, `failed` or `cancelled`, and one per click for a
+connectivity test.
 
 ## Catalogs, retention, trust
 
