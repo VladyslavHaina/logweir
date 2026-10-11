@@ -3538,9 +3538,9 @@ it is `ExecutionSpecInvalid`, as before. Until now such a `Restore` with
 nothing declared waited for its approval and was then refused later:
 destination-backed as `PlanUnparseable`, inline as `ConnectionPlanMismatch`
 when the plan had no readable target block, and otherwise its Job was created
-and the runner refused the plan at phase 0 (exit 3). The runner parses the
-same bytes into the same type, so no plan it could run is refused. A `Restore`
-whose Job already exists is observed as before.
+and the runner refused it (`drill spec does not parse`, exit 1). The runner
+parses the same bytes into the same type, so no plan it could run is refused.
+A `Restore` whose Job already exists is observed as before.
 **Do:** nothing. A `Restore` refused this way needs a new one with a plan the
 runner accepts, as before.
 **Scope:** controller rows over a recording API double: both kinds of
