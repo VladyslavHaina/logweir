@@ -2,12 +2,12 @@
 
 `application/vnd.logweir.protection-event+json;version=1.0.0`
 
-A protection event is what PLAT-14.2's protection controller writes when a policy's alert ledger
-changes state, and what `logweir notify deliver` posts to the configured sinks. The authority for
-its shape is the Rust type `logweir::notify::ProtectionEvent`
-([`crates/logweir/src/notify.rs`](../../crates/logweir/src/notify.rs)), driven over this document's
-own worked example by `crates/logweir/tests/notify_deliver.rs`. The subcommand's environment, stdout
-and exit-code contract lives in [stability.md](../stability.md).
+**No longer written (release notes, item 74).** Alert delivery is withdrawn, and with it the
+controller that wrote this document and `logweir notify deliver`, which read it. The fields below
+are kept as the format's reading rules.
+
+A protection event was what PLAT-14.2's protection controller wrote when a policy's alert ledger
+changed state, and what `logweir notify deliver` posted to the configured sinks.
 
 ## It is UNSIGNED, and that is stated rather than implied
 
@@ -143,9 +143,7 @@ prints no `notify-result=pagerduty:` line.
 
 ## A worked example
 
-This block is the fixture. `crates/logweir/tests/notify_deliver.rs` reads it out of this page and
-parses it into the Rust type, so a field renamed on one side and not the other fails a test rather
-than drifting quietly.
+This block was the fixture both sides were tested against.
 
 ```json
 {"format_version":"1.0.0","event_id":"sha256:0123456789abcdef",

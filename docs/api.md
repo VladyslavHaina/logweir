@@ -171,7 +171,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/preflights/{id}:cancel` | Ask an unfinished preflight **of one's own** to stop. |
 | `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized status; `kind` is the closed set `backup\|restore\|discovery\|preflight`. |
 | `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}/events` | The same thing as a bounded `text/event-stream`; `kind` is `backup\|restore`. |
-| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger with its delivery state. |
+| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger (alert delivery is withdrawn, release notes item 74: `notifications` and each alert's `delivery` are always absent). |
 | `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
 | `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection and retention policy references it by that name. |
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
@@ -535,12 +535,9 @@ Four bounded read families, the same cursor as every other list, and one write
 among them. The rehearsal-schedule read is withdrawn in v1, with scheduled
 rehearsals.
 
-**No response carries a credential, and that shapes the projections.** A
-`ProtectionPolicy`'s notification routes carry `secretKeyRef`s; the projection
-publishes each route's **name** and which channels it has as booleans, because
-a webhook URL is a bearer token with a hostname on the front and the name of
-the Secret holding one is what a reader needs to decide what to read next. A
-`RetentionPolicy`'s enforcement block names the one delete-capable credential in
+**No response carries a credential, and that shapes the projections.** Alert
+sinks are withdrawn (release notes, item 74): `notifications` is always absent.
+A `RetentionPolicy`'s enforcement block names the one delete-capable credential in
 the installation; the projection publishes `credentialConfigured: true` and not
 the Secret's name.
 

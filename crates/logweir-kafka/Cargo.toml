@@ -31,7 +31,7 @@ thiserror.workspace = true
 rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "zstd", "ssl", "sasl", "tokio"], optional = true }
 # PROD-04.0b: the ONE crate where librdkafka is called directly (OD-6 (a2);
 # ADR 0004's amendment). This crate keeps `#![forbid(unsafe_code)]` and
-# reaches the group, cluster and ACL calls the safe rdkafka API lacks only
+# reaches the group and cluster calls the safe rdkafka API lacks only
 # through it; `scripts/check-unsafe-scope.sh` refuses any other crate that
 # depends on it. ADDS NO THIRD-PARTY PACKAGE: it is a workspace member whose
 # only dependency is the `rdkafka` above. Behind `client`, like `rdkafka`, so

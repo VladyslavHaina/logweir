@@ -31,9 +31,8 @@ nothing written) when:
 * the binding the object PUBLISHED (`status`) is not the binding this tool
   computes from the object's `spec` — the spec it prints, and the owner
   confirms (FX-20 fix round, review F2). A status that lags its spec (a
-  `RetentionPolicy` whose destination was re-created elsewhere and back, a
-  PagerDuty endpoint edited a moment ago) would otherwise bind the credential
-  to a route nobody confirmed.
+  `RetentionPolicy` whose destination was re-created elsewhere and back)
+  would otherwise bind the credential to a route nobody confirmed.
 
 The binding written is computed here from `metadata.uid` and the `spec`, in
 the product's own canonical forms (`logweir_core::credential_binding` and, for
@@ -50,8 +49,8 @@ written (PROD-01.3 review P2). The write is one merge patch of the Secret's
 Usage:
 
     python3 scripts/bind-credential.py --context CTX --namespace NS \\
-        --kind BackupDestination|RetentionPolicy|ProtectionPolicy|KafkaCluster \\
-        --name OBJECT [--route ROUTE] --secret SECRET [--apply --confirm-endpoint E]
+        --kind BackupDestination|RetentionPolicy|KafkaCluster \\
+        --name OBJECT --secret SECRET [--apply --confirm-endpoint E]
 
     python3 scripts/bind-credential.py --context CTX --namespace NS \\
         --location s3://BUCKET[/PREFIX] --endpoint URL|aws --region REGION|none \\
@@ -106,7 +105,6 @@ OBJECT_KINDS = {
     "KafkaCluster": fq("kafkaclusters"),
     "BackupDestination": fq("backupdestinations"),
     "RetentionPolicy": fq("retentionpolicies"),
-    "ProtectionPolicy": fq("protectionpolicies"),
 }
 
 # Every Logweir kind that can name a credential Secret, and the paths it names
@@ -120,7 +118,6 @@ INVENTORY = [
       for role in ("archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead")], None),
     (fq("retentionpolicies"), "RetentionPolicy", "object",
      [("spec", "enforcement", "credentialSecretRef", "name")], None),
-    (fq("protectionpolicies"), "ProtectionPolicy", "object", "routes", None),
     (fq("backups"), "Backup", "inline",
      [("spec", "archive", "secretRef", "name")], ("spec", "archive", "url")),
     (fq("backupschedules"), "BackupSchedule", "inline",
@@ -134,13 +131,6 @@ INVENTORY = [
       ("spec", "request", "restore", "legacySourceArchive", "secretRef", "name")],
      None),
 ]
-
-ROUTE_REFS = (
-    ("pagerduty", ("pagerDuty", "routingKeySecretRef", "name")),
-    ("webhook", ("webhook", "urlSecretRef", "name")),
-    ("slack", ("slack", "webhookUrlSecretRef", "name")),
-)
-
 
 class Refused(Exception):
     """Nothing was written, and the message says why."""
@@ -264,14 +254,6 @@ def retention_binding(uid: str, destination_spec: dict, scope: str) -> str:
     return _binding(uid, "RetentionPolicy", lines)
 
 
-def notification_binding(uid: str, sink: str, endpoint: str | None) -> str:
-    if sink == "pagerduty":
-        where = (endpoint or "").strip() or "default"
-    else:
-        where = "in-secret"
-    return _binding(uid, "ProtectionPolicy", [("sink", sink), ("endpoint", where)])
-
-
 def kafka_binding(uid: str, spec: dict) -> str:
     """PROD-01.3's form (`logweir_core::connection::credential_binding`), which
     has no `kind=` line: bootstrap set, mode, username, TLS and CA reference."""
@@ -389,24 +371,17 @@ def inventory(kube: Kubectl, secret: str) -> list[Reference]:
         for item in (listing or {}).get("items", []):
             name = dig(item, ("metadata", "name")) or "?"
             names: set[str] = set()
-            if paths == "routes":
-                for route in dig(item, ("spec", "notifications", "routes")) or []:
-                    for _, path in ROUTE_REFS:
-                        value = dig(route, path)
-                        if value:
-                            names.add(value)
-            else:
-                for path in paths:
-                    value = dig(item, path)
-                    if value:
-                        names.add(value)
+            for path in paths:
+                value = dig(item, path)
+                if value:
+                    names.add(value)
             if secret in names:
                 url = dig(item, url_path) if url_path else None
                 found.append(Reference(kind, name, basis, url))
     return found
 
 
-def object_target(kube: Kubectl, kind: str, name: str, secret: str, route: str | None) -> Target:
+def object_target(kube: Kubectl, kind: str, name: str, secret: str) -> Target:
     """The object, the binding COMPUTED from its `metadata.uid` and `spec`, and
     what its owner confirms, read from that same spec. The published `status`
     binding is only compared with it (`plan`), never written (review F2)."""
@@ -431,7 +406,7 @@ def object_target(kube: Kubectl, kind: str, name: str, secret: str, route: str |
         computed = destination_binding(uid, spec)
         published = status.get("credentialBinding") or ""
         endpoint = destination_route(spec).where()
-    elif kind == "RetentionPolicy":
+    else:  # RetentionPolicy
         names = {dig(spec, ("enforcement", "credentialSecretRef", "name"))}
         dest_name = dig(spec, ("destinationRef", "name")) or ""
         dest = kube.get_json(OBJECT_KINDS["BackupDestination"], dest_name, missing_ok=True)
@@ -445,40 +420,6 @@ def object_target(kube: Kubectl, kind: str, name: str, secret: str, route: str |
         endpoint = f"{destination_route(dest_spec).where()} scope={scope}"
         detail.append(f"destination {dest_name} (uid {dig(dest, ('metadata', 'uid')) or '?'}), "
                       "whose route the key is bound to")
-    else:  # ProtectionPolicy
-        names = set()
-        endpoints: dict[str, str] = {}
-        computed_by_entry: dict[tuple[str, str], str] = {}
-        for r in dig(spec, ("notifications", "routes")) or []:
-            if route and r.get("name") != route:
-                continue
-            for sink, path in ROUTE_REFS:
-                value = dig(r, path)
-                if value:
-                    names.add(value)
-                    if value == secret:
-                        pd_endpoint = dig(r, ("pagerDuty", "endpoint")) if sink == "pagerduty" else None
-                        computed_by_entry[(r.get("name") or "", sink)] = notification_binding(
-                            uid, sink, pd_endpoint)
-                        endpoints[f"{r.get('name')}/{sink}"] = (
-                            (pd_endpoint or "").strip() or "the PagerDuty default"
-                            if sink == "pagerduty" else "the URL inside the Secret")
-        distinct = set(computed_by_entry.values())
-        if len(distinct) > 1:
-            raise Refused(f"the Secret is named by routes with different bindings "
-                          f"({', '.join(sorted(r for r, _ in computed_by_entry))}); "
-                          "name one with --route")
-        computed = next(iter(distinct), "")
-        published_entries = {(b.get("route") or "", b.get("sink") or ""): b.get("binding") or ""
-                             for b in status.get("credentialBindings") or []
-                             if b.get("secretName") == secret}
-        published_values = {published_entries.get(entry, "") for entry in computed_by_entry}
-        if len(published_values) > 1:
-            raise Refused("the policy's published bindings for this Secret's routes disagree "
-                          "with each other, so the status lags the spec; let the controller "
-                          "reconcile and run this again")
-        published = next(iter(published_values), "")
-        endpoint = "; ".join(f"{k}: {v}" for k, v in sorted(endpoints.items()))
     names.discard(None)
     return Target(kind, name, uid, computed, endpoint, secret in names, detail, published)
 
@@ -554,10 +495,9 @@ def plan(kube: Kubectl, args) -> tuple[str, str, str, list[str]]:
         lines.extend(f"  named by {r.label()} ({r.url or 'no url'})" for r in refs)
         target = None
     else:
-        target = object_target(kube, args.kind, args.name, args.secret, args.route)
+        target = object_target(kube, args.kind, args.name, args.secret)
         if not target.names_secret:
-            raise Refused(f"{args.kind} {args.name} does not name Secret {args.secret}"
-                          + (f" on route {args.route}" if args.route else ""))
+            raise Refused(f"{args.kind} {args.name} does not name Secret {args.secret}")
         others = [r for r in refs if not (r.kind == args.kind and r.name == args.name)]
         if others:
             raise Refused(f"Secret {args.secret} is ALSO named by "
@@ -606,7 +546,6 @@ def main(argv: list[str] | None = None, runner=None, out=sys.stdout, err=sys.std
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--kind", choices=sorted(OBJECT_KINDS))
     parser.add_argument("--name")
-    parser.add_argument("--route")
     parser.add_argument("--location")
     parser.add_argument("--endpoint")
     parser.add_argument("--region")

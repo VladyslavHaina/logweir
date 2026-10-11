@@ -95,8 +95,8 @@ engine trait method implements it.
   at `LOGWEIR_ENGINE_BIN`; the container image carries both, for linux/amd64
   and linux/arm64 (amendment below).
 
-`OsoCliEngine` currently inherits the refusing default for `validation_run`;
-its `engine_subreport` is therefore null. The upstream operator's restore CR
+Logweir never runs the engine's `validation run`, so `engine_subreport` is
+null. The upstream operator's restore CR
 write path was rejected because its dry-run gate did not establish a real
 restore. Logweir's own runner Jobs were subsequently admitted by Amendment C.
 
@@ -204,7 +204,7 @@ lint`) enforces the perimeter, the lint table and the attribute, and scans
 the tree for `unsafe` outside the perimeter as a second layer.
 
 The perimeter wraps ListConsumerGroups, DescribeConsumerGroups,
-DescribeCluster and DescribeAcls, the legacy group listing
+DescribeCluster, the legacy group listing
 (`rd_kafka_list_groups`, for the names of every group type: rust-rdkafka
 0.36.2's wrapper builds a member slice from a NULL pointer for a group without
 members and hides each group's error), and DescribeTopics (PROD-01.4a: each

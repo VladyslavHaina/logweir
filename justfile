@@ -382,16 +382,9 @@ e2e-seed:
 demo:
     ./scripts/demo.sh
 
-# Task 19 fix round 2 (review FIX 6): runs every `#[ignore]`d marker test in
-# the workspace — currently just `oso_cli_engine_must_override_validation_run_once_docker_is_available`
-# (crates/logweir-engine-oso/tests/engine.rs), which tracks the
-# `DataEngine::validation_run` override still owed on `OsoCliEngine`, blocked
-# on Docker / the extracted kafka-backup binary in this environment. Expected
-# to FAIL today — that is the point: CI actually runs this (see ci.yml,
-# continue-on-error so it stays informational rather than blocking merges)
-# so the obligation cannot go unnoticed the way a stub nobody runs would let
-# it. The day the real override lands, this recipe (and the CI step) turns
-# green on its own.
+# Runs every `#[ignore]`d test in the workspace: the rows that need a stack,
+# a lab or a binary the default `cargo test` run does not have. CI does not
+# run it.
 check-todo-markers:
     cargo test --workspace -- --ignored
 

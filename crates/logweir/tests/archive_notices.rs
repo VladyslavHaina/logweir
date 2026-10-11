@@ -127,9 +127,6 @@ impl DataEngine for Tells {
     fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
         self.inner.fingerprints(s)
     }
-    fn validation_run(&self, p: &RestorePlan) -> Result<EngineRun, EngineError> {
-        self.inner.validation_run(p)
-    }
     fn backup(
         &self,
         p: &BackupPlan,

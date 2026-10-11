@@ -1,6 +1,6 @@
 //! **PROD-04.0b's broker glue**: the owned values `logweir-rdkafka-ffi`
-//! returns, moved into the pure decisions of [`crate::groups`],
-//! [`crate::acls`] and [`crate::access`]. No `unsafe` here: this crate keeps
+//! returns, moved into the pure decisions of [`crate::groups`] and
+//! [`crate::access`]. No `unsafe` here: this crate keeps
 //! `#![forbid(unsafe_code)]`, and every librdkafka call is the FFI crate's
 //! (OD-6 (a2); `scripts/check-unsafe-scope.sh`).
 //!
@@ -10,7 +10,6 @@
 //! `NoAnswer` or a listing error, and the pure layer turns it into the weaker
 //! verdict.
 use crate::access::ClusterAccess;
-use crate::acls::{acl_coverage, AclCapture, AuthorizerProbe, RawAcl};
 use crate::groups::{
     classify_with, describe_answer, selected_ids, CapturableGroup, DescribeAnswer, DescribeFailure,
     DescribedObservation, GroupClassification, GroupDescription, GroupListings, MemberDescription,
@@ -18,11 +17,11 @@ use crate::groups::{
 };
 use crate::positions::TopicPartition;
 use crate::rdkafka_reader::RdKafkaReader;
-use crate::reader::{ClusterReader, KafkaError};
+use crate::reader::KafkaError;
 use crate::topic_ids::{call_failure as topic_call_failure, TopicAnswer, TopicIdRead};
 use logweir_rdkafka_ffi::groups::{AssignedPartition, DescribedGroup, MAX_DESCRIBE_GROUPS};
 use logweir_rdkafka_ffi::topics::{DescribedTopic, MAX_DESCRIBE_TOPICS};
-use logweir_rdkafka_ffi::{acls, cluster, groups, topics, CText, CallError};
+use logweir_rdkafka_ffi::{cluster, groups, topics, CText, CallError};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -110,7 +109,7 @@ fn observation(d: DescribedGroup) -> DescribedObservation {
 
 impl RdKafkaReader {
     /// Sets the bound of every later admin call (DescribeCluster, the two
-    /// group listings, descriptions, DescribeAcls): librdkafka's request
+    /// group listings, descriptions): librdkafka's request
     /// timeout, plus the FFI crate's poll margin (default
     /// [`crate::groups::DEFAULT_ADMIN_BOUND`], 15 s).
     ///
@@ -315,32 +314,6 @@ impl RdKafkaReader {
                 (g.group_id().to_string(), answer)
             })
             .collect()
-    }
-
-    /// **Every ACL binding the broker returns to this principal, and what
-    /// they are worth** (T9: the authorizer's class through the safe
-    /// DescribeConfigs, then DescribeCluster's operations, then DescribeAcls;
-    /// T10, T11). See [`crate::acls`].
-    pub fn capture_acls(&self) -> AclCapture {
-        let authorizer = AuthorizerProbe::from_broker_configs(&self.broker_configs());
-        let access = self.cluster_access();
-        let answer = acls::describe_acls(self.admin_client().inner(), self.admin_bound())
-            .map(|bindings| {
-                bindings
-                    .into_iter()
-                    .map(|b| RawAcl {
-                        resource_type: b.resource_type,
-                        name: id(b.name),
-                        pattern_type: b.pattern_type,
-                        principal: id(b.principal),
-                        host: id(b.host),
-                        operation: b.operation,
-                        permission: b.permission,
-                    })
-                    .collect()
-            })
-            .map_err(|e| e.to_string());
-        acl_coverage(&authorizer, &access, &answer)
     }
 }
 

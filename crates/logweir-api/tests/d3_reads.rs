@@ -116,14 +116,14 @@ async fn protection_health_is_published_beside_its_basis_and_its_schedules() {
     assert_eq!(schedule["suspended"], true);
     assert_eq!(schedule["ready"], "False");
 
-    // The alert ledger, with the pair that makes delivery exactly-once.
+    // The alert ledger. Alert delivery is withdrawn, so the delivery half an
+    // older controller recorded on this live object is not published.
     let alert = &item["alerts"][0];
     assert_eq!(alert["kind"], "Staleness");
     assert_eq!(alert["state"], "Open");
     assert_eq!(alert["transition"], 1);
-    assert_eq!(alert["notifiedTransition"], 1);
-    assert_eq!(alert["delivery"]["state"], "Delivered");
-    assert_eq!(alert["delivery"]["attempts"], 1);
+    assert!(alert.get("notifiedTransition").is_none(), "{alert}");
+    assert!(alert.get("delivery").is_none(), "{alert}");
 
     // The last ATTEMPT is a different object from the last available POINT.
     assert_eq!(item["lastAttempt"]["phase"], "Succeeded");
@@ -164,15 +164,13 @@ async fn a_protection_response_names_no_secret_and_no_sink() {
     for word in ["urlSecretRef", "routingKeySecretRef", "webhookUrlSecretRef"] {
         assert!(!text.contains(word), "{word} reached the response");
     }
-    // What IS published: the route's name and which channels it has.
-    let route = &app
+    // Alert sinks are withdrawn: the policy's routes are not published at
+    // all, and its own condition says why.
+    let item = &app
         .get("/api/v1/namespaces/team-a/protection-policies")
         .await
-        .json()["items"][0]["notifications"]["routes"][0];
-    assert_eq!(route["name"], "local-sink");
-    assert_eq!(route["webhook"], true);
-    assert_eq!(route["pagerDuty"], false);
-    assert_eq!(route["slack"], false);
+        .json()["items"][0];
+    assert!(item.get("notifications").is_none(), "{item}");
 }
 
 // ======================================================================

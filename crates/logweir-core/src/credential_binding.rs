@@ -10,7 +10,6 @@
 //!
 //! | Object | Credential | Where it is presented |
 //! |---|---|---|
-//! | `ProtectionPolicy` notification route | a PagerDuty routing key, a webhook or Slack URL | the route's `endpoint` (PagerDuty), or the URL inside the Secret |
 //! | `BackupDestination` `SecretKeys` grant | an S3 key pair and session token | `spec.storage` (bucket, endpoint) |
 //! | an inline `archive.secretRef` (Backup, Restore, BackupSchedule, RecoveryCatalog, Preflight) | the same | the archive location the runner dials |
 //! | `RetentionPolicy` `enforcement.credentialSecretRef` | a DELETE-capable S3 key pair | the destination's storage |
@@ -18,8 +17,7 @@
 //! Without a binding, a principal who may write one of those objects but may
 //! not read Secrets names a Secret written for somebody else, points the
 //! endpoint at a host they control, and Logweir's runner reads the Secret and
-//! presents it there. For PagerDuty the routing key itself travels in the
-//! request body. For S3, SigV4 never sends the secret key, but it does send the
+//! presents it there. For S3, SigV4 never sends the secret key, but it does send the
 //! access key id, a replayable signature and any session token in clear
 //! headers.
 //!
@@ -51,10 +49,6 @@
 //!   the destination it resolves to and its scope prefix. `destinationRef` is
 //!   immutable by NAME only, so the route is what stops a re-created
 //!   destination of the same name from receiving the delete-capable key.
-//! * [`notification_binding`]: the `ProtectionPolicy`'s UID, the sink kind
-//!   and, for PagerDuty, the endpoint. The policy's spec is MUTABLE, so the
-//!   endpoint in the digest is the only thing that makes "edit the endpoint,
-//!   keep the routing key" a refusal.
 //! * [`archive_location_binding`]: an inline (legacy) archive has no object of
 //!   its own — a `Backup` is one-shot and a schedule's `Backup`s are minted by
 //!   the controller — so its Secret is bound to the LOCATION the runner dials:
@@ -102,22 +96,6 @@ pub const EVIDENCE_READ_CREDENTIAL_BINDING_ENV: &str = "LOGWEIR_EVIDENCE_READ_CR
 /// What the controller expects [`EVIDENCE_READ_CREDENTIAL_BINDING_ENV`] to be.
 pub const EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
     "LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED";
-
-/// The projected binding of a delivery Job's PagerDuty routing-key Secret.
-pub const NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV: &str = "NOTIFY_PAGERDUTY_CREDENTIAL_BINDING";
-/// What the controller expects [`NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV`] to be.
-pub const NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
-    "NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED";
-/// The projected binding of a delivery Job's webhook-URL Secret.
-pub const NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV: &str = "NOTIFY_WEBHOOK_CREDENTIAL_BINDING";
-/// What the controller expects [`NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV`] to be.
-pub const NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
-    "NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED";
-/// The projected binding of a delivery Job's Slack webhook-URL Secret.
-pub const NOTIFY_SLACK_CREDENTIAL_BINDING_ENV: &str = "NOTIFY_SLACK_CREDENTIAL_BINDING";
-/// What the controller expects [`NOTIFY_SLACK_CREDENTIAL_BINDING_ENV`] to be.
-pub const NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV: &str =
-    "NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED";
 
 /// FX-20c: the `(projected, expected)` pair a CHECK pod carries for one
 /// Secret-backed grant its plan lists in
@@ -196,7 +174,7 @@ pub const UNBOUND_MISSING_EXPECTATION: &str = "unbound:missing-expectation";
 /// [`UNBOUND_MISSING_EXPECTATION`], so a builder that forgets the pair fails
 /// CLOSED instead of reaching a runner as a "hand-run" credential nobody
 /// checks.
-pub const GUARDED_CREDENTIALS: [(&str, &str, &str); 8] = [
+pub const GUARDED_CREDENTIALS: [(&str, &str, &str); 5] = [
     (
         "LOGWEIR_SOURCE_PASSWORD",
         crate::connection::SOURCE_CREDENTIAL_BINDING_ENV,
@@ -221,21 +199,6 @@ pub const GUARDED_CREDENTIALS: [(&str, &str, &str); 8] = [
         "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID",
         EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
         EVIDENCE_READ_CREDENTIAL_BINDING_EXPECTED_ENV,
-    ),
-    (
-        "PAGERDUTY_ROUTING_KEY",
-        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
-        NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
-    ),
-    (
-        "NOTIFY_WEBHOOK_URL",
-        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
-        NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
-    ),
-    (
-        "NOTIFY_SLACK_WEBHOOK_URL",
-        NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
-        NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
     ),
 ];
 
@@ -363,74 +326,6 @@ pub fn retention_binding(uid: &str, archive: &StorageUrl, scope_prefix: &str) ->
     lines.push(("scope", scope_prefix.to_string()));
     let borrowed: Vec<(&str, &str)> = lines.iter().map(|(n, v)| (*n, v.as_str())).collect();
     binding(uid, "RetentionPolicy", &borrowed)
-}
-
-/// Which kind of notification sink a credential is for. Part of the binding,
-/// so a policy's Slack Secret is never accepted as its PagerDuty routing key
-/// (and posted to the PagerDuty endpoint).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NotificationSink {
-    /// PagerDuty Events v2: the routing key travels in the body, to
-    /// `endpoint`.
-    PagerDuty,
-    /// A generic webhook: the URL is in the Secret.
-    Webhook,
-    /// A Slack incoming webhook: the URL is in the Secret.
-    Slack,
-}
-
-impl NotificationSink {
-    /// The spelling in the binding, in `status.credentialBindings[].sink` and
-    /// in the delivery Job's `notify-result=` line.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PagerDuty => "pagerduty",
-            Self::Webhook => "webhook",
-            Self::Slack => "slack",
-        }
-    }
-
-    /// `(projected, expected)` — the two variables of this sink's binding pair.
-    #[must_use]
-    pub const fn binding_env(self) -> (&'static str, &'static str) {
-        match self {
-            Self::PagerDuty => (
-                NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
-                NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_EXPECTED_ENV,
-            ),
-            Self::Webhook => (
-                NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
-                NOTIFY_WEBHOOK_CREDENTIAL_BINDING_EXPECTED_ENV,
-            ),
-            Self::Slack => (
-                NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
-                NOTIFY_SLACK_CREDENTIAL_BINDING_EXPECTED_ENV,
-            ),
-        }
-    }
-}
-
-/// The binding of a `ProtectionPolicy` route's credential Secret: the policy's
-/// UID, the sink kind, and — for PagerDuty — the endpoint the routing key is
-/// POSTed to, `default` when the route names none. A webhook or Slack URL is
-/// the credential itself, so its host is whatever the Secret's writer put
-/// there and nothing else is bound.
-#[must_use]
-pub fn notification_binding(uid: &str, sink: NotificationSink, endpoint: Option<&str>) -> String {
-    let endpoint = match sink {
-        NotificationSink::PagerDuty => endpoint
-            .map(str::trim)
-            .filter(|e| !e.is_empty())
-            .unwrap_or("default")
-            .to_string(),
-        NotificationSink::Webhook | NotificationSink::Slack => "in-secret".to_string(),
-    };
-    binding(
-        uid,
-        "ProtectionPolicy",
-        &[("sink", sink.as_str()), ("endpoint", endpoint.as_str())],
-    )
 }
 
 /// Check one `(projected, expected)` pair through a lookup, so a caller can
@@ -612,49 +507,11 @@ mod tests {
     }
 
     #[test]
-    fn the_notification_binding_covers_the_uid_the_sink_and_the_pagerduty_endpoint() {
-        let base = notification_binding("uid-1", NotificationSink::PagerDuty, None);
-        assert!(base.starts_with("v1:uid-1:sha256:"), "{base}");
-        assert_ne!(
-            base,
-            notification_binding("uid-2", NotificationSink::PagerDuty, None)
-        );
-        assert_ne!(
-            base,
-            notification_binding(
-                "uid-1",
-                NotificationSink::PagerDuty,
-                Some("https://evil.example/v2/enqueue")
-            ),
-            "an endpoint edit must invalidate the routing key"
-        );
-        assert_eq!(
-            base,
-            notification_binding("uid-1", NotificationSink::PagerDuty, Some("  ")),
-            "a blank endpoint is the default one"
-        );
-        let webhook = notification_binding("uid-1", NotificationSink::Webhook, None);
-        let slack = notification_binding("uid-1", NotificationSink::Slack, None);
-        assert_ne!(webhook, slack);
-        assert_ne!(webhook, base);
-        assert_ne!(slack, base);
-        // The endpoint argument means nothing for a URL-in-Secret sink.
-        assert_eq!(
-            webhook,
-            notification_binding("uid-1", NotificationSink::Webhook, Some("https://x"))
-        );
-    }
-
-    #[test]
     fn no_binding_kind_can_collide_with_a_kafka_connections() {
         // PROD-01.3's canonical form has no `kind=` line, so no digest of
         // this module can equal a connection's for the same UID.
         let auth = crate::spec::AuthSpec::default();
         let kafka = crate::connection::credential_binding("uid-1", &[], &auth, None);
-        assert_ne!(
-            kafka,
-            notification_binding("uid-1", NotificationSink::Webhook, None)
-        );
         assert_ne!(kafka, destination_binding("uid-1", &s3("b", "", None)));
     }
 
@@ -805,9 +662,6 @@ mod tests {
             ARCHIVE_CREDENTIAL_BINDING_ENV,
             EVIDENCE_CREDENTIAL_BINDING_ENV,
             EVIDENCE_READ_CREDENTIAL_BINDING_ENV,
-            NOTIFY_PAGERDUTY_CREDENTIAL_BINDING_ENV,
-            NOTIFY_WEBHOOK_CREDENTIAL_BINDING_ENV,
-            NOTIFY_SLACK_CREDENTIAL_BINDING_ENV,
             crate::connection::SOURCE_CREDENTIAL_BINDING_ENV,
             crate::connection::TARGET_CREDENTIAL_BINDING_ENV,
             grant_binding_env(DestinationRole::ArchiveWrite).0,
@@ -827,8 +681,7 @@ mod tests {
                 // already sends the operator to enter the credential again.
                 let kafka_foreign = !absent
                     && !var.starts_with("LOGWEIR_ARCHIVE_")
-                    && !var.starts_with("LOGWEIR_EVIDENCE_")
-                    && !var.starts_with("NOTIFY_");
+                    && !var.starts_with("LOGWEIR_EVIDENCE_");
                 if !kafka_foreign {
                     assert!(
                         text.contains(BINDING_REMEDY),

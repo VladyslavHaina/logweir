@@ -7052,6 +7052,50 @@ async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
     );
 }
 
+/// **A plan that names a notification sink is refused by name at admission**,
+/// before any Job exists: the drill's notification post is withdrawn, and the
+/// reason is the runner's own `GuardRefused`. CONTROL: the same destinations
+/// and the same plan without the block are admitted.
+#[tokio::test]
+async fn a_plan_that_names_a_notification_sink_is_refused_at_admission() {
+    let now = utc(2026, 9, 7, 14, 30);
+    let with_sink =
+        format!("{PLAN_BYTES}notifications:\n  webhooks: [\"https://example.test/hook\"]\n");
+    let mut value: Value = serde_json::from_str(&restore_json(&with_sink, APPROVAL, NAME))
+        .expect("the fixture is JSON");
+    value["spec"]["sourceArchive"] = serde_json::json!({"url": "logweir-destination://src"});
+    value["spec"]["sourceDestinationRef"] = serde_json::json!({"name": "src"});
+    value["spec"]["evidenceDestinationRef"] = serde_json::json!({"name": "ev"});
+    let restore: Restore = serde_json::from_value(value).expect("the mutated fixture is a Restore");
+
+    let (client, _r, _b) = mock_client_recording_bodies(destination_routes(
+        source_destination_value(),
+        evidence_destination_value(),
+    ));
+    let error = admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect_err("a plan that names a sink is refused");
+    let said = error.to_string();
+    assert!(said.contains("GuardRefused"), "{said}");
+    assert!(said.contains("notifications is withdrawn"), "{said}");
+    assert!(
+        !said.contains("example.test"),
+        "the sink is never echoed: {said}"
+    );
+
+    // CONTROL: the plan without the block.
+    let (client, _r, _b) = mock_client_recording_bodies(destination_routes(
+        source_destination_value(),
+        evidence_destination_value(),
+    ));
+    assert!(matches!(
+        admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+            .await
+            .expect("the reads succeed"),
+        RestoreDestinationAdmission::Resolved(_)
+    ));
+}
+
 /// **HALF A DESTINATION-BACKED RESTORE IS REFUSED, AND AN ABSENT DESTINATION
 /// HOLDS.**
 ///

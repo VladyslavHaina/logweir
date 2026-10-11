@@ -2276,6 +2276,9 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "scheduled rehearsals and standing authorizations are withdrawn",
             "StandingAuthorizationRefused",
         ),
+        // PROD-17.1 (2026-10-11, item 74): parts v1 does not use are
+        // withdrawn; the owner decision that withdrew them.
+        ("four unused parts are withdrawn for v1", "OD-12"),
     ];
     assert_eq!(
         items.len(),

@@ -1,10 +1,10 @@
-//! Phase 7 — verify. Four checks, none of which may read "matched" over
-//! nothing: (a) segment sha256 over the sampled archive segments, (b) the
-//! engine's own `validation run` (evidence only — see below), (c) canary
+//! Phase 7 — verify. Three checks, none of which may read "matched" over
+//! nothing: (a) segment sha256 over the sampled archive segments, (c) canary
 //! consume-and-reconcile, per-record fingerprints (not watermark counts),
 //! and (d) topic-config parity against what phase 6 deliberately altered —
 //! INTENDED in a scratch drill, NOT RECONSTRUCTED in a `newTopic` restore
-//! (FX-3; `classify_parity`).
+//! (FX-3; `classify_parity`). The old (b), the engine's own `validation run`,
+//! is no longer called: the engine never implemented it.
 //!
 //! ## ONE chokepoint, every lane (Task 19 fix round 3)
 //!
@@ -189,38 +189,11 @@
 //! (`DrillError::Operational`), never silently skipped — silently skipping it
 //! would under-sample without saying so, exactly the failure mode this phase
 //! exists to prevent.
-//!
-//! A THIRD, separate topic-rename bug lives one layer further out and is NOT
-//! fixable from this file: `kafka-backup`'s own `validation run` resolves its
-//! `message_count`/`offset_range` checks against the manifest's SOURCE topic
-//! names — `ValidationConfig` has no topic-mapping field at all [Task 11's
-//! finding, carried forward by `progress.md`'s ruling: "Task 19's dispatch
-//! must carry this, and its review must confirm the resolution"]. Invoked
-//! against a renamed target, both engine-side checks report a discrepancy
-//! for EVERY topic, EVERY time, even on a perfectly healthy drill. That
-//! report is real, signed engine evidence, and is USELESS as a pass/fail
-//! signal for this drill — worse, it is EXPECTED to look like a failure on
-//! every renamed drill, healthy or not.
-//!
-//! Resolution, in two parts. First, `engine_validation_run`'s `Result` is
-//! never propagated with `?` into `run`'s own error type — `run` matches on
-//! it directly and logs either arm, so an engine-side failure (an `Err`, or
-//! an `Ok` with a non-zero exit code) can neither abort this phase nor be
-//! mistaken for an operational failure. Second, only the exit code is ever
-//! read even on the `Ok` arm, and it never sets `integrity.result` or gates
-//! anything. Logweir's own `compare()` over correctly-mapped consumed
-//! records (mapping point 1 above) is the ONLY input to `integrity.result`.
-//! Nothing under this file's control can teach the upstream engine about the
-//! mapping — that would require a `ValidationConfig` schema change upstream
-//! — so the honest fix available here is to keep inviting the engine's own
-//! evidence while never trusting, or even depending on, its verdict. Pinned
-//! by `a_failing_engine_validation_run_never_fails_or_aborts_the_drill`
-//! (`verify_phase.rs`).
 use crate::drill::DrillError;
 use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::{
     expected_restored_count, partition_count_bound, BackupSetFacts, DataEngine, EngineError,
-    EngineReport, EngineRun, RecordFingerprint, RestorePlan, SampleSelection, SegmentFacts,
+    EngineReport, RecordFingerprint, RestorePlan, SampleSelection, SegmentFacts,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::replay_selection::ReplaySelection;
@@ -1564,32 +1537,6 @@ pub fn not_assessed_marker(target_topic: &str, why: &str) -> String {
     not_assessed_twin(target_topic, CONFIGURATION, why)
 }
 
-/// Wraps `DataEngine::validation_run` — see that method's doc comment
-/// (`logweir-core/src/engine.rs`) for why the trait needed a new default
-/// method to make this call reachable through `&dyn DataEngine` at all.
-///
-/// Returns `Result<EngineRun, EngineError>` — the engine's OWN error type,
-/// deliberately NOT converted (and NOT propagated with `?`) into
-/// `DrillError` at this call site. This is the load-bearing half of "the
-/// known issue" (this file's module doc comment): because the engine's own
-/// `message_count`/`offset_range` checks compare against the manifest's
-/// SOURCE topic names, they are EXPECTED to report a discrepancy — quite
-/// possibly a non-zero exit, quite possibly an `Err` from a real
-/// implementation that maps a failing check to one — on every renamed drill,
-/// including a perfectly healthy one. If this function's result were
-/// propagated with `?` into `run`'s own `Result<_, DrillError>`, that
-/// EXPECTED engine-side failure would abort phase 7 entirely: exactly the
-/// "fails healthy drills" failure mode the module doc comment warns against.
-/// The caller (`run`, below) therefore matches on this `Result` itself and
-/// logs either arm — never a `?`. Pinned by
-/// `verify_phase.rs`'s `a_failing_engine_validation_run_never_fails_or_aborts_the_drill`.
-fn engine_validation_run(
-    engine: &dyn DataEngine,
-    plan: &RestorePlan,
-) -> Result<EngineRun, EngineError> {
-    engine.validation_run(plan)
-}
-
 /// The maximum `ConsumedRecord.timestamp_ms` across every mapped TARGET
 /// topic/partition — what phase 8's RPO reads. Reads only the last record of
 /// each partition (`end_offsets` then `consume_range` at `hi - 1`, count 1),
@@ -2005,22 +1952,6 @@ pub fn run_after_restore(
         ));
     }
 
-    // (b) `validation run --config validation.yaml --triggered-by <s>`
-    // [VERIFIED U/kafka-backup/crates/kafka-backup-cli/src/main.rs:475-489]. Only
-    // the exit code is recorded; the content is never read as corroboration of
-    // Logweir's own measurement. Deliberately NOT `?` — see
-    // `engine_validation_run`'s doc comment ("the known issue"): an engine-side
-    // failure here is EXPECTED on a renamed drill and must never abort this
-    // phase or influence `integrity.result`.
-    match engine_validation_run(engine, plan) {
-        Ok(vr) => tracing::info!(target: "logweir::verify", exit_code = vr.exit_code,
-                                  "engine `validation run` finished"),
-        Err(e) => tracing::warn!(target: "logweir::verify", error = %e,
-                                  "engine `validation run` failed or could not be run; \
-                                   continuing — its verdict is never corroboration for \
-                                   Logweir's own measurement"),
-    }
-
     // (a) + (c). One verdict per selection, built by iterating `sel` ITSELF —
     // never by iterating whatever `probe_archive_modes` happened to return —
     // so `verdicts.len() == sel.len()` holds by construction of this loop and
@@ -2167,27 +2098,6 @@ pub fn run_after_restore(
         verified_at: chrono::Utc::now(),
     })
 }
-
-/// The notification half of this phase lives in [`crate::notify`] now, and is
-/// re-exported here so that every call site and every structural guard keeps
-/// the path it already uses.
-///
-/// D3 §3.4 moves it: the protection controller has no Secret verb and no HTTP
-/// egress, so PLAT-14.2's alert delivery reuses THIS code in the runner image,
-/// through the new `logweir notify deliver` subcommand. A subcommand cannot
-/// reasonably reach into `drill::phase7_verify` for a sink trait, and a second
-/// copy of a redactor or a timeout policy is how the two copies come to
-/// disagree — the reason `redact_url` itself moved to `logweir-core` in fix
-/// round 1. So the code moved and nothing else did: `crate::notify` is the
-/// definition, this is the alias, and the re-export list below is exhaustive
-/// (nothing in the moved block is private to it except `redact_ureq_error`,
-/// which was private here too).
-pub use crate::notify::{
-    dedup_key, failure_dedup_key, notify, notify_agent, notify_agent_with, notify_body,
-    notify_failure, notify_failure_with, notify_with, notify_with_sink, pagerduty_endpoint,
-    redact_url, EventSink, UreqSink, NOTIFY_CONNECT_TIMEOUT, NOTIFY_TIMEOUT, PAGERDUTY_SILENCED,
-    PAGERDUTY_US_ENDPOINT,
-};
 
 #[cfg(test)]
 mod tests {

@@ -242,7 +242,7 @@ pub fn write_textfile(path: &Path, sc: &Scorecard) -> std::io::Result<()> {
     // A COUNT, not a path label: `redactions[].path` is document-controlled
     // text and would be unbounded label cardinality — the same rule that keeps
     // `triggered_by` out of this file. The paths are rendered by
-    // `drill show`'s qualifiers footer and carried in the notification body.
+    // `drill show`'s qualifiers footer.
     o.push_str(
         "# HELP logweir_drill_redactions Scorecard fields removed before signing; 0 for a \
          whole document. Non-zero means BOTH verifiers refuse this document.\n\

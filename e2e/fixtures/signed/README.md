@@ -12,8 +12,8 @@ them under the PINNED keypair, so closing a divergence costs a signature that
 was already going to be re-made and never costs the `917cf9a2…` fingerprint:
 
 - **`engine_subreport` is populated.** Every scorecard v0.1 actually produces
-  has `engine_subreport: null` — `OsoCliEngine` does not override
-  `DataEngine::validation_run`, so no engine report is ever retained. See
+  has `engine_subreport: null` — Logweir never runs the engine's
+  `validation run`, so no engine report is ever retained. See
   `docs/stability.md`, "`engine_subreport` is always null in v0.1".
 - **`last_phase_completed` is `7`** — CLOSED, this pair used to read `9`. No
   real drill can sign `9`: `phase8_score::run` is handed a frozen clone, so

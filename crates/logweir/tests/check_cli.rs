@@ -7302,9 +7302,7 @@ fn an_execution_only_row_can_never_claim_a_verdict() {
 /// overruns.
 ///
 /// Every subprocess a test spawns must have a timeout: a hung child blocks the
-/// whole worker. Consumed in shape from
-/// `crates/logweir/tests/notify_deliver.rs::bounded_output`, whose header
-/// records the 2026-09-15 failure this exists for.
+/// whole worker (a 13-hour hang on 2026-09-15 is why).
 struct BoundedRun {
     code: Option<i32>,
     stdout: String,

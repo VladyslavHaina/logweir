@@ -510,13 +510,9 @@ fn validate_restore_json_stdout_parses_even_though_the_command_logs_first() {
 /// assertions over it (`oso_evidence_verify`, `body_sha256`'s length,
 /// `retained_verbatim`) therefore cannot be met by this task.
 ///
-/// The cause is named and tracked: `OsoCliEngine` does not override
-/// `DataEngine::validation_run`, so nothing ever writes a report under
-/// `logweir/<run_id>/engine-validation/` for `phase8_score::run` to retain.
-/// `crates/logweir-engine-oso/tests/engine.rs` carries an `#[ignore]`d marker
-/// test (`oso_cli_engine_must_override_validation_run_once_docker_is_available`)
-/// that CI runs on every build, and the override is owed to whoever adds it —
-/// not to this task, which owns no file in that crate's engine module.
+/// The cause: nothing runs the engine's `validation run`, so nothing ever
+/// writes a report under `logweir/<run_id>/engine-validation/` for
+/// `phase8_score::run` to retain.
 ///
 /// The gap is also stated where a READER meets it, not only here:
 /// `docs/stability.md` ("`engine_subreport` is always null in v0.1"),
@@ -525,8 +521,8 @@ fn validate_restore_json_stdout_parses_even_though_the_command_logs_first() {
 /// documents carry a POPULATED block the shipping code cannot emit.
 ///
 /// This test pins the gap so it cannot be mistaken for coverage: it goes RED the
-/// day the override lands, at which point the brief's real round-trip assertions
-/// belong here, driven by `harness::oso_evidence_verify`.
+/// day an engine report is retained, at which point the brief's real
+/// round-trip assertions belong here, driven by `harness::oso_evidence_verify`.
 #[test]
 fn the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run() {
     let out = drill_run(&spec_default());
@@ -542,11 +538,9 @@ fn the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run(
     assert_eq!(
         sc["engine_subreport"],
         serde_json::Value::Null,
-        "an engine sub-report appeared: OsoCliEngine::validation_run must now be \
-         implemented. Replace this test with the brief's round-trip assertions — \
-         oso_evidence_verify(&sc[\"engine_subreport\"]).success() and a 71-character \
-         body_sha256 — and delete the #[ignore]d marker test in \
-         crates/logweir-engine-oso/tests/engine.rs."
+        "an engine sub-report appeared. Replace this test with the brief's round-trip \
+         assertions — oso_evidence_verify(&sc[\"engine_subreport\"]).success() and a \
+         71-character body_sha256."
     );
     // Phase 8's own "no engine validation report under the per-run prefix" note
     // is NOT assertable from the signed document: `sign_and_publish` freezes

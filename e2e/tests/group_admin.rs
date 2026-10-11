@@ -1,7 +1,7 @@
 #![cfg(feature = "e2e")]
-//! **PROD-04.0b — the group and ACL calls inside OD-6's perimeter, against a
-//! real broker.** `RdKafkaReader::classify_groups`, `describe_groups`,
-//! `group_listings`, `cluster_access` and `capture_acls`
+//! **PROD-04.0b — the group calls inside OD-6's perimeter, against a real
+//! broker.** `RdKafkaReader::classify_groups`, `describe_groups`,
+//! `group_listings` and `cluster_access`
 //! (`docs/to-do/decisions/PROD-04.0-admin-path.md` §4, §5, §6), each row
 //! checked against the broker's OWN tools run inside its container
 //! (`kafka-groups.sh` through `e2e/compose/groups.sh list`,
@@ -12,9 +12,6 @@
 //! |---|---|---|
 //! | `every_fixture_group_gets_the_verdict_its_type_calls_for` | one verdict per id; classic and consumer groups captured with the broker's state and member count; share and streams groups `GroupTypeNotCaptured`; an absent id `GroupNotFound` and still absent after. On a line below ListGroups v5 (3.7.1, the default stack CI runs), where the broker's own tool prints TYPE `-`: every typed entry carries type 0, every fixture group is `GroupTypeNotCaptured { UnknownType }` (T4), and no description is taken | the typed listing ALONE omits the share and streams groups the name listing shows (T3): classifying from it would drop them |
 //! | `a_group_hidden_from_the_principal_is_never_absent` (`acl`) | with §3.9's visibility setup the restricted principal's listing is not complete, its hidden group is `NotVisibleToPrincipal`, a describable absent id `GroupNotFound` by targeted describe, and the visible group captured | the super user's complete listing captures the hidden group; granting the principal Describe on the cluster makes the listing complete and the group listed, and its description then `NotAuthorized` |
-//! | `acls_without_an_authorizer_are_not_applicable` | on the broker with no authorizer, coverage is `AuthorizerDisabled` with no binding | `kafka-acls.sh --list` says SecurityDisabledException there, and DescribeAcls alone reads "0 bindings" |
-//! | `acls_round_trip_and_what_librdkafka_cannot_name_is_counted` (`acl`) | literal, prefixed, wildcard-name, wildcard-principal, ALLOW and DENY bindings on TOPIC, GROUP, TRANSACTIONAL_ID and CLUSTER equal `kafka-acls.sh --list`; CLUSTER is named CLUSTER; USER, DELEGATION_TOKEN and TwoPhaseCommit bindings are counted not-representable, never exported | the CLI lists the unnameable bindings as distinct, and none of them appears among the exported ones |
-//! | `a_principal_denied_on_the_cluster_is_capture_denied` (`acl`) | the restricted principal without cluster operations gets `CaptureDenied`, never "captured, 0 bindings" | granting Describe alone gives `Unverified` (its DescribeConfigs is refused, T13); granting DescribeConfigs too gives `Captured` with the super user's bindings |
 //! | `thousands_of_admin_calls_keep_the_resident_set_bounded` | the soak of PROD-04.0 §7.2 over every call, against the broker, under 1 MiB of growth | one leaked name listing per round grows it by about 3 MiB (review L2's mutant R2) |
 //! | `on_three_brokers_an_existing_group_is_never_excluded_while_one_is_down` (`cluster3`) | twelve classic groups over two or more coordinators, captured with the listings complete; with one broker stopped for a minute no existing group is ever excluded, and a listing called complete captures all; restarted, complete again | the existence of every group (made by its own commit) is what an exclusion would contradict |
 //!
@@ -43,7 +40,6 @@ mod harness;
 
 use harness::{demo_dir, root};
 use logweir_kafka::access::ClusterAccess;
-use logweir_kafka::acls::{AclCoverage, Unverified};
 use logweir_kafka::groups::{
     Absence, CapturableGroup, DescribeFailure, Excluded, GroupFailure, GroupState, GroupType,
     GroupVerdict, IncompleteReason, ListingCompleteness, OtherType,
@@ -641,343 +637,6 @@ fn a_group_hidden_from_the_principal_is_never_absent() {
     drop(visibility);
 }
 
-// ============================================================ ACLs
-
-/// AP-05.3-1, live: the default broker has no authorizer.
-#[test]
-fn acls_without_an_authorizer_are_not_applicable() {
-    let c = default_cluster();
-    let version = c.version();
-    let capture = c.reader().capture_acls();
-    assert_eq!(capture.coverage, AclCoverage::AuthorizerDisabled);
-    assert!(capture.bindings.is_empty() && capture.not_representable.is_empty());
-    let cli = c.acl("--list", &[]);
-    let said = text(&cli);
-    assert!(
-        said.contains("SecurityDisabledException") || said.contains("No Authorizer is configured"),
-        "the broker's own tool must say ACLs are disabled:\n{said}"
-    );
-    write_evidence(
-        &format!("acls-no-authorizer-{version}"),
-        &json!({ "broker": version, "coverage": format!("{:?}", capture.coverage), "cli": said.trim() }),
-    );
-}
-
-/// One binding as `kafka-acls.sh --list` prints it.
-type CliAcl = (String, String, String, String, String, String, String);
-
-/// Parses `kafka-acls.sh --list`: `Current ACLs for resource
-/// \`ResourcePattern(resourceType=…, name=…, patternType=…)\`:` followed by
-/// `(principal=…, host=…, operation=…, permissionType=…)` lines.
-fn parse_cli_acls(out: &str) -> Vec<CliAcl> {
-    let field = |s: &str, key: &str| -> String {
-        let start = s
-            .find(&format!("{key}="))
-            .map(|i| i + key.len() + 1)
-            .unwrap_or(s.len());
-        let rest = &s[start..];
-        let end = rest.find([',', ')']).unwrap_or(rest.len());
-        rest[..end].trim().to_string()
-    };
-    let mut out_acls = Vec::new();
-    let mut resource: Option<(String, String, String)> = None;
-    for line in out.lines() {
-        if line.contains("ResourcePattern(") {
-            resource = Some((
-                field(line, "resourceType"),
-                field(line, "name"),
-                field(line, "patternType"),
-            ));
-        } else if line.trim_start().starts_with("(principal=") {
-            if let Some((rt, name, pt)) = &resource {
-                out_acls.push((
-                    rt.clone(),
-                    name.clone(),
-                    pt.clone(),
-                    field(line, "principal"),
-                    field(line, "host"),
-                    field(line, "operation"),
-                    field(line, "permissionType"),
-                ));
-            }
-        }
-    }
-    out_acls
-}
-
-/// AP-05.3-3 and AP-05.3-4, live, as the super user on `acl`.
-#[test]
-#[ignore = "needs the `acl` profile"]
-fn acls_round_trip_and_what_librdkafka_cannot_name_is_counted() {
-    let c = acl_cluster();
-    let version = c.version();
-    let four = !version.starts_with('3');
-    let n = nonce();
-    let who = format!("User:lw-acl-{n}");
-    let topic = format!("lw-acl-{n}");
-    let prefix = format!("lw-acl-{n}-");
-    let deny_topic = format!("lw-acl-deny-{n}");
-    let group = format!("lw-acl-g-{n}");
-    let txn = format!("lw-acl-tx-{n}");
-    let token = format!("lw-tok-{n}");
-    let bob = format!("User:lw-bob-{n}");
-    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
-    let mut adds: Vec<Vec<String>> = vec![
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Read",
-            "--topic",
-            &topic,
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Write",
-            "--topic",
-            &prefix,
-            "--resource-pattern-type",
-            "prefixed",
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Describe",
-            "--topic",
-            "*",
-        ]),
-        s(&[
-            "--deny-principal",
-            "User:*",
-            "--operation",
-            "Write",
-            "--topic",
-            &deny_topic,
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Read",
-            "--group",
-            &group,
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Write",
-            "--transactional-id",
-            &txn,
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Describe",
-            "--cluster",
-        ]),
-        // What librdkafka cannot name (T10): a USER resource with the token
-        // operations, a DELEGATION_TOKEN resource.
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "CreateTokens",
-            "--operation",
-            "DescribeTokens",
-            "--user-principal",
-            &bob,
-        ]),
-        s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "Describe",
-            "--delegation-token",
-            &token,
-        ]),
-    ];
-    if four {
-        adds.push(s(&[
-            "--allow-principal",
-            &who,
-            "--operation",
-            "TwoPhaseCommit",
-            "--transactional-id",
-            &txn,
-        ]));
-    }
-    let guard = AclGuard {
-        cluster: &c,
-        removals: adds.clone(),
-    };
-    for a in &adds {
-        c.acl_ok("--add", &a.iter().map(String::as_str).collect::<Vec<_>>());
-    }
-    let mine = |name: &str, principal: &str| name.contains(&n) || principal.contains(&n);
-
-    // The broker's own list, as the super user, after the adds are visible.
-    let mut cli: Vec<CliAcl> = Vec::new();
-    for _ in 0..40 {
-        let o = c.acl("--list", &[]);
-        cli = parse_cli_acls(&String::from_utf8_lossy(&o.stdout))
-            .into_iter()
-            .filter(|a| mine(&a.1, &a.3))
-            .collect();
-        if cli.len() > adds.len() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let capture = c.reader().capture_acls();
-    assert_eq!(capture.coverage, AclCoverage::Captured);
-    let exported: BTreeSet<CliAcl> = capture
-        .bindings
-        .iter()
-        .filter(|b| mine(&b.name, &b.principal))
-        .map(|b| {
-            (
-                b.resource_type.kafka_name().to_string(),
-                b.name.clone(),
-                b.pattern_type.kafka_name().to_string(),
-                b.principal.clone(),
-                b.host.clone(),
-                b.operation.kafka_name().to_string(),
-                b.permission.kafka_name().to_string(),
-            )
-        })
-        .collect();
-    let unnameable = |a: &CliAcl| {
-        matches!(a.0.as_str(), "USER" | "DELEGATION_TOKEN") || a.5 == "TWO_PHASE_COMMIT"
-    };
-    let cli_nameable: BTreeSet<CliAcl> = cli.iter().filter(|a| !unnameable(a)).cloned().collect();
-    let cli_unnameable: Vec<&CliAcl> = cli.iter().filter(|a| unnameable(a)).collect();
-    assert_eq!(
-        exported, cli_nameable,
-        "every nameable binding round-trips exactly"
-    );
-    assert!(
-        exported
-            .iter()
-            .any(|a| a.0 == "CLUSTER" && a.1 == "kafka-cluster"),
-        "the CLUSTER resource is named CLUSTER (T11): {exported:?}"
-    );
-    assert!(exported.iter().any(|a| a.2 == "PREFIXED" && a.1 == prefix));
-    let counted: Vec<_> = capture
-        .not_representable
-        .iter()
-        .filter(|x| x.principal.as_deref().is_some_and(|p| p.contains(&n)))
-        .collect();
-    assert_eq!(
-        counted.len(),
-        cli_unnameable.len(),
-        "every binding librdkafka cannot name is counted once: CLI {cli_unnameable:?}, counted {counted:?}"
-    );
-    assert_eq!(
-        cli_unnameable.len(),
-        if four { 4 } else { 3 },
-        "{cli_unnameable:?}"
-    );
-    write_evidence(
-        &format!("acls-round-trip-{version}"),
-        &json!({
-            "broker": version, "coverage": format!("{:?}", capture.coverage),
-            "exported": exported.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
-            "cliUnnameable": cli_unnameable.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>(),
-            "notRepresentable": counted.iter().map(|x| json!({"principal": x.principal, "name": x.name, "why": x.why, "raw": format!("{:?}", x.raw)})).collect::<Vec<_>>(),
-        }),
-    );
-    drop(guard);
-}
-
-/// AP-05.3-2, live: §3.8's denied principal, and the two grants after it.
-#[test]
-#[ignore = "needs the `acl` profile"]
-fn a_principal_denied_on_the_cluster_is_capture_denied() {
-    let c = acl_cluster();
-    let version = c.version();
-    let visibility = Visibility::apply();
-    let restricted = restricted_reader();
-    let denied = restricted.capture_acls();
-    assert_eq!(denied.coverage, AclCoverage::CaptureDenied, "{denied:?}");
-    assert!(denied.bindings.is_empty());
-
-    let me = format!("User:{}", harness::SCRAM_USER);
-    let describe = vec![
-        "--allow-principal".to_string(),
-        me.clone(),
-        "--operation".into(),
-        "Describe".into(),
-        "--cluster".into(),
-    ];
-    let configs = vec![
-        "--allow-principal".to_string(),
-        me.clone(),
-        "--operation".into(),
-        "DescribeConfigs".into(),
-        "--cluster".into(),
-    ];
-    let guard = AclGuard {
-        cluster: &c,
-        removals: vec![describe.clone(), configs.clone()],
-    };
-    c.acl_ok(
-        "--add",
-        &describe.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    let mut only_describe = restricted.capture_acls();
-    for _ in 0..40 {
-        if !matches!(only_describe.coverage, AclCoverage::CaptureDenied) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-        only_describe = restricted.capture_acls();
-    }
-    assert!(
-        matches!(
-            only_describe.coverage,
-            AclCoverage::Unverified(Unverified::AuthorizerUnread(_) | Unverified::AuthorizerMissing)
-        ),
-        "Describe without DescribeConfigs: the authorizer is unverified (T13), never captured: {:?}",
-        only_describe.coverage
-    );
-    c.acl_ok(
-        "--add",
-        &configs.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    let mut both = restricted.capture_acls();
-    for _ in 0..40 {
-        if both.coverage == AclCoverage::Captured {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-        both = restricted.capture_acls();
-    }
-    assert_eq!(both.coverage, AclCoverage::Captured);
-    let sup = c.reader().capture_acls();
-    assert_eq!(
-        both.bindings, sup.bindings,
-        "the granted principal reads the super user's set"
-    );
-    assert!(!both.bindings.is_empty());
-    write_evidence(
-        &format!("acls-denied-{version}"),
-        &json!({
-            "broker": version,
-            "denied": format!("{:?}", denied.coverage),
-            "describeOnly": format!("{:?}", only_describe.coverage),
-            "describeAndDescribeConfigs": format!("{:?}", both.coverage),
-            "bindings": both.bindings.len(),
-        }),
-    );
-    drop(guard);
-    drop(visibility);
-}
-
 // ============================================================ soak
 
 /// This process's resident set in KiB, from `ps`, bounded.
@@ -1013,11 +672,10 @@ fn thousands_of_admin_calls_keep_the_resident_set_bounded() {
         for (_, d) in r.describe_groups(&captured) {
             d.expect("described");
         }
-        assert_eq!(r.capture_acls().coverage, AclCoverage::AuthorizerDisabled);
-        // DescribeCluster, the name listing, the typed listing, one
+        // DescribeCluster, the name listing, the typed listing, and one
         // description call (none on a legacy line, where nothing is
-        // captured), DescribeConfigs, DescribeCluster, DescribeAcls.
-        6 + usize::from(!captured.is_empty())
+        // captured).
+        3 + usize::from(!captured.is_empty())
     };
     for _ in 0..100 {
         round();

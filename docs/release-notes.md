@@ -68,8 +68,9 @@ topic it created), 70 (FX-49, the console's original-name box takes effect
 when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
 points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
-changes) and 73 (PROD-17.1 C1, scheduled rehearsals and standing
-authorizations withdrawn) so far. Items continue the next entry's
+changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
+authorizations withdrawn) and 74 (PROD-17.1, four parts v1 does not use are
+withdrawn) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3369,9 +3370,79 @@ charts/logweir/crds/`) before rolling the controller back. Its controller then
 resumes any schedule left in the cluster, under standing documents that still
 verify until they expire.
 
+#### 74. Withdrawn for v1: alert sinks, the drill's notification post, an unused ACL read and phase 7's engine validation call (PROD-17.1)
+
+**Withdrawn.** v1 is cut to what one team per install needs (owner decision
+OD-12); each part below did nothing v1 uses.
+- **Phase 7 no longer calls the engine's `validation run`.** The engine never
+  implemented it, so every drill logged a WARN that it "failed or could not
+  be run", and nothing read the result. No verdict changes, and
+  `engine_subreport` stays `null`.
+- **Alert sinks are withdrawn.** A `ProtectionPolicy` delivers no alert to
+  PagerDuty, Slack or a webhook: the controller creates no delivery Job and
+  writes no protection event (its format page says "no longer written"),
+  `logweir notify deliver` is gone, and so are the sink fields, the
+  `credentialBindings` status and the chart's `notify.allowInsecureSinks`.
+  Health, the objectives, the alert ledger (`status.alerts`: open and
+  resolved, no delivery state) and the console's `#/protection` page stay.
+  An upgraded install sees: a policy that still carries `spec.notifications`
+  parses, the API server keeps the key and drops its contents, and the
+  policy's `NotificationsDelivered` condition reads `False` /
+  `NotificationsWithdrawn`, naming the field; a values file that sets
+  `notify` is refused at render, naming it; `scripts/bind-credential.py`
+  refuses `--kind ProtectionPolicy`. A delivery Job an older controller left
+  running finishes and then stays, because nothing patches its TTL any more:
+  `kubectl delete jobs,configmaps -n <ns> -l app.kubernetes.io/component=notification,app.kubernetes.io/managed-by=weirkeeper`
+  removes them and their event ConfigMaps, including a ConfigMap the policy
+  owned rather than the Job.
+- **The drill's own notification post is withdrawn.** A run no longer posts
+  to a webhook, Slack or PagerDuty, after a drill or on a failure. The plan's
+  `notifications` block still parses, because it sits inside signed plan
+  bytes: absent or empty (`webhooks: []`, what the console writes) is
+  accepted, and a block that names a sink is refused by name, by the
+  controller's admission of a destination-backed `Restore` and by the runner
+  at startup (exit 3, `refusal-reason=GuardRefused`), before anything is read
+  or dialled; phase 0 repeats the check.
+  An upgraded install sees such a `Restore` or `drill run` refused; remove the
+  sinks and approve the plan again. Alert on the runner's metrics textfile or
+  the `Restore`'s conditions instead.
+- **The ACL read is gone** (item 37's `DescribeAcls` capture and its `unsafe`
+  wrapper). Nothing called it: no run reads or records ACLs. The
+  consumer-group and cluster reads behind the same crate are unchanged, and
+  consumer positions are still written, read and documented.
+
+**Do:** remove the `notify` block from your values before `helm upgrade`
+and the sinks from every plan that names one (see *Required operator
+actions*), apply the CRDs, and remove `spec.notifications` from each
+`ProtectionPolicy` when convenient.
+**Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone);
+controller rows over a recording API double (a policy that still names sinks
+is evaluated as before and its condition names the withdrawal; the control
+without the field publishes no such condition; no row's route table has a
+Job or ConfigMap route, so any delivery would panic); API rows over an older
+live object (its routes and delivery state are not published); the chart's
+refusal row and its control (`notify=null` renders); the bind-credential
+refusal row and its control; the plan's `notifications` refusal at the
+controller's admission, at phase 0 and through the binary (before any
+phase), with an empty block as the control; the unsafe-scope gate over the smaller crate;
+the e2e group rows (the three ACL rows are removed with the read).
+[UNVERIFIED — no cluster has applied the narrowed ProtectionPolicy CRD over an older policy yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the chart, the CRDs, the controller and the runner
+together. The older CRD types `spec.notifications` again, but the API server
+already dropped what was inside it, so each route must be written again; an
+older runner posts a plan's notifications and logs phase 7's warning again.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before `helm upgrade`, remove the `notify` block from your values**
+  (item 74): the chart refuses it by name. With `--reuse-values`, pass
+  `--set notify=null`. A `ProtectionPolicy` that still sets
+  `spec.notifications` keeps working and says the field is withdrawn; remove
+  the field when convenient. **Before the runner image rolls, remove the
+  sinks from every restore plan that names one** (item 74) and approve it
+  again: a plan whose `notifications` block names a sink is refused.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
@@ -3448,8 +3519,8 @@ In addition to the next entry's six, in its order:
   install replaces its engine with Logweir's build and exports
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
   item 41).
-- **Bind every destination, retention, notification and inline-archive
-  credential Secret, one at a time, with `scripts/bind-credential.py`**
+- **Bind every destination, retention and inline-archive credential Secret,
+  one at a time, with `scripts/bind-credential.py`**
   (item 38), after suspending the schedules that use them and rolling the
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
@@ -3474,14 +3545,13 @@ In addition to the next entry's six, in its order:
   still verifies a sample. The signed scorecard says which in
   `integrity.verification.coverage`; the `Restore`'s status, the product API
   (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
-  it. A protection event's `verification_scope` describes a policy's newest
-  POINT and still never says `complete`. A complete verification that did not
+  it. A complete verification that did not
   cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72 and 73, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73 and 74, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3564,7 +3634,7 @@ transaction markers; items 69 and 71 change the runner and the controller and
 need nothing, in either order; item 70 changes the console only; item 72
 changes only how the repository is tested and needs nothing; item 73
 removes a kind, a route and a flag, and leaves the `RehearsalSchedule` CRD for
-the operator to delete. To roll back to
+the operator to delete; item 74 withdraws what its own section lists. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

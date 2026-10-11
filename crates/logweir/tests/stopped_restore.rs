@@ -32,9 +32,9 @@ use logweir::drill::phase4_sample;
 use logweir::drill::phase6_restore::assert_post_condition;
 use logweir::drill::phase7_verify::{run_after_restore, VerifyOutcome};
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineReport, EngineRun,
-    PartitionFacts, PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan,
-    SampleSelection, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineReport, PartitionFacts,
+    PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
+    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::IntegrityResult;
 use logweir_core::spec::{Anchor, Coverage, SampleSpec};
@@ -143,9 +143,6 @@ impl DataEngine for ArchiveEngine {
             .into_iter()
             .take(s.count)
             .collect())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 

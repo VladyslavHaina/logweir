@@ -46,12 +46,6 @@ pub enum Command {
     Backup(BackupCmd),
     /// Print a JSON Schema. Tag 1 accepts `scorecard` and `backup-receipt`.
     Schema { which: String },
-    // PLAT-14.2 / D3 §3.4. DELIBERATELY A SUBCOMMAND GROUP WITH ONE LEAF: the
-    // D2 check runner adds a sibling `notify check` to this same enum, and a
-    // flat `NotifyDeliver` would have to be renamed to make room for it.
-    /// Deliver one protection event to the configured notification sinks.
-    #[command(subcommand)]
-    Notify(NotifyCmd),
     // PLAT-15.1 / decision D3 §5. A SUBCOMMAND GROUP under `catalog`, for the
     // reason `Backup` records for its own: `catalog verify`, `catalog show`
     // and the disaster-import half (PLAT-15.2) have somewhere to land without
@@ -68,7 +62,7 @@ pub enum Command {
     #[command(subcommand)]
     Catalog(CatalogCmd),
     // PLAT-19.1 / decision D3 §7.1 and §7.5. A SUBCOMMAND GROUP, for the
-    // reason `Catalog` and `Notify` record for theirs: `trust show` and the
+    // reason `Catalog` records for its own: `trust show` and the
     // PLAT-19.2 confirmation-key commands have somewhere to land without
     // renaming either of these two argv surfaces.
     //
@@ -80,7 +74,7 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCmd),
     // Decision D2 §4.2 / D-SEAMS S1. A SUBCOMMAND GROUP for the same
-    // structural reason `Notify` and `Catalog` are one: D2 §4.5 phase 2 turns
+    // structural reason `Catalog` is one: D2 §4.5 phase 2 turns
     // the `KafkaCluster` probe into a sixth plan kind, and PLAT-09.2 invokes
     // the same `check run` from a Backup-owned Job. A flat `CheckRun` would
     // have to be renamed to make room for a sibling.
@@ -173,41 +167,6 @@ pub enum Command {
         /// that genuinely had no way to look (addendum A2/A4).
         #[arg(long)]
         strict: bool,
-    },
-}
-
-/// PLAT-14.2's delivery leaf. Kept SMALL on purpose — D3 §14 gives this enum a
-/// second arm later, and the enum is the seam the two tasks share.
-#[derive(Subcommand)]
-pub enum NotifyCmd {
-    /// POST one protection event to every configured sink, and report each one
-    /// on stdout.
-    ///
-    /// Sinks come from the ENVIRONMENT, never from a flag, because a routing
-    /// key or a signed webhook URL on an argv is visible in every process
-    /// listing on the host and lands in the Job spec anyone with pod read can
-    /// see: `PAGERDUTY_ROUTING_KEY`, `NOTIFY_WEBHOOK_URL`,
-    /// `NOTIFY_SLACK_WEBHOOK_URL`, plus `PAGERDUTY_ENDPOINT` for a non-US
-    /// PagerDuty service region. A variable that is present and blank is not a
-    /// configured sink.
-    ///
-    /// A controller-built Job also carries each sink Secret's
-    /// `logweir-binding` and the expected value; a sink whose two differ is
-    /// refused before anything is dialled (FX-20).
-    ///
-    /// Prints `notify-result=<sink>:<ok|failed|refused>` for each configured
-    /// sink as its final stdout lines. Exits 0 when every configured sink
-    /// accepted (including when none was configured), 1 when one did not or
-    /// was refused, and 3 when
-    /// the event document itself was refused — in which case nothing was
-    /// posted and no `notify-result=` line is printed.
-    Deliver {
-        /// The protection event document
-        /// (`application/vnd.logweir.protection-event+json;version=1.0.0`).
-        /// In the shipped Job this is the controller's immutable ConfigMap
-        /// projected at `/event/event.json`.
-        #[arg(long)]
-        event: PathBuf,
     },
 }
 

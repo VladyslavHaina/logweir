@@ -401,7 +401,7 @@ pub enum GroupVerdict {
 }
 
 /// The default bound of one admin call (DescribeCluster, a listing, a
-/// description, DescribeAcls): the 15 s PROD-04.0 measured its calls with.
+/// description): the 15 s PROD-04.0 measured its calls with.
 pub const DEFAULT_ADMIN_BOUND: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One classification: a verdict per selected id, and the evidence behind

@@ -1,5 +1,4 @@
-//! `ProtectionPolicy` — the objective a set of schedules is meant to meet, and
-//! who hears about it when they do not.
+//! `ProtectionPolicy` — the objective a set of schedules is meant to meet.
 //!
 //! # Why it is a kind, and why its spec is the one that is NOT sealed
 //!
@@ -16,25 +15,13 @@
 //! CEL seal on `.spec`: there is nothing here whose mutation could rewrite
 //! history, and an objective an operator cannot tighten is an objective nobody
 //! adopts.
-//!
-//! # No credential value, only references
-//!
-//! Every notification channel names a `secretKeyRef`. The routing key, the
-//! webhook URL and the Slack URL are all credentials — a Slack webhook URL is
-//! a bearer token with a hostname on the front — so none of them appears as a
-//! value here. They are projected into the delivery Job and nowhere else. This
-//! closes decision O17 for this path; the drill spec's inline `notifications`
-//! block is unchanged and stays documented as plaintext.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{ArchiveRef, Condition, LocalRef, SpecRule, Time};
 
-/// A DNS-1123 subdomain — a Secret name.
-pub const OBJECT_NAME_PATTERN: &str = super::kafka_cluster::OBJECT_NAME_PATTERN;
-/// The API server's own rule for a `data` key.
-pub const DATA_KEY_PATTERN: &str = super::kafka_cluster::DATA_KEY_PATTERN;
 /// The Kafka topic-name grammar.
 pub const TOPIC_NAME_PATTERN: &str = super::topic_discovery::TOPIC_NAME_PATTERN;
 
@@ -44,15 +31,6 @@ pub const H1_DESTINATION_XOR_RULE: &str = "has(self.destinationRef) != has(self.
 /// H1's message.
 pub const H1_DESTINATION_XOR_MESSAGE: &str =
     "spec.protects sets exactly one of destinationRef or legacyArchive";
-
-/// H2 — a notification route that names no channel delivers nothing, and an
-/// alert nobody receives is worse than no alert configured: it looks
-/// configured.
-pub const H2_ROUTE_HAS_A_CHANNEL_RULE: &str =
-    "has(self.pagerDuty) || has(self.webhook) || has(self.slack)";
-/// H2's message.
-pub const H2_ROUTE_HAS_A_CHANNEL_MESSAGE: &str =
-    "a notification route names at least one of pagerDuty, webhook or slack";
 
 /// `ProtectionPolicy` carries **no rule on `.spec`**, and that is the
 /// decision.
@@ -64,25 +42,16 @@ pub const H2_ROUTE_HAS_A_CHANNEL_MESSAGE: &str =
 pub const SPEC_RULES: [SpecRule; 0] = [];
 
 /// The rules attached below `.spec`.
-pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
-    (
-        &["protects"],
-        H1_DESTINATION_XOR_RULE,
-        H1_DESTINATION_XOR_MESSAGE,
-    ),
-    (
-        &["notifications", "routes", "[]"],
-        H2_ROUTE_HAS_A_CHANNEL_RULE,
-        H2_ROUTE_HAS_A_CHANNEL_MESSAGE,
-    ),
-];
+pub const NESTED_RULES: [(&[&str], &str, &str); 1] = [(
+    &["protects"],
+    H1_DESTINATION_XOR_RULE,
+    H1_DESTINATION_XOR_MESSAGE,
+)];
 
 /// The default evaluation cadence, in seconds.
 pub const DEFAULT_EVALUATION_INTERVAL_SECONDS: i32 = 300;
 /// The default consecutive-failure tolerance.
 pub const DEFAULT_MAX_CONSECUTIVE_FAILED_RUNS: i32 = 1;
-/// The default re-notify interval, in seconds.
-pub const DEFAULT_RENOTIFY_AFTER_SECONDS: i32 = 86_400;
 
 fn default_evaluation_interval_seconds() -> i32 {
     DEFAULT_EVALUATION_INTERVAL_SECONDS
@@ -93,20 +62,17 @@ fn default_max_consecutive_failed_runs() -> i32 {
 fn default_true() -> bool {
     true
 }
-fn default_renotify_after_seconds() -> i32 {
-    DEFAULT_RENOTIFY_AFTER_SECONDS
-}
 
-/// A key inside a Secret in this namespace. **A reference, never a value.**
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SecretKeyRef {
-    /// The Secret name, in this namespace.
-    #[schemars(regex(path = "OBJECT_NAME_PATTERN"), length(min = 1, max = 253))]
-    pub name: String,
-    /// The data key.
-    #[schemars(regex(path = "DATA_KEY_PATTERN"), length(min = 1, max = 253))]
-    pub key: String,
+/// The schema of the withdrawn `spec.notifications`: an object with no
+/// properties. The API server prunes whatever an older policy wrote inside it
+/// (so no credential can be parked there) and keeps the key itself, which is
+/// what lets the status name the withdrawal.
+fn withdrawn_object(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Object.into()),
+        ..Default::default()
+    }
+    .into()
 }
 
 /// What this policy protects.
@@ -165,53 +131,6 @@ pub struct Objectives {
     pub max_rehearsal_age_seconds: Option<i32>,
 }
 
-/// PagerDuty Events v2.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct PagerDutyChannel {
-    /// The routing key, by reference.
-    pub routing_key_secret_ref: SecretKeyRef,
-    /// The Events endpoint, when it is not the global one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 2048))]
-    pub endpoint: Option<String>,
-}
-
-/// A generic webhook. The URL is a credential, so it is a reference.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct WebhookChannel {
-    /// The URL, by reference.
-    pub url_secret_ref: SecretKeyRef,
-}
-
-/// A Slack incoming webhook. The URL is a bearer token with a hostname on the
-/// front, so it is a reference too.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SlackChannel {
-    /// The webhook URL, by reference.
-    pub webhook_url_secret_ref: SecretKeyRef,
-}
-
-/// One destination for alerts.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationRoute {
-    /// What to call it in status and in logs.
-    #[schemars(length(min = 1, max = 63))]
-    pub name: String,
-    /// PagerDuty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pager_duty: Option<PagerDutyChannel>,
-    /// A webhook.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook: Option<WebhookChannel>,
-    /// Slack.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slack: Option<SlackChannel>,
-}
-
 /// What an alert is about.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 pub enum AlertKind {
@@ -228,34 +147,13 @@ pub enum AlertKind {
     RecoveryCompleted,
 }
 
-/// Where alerts go.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Notifications {
-    /// The routes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 4))]
-    pub routes: Option<Vec<NotificationRoute>>,
-    /// Which alerts to send. Absent means all of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 5))]
-    pub kinds: Option<Vec<AlertKind>>,
-    /// Whether a resolution is delivered too.
-    #[serde(default = "default_true")]
-    pub send_resolved: bool,
-    /// How long before an open alert is re-sent. `0` disables re-notify.
-    #[serde(default = "default_renotify_after_seconds")]
-    #[schemars(range(min = 0, max = 604800))]
-    pub renotify_after_seconds: i32,
-}
-
 /// `ProtectionPolicy.spec`.
 #[derive(kube::CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "ProtectionPolicy",
-    doc = "The recovery objective a set of schedules is meant to meet, and who hears about it when they do not (ADR 0008 Amendment G). The spec is MUTABLE and carries no CEL seal: it is evaluation policy, never an execution input, so editing it changes what Logweir says about results and never the results themselves. Notification channels are secretKeyRef references; no credential value appears here.",
+    doc = "The recovery objective a set of schedules is meant to meet (ADR 0008 Amendment G). The spec is MUTABLE and carries no CEL seal: it is evaluation policy, never an execution input, so editing it changes what Logweir says about results and never the results themselves.",
     plural = "protectionpolicies",
     singular = "protectionpolicy",
     namespaced,
@@ -272,11 +170,12 @@ pub struct ProtectionPolicySpec {
     pub protects: ProtectedSubject,
     /// What "protected" means.
     pub objectives: Objectives,
-    /// Where alerts go. Absent means the verdict is reported in status and in
-    /// the console and delivered nowhere — which is a real choice, not a
-    /// broken configuration.
+    /// WITHDRAWN: Logweir delivers no alert. Still accepted, as an empty
+    /// object, so an older policy parses; while it is set the
+    /// `NotificationsDelivered` condition says so. Remove it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notifications: Option<Notifications>,
+    #[schemars(schema_with = "withdrawn_object")]
+    pub notifications: Option<Value>,
     /// How often to evaluate.
     #[serde(default = "default_evaluation_interval_seconds")]
     #[schemars(range(min = 60, max = 3600))]
@@ -384,57 +283,10 @@ pub struct RehearsalSummary {
     pub last_reason: Option<String>,
 }
 
-/// How an alert was delivered, or why it was not.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AlertDelivery {
-    /// `Pending`, `Delivered`, `Failed` or `Suppressed`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
-    /// How many times delivery was attempted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempts: Option<i64>,
-    /// When it was last attempted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_attempt_at: Option<Time>,
-    /// The delivery Job.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_ref: Option<LocalRef>,
-    /// The last error, redacted and bounded. Never a routing key, never a URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 512))]
-    pub last_error: Option<String>,
-}
-
-/// One notification route's credential binding (FX-20).
+/// One entry of the alert ledger.
 ///
-/// What the route's Secret must carry under its `logweir-binding` key for the
-/// delivery Job to use it at all: `v1:<policy uid>:sha256:<digest>` over the
-/// sink kind and, for PagerDuty, the endpoint. Public — a UID and a digest of
-/// public values, never a credential. A Secret without it, or with another
-/// policy's, route's or endpoint's, is refused before anything is posted
-/// (`notify-result=<sink>:refused`, `CredentialBindingMismatch`).
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct NotificationCredentialBinding {
-    /// The route's `name`.
-    #[schemars(length(min = 1, max = 63))]
-    pub route: String,
-    /// `pagerduty`, `webhook` or `slack`.
-    pub sink: String,
-    /// The Secret the route names.
-    pub secret_name: String,
-    /// The value its `logweir-binding` key must hold.
-    pub binding: String,
-}
-
-/// One entry of the deduplication ledger.
-///
-/// A LEDGER AND NOT A LOG. `transition` increments on open, on resolve and on
-/// each re-notify; `notifiedTransition` records the last one a delivery Job was
-/// created for. The pair is what makes delivery exactly-once-per-transition
-/// across controller restarts, instead of "once per reconcile", which is how an
-/// alerting integration gets muted by its own operator.
+/// A LEDGER AND NOT A LOG. `transition` increments on open and on resolve, and
+/// a condition that stays true moves nothing.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertEntry {
@@ -453,12 +305,6 @@ pub struct AlertEntry {
     /// The transition counter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<i64>,
-    /// The last transition a delivery Job was created for.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notified_transition: Option<i64>,
-    /// How that delivery went.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delivery: Option<AlertDelivery>,
 }
 
 /// `ProtectionPolicy.status`.
@@ -502,19 +348,12 @@ pub struct ProtectionPolicyStatus {
     /// Since when the objective has been missed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_since: Option<Time>,
-    /// The deduplication ledger.
+    /// The alert ledger: what is open and what resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(max = 16))]
     pub alerts: Option<Vec<AlertEntry>>,
-    /// FX-20: the binding each notification route's credential Secret must
-    /// carry under `logweir-binding`, one entry per channel a route names.
-    /// Absent when no route is configured. An edit to a PagerDuty route's
-    /// `endpoint` changes its binding, so the old Secret is refused until it is
-    /// bound again: the routing key never follows an endpoint edit silently.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(length(max = 12))]
-    pub credential_bindings: Option<Vec<NotificationCredentialBinding>>,
-    /// The condition set: `Ready`, `Protected`, `NotificationsDelivered`.
+    /// The condition set: `Ready`, `Protected`, and `NotificationsDelivered`
+    /// (`False`) while the withdrawn `spec.notifications` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
 }

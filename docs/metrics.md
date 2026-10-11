@@ -65,8 +65,8 @@ Use it to correlate the file with logs, including failures without scorecards.
 | `logweir_evidence_lock_verified` | gauge | `cluster` | no scorecard exists. `0` means no proof was obtainable, **not** that the bucket is unprotected. |
 
 The removed redaction **paths** are deliberately not labels (document-controlled
-text, unbounded cardinality); read them from `drill show`'s qualifiers footer or
-the notification body. The **names** of the scratch topics teardown could not
+text, unbounded cardinality); read them from `drill show`'s qualifiers footer.
+The **names** of the scratch topics teardown could not
 delete are left off `logweir_drill_teardown_topics_failed` for the same reason —
 topic names are cluster-controlled text — and are carried instead by the run's
 `WARN` line, by the `drill run` summary line and by the signed teardown

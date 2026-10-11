@@ -1,98 +1,47 @@
-//! The `ProtectionPolicy` reconciler — PLAT-14.2, decision D3 §§3.1–3.5.
+//! The `ProtectionPolicy` reconciler — PLAT-14.2, decision D3 §§3.1–3.3.
 //!
 //! # The thin half
 //!
 //! Every verdict this file publishes is computed by [`crate::protection`],
 //! which holds no client. This module reads what the API server says, calls
-//! [`crate::protection::evaluate`] and
-//! [`crate::protection::reconcile_alerts`], creates at most
-//! [`crate::protection::MAX_DELIVERY_JOBS_PER_PASS`] delivery Jobs, and
-//! patches `protectionpolicies/status`. That is the whole of it.
+//! [`crate::protection::evaluate`] and [`crate::protection::reconcile_alerts`],
+//! and patches `protectionpolicies/status`. That is the whole of it.
 //!
-//! # WHAT IT WRITES TO, AND THE ONE SENTENCE THAT MATTERS
+//! **It writes nothing but this status.** There is no `Api<Backup>` or
+//! `Api<Restore>` status write anywhere in this file;
+//! `the_controller_names_no_backup_or_restore_status_write` asserts it. A
+//! protection verdict is a projection of runs that already happened, and this
+//! controller is not the execution authority for any of them.
 //!
-//! **A notification failure never rewrites a backup result.** This reconciler
-//! patches `protectionpolicies/status` and nothing else — there is no
-//! `Api<Backup>` or `Api<Restore>` status write anywhere in this file, and
-//! `notification_failure_never_patches_a_backup` asserts it over a route table
-//! that would panic on the attempt. `Api<Backup>` appears here exactly once,
-//! for a bounded `list`, because a protection verdict is a projection of runs
-//! that already happened and this controller is not the execution authority
-//! for any of them.
+//! # Alert delivery is withdrawn
 //!
-//! # THE THREE ORDERING RULES
-//!
-//! 1. **The event `ConfigMap` before its Job** (D3 §3.4 point 3). A Job whose
-//!    mounted `ConfigMap` does not exist sits in `ContainerCreating` until its
-//!    deadline and reports nothing at all.
-//! 2. **The status before the TTL** (seam **S7**, the `Backup` path's own
-//!    rule). `ttlSecondsAfterFinished` is patched onto a finished delivery Job
-//!    only after the `/status` patch carrying that delivery's verdict returned
-//!    200. The exit code lives on the POD, and the TTL controller removes the
-//!    Job and its pod together: a TTL set first lets garbage collection race
-//!    the read, and the delivery would be recorded as "no exit code" forever.
-//! 3. **The pod is proved before it is read** (seam **S6**, defect
-//!    `SEC-PODLOG`). [`crate::check::pod::find_owned_pod`] narrows by the
-//!    Job's name label and then checks the Job's own `metadata.uid` on the
-//!    pod's controller `ownerReference`; a second claimant is refused rather
-//!    than ranked. A `notify-result=` line is a document this controller
-//!    writes into a custom resource's status, so reading a stranger's is the
-//!    whole of that defect.
-//!
-//! # No credential value is held, read or written
-//!
-//! `config/rbac/role.yaml` grants this controller no verb on `secrets`, and
-//! this file adds none. A sink's routing key or webhook URL reaches the
-//! delivery pod as a `valueFrom.secretKeyRef` the kubelet projects from a
-//! reference written into a PodSpec — writing a reference is not reading a
-//! value. Nothing from a pod log reaches the status except a `'static` string
-//! from [`crate::protection::NOTIFY_RESULTS`]'s closed table.
-//!
-//! # A delivery Job whose pod is refused at creation fails fast (FX-11)
-//!
-//! A `ResourceQuota`, a `LimitRange` or an admission webhook can refuse the
-//! delivery pod, and the Job controller's only trace is a `FailedCreate`
-//! Event on the Job. Once the Job has had no pod for 30 seconds and that Event
-//! says why ([`crate::check::refused_pod_creation`], the `Preflight` grace and
-//! the same matcher), the Job is cancelled and the attempt is recorded
-//! `Failed` with `PodCreationForbidden` and the admission's own words — never
-//! "the delivery Job finished with no exit code" two minutes later. The
-//! attempt counts: the ordinary backoff retries it, three attempts in all
-//! ([`crate::protection::MAX_DELIVERY_ATTEMPTS`]), then
-//! `NotificationsDelivered=False/DeliveryFailed`. The admission's message is an
-//! API-server Event, not pod output; it reaches `lastError` redacted
-//! ([`logweir_core::check_contract::redact`]) and capped, as a `Preflight`
-//! publishes the same message.
+//! v1 delivers no alert (owner decision OD-12). The alert ledger in
+//! `status.alerts` still records what is open and what resolved; a policy that
+//! still carries `spec.notifications` says by name, in its
+//! `NotificationsDelivered` condition, that nothing is delivered.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::StreamExt as _;
-use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{ConfigMap, Pod};
-use kube::api::{ListParams, ObjectMeta, Patch, PatchParams, PostParams};
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::api::{ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
-use kube::{Api, Resource as _, ResourceExt as _};
+use kube::{Api, ResourceExt as _};
 use serde_json::{json, Value};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::backup::Backup;
 use crate::crds::backup_destination::BackupDestination;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
-use crate::crds::protection_policy::{
-    AlertDelivery, AlertEntry, AlertKind, NotificationCredentialBinding, NotificationRoute,
-    ProtectionPolicy, ProtectionPolicyStatus, SecretKeyRef,
-};
+use crate::crds::protection_policy::{AlertEntry, ProtectionPolicy, ProtectionPolicyStatus};
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
-use crate::crds::{Condition, LocalRef, Time};
+use crate::crds::{Condition, Time};
 use crate::identity;
-use crate::job::{self, ConfigMapMount, EnvFromSecret, RunnerImage, RunnerJobSpec, RunnerOwner};
 use crate::protection as p;
-use logweir_core::credential_binding::{self as binding, NotificationSink};
 
 use super::approval::ReconcileError;
 
@@ -104,159 +53,25 @@ use super::approval::ReconcileError;
 pub const CONDITION_READY: &str = "Ready";
 /// `Protected` — D3 §3.2: `True` only for `Healthy`, `Unknown` for `Unknown`.
 pub const CONDITION_PROTECTED: &str = "Protected";
-/// `NotificationsDelivered`.
+/// `NotificationsDelivered` — written only for a policy that still carries
+/// the withdrawn `spec.notifications`, and then always `False`.
 pub const CONDITION_NOTIFICATIONS_DELIVERED: &str = "NotificationsDelivered";
 
 /// `Ready`'s reason when a verdict was published.
 pub const REASON_EVALUATED: &str = "Evaluated";
 /// `Ready`'s reason for an object with no namespace or UID.
 pub const REASON_NOT_EVALUATED: &str = "NotEvaluated";
-/// `NotificationsDelivered`'s reason when every due alert was delivered.
-pub const REASON_DELIVERED: &str = "Delivered";
-/// …when a delivery Job exists and has not finished.
-pub const REASON_DELIVERY_PENDING: &str = "DeliveryPending";
-/// …after [`crate::protection::MAX_DELIVERY_ATTEMPTS`] failed attempts.
-///
-/// **AND NOTHING ELSE HAPPENS.** D3 §3.4 point 4: exhaustion sets this
-/// condition and does not touch a `Backup`, a `Restore`, a phase or a piece of
-/// evidence.
-pub const REASON_DELIVERY_FAILED: &str = "DeliveryFailed";
-/// …FX-20: a delivery failed because a route's credential Secret is not bound
-/// to this policy, its sink and its endpoint; nothing was posted to that sink.
-/// Takes precedence over [`REASON_DELIVERY_FAILED`], because it names the fix.
-pub const REASON_CREDENTIAL_BINDING_MISMATCH: &str =
-    logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH;
-/// …when the policy configures no route, or none for this kind. Reported as
-/// `True`: nothing failed, and an operator who configured no sink chose that.
-pub const REASON_NOTHING_TO_DELIVER: &str = "NothingToDeliver";
-
-/// The ServiceAccount the delivery Job runs as.
-///
-/// # `logweir-runner` AND NOT A NEW `logweir-notifier` (deviation from D3 §3.4)
-///
-/// D3 §3.4 names `logweir-notifier`. That account does not exist, and creating
-/// it means a new chart template, a new object in `logweir.yaml`, a new
-/// `docs/install.md` step-4 fragment for every namespace that runs Jobs and a
-/// new `manifest_lint` exemption row — all of them files D3 §14 gives to the
-/// wave-4 RBAC/chart/docs worker, not to this one. `logweir-runner` is the
-/// account every other runner Job in this product names, it is granted **no
-/// verb on anything**, its token is not mounted
-/// (`automountServiceAccountToken: false`, twice over — on the account and on
-/// the PodSpec [`crate::job::build`] writes), and it carries the
-/// `imagePullSecrets` a private registry needs. The security delta is nil and
-/// the delta in files touched is four. Recorded so W13 can rename it in one
-/// line if the separate identity is wanted for its own sake.
-pub const SERVICE_ACCOUNT: &str = "logweir-runner";
-
-/// `spec.activeDeadlineSeconds` on a delivery Job — D3 §3.4 point 3.
-///
-/// Three sinks at `NOTIFY_TIMEOUT` (10 s) plus connect is thirty seconds in
-/// the worst case; 120 leaves room for image pull and scheduling and still
-/// bounds a wedged sink.
-pub const DELIVERY_DEADLINE_SECONDS: i64 = 120;
-
-/// `ttlSecondsAfterFinished`, patched on only after the status landed.
-pub const DELIVERY_TTL_SECONDS: i32 = 3600;
-
-/// The argv the delivery Job runs — D3 §3.4 point 2, verbatim.
-///
-/// A FUNCTION AND NOT A LITERAL AT THE CALL SITE, so the subcommand's contract
-/// and this controller's spelling of it are one thing.
-#[must_use]
-pub fn delivery_argv() -> Vec<String> {
-    vec![
-        "notify".to_string(),
-        "deliver".to_string(),
-        "--event".to_string(),
-        format!("{}/{}", p::EVENT_MOUNT_PATH, p::EVENT_DATA_KEY),
-    ]
-}
-
-/// The volume the event `ConfigMap` is projected as.
-pub const EVENT_VOLUME: &str = "event";
-
-/// `PAGERDUTY_ROUTING_KEY` — D3 W4's sink variable.
-pub const ROUTING_KEY_ENV: &str = "PAGERDUTY_ROUTING_KEY";
-/// `NOTIFY_WEBHOOK_URL`.
-pub const WEBHOOK_URL_ENV: &str = "NOTIFY_WEBHOOK_URL";
-/// `NOTIFY_SLACK_WEBHOOK_URL`.
-pub const SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
-/// `PAGERDUTY_ENDPOINT` — a service REGION, not a credential, so it is a
-/// literal. Without it an EU-service-region adopter enqueues into a region
-/// that does not hold their account and never sees a page.
-pub const PAGERDUTY_ENDPOINT_ENV: &str = "PAGERDUTY_ENDPOINT";
-
-/// `NOTIFY_ALLOW_INSECURE_SINKS` — the variable a delivery Job carries when
-/// THIS INSTALLATION has turned the escape hatch on, spelt exactly as
-/// `logweir::notify`'s `ALLOW_INSECURE_SINKS_ENV` reads it inside that Job.
-///
-/// It is a literal `1` and it is not a credential: the sink URL stays in the
-/// `Secret` the kubelet resolves, so neither the Job's command line nor its
-/// env names a URL. Without it `logweir notify deliver` refuses a
-/// non-`https://` webhook or Slack URL BEFORE it dials, which is why an
-/// in-cluster echo sink on a laptop cluster received zero POSTs
-/// (`NOTIFY-INSECURE-SINK-UNEXPOSED`): the hatch was documented and set by
-/// nothing.
-pub const ALLOW_INSECURE_SINKS_ENV: &str = "NOTIFY_ALLOW_INSECURE_SINKS";
-
-/// The variable THIS PROCESS reads to decide whether the Jobs it creates
-/// carry [`ALLOW_INSECURE_SINKS_ENV`]. `charts/logweir` renders it from
-/// `notify.allowInsecureSinks`, and nothing else sets it.
-///
-/// # Why it is an INSTALLATION setting and never a policy field
-///
-/// A `ProtectionPolicy` is a namespaced object any namespace operator may
-/// write. If the hatch lived in its spec, whoever could create a policy could
-/// downgrade their own alerts' transport to cleartext — carrying the event,
-/// the policy's name, its health and (on Slack) a bearer credential in the
-/// URL — and the administrator who installed Logweir would have nowhere to
-/// say no. Here the only way to set it is an edit to the controller
-/// Deployment, which is the installation's own boundary: the same one
-/// [`crate::job::RUNNER_IMAGE_ENV`] and the archive addressing already sit on.
-/// The answer is therefore the same for every policy in the cluster, and
-/// `a_policy_cannot_turn_the_insecure_sink_hatch_on` is the row that holds it.
-///
-/// # Why the two names differ
-///
-/// Every variable this controller reads FOR ITSELF is `LOGWEIR_`-prefixed and
-/// every variable it writes into a runner Job is not. They are also different
-/// decisions — whether an installation allows the hatch at all, versus what
-/// one Job was told — and one name for both would make a `grep` in a cluster
-/// unable to tell the controller's setting from a Job's.
-pub const CONTROLLER_ALLOW_INSECURE_SINKS_ENV: &str = "LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS";
-
-/// [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`]'s value as a decision.
-///
-/// **AN EXPLICIT AFFIRMATIVE ONLY** — `1`, `true` or `yes`, trimmed and
-/// case-insensitive. Everything else is "no": `0`, `false`, an absent
-/// variable, and the empty string a Kubernetes `env:` entry with an empty
-/// `value:` actually produces (plan erratum **E19(e)**). That is the same
-/// reading `logweir::notify::SinkRoutes::from_lookup` gives the Job-side
-/// variable and the same one `weirkeeper::retention`'s flag parser gives its
-/// own, so an operator who switches the value off does not discover it was
-/// still on — and a hatch that defaults open is not a hatch.
-///
-/// # Why it takes the `Result`
-///
-/// So a test can hand it `Ok(String::new())` — the exact value the E19(e)
-/// defect is about — without mutating process-global state the rest of the
-/// binary shares. The predicate is the whole of the decision; [`controller`]
-/// supplies the read, exactly once per process.
-#[must_use]
-pub fn configured_allow_insecure_sinks(raw: Result<String, std::env::VarError>) -> bool {
-    raw.is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes"
-        )
-    })
-}
+/// `NotificationsDelivered`'s reason: the policy names alert sinks, and alert
+/// delivery is withdrawn.
+pub const REASON_NOTIFICATIONS_WITHDRAWN: &str = "NotificationsWithdrawn";
+/// What that condition says.
+pub const NOTIFICATIONS_WITHDRAWN_MESSAGE: &str =
+    "spec.notifications is withdrawn: Logweir delivers no alert to PagerDuty, Slack or a \
+     webhook, and this field is read by nothing. Remove it; health and the alert ledger are \
+     unchanged";
 
 /// How long before an errored reconcile is retried.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
-/// How long before a pass that has an in-flight or deferred delivery looks
-/// again. Short, because a page nobody sent is the defect.
-pub const REQUEUE_DELIVERY_SECONDS: u64 = 15;
 
 /// One page of the bounded `Backup` listing.
 pub const BACKUP_PAGE_LIMIT: u32 = 200;
@@ -282,12 +97,6 @@ pub const CATALOG_PAGE_DATA_KEY: &str = "entries.jsonl";
 pub struct ProtectionContext {
     /// The client every `Api` here is built from.
     pub client: kube::Client,
-    /// The image and pull policy the delivery Jobs name.
-    pub runner_image: RunnerImage,
-    /// Whether THIS INSTALLATION allows a delivery Job to POST to a
-    /// non-`https://` sink — [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`], read
-    /// once by [`controller`] and never from a policy's spec.
-    pub allow_insecure_sinks: bool,
 }
 
 /// What one pass did — the shape the tests assert over.
@@ -299,12 +108,6 @@ pub struct Outcome {
     pub freshness: p::Freshness,
     /// Why.
     pub reason: p::FreshnessReason,
-    /// How many delivery Jobs it created.
-    pub created_jobs: usize,
-    /// How many due deliveries it deferred to the next pass.
-    pub deferred: usize,
-    /// How many finished delivery Jobs it had its TTL patched on.
-    pub ttl_patched: usize,
     /// Whether the status patch landed (or was already what this pass
     /// computed).
     pub committed: bool,
@@ -425,185 +228,17 @@ pub async fn reconcile_policy(
     });
 
     // ------------------------------------------------------------------
-    // Observe the deliveries already in flight, THEN move the ledger.
+    // Move the ledger: D3 §3.3's open and resolve, and the fifth kind.
     // ------------------------------------------------------------------
     let stored_alerts: Vec<AlertEntry> = policy
         .status
         .as_ref()
         .and_then(|s| s.alerts.clone())
         .unwrap_or_default();
-    let mut observed: Vec<AlertEntry> = Vec::new();
-    let mut finished_jobs: Vec<String> = Vec::new();
-    for entry in &stored_alerts {
-        let (entry, finished) = observe_delivery(&ctx.client, &namespace, &uid, entry, now).await?;
-        if let Some(job_name) = finished {
-            finished_jobs.push(job_name);
-        }
-        observed.push(entry);
-    }
-
-    // D3 §3.3's fifth kind. Read AFTER the deliveries in flight, so a
-    // recovery recorded this pass cannot displace a delivery verdict this pass
-    // was about to write.
     let backup_ids: Vec<String> = members.iter().filter_map(|b| backup_set_id(b)).collect();
     let completions = read_recoveries(&ctx.client, &namespace, spec, &backup_ids).await?;
-    let observed = p::fold_recoveries(&observed, &completions, now);
-
-    let ledger = p::reconcile_alerts(
-        &observed,
-        &verdict.open_kinds,
-        verdict.health,
-        &uid,
-        spec.notifications.as_ref(),
-        now,
-    );
-    let mut alerts = ledger.alerts;
-
-    // ------------------------------------------------------------------
-    // Deliver. The Job first, then the event `ConfigMap` it mounts and OWNS
-    // it, then the ledger note that a Job exists for this transition.
-    // ------------------------------------------------------------------
-    let owner = owner_of(&name, &uid);
-    let mut created = 0usize;
-    let mut deferred = 0usize;
-    for due in &ledger.due {
-        let Some(index) = alerts.iter().position(|a| a.key == due.key) else {
-            continue;
-        };
-        let state = p::AlertState::parse(&alerts[index].state).unwrap_or(p::AlertState::Open);
-        let transition = alerts[index].transition.unwrap_or(0);
-
-        if p::is_suppressed(spec.notifications.as_ref(), alerts[index].kind, state) {
-            alerts[index].notified_transition = Some(transition);
-            alerts[index].delivery = Some(AlertDelivery {
-                state: Some(p::DeliveryState::Suppressed.as_str().to_string()),
-                attempts: Some(0),
-                last_attempt_at: None,
-                job_ref: None,
-                last_error: Some(p::cap_error(
-                    "no configured route carries this alert kind; nothing was sent and nothing \
-                     is retried",
-                )),
-            });
-            continue;
-        }
-
-        if created >= p::MAX_DELIVERY_JOBS_PER_PASS {
-            deferred += 1;
-            continue;
-        }
-
-        // The backoff. A previous attempt for THIS transition that failed sets
-        // `attempts`; a new transition starts at attempt 1 with no wait.
-        let previous = alerts[index]
-            .delivery
-            .as_ref()
-            .filter(|_| alerts[index].notified_transition == Some(transition));
-        let attempts = previous.and_then(|d| d.attempts).unwrap_or(0);
-        if let Some(d) = previous {
-            if p::DeliveryState::parse(d.state.as_deref().unwrap_or_default())
-                == Some(p::DeliveryState::Failed)
-            {
-                match p::next_attempt_at(d) {
-                    None => continue,
-                    Some(at) if at > now => {
-                        deferred += 1;
-                        continue;
-                    }
-                    Some(_) => {}
-                }
-            }
-        }
-        let attempt = attempts + 1;
-
-        let facts = p::EventFacts {
-            namespace: &namespace,
-            name: &name,
-            uid: &uid,
-            alert_key: &alerts[index].key,
-            kind: alerts[index].kind,
-            // A `RecoveryCompleted` is recorded as `Resolved` because it
-            // auto-resolves the instant it opens — but the MESSAGE about it
-            // is news, not the clearing of a page, so its action is
-            // `trigger`. A `resolve` here would read on a webhook as "the
-            // recovery-completed condition has cleared", which is nonsense.
-            open: state == p::AlertState::Open
-                || alerts[index].kind == AlertKind::RecoveryCompleted,
-            transition,
-            health: verdict.health,
-            summary: &verdict.summary,
-            point: verdict.point.as_ref(),
-            consecutive_failed_runs: verdict.consecutive_failed_runs,
-            missed_slots: missed_slot_count(&schedule_facts, &verdict),
-            // ALWAYS `sampled`, `degraded` or `none`, and this controller
-            // publishes `sampled` for a policy whose newest point carries
-            // verified evidence and `none` otherwise. There is no fourth
-            // value and there must never be one: `logweir notify deliver`
-            // refuses `complete` at parse time.
-            scope: verification_scope(&verdict),
-            generated_at: now,
-        };
-        let document = p::event_document(&facts);
-        let config_map_name = p::event_config_map_name(&name, &alerts[index].key, transition);
-        let job_name = p::delivery_job_name(&name, &uid, &alerts[index].key, transition, attempt);
-        let spec_for_job = delivery_job_spec(
-            &job_name,
-            &namespace,
-            &owner,
-            &config_map_name,
-            spec.notifications
-                .as_ref()
-                .and_then(|n| n.routes.as_deref()),
-            &ctx.runner_image,
-            ctx.allow_insecure_sinks,
-        );
-        // THE JOB FIRST, AND THE ConfigMap IT MOUNTS SECOND — review F7, and
-        // the shape `controllers/recovery_catalog.rs` already uses for its
-        // pages. The event ConfigMap is `immutable: true` and this role holds
-        // no `delete`; owned by the POLICY, nothing ever removed it, so one
-        // object per `(alertKey, transition)` accumulated for the life of the
-        // policy. Owned by the FIRST attempt's Job, the API server's TTL
-        // controller collects it with that Job.
-        //
-        // The cost is stated rather than buried: a pod scheduled in the window
-        // between the two creates sits `ContainerCreating` on a mount the
-        // kubelet retries, and a crash inside that window leaves a Job whose
-        // ConfigMap never arrives — which the next pass repairs, because the
-        // ledger records the delivery only after BOTH objects exist.
-        create_delivery_job(&ctx.client, &namespace, &spec_for_job).await?;
-        let first_job = p::delivery_job_name(&name, &uid, &alerts[index].key, transition, 1);
-        let cm_owner = event_config_map_owner(&ctx.client, &namespace, &first_job).await?;
-        create_event_config_map(
-            &ctx.client,
-            &namespace,
-            &config_map_name,
-            &cm_owner,
-            &document,
-        )
-        .await?;
-        created += 1;
-
-        alerts[index].notified_transition = Some(transition);
-        alerts[index].delivery = Some(AlertDelivery {
-            state: Some(p::DeliveryState::Pending.as_str().to_string()),
-            attempts: Some(attempt),
-            last_attempt_at: Some(now),
-            job_ref: Some(LocalRef {
-                name: job_name.clone(),
-            }),
-            last_error: None,
-        });
-        info!(
-            policy = %name,
-            namespace = %namespace,
-            alert = %alerts[index].key,
-            transition,
-            attempt,
-            job = %job_name,
-            "created one delivery Job for one alert transition; a duplicate reconcile computes \
-             the same name and gets 409 rather than paging a human twice"
-        );
-    }
+    let observed = p::fold_recoveries(&stored_alerts, &completions, now);
+    let alerts = p::reconcile_alerts(&observed, &verdict.open_kinds, verdict.health, &uid, now);
 
     // ------------------------------------------------------------------
     // Status. One merge PATCH, `metadata.resourceVersion` as the
@@ -612,42 +247,12 @@ pub async fn reconcile_policy(
     let status = build_status(policy, &verdict, alerts, now, interval);
     let commit = write_status(&api, policy, &status).await?;
 
-    // ------------------------------------------------------------------
-    // The TTL, LAST, and only on a committed status.
-    // ------------------------------------------------------------------
-    let mut ttl_patched = 0usize;
-    if commit.is_committed() {
-        for job_name in &finished_jobs {
-            set_delivery_ttl(&ctx.client, &namespace, job_name).await?;
-            ttl_patched += 1;
-        }
-    } else if !finished_jobs.is_empty() {
-        debug!(
-            policy = %name,
-            "the status patch did not land (409); the finished delivery Jobs keep their pods \
-             until the pass that reads the newer object records them"
-        );
-    }
-
-    let pending = status
-        .alerts
-        .as_ref()
-        .is_some_and(|a| a.iter().any(is_delivery_pending));
-    let requeue_seconds = if deferred > 0 || pending {
-        REQUEUE_DELIVERY_SECONDS
-    } else {
-        u64::try_from(interval).unwrap_or(300)
-    };
-
     Ok(Outcome {
         health: verdict.health,
         freshness: verdict.freshness,
         reason: verdict.reason,
-        created_jobs: created,
-        deferred,
-        ttl_patched,
         committed: commit.is_committed(),
-        requeue_seconds,
+        requeue_seconds: u64::try_from(interval).unwrap_or(300),
     })
 }
 
@@ -662,52 +267,8 @@ fn idle() -> Outcome {
         health: p::Health::Unknown,
         freshness: p::Freshness::Unknown,
         reason: p::FreshnessReason::NotEvaluated,
-        created_jobs: 0,
-        deferred: 0,
-        ttl_patched: 0,
         committed: false,
         requeue_seconds: ERROR_REQUEUE_SECONDS,
-    }
-}
-
-fn is_delivery_pending(entry: &AlertEntry) -> bool {
-    entry
-        .delivery
-        .as_ref()
-        .and_then(|d| d.state.as_deref())
-        .and_then(p::DeliveryState::parse)
-        == Some(p::DeliveryState::Pending)
-}
-
-/// How many slots the schedules report as missed.
-///
-/// D1 W2's `status.missedSlots` when the schedule carries it; otherwise `1`
-/// for a schedule that recorded a `lastMissedSlot` and `0` for one that did
-/// not. The fallback is a LOWER bound and is documented as one: the field that
-/// would make it exact is D1's, in review, and a protection verdict does not
-/// wait on a neighbouring worker's rebase.
-fn missed_slot_count(schedules: &[p::ScheduleFacts], verdict: &p::Verdict) -> i64 {
-    let declared: i64 = schedules.iter().filter_map(|s| s.missed_slots).sum();
-    if declared > 0 {
-        return declared;
-    }
-    // The LIVE signal, not the sticky audit field (review F5): a slot missed in
-    // January and fired over every night since is not a miss this event should
-    // report to the person it wakes.
-    i64::from(verdict.missed_since_last_fire)
-}
-
-/// `sampled` when the newest available point carries verified evidence, `none`
-/// otherwise.
-///
-/// **NEVER `complete`.** Logweir compares a SAMPLE of records; the enum has
-/// three variants and `logweir notify deliver` refuses a fourth at parse time.
-/// `degraded` belongs to a rehearsal's `integrityLevel: consume-only` and is
-/// reachable from PLAT-14.3's inputs, not from a backup's.
-fn verification_scope(verdict: &p::Verdict) -> p::VerificationScope {
-    match verdict.point.as_ref().map(|point| point.evidence) {
-        Some(evidence) if evidence.is_verified() => p::VerificationScope::Sampled,
-        _ => p::VerificationScope::None,
     }
 }
 
@@ -1234,600 +795,6 @@ async fn read_catalog(
 }
 
 // ===========================================================================
-// Delivery
-// ===========================================================================
-
-/// The owner reference every object this reconciler creates carries.
-///
-/// From `kube::Resource`'s own `api_version`/`kind` and never two string
-/// literals: a hand-written `apiVersion` that drifts from the CRD makes the
-/// garbage collector refuse to resolve the owner, and an unresolvable owner is
-/// a cascade that silently does not happen.
-#[must_use]
-pub fn owner_of(name: &str, uid: &str) -> RunnerOwner {
-    RunnerOwner {
-        api_version: ProtectionPolicy::api_version(&()).to_string(),
-        kind: ProtectionPolicy::kind(&()).to_string(),
-        name: name.to_string(),
-        uid: uid.to_string(),
-    }
-}
-
-/// The owner reference, with `blockOwnerDeletion: false` — D3 §3.4 point 3.
-///
-/// # Why `false`, and why it is written out rather than defaulted
-///
-/// `blockOwnerDeletion: true` makes the garbage collector hold the OWNER in
-/// `Terminating` until this dependent is gone, and it requires the deleter to
-/// hold `update` on the owner's `finalizers` subresource. A delivery Job is a
-/// side effect of a verdict; an operator deleting a `ProtectionPolicy` during
-/// an incident must not find the delete hanging on a notification Job whose
-/// pod is waiting out a 120-second deadline against a sink that is down.
-/// [`crate::job::build`] writes `true` — correct for a run whose evidence must
-/// outlive nothing — so this is overridden here rather than parameterised in a
-/// file this worker does not own.
-fn deletion_safe_owner(
-    owner: &RunnerOwner,
-) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-    k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
-        api_version: owner.api_version.clone(),
-        kind: owner.kind.clone(),
-        name: owner.name.clone(),
-        uid: owner.uid.clone(),
-        controller: Some(true),
-        block_owner_deletion: Some(false),
-    }
-}
-
-/// The owner every event `ConfigMap` carries: the FIRST delivery Job for its
-/// transition.
-///
-/// # Why the Job and not the policy (review F7)
-///
-/// The ConfigMap is `immutable: true` and this role holds `delete` on nothing,
-/// so whoever owns it decides when it goes away. Owned by the
-/// `ProtectionPolicy` it never went away: one object per
-/// `(alertKey, transition)`, for the life of the policy — with a daily
-/// re-notify and two long-open alerts, thousands a year that every
-/// `kubectl get cm` and every controller LIST pays for. Owned by the Job, the
-/// API server's TTL controller collects it with that Job.
-///
-/// **The FIRST attempt's Job**, not this attempt's: retries share the one
-/// ConfigMap, and hanging it off attempt 3 would leave attempts 1 and 2 to
-/// create an owner reference to a Job that does not exist yet. Attempt 1's TTL
-/// is patched only once its own verdict is recorded, and the whole retry
-/// schedule runs inside six minutes against a 3600 s TTL, so the mount is alive
-/// for every attempt that can still be made.
-///
-/// The Job's `metadata.uid` is read back from the create — or, on the
-/// duplicate-reconcile 409, from a `get`. A UID that cannot be read at all
-/// falls back to the policy: an unowned immutable object is worse than one
-/// collected late, and the fallback is logged rather than silent.
-async fn event_config_map_owner(
-    client: &kube::Client,
-    namespace: &str,
-    job_name: &str,
-) -> Result<RunnerOwner, ReconcileError> {
-    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
-    let uid = jobs
-        .get_opt(job_name)
-        .await
-        .map_err(ReconcileError::Api)?
-        .and_then(|job| job.uid());
-    match uid {
-        Some(uid) => Ok(RunnerOwner {
-            api_version: "batch/v1".to_string(),
-            kind: "Job".to_string(),
-            name: job_name.to_string(),
-            uid,
-        }),
-        None => {
-            warn!(
-                namespace = %namespace,
-                job = %job_name,
-                "the first delivery Job for this transition carries no readable metadata.uid; \
-                 the event ConfigMap is owned by the ProtectionPolicy instead and is collected \
-                 when the policy is deleted rather than by the Job's TTL"
-            );
-            Err(ReconcileError::Api(kube::Error::Discovery(
-                kube::error::DiscoveryError::MissingResource(format!(
-                    "delivery Job {job_name} has no metadata.uid to own its event ConfigMap"
-                )),
-            )))
-        }
-    }
-}
-
-/// Create the immutable event `ConfigMap`, tolerating the duplicate-reconcile
-/// 409.
-///
-/// `immutable: true` because a view a second pass could rewrite is not a
-/// record: the document names a `(policyUID, alertKey, transition)` triple and
-/// the Job that mounts it may already be running.
-async fn create_event_config_map(
-    client: &kube::Client,
-    namespace: &str,
-    name: &str,
-    owner: &RunnerOwner,
-    document: &Value,
-) -> Result<(), ReconcileError> {
-    let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
-    let body = serde_json::to_string(document).unwrap_or_else(|_| "{}".to_string());
-    let map = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            labels: Some(BTreeMap::from([
-                (
-                    crate::check::job::LABEL_MANAGED_BY.to_string(),
-                    crate::check::job::MANAGED_BY.to_string(),
-                ),
-                (
-                    crate::check::job::LABEL_COMPONENT.to_string(),
-                    COMPONENT_NOTIFICATION.to_string(),
-                ),
-            ])),
-            owner_references: Some(vec![deletion_safe_owner(owner)]),
-            ..ObjectMeta::default()
-        },
-        immutable: Some(true),
-        data: Some(BTreeMap::from([(p::EVENT_DATA_KEY.to_string(), body)])),
-        binary_data: None,
-    };
-    match maps.create(&PostParams::default(), &map).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(e)) if e.code == 409 => {
-            debug!(
-                namespace = %namespace,
-                config_map = %name,
-                "the event ConfigMap already exists; this pass adopts it (the name is a pure \
-                 function of the alert key and the transition, so it holds the same document)"
-            );
-            Ok(())
-        }
-        Err(e) => Err(ReconcileError::Api(e)),
-    }
-}
-
-/// `app.kubernetes.io/component` on the objects a delivery creates.
-pub const COMPONENT_NOTIFICATION: &str = "notification";
-
-/// The [`RunnerJobSpec`] for one delivery.
-///
-/// # One Job, one sink of each kind
-///
-/// `spec.notifications.routes` is `maxItems: 4`, and `logweir notify deliver`
-/// reads ONE variable per sink kind. So a Job addresses at most one PagerDuty,
-/// one webhook and one Slack, and this function projects the FIRST of each in
-/// route order. That is a real bound on D3 §3.1's shape and it is recorded
-/// rather than papered over: two routes that both name a webhook deliver to
-/// the first one only. The alternative — a Job per route — contradicts D3
-/// §3.4's "ONE Job per event" and would multiply the pages a single transition
-/// produces.
-///
-/// # `allow_insecure_sinks`
-///
-/// The INSTALLATION's answer, threaded from [`ProtectionContext`] and never
-/// from `routes`: `true` adds [`ALLOW_INSECURE_SINKS_ENV`]`=1` to the literal
-/// env and `false` adds nothing at all, so a default install renders exactly
-/// the Job it rendered before this parameter existed. See
-/// [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`] for why a policy cannot set it.
-#[must_use]
-pub fn delivery_job_spec(
-    job_name: &str,
-    namespace: &str,
-    owner: &RunnerOwner,
-    config_map_name: &str,
-    routes: Option<&[NotificationRoute]>,
-    image: &RunnerImage,
-    allow_insecure_sinks: bool,
-) -> RunnerJobSpec {
-    let routes = routes.unwrap_or_default();
-    let mut env_from_secret: Vec<EnvFromSecret> = Vec::new();
-    let mut env_literal: Vec<(String, String)> = vec![
-        // The deliverer's stdout is the machine contract; anything chattier
-        // competes with the `notify-result=` lines for the log's byte budget.
-        ("RUST_LOG".to_string(), "warn".to_string()),
-    ];
-
-    // THE INSTALLATION'S ESCAPE HATCH, AND ONLY WHEN IT IS ON. The argument
-    // comes from the CONTROLLER's environment
-    // ([`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`]) and `routes` cannot reach this
-    // line: a policy is a namespaced object and this is the cluster
-    // administrator's switch.
-    //
-    // WHEN IT IS OFF, NOTHING IS PUSHED — not the variable with a falsy value.
-    // A rendered Job is then byte-identical to the one this function built
-    // before the value existed, which is what makes the default install's
-    // goldens unmoved and what keeps `logweir notify deliver`'s own reading
-    // ("an explicit affirmative only") the single place the answer is decided.
-    if allow_insecure_sinks {
-        env_literal.push((ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string()));
-    }
-
-    // FX-20: EVERY SINK'S CREDENTIAL TRAVELS WITH ITS BINDING PAIR. The
-    // controller's EXPECTED binding (the policy's UID, the sink kind and, for
-    // PagerDuty, the endpoint) is a literal; the Secret's own
-    // `logweir-binding` key is an OPTIONAL `secretKeyRef` beside the
-    // credential. `logweir notify deliver` compares the two before it builds a
-    // request, so a route that names another policy's Secret — or a PagerDuty
-    // endpoint edited after the Secret was bound — posts nothing to that sink.
-    if let Some((route, channel)) = routes
-        .iter()
-        .find_map(|r| r.pager_duty.as_ref().map(|c| (r, c)))
-    {
-        env_from_secret.push(secret_env(ROUTING_KEY_ENV, &channel.routing_key_secret_ref));
-        if let Some(endpoint) = channel.endpoint.as_deref() {
-            env_literal.push((PAGERDUTY_ENDPOINT_ENV.to_string(), endpoint.to_string()));
-        }
-        push_binding_pair(
-            &mut env_from_secret,
-            &mut env_literal,
-            NotificationSink::PagerDuty,
-            &channel.routing_key_secret_ref,
-            sink_binding(
-                &owner.uid,
-                NotificationSink::PagerDuty,
-                channel.endpoint.as_deref(),
-            ),
-        );
-        debug!(route = %route.name, "the PagerDuty route this delivery Job addresses");
-    }
-    if let Some(channel) = routes.iter().find_map(|r| r.webhook.as_ref()) {
-        env_from_secret.push(secret_env(WEBHOOK_URL_ENV, &channel.url_secret_ref));
-        push_binding_pair(
-            &mut env_from_secret,
-            &mut env_literal,
-            NotificationSink::Webhook,
-            &channel.url_secret_ref,
-            sink_binding(&owner.uid, NotificationSink::Webhook, None),
-        );
-    }
-    if let Some(channel) = routes.iter().find_map(|r| r.slack.as_ref()) {
-        env_from_secret.push(secret_env(
-            SLACK_WEBHOOK_URL_ENV,
-            &channel.webhook_url_secret_ref,
-        ));
-        push_binding_pair(
-            &mut env_from_secret,
-            &mut env_literal,
-            NotificationSink::Slack,
-            &channel.webhook_url_secret_ref,
-            sink_binding(&owner.uid, NotificationSink::Slack, None),
-        );
-    }
-
-    RunnerJobSpec {
-        name: job_name.to_string(),
-        namespace: namespace.to_string(),
-        owner: owner.clone(),
-        args: delivery_argv(),
-        deadline_seconds: DELIVERY_DEADLINE_SECONDS,
-        service_account_name: SERVICE_ACCOUNT.to_string(),
-        // NO SECRET VOLUME. The signing key, the approval bundle and the
-        // archive credential are all absent from a delivery: it signs nothing,
-        // it reads no archive, and it holds no token.
-        secret_mounts: Vec::new(),
-        config_map_mounts: vec![ConfigMapMount {
-            volume: EVENT_VOLUME.to_string(),
-            config_map_name: config_map_name.to_string(),
-            mount_path: p::EVENT_MOUNT_PATH.to_string(),
-            items: Vec::new(),
-        }],
-        env_from_secret,
-        env_literal,
-        plan_config_map: None,
-        image: image.image.clone(),
-        image_pull_policy: image.image_pull_policy.clone(),
-        // `ProtectionPolicy` states no resources for its delivery Job (FX-2).
-        resources: None,
-    }
-}
-
-/// `valueFrom.secretKeyRef` AND NEVER A LITERAL.
-///
-/// The controller holds no verb on `secrets`, so it could not inline the value
-/// if it wanted to; this function is where that fact becomes the Job's shape.
-/// Every reader of `kubectl get job -o yaml` sees a Secret NAME and a KEY.
-fn secret_env(name: &str, reference: &SecretKeyRef) -> EnvFromSecret {
-    EnvFromSecret {
-        name: name.to_string(),
-        secret_name: reference.name.clone(),
-        optional: false,
-        key: reference.key.clone(),
-    }
-}
-
-/// The binding one sink's Secret must carry: [`binding::notification_binding`]
-/// over the policy's UID, or the fail-closed [`binding::UNBOUND_NO_UID`] when
-/// there is no UID to bind to.
-#[must_use]
-pub fn sink_binding(policy_uid: &str, sink: NotificationSink, endpoint: Option<&str>) -> String {
-    if policy_uid.trim().is_empty() {
-        return binding::UNBOUND_NO_UID.to_string();
-    }
-    binding::notification_binding(policy_uid, sink, endpoint)
-}
-
-/// The pair one sink contributes: the EXPECTED literal and the Secret's
-/// `logweir-binding` key as an OPTIONAL `secretKeyRef` — optional, so an
-/// unbound Secret still reaches the deliverer, which refuses it by name rather
-/// than the pod failing to start and the attempt reading "no exit code".
-fn push_binding_pair(
-    env_from_secret: &mut Vec<EnvFromSecret>,
-    env_literal: &mut Vec<(String, String)>,
-    sink: NotificationSink,
-    reference: &SecretKeyRef,
-    expected: String,
-) {
-    let (projected, expected_env) = sink.binding_env();
-    env_literal.push((expected_env.to_string(), expected));
-    env_from_secret.push(EnvFromSecret {
-        name: projected.to_string(),
-        secret_name: reference.name.clone(),
-        optional: true,
-        key: binding::CREDENTIAL_BINDING_KEY.to_string(),
-    });
-}
-
-/// FX-20: `status.credentialBindings` — one entry per channel a route names, in
-/// route order, so an operator binding a Secret by hand reads the value here
-/// (the same function the delivery Job's expectation comes from).
-#[must_use]
-pub fn notification_bindings(
-    policy_uid: &str,
-    routes: Option<&[NotificationRoute]>,
-) -> Vec<NotificationCredentialBinding> {
-    let mut out = Vec::new();
-    for route in routes.unwrap_or_default() {
-        let channels: [(NotificationSink, Option<&SecretKeyRef>, Option<&str>); 3] = [
-            (
-                NotificationSink::PagerDuty,
-                route.pager_duty.as_ref().map(|c| &c.routing_key_secret_ref),
-                route
-                    .pager_duty
-                    .as_ref()
-                    .and_then(|c| c.endpoint.as_deref()),
-            ),
-            (
-                NotificationSink::Webhook,
-                route.webhook.as_ref().map(|c| &c.url_secret_ref),
-                None,
-            ),
-            (
-                NotificationSink::Slack,
-                route.slack.as_ref().map(|c| &c.webhook_url_secret_ref),
-                None,
-            ),
-        ];
-        for (sink, reference, endpoint) in channels {
-            let Some(reference) = reference else { continue };
-            out.push(NotificationCredentialBinding {
-                route: route.name.clone(),
-                sink: sink.as_str().to_string(),
-                secret_name: reference.name.clone(),
-                binding: sink_binding(policy_uid, sink, endpoint),
-            });
-        }
-    }
-    out
-}
-
-/// Create the delivery Job, tolerating the duplicate-reconcile 409, with
-/// `blockOwnerDeletion: false` on its owner reference.
-async fn create_delivery_job(
-    client: &kube::Client,
-    namespace: &str,
-    spec: &RunnerJobSpec,
-) -> Result<(), ReconcileError> {
-    let mut built = job::build(spec);
-    built.metadata.owner_references = Some(vec![deletion_safe_owner(&spec.owner)]);
-    let labels = BTreeMap::from([
-        (
-            crate::check::job::LABEL_MANAGED_BY.to_string(),
-            crate::check::job::MANAGED_BY.to_string(),
-        ),
-        (
-            crate::check::job::LABEL_COMPONENT.to_string(),
-            COMPONENT_NOTIFICATION.to_string(),
-        ),
-    ]);
-    built.metadata.labels = Some(labels.clone());
-    if let Some(job_spec) = built.spec.as_mut() {
-        let mut meta = job_spec.template.metadata.take().unwrap_or_default();
-        meta.labels = Some(labels);
-        job_spec.template.metadata = Some(meta);
-    }
-    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
-    match jobs.create(&PostParams::default(), &built).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(e)) if e.code == 409 => {
-            debug!(
-                namespace = %namespace,
-                job = %spec.name,
-                "the delivery Job already exists; this pass adopts it rather than paging a \
-                 human a second time"
-            );
-            Ok(())
-        }
-        Err(e) => Err(ReconcileError::Api(e)),
-    }
-}
-
-/// Look at the delivery Job for one ledger entry and record what it did.
-///
-/// Returns the entry (possibly unchanged) and the name of a Job whose verdict
-/// this pass just recorded — the caller patches its TTL after the status
-/// write, never before. That Job is FINISHED, or (FX-11) cancelled this pass
-/// because its pod was refused at creation: a TTL counts from the finish, and
-/// a Job with no pod has no log for it to race.
-async fn observe_delivery(
-    client: &kube::Client,
-    namespace: &str,
-    owner_uid: &str,
-    entry: &AlertEntry,
-    now: Time,
-) -> Result<(AlertEntry, Option<String>), ReconcileError> {
-    let Some(delivery) = entry.delivery.as_ref() else {
-        return Ok((entry.clone(), None));
-    };
-    if p::DeliveryState::parse(delivery.state.as_deref().unwrap_or_default())
-        != Some(p::DeliveryState::Pending)
-    {
-        return Ok((entry.clone(), None));
-    }
-    let Some(job_ref) = delivery.job_ref.as_ref() else {
-        return Ok((entry.clone(), None));
-    };
-    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
-    let Some(job) = jobs
-        .get_opt(&job_ref.name)
-        .await
-        .map_err(ReconcileError::Api)?
-    else {
-        // The Job is gone — its TTL fired, or an operator removed it. There is
-        // nothing left to read and nothing to claim; the delivery is recorded
-        // as failed rather than left Pending forever, which would keep the
-        // requeue at fifteen seconds for the life of the object.
-        let mut next = entry.clone();
-        next.delivery = Some(AlertDelivery {
-            state: Some(p::DeliveryState::Failed.as_str().to_string()),
-            last_attempt_at: Some(now),
-            last_error: Some(p::cap_error(
-                "the delivery Job no longer exists, so its result cannot be read",
-            )),
-            ..delivery.clone()
-        });
-        return Ok((next, None));
-    };
-    if !crate::controllers::backup::job_finished(&job) {
-        // FX-11: A POD THE NAMESPACE REFUSED IS FAILED FAST. No request at all
-        // while the Job's own status counts a pod or it is younger than the
-        // 30-second grace; otherwise one pod list and, when it finds none, one
-        // events list by the Job's UID.
-        let Some(refusal) = crate::check::refused_pod_creation(client, namespace, &job, now)
-            .await
-            .map_err(ReconcileError::Api)?
-        else {
-            return Ok((entry.clone(), None));
-        };
-        crate::check::cancel(client, namespace, &job, owner_uid)
-            .await
-            .map_err(ReconcileError::Api)?;
-        warn!(
-            namespace = %namespace,
-            alert = %entry.key,
-            job = %job_ref.name,
-            attempts = delivery.attempts.unwrap_or(0),
-            code = refusal.code.as_str(),
-            "a delivery Job's pod was refused at creation; the Job is cancelled and the attempt \
-             is recorded as failed, naming the refusal. NOTHING else is written"
-        );
-        return Ok((
-            refused(entry, delivery, &refusal, now),
-            Some(job_ref.name.clone()),
-        ));
-    }
-
-    // SEAM S6. The pod is proved by the Job's own `metadata.uid` on its
-    // controller `ownerReference` before one byte of its log is read; a second
-    // claimant is refused rather than ranked.
-    let found = crate::check::pod::find_owned_pod(client, namespace, &job)
-        .await
-        .map_err(ReconcileError::Api)?;
-    if found.is_none() {
-        // FX-11: a Job that finished without ever having a pod, and whose
-        // `FailedCreate` Event says why, is that refusal — not "no exit code".
-        if let Some(refusal) =
-            crate::check::finished_without_pod(client, namespace, &job, now).await
-        {
-            return Ok((
-                refused(entry, delivery, &refusal, now),
-                Some(job_ref.name.clone()),
-            ));
-        }
-    }
-    let (exit_code, tail) = match found.as_ref() {
-        Some(pod) => {
-            let exit = crate::controllers::backup::terminated_exit_code(pod);
-            let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-            let log = match pods
-                .logs(&pod.name_any(), &crate::check::relay::log_params())
-                .await
-            {
-                Ok(log) => log,
-                Err(e) if crate::check::is_log_absent(&e) => String::new(),
-                Err(e) => return Err(ReconcileError::Api(e)),
-            };
-            (exit, log)
-        }
-        None => (None, String::new()),
-    };
-    let lines = crate::controllers::backup::tail_lines(&tail);
-    let (state, message) = p::classify_delivery(exit_code, &lines);
-
-    let mut next = entry.clone();
-    next.delivery = Some(AlertDelivery {
-        state: Some(state.as_str().to_string()),
-        last_attempt_at: Some(now),
-        last_error: (state != p::DeliveryState::Delivered).then(|| p::cap_error(&message)),
-        ..delivery.clone()
-    });
-    if state == p::DeliveryState::Failed {
-        warn!(
-            namespace = %namespace,
-            alert = %entry.key,
-            job = %job_ref.name,
-            attempts = delivery.attempts.unwrap_or(0),
-            "a protection alert was not delivered; the failure is recorded on this policy's \
-             status and NOTHING else is written — no Backup, no Restore, no evidence"
-        );
-    }
-    Ok((next, Some(job_ref.name.clone())))
-}
-
-/// The ledger entry for an attempt whose pod was refused at creation — FX-11.
-///
-/// `Failed`, so the ordinary backoff retries it and the third such attempt
-/// ends in `DeliveryFailed`; `lastError` names `PodCreationForbidden` and the
-/// admission's words ([`crate::protection::refused_delivery`]).
-fn refused(
-    entry: &AlertEntry,
-    delivery: &AlertDelivery,
-    refusal: &crate::check::Waiting,
-    now: Time,
-) -> AlertEntry {
-    let (state, message) = p::refused_delivery(&refusal.message);
-    let mut next = entry.clone();
-    next.delivery = Some(AlertDelivery {
-        state: Some(state.as_str().to_string()),
-        last_attempt_at: Some(now),
-        last_error: Some(p::cap_error(&message)),
-        ..delivery.clone()
-    });
-    next
-}
-
-/// Patch a finished delivery Job's `ttlSecondsAfterFinished`.
-///
-/// ONLY AFTER THE STATUS WRITE RETURNED 200 — see the module header's rule 2.
-async fn set_delivery_ttl(
-    client: &kube::Client,
-    namespace: &str,
-    job_name: &str,
-) -> Result<(), ReconcileError> {
-    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
-    jobs.patch(
-        job_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({"spec": {"ttlSecondsAfterFinished": DELIVERY_TTL_SECONDS}})),
-    )
-    .await
-    .map_err(ReconcileError::Api)?;
-    Ok(())
-}
-
-// ===========================================================================
 // Status
 // ===========================================================================
 
@@ -1843,8 +810,7 @@ pub enum Commit {
 }
 
 impl Commit {
-    /// Whether the server's status now says what this pass computed — which is
-    /// what the TTL patch's ordering depends on.
+    /// Whether the server's status now says what this pass computed.
     #[must_use]
     pub fn is_committed(self) -> bool {
         matches!(self, Self::Written | Self::Unchanged)
@@ -1890,18 +856,22 @@ pub fn build_status(
             message: Some(verdict.condition_summary.clone()),
         },
     );
-    let (delivery_status, delivery_reason, delivery_message) = delivery_condition(&alerts);
-    let delivered = merge_condition(
-        current_condition(existing, CONDITION_NOTIFICATIONS_DELIVERED),
-        Condition {
-            r#type: CONDITION_NOTIFICATIONS_DELIVERED.to_string(),
-            status: delivery_status.to_string(),
-            observed_generation: generation,
-            last_transition_time: Some(now),
-            reason: Some(delivery_reason.to_string()),
-            message: Some(delivery_message),
-        },
-    );
+    let mut conditions = vec![ready, protected];
+    // The withdrawn sinks, said by name. The field still parses (an older
+    // policy keeps working); it is read for nothing but this condition.
+    if policy.spec.notifications.is_some() {
+        conditions.push(merge_condition(
+            current_condition(existing, CONDITION_NOTIFICATIONS_DELIVERED),
+            Condition {
+                r#type: CONDITION_NOTIFICATIONS_DELIVERED.to_string(),
+                status: "False".to_string(),
+                observed_generation: generation,
+                last_transition_time: Some(now),
+                reason: Some(REASON_NOTIFICATIONS_WITHDRAWN.to_string()),
+                message: Some(NOTIFICATIONS_WITHDRAWN_MESSAGE.to_string()),
+            },
+        ));
+    }
 
     let status = ProtectionPolicyStatus {
         observed_generation: generation,
@@ -1918,18 +888,7 @@ pub fn build_status(
         rehearsal: verdict.rehearsal.clone(),
         stale_since: stale_since(stored, verdict.health, now),
         alerts: (!alerts.is_empty()).then_some(alerts),
-        credential_bindings: {
-            let bindings = notification_bindings(
-                policy.metadata.uid.as_deref().unwrap_or_default(),
-                policy
-                    .spec
-                    .notifications
-                    .as_ref()
-                    .and_then(|n| n.routes.as_deref()),
-            );
-            (!bindings.is_empty()).then_some(bindings)
-        },
-        conditions: Some(vec![ready, protected, delivered]),
+        conditions: Some(conditions),
     };
     settle_clock_fields(stored, status, interval, now)
 }
@@ -2027,83 +986,6 @@ fn verdict_bytes(status: &ProtectionPolicyStatus) -> Value {
     value
 }
 
-/// `NotificationsDelivered`, from the ledger alone.
-fn delivery_condition(alerts: &[AlertEntry]) -> (&'static str, &'static str, String) {
-    let mut pending = 0usize;
-    let mut failed = 0usize;
-    let mut refused = 0usize;
-    let mut delivered = 0usize;
-    let mut suppressed = 0usize;
-    for entry in alerts {
-        match entry
-            .delivery
-            .as_ref()
-            .and_then(|d| d.state.as_deref())
-            .and_then(p::DeliveryState::parse)
-        {
-            Some(p::DeliveryState::Pending) => pending += 1,
-            Some(p::DeliveryState::Failed) => {
-                failed += 1;
-                if entry.delivery.as_ref().is_some_and(p::binding_refused) {
-                    refused += 1;
-                }
-            }
-            Some(p::DeliveryState::Delivered) => delivered += 1,
-            Some(p::DeliveryState::Suppressed) => suppressed += 1,
-            None => {}
-        }
-    }
-    if refused > 0 {
-        return (
-            "False",
-            REASON_CREDENTIAL_BINDING_MISMATCH,
-            format!(
-                "{refused} alert transition(s) were not delivered to a sink whose credential \
-                 Secret is not bound to this policy (no `logweir-binding`, or one written for \
-                 another policy, sink or endpoint); nothing was posted to that sink. {}",
-                logweir_core::credential_binding::BINDING_REMEDY
-            ),
-        );
-    }
-    if failed > 0 {
-        return (
-            "False",
-            REASON_DELIVERY_FAILED,
-            format!(
-                "{failed} alert transition(s) were not delivered after {} attempts; this policy's \
-                 status is the only thing that records it — no backup result was rewritten",
-                p::MAX_DELIVERY_ATTEMPTS
-            ),
-        );
-    }
-    if pending > 0 {
-        return (
-            "Unknown",
-            REASON_DELIVERY_PENDING,
-            format!("{pending} alert transition(s) have a delivery Job that has not finished"),
-        );
-    }
-    if delivered > 0 {
-        return (
-            "True",
-            REASON_DELIVERED,
-            format!("{delivered} alert transition(s) were delivered to every configured sink"),
-        );
-    }
-    (
-        "True",
-        REASON_NOTHING_TO_DELIVER,
-        if suppressed > 0 {
-            format!(
-                "{suppressed} alert transition(s) matched no configured route; nothing was sent, \
-                 which is a configuration choice and not a failure"
-            )
-        } else {
-            "no alert transition needed delivering".to_string()
-        },
-    )
-}
-
 /// Add the optimistic-concurrency precondition to a `/status` merge patch —
 /// D-SEAMS **S7**.
 ///
@@ -2157,9 +1039,9 @@ fn status_patch_with_preconditions(
 /// * `staleSince` from a long-resolved outage sat on a `Healthy` policy,
 ///   contradicting its own field documentation.
 ///
-/// `conditions` is deliberately NOT here: this controller always writes all
-/// three, so a `null` would be a removal that never applies, and an array in a
-/// merge patch is replaced wholesale anyway.
+/// `conditions` is deliberately NOT here: this controller always writes them,
+/// so a `null` would be a removal that never applies, and an array in a merge
+/// patch is replaced wholesale anyway.
 ///
 /// `metadata` is not a status key and never appears in this list;
 /// [`status_patch_with_preconditions`] adds it to the body afterwards.
@@ -2183,9 +1065,8 @@ pub const CLEARABLE_STATUS_FIELDS: [&str; 7] = [
 ///
 /// # Why the seven named fields were not enough (FX-29's class sweep)
 ///
-/// `credentialBindings` is not among them, and neither is any optional field
-/// INSIDE `lastAvailablePoint`, `lastAttempt`, `missed` or `rehearsal`. Each of
-/// those, once it became `None`, stayed on the object under the merge — and
+/// No optional field INSIDE `lastAvailablePoint`, `lastAttempt`, `missed` or
+/// `rehearsal` is among them. Each of those, once it became `None`, stayed on the object under the merge — and
 /// [`settle_clock_fields`] compares the stored status with the computed one,
 /// so the stale key made "did the verdict change?" answer yes on every pass:
 /// `evaluatedAt` was `now` each time, and each write woke this reconciler's own
@@ -2259,9 +1140,7 @@ async fn reconcile(
 }
 
 /// The [`Action`] a pass returns: a timed requeue of the outcome's
-/// `requeue_seconds` — the evaluation interval, or
-/// [`REQUEUE_DELIVERY_SECONDS`] while a delivery is pending — never
-/// `await_change()`.
+/// `requeue_seconds` — the evaluation interval — never `await_change()`.
 ///
 /// A recovery point AGES with no event on any object, so this requeue is
 /// what turns a policy `Stale` when its newest point crosses the objective
@@ -2294,65 +1173,22 @@ fn error_policy(
 
 /// Run the `ProtectionPolicy` controller until the process ends.
 ///
-/// ALL NAMESPACES (`Api::all`), like every other controller in this directory,
-/// and `.owns(jobs, …)` so a finished delivery Job wakes its own policy rather
-/// than waiting out the evaluation interval — a page whose result is recorded
-/// five minutes late is a page whose retry is five minutes late.
-pub fn controller(
-    client: kube::Client,
-    runner_image: RunnerImage,
-) -> impl std::future::Future<Output = ()> + Send {
-    // THE READ, ONCE PER PROCESS, and the only read of this variable in the
-    // crate. It is here rather than in `fn main` because it belongs to this
-    // reconciler alone — no other controller creates a delivery Job — and the
-    // DECISION is `configured_allow_insecure_sinks`, a pure predicate a test
-    // can drive without mutating process-global state.
-    let allow_insecure_sinks =
-        configured_allow_insecure_sinks(std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV));
-    if allow_insecure_sinks {
-        // ONE LINE, AND IT IS A WARNING. An installation that allows cleartext
-        // alert delivery should say so in its own logs: the POST carries the
-        // protection event, the policy's name and — on Slack, where the URL is
-        // the credential — a bearer token, and the operator who set this on a
-        // laptop is not always the one reading the controller a month later.
-        warn!(
-            env = CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
-            "this installation ALLOWS INSECURE notification sinks: every delivery Job created \
-             here carries NOTIFY_ALLOW_INSECURE_SINKS=1 and may POST a protection event over \
-             cleartext http. It is a local-development setting; production leaves it unset"
-        );
-    }
-    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE (`crate::scope`). The
-    // variable above is read, and warned about, once per process — not once
-    // per namespace.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            runner_image.clone(),
-            allow_insecure_sinks,
-            namespace,
-        )
-    })
+/// One watch per watched namespace (`crate::scope`), like every other
+/// controller in this directory.
+pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
+    crate::scope::run_everywhere(move |namespace| controller_in(client.clone(), namespace))
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
 /// cluster, the behaviour before D0 stage 5).
 fn controller_in(
     client: kube::Client,
-    runner_image: RunnerImage,
-    allow_insecure_sinks: bool,
     namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<ProtectionPolicy> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
-    let ctx = Arc::new(ProtectionContext {
-        client,
-        runner_image,
-        allow_insecure_sinks,
-    });
+    let ctx = Arc::new(ProtectionContext { client });
     async move {
         Controller::new(api, watcher::Config::default())
-            .owns(jobs, watcher::Config::default())
             .run(reconcile, error_policy, ctx)
             .for_each(|_| std::future::ready(()))
             .await;
