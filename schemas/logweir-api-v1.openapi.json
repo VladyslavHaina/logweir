@@ -14895,7 +14895,7 @@
         }
       },
       "TeardownView": {
-        "description": "What phase 9 removed, from the SIGNED teardown attestation.",
+        "description": "What a run's teardown could not remove, from `Restore.status.teardown` (the runner's `teardown-failed=` line, FX-44).",
         "type": "object",
         "required": [
           "deletedTruncated"

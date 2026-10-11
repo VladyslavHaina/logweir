@@ -3406,6 +3406,22 @@ fn execute_with_validated_approval(
     // `validate-restore`, which force-sets `dry_run = true` and writes nothing,
     // so it needs no target topic; `restore` does.
     //
+    // **FX-44: a run that fails AFTER the restore started tears down what the
+    // creation step created**, by phase 9's rule, and names what it left.
+    // Defined here, before the creation step, and called only from the error
+    // returns of phases 6 to 8 that are not a signed `NotPass` (whose path
+    // runs phase 9): a stopped creation step itself still deletes nothing.
+    let remove_created = |created: &[String]| {
+        phase9_teardown::after_failure(
+            deleter,
+            &admitted.topic_mapping,
+            created,
+            &c.spec.target.teardown,
+            c.spec.target.mode,
+            run_id,
+            &mut std::io::stdout().lock(),
+        );
+    };
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
     // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
     phase0_admit::create_target_topics(
@@ -3416,6 +3432,11 @@ fn execute_with_validated_approval(
         c.spec.target.default_replication_factor,
         &mut topic_preflight,
     )?;
+    let created = topic_preflight.topics_created.clone();
+    let torn_down = |e: DrillError| -> DrillError {
+        remove_created(&created);
+        e
+    };
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
@@ -3470,7 +3491,8 @@ fn execute_with_validated_approval(
             // `None` for the same reason as the phase-5 branch, with one extra
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
-            let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
+            let signed =
+                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(torn_down)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -3495,7 +3517,7 @@ fn execute_with_validated_approval(
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(torn_down(e)),
     };
     // Every config key Logweir rendered that the engine dropped, from both
     // readbacks. Phase 5's were recorded above; phase 6's arrive here.
@@ -3526,7 +3548,8 @@ fn execute_with_validated_approval(
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
         )
-    })?;
+    })
+    .map_err(torn_down)?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
@@ -3578,7 +3601,8 @@ fn execute_with_validated_approval(
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
-    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))?;
+    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
+        .map_err(torn_down)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
@@ -3715,10 +3739,11 @@ fn teardown(
                 "{msg}"
             );
         }
+        // FX-44: and the line the controller copies to `status.teardown`.
+        phase9_teardown::print_left(&a.topics_failed);
         // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
-        // The attestation is what the controller fetches, verifies with
-        // `PAYLOAD_TYPE_TEARDOWN` and copies into `status.teardown`; a key
-        // line printed after a failed put would send it after an object that
+        // The attestation is the durable record of the teardown; a key line
+        // printed after a failed put would send a reader after an object that
         // is not there. So the answer is carried out of the closure rather
         // than logged and forgotten.
         let persisted = match phase9_teardown::persist_with_signer(&a, signer, &c.store) {

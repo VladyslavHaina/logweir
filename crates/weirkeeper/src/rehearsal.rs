@@ -39,8 +39,8 @@
 //!
 //! Teardown. The controller deletes no topic, ever (D3 §4.4): phase 9 deletes
 //! the exact names it created through a prefix-scoped deleter, and
-//! [`pending_topics`] only READS what the signed teardown attestation said could
-//! not be removed. While that list is non-empty the next slot is skipped with
+//! [`pending_topics`] only READS what `Restore.status.teardown.failed` (the
+//! runner's unsigned `teardown-failed=` line, FX-44) says could not be removed. While that list is non-empty the next slot is skipped with
 //! [`SkipReason::LeftoverTopics`] — the run that would otherwise collide is not
 //! allowed to adopt or delete topics it did not create.
 
@@ -929,10 +929,11 @@ pub fn plan_bytes(plan: &DrillSpec) -> Result<String, serde_yaml::Error> {
 // Cleanup — D3 §4.4
 // ===========================================================================
 
-/// The topics a signed teardown attestation says phase 9 could NOT remove.
+/// The topics `Restore.status.teardown.failed` says a teardown could NOT
+/// remove (the runner's unsigned `teardown-failed=` line, FX-44).
 ///
 /// Sorted and de-duplicated, so the `status.cleanup.pendingTopics` list a
-/// reconcile writes is a function of the attestation and not of its ordering —
+/// reconcile writes is a function of the status and not of its ordering —
 /// otherwise two reconciles over one unchanged `Restore` would bump the
 /// `resourceVersion` for no reason (`merge_condition`'s own rule, one level up).
 ///

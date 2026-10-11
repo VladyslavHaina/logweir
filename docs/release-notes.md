@@ -61,9 +61,10 @@ catalog view), 65 (FX-33, one
 backup names at most 1,000 topics, and a backup of many topics stays listed
 and verified), 66 (PROD-16.2,
 two-person approval in the console, no key), 67 (PROD-01.1a, an
-archive holding transaction markers is refused unless the plan allows them) and 68
+archive holding transaction markers is refused unless the plan allows them), 68
 (PROD-02.1, a backup of a source whose records all expired is a signed, named
-empty capture) so far. Items continue the next entry's
+empty capture) and 69 (FX-44, a failed restore removes or names the scratch
+topic it created) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -250,6 +251,12 @@ stack over a topic whose records were produced and deleted, by runner,
 catalog and controller rows, and by both verifiers over a corpus; it changes
 the runner, the receipt format (1.8.0), both verifiers and the controller, and
 the PoC upgrade that carries it runs the schedules over an emptied source.
+Item 69 is fix-now row FX-44, proven by unit rows, controller rows over a
+recording API double and the compose ACL row; it changes the runner (the
+failure-path teardown, the warning's grant clause, one more stdout line) and
+the controller (`status.teardown.failed`), and the PoC upgrade that carries it
+runs a scratch `Restore` that fails after creating its topic and reads the
+topic gone, and one whose topic cannot be deleted and reads it on the status.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -3215,6 +3222,38 @@ of an emptied source.
 already signed keep verifying with this build, and an older verifier refuses
 an empty capture's receipt (arm 4) — the safer verdict.
 
+#### 69. A failed restore removes or names the scratch topic it created (FX-44)
+
+**Changed.** A restore that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), now tears down the topics that step
+created by phase 9's rule: deleted in `scratch` mode under
+`teardown: delete`, never in `newTopic` mode, never a topic it did not
+create. A creation step that stops partway still deletes nothing. It logs
+`the restore failed after it created its target topics; teardown removed 1
+scratch topic: <topic>`. Before, it left them and said nothing, and a
+leftover `drill-` topic refused the next run.
+A topic the broker would not delete is named, on a pass and on a failure, by
+the teardown warning, which now also names the grant when the broker's answer
+was an authorization refusal (``…; the restore principal lacks `Delete` on
+topic `<topic>` ``), and by a new stdout line, `teardown-failed=`, which the
+controller copies to `Restore.status.teardown.failed` (until now declared and
+never written). The product API's `teardown` and the console's Teardown
+section show it, and a `RehearsalSchedule` skips its next slot with
+`LeftoverTopics`. The failure path signs nothing and writes no attestation,
+as before; a pass's signed attestation is unchanged.
+**Do:** nothing. Give the restore identity `Delete` on the scratch prefix.
+**Scope:** unit rows (the failure-path teardown over a fixture drill, only
+the topics the run created, nothing in `newTopic` mode or under `keep`, the
+grant only for an authorization refusal, the line's bounds), controller rows
+over a recording API double (exit 1 and exit 0, an unmapped name dropped, no
+line no block), a rehearsal row (a failed child's block becomes
+`pendingTopics`), and the compose ACL row (`Write`, `Read`, `Delete`, and
+`Write` with `Delete` removed; an existing target topic is not deleted).
+[UNVERIFIED — no controller has read a `teardown-failed=` line on a cluster yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older controller ignores the line; an older runner prints none, and leaves a
+failed run's topics as before.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3325,7 +3364,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67 and 68, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68 and 69, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3404,7 +3443,8 @@ console and the chart, and needs nothing until a namespace is bound
 `two-person`; item 67 changes the
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
-transaction markers. To roll back to
+transaction markers; item 69 changes the runner and the controller and needs
+nothing, in either order. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

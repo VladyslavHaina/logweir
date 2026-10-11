@@ -909,6 +909,79 @@ pub fn progress_phase_line(phase: i8, name: &str) -> Option<String> {
 /// `teardown-key=<key>` (D3 §2.4), printed only when phase 9 attested.
 pub const TEARDOWN_KEY_PREFIX: &str = "teardown-key=";
 
+/// **FX-44.** `teardown-failed=[{"topic":…,"error":…},…]`: the topics a
+/// restore's teardown left on the target cluster, each with why. The runner
+/// prints it whenever teardown left one: phase 9 of a run that signed, and the
+/// teardown of a run that failed after it created its target topics, which
+/// signs nothing. The controller copies it to `Restore.status.teardown.failed`.
+pub const TEARDOWN_FAILED_PREFIX: &str = "teardown-failed=";
+
+/// The most topics, and the most characters of one error, the line carries:
+/// the bounds the Restore CRD puts on `status.teardown.failed`.
+pub const TEARDOWN_FAILED_MAX_TOPICS: usize = 256;
+pub const TEARDOWN_FAILED_MAX_ERROR_CHARS: usize = 256;
+
+/// The longest value a genuine line carries; a reader refuses a longer one
+/// before parsing it.
+pub const TEARDOWN_FAILED_MAX_VALUE_BYTES: usize = TEARDOWN_FAILED_MAX_TOPICS
+    * (crate::guard::MAX_TOPIC_NAME_CHARS + 4 * TEARDOWN_FAILED_MAX_ERROR_CHARS + 32);
+
+/// One entry of the `teardown-failed=` line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeardownFailed {
+    pub topic: String,
+    pub error: String,
+}
+
+impl TeardownFailed {
+    /// Kafka-legal names only, the error on one line and cut to its bound.
+    fn bounded(topic: &str, error: &str) -> Option<Self> {
+        crate::guard::topic_name_is_kafka_legal(topic).then(|| TeardownFailed {
+            topic: topic.to_string(),
+            error: error
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(TEARDOWN_FAILED_MAX_ERROR_CHARS)
+                .collect(),
+        })
+    }
+}
+
+/// The `teardown-failed=` line for `failed` (topic, why), or `None` when
+/// nothing was left.
+#[must_use]
+pub fn teardown_failed_line(failed: &[(String, String)]) -> Option<String> {
+    let entries: Vec<TeardownFailed> = failed
+        .iter()
+        .filter_map(|(topic, error)| TeardownFailed::bounded(topic, error))
+        .take(TEARDOWN_FAILED_MAX_TOPICS)
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{TEARDOWN_FAILED_PREFIX}{}",
+        serde_json::to_string(&entries).ok()?
+    ))
+}
+
+/// What a reader keeps of a `teardown-failed=` value: `None` unless it is a
+/// JSON array no longer than a genuine one; entries bounded as the writer
+/// bounds them.
+#[must_use]
+pub fn parse_teardown_failed(value: &str) -> Option<Vec<TeardownFailed>> {
+    if value.len() > TEARDOWN_FAILED_MAX_VALUE_BYTES {
+        return None;
+    }
+    let entries: Vec<TeardownFailed> = serde_json::from_str(value).ok()?;
+    let kept: Vec<TeardownFailed> = entries
+        .iter()
+        .filter_map(|e| TeardownFailed::bounded(&e.topic, &e.error))
+        .take(TEARDOWN_FAILED_MAX_TOPICS)
+        .collect();
+    (!kept.is_empty()).then_some(kept)
+}
+
 // ---------------------------------------------------------------------------
 // plan ∈ scope (D3 §4.3(d)), the runner's half and the controller's
 // ---------------------------------------------------------------------------
@@ -2148,5 +2221,48 @@ mod tests {
         assert_eq!(AuthorizationKind::parse("Standing"), None);
         assert_eq!(AuthorizationKind::parse("none"), None);
         assert_eq!(AuthorizationKind::default(), AuthorizationKind::Approval);
+    }
+
+    /// **FX-44.** The `teardown-failed=` line round-trips, is held to the
+    /// CRD's bounds on both sides, and carries only names a broker accepts.
+    #[test]
+    fn the_teardown_failed_line_is_bounded_and_round_trips() {
+        let failed = vec![
+            (
+                "drill-a".to_string(),
+                "Broker: Topic authorization failed".to_string(),
+            ),
+            ("bad name\n".to_string(), "dropped".to_string()),
+            ("drill-b".to_string(), format!("x\ny{}", "e".repeat(400))),
+        ];
+        let line = teardown_failed_line(&failed).expect("a line");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        let value = line
+            .strip_prefix(TEARDOWN_FAILED_PREFIX)
+            .expect("the prefix");
+        let back = parse_teardown_failed(value).expect("parsed");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].topic, "drill-a");
+        assert_eq!(back[0].error, "Broker: Topic authorization failed");
+        assert_eq!(back[1].topic, "drill-b");
+        assert!(back[1].error.starts_with("x y"));
+        assert_eq!(
+            back[1].error.chars().count(),
+            TEARDOWN_FAILED_MAX_ERROR_CHARS
+        );
+        // Nothing left, no line; a value that is not the array, nothing read.
+        assert!(teardown_failed_line(&[]).is_none());
+        assert!(parse_teardown_failed("{}").is_none());
+        assert!(parse_teardown_failed("[]").is_none());
+        assert!(parse_teardown_failed(&" ".repeat(TEARDOWN_FAILED_MAX_VALUE_BYTES + 1)).is_none());
+        let many: Vec<(String, String)> = (0..300)
+            .map(|i| (format!("drill-{i}"), "e".to_string()))
+            .collect();
+        let line = teardown_failed_line(&many).unwrap();
+        let value = line.strip_prefix(TEARDOWN_FAILED_PREFIX).unwrap();
+        assert_eq!(
+            parse_teardown_failed(value).unwrap().len(),
+            TEARDOWN_FAILED_MAX_TOPICS
+        );
     }
 }

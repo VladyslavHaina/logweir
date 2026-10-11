@@ -530,7 +530,9 @@ pub struct SkippedSlot {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupState {
-    /// The names still present, read from the signed teardown attestation.
+    /// The names still present, from the child Restore's
+    /// `status.teardown.failed` (the runner's unsigned `teardown-failed=`
+    /// line, FX-44).
     /// While this is non-empty the next slot is SKIPPED: the controller
     /// deletes no topic, and a run that adopted them would be operating on
     /// data it did not create.

@@ -3299,15 +3299,21 @@ authorization is a different document.
 
 **The controller deletes no topic, ever.** Teardown is the runner's phase 9,
 which deletes the exact names it created through a deleter that refuses any name
-outside the prefix. Failures are read from the signed teardown attestation into
-`Restore.status.teardown` and mirrored to
+outside the prefix. A run that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), tears down what that step created by the
+same rule (FX-44). What either teardown could not remove
+is printed on the runner's `teardown-failed=` line, copied to
+`Restore.status.teardown.failed` and mirrored to
 `RehearsalSchedule.status.cleanup.pendingTopics`; while that list is non-empty
 the next slot is **skipped** with `LeftoverTopics`, because the run that would
 otherwise collide is not allowed to adopt or delete topics it did not create.
 
-**That guard covers an ATTESTED teardown failure and not a crash.** A run killed
-before phase 9 — deadline, OOM, node loss, an evicted pod — writes no teardown
-attestation at all, so `Restore.status.teardown` is absent, `pendingTopics` stays
+**That guard covers a teardown that ran, and not a crash or a stopped
+creation step.** A stopped creation step (`CreatedTopicsLeft`, named on
+`status.targetTopicsAppeared`; nothing deleted, not in `pendingTopics`) leaves
+the next slot to phase 0's refusal too. A run killed
+before its teardown — deadline, OOM, node loss, an evicted pod — prints no
+`teardown-failed=` line, so `Restore.status.teardown` is absent, `pendingTopics` stays
 empty and the next slot fires under the same per-schedule prefix over whatever
 the dead run left behind. What happens then is the runner's phase 0 question (it
 refuses a mapped name that already exists), not this controller's, and the
