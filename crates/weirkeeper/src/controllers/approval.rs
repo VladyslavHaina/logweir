@@ -9,7 +9,7 @@
 //! # The order is load-bearing
 //!
 //! [`logweir_verify::verify_detached`] refuses a `payloadType` mismatch first
-//! and returns "no signature by key <want> in the sidecar" for a key not in
+//! and returns `"no signature by key <want> in the sidecar"` for a key not in
 //! the sidecar at all, both as `logweir_verify::Error::Verify`. A loop over the
 //! roster calling `verify_detached` would report the same refusal for a
 //! substituted document, an attacker's key and a broken signature, three

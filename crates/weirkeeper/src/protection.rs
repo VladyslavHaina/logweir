@@ -20,8 +20,9 @@
 //!    [`Health::Unknown`], whose `Protected` condition is `Unknown`: an
 //!    evaluation that could not happen is neither a pass nor a failure.
 //! 3. **Capture start and the newest record.**
-//!    [`AvailablePointFacts::recovery_point_at`] is the capture start
-//!    (`Backup.status.capture.startedAt`, the receipt's `started_at`);
+//!    [`AvailablePointFacts::recovery_point_at`](crate::protection::AvailablePointFacts::recovery_point_at)
+//!    is the capture start (`Backup.status.capture.startedAt`, the receipt's
+//!    `started_at`);
 //!    `newest_record_at` (`windowCovered.toMs - 1 ms`) sits beside it. An
 //!    objective measured from the newest record makes an idle topic look stale
 //!    forever; one measured from `finishedAt` under-reports the gap by the
