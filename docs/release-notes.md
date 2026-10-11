@@ -3031,8 +3031,8 @@ bounds what a backup signs ([kubernetes.md](kubernetes.md) §7b.5):
   grant. A point whose record could not be read is listed by its point id
   alone, with nothing a restore could bind to, and is never selectable; in a
   full view it gives its place to a point with a record, and an entry with a
-  record gives its place only to a newer one (item 70). A record read that did not answer leaves the walk
-  incomplete until a sync reads it. `counts` and the `Synced` message
+  record gives its place only to a newer one (item 70). A record read that
+  did not answer leaves the walk incomplete until a sync reads it. `counts` and the `Synced` message
   separate a size and a content fault from a permission or transport
   failure.
 
