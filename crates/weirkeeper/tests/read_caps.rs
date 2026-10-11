@@ -348,6 +348,24 @@ const CHILD_LINE: &str = "[fx31-child]";
 /// Linux and bytes on macOS). Read by the CHILD at its end, so each child
 /// reports only its own peak and no ordering between children matters.
 fn self_peak_rss() -> u64 {
+    // Linux keeps `ru_maxrss` across `execve`, so a child reports its parent's
+    // peak when that was higher, and a difference between two children is
+    // noise (main `dff411ad`'s CI: the parsed-tree control "added" less than
+    // the document). The child's own address space has its own high-water
+    // mark, `VmHWM`, reset at exec.
+    if cfg!(target_os = "linux") {
+        if let Some(kib) = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status.lines().find_map(|l| {
+                    l.strip_prefix("VmHWM:")
+                        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                })
+            })
+        {
+            return kib * 1024;
+        }
+    }
     let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
         .expect("getrusage(RUSAGE_SELF)");
     let max = u64::try_from(usage.max_rss()).unwrap_or(0);
