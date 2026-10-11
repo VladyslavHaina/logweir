@@ -1078,15 +1078,46 @@ fn scan_rust_readers(base: &Path, dirs: &[&str], skip: &[&str]) -> (usize, Vec<S
     (scanned, found)
 }
 
+/// The `.rs` files under `crates/` that gate code on the `e2e` feature: the
+/// `--features e2e` rows, which dial the stack too (PROD-01.5b).
+fn crate_e2e_files() -> Vec<String> {
+    let mut files = Vec::new();
+    rs_files_recursive(&root().join("crates"), &mut files);
+    files
+        .into_iter()
+        .filter(|f| {
+            std::fs::read_to_string(f).is_ok_and(|t| {
+                t.lines().any(|l| {
+                    let l = l.trim_start();
+                    l.starts_with("#![cfg(feature = \"e2e\")]")
+                        || l.starts_with("#[cfg(feature = \"e2e\")]")
+                })
+            })
+        })
+        .map(|f| {
+            f.strip_prefix(root())
+                .expect("under the root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect()
+}
+
 /// **The sweep's guard.** No e2e suite or support module (at any depth under
-/// `e2e/tests/` or `e2e/src/`), and none of the scripts that address the stack,
-/// spells a default-stack host address in CODE: every one goes through
-/// `harness/stack.rs` or `stack-lib.sh`, so a slot reaches its own stack and
-/// never the default one. (Comments may still name the defaults.)
+/// `e2e/tests/` or `e2e/src/`), no `--features e2e` row under `crates/`, and
+/// none of the scripts that address the stack, spells a default-stack host
+/// address in CODE: every one goes through `harness/stack.rs` or
+/// `stack-lib.sh`, so a slot reaches its own stack and never the default one.
+/// (Comments may still name the defaults.) One file under `crates/` is not
+/// read: `crates/logweir/src/doctor.rs`, whose unit tests carry
+/// `localhost:9092` and `localhost:9000` as DATA (a spec handed to a stub
+/// reader, an error text) and whose one e2e row dials `127.0.0.1:1`.
 ///
 /// Mutant: put `"http://localhost:9000"` back into `pitr_boundary.rs`'s
-/// restore spec → fails naming the file and line. A planted twin in a
-/// SUBDIRECTORY is `the_sweep_reaches_support_modules_in_subdirectories`.
+/// restore spec, or `"localhost:9092"` back into
+/// `crates/logweir-kafka/tests/live.rs` → fails naming the file and line. A
+/// planted twin in a SUBDIRECTORY is
+/// `the_sweep_reaches_support_modules_in_subdirectories`.
 #[test]
 fn no_stack_reader_hard_codes_a_default_host_address() {
     let (mut scanned, mut found) = scan_rust_readers(
@@ -1098,7 +1129,20 @@ fn no_stack_reader_hard_codes_a_default_host_address() {
         scanned += 1;
         found.extend(literal_addresses(rel, &read(rel), "#"));
     }
-    assert!(scanned >= 14, "scanned only {scanned} files");
+    let crate_rows = crate_e2e_files();
+    assert!(
+        crate_rows.len() >= 6,
+        "found only {} `--features e2e` files under crates/: {crate_rows:?}",
+        crate_rows.len()
+    );
+    for rel in crate_rows
+        .iter()
+        .filter(|r| *r != "crates/logweir/src/doctor.rs")
+    {
+        scanned += 1;
+        found.extend(literal_addresses(rel, &read(rel), "//"));
+    }
+    assert!(scanned >= 19, "scanned only {scanned} files");
     assert!(
         found.is_empty(),
         "{} code line(s) hard-code a DEFAULT-stack host address, so on another slot they \

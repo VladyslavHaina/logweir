@@ -10,6 +10,7 @@
 //! | `scram256` | `scramSha256` | `SCRAM256` (`LOGWEIR_E2E_AUTH_SCRAM256_PORT`) | SASL_PLAINTEXT |
 //! | `scram256-tls` | `scramSha256` | `PLAINTLS` (it serves SCRAM-SHA-256 too) | SASL_SSL, private CA |
 //! | `mtls` | `mtls` | `MTLS` (`LOGWEIR_E2E_AUTH_MTLS_PORT`) | SSL, client certificate required |
+//! | `scram512-tls` | `scramSha512` | `SCRAM512TLS` (`LOGWEIR_E2E_AUTH_SCRAM512_TLS_PORT`), SCRAM-SHA-512 only | SASL_SSL, private CA: Amazon MSK's SASL/SCRAM shape (PROD-01.2a) |
 //!
 //! Each row runs a real `logweir backup run` (phase −1's cluster-id and
 //! DescribeConfigs reads through LOGWEIR'S librdkafka client, then the pinned
@@ -23,8 +24,9 @@
 //!
 //! NEGATIVE CONTROLS, each REQUIRING the refusal it records: a wrong password
 //! (PLAIN, SCRAM-SHA-256 with and without TLS), a wrong CA (every TLS row), an
-//! untrusted client certificate (mTLS), and PLAIN without TLS (refused by name,
-//! `refusal-reason=PlainWithoutTls`, before any client exists).
+//! untrusted client certificate (mTLS), PLAIN without TLS (refused by name,
+//! `refusal-reason=PlainWithoutTls`, before any client exists), and a
+//! mechanism the SCRAM-SHA-512 listener does not serve.
 //!
 //! Requires the stack with the `auth` profile on the slot the environment
 //! names: `eval "$(e2e/compose/stack-env.sh --slot N --profiles auth)"`,
@@ -75,6 +77,13 @@ const MTLS: Row = Row {
     label: "mtls",
     mode: "mtls",
     port_var: "LOGWEIR_E2E_AUTH_MTLS_PORT",
+    tls: true,
+};
+/// PROD-01.2a: SCRAM-SHA-512 over TLS, on a listener that serves nothing else.
+const SCRAM512_TLS: Row = Row {
+    label: "scram512-tls",
+    mode: "scramSha512",
+    port_var: "LOGWEIR_E2E_AUTH_SCRAM512_TLS_PORT",
     tls: true,
 };
 
@@ -171,6 +180,12 @@ fn client(row: Row, m: &Material) -> RdKafkaReader {
             tls_ca_file: m.ca.as_ref().map(|p| p.display().to_string()),
         },
         "scramSha256" => AuthConfig::ScramSha256 {
+            username: USER.into(),
+            password: m.password.clone().unwrap(),
+            tls: row.tls,
+            tls_ca_file: m.ca.as_ref().map(|p| p.display().to_string()),
+        },
+        "scramSha512" => AuthConfig::ScramSha512 {
             username: USER.into(),
             password: m.password.clone().unwrap(),
             tls: row.tls,
@@ -570,6 +585,11 @@ fn mtls_backs_up_restores_and_verifies() {
     backup_restore_verify(MTLS);
 }
 
+#[test]
+fn scram_sha_512_over_tls_backs_up_restores_and_verifies() {
+    backup_restore_verify(SCRAM512_TLS);
+}
+
 // ---------------------------------------------------------------------------
 // NEGATIVE CONTROLS — each requires the refusal, and runs beside its control.
 // ---------------------------------------------------------------------------
@@ -622,7 +642,7 @@ const TLS_FAILED: [&str; 5] = [
 
 #[test]
 fn a_wrong_password_is_refused_on_every_sasl_mode() {
-    for row in [PLAIN, SCRAM256, SCRAM256_TLS] {
+    for row in [PLAIN, SCRAM256, SCRAM256_TLS, SCRAM512_TLS] {
         let mut m = good(row);
         m.password = Some("definitely-not-the-password".into());
         // Logweir's own client refuses first: phase −1 reads the cluster id.
@@ -644,7 +664,7 @@ fn a_wrong_password_is_refused_on_every_sasl_mode() {
 
 #[test]
 fn a_wrong_ca_is_refused_on_every_tls_mode() {
-    for row in [PLAIN, SCRAM256_TLS, MTLS] {
+    for row in [PLAIN, SCRAM256_TLS, MTLS, SCRAM512_TLS] {
         let mut m = good(row);
         m.ca = Some(certs().join("wrong-ca.pem"));
         assert!(
@@ -720,4 +740,40 @@ fn plain_without_tls_is_refused_by_name_before_dialling() {
     );
     assert!(!receipt.exists());
     assert_no_secret("plain-clear", "the refusal", &text(&out), &m);
+}
+
+/// **PROD-01.2a's control: the SCRAM-SHA-512 listener refuses another
+/// mechanism.** The right user, password and CA, asking for SCRAM-SHA-256 on
+/// the listener that enables SCRAM-SHA-512 only: Logweir's client cannot read
+/// the cluster id, and a backup fails before an archive exists, naming the
+/// broker's refusal of the mechanism. CONTROL: SCRAM-SHA-512 there
+/// authenticates.
+#[test]
+fn a_wrong_mechanism_is_refused_on_the_scram_sha_512_listener() {
+    let wrong = Row {
+        label: "scram512-tls-asked-256",
+        mode: "scramSha256",
+        ..SCRAM512_TLS
+    };
+    let m = good(wrong);
+    assert!(
+        client(wrong, &m).cluster_id().is_err(),
+        "SCRAM-SHA-256 authenticated on a SCRAM-SHA-512-only listener"
+    );
+    assert_refused(
+        wrong,
+        &m,
+        &[
+            "Unsupported SASL mechanism",
+            "not supported by broker",
+            "UnsupportedSaslMechanism",
+        ],
+        "a mechanism the listener does not serve",
+    );
+    assert!(
+        client(SCRAM512_TLS, &good(SCRAM512_TLS))
+            .cluster_id()
+            .is_ok(),
+        "the control (SCRAM-SHA-512) must authenticate"
+    );
 }

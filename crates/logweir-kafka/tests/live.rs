@@ -1,10 +1,25 @@
 #![cfg(feature = "e2e")]
 use logweir_kafka::{rdkafka_reader::RdKafkaReader, reader::AuthConfig, reader::ClusterReader};
 
-/// Requires `just e2e-up`. LOGWEIR_TEST_BOOTSTRAP defaults to localhost:9092.
+/// The stack this process addresses, read as the e2e package reads it (the
+/// same module, compiled in), so these rows run on any compose slot
+/// (PROD-01.5b). `LOGWEIR_TEST_BOOTSTRAP` and `LOGWEIR_TEST_SASL_BOOTSTRAP`
+/// still override.
+#[path = "../../../e2e/tests/harness/stack.rs"]
+#[allow(dead_code)]
+mod stack;
+
+fn plain_bootstrap() -> String {
+    std::env::var("LOGWEIR_TEST_BOOTSTRAP").unwrap_or_else(|_| stack::bootstrap())
+}
+
+fn sasl_bootstrap() -> String {
+    std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| stack::bootstrap_sasl())
+}
+
+/// Requires `just e2e-up` on the stack the environment names.
 fn reader() -> RdKafkaReader {
-    let bs = std::env::var("LOGWEIR_TEST_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
-    RdKafkaReader::connect(&[bs], AuthConfig::Plaintext).unwrap()
+    RdKafkaReader::connect(&[plain_bootstrap()], AuthConfig::Plaintext).unwrap()
 }
 
 #[test]
@@ -43,9 +58,8 @@ use logweir_kafka::reader::NewTopicSpec;
 use std::time::Duration;
 
 fn check_client() -> KafkaInventory {
-    let bs = std::env::var("LOGWEIR_TEST_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into());
     KafkaInventory::connect(&ConnectionSettings {
-        bootstrap_servers: vec![bs],
+        bootstrap_servers: vec![plain_bootstrap()],
         auth: AuthConfig::Plaintext,
         timeouts: ProbeTimeouts::for_budget(Duration::from_secs(30)),
     })
@@ -190,15 +204,13 @@ fn describe_configs_reads_the_broker_and_a_topic() {
 /// `MetadataTimeout`, and an operator with a wrong password is sent to look at
 /// the network.
 ///
-/// The SASL listener published at `localhost:9097` authenticates against the
+/// The stack's SASL listener (`SASLEXT`, published on the host) authenticates against the
 /// broker's SCRAM credential store. This test names a principal that is not in
 /// it, so it needs no `scram-setup` step and cannot be made to pass by one.
 #[test]
 fn a_refused_scram_credential_is_authentication_failed_and_not_a_timeout() {
-    let bs =
-        std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| "localhost:9097".into());
     let c = KafkaInventory::connect(&ConnectionSettings {
-        bootstrap_servers: vec![bs],
+        bootstrap_servers: vec![sasl_bootstrap()],
         auth: AuthConfig::from_spec(
             &logweir_core::spec::AuthSpec::ScramSha512 {
                 username: "no-such-principal".to_string(),
@@ -255,10 +267,8 @@ fn a_refused_scram_credential_is_authentication_failed_and_not_a_timeout() {
 /// whole point of the case.
 #[test]
 fn an_admin_first_refusal_is_authentication_failed_and_not_a_timeout() {
-    let bs =
-        std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| "localhost:9097".into());
     let c = KafkaInventory::connect(&ConnectionSettings {
-        bootstrap_servers: vec![bs],
+        bootstrap_servers: vec![sasl_bootstrap()],
         auth: AuthConfig::from_spec(
             &logweir_core::spec::AuthSpec::ScramSha512 {
                 username: "no-such-principal".to_string(),

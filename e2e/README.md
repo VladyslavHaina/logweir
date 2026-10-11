@@ -51,7 +51,7 @@ their one list is [`compose/stack-lib.sh`](compose/stack-lib.sh):
 | `LOGWEIR_E2E_SASL_PORT` | 9097 | `SASLEXT` host port and its advertisement |
 | `LOGWEIR_E2E_S3_PORT` | 9000 | MinIO's S3 API |
 | `LOGWEIR_E2E_S3_CONSOLE_PORT` | 9001 | MinIO's console |
-| `LOGWEIR_E2E_<PROFILE>_PORT` ×9 | 9102-9141 | each optional profile's ports (below) |
+| `LOGWEIR_E2E_<PROFILE>_PORT` ×22 | 9102-9151 | each optional profile's ports (below) |
 | `KAFKA_VERSION` | `.env`'s pin (4.3.1) | the broker line (`--kafka`) |
 | `KAFKA_IMAGE` | unset | the broker image, pinned by digest (`--kafka LINE`) |
 | `COMPOSE_PROFILES` | none | the optional profiles (`--profiles`) |
@@ -61,7 +61,7 @@ slot has its own network.
 
 **Anything but one coherent stack is refused.** The project must be
 `logweir-e2e` (or unset) or `logweir-e2e-sN`, and EVERY port — the five above
-and the nine profile ports — must be exactly that slot's; an unknown
+and every profile port — must be exactly that slot's; an unknown
 `LOGWEIR_E2E_*_PORT` is refused too. `just e2e-up`, `just e2e-down`,
 `scripts/mvp-demo.sh`, `scripts/e2e-seed.sh` and
 `compose/profile-smoke.sh` check first (`stack-env.sh --check`), and so does the
@@ -82,14 +82,16 @@ tracked fixtures on a slot (it refuses `LOGWEIR_SEED_REFRESH_FIXTURES=1` there).
 anything else keeps a copy of it, if the shell and the harness refuse different
 environments, if a slot switch leaves a variable behind, if a published port or
 a host-facing advertisement is a literal, if `just e2e-down` misses a profile,
-if an e2e suite or stack script spells a default-stack address (any of the 14
-ports) in code, or if a function runs `docker compose` without checking
+if an e2e suite, a `--features e2e` row under `crates/` or a stack script
+spells a default-stack address (any published port) in code, or if a function runs `docker compose` without checking
 coherence first (`stack::ensure_coherent()`).
 
-**What does not move yet.** On a non-default slot `just e2e` runs only the `e2e`
-package: the `--features e2e` rows under `crates/` still dial
-`localhost:9092` / `localhost:9000` and would reach the default stack, so they
-run on the default stack.
+**The `--features e2e` rows under `crates/`** (`logweir-kafka`'s `live`,
+`logweir-store`'s `minio_options`, `logweir`'s `catalog_minio` and the live
+rows of `check_cli`) compile the same `tests/harness/stack.rs` in, so they
+follow the slot too, and `just e2e` runs the whole workspace on any stack
+(PROD-01.5b). `LOGWEIR_TEST_BOOTSTRAP`, `LOGWEIR_TEST_SASL_BOOTSTRAP` and
+`LOGWEIR_TEST_S3_ENDPOINT` still override them.
 
 **Cluster ids.** Each Kafka cluster loads its id from
 `compose/slots/<project>/<cluster>.env`: `kafka-broker-1.env`,
@@ -183,17 +185,20 @@ container with `timeout` or `gtimeout` when present (this host's
 
 | Profile | Services | What it provides | Ports (default) | Owner (first consumers) |
 |---|---|---|---|---|
-| `auth` | `kafka-auth` (+ certs, setup) | A separate single-node cluster: SASL_SSL/PLAIN on 9102, SASL_PLAINTEXT/SCRAM-SHA-256 on 9103, SSL with a required client certificate on 9104, all advertised as `localhost:<port>`. User `logweir`, password `logweir-e2e-not-a-secret`. A throwaway test CA, broker and client certificates and a wrong CA in `.e2e/auth/<project>/`. | 9102-9104 | PROD-01.3 |
+| `auth` | `kafka-auth` (+ certs, setup) | A separate single-node cluster: SASL_SSL/PLAIN on 9102, SASL_PLAINTEXT/SCRAM-SHA-256 on 9103, SSL with a required client certificate on 9104, and SASL_SSL with SCRAM-SHA-512 and no other mechanism on 9105 (PROD-01.2a: Amazon MSK's SCRAM shape), all advertised as `localhost:<port>`. User `logweir`, password `logweir-e2e-not-a-secret`, with a SCRAM-SHA-256 and a SCRAM-SHA-512 credential. A throwaway test CA, broker and client certificates and a wrong CA in `.e2e/auth/<project>/`. | 9102-9105 | PROD-01.3 |
 | `cluster3` | `kafka-c3-1..3` | A three-node KRaft cluster, replication factor 3 and `min.insync.replicas` 2 by default | 9112-9114 | the orchestrator until PROD-10.1 starts (FX-5 and PROD-05.1 use it first; FX-3's `new_topic_parity.rs` and FX-21's `replication_factor_parity.rs`). PROD-01.2's `compat_contract.rs::a_three_broker_cluster_is_answered_by_every_broker_or_not_at_all` reads it and FREEZES one node that is not the active controller (`docker compose pause`) for about a minute, then unfreezes it and waits for three brokers again: do not run it beside another row on the same stack |
 | `cluster2` | `kafka-cluster2` (+ setup) | A second single-node cluster with its own cluster id and the marker topic | 9122 | PROD-11.1 (PROD-04.2, PROD-12.1) |
 | `autocreate` | `kafka-autocreate` | A single-node cluster that AUTO-CREATES topics (`auto.create.topics.enable=true`, Kafka's default, which every other broker here turns off), with its own cluster id and no marker topic. Harness: `bootstrap_autocreate()` | 9126 | PROD-15.1 (`e2e/tests/original_name.rs`) |
 | `objectstore` | `objectstore` (+ setup) | SeaweedFS 4.48 beside MinIO: `kafka-backups`, `logweir-evidence`, `kafka-backups-locked` (Object Lock) and `kafka-backups-2`, credentials `minioadmin`/`minioadmin` | 9130 | PROD-09.1 (PROD-09.2, REPLACE-MINIO) |
+| `rustfs` | `rustfs` (+ setup) | RustFS 1.0.0, pinned by digest, beside MinIO: `kafka-backups` and `logweir-evidence`, credentials `minioadmin`/`minioadmin`. Harness: `rustfs_endpoint()` | 9131 | PROD-01.2a (`tests/compat_contract.rs`) |
+| `versitygw` | `versitygw` (+ setup) | versitygw v1.8.0, pinned by digest, its POSIX backend with a versioning directory, beside MinIO: the same two buckets and credentials. Harness: `versitygw_endpoint()` | 9132 | PROD-01.2a (`tests/compat_contract.rs`) |
 | `registry` | `registry`, `registry-rest` | Karapace 6.2.3, Schema-Registry-compatible, schemas in `_schemas` on `kafka-broker-1`, BACKWARD compatibility; and its REST proxy (Confluent REST v2: `POST /topics/<t>` in `avro`, `jsonschema` or `protobuf` writes records in the Confluent wire format, registering their schemas in `registry`). Logweir never talks to either: PROD-03.0's row (`tests/schema_dependency.rs`) produces through the proxy, then stops both before the backup | 9141, 9142 | PROD-03.0 (PROD-03.1, 03.2) |
 | `streams` | `streams-wordcount` (+ topics) | Apache Kafka's WordCountDemo from the broker line's own image, group `logweir-e2e-wordcount`, in-memory state stores | none | PROD-06.1 (PROD-04.x, 06.2) |
 | `streams-protocol` | `streams-protocol-wordcount` (+ topics) | The same idea on the STREAMS rebalance protocol (KIP-1071, `group.protocol=streams`): Apache Kafka's WordCountProcessorDemo, group `logweir-e2e-streams-protocol`, a Streams group that `kafka-groups.sh --list` types `Streams` and the consumer-group tools do not show. It reads `streams-plaintext-input` and writes `streams-wordcount-processor-output`, so it runs beside `streams` (two WordCountDemos would share one output topic). In-memory store, changelog-backed, no repartition topic; counts are forwarded on stream-time punctuation, i.e. once a later record arrives. **4.x lines only** (measured on 4.3.1): on 3.x the application exits and `up --wait` fails. The groups fixture's streams member | none | PROD-04.0d (PROD-04.1, 04.2, 06.1, 06.x) |
 | `acl` | `kafka-acl` (+ setup) | A single-node cluster that ENFORCES ACLs (KRaft's StandardAuthorizer, `super.users=User:ANONYMOUS`, `allow.everyone.if.no.acl.found=true`). Every PLAINTEXT client, in-network on `kafka-acl:9094` or host-side on 9150, is `User:ANONYMOUS`, a super user; the SCRAM-SHA-512 user `logweir` (password `logweir-e2e-not-a-secret`) on 9151 is the restricted principal a row's ACLs name. The marker topic exists. PROD-04.0 §3.9's visibility state is opt-in: `e2e/compose/groups.sh visibility apply` / `remove` (below). Harness: `bootstrap_acl()`, `bootstrap_acl_sasl()` | 9150-9151 | FX-4 (PROD-04.0d extends it; PROD-04.1's `position_evidence.rs`, 04.2, PROD-05.1's `topic_configuration.rs`, run on `--kafka 3.9` and `--kafka 4.3`; PROD-05.3; PROD-01.4a's `topic_ids.rs`, a DescribeTopics refused by name) |
 | `redpanda` | `redpanda` (+ setup) | One Redpanda v26.2.4 node, pinned by digest: a Kafka-compatible endpoint that is not Apache Kafka. PLAINTEXT on 9124; SASL_PLAINTEXT on 9125, where user `logweir` authenticates with SCRAM-SHA-256 and `logweir512` with SCRAM-SHA-512 (Redpanda holds one mechanism per user), both with the fixture password. Authorization is off. `orders` (3 partitions) and the marker topic exist; topic auto-creation is off. Its cluster id is `redpanda.<uuid>`, new at every first start. Redpanda is under the Business Source License 1.1; the image is pulled, never redistributed. | 9124, 9125 | PROD-01.2 (`tests/compat_contract.rs`) |
 | `confluent` | `kafka-cp` (+ setup) | One Confluent Platform 8.3.2 broker from the image `confluentinc/cp-kafka`, pinned by digest (Confluent's build of Apache Kafka, `8.3.2-ccs`; not `cp-server`; its Kafka jars carry the Apache-2.0 text, and the terms of the image as a whole are not stated in it: the decision record, §4.2). PLAINTEXT on 9128. Its own cluster id per stack, `orders` (3 partitions) and the marker topic. A third listener, OFFNET on 9129, is the advertised-address failure: it answers a bootstrap and advertises `127.0.0.1:1`, where nothing listens, so a connection test over it passes and no request to the advertised broker can. | 9128, 9129 (9126 is `autocreate`'s) | PROD-01.2 (`tests/compat_contract.rs`) |
+| `faultproxy` | `kafka-faulty`, `faultproxy` | A single-node cluster whose host-facing listener is advertised as a proxy's address, so every request a client sends crosses [`compose/profiles/faultproxy/faultproxy.py`](compose/profiles/faultproxy/faultproxy.py). The proxy forwards everything and, armed over its control port (one line per connection: `arm drop N`, `arm hold N MS`, `off`, `stats`), drops or holds the response to the Nth Produce request since it was armed: the broker appended the record and the client never hears so, a lost acknowledgement. The proxy is Python's standard library on the `registry` profile's pinned image, in the broker's network namespace. Its own cluster id per stack; no marker topic. Harness: `bootstrap_faultproxy()`, `faultproxy_control()`; the proxy's proof is `tests/fault_proxy.rs` | 9143, 9144 | PROD-01.5d (07.1-R9 in PROD-07.3, A-C5-1 in PROD-00.3d) |
 | `txn` | reserved | The transactional producer PROD-01.1 builds | — | PROD-01.1 |
 
 The **owner** changes a profile's services without asking; anyone else extends
@@ -303,6 +308,21 @@ the ACLs, both groups and the topic.
 Owner: PROD-04.0d; PROD-04.1, 04.2 and 05.3 are the first consumers. Extend it
 as a profile is extended; a new member or group goes in `groups.sh`'s `SET`
 and in `smoke_groups`.
+
+## The weekly compatibility job
+
+`.github/workflows/compat-weekly.yml` (PROD-01.2a) runs the compatibility
+contract's rows that need a profile CI's e2e job does not start, by name, every
+Monday and on `workflow_dispatch`: one runner and one default stack per entry
+(`confluent`; `redpanda`; `objectstore,rustfs,versitygw` with the directory
+archive row; `registry`), with the engine built from the vendored source as CI
+builds it. It needs no secret. A new hand-run row that needs a profile goes in
+one entry's `rows`. Its `operator-archives` job (PROD-00.3o) runs
+`scripts/archive-compat.sh`: `fixtures` fails if a published version's (`v*`
+tag's) archive fixtures are no longer in the tree, and `engines` seeds a fresh
+stack with each engine a published version pinned, puts the pin back and
+drills that archive with the checkout's engine. On a slot:
+`eval "$(e2e/compose/stack-env.sh --slot N)"; scripts/archive-compat.sh engines`.
 
 ## CI's e2e job: four shards
 

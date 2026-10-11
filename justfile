@@ -313,7 +313,7 @@ e2e-up:
 # stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
-    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile autocreate --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl --profile redpanda --profile confluent down -v --remove-orphans
+    docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile autocreate --profile streams --profile streams-protocol --profile objectstore --profile registry --profile acl --profile redpanda --profile confluent --profile faultproxy --profile rustfs --profile versitygw down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
 # in the environment, `AmazonS3Builder::from_env()` falls through to the EC2
@@ -335,28 +335,16 @@ e2e-down:
 # reporting every failure is both safe and the only way the run is diagnostic.
 # cargo's own exit code is unchanged: non-zero if any binary failed.
 #
-# PROD-01.5: on a NON-default slot only the `e2e` package runs. Its harness
-# reads the slot's ports (`e2e/tests/harness/stack.rs`); the `--features e2e`
-# rows under `crates/` still dial the default ports (9092, 9000) and would
-# reach whoever owns the default stack, so they are refused there and named
-# instead. `cargo build -p logweir` first for the reason `pitr` gives (a
-# `-p e2e` run does not rebuild the binary). The default stack runs exactly
-# the command it always ran.
+# Every stack, a slot included, runs the same command: the e2e package and the
+# `--features e2e` rows under `crates/` all read the stack's addresses from
+# `e2e/tests/harness/stack.rs` (PROD-01.5, 01.5b), so a slot never reaches the
+# default stack.
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     . e2e/compose/stack-lib.sh
     lw_e2e_check_coherent
-    if lw_e2e_is_default; then
-      AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e --no-fail-fast -- --test-threads=1 --nocapture
-    else
-      echo "e2e: stack $LW_E2E_PROJECT is not the default one; running the e2e package only."
-      echo "e2e: NOT run here (they dial localhost:9092 / :9000): the --features e2e rows of"
-      echo "e2e: logweir-kafka, logweir-store, logweir-engine-oso and logweir. Run those on the"
-      echo "e2e: default stack, under claude/compose-lock.sh."
-      cargo build -p logweir
-      AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --no-fail-fast -- --test-threads=1 --nocapture
-    fi
+    AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e --no-fail-fast -- --test-threads=1 --nocapture
 
 # Produce, back up with the pinned engine, and refresh the two fixtures that
 # must come from a REAL archive. Needs a FRESH stack (`e2e-down` then `e2e-up`);
@@ -389,7 +377,7 @@ engine:
 # http/https are never fetched (Global Constraint 17); this is a repository
 # integrity check, not a network check.
 links:
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/ deploy/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/README.md e2e/fixtures/ ui/ charts/ deploy/
 
 # Task 22. The v0.1.0 definition of done, as far as it is mechanically
 # checkable without GitHub Actions or a live stack. Prints what it could NOT

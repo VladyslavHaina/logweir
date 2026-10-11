@@ -7613,6 +7613,14 @@ fn the_relay_bounds_are_the_controllers() {
 //     just e2e-up
 //     cargo test --locked -p logweir --features e2e --test check_cli -- --test-threads=1
 //     just e2e-down
+/// The stack this process addresses, read as the e2e package reads it (the
+/// same module, compiled in), so the live rows run on any compose slot
+/// (PROD-01.5b).
+#[cfg(feature = "e2e")]
+#[path = "../../../e2e/tests/harness/stack.rs"]
+#[allow(dead_code)]
+mod stack;
+
 #[cfg(feature = "e2e")]
 mod live {
     use super::*;
@@ -7623,15 +7631,15 @@ mod live {
     /// combination `AuthConfig::with_tls_ca_file` refuses a CA for, and the
     /// one the e2e stack really serves.
     fn sasl_bootstrap() -> String {
-        std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| "localhost:9097".into())
+        std::env::var("LOGWEIR_TEST_SASL_BOOTSTRAP").unwrap_or_else(|_| stack::bootstrap_sasl())
     }
 
     fn plain_bootstrap() -> String {
-        std::env::var("LOGWEIR_TEST_BOOTSTRAP").unwrap_or_else(|_| "localhost:9092".into())
+        std::env::var("LOGWEIR_TEST_BOOTSTRAP").unwrap_or_else(|_| stack::bootstrap())
     }
 
     fn s3_endpoint() -> String {
-        std::env::var("LOGWEIR_TEST_S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into())
+        std::env::var("LOGWEIR_TEST_S3_ENDPOINT").unwrap_or_else(|_| stack::s3_endpoint())
     }
 
     const SCRAM_USER: &str = "logweir";

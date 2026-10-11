@@ -78,8 +78,9 @@ T=/opt/kafka/bin
 FAST="request.timeout.ms=10000\ndefault.api.timeout.ms=15000\nsocket.connection.setup.timeout.ms=5000\nsocket.connection.setup.timeout.max.ms=5000"
 
 smoke_auth() {
-  local plain scram mtls
+  local plain scram mtls s512
   plain=$(lw_e2e_port LOGWEIR_E2E_AUTH_PLAIN_PORT)
+  s512=$(lw_e2e_port LOGWEIR_E2E_AUTH_SCRAM512_TLS_PORT)
   scram=$(lw_e2e_port LOGWEIR_E2E_AUTH_SCRAM256_PORT)
   mtls=$(lw_e2e_port LOGWEIR_E2E_AUTH_MTLS_PORT)
   [ -s "$CERTS/ca.pem" ] || { fail auth.certs "no $CERTS/ca.pem — is the auth profile up?"; return; }
@@ -97,6 +98,12 @@ smoke_auth() {
   cfg="security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-256\nssl.truststore.type=PEM\nssl.truststore.location=/certs/ca.pem\n$FAST"
   out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$plain --command-config /tmp/c --list")
   if printf '%s' "$out" | grep -qx logweir.scratch; then pass auth.scram-sha-256-tls "localhost:$plain lists the marker topic over SCRAM-SHA-256/TLS"; else fail auth.scram-sha-256-tls "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  # SCRAM-SHA-512 over TLS, on a listener that serves nothing else (PROD-01.2a) ----
+  cfg="security.protocol=SASL_SSL\nsasl.mechanism=SCRAM-SHA-512\nssl.truststore.type=PEM\nssl.truststore.location=/certs/ca.pem\n$FAST"
+  out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s512 --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -qx orders; then pass auth.scram-sha-512-tls "localhost:$s512 lists orders over SCRAM-SHA-512/TLS"; else fail auth.scram-sha-512-tls "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(hostside "printf '$(printf '%s' "$cfg" | sed 's/SCRAM-SHA-512/SCRAM-SHA-256/')\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$s512 --command-config /tmp/c --list")
+  if printf '%s' "$out" | grep -q -i 'UnsupportedSaslMechanism\|Unsupported SASL mechanism'; then pass auth.scram-sha-512-tls.other-mechanism-refused "SCRAM-SHA-256 refused there"; else fail auth.scram-sha-512-tls.other-mechanism-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   # SCRAM-SHA-256 ------------------------------------------------------------------
   cfg="security.protocol=SASL_PLAINTEXT\nsasl.mechanism=SCRAM-SHA-256\n$FAST"
   out=$(hostside "printf '$cfg\nsasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username=\"logweir\" password=\"$PASSWORD\";\n' > /tmp/c; $T/kafka-topics.sh --bootstrap-server localhost:$scram --command-config /tmp/c --list")
@@ -233,6 +240,20 @@ smoke_objectstore() {
   out=$(s3 "$in" minioadmin get-object --bucket kafka-backups-locked --key "$RUN/locked" --version-id "$vid" /tmp/got --query VersionId --output text)
   if [ "$(printf '%s' "$out" | tail -1 | tr -d '[:space:]')" = "$vid" ]; then pass objectstore.read-by-version-id "GET ?versionId=$vid"; else fail objectstore.read-by-version-id "$(printf '%s' "$out" | tail -1)"; fi
   s3 "$in" minioadmin delete-object --bucket kafka-backups-locked --key "$RUN/locked" --version-id "$vid" --bypass-governance-retention > /dev/null
+}
+
+# PROD-01.2a: one of the other S3 servers (`rustfs`, `versitygw`): its buckets
+# over the PUBLISHED port, a wrong secret refused, and conditional create (the
+# second create of one key refused), which Logweir's execution claim needs.
+smoke_s3store() { # NAME IN-NETWORK-ENDPOINT PORT-VARIABLE
+  local name=$1 in=$2 out host
+  host="http://host.docker.internal:$(lw_e2e_port "$3")"
+  out=$(s3 "$host" minioadmin list-buckets --query 'Buckets[].Name' --output text)
+  if printf '%s' "$out" | grep -q kafka-backups && printf '%s' "$out" | grep -q logweir-evidence; then pass "$name.buckets" "via the PUBLISHED port ($host): $(printf '%s' "$out" | tr -s '\t\n' ' ')"; else fail "$name.buckets" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
+  out=$(s3 "$in" not-the-secret list-objects-v2 --bucket kafka-backups)
+  if printf '%s' "$out" | grep -q 'SignatureDoesNotMatch\|AccessDenied\|InvalidAccessKeyId'; then pass "$name.wrong-secret-refused" "$(printf '%s' "$out" | grep -o 'SignatureDoesNotMatch\|AccessDenied\|InvalidAccessKeyId' | head -1)"; else fail "$name.wrong-secret-refused" "$(printf '%s' "$out" | tail -1)"; fi
+  out=$(s3 "$in" minioadmin "put-object --bucket kafka-backups --key $RUN/claim --body /tmp/a --if-none-match '*' && echo FIRST-CREATED && aws --endpoint-url $in s3api put-object --bucket kafka-backups --key $RUN/claim --body /tmp/b --if-none-match '*'")
+  if printf '%s' "$out" | grep -q 'FIRST-CREATED' && printf '%s' "$out" | grep -q 'PreconditionFailed'; then pass "$name.if-none-match" "first create 200, second 412 PreconditionFailed"; else fail "$name.if-none-match" "$(printf '%s' "$out" | tail -1)"; fi
 }
 
 smoke_registry() {
@@ -537,6 +558,20 @@ smoke_confluent() {
 
 profiles=${*:-$(printf '%s' "${COMPOSE_PROFILES:-}" | tr ',' ' ')}
 [ -n "$profiles" ] || { echo "profile-smoke: no profile named and COMPOSE_PROFILES is empty" >&2; exit 2; }
+smoke_faultproxy() {
+  local p c out want
+  p=$(lw_e2e_port LOGWEIR_E2E_FAULTPROXY_PORT)
+  c=$(lw_e2e_port LOGWEIR_E2E_FAULTPROXY_CTL_PORT)
+  want=$(sed -n 's/^CLUSTER_ID=//p' "e2e/compose/slots/$LW_E2E_PROJECT/kafka-faulty.env")
+  out=$(hostside "$T/kafka-cluster.sh cluster-id --bootstrap-server localhost:$p")
+  if printf '%s' "$out" | grep -qx "Cluster ID: $want"; then pass faultproxy.forwards "localhost:$p reaches kafka-faulty ($want) through the proxy"; else fail faultproxy.forwards "wanted $want: $(printf '%s' "$out" | tail -1)"; fi
+  out=$(hostside "exec 3<>/dev/tcp/localhost/$c; echo stats >&3; cat <&3")
+  if printf '%s' "$out" | grep -q '"mode": "off"'; then pass faultproxy.control "stats: $(printf '%s' "$out" | tail -1)"; else fail faultproxy.control "$(printf '%s' "$out" | tail -1)"; fi
+  # Negative control: an ordinal the proxy cannot count to is refused.
+  out=$(hostside "exec 3<>/dev/tcp/localhost/$c; echo 'arm drop 0' >&3; cat <&3")
+  if printf '%s' "$out" | grep -q '"error"'; then pass faultproxy.bad-command-refused "$(printf '%s' "$out" | tail -1)"; else fail faultproxy.bad-command-refused "$(printf '%s' "$out" | tail -1)"; fi
+}
+
 echo "# profile smoke: project $LW_E2E_PROJECT, broker image $IMG, profiles: $profiles ($(date -u +%FT%TZ))"
 for p in $profiles; do
   case "$p" in
@@ -551,6 +586,9 @@ for p in $profiles; do
     streams-protocol) smoke_streams_protocol ;;
     redpanda) smoke_redpanda ;;
     confluent) smoke_confluent ;;
+    faultproxy) smoke_faultproxy ;;
+    rustfs) smoke_s3store rustfs http://rustfs:9000 LOGWEIR_E2E_RUSTFS_PORT ;;
+    versitygw) smoke_s3store versitygw http://versitygw:7070 LOGWEIR_E2E_VERSITYGW_PORT ;;
     groups) smoke_groups ;;
     *) fail "$p" "no smoke defined for profile $p" ;;
   esac
