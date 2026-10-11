@@ -3257,12 +3257,12 @@ failed run's topics as before.
 
 #### 70. The console's "Restore under the original topic names" box takes effect when ticked (FX-49)
 
-**Changed.** Ticking the restore wizard's original-name box, or its owner
-statement, now redraws the wizard at once: the owner statement, the locked
-*Verify every record* and the plan appear. Before, nothing changed until another
-field was edited (PoC batch 7, F-1). The approval panel now says a `newTopic`
-restore's topics stay on the target cluster, where it printed "nothing is
-deleted (teardown delete)" (F-5).
+**Changed.** Ticking *Restore under the original topic names* in the restore
+wizard, or its owner statement, now redraws the wizard at once: the owner
+statement, the locked *Verify every record* and the plan appear. Before, nothing
+changed until another field was edited (PoC batch 7, F-1). The approval panel
+now says a `newTopic` restore's topics stay on the target cluster, where it
+printed "nothing is deleted (teardown delete)" (F-5).
 **Do:** nothing.
 **Scope:** console rows only (`ui/tests/original-name.spec.js`,
 `ui/tests/console-approval.spec.js`): the mounted wizard driven by `change`
