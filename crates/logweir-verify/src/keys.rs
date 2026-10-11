@@ -39,10 +39,10 @@ impl VerifyingKey {
 
     /// The same parse as `from_pem_file` with no `std::fs`.
     ///
-    /// Two reasons, both of them somebody else's requirement. Task 16's
+    /// Two reasons, both of them somebody else's requirement. The
     /// `TrustRoster` reconciler reads an entry's `spkiPem` out of an API
     /// object and has no file to hand. And it removes one of the two WASM
-    /// blockers spec §8 names, for free — the other, an unconditional
+    /// blockers, for free — the other, an unconditional
     /// `rand_core` + `getrandom`, is exactly what this crate's manifest does
     /// not declare. The WASM verifier itself stays out of tag 1.
     pub fn from_pem_str(pem: &str) -> Result<Self, Error> {

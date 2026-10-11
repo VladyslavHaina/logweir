@@ -149,7 +149,7 @@ pub struct BackupSetFacts {
     pub manifest_version_id: Option<String>,
     /// `sha256:<hex>` of the sibling `consumer-groups-snapshot.json` when the
     /// object is present, else `None`. v0.1 records presence and hash only —
-    /// restoring consumer offsets is a spec §2 non-goal.
+    /// restoring consumer offsets is a non-goal.
     pub consumer_group_snapshot_sha256: Option<String>,
     pub topics: Vec<TopicFacts>,
 }
@@ -744,7 +744,7 @@ pub enum EngineError {
     #[error("operational: {0}")]
     Operational(String),
     /// The KBAK decoder cannot read this segment. The drill records
-    /// integrity.level "consume-only" rather than failing (spec §11).
+    /// integrity.level "consume-only" rather than failing.
     #[error("unsupported: {0}")]
     Unsupported(String),
 }

@@ -1,4 +1,4 @@
-//! **PROD-04.0b's broker glue**: the owned values `logweir-rdkafka-ffi`
+//! **The admin calls' broker glue**: the owned values `logweir-rdkafka-ffi`
 //! returns, moved into the pure decisions of [`crate::groups`] and
 //! [`crate::access`]. No `unsafe` here: this crate keeps
 //! `#![forbid(unsafe_code)]`, and every librdkafka call is the FFI crate's
@@ -137,7 +137,7 @@ impl RdKafkaReader {
         }
     }
 
-    /// **PROD-01.4a: each named topic's ID, through DescribeTopics** (the
+    /// **Each named topic's ID, through DescribeTopics** (the
     /// FFI crate's [`topics::describe_topics`]), at most
     /// [`MAX_DESCRIBE_TOPICS`] names per call, each call bounded by the admin
     /// bound. One verdict per requested name, in order; see
@@ -251,7 +251,7 @@ impl RdKafkaReader {
         out
     }
 
-    /// **PROD-04.0 §5 for every selected id**: one verdict each, from both
+    /// **The group rules for every selected id**: one verdict each, from both
     /// listings, DescribeCluster, and a targeted describe of every id no
     /// listing shows when the listings are not complete (T14). See
     /// [`crate::groups`] for the rules.
@@ -265,7 +265,7 @@ impl RdKafkaReader {
         selected_ids(selected).map_err(KafkaError::Client)?;
         let listings = self.group_listings();
         // The whole decision is `classify_with`'s, pure and unit-tested; this
-        // only supplies the describe call (PROD-04.0b review L3).
+        // only supplies the describe call.
         classify_with(&listings, selected, |ids| {
             self.describe_ids(ids)
                 .into_iter()
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(o.members[0].consumer_id, None);
     }
 
-    /// Review L1: what a whole DescribeTopics failure becomes. No result
+    /// What a whole DescribeTopics failure becomes. No result
     /// within the bound and librdkafka's `_TIMED_OUT` are `Unreachable`; a
     /// refused request is `Client`; none of them is ever "not found".
     #[test]

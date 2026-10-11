@@ -600,11 +600,11 @@ mod tests {
         assert!(is_canonical(&topic_id_text(0, 2).unwrap()));
     }
 
-    /// Review M1's failure, closed: a recreated topic can never read as the
-    /// same generation through the sentinel. Two points whose reads carried
-    /// it record no ID (`reservedTopicId`) and are not established; even
-    /// handed unverified entries carrying the text, the rule does not read it
-    /// as an ID. The control: two real equal IDs are `Same`.
+    /// A recreated topic can never read as the same generation through the
+    /// sentinel. Two points whose reads carried it record no ID
+    /// (`reservedTopicId`) and are not established; even handed unverified
+    /// entries carrying the text, the rule does not read it as an ID. The
+    /// control: two real equal IDs are `Same`.
     #[test]
     fn a_sentinel_id_never_makes_two_points_the_same_generation() {
         let sentinel_read = IdRead::of_halves(0, 1);
@@ -728,7 +728,7 @@ mod tests {
         );
     }
 
-    /// Review M2: equal pre-capture IDs are `Same` only when this capture's
+    /// Equal pre-capture IDs are `Same` only when this capture's
     /// read AFTER the engine recorded the same ID. Whatever the after-read's
     /// reason, the link is not established (the topic may have been recreated
     /// while the engine ran) — never `Same`.
@@ -753,7 +753,7 @@ mod tests {
         );
     }
 
-    /// Review M1, the catalog half: a record copying a reserved or
+    /// The catalog half: a record copying a reserved or
     /// other-alphabet ID is refused; real IDs, nulls and records without the
     /// block pass.
     #[test]
@@ -792,8 +792,8 @@ mod tests {
         assert_eq!(refuse_copied_topic_ids(&serde_json::json!({})), Ok(()));
     }
 
-    /// Review L2: a previous point that itself changed during its capture
-    /// (A before, B after) is followed by a point that reads B: R1 compares the
+    /// A previous point that itself changed during its capture (A before, B
+    /// after) is followed by a point that reads B: the rule compares the
     /// PRE-capture IDs, A and B, so the link is a new generation — never `Same`
     /// through the previous point's after-read.
     #[test]

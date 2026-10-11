@@ -1,5 +1,5 @@
-//! **PROD-04.0a's broker glue: a consumer bound to ONE group id that can
-//! only read and commit that group's positions** (PROD-04.0 §4.3). The
+//! **The positions' broker glue: a consumer bound to ONE group id that can
+//! only read and commit that group's positions.** The
 //! decisions live in [`crate::positions`]; this module only moves values
 //! between them and rust-rdkafka 0.36.2's safe consumer API. No `unsafe`.
 //!
@@ -277,7 +277,7 @@ mod tests {
     /// **Every key that makes the handle a non-member reading STABLE
     /// positions is pinned.** No socket: `ClientConfig` is a map until
     /// `create()`. Each assertion is a mutant's failure: `read_uncommitted`
-    /// would read a pending transaction's pre-transaction position (§3.4),
+    /// would read a pending transaction's pre-transaction position,
     /// `consumer` would change the commit's non-member shape and make
     /// librdkafka refuse `session.timeout.ms`, and auto-commit would write
     /// positions nobody asked for.
@@ -414,14 +414,13 @@ mod tests {
     /// The bound the bound rows use: librdkafka's minimum this crate accepts.
     const UNIT_BOUND: Duration = crate::positions::MIN_POSITION_BOUND;
     /// What an unanswered call may take beyond its bound. Measured on the
-    /// development host (2026-10-08, five runs, other builds running): a fetch
-    /// returned 2000.9–2003.3 ms after a 2 s bound and a commit 2001.8–2007.1 ms
-    /// (`artifacts/prod-04-0a/fix-bound-measure.log`). The commit can also wait
-    /// up to one more second for librdkafka's timeout scan, which runs once a
-    /// second (`rdkafka_cgrp.c:5809-5830`). So the margins are 1.5 s over the
-    /// fetch's bound and 2.5 s over the commit's: room for a loaded CI runner,
-    /// and far below what a dropped bound costs (no fetch deadline at all, or
-    /// librdkafka's 45 s `session.timeout.ms`).
+    /// development host (five runs, other builds running): a fetch returned
+    /// 2000.9–2003.3 ms after a 2 s bound and a commit 2001.8–2007.1 ms. The
+    /// commit can also wait up to one more second for librdkafka's timeout
+    /// scan, which runs once a second (`rdkafka_cgrp.c:5809-5830`). So the
+    /// margins are 1.5 s over the fetch's bound and 2.5 s over the commit's:
+    /// room for a loaded CI runner, and far below what a dropped bound costs
+    /// (no fetch deadline at all, or librdkafka's 45 s `session.timeout.ms`).
     const FETCH_MARGIN: Duration = Duration::from_millis(1500);
     const COMMIT_MARGIN: Duration = Duration::from_millis(2500);
 

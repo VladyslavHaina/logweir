@@ -1,4 +1,4 @@
-//! **PROD-04.1: one capture of the selected consumer groups**, as the reader
+//! **One capture of the selected consumer groups**, as the reader
 //! observed it, before anything about the archive is known. Pure values; the
 //! broker glue is `crate::rdkafka_capture` (feature `client`), reached through
 //! [`crate::reader::ClusterReader::observe_consumer_groups`] and
@@ -6,7 +6,7 @@
 //!
 //! # The order of the reads, and why
 //!
-//! 1. **Classify** every selected id (PROD-04.0b's [`crate::groups`]): one
+//! 1. **Classify** every selected id ([`crate::groups`]): one
 //!    verdict each, nothing dropped.
 //! 2. **Describe** the capturable ones, refused unless the description agrees
 //!    with the listing (T2): the state the description gives is fresher than
@@ -46,7 +46,7 @@ pub type TopicMarks = Result<Vec<(i32, Result<Marks, String>)>, String>;
 pub struct ObservedGroup {
     /// The selected id.
     pub group_id: String,
-    /// PROD-04.0 §5's verdict.
+    /// The classification's verdict.
     pub verdict: GroupVerdict,
     /// The description, for a [`GroupVerdict::Capture`] only.
     pub description: Option<Result<GroupDescription, DescribeFailure>>,

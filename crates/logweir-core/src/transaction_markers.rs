@@ -1,25 +1,22 @@
 //! A restore of an archive that holds Kafka transaction
 //! control records is refused unless its plan allows them.
 //!
-//! The pinned engine captures `READ_UNCOMMITTED` and archives every commit
-//! and abort marker as an ordinary record, and the restore writes each one,
-//! with the aborted records before it, as data every consumer reads
-//! (`docs/to-do/decisions/PROD-01.1-record-semantics.md` §2.1). Before phase 2
+//! The pinned engine captures `READ_UNCOMMITTED` and archives every commit and
+//! abort marker as an ordinary record, and the restore writes each one, with
+//! the aborted records before it, as data every consumer reads. Before phase 2
 //! the runner counts the records with a marker's shape ([`is_control_shaped`])
 //! in the segments the restore reads and every segment after its window (a
-//! marker there can close a transaction with records in the window); a count
-//! is refused by name
-//! ([`refusal`]) unless the approved plan states
+//! marker there can close a transaction with records in the window); a count is
+//! refused by name ([`refusal`]) unless the approved plan states
 //! `restore.allow_transaction_markers: true`, and a run under that override
 //! says so in its scorecard ([`OVERRIDE_NOTE`]).
 //!
-//! The shape alone is the signal: the source is not read, so the decision
-//! record's offset-gap confirmation (§6.2) is not made, and a user record of
-//! the same shape is counted too. Not seen: a transaction open at capture
-//! whose marker is not in the archive, one opened after the backup began, one
-//! whose marker is in a segment after the window that cannot be read (never
-//! silent: [`unread_after_window_note`]), and a marker of another encoding
-//! version.
+//! The shape alone is the signal: the source is not read, so no offset-gap
+//! confirmation is made, and a user record of the same shape is counted too.
+//! Not seen: a transaction open at capture whose marker is not in the archive,
+//! one opened after the backup began, one whose marker is in a segment after
+//! the window that cannot be read (never silent: [`unread_after_window_note`]),
+//! and a marker of another encoding version.
 
 use std::collections::BTreeMap;
 

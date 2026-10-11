@@ -73,7 +73,7 @@ fn retired() -> TrustedKey {
 }
 
 /// The same key with a window that has not opened yet — the successor staged
-/// at §7.6 step 1, before the cutover.
+/// before the cutover.
 fn not_yet_valid() -> TrustedKey {
     TrustedKey {
         not_before: at("2027-01-01T00:00:00Z"),

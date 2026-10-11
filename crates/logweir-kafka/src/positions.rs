@@ -185,7 +185,7 @@ pub enum PartitionFailure {
 }
 
 /// What the caller's own group listing said about the group, the one fact a
-/// safe fetch cannot supply (§5). It decides what a TIMEOUT means.
+/// safe fetch cannot supply. It decides what a TIMEOUT means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupListing {
     /// A listing the caller made shows this group id.
@@ -224,7 +224,7 @@ impl GroupPositions {
 }
 
 /// Why a group's positions could not be read. Per group: every requested
-/// partition of the group shares it (§4.2), and other groups are unaffected.
+/// partition of the group shares it, and other groups are unaffected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PositionsError {
     /// The bounded RequireStable fetch of a LISTED group got no answer: a
@@ -251,7 +251,7 @@ pub enum PositionsError {
     #[error("{group}: not authorized on the group (GROUP_AUTHORIZATION_FAILED)")]
     NotAuthorized { group: String },
     /// As [`Self::NotAuthorized`], for a group no listing shows: it may exist,
-    /// and this principal may not see it (§5). Never "not found".
+    /// and this principal may not see it. Never "not found".
     #[error(
         "{group}: not visible to this principal (GROUP_AUTHORIZATION_FAILED for a group no \
          listing shows)"
@@ -290,7 +290,7 @@ pub enum CommitApplied {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CommitError {
     /// UNKNOWN_MEMBER_ID (25): the group has members, so the broker refused
-    /// the non-member commit for the whole request (K3, §3.3). Nothing changed.
+    /// the non-member commit for the whole request. Nothing changed.
     #[error("{group}: group active: the broker refused a non-member commit (UNKNOWN_MEMBER_ID)")]
     GroupActive { group: String },
     /// GROUP_ID_NOT_FOUND (69): the id is a group that takes no offset

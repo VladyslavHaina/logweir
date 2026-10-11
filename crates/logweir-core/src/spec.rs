@@ -38,13 +38,13 @@ pub struct DrillSpec {
     pub restore: RestoreSpecBlock,
     pub objectives: ObjectivesSpec,
     /// The evidence sink. A DIFFERENT bucket and principal from `source` by
-    /// default (spec §7.1); the guard warns loudly when they are equal.
+    /// default; the guard warns loudly when they are equal.
     pub evidence: crate::engine::StorageUrl,
     /// Deliberately a free-form map so an adopter CAN try to pass an engine
     /// key — and be refused by name. Silently ignoring it would hide the guard.
     #[serde(default)]
     pub engine_overrides: BTreeMap<String, serde_yaml::Value>,
-    /// Spec §13, WITHDRAWN: Logweir posts nothing after a run. The key still
+    /// WITHDRAWN: Logweir posts nothing after a run. The key still
     /// parses, because it sits inside signed plan bytes, and an absent or
     /// empty block is fine; a block that names a sink is refused by name
     /// (`crate::guard::reject_withdrawn_notifications`).
@@ -402,7 +402,7 @@ impl std::fmt::Display for TimeBasis {
     }
 }
 
-/// Spec §13's notification shape, WITHDRAWN: kept so a plan that carries it
+/// The withdrawn notification shape, kept so a plan that carries it
 /// still parses, and refused when it names a sink
 /// (`crate::guard::reject_withdrawn_notifications`).
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -1254,7 +1254,7 @@ fn max_concurrent_partitions() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowedClusters {
     /// Supplied as a SEPARATE file argument, never read from the drill spec,
-    /// so an edited spec cannot widen its own allowlist (spec §9.3 phase 0).
+    /// so an edited spec cannot widen its own allowlist.
     pub allowed_cluster_ids: Vec<String>,
     /// Refused as a target even if it appears above.
     #[serde(default)]

@@ -84,7 +84,7 @@ pub mod code {
     pub const GROUP_AUTHORIZATION_FAILED: i32 = 30;
 }
 
-/// The group types Logweir captures (§5).
+/// The group types Logweir captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GroupType {
     /// A classic group: protocol type `consumer`, or empty (a simple group).
@@ -194,7 +194,7 @@ pub struct NameEntry {
 }
 
 /// What a targeted DescribeConsumerGroups said about ONE id that no listing
-/// shows (§5, T14).
+/// shows (T14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetedAnswer {
     /// The describe answered with no error for the id.
@@ -389,7 +389,7 @@ pub enum GroupFailure {
 /// One selected id's verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupVerdict {
-    /// §5's captured types: positions may be read for it.
+    /// The captured types: positions may be read for it.
     Capture(CapturableGroup),
     /// Not captured, with a reason.
     Excluded(Excluded),
@@ -663,7 +663,7 @@ impl GroupListings {
     }
 }
 
-/// What a targeted describe of an unlisted id means (§5, T14).
+/// What a targeted describe of an unlisted id means (T14).
 fn targeted_verdict(answer: Option<&TargetedAnswer>, lost: &[String]) -> GroupVerdict {
     match answer {
         None => GroupVerdict::Failed(GroupFailure::Unreachable {
@@ -869,7 +869,7 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// §3.1's 4.3.1 fixture, as the two listings saw it for a super user.
+    /// A Kafka 4.3.1 fixture, as the two listings saw it for a super user.
     fn fixture(access: ClusterAccess) -> GroupListings {
         use code::*;
         GroupListings {

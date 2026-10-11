@@ -38,7 +38,7 @@ pub fn record_fingerprint(
     hex::encode(h.finalize())
 }
 
-/// **PROD-08.1, complete verification.** sha256(key ‖ value ‖ headers ‖
+/// **Complete verification.** sha256(key ‖ value ‖ headers ‖
 /// timestamp) with the headers in their RECORDED ORDER, every occurrence
 /// kept — the record exactly as the archive holds it and as a consumer reads
 /// it back.
@@ -52,12 +52,11 @@ pub fn record_fingerprint(
 /// # Why a second digest, and why ordered
 ///
 /// [`record_fingerprint`] sorts the headers, so a restore that reordered a
-/// record's headers reconciles as a match: PROD-01.1's acceptance row 08-6
-/// ("header comparison is ordered and multiplicity-aware in complete mode, or
-/// the evidence states that header order is not verified"). Kafka keeps a
-/// record's headers in order — they are an array in the record format, and
-/// PROD-01.1 measured the pinned engine keeping header order through capture
-/// and replay (its contract row C5) — so an ordered comparison holds a correct
+/// record's headers reconciles as a match. Header comparison must be ordered
+/// and multiplicity-aware in complete mode, or the evidence must state that
+/// header order is not verified. Kafka keeps a record's headers in order —
+/// they are an array in the record format, and the pinned engine was measured
+/// keeping header order through capture and replay — so an ordered comparison holds a correct
 /// restore to nothing it cannot meet. Sampled verification keeps the sorted
 /// fingerprint, and its evidence says header order is not verified.
 ///

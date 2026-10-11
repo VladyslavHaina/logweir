@@ -262,7 +262,7 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
     assert_eq!(terminal_state(""), "GuardRefused");
     assert_eq!(refusal_reason_line(""), "refusal-reason=GuardRefused");
 
-    // The three names are exactly spec §3.2's, spelled once.
+    // The three names, spelled once.
     assert_eq!(TERMINAL_STATE_GUARD_REFUSED, "GuardRefused");
     assert_eq!(
         TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,

@@ -184,8 +184,8 @@ macro_rules! closed_vocabulary {
 }
 
 closed_vocabulary! {
-    /// The CLOSED code vocabulary (D2 §4.2 classification, §4.3 waiting
-    /// classification, §6.3 check catalogue, §3.3 destination validation).
+    /// The CLOSED code vocabulary (connection classification, waiting
+    /// classification, the check catalogue and destination validation).
     ///
     /// Every spelling is CamelCase so it can be a `metav1.Condition.reason`
     /// verbatim; `every_code_is_a_valid_condition_reason` asserts it.
@@ -278,7 +278,7 @@ closed_vocabulary! {
         // A projected object-store credential whose Secret's
         // `logweir-binding` is absent or names another object or endpoint, so
         // the runner refused it before building a client
-        // (`logweir_core::credential_binding`). The same string as PROD-01.3's
+        // (`logweir_core::credential_binding`). The same string as the
         // `CredentialBindingMismatch` terminal state.
         CredentialBindingMismatch => "CredentialBindingMismatch",
         ClusterIdentityChanged => "ClusterIdentityChanged",
@@ -589,7 +589,7 @@ pub enum Gating {
     ExecutionOnly,
 }
 
-/// Who observed the fact (D2 §6.4 `authority`).
+/// Who observed the fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Authority {

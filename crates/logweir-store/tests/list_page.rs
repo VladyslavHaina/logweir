@@ -1,5 +1,5 @@
-//! `Store::list_page` — the ONE new store capability decision D3 §5.2 adds
-//! for the recovery catalog.
+//! `Store::list_page` — the store capability the recovery catalog pages
+//! with.
 //!
 //! Every test here runs against `Store::in_memory`, so the whole file is
 //! socket-free and subprocess-free (Global Constraint 22); the `InMemory`

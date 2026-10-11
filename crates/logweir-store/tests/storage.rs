@@ -48,7 +48,7 @@ fn list_manifests_returns_only_manifest_json_keys() {
     );
 }
 
-/// spec §11 / §6 C3: a backend that cannot do a conditional put must be
+/// A backend that cannot do a conditional put must be
 /// RECORDED as such, never silently treated as if it had.
 #[test]
 fn a_backend_without_conditional_put_reports_create_only_enforced_false() {

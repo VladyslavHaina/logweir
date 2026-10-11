@@ -371,7 +371,7 @@ impl RdKafkaReader {
     /// returns.
     ///
     /// - The broker refuses the WHOLE request while the group has members:
-    ///   [`CommitError::GroupActive`], nothing changed (§3.3). A share group
+    ///   [`CommitError::GroupActive`], nothing changed. A share group
     ///   is [`CommitError::NotAConsumerGroup`]; a principal without Read on
     ///   the group [`CommitError::NotAuthorized`]; no coordinator within the
     ///   bound [`CommitError::NotVisibleOrUnreachable`], nothing sent.
@@ -426,9 +426,8 @@ impl RdKafkaReader {
     }
 
     /// Maps a per-topic Kafka error code to the distinction a caller needs —
-    /// topic-not-found vs. not-authorised vs. anything else — instead of the
-    /// generic `Client` bucket every code used to fall into regardless of
-    /// cause. Verified against the vendored rdkafka-sys 4.10.0+2.12.1 error
+    /// topic-not-found vs. not-authorised vs. anything else — instead of one
+    /// generic `Client` bucket regardless of cause. Verified against the vendored rdkafka-sys 4.10.0+2.12.1 error
     /// code table (`src/types.rs`): `UnknownTopicOrPartition = 3`,
     /// `TopicAuthorizationFailed = 29`.
     fn classify_topic_error(topic: &str, code: rdkafka::error::RDKafkaErrorCode) -> KafkaError {

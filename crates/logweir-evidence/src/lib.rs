@@ -22,13 +22,12 @@
 //! DECLARED, and `docs/test_verify_scorecard.py` reads that file: a
 //! re-export contains none of the media-type literals.
 //!
-//! THERE ARE FOUR OF THEM SINCE TASK 5. Three moved in Task 14
-//! (`PAYLOAD_TYPE_SCORECARD`, `_TEARDOWN`, `_PUT_RECEIPT`) and
-//! `PAYLOAD_TYPE_BACKUP_RECEIPT` was declared there, beside them, by Task 5 —
-//! never here (critique A F8, critique B H2). The `pub use` below re-exports
-//! all four, so `logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT` resolves for
-//! `examples/mint_backup_receipt_fixture.rs`, which signs with it, and no
-//! call site has to know which crate declares what.
+//! THERE ARE FOUR OF THEM — `PAYLOAD_TYPE_SCORECARD`, `_TEARDOWN`,
+//! `_PUT_RECEIPT` and `PAYLOAD_TYPE_BACKUP_RECEIPT` — all declared there and
+//! never here. The `pub use` below re-exports all four, so
+//! `logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT` resolves for
+//! `examples/mint_backup_receipt_fixture.rs`, which signs with it, and no call
+//! site has to know which crate declares what.
 pub mod keys;
 pub mod pae;
 pub mod sign;

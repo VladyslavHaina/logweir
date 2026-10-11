@@ -104,7 +104,7 @@ fn the_tool_and_the_product_compute_one_location_binding() {
             "{case}"
         );
     }
-    // Review F1's shape, in the agreement itself: the victim's bucket on the
+    // In the agreement itself: the victim's bucket on the
     // AWS-default endpoint with an injected region is a DIFFERENT location.
     let by_region: std::collections::BTreeSet<&str> = cases(&doc, "location", 8)
         .iter()
@@ -140,7 +140,7 @@ fn the_tool_and_the_product_compute_one_destination_and_retention_binding() {
     }
 }
 
-/// PROD-01.3's form, from a `KafkaCluster` spec as the controller resolves it
+/// The connection form, from a `KafkaCluster` spec as the controller resolves it
 /// (`weirkeeper::connection::resolve` then `credential_binding`).
 #[test]
 fn the_tool_and_the_product_compute_one_kafka_binding() {
