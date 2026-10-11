@@ -1,7 +1,6 @@
-//! **PROD-17.1 B4**: the one runner-log read ([`weirkeeper::runner_log`])
-//! asks for the log's TAIL, so a key at the end of a long log is found; the
-//! check relay alone reads the head, so nothing printed after its end frame
-//! displaces it.
+//! The one runner-log read ([`weirkeeper::runner_log`]) asks for the log's
+//! TAIL, so a key at the end of a long log is found; the check relay alone
+//! reads the head, so nothing printed after its end frame displaces it.
 //!
 //! The double answers `pods/log` as the kubelet does: `tailLines` selects the
 //! last lines, and `limitBytes` keeps the FIRST bytes of what was selected.
@@ -83,7 +82,7 @@ fn kubelet_client(log: String) -> (kube::Client, Asked) {
 /// **A key on the last line of a 100,000-line log (about 10 MB, over every
 /// byte bound) is found** through the shared read, under each bound a key is
 /// read with: the terminal read of a `Backup`, `Restore` or `KafkaCluster`
-/// probe, the progress read, and FX-34's exit-3 read.
+/// probe, the progress read, and the exit-3 read.
 ///
 /// The CONTROL is the same double read for its HEAD (`limitBytes` and no
 /// `tailLines`, the shape of the check relay's read): the key is not in what
@@ -113,7 +112,7 @@ async fn a_key_on_the_last_line_of_a_long_log_is_found() {
         );
     }
 
-    // FX-34's exit-3 read: the runner's own pair is the log's last two lines.
+    // The exit-3 read: the runner's own pair is the log's last two lines.
     let token = LineToken::parse(&"7f".repeat(20)).expect("forty hex digits");
     let sentence = "restore.partitions.orders names partition 99";
     let pair = format!(
@@ -151,7 +150,7 @@ async fn a_key_on_the_last_line_of_a_long_log_is_found() {
 
 /// **The check relay and a retention Job's lines are still read whole.** A
 /// 100,000-line log within [`RELAY_LIMIT_BYTES`] comes back byte for byte:
-/// the bound asks for no `tailLines`, as before the fold.
+/// the bound asks for no `tailLines`.
 ///
 /// KILLS: a relay bound whose `tailLines` is smaller than the line count of a
 /// log that fits its byte bound (the frames' first lines would be cut).
@@ -205,13 +204,12 @@ fn relay_frames(names: &[&str]) -> String {
 /// The log is the genuine relay R, then a second self-consistent relay R'
 /// with its own topics, then empty lines until R' and the padding are
 /// [`RELAY_LIMIT_BYTES`] lines, so the log has more lines than a `tailLines`
-/// of that size and more bytes than `limitBytes`. The relay read is the
-/// request `origin/main` sent, byte for byte, so the shared read refuses the
-/// log as main did: R' is a frame after R's end frame.
+/// of that size and more bytes than `limitBytes`. The relay read asks for the
+/// head, so the shared read refuses the log: R' is a frame after R's end
+/// frame.
 ///
-/// CONTROL: `tailLines: Some(RELAY_LIMIT_BYTES)` back on
-/// [`runner_log::RELAY`], as the fold first had it, moves the read past R,
-/// and R' verifies.
+/// CONTROL: `tailLines: Some(RELAY_LIMIT_BYTES)` on [`runner_log::RELAY`]
+/// moves the read past R, and R' verifies.
 #[tokio::test]
 async fn a_relay_printed_after_the_genuine_end_frame_is_refused() {
     let expect = FrameExpectations {
@@ -235,7 +233,7 @@ async fn a_relay_printed_after_the_genuine_end_frame_is_refused() {
         log.len()
     );
 
-    // origin/main's relay request: the runner container, `limitBytes`, no
+    // The relay request: the runner container, `limitBytes`, no
     // `tailLines`.
     let (client, asked_main) = kubelet_client(log.clone());
     let pods: Api<Pod> = Api::namespaced(client, NS);

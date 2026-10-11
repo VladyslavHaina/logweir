@@ -1,4 +1,4 @@
-//! FX-20: the Job builder's backstop.
+//! The Job builder's credential-binding backstop.
 //!
 //! Every builder in this crate projects a credential WITH its binding pair
 //! (the per-site rows say so: `protection_controller`, `destination_controller`,

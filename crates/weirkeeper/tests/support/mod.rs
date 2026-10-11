@@ -69,9 +69,8 @@ pub fn repo_root() -> PathBuf {
 pub fn self_peak_rss() -> u64 {
     // Linux keeps `ru_maxrss` across `execve`, so a child reports its parent's
     // peak when that was higher, and a difference between two children is
-    // noise (main `dff411ad`'s CI: the parsed-tree control "added" less than
-    // the document). The child's own address space has its own high-water
-    // mark, `VmHWM`, reset at exec.
+    // noise. The child's own address space has its own high-water mark,
+    // `VmHWM`, reset at exec.
     if cfg!(target_os = "linux") {
         if let Some(kib) = std::fs::read_to_string("/proc/self/status")
             .ok()
