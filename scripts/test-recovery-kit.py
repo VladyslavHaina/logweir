@@ -139,8 +139,10 @@ class RecoveryKit(unittest.TestCase):
             self.assertRegex(ref, r"@sha256:[0-9a-f]{64}$")
             self.assertIn(ref, values)
         recovery = (self.kit / "RECOVERY.md").read_text()
-        self.assertIn("## Recover onto a clean installation with the kit", recovery)
-        self.assertIn("Connect an existing archive", recovery)
+        self.assertIn("\n## Recover onto a clean installation with the kit\n", recovery)
+        flat = " ".join(recovery.split())
+        for step in ("Connect an existing archive", "verify_scorecard.py", "Trust the archive's signer"):
+            self.assertIn(step, flat)
         self.assertNotIn("## Upgrade CRDs", recovery)
 
     def test_the_private_key_guard_refuses(self):

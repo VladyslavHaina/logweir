@@ -160,6 +160,8 @@ fi
 Built by \`scripts/recovery-kit.sh\` from \`$commit\` (binaries: $mode). \`kit.json\`
 and \`images/images.txt\` name what is here. \`MANIFEST.sha256\` holds every file's
 sha256: check it first with \`sha256sum -c MANIFEST.sha256\` (or \`shasum -a 256 -c\`).
+Below is docs/install.md's section of the same name, at that commit; a section
+named in it (*3.11*, *5e*, *5f*, …) is one of that guide's.
 
 EOF
   awk -v h="$GUIDE_SECTION" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }' "$GUIDE"
