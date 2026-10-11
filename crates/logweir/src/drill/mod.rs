@@ -2844,6 +2844,7 @@ fn standing_approved_from(
             approved_at: doc.issued_at,
             key_id: verified.key_id.clone(),
             self_attested: verified.key_id == signing_key.key_id(),
+            console: None,
         },
     })
 }
@@ -3034,6 +3035,14 @@ fn execute_with_validated_approval(
     .to_string();
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
+    // PROD-16.2: a restore a second person approved in the console signs who
+    // approved and how (`approval.console`), which is format 1.9.0 — and 2.1.0
+    // once the selection step below has chosen major 2 for a partition
+    // subset. The step reads the major the earlier steps chose, so it is
+    // applied HERE, with the block, and again after each step that can change
+    // the major: no document this run signs carries the block under a version
+    // that does not define it (arm CA-1 would refuse to sign it).
+    raise_version_for_console_approval(&mut sc);
 
     // The archive read every later phase consumes. Not a phase of its own in
     // spec §9.3, and deliberately placed HERE: phases 0 and 1 are the two
@@ -3111,6 +3120,8 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-16.2: a partition subset approved in the console is 2.1.0.
+    raise_version_for_console_approval(&mut sc);
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3182,6 +3193,9 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-16.2: THE LAST VERSION STEP, after every step that can choose the
+    // major (`format_version_with_console_approval`).
+    raise_version_for_console_approval(&mut sc);
 
     // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
     // record's own `duration_ms` is the number `compute_measured` subtracts
@@ -4234,6 +4248,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             approved_at: chrono::DateTime::UNIX_EPOCH,
             key_id: String::new(),
             self_attested: false,
+            console: None,
         },
         phases: Vec::new(),
         measured: Measured {
@@ -6582,6 +6597,20 @@ mod standing_approved_tests {
     }
 }
 
+/// **PROD-16.2.** Raises `sc.format_version` to the first version of its
+/// major that defines `approval.console`, when the document carries the
+/// block; a no-op for every other document, which keeps the version it had
+/// byte for byte. Monotonic, and it never changes the major, so it is safe to
+/// apply after each step that can
+/// (`logweir_core::scorecard::format_version_with_console_approval`).
+fn raise_version_for_console_approval(sc: &mut Scorecard) {
+    sc.format_version = logweir_core::scorecard::format_version_with_console_approval(
+        &sc.format_version,
+        sc.approval.console.as_ref(),
+    )
+    .to_string();
+}
+
 // =======================================================================
 // PROD-15.1 — the runner holds the signed approval subject to the plan
 // =======================================================================
@@ -6617,6 +6646,7 @@ mod original_name_subject_tests {
                 approved_at: chrono::Utc::now(),
                 key_id: "k".into(),
                 self_attested: false,
+                console: None,
             },
             validated_at: chrono::Utc::now(),
             approval_subject: subject,

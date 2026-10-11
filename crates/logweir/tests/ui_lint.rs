@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 29] = [
+const API_EXPORTS: [&str; 30] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -122,6 +122,12 @@ const API_EXPORTS: [&str; 29] = [
     // effective approval policy the submit step and the approvals page render.
     // No body, no query, no write.
     "consoleApprovalPolicy",
+    // PROD-16.2: ONE more read, `GET .../restores/{name}/approval-request` --
+    // a two-person request as the approver is shown it, every field of it
+    // from bytes the console verified its own signature on. No body, no
+    // query, no write. The click itself is not an export: it is the action
+    // `restores:console-approval` in `consoleAction`'s frozen table.
+    "consoleApprovalRequest",
     "consoleCreate",
     "consoleSetSuspension",
     // D1 W7: the draft-cadence preview (a safe, namespace-less GET that reads

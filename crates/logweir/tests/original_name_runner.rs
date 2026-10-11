@@ -51,6 +51,7 @@ fn approved(subject: ApprovalSubject, mode: &'static str) -> phase1_approval::Ap
             approved_at: chrono::Utc::now(),
             key_id: "k".into(),
             self_attested: false,
+            console: None,
         },
         validated_at: chrono::Utc::now(),
         approval_subject: subject,

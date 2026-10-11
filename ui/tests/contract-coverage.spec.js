@@ -410,8 +410,8 @@ test("every_console_fixture_is_listed_is_an_instance_and_survives_its_decoder", 
   }
   // AN EQUALITY, NOT A FLOOR: a fixture deleted with the row that used it is
   // exactly the change this arm exists to notice.
-  assert.equal(documents, 83, "the console fixture set");
-  assert.equal(files.length, 84);
+  assert.equal(documents, 89, "the console fixture set");
+  assert.equal(files.length, 90);
 });
 
 test("a_document_of_the_first_sixteen_members_alone_is_refused_by_the_operation_page", () => {
@@ -570,7 +570,7 @@ const APPROVAL_POLICY = Object.freeze({
     operatorMode: "strict", basis: "binding", requireDistinctPrincipal: true,
     installationDigest: "sha256:" + "b".repeat(64), ordinaryConfirmationAvailable: false,
     ticketRequired: true, maxAgeSeconds: 900, digest: "sha256:" + "c".repeat(64),
-    confirmationKeyId: "d".repeat(64),
+    confirmationKeyId: "d".repeat(64), consoleApprovalAvailable: false,
   },
 });
 
@@ -594,6 +594,8 @@ const ANSWERS = Object.freeze({
   "POST /api/v1/namespaces/{ns}/restores": "restore.json",
   "GET /api/v1/namespaces/{ns}/restores/{name}": "restore.json",
   "POST /api/v1/namespaces/{ns}/restores/{name}/approval": "approval.json",
+  "GET /api/v1/namespaces/{ns}/restores/{name}/approval-request": "approval-request-pending.json",
+  "POST /api/v1/namespaces/{ns}/restores/{name}/console-approval": "approval.json",
   "GET /api/v1/namespaces/{ns}/approval-policy": { body: () => structuredClone(APPROVAL_POLICY) },
   "GET /api/v1/namespaces/{ns}/approvals": "approvals-list.json",
   "GET /api/v1/namespaces/{ns}/approvals/{name}": "approval.json",
@@ -709,6 +711,8 @@ async function everyRead() {
     () => api.get(NS, "restores", "orders-drill-20260911"),
     () => api.create(NS, "restores", restoreObject(reviewed)),
     () => api.submitGovernedApproval(NS, "orders-drill-20260911", "sidecar bytes"),
+    () => api.approvalRequest(NS, "orders-drill-20260911"),
+    () => api.approveInConsole(NS, "orders-drill-20260911", "a".repeat(64)),
     () => api.approvalPolicy(NS),
     () => api.list(NS, "approvals"),
     () => api.get(NS, "approvals", "approval-x"),
@@ -822,7 +826,7 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   assert.deepEqual(badRequests, [],
     "a body the console builds must be an instance of the request schema the document " +
       "publishes for the route it is sent to:\n" + badRequests.join("\n"));
-  assert.equal(requests, 14, "the row held every create and update body the console builds");
+  assert.equal(requests, 15, "the row held every create and update body the console builds");
 
   // EACH ANSWER, AND THE DECODE THAT READ IT. An answer is matched to its
   // decode by the document itself: the transport served these exact bytes and

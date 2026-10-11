@@ -2225,6 +2225,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "one backup names at most 1,000 topics",
             "BackupSelectionTooLarge",
         ),
+        // PROD-16.2 (2026-10-10, item 66): two-person approval in the
+        // console; the policy setting the chart renders for it.
+        (
+            "two-person approval in the console",
+            "approverSignature: Console",
+        ),
     ];
     assert_eq!(
         items.len(),

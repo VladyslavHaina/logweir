@@ -57,9 +57,10 @@ guard-refused Restore or Backup says why in its status), 62 (FX-27 and FX-42, th
 closed and a failed RetentionPolicy read says so), 63 (FX-35, a restore started from a Backup is bound to
 its recovery point), 64 (FX-39 and FX-40, a retention policy over more than
 500 points keeps enforcing, and no run deletes from a partial or expired
-catalog view) and 65 (FX-33, one
+catalog view), 65 (FX-33, one
 backup names at most 1,000 topics, and a backup of many topics stays listed
-and verified) so far. Items continue the next entry's
+and verified) and 66 (PROD-16.2,
+two-person approval in the console, no key) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -295,7 +296,7 @@ structs ignore unknown keys.
 
 **Changed.** Three approval modes by name: **confirm** (one person clicks
 Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
-refused by name) and **strict** (an approver's personal key; `Governed` or
+refused by name here; item 66 adds it) and **strict** (an approver's personal key; `Governed` or
 `legacy-governed-v1`). On a FIRST `helm install` (Helm 3.19+ or 4.x) with a
 console, the managed identity and `identity.bootstrapFeatures.consoleKey: true`,
 the identity hook generates the console's `ConsoleConfirmation` key
@@ -2569,7 +2570,6 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 `HELD-BACK` column, or ignore them while the older controller runs. An older
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
-
 #### 59. The shared console shows what the product API publishes and sends what its routes require: the schema note, a restore's integrity level, an original-name restore (FX-48)
 
 **Changed.** Three things the product API publishes never reached a page of
@@ -3068,6 +3068,49 @@ so under that pair no backup on a destination the controller cannot read
 itself is verified (`NotAttempted` after four attempts). An older controller
 with this runner works as before.
 
+#### 66. Two-person approval in the console: the second person signs in and clicks Approve, no key (PROD-16.2)
+
+**Added.** A third approval mode, `two-person`
+([kubernetes.md](kubernetes.md#two-person-approval-in-the-console-prod-162) §8):
+a namespace bound to `approvalPolicy.policies[].mode: two-person` runs a restore
+after a SECOND person, signed in to the shared console as an Approver and not
+the requester, opens the Restore's approval page and clicks Approve. Nobody
+holds, copies or pastes a key. The console verifies its own signature on the
+request before it shows or uses any of it, shows the whole scope (the source,
+the recovery point, the target cluster, every topic and the name it is
+restored under), and signs the same document with `approver` and
+`approvedAt` added (authorization document **2.2.0**) with its existing
+`ConsoleConfirmation` key; the controller and the runner re-check the
+signature, the binding, that the approver is a second person (issuer and
+subject, case ignored) and that the approval lies in the request's window. The
+chart renders `mode: Governed` with `approverSignature: Console`, only with
+`api.console.mode: shared`. A scorecard of such a run is **1.9.0** (or **2.1.0**
+for a partition subset) with `approval.console`, and both verifiers
+(`verify_scorecard.py` 1.29.0) print who asked and who approved. Product API:
+`GET .../restores/{name}/approval-request` and `POST
+.../restores/{name}/console-approval` (OpenAPI additive: 58 → 60 operations,
+280 → 295 schemas).
+**Do:** nothing, until you bind a namespace `two-person` (`docs/install.md`
+§5f): bind the approver the console role Approver there. A two-person request
+names at most 1024 topics; split a larger restore or bind it `strict`.
+**Scope:** core, controller, runner, API and console rows over fakes and fixtures
+for every must-have and its negative control (self-approval in every spelling,
+a planted confirmation, an incomplete scope, the role, cross-site, expiry, the
+table of modes, the version rules); the two verifiers agree on a 32-case corpus
+and the parity script; mutants on the identity rule, the role check, the
+console's own-signature check, the scope check and the table. Older runners
+(main and PROD-15.1) refuse a two-person bundle (exit 3); older verifiers accept
+a 1.9.0 scorecard and ignore the block, and 1.28.0 refuses an original-name one.
+Not proven live: the PoC rows in
+[PROD-16.2-console-approval.md](to-do/decisions/PROD-16.2-console-approval.md).
+A `strict` namespace is unchanged byte for byte.
+**Rollback:** remove the two-person policies first: an older controller or
+console refuses to start on `approverSignature`, and an older runner refuses
+the snapshot and every 2.2.0 document; a pending console-approved Restore is
+then refused and submitted again. Scorecards stay valid under older readers.
+SECURITY.md states the residual: whoever controls the console, its key or the
+identity provider can produce both halves.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3178,7 +3221,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64 and 65, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65 and 66, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3252,8 +3295,14 @@ console, and needs the CRDs applied before the controller rolls; item 65
 changes the runner, the check Jobs, the controller and the product API, and
 needs every `Backup` and `BackupSchedule` that names or resolves
 to more than 1,000 topics split before the upgrade, and each
-`RecoveryCatalog` synced again after the runner image rolls. To roll back to
+`RecoveryCatalog` synced again after the runner image rolls; item 66 changes the controller, the runner, the product API, the
+console and the chart, and needs nothing until a namespace is bound
+`two-person`. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
+
+0. **Remove every `two-person` policy** (item 66) before rolling an image
+   back: an older controller or console refuses to start on a document that
+   carries `approverSignature`.
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
    document carrying `defaultMode` at start. Expect unbound namespaces of a

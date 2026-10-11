@@ -1,0 +1,75 @@
+# console-two-person.values.yaml — PROD-16.2: TWO-PERSON APPROVAL IN THE
+# CONSOLE, with the shared (SSO) console it needs. Read
+# `console-shared.values.yaml` first: everything about the shared console is
+# there, and this file repeats only what it must.
+#
+# WHAT IT ADDS. One approval policy, `prod-two-person`, written `mode:
+# two-person`, and `team-a` bound to it. A restore submitted in `team-a` then
+# waits for a SECOND person: someone with the approver role, who is not the
+# requester, signs in to this console and clicks Approve. Nobody handles a
+# key. `team-b` is bound to a `strict` policy beside it, which still needs a
+# personal GovernedApproval key: the two modes are per namespace.
+#
+# WHAT IS RENDERED. The policy document says `mode: Governed` and
+# `approverSignature: Console` (the internal names). That setting is inside the
+# policy's snapshot digest, so a request made under it can never be approved
+# with a personal key, and the reverse.
+#
+# WHAT IT NEEDS BESIDE THE SHARED CONSOLE'S OWN SECRETS:
+#
+# 1. The console's confirmation key Secret (`confirmationKeySecret`), with its
+#    PUBLIC half on the TrustPolicy governing `team-a` under the single usage
+#    ConsoleConfirmation. A fresh install with the managed key has both
+#    already (docs/install.md section 5f).
+# 2. An approver binding (`api.console.roles.bindings`, role `approver`) for
+#    `team-a`. An administrator is not an approver unless bound as one.
+#
+# IT RENDERS ONLY WITH `api.console.mode: shared`. The in-cluster
+# administrator console has one identity, which cannot be two people: the
+# chart refuses a two-person policy there, and without a console.
+#
+# THE RESIDUAL (SECURITY.md): in the console modes, whoever controls the
+# console pod, its confirmation-key Secret or the identity provider can
+# approve alone. `strict` is for namespaces that cannot accept that.
+controller:
+  watchNamespaces: [team-a, team-b]
+kubernetes:
+  namespace: team-a
+api:
+  enabled: true
+  namespaces: [team-a, team-b]
+  console:
+    enabled: true
+    mode: shared
+    keySecret: logweir-console-keys
+    keyVersion: 1
+    publicBaseUrl: https://console.example.com
+    trustedProxy: none
+    oidc:
+      issuer: https://idp.example.com/realms/logweir
+      clientId: logweir-console
+      clientSecret: logweir-console-oidc
+    roles:
+      revision: "2026-10-10.1"
+      bindings:
+        - role: operator
+          namespace: team-a
+          groups: ["logweir-team-a-operators"]
+        - role: approver
+          namespace: team-a
+          groups: ["logweir-team-a-approvers"]
+        - role: approver
+          namespace: team-b
+          groups: ["logweir-team-b-approvers"]
+approvalPolicy:
+  policies:
+    - name: prod-two-person
+      mode: two-person
+      maxAgeSeconds: 86400
+    - name: prod-strict
+      mode: strict
+      maxAgeSeconds: 86400
+  namespaces:
+    team-a: prod-two-person
+    team-b: prod-strict
+  confirmationKeySecret: logweir-console-confirmation

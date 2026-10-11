@@ -38,6 +38,10 @@ pub const FORMAT_VERSION: &str = "1.4.0";
 /// the installation policy set, the policy snapshot and authorization
 /// document v2, with `now` always an argument.
 pub mod approval_policy;
+/// PROD-16.2: the approval scope — everything a second person must be shown
+/// before they approve, as a pure function of the request the console signed
+/// and the plan it names by hash; complete, or not approvable.
+pub mod approval_scope;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;

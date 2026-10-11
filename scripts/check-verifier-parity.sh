@@ -2479,3 +2479,234 @@ for name in on1-under-1.7.0 on2-scratch on3-prefix on4-subject on5-mode on6-cond
     echo "check-verifier-parity: scorecard/$name  rust=$rust_rc python=$py_rc  ok  (original name refused)"
 done
 echo "check-verifier-parity: both readers accept $SCORECARD_ORIGINAL_NAME_VERSION original-name scorecards, say the same about what admitted them, and refuse each of the fourteen original-name arms with the same words"
+
+# ---------------------------------------------------------------------------
+# PROD-16.2: `approval.console` (scorecard 1.9.0, and 2.1.0), arms CA-1 to CA-8
+# ---------------------------------------------------------------------------
+# A restore a SECOND PERSON APPROVED IN THE CONSOLE. Five documents both
+# readers ACCEPT, and the `console approval:` line they print compared byte
+# for byte (who approved and how: the mode, both people, both instants, the
+# expiry, and that the console key signed both, which is expected in this
+# mode):
+#
+#   ordinary       a restore under a prefix, 1.9.0
+#   subset         a partition-subset restore, 2.1.0 (allowed: the same block)
+#   original-name  a restore under the original topic names, 1.9.0, whose own
+#                  block says `consoleApproval` too
+#   offsets        the instants written with an offset and a fraction: both
+#                  readers print the same UTC instant
+#   slash          the approver's issuer behind a trailing `/`: one issuer
+#
+# and nineteen both readers REFUSE with the same full text: CA-1 in each
+# line of the format, CA-2, six faults of CA-3 (the requester approving, the
+# same person in another case, two issuers, a form that cannot be compared,
+# the local administrator, a system identity), CA-4 at both ends of the
+# window, CA-5, CA-6 twice (a distinct personal key, and no console key),
+# CA-7, CA-8 both ways, and ON-5's two new statements (the member 1.9.0 added
+# under 1.8.0, refused by the version; and a word outside the four from
+# 1.9.0). Generated and signed here with the throwaway fixture key.
+#
+# The scorecard formats that define `approval.console` —
+# `FORMAT_VERSION_WITH_CONSOLE_APPROVAL` and
+# `FORMAT_VERSION_SUBSET_WITH_CONSOLE_APPROVAL`; a renumber moves them here.
+SCORECARD_CONSOLE_APPROVAL_VERSION="1.9.0"
+SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION="2.1.0"
+mkdir -p "$tmp/scorecard-ca"
+"$PY" - "$ROOT" "$tmp/scorecard-ca" "$SC_PT" "$SCORECARD_CONSOLE_APPROVAL_VERSION" \
+    "$SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION" <<'PYEOF'
+import base64, copy, hashlib, json, pathlib, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current, subset_current = sys.argv[4], sys.argv[5]
+fix = root / "e2e" / "fixtures" / "signed"
+key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
+der = key.public_key().public_bytes(
+    serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+keyid = hashlib.sha256(der).hexdigest()
+corpus = root / "e2e" / "fixtures" / "invariants"
+plain = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
+subset = json.loads((corpus / "subsets_2_0_sampled.json").read_text())
+named = json.loads((corpus / "original_name_1_8_accepted.json").read_text())
+IDP = "https://idp.example"
+CONSOLE_KEY = "c0" * 32
+ALICE = {"issuer": IDP, "subject": "alice"}
+
+
+def block(**over):
+    b = {"mode": "consoleApproval", "requester": dict(ALICE),
+         "approver": {"issuer": IDP, "subject": "bob"},
+         "requested_at": "2026-10-10T12:00:00Z", "approved_at": "2026-10-10T12:04:00Z",
+         "request_expires_at": "2026-10-10T13:00:00Z", "confirmation_key_id": CONSOLE_KEY}
+    b.update(over)
+    return b
+
+
+def approve(base, b=None, version=current, **approval):
+    d = copy.deepcopy(base)
+    b = block() if b is None else b
+    d["format_version"] = version
+    d["approval"]["console"] = b
+    d["approval"]["approver"] = f"{b['approver']['issuer']}#{b['approver']['subject']}"
+    d["approval"]["key_id"] = b["confirmation_key_id"]
+    d["approval"]["approved_at"] = b["approved_at"]
+    d["approval"].update(approval)
+    return d
+
+
+def original_name(mode, version=current, console=True):
+    d = copy.deepcopy(named)
+    d["target"]["original_name"]["approval_mode"] = mode
+    d["format_version"] = version
+    return approve(d, version=version) if console else d
+
+
+cases = {
+    "ordinary": approve(plain),
+    "subset": approve(subset, version=subset_current),
+    "original-name": original_name("consoleApproval"),
+    "offsets": approve(plain, block(requested_at="2026-10-10T14:00:00+02:00",
+                                    approved_at="2026-10-10T08:04:00.250-04:00",
+                                    request_expires_at="2026-10-10T13:00:00.000000Z")),
+    "slash": approve(plain, block(approver={"issuer": IDP + "/", "subject": "bob"})),
+    "ca1-under-1.8.0": approve(plain, version="1.8.0"),
+    "ca1-under-2.0.0": approve(subset, version="2.0.0"),
+    "ca2-mode": approve(plain, block(mode="governed")),
+    "ca3-same": approve(plain, block(approver=dict(ALICE))),
+    "ca3-case": approve(plain, block(approver={"issuer": "HTTPS://IDP.EXAMPLE/",
+                                               "subject": "Alice"})),
+    "ca3-issuers": approve(plain, block(approver={"issuer": "https://other.example",
+                                                  "subject": "bob"})),
+    "ca3-form": approve(plain, block(approver={"issuer": IDP, "subject": "alice "})),
+    "ca3-local-admin": approve(plain, block(approver={"issuer": "urn:logweir:local-admin",
+                                                      "subject": "admin"})),
+    "ca3-system": approve(plain, block(requester={
+        "issuer": IDP, "subject": "system:serviceaccount:team-a:deployer"})),
+    "ca4-before": approve(plain, block(approved_at="2026-10-10T11:59:59Z")),
+    "ca4-expiry": approve(plain, block(approved_at="2026-10-10T13:00:00Z")),
+    "ca5-approver": approve(plain, approver="governed approver key " + CONSOLE_KEY),
+    "ca6-personal-key": approve(plain, key_id="aa" * 32),
+    "ca6-blank": approve(plain, block(confirmation_key_id=" ")),
+    "ca7-request-time": approve(plain, approved_at="2026-10-10T12:00:00Z"),
+    "ca8-mode-without-block": original_name("consoleApproval", console=False),
+    "ca8-block-beside-governed": original_name("governed"),
+    "on5-console-under-1.8.0": original_name("consoleApproval", version="1.8.0", console=False),
+    "on5-unknown-at-1.9.0": original_name("standing", console=False),
+}
+for name, d in cases.items():
+    payload = (json.dumps(d, indent=2) + "\n").encode()
+    t = pt.encode()
+    msg = (b"DSSEv1 " + str(len(t)).encode() + b" " + t + b" "
+           + str(len(payload)).encode() + b" " + payload)
+    sig = key.sign(msg, ec.ECDSA(hashes.SHA256()))
+    (out / f"{name}.json").write_bytes(payload)
+    (out / f"{name}.sig").write_text(json.dumps(
+        {"payloadType": pt,
+         "signatures": [{"keyid": keyid, "sig": base64.b64encode(sig).decode()}]}))
+PYEOF
+
+ca_key="c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+ca_tail="(the request expired at 2026-10-10T13:00:00Z); the console key $ca_key signed the request and the approval, which is expected in this mode: no personal key is involved"
+for name in ordinary subset original-name offsets slash; do
+    doc="$tmp/scorecard-ca/$name.json"
+    sig="$tmp/scorecard-ca/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 0 ] || { cat "$tmp/rust.err" >&2; fail "scorecard/console-$name: drill verify exited $rust_rc, expected 0"; }
+    [ "$py_rc" -eq 0 ] || { cat "$tmp/py.err" >&2; fail "scorecard/console-$name: verify_scorecard.py exited $py_rc, expected 0"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_lines="$(grep -oE 'console approval: .*' "$tmp/rust.all" || true)"
+    py_lines="$(grep -oE 'console approval: .*' "$tmp/py.all" || true)"
+    if [ "$rust_lines" != "$py_lines" ]; then
+        fail "scorecard/console-$name: the two readers say different things about who approved and how.
+  rust:   $rust_lines
+  python: $py_lines"
+    fi
+    case "$name" in
+        ordinary|subset|original-name) want="console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00Z $ca_tail" ;;
+        offsets) want="console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example#bob at 2026-10-10T12:04:00.250Z $ca_tail" ;;
+        slash) want="console approval: mode consoleApproval; requested by https://idp.example#alice at 2026-10-10T12:00:00Z; approved in the console by https://idp.example/#bob at 2026-10-10T12:04:00Z $ca_tail" ;;
+    esac
+    if [ "$rust_lines" != "$want" ]; then
+        fail "scorecard/console-$name: expected the console-approval line to be
+$want
+got:
+$rust_lines"
+    fi
+    if [ "$name" = "original-name" ]; then
+        # Both places say so: the original-name line names the same mode.
+        rust_on="$(grep -oE 'original name: .*' "$tmp/rust.all" || true)"
+        py_on="$(grep -oE 'original name: .*' "$tmp/py.all" || true)"
+        [ "$rust_on" = "$py_on" ] || fail "scorecard/console-$name: the original-name lines differ between the two readers"
+        case "$rust_on" in
+            *"approval subject originalName, approved by consoleApproval; "*) ;;
+            *) fail "scorecard/console-$name: the original-name line does not say consoleApproval: $rust_on" ;;
+        esac
+    fi
+    echo "check-verifier-parity: scorecard/console-$name  rust=$rust_rc python=$py_rc  ok  (console approval)"
+done
+
+# NEGATIVE CONTROL for the line: a document nobody approved in the console
+# prints none, from either reader.
+for reader_out in "$tmp/rust.plain" "$tmp/py.plain"; do : >"$reader_out"; done
+"$BIN" drill verify --scorecard "$FIX/scorecard.json" --signature "$FIX/scorecard.sig" \
+    --public-key "$FIX/public.pem" >"$tmp/rust.plain" 2>&1
+"$PY" "$VERIFIER" "$FIX/scorecard.json" "$FIX/scorecard.sig" "$FIX/public.pem" >"$tmp/py.plain" 2>&1
+if grep -q 'console approval:' "$tmp/rust.plain" "$tmp/py.plain"; then
+    fail "scorecard/console-control: a document without approval.console printed a console-approval line"
+fi
+
+ca3="approval.console does not name two people: "
+for name in ca1-under-1.8.0 ca1-under-2.0.0 ca2-mode ca3-same ca3-case ca3-issuers ca3-form ca3-local-admin ca3-system ca4-before ca4-expiry ca5-approver ca6-personal-key ca6-blank ca7-request-time ca8-mode-without-block ca8-block-beside-governed on5-console-under-1.8.0 on5-unknown-at-1.9.0; do
+    doc="$tmp/scorecard-ca/$name.json"
+    sig="$tmp/scorecard-ca/$name.sig"
+    set +e
+    "$BIN" drill verify --scorecard "$doc" --signature "$sig" --public-key "$FIX/public.pem" \
+        >"$tmp/rust.out" 2>"$tmp/rust.err"
+    rust_rc=$?
+    set -e
+    set +e
+    "$PY" "$VERIFIER" "$doc" "$sig" "$FIX/public.pem" >"$tmp/py.out" 2>"$tmp/py.err"
+    py_rc=$?
+    set -e
+    [ "$rust_rc" -eq 4 ] || { cat "$tmp/rust.out" "$tmp/rust.err" >&2; fail "scorecard/console-$name: drill verify exited $rust_rc, expected 4"; }
+    [ "$py_rc" -eq 1 ] || { cat "$tmp/py.out" "$tmp/py.err" >&2; fail "scorecard/console-$name: verify_scorecard.py exited $py_rc, expected 1"; }
+    cat "$tmp/rust.out" "$tmp/rust.err" >"$tmp/rust.all"
+    cat "$tmp/py.out" "$tmp/py.err" >"$tmp/py.all"
+    rust_msg="$(refusal_text "$tmp/rust.all" "${RUST_PREFIX}scorecard invariant violated: ")"
+    py_msg="$(refusal_text "$tmp/py.all" "$PY_PREFIX")"
+    case "$name" in
+        ca1-under-1.8.0) want_msg="approval.console is present but format_version \"1.8.0\" does not define it: the block is defined from $SCORECARD_CONSOLE_APPROVAL_VERSION of format 1 and from $SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION of format 2" ;;
+        ca1-under-2.0.0) want_msg="approval.console is present but format_version \"2.0.0\" does not define it: the block is defined from $SCORECARD_CONSOLE_APPROVAL_VERSION of format 1 and from $SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION of format 2" ;;
+        ca2-mode) want_msg="approval.console.mode is not \"consoleApproval\"" ;;
+        ca3-same|ca3-case) want_msg="${ca3}the approver is the requester (the issuer and the subject are compared without case); a two-person approval needs a second person, and no role changes that" ;;
+        ca3-issuers) want_msg="${ca3}the approver and the requester come from two issuers; whether a subject of one is a subject of the other cannot be known, so a principal of another issuer is never a second person" ;;
+        ca3-form) want_msg="${ca3}the approver is not in a form that can be compared: a console approval compares an issuer and a subject made of visible ASCII characters only (no space, no control character, nothing outside ASCII; the issuer without \`#\`; each at most 255 characters, as OpenID Connect bounds \`sub\`), and an identity it cannot compare cannot be shown to be a second person" ;;
+        ca3-local-admin) want_msg="${ca3}the approver is the in-cluster administrator console's one identity, which cannot be one of two people; a console approval needs two people the same identity provider vouches for" ;;
+        ca3-system) want_msg="${ca3}the requester is a Kubernetes system identity (a service account, a node or a system user), not a person; a console approval is between two people" ;;
+        ca4-before|ca4-expiry) want_msg="approval.console.approved_at is before requested_at or not before request_expires_at; an approval is given after the request was made and before it expires" ;;
+        ca5-approver) want_msg="approval.approver is not approval.console.approver as \"<issuer>#<subject>\"; under a console approval the approver a scorecard names is the second person the console attested" ;;
+        ca6-personal-key|ca6-blank) want_msg="approval.key_id is not approval.console.confirmation_key_id; under a console approval the console's key signs the approval, so the approver's key is the console key (expected in this mode), and a distinct personal key is not a console approval" ;;
+        ca7-request-time) want_msg="approval.approved_at is not approval.console.approved_at; under a console approval the approval time is the instant the second person approved, never the request's" ;;
+        ca8-mode-without-block|ca8-block-beside-governed) want_msg="target.original_name.approval_mode is \"consoleApproval\" exactly when approval.console is present; a console approval names who approved, and a governed, ordinary or v1 approval carries no console approver" ;;
+        on5-console-under-1.8.0) want_msg="target.original_name.approval_mode is a value defined from $SCORECARD_CONSOLE_APPROVAL_VERSION and format_version \"1.8.0\" predates it" ;;
+        on5-unknown-at-1.9.0) want_msg="target.original_name.approval_mode is not one of the four values this format defines; it is \"v1Approval\", \"governed\", \"ordinary\" or \"consoleApproval\" and nothing else" ;;
+    esac
+    if [ "$rust_msg" != "$py_msg" ] || [ "$rust_msg" != "$want_msg" ]; then
+        fail "scorecard/console-$name: the refusal differs between the two readers or from its arm.
+  rust:   $rust_msg
+  python: $py_msg
+  want:   $want_msg"
+    fi
+    echo "check-verifier-parity: scorecard/console-$name  rust=$rust_rc python=$py_rc  ok  (console approval refused)"
+done
+echo "check-verifier-parity: both readers accept $SCORECARD_CONSOLE_APPROVAL_VERSION and $SCORECARD_SUBSET_CONSOLE_APPROVAL_VERSION console-approved scorecards, say the same about who approved and how, and refuse each of CA-1 to CA-8 and ON-5's two new statements with the same words"

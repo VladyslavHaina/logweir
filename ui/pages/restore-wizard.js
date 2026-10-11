@@ -4537,6 +4537,43 @@ export function approvalPolicyBlock(policy, ticket, ticketErrors) {
       "are involved." + fresh + "</p>"
     );
   }
+  // PROD-16.2: two-person. A `Governed` policy whose operator mode is
+  // `two-person` takes its approval from a second person in the console: no
+  // key, no command, nothing to copy. Any other word keeps the strict text
+  // below, so an unknown mode never reads as "no key needed".
+  if (p !== null && p.legacy === false && p.mode === "governed" &&
+    p.operatorMode === "two-person") {
+    const ticketField =
+      "<div class=\"field\"><label for=\"change-ticket\">Change ticket (required)</label>" +
+      "<input id=\"change-ticket\" name=\"ticket\" maxlength=\"128\" value=\"" +
+      esc(typeof ticket === "string" ? ticket : "") + "\"" +
+      invalidAttributes("change-ticket", ticketErrors) + ">" +
+      fieldErrorLine("change-ticket", ticketErrors) +
+      "<p class=\"note\">Signed into the request with the plan hash; the approver sees it " +
+      "before approving.</p></div>";
+    if (p.consoleApprovalAvailable !== true) {
+      return (
+        "<h4 id=\"approval-policy-two-person-unavailable\">Two-person: not available in " +
+        "this console</h4>" +
+        "<p class=\"complaint\">This namespace is under approval policy <code>" +
+        esc(p.name) + "</code> (two-person: a second person approves in the console), and " +
+        "this console cannot take part: it is the in-cluster administrator console, whose one " +
+        "identity cannot be two people, or its confirmation key is not there yet. Request and " +
+        "approve this Restore in the shared console.</p>"
+      );
+    }
+    return (
+      "<h4 id=\"approval-policy-two-person\">Two-person: a second person approves in the " +
+      "console</h4>" +
+      "<p class=\"note\">This namespace is under approval policy <code>" + esc(p.name) +
+      "</code> (two-person). Create the Restore records the console's signed request naming " +
+      "you as the requester; the Restore runs only after a second person, signed in to this " +
+      "console as an approver and NOT you, opens the Restore's approval page and approves it. " +
+      "No key is involved, and there is nothing to copy, sign or paste. The request expires " +
+      "if nobody approves it in time.</p>" +
+      ticketField
+    );
+  }
   if (p !== null && p.legacy === false && p.mode === "governed") {
     return (
       "<h4 id=\"approval-policy-governed\">Strict: an approver's personal key</h4>" +
@@ -5584,6 +5621,14 @@ export function policyRefusal(state) {
     p.ordinaryConfirmationAvailable === false) {
     return "namespace policy " + String(p.name) + " is confirm, and this console does not " +
       "offer it yet: its confirmation key is not there; try again in a minute";
+  }
+  // PROD-16.2: a two-person namespace through a console that cannot take
+  // part (the in-cluster administrator console, or no key yet). The product
+  // API refuses the same request with nothing created; this says so first.
+  if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "governed" &&
+    p.operatorMode === "two-person" && p.consoleApprovalAvailable !== true) {
+    return "namespace policy " + String(p.name) + " is two-person, and this console cannot " +
+      "take part in it: request and approve this Restore in the shared console";
   }
   return null;
 }

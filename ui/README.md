@@ -862,6 +862,59 @@ here). Legacy (`kubectl proxy`) mode cannot know the policy, cannot
 sign a confirmation and has no countersign route (D0): it keeps today's governed
 flow unchanged.
 
+### Two-person: a second person approves in the console (PROD-16.2)
+
+A namespace whose policy read says `mode: governed` and `operatorMode:
+two-person` takes its approval from a **second person signed in to the shared
+console**. There is no key in this mode and nothing to copy, sign or paste, and
+the page is built so that there is nowhere to do any of that:
+
+* **The submit step** (`approvalPolicyBlock`) says so and asks for the change
+  ticket; it shows no command. When the read says `consoleApprovalAvailable:
+  false` -- the in-cluster administrator console, whose one identity cannot be
+  two people, or a console key that is not there yet -- it says that and Create
+  is disabled (`policyRefusal`); the product API refuses the same request with
+  nothing created.
+* **The approvals page** reads `GET .../restores/{name}/approval-request` and
+  renders the request **as the server shows it** (`renderConsoleApprovalPanel`):
+  who asked, the Restore and its UID, the plan hash, the policy and its digest,
+  the ticket, when it was asked and when it expires -- and **the whole approval
+  scope** (`renderApprovalScope`): the source archive and backup set, the
+  recovery point, the target cluster's bootstrap servers, **every topic and the
+  name it is restored under** (original names marked, partition subsets listed
+  number by number), the verification and where the evidence goes. Every one of
+  those is the server's, taken from bytes the console verified its own
+  signature on and the plan they name by hash, and every one is rendered as
+  text. The topic list is never sliced: it scrolls inside the panel
+  (`.approval-scope-topics`) and a long name wraps. The page never reads the
+  stored confirmation in this mode, never parses a document, and shows none.
+  A request the console did not confirm shows its state sentence and **no
+  field**.
+* **The Approve button is drawn only when the server offered it**
+  (`consoleApprovalOffered`): the view's `approve.offered` is exactly `true`
+  for a `pending` request of this Restore's name and UID, it carries a
+  well-formed `confirmationSha256`, the login holds `approvalSubmit`, the link
+  agrees with the Restore, and **the server said the scope is complete**
+  (`scopeComplete: true`, with as many topics as its `topicsCount`). Otherwise
+  the page shows the server's own sentence -- you are the requester, you are not
+  an approver here, the request expired, it is already approved, or it cannot
+  be shown in full (`scopeSentence`: split the restore, or approve it under
+  `strict`).
+* **The click sends one value** (`submitConsoleApproval`, `POST
+  .../restores/{name}/console-approval`): `confirmationSha256`, the hash of the
+  request that was shown, exactly as the server gave it. It names what was
+  reviewed and supplies nothing an authorization carries. The console decides
+  who the approver is from the sign-in and signs who approved and when.
+
+None of this is the security boundary: the product API checks the Approver
+role, that the approver is not the requester, the request's own signature, its
+expiry and the request's origin again on the click
+(`crates/logweir-api/tests/console_approval.rs`). What the page owes is to not
+teach an approver to trust what they should not, and
+`ui/tests/console-approval.spec.js` holds it to that, one negative control per
+behaviour. A mode word this page does not know is read as strict, never as "no
+key needed". Legacy (`kubectl proxy`) mode shows no request and has no click.
+
 ## The restore route, and the point it names
 
 **The wizard is bound to a recovery point somebody chose, and never picks one
@@ -3269,12 +3322,15 @@ NODE_PATH="$(npm root -g)" node scripts/plat12-13-ui-e2e.mjs
 ## What this page does not do
 
 It does not mint an approval, hold a key, or submit the cluster-scoped
-`TrustRoster`. There is no "Approve" button that produces a signature anywhere
-in it: the approver runs `logweir drill approve` where their private key lives,
-and the approvals page takes the two files that command wrote -- as UTF-8 text,
-verbatim -- and refuses anything whose name ends `.pem` or `.key` or whose
-content carries a private-key header, with the message **this page never accepts
-a private key**. The roster is a cluster-admin step -- see the trust-roster step in
+`TrustRoster`. Nothing in it produces a signature: under a strict or an unbound
+namespace the approver runs `logweir drill approve` where their private key
+lives, and the approvals page takes the two files that command wrote -- as
+UTF-8 text, verbatim -- and refuses anything whose name ends `.pem` or `.key` or
+whose content carries a private-key header, with the message **this page never
+accepts a private key**. The one "Approve" button it has is a two-person
+namespace's (PROD-16.2, above), and it signs nothing either: it sends the hash
+of the request the approver was shown, and the console -- not the page --
+records who approved and signs that. The roster is a cluster-admin step -- see the trust-roster step in
 [the installation guide](../docs/install.md) -- and the page surfaces that
 snippet rather than submitting it.
 

@@ -145,8 +145,8 @@ use crate::verification::{
     EvidenceRef, VerifyOracle,
 };
 use logweir_core::approval_policy::{
-    self as approval_policy, ApprovalMode, ApprovalPolicySet, AuthorizationRefusal,
-    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as approval_policy, ApprovalPolicySet, AuthorizationRefusal, EffectivePolicy,
+    ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
@@ -2113,12 +2113,27 @@ pub fn approval_bundle_config_map_with_policy(
         ))
     })?;
     // THE USAGE THE AUTHORISING KEY MUST STILL HOLD is the bound policy's:
-    // a governed approver's, or — under `Ordinary` only — the console's.
+    // a governed approver's, or the console's — under `Ordinary`, and
+    // (PROD-16.2) under a `Governed` policy whose approval the console signs.
     let bound = policy.bound().filter(|_| is_authorization_v2(approval));
-    let authorising_usage = match bound.map(|p| p.mode) {
-        Some(ApprovalMode::Ordinary) => logweir_core::trust::KeyUsage::ConsoleConfirmation,
-        Some(ApprovalMode::Governed) | None => logweir_core::trust::KeyUsage::GovernedApproval,
-    };
+    // BY THE TABLE (PROD-16.2): the bound policy's row says which usage
+    // authorises, and the pair that is not a row materialises nothing.
+    let route = bound
+        .map(logweir_core::approval_policy::ApprovalPolicy::route)
+        .transpose()
+        .map_err(|refusal| {
+            RestoreError::Materialization(format!(
+                "the Approval {} is under a policy this build runs nothing under ({refusal}); no \
+                 bundle is written",
+                approval.name_any()
+            ))
+        })?;
+    let console_approved =
+        route == Some(logweir_core::approval_policy::ApprovalRoute::SecondPersonInConsole);
+    let authorising_usage = route.map_or(
+        logweir_core::trust::KeyUsage::GovernedApproval,
+        logweir_core::approval_policy::ApprovalRoute::authorising_usage,
+    );
     if let Err(refusal) = trust.may_sign_new_for(matched_key_id, authorising_usage, now) {
         return Err(RestoreError::Materialization(format!(
             "the Approval {} verified under key {matched_key_id}, which {} no longer accepts for \
@@ -2165,6 +2180,52 @@ pub fn approval_bundle_config_map_with_policy(
                     trust_source_phrase(trust),
                     refusal.as_str()
                 )));
+            }
+            // PROD-16.2: UNDER A CONSOLE-APPROVED POLICY THE CONSOLE'S
+            // SIGNATURE IS THE APPROVAL, AND IT IS VERIFIED AGAIN HERE — the
+            // last thing done before a runner is given anything — against the
+            // console key this namespace's trust carries NOW, over the exact
+            // bytes the bundle is about to mount. The Approval controller
+            // verified it for its verdict; admission does not take that
+            // verdict's word for the one signature the run rests on. A
+            // personal-key policy's second signature is unchanged: the
+            // Approval controller's, and the runner's again.
+            if console_approved {
+                if matched_key_id != confirmation_key_id {
+                    return Err(RestoreError::Materialization(format!(
+                        "the Approval {} is under policy {}, which takes its approval from the \
+                         console, and it verified under key {matched_key_id}, which is not the \
+                         console key {confirmation_key_id} that confirmed it; no bundle is written",
+                        approval.name_any(),
+                        bound.name
+                    )));
+                }
+                let verified =
+                    serde_json::from_str::<logweir_verify::Sidecar>(&approval.spec.sidecar_bytes)
+                        .map_err(|e| e.to_string())
+                        .and_then(|sidecar| {
+                            let key = logweir_verify::VerifyingKey::from_pem_str(
+                                &confirmation_key.spki_pem,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            logweir_verify::verify_detached(
+                                &key,
+                                PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+                                approval.spec.approval_bytes.as_bytes(),
+                                &sidecar,
+                            )
+                            .map_err(|e| e.to_string())
+                        });
+                if let Err(reason) = verified {
+                    return Err(RestoreError::Materialization(format!(
+                        "the Approval {} is under policy {}, which takes its approval from the \
+                         console, and the console key {confirmation_key_id} does not verify its \
+                         signature over the approval's bytes ({reason}); no bundle is written and \
+                         nothing executes under it",
+                        approval.name_any(),
+                        bound.name
+                    )));
+                }
             }
             Some((confirmation_key.spki_pem.clone(), bound))
         }
