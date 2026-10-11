@@ -1948,7 +1948,11 @@ async fn evidence_fetch_pass(
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
-                                if let Some((from_ms, to_ms)) = doc.covered {
+                                // PROD-02.1's rule, on FX-33's fold: an EMPTY
+                                // window is no window (`covered_from_receipt`).
+                                if let Some((from_ms, to_ms)) =
+                                    doc.covered.filter(|(from, to)| from < to)
+                                {
                                     facts.insert(
                                         "windowCovered".to_string(),
                                         window_covered(from_ms, to_ms),
@@ -2647,7 +2651,11 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     let document = receipt
         .as_deref()
         .and_then(logweir_core::receipt_facts::ReceiptFacts::fold);
-    let covered = document.as_ref().and_then(|d| d.covered);
+    // PROD-02.1: an EMPTY window is no window, as `covered_from_receipt` says.
+    let covered = document
+        .as_ref()
+        .and_then(|d| d.covered)
+        .filter(|(from, to)| from < to);
     let records = document.as_ref().and_then(|d| d.records);
     let capture = document
         .as_ref()

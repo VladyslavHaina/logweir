@@ -16147,6 +16147,19 @@ fn an_empty_capture_is_read_only_from_a_receipt_whose_arms_hold() {
     let doc = empty_capture_document();
     assert_eq!(covered_from_receipt(&doc), None);
     assert!(receipt_is_empty_capture(&serde_json::to_vec(&doc).unwrap()));
+    // The controller's own read (FX-33's fold, integrate-10): the same rule.
+    let store = Store::in_memory("logweir/");
+    store
+        .put_create_only(RECEIPT_KEY, &serde_json::to_vec(&doc).unwrap())
+        .expect("the fixture receipt is written");
+    let keys = EvidenceKeys {
+        receipt: Some(RECEIPT_KEY.to_string()),
+        sidecar: None,
+        receipt_sha256: None,
+    };
+    let observed = observe_archive(&store, &keys).expect("a key was looked up");
+    assert_eq!(observed.covered, None, "an empty window is no window");
+    assert!(observed.empty_capture);
 
     let mut tampered = empty_capture_document();
     tampered["source_watermarks"]["orders"][0] = json!([0, 15]);

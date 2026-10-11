@@ -519,6 +519,10 @@ pub fn reference_receipt(
                 .collect(),
         ),
         consumer_positions,
+        // PROD-02.1's block is not per topic: the writer caps it at
+        // `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` inside the base
+        // budget, and it is only from 1.8.0, which this reference is not.
+        source_watermarks: None,
     }
 }
 
