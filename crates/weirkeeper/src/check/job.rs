@@ -1,10 +1,10 @@
-//! The check Job — D2 §4.3's `job.rs` row.
+//! The check Job (D2 §4.3's `job.rs` row).
 //!
-//! One shape for every check kind, built on [`crate::job::build`] so that a
-//! check pod and an execution pod cannot drift apart: same container name,
-//! same `restartPolicy: Never` + `backoffLimit: 0`, same
+//! One shape for every check kind, built on [`crate::job::build`] so a check
+//! pod and an execution pod cannot drift apart: same container name, same
+//! `restartPolicy: Never` + `backoffLimit: 0`, same
 //! `automountServiceAccountToken: false`, same `podFailurePolicy`, same
-//! security context, and — the ordering the whole framework depends on — **no
+//! security context, and (the ordering the framework depends on) **no
 //! `ttlSecondsAfterFinished` at creation time**.
 
 use std::collections::BTreeMap;
@@ -19,57 +19,49 @@ pub const CHECK_JOB_PREFIX: &str = "lwc-";
 
 /// How many hex characters of `sha256(owner uid)` a check Job's name carries.
 ///
-/// TWENTY. The name is `lwc-` + a two-character discriminator + `-` + this, so
-/// 4 + 2 + 1 + 20 = **27 characters, always**, whatever the owning object is
-/// called. That is what removes the `NameTooLong` path the `KafkaCluster`
-/// probe has to carry ([`crate::controllers::kafka_cluster::name_limit_for_cluster`]):
-/// a check Job's name is independent of its owner's name, so no object can be
-/// named in a way that makes its check unschedulable.
+/// The name is `lwc-` + a two-character discriminator + `-` + this, so always
+/// 27 characters whatever the owner is called: no object can be named so that
+/// its check is unschedulable (unlike the `KafkaCluster` probe's
+/// [`crate::controllers::kafka_cluster::name_limit_for_cluster`]).
 ///
-/// Twenty hex characters is 80 bits. A namespace would need about 2^40 live
-/// check subjects for an even chance of a collision, and the two objects would
-/// also have to want the same check KIND at the same time; the plan
-/// `ConfigMap`'s owner-UID check (D2 §4.3's `plan.rs` 409 rule) is the backstop
-/// that turns a collision into a refusal rather than into a wrong answer.
+/// 80 bits: a namespace would need about 2^40 live check subjects for an even
+/// chance of a collision, both wanting the same check kind at once, and the
+/// plan `ConfigMap`'s owner-UID check (D2 §4.3's `plan.rs` 409 rule) turns a
+/// collision into a refusal rather than a wrong answer.
 pub const OWNER_UID_HEX_CHARS: usize = 20;
 
 /// `app.kubernetes.io/managed-by` on every check Job and its pod template.
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 /// The value of [`LABEL_MANAGED_BY`].
 pub const MANAGED_BY: &str = "weirkeeper";
-/// `app.kubernetes.io/component`.
 pub const LABEL_COMPONENT: &str = "app.kubernetes.io/component";
-/// The value of [`LABEL_COMPONENT`] — also the selector D2 §4.3's `limits.rs`
+/// The value of [`LABEL_COMPONENT`], also the selector D2 §4.3's `limits.rs`
 /// counts active check Jobs with.
 pub const COMPONENT_CHECK: &str = "check";
 /// Which plan kind this Job runs.
 pub const LABEL_CHECK_KIND: &str = "logweir.dev/check-kind";
 /// The UID of the custom resource this check belongs to.
 ///
-/// **A LABEL, AND NEVER AN IDENTITY.** It is here so an operator can find a
-/// check's Job with `kubectl get jobs -l`, and for the `limits.rs` count. It is
-/// NOT how a pod is matched to a Job: that is
-/// [`super::pod::find_owned_pod`]'s `ownerReferences` check (D-SEAMS **S6**),
+/// **A label, never an identity**: it is for `kubectl get jobs -l` and the
+/// `limits.rs` count. A pod is matched to a Job by
+/// [`super::pod::find_owned_pod`]'s `ownerReferences` check (seam **S6**),
 /// because a label is writable by anything that can create a pod.
 pub const LABEL_CHECK_OWNER_UID: &str = "logweir.dev/check-owner-uid";
 
 /// The UID of the `KafkaCluster` this check dials, when it dials one.
 ///
-/// Present ONLY so [`super::limits`] can enforce D2 §4.4's
-/// `maxActiveDiscoveriesPerConnection` — one active discovery per connection —
-/// without reading every check's plan `ConfigMap` to find out which cluster it
-/// names. Absent for a kind that has no connection (`destinationAccess`,
-/// `evidenceFetch`), and absent is counted as "no connection", never as a
-/// wildcard.
+/// Present only so [`super::limits`] can enforce D2 §4.4's
+/// `maxActiveDiscoveriesPerConnection` without reading every check's plan
+/// `ConfigMap`. Absent for a kind with no connection (`destinationAccess`,
+/// `evidenceFetch`), and absent counts as "no connection", never as a wildcard.
 pub const LABEL_CHECK_CONNECTION_UID: &str = "logweir.dev/check-connection-uid";
 
 /// Where the check plan `ConfigMap` is mounted.
 ///
-/// `/check`, NOT [`crate::job::PLAN_MOUNT_PATH`]. D2 §4.2's argv is
-/// `--plan /check/check-plan.json`, and the two mounts are deliberately
-/// different directories: an execution pod's `/plan` carries a `backup.yaml`
-/// the engine reads, a check pod's `/check` carries a contract document with a
-/// digest pinned in the environment. A check Job that reused `/plan` would make
+/// `/check`, not [`crate::job::PLAN_MOUNT_PATH`] (D2 §4.2's argv is
+/// `--plan /check/check-plan.json`): an execution pod's `/plan` carries a
+/// `backup.yaml` the engine reads, a check pod's `/check` a contract document
+/// whose digest is pinned in the environment, and reusing `/plan` would make
 /// `RunnerJobSpec::plan_config_map` mean two things.
 pub const CHECK_MOUNT_PATH: &str = "/check";
 /// The volume name for [`CHECK_MOUNT_PATH`].
@@ -77,39 +69,33 @@ pub const CHECK_VOLUME: &str = "check-plan";
 /// The plan document's key inside the `ConfigMap`, and its file name.
 pub const CHECK_PLAN_KEY: &str = "check-plan.json";
 
-/// `LOGWEIR_CHECK_CONTRACT_VERSION` — D2 §4.2's env.
+/// `LOGWEIR_CHECK_CONTRACT_VERSION` (D2 §4.2's env).
 pub const CONTRACT_VERSION_ENV: &str = "LOGWEIR_CHECK_CONTRACT_VERSION";
-/// `LOGWEIR_CHECK_PLAN_SHA256`.
 pub const PLAN_SHA256_ENV: &str = "LOGWEIR_CHECK_PLAN_SHA256";
-/// `LOGWEIR_CHECK_SUBJECT_UID`.
 pub const SUBJECT_UID_ENV: &str = "LOGWEIR_CHECK_SUBJECT_UID";
 
 /// Seconds added to a check's own `timeoutSeconds` to get the Job's
-/// `activeDeadlineSeconds` — D2 §4.3.
+/// `activeDeadlineSeconds` (D2 §4.3).
 ///
-/// NINETY. The runner's own budget is the plan's `timeoutSeconds`; the margin
-/// is image pull, scheduling and container start, none of which the runner can
-/// bound. A deadline that fires therefore means the POD never got going, which
-/// is a different fact from a check that ran out of time — and it is reported
-/// as a different code.
+/// The margin covers image pull, scheduling and container start, which the
+/// runner cannot bound, so a Job deadline that fires means the pod never got
+/// going: a different fact, and code, from a check that ran out of time.
 pub const DEADLINE_MARGIN_SECONDS: i64 = 90;
 
-/// `ttlSecondsAfterFinished` for a finished check Job — D2 §4.3.
+/// `ttlSecondsAfterFinished` for a finished check Job (D2 §4.3).
 ///
-/// TEN MINUTES, and **patched on only after the status commit**. The relay
-/// lives on the pod, and the TTL controller deletes a Job and its pods
-/// together: a TTL set at creation time would let garbage collection race the
-/// log read. [`crate::runner_log::set_ttl`] is the one place it is written.
+/// **Patched on only after the status commit**: the relay lives on the pod, and
+/// the TTL controller deletes a Job and its pods together, so a TTL set at
+/// creation would let garbage collection race the log read.
+/// [`crate::runner_log::set_ttl`] is the one place it is written.
 pub const TTL_SECONDS: i32 = 600;
 
 /// The Job name for one check: `lwc-<k>-<first 20 hex of sha256(owner uid)>`.
 ///
-/// A PURE FUNCTION OF THE KIND AND THE UID, and of nothing else — see
-/// [`OWNER_UID_HEX_CHARS`] for why the owner's NAME is deliberately absent.
-/// A duplicate reconcile therefore computes the same name and gets
-/// **409 `AlreadyExists`** from the API server instead of creating a second
-/// check Job, which is the same mechanism [`crate::slot`] uses for scheduled
-/// backups.
+/// A pure function of the kind and the UID (see [`OWNER_UID_HEX_CHARS`] for
+/// why the owner's name is absent), so a duplicate reconcile gets **409
+/// `AlreadyExists`** instead of creating a second check Job, as [`crate::slot`]
+/// does for scheduled backups.
 #[must_use]
 pub fn check_job_name(kind: CheckPlanKind, owner_uid: &str) -> String {
     let digest = logweir_core::ids::sha256_hex(owner_uid.as_bytes());
@@ -120,16 +106,14 @@ pub fn check_job_name(kind: CheckPlanKind, owner_uid: &str) -> String {
     )
 }
 
-/// The evidence-fetch Job name for one ATTEMPT —
+/// The evidence-fetch Job name for one attempt:
 /// `lwc-ev-<first 20 hex of sha256(owner uid + ":" + attempt)>` (D2 §3.9 step 2).
 ///
-/// THE ATTEMPT IS IN THE NAME, AND THAT IS THE WHOLE IDEMPOTENCE ARGUMENT. A
-/// fetch that did not finish is retried with a NEW Job (D2 §3.9 step 5), and a
-/// controller restarted between creating attempt `n`'s Job and recording it on
-/// the status recomputes this same name and finds that Job instead of making a
-/// second one. Two attempts can never share a Job; one attempt can never have
-/// two. Same length and alphabet as [`check_job_name`], so the 27-character
-/// argument there holds here too.
+/// The attempt in the name is the idempotence argument: an unfinished fetch is
+/// retried with a new Job (D2 §3.9 step 5), and a controller restarted between
+/// creating attempt `n`'s Job and recording it recomputes this name and finds
+/// that Job. Two attempts never share a Job; one attempt never has two. Same
+/// length and alphabet as [`check_job_name`].
 #[must_use]
 pub fn evidence_fetch_job_name(owner_uid: &str, attempt: u32) -> String {
     check_job_name(
@@ -138,11 +122,10 @@ pub fn evidence_fetch_job_name(owner_uid: &str, attempt: u32) -> String {
     )
 }
 
-/// The labels on a check Job and on its pod template — the same map, on both.
+/// The labels on a check Job and on its pod template (the same map on both).
 ///
-/// `connection_uid` is `None` for a kind that dials no cluster; the key is then
-/// ABSENT rather than empty, because an empty label value is a value a
-/// selector can match.
+/// With no `connection_uid` the key is absent rather than empty, because an
+/// empty label value is a value a selector can match.
 #[must_use]
 pub fn labels(
     kind: CheckPlanKind,
@@ -164,18 +147,15 @@ pub fn labels(
 /// Everything one check Job needs.
 ///
 /// The projections ([`SecretMount`], [`ConfigMapMount`], [`EnvFromSecret`]) are
-/// the CALLER's: W8 renders a connection's credential, W9 a destination's, and
-/// this module never decides which Secret a check may name. What it does decide
-/// is that they are the SAME kinds of projection an execution pod gets, which
-/// is what makes a check's `credentialProjected` answer mean something about
-/// the run it is a check for.
+/// the caller's: this module never decides which Secret a check may name, only
+/// that they are the same kinds of projection an execution pod gets, which is
+/// what makes a check's `credentialProjected` answer mean something about the
+/// run it checks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckJobSpec {
-    /// Which plan kind runs.
     pub kind: CheckPlanKind,
-    /// The Job's namespace — the subject's.
+    /// The Job's namespace (the subject's).
     pub namespace: String,
-    /// The owning custom resource.
     pub owner: RunnerOwner,
     /// The `KafkaCluster` UID this check dials, for
     /// [`LABEL_CHECK_CONNECTION_UID`]. `None` for a kind that dials none.
@@ -205,15 +185,13 @@ pub struct CheckJobSpec {
     pub image: Option<String>,
     /// The pull policy this process was handed, or `None` for the compiled-in.
     pub image_pull_policy: Option<String>,
-    /// The evidence-fetch attempt this Job serves — `Some` for
-    /// [`CheckPlanKind::EvidenceFetch`] only, whose name is
-    /// [`evidence_fetch_job_name`]. `None` for every other kind: one subject,
-    /// one check, one name.
+    /// The evidence-fetch attempt this Job serves: `Some` only for
+    /// [`CheckPlanKind::EvidenceFetch`], whose name is
+    /// [`evidence_fetch_job_name`].
     pub attempt: Option<u32>,
 }
 
 impl CheckJobSpec {
-    /// This check's Job name.
     #[must_use]
     pub fn job_name(&self) -> String {
         match self.attempt {
@@ -222,13 +200,12 @@ impl CheckJobSpec {
         }
     }
 
-    /// This check's labels.
     #[must_use]
     pub fn labels(&self) -> BTreeMap<String, String> {
         labels(self.kind, &self.owner.uid, self.connection_uid.as_deref())
     }
 
-    /// This check's plan `ConfigMap` name — [`super::plan::plan_config_map_name`].
+    /// [`super::plan::plan_config_map_name`].
     #[must_use]
     pub fn plan_name(&self) -> String {
         super::plan::plan_config_map_name(&self.job_name())
@@ -237,8 +214,8 @@ impl CheckJobSpec {
 
 /// D2 §4.2's argv, verbatim.
 ///
-/// A FUNCTION AND NOT A LITERAL AT THE CALL SITE, so the runner's contract and
-/// the controller's spelling of it are one thing.
+/// A function, not a literal at the call site, so the runner's contract and the
+/// controller's spelling of it are one thing.
 #[must_use]
 pub fn runner_argv() -> Vec<String> {
     vec![
@@ -255,9 +232,8 @@ pub fn runner_argv() -> Vec<String> {
 #[must_use]
 pub fn runner_job_spec(spec: &CheckJobSpec) -> RunnerJobSpec {
     let mut config_map_mounts = spec.config_map_mounts.clone();
-    // THE PLAN, AS AN ORDINARY ConfigMap MOUNT AT `/check`. It deliberately
-    // does not go through `RunnerJobSpec::plan_config_map`, which mounts at
-    // `/plan` — see `CHECK_MOUNT_PATH`.
+    // The plan as an ordinary `ConfigMap` mount at `/check`, not through
+    // `RunnerJobSpec::plan_config_map` (`/plan`): see `CHECK_MOUNT_PATH`.
     config_map_mounts.push(ConfigMapMount {
         volume: CHECK_VOLUME.to_string(),
         config_map_name: spec.plan_config_map.clone(),
@@ -273,7 +249,7 @@ pub fn runner_job_spec(spec: &CheckJobSpec) -> RunnerJobSpec {
         (PLAN_SHA256_ENV.to_string(), spec.plan_sha256.clone()),
         (SUBJECT_UID_ENV.to_string(), spec.subject_uid.clone()),
         // D2 §4.2: stderr carries JSON tracing at `warn`. A check's stdout is
-        // the machine contract, so anything chattier competes with the frames
+        // the machine contract, and anything chattier competes with the frames
         // for the log's byte budget.
         ("RUST_LOG".to_string(), "warn".to_string()),
     ];
@@ -290,33 +266,23 @@ pub fn runner_job_spec(spec: &CheckJobSpec) -> RunnerJobSpec {
         config_map_mounts,
         env_from_secret: spec.env_from_secret.clone(),
         env_literal,
-        // NOT the `/plan` mount. See `CHECK_MOUNT_PATH`.
+        // Not the `/plan` mount: see `CHECK_MOUNT_PATH`.
         plan_config_map: None,
         image: spec.image.clone(),
         image_pull_policy: spec.image_pull_policy.clone(),
-        // No check kind's spec states resources for its Job (FX-2's sweep).
+        // No check kind's spec states resources for its Job.
         resources: None,
     }
 }
 
 /// The check Job, labelled.
 ///
-/// # THE ONE PLACE THE DEFERRED `job.rs` SEAM IS APPLIED
-///
-/// D2 §13.2 gives W5 a last commit that adds `labels` and `template_labels`
-/// fields to [`crate::job::RunnerJobSpec`], scheduled AFTER PLAT-07.1 merges
-/// because `job.rs` is that task's file for the duration of its rebase. Until
-/// then the labels are written onto the built `Job` here, which produces the
-/// identical object: `job::build` leaves `metadata.labels` and
-/// `spec.template.metadata` unset, so there is nothing to merge with and
-/// nothing to overwrite.
-///
-/// **What moves when the seam closes.** The two `labels` assignments below
-/// become `spec.labels` / `spec.template_labels` on the `RunnerJobSpec`
-/// [`runner_job_spec`] already returns, and this function becomes
-/// `job::build(&runner_job_spec(spec))`. Nothing else changes, and
-/// `the_check_job_is_the_runner_job_shape_plus_labels` is the test that holds
-/// both forms to the same object.
+/// The labels are written onto the built `Job` here rather than through
+/// [`crate::job::RunnerJobSpec`], which has no label fields: `job::build`
+/// leaves `metadata.labels` and `spec.template.metadata` unset, so there is
+/// nothing to merge with or overwrite.
+/// `the_check_job_is_the_runner_job_shape_plus_labels` holds the result to
+/// `job::build`'s shape.
 #[must_use]
 pub fn build(spec: &CheckJobSpec) -> Job {
     let mut job = job::build(&runner_job_spec(spec));
@@ -324,9 +290,9 @@ pub fn build(spec: &CheckJobSpec) -> Job {
     job.metadata.labels = Some(labels.clone());
     if let Some(job_spec) = job.spec.as_mut() {
         let mut meta = job_spec.template.metadata.take().unwrap_or_default();
-        // THE POD TEMPLATE'S LABELS, and the Job's, are the same map. The
-        // `limits.rs` count selects Jobs and the `kubectl` an operator types
-        // selects pods; two spellings would make one of them wrong.
+        // The pod template's labels and the Job's are the same map: the
+        // `limits.rs` count selects Jobs and an operator's `kubectl` selects
+        // pods, and two spellings would make one of them wrong.
         meta.labels = Some(labels);
         job_spec.template.metadata = Some(meta);
     }
