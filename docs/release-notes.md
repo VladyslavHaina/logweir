@@ -2867,7 +2867,7 @@ held records, or with the watermarks unread, is still exit 1. Both verifiers
 (`verify_scorecard.py` 1.29.0) check arms 41–45 and print "coverage not
 recorded" for every receipt without the block, never complete.
 
-**Proved by** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
+**Scope:** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
 shipped engine `0.23.3+logweir.2`), `crates/logweir/tests/backup_run.rs`,
 `crates/logweir/tests/catalog.rs`, `crates/weirkeeper/tests/backup_controller.rs`,
 `crates/logweir-core/tests/backup_receipt.rs`, the corpus and

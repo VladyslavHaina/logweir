@@ -2199,6 +2199,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
+        // PROD-02.1 (2026-10-10, item 62): a backup of a source whose
+        // records all expired is a signed empty capture; the reason an
+        // operator reads on the `Backup`.
+        (
+            "a backup of an emptied source is a named empty capture",
+            "EmptyCapture",
+        ),
     ];
     assert_eq!(
         items.len(),

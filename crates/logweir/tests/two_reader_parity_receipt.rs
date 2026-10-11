@@ -792,11 +792,18 @@ fn the_receipt_window_and_the_crds_window_are_both_half_open() {
 
     let receipt = std::fs::read_to_string(root().join("crates/logweir-core/src/backup_receipt.rs"))
         .expect("read crates/logweir-core/src/backup_receipt.rs");
+    // PROD-02.1 (1.8.0): the EMPTY window is admitted only beside
+    // `source_watermarks` — an empty capture, which arm 45 proves and which
+    // the controller never copies to `windowCovered` (an empty window is no
+    // window there). Without the block the comparison stays strict.
     assert!(
-        receipt.contains("if self.covered.from_ms >= self.covered.to_ms {"),
-        "BackupReceipt::validate_invariants's arm 4 is no longer the STRICT comparison. \
-         `from_ms > to_ms` accepts `from_ms == to_ms`, i.e. an EMPTY half-open range, \
-         which the CRD's exclusive `toMs` says covers no record."
+        receipt.contains(
+            "if self.covered.from_ms > self.covered.to_ms\n            || (empty_window && \
+             self.source_watermarks.is_none())"
+        ),
+        "BackupReceipt::validate_invariants's arm 4 is no longer STRICT for a receipt without \
+         source_watermarks. `from_ms == to_ms` is an EMPTY half-open range, which the CRD's \
+         exclusive `toMs` says covers no record; only an empty capture may carry one."
     );
     assert!(
         receipt
