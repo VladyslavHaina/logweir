@@ -57,7 +57,7 @@ install document; this README is the chart's own.
 |---|---|---|
 | the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
 | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below, plus `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` when `notify.allowInsecureSinks` is true. **Probed**: `weirkeeper --probe live` / `--probe ready` by exec against the controller's own loopback health listener (`127.0.0.1:8081`, `LOGWEIR_HEALTH_ADDR`; no port is exposed). Liveness fails when the runtime is wedged — the listener shares the reconcilers' thread — or a controller task has ended, and three misses 20 s apart restart the pod; readiness waits for the client and every controller |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below. **Probed**: `weirkeeper --probe live` / `--probe ready` by exec against the controller's own loopback health listener (`127.0.0.1:8081`, `LOGWEIR_HEALTH_ADDR`; no port is exposed). Liveness fails when the runtime is wedged — the listener shares the reconcilers' thread — or a controller task has ended, and three misses 20 s apart restart the pod; readiness waits for the client and every controller |
 | `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
 | `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound** | the five human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding`; `logweir-retention-admin` is namespaced and is the only holder of a write verb on `retentionpolicies` — see *`retention.enabled`* below |
 | `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
@@ -340,8 +340,8 @@ account holds no Kubernetes verb. The deletion capability lives in an
 object-store credential scoped to the policy's own prefix, and the account
 exists so that the pod which mounts that credential has a name an audit trail,
 a NetworkPolicy selector and a `kubectl get pods` can use — separate from
-`logweir-runner`, which runs backups, restores, checks, catalog syncs and
-notification deliveries. "What has run as the deleter" should have an answer.
+`logweir-runner`, which runs backups, restores, checks and catalog syncs.
+"What has run as the deleter" should have an answer.
 
 A deletion needs all four of these, and they are deliberately in four places:
 
@@ -993,26 +993,12 @@ chart does not refuse either, because a typo should not fail the upgrade of a
 whole release. A job TTL below an hour would mean an operator cannot fetch the
 pod log of a run that failed overnight, which is why that floor is where it is.
 
-## `notify.allowInsecureSinks` — the one notification setting
+## `notify` — withdrawn
 
-| value | default | what it decides |
-|---|---|---|
-| `notify.allowInsecureSinks` | `false` | whether a delivery Job may POST an alert to a `http://` webhook or Slack URL |
-
-`logweir notify deliver` refuses a non-`https://` sink **before it dials**, so
-a scratch receiver on `http://echo.<ns>.svc:8080` receives nothing on a default
-install. Set this true and the chart renders
-`LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the `weirkeeper` Deployment; the
-controller forwards `NOTIFY_ALLOW_INSECURE_SINKS=1` into every delivery Job.
-Left alone it renders **nothing** — not the variable with a falsy value — so
-the Deployment and the Jobs are byte-identical to what they were before the
-value existed.
-
-It is an **installation** setting and a `ProtectionPolicy` cannot turn it on: a
-namespaced object that could would let whoever creates a policy downgrade their
-own alerts' transport to cleartext, carrying the event, the policy's name, its
-health and — on Slack, where the URL *is* the credential — a bearer token.
-**Local development only; production leaves it `false`.**
+Alert delivery is withdrawn (release notes, item 73), and with it
+`notify.allowInsecureSinks`. A values file that still sets `notify` is refused
+at render, naming it; remove the block, or pass `--set notify=null` with
+`helm upgrade --reuse-values`.
 
 ## The five-minute path
 

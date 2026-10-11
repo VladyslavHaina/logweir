@@ -10,12 +10,8 @@ policy the controller hands every Job (`runnerImage`, `runnerImagePullPolicy`
 start), and the archive addressing env the `config/overlays/k8s-demo` patch
 sets (`archive.*`, rendered only when a value or `minio.enabled` supplies one).
 
-W13 adds `notify.allowInsecureSinks`, which renders
-`LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` and ONLY when the value is true — the
-default render is unchanged, and the controller forwards it into every
-delivery Job as `NOTIFY_ALLOW_INSECURE_SINKS=1` (NOTIFY-INSECURE-SINK-UNEXPOSED:
-`logweir notify deliver` refuses a non-`https://` sink before it dials, and
-nothing set the documented hatch).
+`notify` is WITHDRAWN with the alert sinks it configured: a values file that
+still sets it is refused below, naming it.
 
 Task 38 adds node placement (`kubernetes.nodeSelector`/`tolerations`/`affinity`,
 overridable by `controller.*`) — which renders NOTHING when nothing is set, so
@@ -97,19 +93,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- /*
-            The delivery Jobs' one installation setting, and RENDERED ONLY WHEN
-            TRUE so the default install is byte-identical to `logweir.yaml`
-            (`chart_lint_default_render_agrees_with_the_install_file` permits
-            exactly four differences and this is not a fifth). `1` is the only
-            value `weirkeeper`'s predicate and `logweir notify deliver` both
-            read as yes, so a rendered `"false"` could never be mistaken for
-            one. A `ProtectionPolicy` cannot set this: it is the cluster
-            administrator's switch, on the Deployment only.
-            */ -}}
-            {{- if .Values.notify.allowInsecureSinks }}
-            - name: LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS
-              value: "1"
+            {{- if .Values.notify }}
+            {{- fail "notify is withdrawn: Logweir no longer delivers ProtectionPolicy alerts, so notify.allowInsecureSinks configures nothing (release notes, item 73). Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
             {{- end }}
             {{- /*
             D3 §2.3 and §2.7's two controller-wide windows, RENDERED ONLY WHEN

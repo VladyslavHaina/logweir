@@ -3310,20 +3310,54 @@ OD-12); each part below did nothing v1 uses.
   implemented it, so every drill logged a WARN that it "failed or could not
   be run", and nothing read the result. No verdict changes, and
   `engine_subreport` stays `null`.
+- **Alert sinks are withdrawn.** A `ProtectionPolicy` delivers no alert to
+  PagerDuty, Slack or a webhook: the controller creates no delivery Job and
+  writes no protection event (its format page says "no longer written"),
+  `logweir notify deliver` is gone, and so are the sink fields, the
+  `credentialBindings` status and the chart's `notify.allowInsecureSinks`.
+  Health, the objectives, the alert ledger (`status.alerts`: open and
+  resolved, no delivery state) and the console's `#/protection` page stay.
+  An upgraded install sees: a policy that still carries `spec.notifications`
+  parses, the API server keeps the key and drops its contents, and the
+  policy's `NotificationsDelivered` condition reads `False` /
+  `NotificationsWithdrawn`, naming the field; a values file that sets
+  `notify` is refused at render, naming it; `scripts/bind-credential.py`
+  refuses `--kind ProtectionPolicy`. A delivery Job an older controller left
+  running finishes and then stays, because nothing patches its TTL any more:
+  `kubectl delete jobs -n <ns> -l logweir.dev/component=notification`
+  removes them and their event ConfigMaps.
 - **The ACL read is gone** (item 37's `DescribeAcls` capture and its `unsafe`
   wrapper). Nothing called it: no run reads or records ACLs. The
   consumer-group and cluster reads behind the same crate are unchanged, and
   consumer positions are still written, read and documented.
 
-**Do:** nothing for these parts.
+**Do:** remove the `notify` block from your values before `helm upgrade`
+(see *Required operator actions*), apply the CRDs, and remove
+`spec.notifications` from each `ProtectionPolicy` when convenient.
 **Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone);
-the unsafe-scope gate over the smaller crate; the e2e group rows (the three
-ACL rows are removed with the read).
-**Rollback:** roll back the runner; an older runner logs the warning again.
+controller rows over a recording API double (a policy that still names sinks
+is evaluated as before and its condition names the withdrawal; the control
+without the field publishes no such condition; no row's route table has a
+Job or ConfigMap route, so any delivery would panic); API rows over an older
+live object (its routes and delivery state are not published); the chart's
+refusal row and its control (`notify=null` renders); the bind-credential
+refusal row and its control; the unsafe-scope gate over the smaller crate;
+the e2e group rows (the three ACL rows are removed with the read).
+[UNVERIFIED — no cluster has applied the narrowed ProtectionPolicy CRD over an older policy yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the chart, the CRDs, the controller and the runner
+together. The older CRD types `spec.notifications` again, but the API server
+already dropped what was inside it, so each route must be written again; an
+older runner logs phase 7's warning again.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before `helm upgrade`, remove the `notify` block from your values**
+  (item 73): the chart refuses it by name. With `--reuse-values`, pass
+  `--set notify=null`. A `ProtectionPolicy` that still sets
+  `spec.notifications` keeps working and says the field is withdrawn; remove
+  the field when convenient.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
@@ -3398,8 +3432,8 @@ In addition to the next entry's six, in its order:
   install replaces its engine with Logweir's build and exports
   `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.2` and its digest (build 2 since
   item 41).
-- **Bind every destination, retention, notification and inline-archive
-  credential Secret, one at a time, with `scripts/bind-credential.py`**
+- **Bind every destination, retention and inline-archive credential Secret,
+  one at a time, with `scripts/bind-credential.py`**
   (item 38), after suspending the schedules that use them and rolling the
   controller, the runner and the console together; never in a loop. The tool's
   refusal of a Secret another object also names is an incident to investigate
@@ -3424,8 +3458,7 @@ In addition to the next entry's six, in its order:
   still verifies a sample. The signed scorecard says which in
   `integrity.verification.coverage`; the `Restore`'s status, the product API
   (`Restore.coverage`, `verificationScope.coverage`) and the console repeat
-  it. A protection event's `verification_scope` describes a policy's newest
-  POINT and still never says `complete`. A complete verification that did not
+  it. A complete verification that did not
   cover the restore (`covered: false`) is never a pass.
 
 ### Migration and rollback after `v0.2.0-rc.1`

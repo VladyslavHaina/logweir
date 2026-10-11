@@ -2034,110 +2034,21 @@ label (the index), which is why **a manual run of a schedule counts as that
 schedule's history**.
 
 **Alerts are a ledger, not a log.** One open alert per `(policy, kind)` under a
-stable key, `logweir-protection-<policyUID>-<kind>`. **`Staleness` covers
-`Unprotected` too** — there being nothing to recover from at all is the worst
-state the enum has, and it pages under the same key rather than opening a second
-incident for the same objective. **A resolve is only ever sent when `health` is
-back to `Healthy` or `AtRisk`**: under `Stale`, `Unprotected` or `Unknown` an
-open entry is left exactly as it is, because protection getting worse, or
-becoming unmeasurable, is not the condition clearing and a `resolve` on the
-shared dedup key would close a real incident. `transition` increments on
-open, on resolve and on each re-notify; `notifiedTransition` records the last
-transition a delivery Job was created for. A condition that stays true produces
-**no further messages** — not one per reconcile — until it resolves or until
-`notifications.renotifyAfterSeconds` elapses. `RecoveryCompleted` is the
-exception in three ways: it keys on the **Restore** UID (a policy's points are
-restored many times), it is webhook/Slack only, and it auto-resolves the instant
-it opens.
+stable key, `logweir-protection-<policyUID>-<kind>`, in `status.alerts`.
+**`Staleness` covers `Unprotected` too**, under the same key. **An alert
+resolves only when `health` is back to `Healthy` or `AtRisk`**: under `Stale`,
+`Unprotected` or `Unknown` an open entry is left exactly as it is, because
+protection getting worse, or becoming unmeasurable, is not the condition
+clearing. `transition` increments on open and on resolve; a condition that stays
+true moves nothing. `RecoveryCompleted` keys on the **Restore** UID (a policy's
+points are restored many times) and auto-resolves the instant it opens.
 
-**Delivery is a Job, and that is a boundary and not an implementation detail.**
-The controller holds no verb on `secrets` and gains no HTTP egress. For each
-alert transition it creates one Job `<policy>-n-<sha8>-<attempt>` running
-`logweir notify deliver --event /event/event.json` in the runner image, and one
-immutable `ConfigMap` `<policy>-ev-<sha8>` holding the unsigned protection
-event that Job mounts, with the sink credentials projected as
-`valueFrom.secretKeyRef` — a reference the kubelet resolves, never a value this
-controller read. Both names are pure functions of
-`(policyUID, alertKey, transition)`, so a duplicate reconcile is a **409** and
-not a second page. **Three attempts in total** for one transition, waiting 60 s
-and then 300 s; exhaustion sets `NotificationsDelivered=False` with reason
-`DeliveryFailed` **and does nothing else**. (D3 §3.4 reads "at most 3 times with
-60 s/300 s/900 s", which is four attempts if the first is not a retry; three is
-what shipped, because it bounds a transition's delivery inside the interval the
-policy is re-evaluated on, so a failure is visible in status before the next
-pass.) A notification failure never
-rewrites a backup result: this controller patches `protectionpolicies/status`
-and nothing else, and it reads `Backup` and `Restore` objects through bounded
-`list` calls only.
-
-**The ordering rules, all three of which are load-bearing.** The delivery Job
-is created **before** the event `ConfigMap` it mounts, and that `ConfigMap` is
-owned by the FIRST Job of its transition so the API server's TTL controller
-collects it — owned by the policy, an immutable object that this role cannot
-delete accumulated one per `(alertKey, transition)` for the life of the policy.
-The cost of the order is stated rather than buried: a pod scheduled in the
-window between the two creates sits `ContainerCreating` on a mount the kubelet
-retries, and a crash inside that window leaves a Job whose ConfigMap never
-arrives — which the next pass repairs, because the ledger records a delivery
-only once both objects exist. `ttlSecondsAfterFinished` is patched
-onto a finished delivery Job **only after** the `/status` patch carrying that
-delivery's verdict returned 200 (the exit code lives on the pod, and the TTL
-controller removes the Job and its pod together). And the pod is proved by the
-Job's own `metadata.uid` on its controller `ownerReference` **before** one byte
-of its log is read — a `notify-result=` line becomes a status field and then an
-API response, so reading a stranger's is defect `SEC-PODLOG`. Only the ten
-`notify-result=` values this build knows are read; nothing else from a pod log
-can reach a status.
-
-**Each sink's Secret is bound to this policy (FX-20).** Every route's
-credential Secret must carry, under `logweir-binding`, the value
-`status.credentialBindings` publishes for it — the policy's UID, the sink kind
-and, for PagerDuty, the endpoint. The delivery Job projects that key beside the
-credential, and `logweir notify deliver` refuses a sink whose Secret carries no
-binding or another policy's, sink's or endpoint's **before composing a body or
-dialling**: it prints `notify-result=<sink>:refused`, still delivers the other
-sinks, and the controller records the attempt `Failed` with
-`NotificationsDelivered=False/CredentialBindingMismatch`. Editing a PagerDuty
-route's `endpoint` changes its binding, so the routing key is never sent to the
-new endpoint until the Secret is bound again (§20.10).
-
-**A sink must be `https://`, and the one way round it is the INSTALLATION's.**
-`logweir notify deliver` refuses a non-`https://` webhook or Slack URL **before
-it dials**, so an in-cluster echo sink on `http://` receives nothing and the
-delivery is recorded `<sink>:failed`. The documented escape hatch,
-`NOTIFY_ALLOW_INSECURE_SINKS`, was set by nothing — not by the spec and not by
-the delivery Job — which made a laptop-cluster rehearsal of the notification
-path impossible (`NOTIFY-INSECURE-SINK-UNEXPOSED`). It is now
-`notify.allowInsecureSinks` in `charts/logweir/values.yaml`, default `false`:
-when true the chart renders `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the
-`weirkeeper` Deployment, the controller reads it **once at startup** (an
-explicit `1`/`true`/`yes` only, so an empty `value:` is off) and forwards
-`NOTIFY_ALLOW_INSECURE_SINKS=1` into every delivery Job's literal env. When it
-is unset nothing at all is rendered — not the variable with a falsy value — so
-the Job, the install file and the chart's rendered output are byte-identical to
-what they were before the value existed. **A `ProtectionPolicy` cannot enable
-it.** The spec is a namespaced object any namespace operator may write, and a
-field there would let whoever creates a policy downgrade their own alerts'
-transport to cleartext — carrying the event, the policy's name, its health and,
-on Slack, a bearer credential in the URL. The switch is on the controller
-Deployment, which is the cluster administrator's, and the answer is the same for
-every policy in the cluster. The Job's command line still names no URL either
-way: the sink URL reaches the pod as a `secretKeyRef` and the hatch is a literal
-`1`. **Production leaves it `false`**; it is a local-development setting, and an
-installation that turns it on logs one `WARN` at startup saying so.
-
-**A protection event's `verificationScope` is `sampled`, `degraded` or `none` —
-never `complete`.** It describes the policy's newest available POINT (`sampled`
-when that point carries verified evidence), not a restore of it. A `Restore` and
-a rehearsal can ask for complete coverage (PROD-08.1a, §12 *Complete coverage*),
-and a complete run reports what it covered on the `Restore` itself
-(`status.integrity.coverage` and `.complete`), in the product API's
-`verificationScope.coverage`, in the runner's own notification body and in its
-metrics — never in this field. The value reaches a PagerDuty incident title and
-a Slack channel where someone decides, during an incident, whether an archive
-can be trusted, so the type has three variants and `logweir notify deliver`
-refuses a fourth at parse time. See
-[`docs/formats/protection-event.md`](formats/protection-event.md).
+**Alert delivery is withdrawn** (release notes, item 73). Logweir posts no alert
+to PagerDuty, Slack or a webhook, creates no delivery Job and writes no
+protection event; `health`, the conditions and the ledger are the record. A
+policy that still carries `spec.notifications` keeps parsing (the API server
+keeps the key and drops what is inside it), and its `NotificationsDelivered`
+condition is `False` with reason `NotificationsWithdrawn`. Remove the field.
 
 **Reading the catalog, and what a field this build cannot find means.** The
 policy reads the catalog's own materialised `selectable` — BOTH of D3 §5.4's
@@ -2230,54 +2141,17 @@ the controller does read receipts (`ControllerIdentity`) see no change at all:
 `status.capture` is present, so none of the three paths is taken.
 
 **Bounds.** At most 16 ledger entries (8 of them recoveries), 16 schedules, 64
-topics on `lastAvailablePoint` (`topicsTruncated: true` beyond that), the newest
-50 runs considered per evaluation over at most 5 API pages of 200, and at most 4
-delivery Jobs created per reconcile pass. Over a window `W` one policy therefore
-creates at most `5 kinds × (2 + W / renotifyAfterSeconds) × 3 attempts` delivery
-Jobs.
+topics on `lastAvailablePoint` (`topicsTruncated: true` beyond that), and the
+newest 50 runs considered per evaluation over at most 5 API pages of 200.
 
-**Deviations from decision D3 §3, recorded here rather than in a commit
-message.** The delivery Job runs as `logweir-runner` and not as a new
-`logweir-notifier` ServiceAccount: `logweir-runner` is bound to no Role or
-ClusterRole, is granted no verb on anything, its token is not mounted (on the
-account and again on the PodSpec), and creating a second zero-verb account would
-touch four files this worker does not own. **The NetworkPolicy half is still not
-covered, and W13 did not take it either — the reason is below, and it is not a
-missing selector.** `logweir-runner-egress` selects
-`batch.kubernetes.io/job-name Exists`, so a delivery pod inherits egress to the
-broker ports as well as 443, where D3 §9 wants a notifier reaching DNS and 443
-only; on an enforcing CNI a compromised runner image in a delivery pod can reach
-a broker.
-
-**Why a selector is not enough, corrected at W13's review.** The labels are
-there — `controllers/protection_policy.rs` puts
-`logweir.dev/component: notification` on the delivery Job *and* on its pod
-template, and `controllers/retention_policy.rs` does the same with
-`logweir.dev/component: retention` — so for those two classes a narrow policy
-really is one selector away. What is not one selector away is the OTHER half:
-**NetworkPolicies are additive**, so adding a narrow policy for a delivery pod
-does not take anything away from it. The broad `logweir-runner-egress` matches
-that same pod and keeps granting the broker ports, and a narrow policy beside it
-changes nothing at all. Narrowing therefore means editing the SHIPPED policy's
-`podSelector` to exclude those components
-(`matchExpressions: [{key: logweir.dev/component, operator: NotIn, values:
-[notification, retention]}]`), which changes the egress of every runner Job in
-every installation — and Docker Desktop, the only cluster this project has,
-enforces no NetworkPolicy, so the change could be made but its effect could not
-be observed. The third class, catalog sync, has no component label at all
-(`controllers/recovery_catalog.rs` sets none), so it would need a controller
-change first.
-
-**Who owns it now.** The two policies plus the `NotIn` on the broad selector,
-and the catalog-sync label, are a wave that can both edit
-`crates/weirkeeper/src/controllers/recovery_catalog.rs` and test on a CNI that
-enforces. It is **not** W13, which shipped the ServiceAccounts and the RBAC and
-owns no controller source; recording it against a finished wave is how a gap
-stops being looked for.
-A policy may declare up to four notification routes, but `logweir notify
-deliver` reads one environment variable per sink kind, so one Job addresses at
-most one PagerDuty, one webhook and one Slack — the **first** of each in route
-order.
+**A NetworkPolicy gap, recorded here.** `logweir-runner-egress` selects
+`batch.kubernetes.io/job-name Exists`, so a retention pod
+(`logweir.dev/component: retention`) inherits egress to the broker ports as well
+as 443. NetworkPolicies are additive, so narrowing it means editing the shipped
+policy's `podSelector` (`matchExpressions: [{key: logweir.dev/component,
+operator: NotIn, values: [retention]}]`), which changes every runner Job's
+egress and cannot be observed on Docker Desktop, which enforces none. Catalog
+sync has no component label yet (`controllers/recovery_catalog.rs`).
 
 **RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole —
 `list`/`watch` on `protectionpolicies` and `patch` on
@@ -2292,8 +2166,8 @@ handed it — no verb on `secrets`, and no `delete` on anything.
 references it and an installation that never creates a `ProtectionPolicy`
 behaves exactly as before. An older controller running against the newer CRDs
 does not reconcile them, so they sit with no status — visibly pending rather
-than silently wrong. Rolling the CRD back deletes any `ProtectionPolicy` objects
-and, by owner cascade, their event `ConfigMap`s and delivery Jobs; no `Backup`,
+than silently wrong. Rolling the CRD back deletes any `ProtectionPolicy` objects;
+no `Backup`,
 `Restore` or archive is affected, because a protection verdict is a derived
 projection and never an execution input. An absent `status.alerts` after a
 rollback and re-apply means only that no alert has been recorded yet: the ledger
@@ -7234,7 +7108,6 @@ The same holds for a pod refused because its ServiceAccount does not exist
 | A `RecoveryCatalog` sync | `Synced` names `PodCreateRejected` once the Job has had no pod for 30 seconds and the Job is cancelled; the harvest that follows is `Synced=False` / `PodCreateRejected` with `lastSyncJob.refusalReason: PodCreateRejected`, and the published view is kept |
 | A dynamic `Backup`'s topic discovery | Once the discovery Job has had no pod for 30 seconds the Job is cancelled and the `Backup` ends `Failed` / `PodCreationForbidden` (also on `TopicsResolved`), quoting the admission; no runner Job is created |
 | A `KafkaCluster` probe | `Reachable=Unknown` / `PodCreationForbidden` (also in `status.reason`) once the Job has had no pod for 30 seconds, quoting the admission; the Job is cancelled, `reachable` is cleared, `clusterId` and `observedAt` keep their last values (a refused probe observed nothing, so the last look's record ages and goes stale as usual), and the finished Job gets the usual five-minute TTL, so the next probe runs on the ordinary cadence and clears the reason once the namespace admits the pod |
-| A `ProtectionPolicy` delivery | Once the delivery Job has had no pod for 30 seconds the Job is cancelled and the attempt is recorded `Failed`, `lastError` naming `PodCreationForbidden` and the admission, with `NotificationsDelivered=False` / `DeliveryFailed`; the ordinary backoff retries it, three attempts in all |
 | A `RetentionPolicy` enforcement run | Once the Job has had no pod for 30 seconds the Job is cancelled and `Enforced=False` / `PodCreationForbidden` quotes the admission, "nothing was deleted". The run is recorded when the cancelled Job has finished, about a second later, and its lease is held until then. It counts as a failed run, so three in a row turn `EnforcementDegraded=True` |
 
 **What it costs, and what it needs.** The read is one `list` of core `events`
@@ -9783,14 +9656,13 @@ point the endpoint at a host they control, and have Logweir present it there:
 
 | Object | Credential | Presented to | Bound to |
 |---|---|---|---|
-| `ProtectionPolicy` route | PagerDuty routing key (sent in the body); webhook or Slack URL (a bearer token) | the route's `endpoint`; the URL in the Secret | the policy's UID, the sink kind, and the PagerDuty endpoint |
 | `BackupDestination` `SecretKeys` grant | S3 key pair and session token | `spec.storage` | the destination's UID and its whole archive route (bucket, prefix, region, endpoint, addressing, transport) |
 | `RetentionPolicy` `enforcement.credentialSecretRef` | a DELETE-capable S3 key pair | the destination it resolves to | the policy's UID, that destination's route, and `spec.scope.prefix` |
 | inline archive `secretRef` (`Backup`, `BackupSchedule`, `Restore.sourceArchive`, a restore `Preflight`'s legacy source) | S3 key pair | the location the runner dials | the LOCATION: every field that shapes the URL — scheme, bucket, endpoint, region, addressing, `allowHttp` — never the prefix |
 
 For S3, SigV4 never sends the secret key, but every request carries the access
 key id, a signature an endpoint can replay within its window, and any session
-token, in clear headers; for PagerDuty the routing key itself travels.
+token, in clear headers.
 
 **The rule is §20.9's.** A credential Secret is used only when its
 `logweir-binding` key equals the binding the controller computed for the object
@@ -9802,7 +9674,6 @@ literal and the Secret's key as an **optional** `secretKeyRef`:
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | `LOGWEIR_ARCHIVE_CREDENTIAL_BINDING[_EXPECTED]` |
 | `LOGWEIR_EVIDENCE_AWS_*` | `LOGWEIR_EVIDENCE_CREDENTIAL_BINDING[_EXPECTED]` |
 | `LOGWEIR_EVIDENCE_READ_AWS_*` (a check pod) | `LOGWEIR_EVIDENCE_READ_CREDENTIAL_BINDING[_EXPECTED]` |
-| `PAGERDUTY_ROUTING_KEY`, `NOTIFY_WEBHOOK_URL`, `NOTIFY_SLACK_WEBHOOK_URL` | `NOTIFY_{PAGERDUTY,WEBHOOK,SLACK}_CREDENTIAL_BINDING[_EXPECTED]` |
 
 Every runner compares the pairs **before it builds a store or composes a
 request**, and refuses an absent or different binding with
@@ -9823,10 +9694,7 @@ request**, and refuses an absent or different binding with
   "enforced by Logweir" over it — `status.enforcement` reads
   `RecommendationOnly` and `status.guarantees.ageExpiry` `NotEnforced`, the two
   fields the console's retention panel reads, which also prints the
-  `Enforced=False` reason;
-* `logweir notify deliver`: `notify-result=<sink>:refused` for that sink only
-  (the others are still attempted), and
-  `NotificationsDelivered=False/CredentialBindingMismatch` (§7e).
+  `Enforced=False` reason.
 
 A Job builder that projected a credential without its expectation would hand
 the runner an unchecked credential; `job::build` gives such a credential the
@@ -9914,10 +9782,7 @@ foreign Secret.
 `spec.storage` and `spec.transport.security` are immutable, so another endpoint
 is another destination with another UID. A `RetentionPolicy` is bound to the
 route of the destination its `destinationRef` resolves to NOW, so a destination
-deleted and re-created under the same name elsewhere changes it. A
-`ProtectionPolicy`'s spec is mutable, so its PagerDuty `endpoint` is in the
-binding: edit it, and the routing key is refused until the Secret is bound
-again. An inline archive is bound to its location — every field that shapes
+deleted and re-created under the same name elsewhere changes it. An inline archive is bound to its location — every field that shapes
 the URL the runner dials, the region included — so a plan or URL naming
 another bucket, endpoint, region, addressing style or transport is refused.
 
@@ -9940,8 +9805,7 @@ refuse the same spellings at admission.
   ([api.md](api.md)); a rotation writes the new value to a new bound Secret.
 * **`kubectl`**: read the object's published binding —
   `BackupDestination.status.credentialBinding`,
-  `RetentionPolicy.status.credentialBinding`,
-  `ProtectionPolicy.status.credentialBindings[]` (one per route and channel) —
+  `RetentionPolicy.status.credentialBinding` —
   and write it into the Secret under `logweir-binding`, as §20.9 shows.
 * **An inline archive** has no object of its own (a `Backup` is one-shot and a
   schedule mints them), so its Secret is bound to the location:
@@ -9987,9 +9851,8 @@ object at a time:
      --apply --confirm-endpoint '<the endpoint it printed>'
    ```
 
-   `--kind` is `BackupDestination`, `RetentionPolicy`, `ProtectionPolicy`
-   (`--route` when one Secret serves routes with different bindings) or
-   `KafkaCluster`; an inline archive is `--location s3://<bucket> --endpoint
+   `--kind` is `BackupDestination`, `RetentionPolicy` or `KafkaCluster`
+   (`ProtectionPolicy` is refused: alert sinks are withdrawn); an inline archive is `--location s3://<bucket> --endpoint
    <url|aws> --region <region|none> --path-style true|false --allow-http
    true|false` — for a `Restore` its plan's `source.storage` (and `evidence`),
    for a `Backup` or a schedule the controller's `AWS_ENDPOINT_URL`,

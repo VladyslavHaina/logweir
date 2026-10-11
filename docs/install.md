@@ -1448,35 +1448,8 @@ the binding is deleted.
 
 ### 5c. Notification sinks on a laptop cluster (`notify.allowInsecureSinks`)
 
-`logweir notify deliver` **refuses a non-`https://` webhook or Slack URL before
-it dials**. A scratch receiver on `http://echo.<ns>.svc:8080` therefore receives
-nothing on a default install, and the alert is recorded as
-`<sink>:failed` — the sink never saw a request.
-
-The escape hatch is an **installation** setting and is off:
-
-```bash
-helm upgrade --install logweir charts/logweir -n logweir-system \
-  --set notify.allowInsecureSinks=true      # LOCAL DEVELOPMENT ONLY
-```
-
-It renders `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the `weirkeeper`
-Deployment and the controller forwards `NOTIFY_ALLOW_INSECURE_SINKS=1` into
-every delivery Job it creates. Left at its default, the chart renders **no**
-such variable and the delivery Job is byte-identical to the one it rendered
-before the value existed.
-
-**A `ProtectionPolicy` cannot turn it on**, and that is the point: the spec is a
-namespaced object any namespace operator may write, and a field there would let
-whoever creates a policy downgrade their own alerts' transport to cleartext —
-the protection event, the policy's name, its health, and on Slack a bearer
-credential carried in the URL itself. The only place to set it is the
-controller Deployment, which is the cluster administrator's.
-
-**Production leaves it `false`.** Turning it on does not weaken TLS for an
-`https://` sink and changes nothing else about the Job; it removes one refusal,
-and that refusal is the only thing standing between an alert and a cleartext
-POST.
+Withdrawn in v1 (release notes, item 73): Logweir delivers no alert, and a
+values file that still sets `notify` is refused at render, naming it.
 
 ---
 
@@ -1566,10 +1539,9 @@ object, by name, with a dry run**:
 1. **Before the roll**, suspend every `BackupSchedule` and `RehearsalSchedule`
    that uses a credential Secret (its destination's, its connection's or its
    inline archive's), so their slots are skipped rather than refused.
-2. Apply the CRDs (three additive `status` fields:
-   `BackupDestination.status.credentialBinding`,
-   `RetentionPolicy.status.credentialBinding`,
-   `ProtectionPolicy.status.credentialBindings`) and roll the controller, the
+2. Apply the CRDs (additive `status` fields:
+   `BackupDestination.status.credentialBinding` and
+   `RetentionPolicy.status.credentialBinding`) and roll the controller, the
    runner and the console together, as above.
 3. For each object that names a credential Secret, run
    `scripts/bind-credential.py` dry, read the endpoint it prints, have the

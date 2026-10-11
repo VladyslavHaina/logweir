@@ -1958,49 +1958,6 @@ fn the_drill_path_re_exports_the_drill_half_and_nothing_more() {
     }
 }
 
-/// **A protection dedup key can never resolve a drill incident, and the other
-/// way round.**
-///
-/// The three key families now live in one module, which is exactly when they
-/// become able to collide. T0-15's defect was one incident shared by two
-/// drills, where a passing nightly drill's `resolve` closed the weekly full
-/// drill's open page; a protection `resolve` closing a drill's page would be
-/// the same defect with a third family added to it. The prefixes are what keep
-/// them apart, so the prefixes are asserted here rather than left to be
-/// noticed.
-#[test]
-fn the_three_dedup_key_families_cannot_collide() {
-    use logweir::notify::{
-        protection_dedup_key, recovery_completed_dedup_key, PolicyAlertKind,
-        PROTECTION_DEDUP_PREFIX,
-    };
-
-    let sc = scorecard_pass();
-    let drill = logweir::drill::phase7_verify::dedup_key(Some("nightly"), &sc);
-    let preflight = logweir::drill::phase7_verify::failure_dedup_key(Some("nightly"));
-    let protection = protection_dedup_key("uid-1", PolicyAlertKind::Staleness);
-    let recovery = recovery_completed_dedup_key("restore-1");
-
-    let keys = [&drill, &preflight, &protection, &recovery];
-    let distinct: std::collections::BTreeSet<&String> = keys.iter().copied().collect();
-    assert_eq!(distinct.len(), 4, "four families, four keys: {keys:?}");
-
-    for k in [&protection, &recovery] {
-        assert!(k.starts_with(PROTECTION_DEDUP_PREFIX), "{k}");
-        assert!(
-            !k.starts_with("logweir-drill-"),
-            "a protection resolve must not be able to close a drill's page: {k}"
-        );
-    }
-    for k in [&drill, &preflight] {
-        assert!(k.starts_with("logweir-drill-"), "{k}");
-        assert!(
-            !k.starts_with(PROTECTION_DEDUP_PREFIX),
-            "a drill resolve must not be able to close a protection page: {k}"
-        );
-    }
-}
-
 // ------------------------------------------------------------- PROD-11.1b
 // A restore of a PARTITION SUBSET notified as a plain pass: the body carried
 // no selection and the PagerDuty title said `Pass`, so the on-call reader saw

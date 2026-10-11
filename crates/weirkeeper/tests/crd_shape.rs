@@ -1417,11 +1417,6 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::protection_policy::H1_DESTINATION_XOR_MESSAGE,
     ),
     (
-        "protectionpolicies.yaml",
-        weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_RULE,
-        weirkeeper::crds::protection_policy::H2_ROUTE_HAS_A_CHANNEL_MESSAGE,
-    ),
-    (
         "rehearsalschedules.yaml",
         weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_RULE,
         weirkeeper::crds::rehearsal_schedule::SUSPEND_ONLY_MESSAGE,

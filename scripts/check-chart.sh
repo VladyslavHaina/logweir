@@ -413,7 +413,7 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks api.enabled api.console.enabled; do
+for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled api.enabled api.console.enabled; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -734,6 +734,21 @@ console_refuses() {
   fi
   echo "   rc=$rc  ($what refused, naming $expect)"
 }
+# Release-notes item 73: `notify` is withdrawn with the alert sinks, and a
+# values file that still sets it is refused by name. CONTROL: `notify=null`,
+# which an upgrade with --reuse-values passes to clear it, renders.
+console_refuses "a values file that still sets notify.allowInsecureSinks" "notify is withdrawn" \
+  --set notify.allowInsecureSinks=false
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set notify=null > /dev/null 2> "$tmp/notify-null.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: --set notify=null was refused; an upgrade that clears the withdrawn block must render" >&2
+  sed 's/^/      /' "$tmp/notify-null.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (notify=null renders: the control)"
+fi
 console_refuses "the console with NO mode at all" "api.console.mode is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}"
 console_refuses "the console workload without its principal (api.enabled=false)" "requires api.enabled" \

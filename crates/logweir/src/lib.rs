@@ -32,9 +32,9 @@ pub mod exit;
 pub mod identity;
 pub mod ids;
 pub mod metrics;
-/// Outbound notification — the sinks, their bounds, their redaction, their
-/// dedup keys, and `logweir notify deliver` (D3 §3.4, PLAT-14.2). This was
-/// `drill::phase7_verify`'s second half; that path still re-exports it.
+/// Outbound notification — the drill's sinks, their bounds, their redaction
+/// and their dedup keys. This was `drill::phase7_verify`'s second half; that
+/// path still re-exports it.
 pub mod notify;
 /// Interface **I14**: `logweir cluster-probe`, the liveness probe the
 /// `KafkaCluster` reconciler runs as a Job. It is a subcommand of THIS binary

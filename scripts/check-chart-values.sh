@@ -230,7 +230,6 @@ controller.resources.limits.memory|default|-|--set-string|600Mi
 controller.nodeSelector|default|-|--set-json|{"fx10":"probe"}
 controller.tolerations|default|-|--set-json|[{"key":"fx10","operator":"Exists"}]
 controller.affinity|default|-|--set-json|{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fx10","operator":"Exists"}]}]}}}
-notify.allowInsecureSinks|default|-|--set|true
 retention.enabled|default|-|--set|true
 # ---- identity, environment, placement
 environment|default|-|--set-string|fx10

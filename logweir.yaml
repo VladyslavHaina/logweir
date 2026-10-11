@@ -3635,12 +3635,10 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'The recovery objective a set of schedules is meant to meet,
-          and who hears about it when they do not (ADR 0008 Amendment G). The spec
-          is MUTABLE and carries no CEL seal: it is evaluation policy, never an execution
-          input, so editing it changes what Logweir says about results and never the
-          results themselves. Notification channels are secretKeyRef references; no
-          credential value appears here.'
+        description: 'The recovery objective a set of schedules is meant to meet (ADR
+          0008 Amendment G). The spec is MUTABLE and carries no CEL seal: it is evaluation
+          policy, never an execution input, so editing it changes what Logweir says
+          about results and never the results themselves.'
         properties:
           spec:
             description: '`ProtectionPolicy.spec`.'
@@ -3653,141 +3651,9 @@ spec:
                 minimum: 60
                 type: integer
               notifications:
-                description: Where alerts go. Absent means the verdict is reported
-                  in status and in the console and delivered nowhere — which is a
-                  real choice, not a broken configuration.
-                nullable: true
-                properties:
-                  kinds:
-                    description: Which alerts to send. Absent means all of them.
-                    items:
-                      description: What an alert is about.
-                      enum:
-                      - BackupFailure
-                      - Staleness
-                      - ArchiveUnavailable
-                      - RehearsalFailure
-                      - RecoveryCompleted
-                      type: string
-                    maxItems: 5
-                    nullable: true
-                    type: array
-                  renotifyAfterSeconds:
-                    default: 86400
-                    description: How long before an open alert is re-sent. `0` disables
-                      re-notify.
-                    format: int32
-                    maximum: 604800
-                    minimum: 0
-                    type: integer
-                  routes:
-                    description: The routes.
-                    items:
-                      description: One destination for alerts.
-                      properties:
-                        name:
-                          description: What to call it in status and in logs.
-                          maxLength: 63
-                          minLength: 1
-                          type: string
-                        pagerDuty:
-                          description: PagerDuty.
-                          nullable: true
-                          properties:
-                            endpoint:
-                              description: The Events endpoint, when it is not the
-                                global one.
-                              maxLength: 2048
-                              nullable: true
-                              type: string
-                            routingKeySecretRef:
-                              description: The routing key, by reference.
-                              properties:
-                                key:
-                                  description: The data key.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[-._a-zA-Z0-9]+$
-                                  type: string
-                                name:
-                                  description: The Secret name, in this namespace.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                                  type: string
-                              required:
-                              - key
-                              - name
-                              type: object
-                          required:
-                          - routingKeySecretRef
-                          type: object
-                        slack:
-                          description: Slack.
-                          nullable: true
-                          properties:
-                            webhookUrlSecretRef:
-                              description: The webhook URL, by reference.
-                              properties:
-                                key:
-                                  description: The data key.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[-._a-zA-Z0-9]+$
-                                  type: string
-                                name:
-                                  description: The Secret name, in this namespace.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                                  type: string
-                              required:
-                              - key
-                              - name
-                              type: object
-                          required:
-                          - webhookUrlSecretRef
-                          type: object
-                        webhook:
-                          description: A webhook.
-                          nullable: true
-                          properties:
-                            urlSecretRef:
-                              description: The URL, by reference.
-                              properties:
-                                key:
-                                  description: The data key.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[-._a-zA-Z0-9]+$
-                                  type: string
-                                name:
-                                  description: The Secret name, in this namespace.
-                                  maxLength: 253
-                                  minLength: 1
-                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
-                                  type: string
-                              required:
-                              - key
-                              - name
-                              type: object
-                          required:
-                          - urlSecretRef
-                          type: object
-                      required:
-                      - name
-                      type: object
-                      x-kubernetes-validations:
-                      - message: a notification route names at least one of pagerDuty,
-                          webhook or slack
-                        rule: has(self.pagerDuty) || has(self.webhook) || has(self.slack)
-                    maxItems: 4
-                    nullable: true
-                    type: array
-                  sendResolved:
-                    default: true
-                    description: Whether a resolution is delivered too.
-                    type: boolean
+                description: 'WITHDRAWN: Logweir delivers no alert. Still accepted,
+                  as an empty object, so an older policy parses; while it is set the
+                  `NotificationsDelivered` condition says so. Remove it.'
                 type: object
               objectives:
                 description: What "protected" means.
@@ -3935,49 +3801,13 @@ spec:
             nullable: true
             properties:
               alerts:
-                description: The deduplication ledger.
+                description: 'The alert ledger: what is open and what resolved.'
                 items:
                   description: |-
-                    One entry of the deduplication ledger.
+                    One entry of the alert ledger.
 
-                    A LEDGER AND NOT A LOG. `transition` increments on open, on resolve and on each re-notify; `notifiedTransition` records the last one a delivery Job was created for. The pair is what makes delivery exactly-once-per-transition across controller restarts, instead of "once per reconcile", which is how an alerting integration gets muted by its own operator.
+                    A LEDGER AND NOT A LOG. `transition` increments on open and on resolve, and a condition that stays true moves nothing.
                   properties:
-                    delivery:
-                      description: How that delivery went.
-                      nullable: true
-                      properties:
-                        attempts:
-                          description: How many times delivery was attempted.
-                          format: int64
-                          nullable: true
-                          type: integer
-                        jobRef:
-                          description: The delivery Job.
-                          nullable: true
-                          properties:
-                            name:
-                              description: The referenced object's `metadata.name`,
-                                in this namespace.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        lastAttemptAt:
-                          description: When it was last attempted.
-                          format: date-time
-                          nullable: true
-                          type: string
-                        lastError:
-                          description: The last error, redacted and bounded. Never
-                            a routing key, never a URL.
-                          maxLength: 512
-                          nullable: true
-                          type: string
-                        state:
-                          description: '`Pending`, `Delivered`, `Failed` or `Suppressed`.'
-                          nullable: true
-                          type: string
-                      type: object
                     key:
                       description: The dedup key — `logweir-protection-<policyUID>-<kind>`.
                       type: string
@@ -3990,12 +3820,6 @@ spec:
                       - RehearsalFailure
                       - RecoveryCompleted
                       type: string
-                    notifiedTransition:
-                      description: The last transition a delivery Job was created
-                        for.
-                      format: int64
-                      nullable: true
-                      type: integer
                     openedAt:
                       description: When it opened.
                       format: date-time
@@ -4029,7 +3853,8 @@ spec:
                 nullable: true
                 type: string
               conditions:
-                description: 'The condition set: `Ready`, `Protected`, `NotificationsDelivered`.'
+                description: 'The condition set: `Ready`, `Protected`, and `NotificationsDelivered`
+                  (`False`) while the withdrawn `spec.notifications` is set.'
                 items:
                   description: 'A `metav1.Condition`: the standard six fields with
                     their standard meanings.'
@@ -4074,42 +3899,6 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
-              credentialBindings:
-                description: 'FX-20: the binding each notification route''s credential
-                  Secret must carry under `logweir-binding`, one entry per channel
-                  a route names. Absent when no route is configured. An edit to a
-                  PagerDuty route''s `endpoint` changes its binding, so the old Secret
-                  is refused until it is bound again: the routing key never follows
-                  an endpoint edit silently.'
-                items:
-                  description: |-
-                    One notification route's credential binding (FX-20).
-
-                    What the route's Secret must carry under its `logweir-binding` key for the delivery Job to use it at all: `v1:<policy uid>:sha256:<digest>` over the sink kind and, for PagerDuty, the endpoint. Public — a UID and a digest of public values, never a credential. A Secret without it, or with another policy's, route's or endpoint's, is refused before anything is posted (`notify-result=<sink>:refused`, `CredentialBindingMismatch`).
-                  properties:
-                    binding:
-                      description: The value its `logweir-binding` key must hold.
-                      type: string
-                    route:
-                      description: The route's `name`.
-                      maxLength: 63
-                      minLength: 1
-                      type: string
-                    secretName:
-                      description: The Secret the route names.
-                      type: string
-                    sink:
-                      description: '`pagerduty`, `webhook` or `slack`.'
-                      type: string
-                  required:
-                  - binding
-                  - route
-                  - secretName
-                  - sink
-                  type: object
-                maxItems: 12
-                nullable: true
-                type: array
               evaluatedAt:
                 description: When. Rewritten only on change, or when older than half
                   the interval.

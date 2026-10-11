@@ -2131,9 +2131,8 @@ code (when the code is one of I9's states and the sentence named it with `: `) o
   read as a reason, and the condition's message is byte for byte what it was before this line
   existed.
 
-**Not printed by the other three binaries that exit 3.** `logweir check run` prints
-`refusal-reason=CheckContractMismatch` and nothing else on stdout, `logweir notify deliver` prints
-no line at all for a refused event document, and `logweir-retention` prints
+**Not printed by the other two binaries that exit 3.** `logweir check run` prints
+`refusal-reason=CheckContractMismatch` and nothing else on stdout, and `logweir-retention` prints
 `retention-refusal=<code>` for the one refusal the controller names. Their contracts are below and
 are unchanged, and none of them is given a line token.
 
@@ -2618,106 +2617,9 @@ here.
 
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 
-`logweir notify deliver --event <path>` posts one protection event
-(`application/vnd.logweir.protection-event+json;version=1.0.0`,
-[docs/formats/protection-event.md](formats/protection-event.md)) to every configured sink. It is the
-runner-side half of PLAT-14.2: the protection controller decides what the alert says and has no way
-to send it — `config/rbac/role.yaml` gives it no Secret verb, so it cannot read a routing key, and it
-is given no HTTP egress — so delivery runs as a short Job built from the runner image, with the sink
-credentials projected into that Job and nowhere else.
-
-**Sinks come from the environment, never from a flag.** A routing key or a signed webhook URL on an
-argv is visible in `/proc/<pid>/cmdline`, in every process listing on the host, and in the Job spec
-anyone with pod read can see — the same reason `logweir cluster-probe` takes its SASL password from
-`LOGWEIR_SOURCE_PASSWORD` and offers no `--password`.
-
-| variable | sink name | what is posted |
-|---|---|---|
-| `PAGERDUTY_ROUTING_KEY` | `pagerduty` | one Events v2 enqueue, `trigger`/`resolve` from `alert.action`, `dedup_key` = `alert.key` |
-| `NOTIFY_WEBHOOK_URL` | `webhook` | one POST of the event document |
-| `NOTIFY_SLACK_WEBHOOK_URL` | `slack` | one POST of `{"text": …}` |
-| `PAGERDUTY_ENDPOINT` | — | not a sink: the PagerDuty service region, `https://` only, US default |
-| `NOTIFY_{PAGERDUTY,WEBHOOK,SLACK}_CREDENTIAL_BINDING[_EXPECTED]` | — | not sinks (FX-20): each sink Secret's `logweir-binding` and the controller's expectation; when an expectation is set and the two differ, that sink is `refused` |
-
-**A variable that is present and blank is not a configured sink.** `std::env::var` returns `Ok("")`
-— not `Err(NotPresent)` — for a Kubernetes `env:` entry with an empty `value:`, and a `secretKeyRef`
-to a key that exists and is blank projects the same thing.
-
-**Stdout is one line per configured sink**, in the fixed order `pagerduty`, `webhook`, `slack`, as
-the final lines the process writes:
-
-```
-notify-result=pagerduty:ok
-notify-result=webhook:failed
-notify-result=slack:ok
-```
-
-A reader scans a bounded tail and matches **by key name**, never by position — the rule erratum E4
-draws for `refusal-reason=` and `offset-report-key=`, and for the same reason: a pod log is stdout
-and stderr merged in nondeterministic order.
-
-**A delivery with no configured sink prints exactly one line and exits 1:**
-
-```
-notify-result=none:unconfigured
-```
-
-**FX-20 adds a third per-sink value, `refused`**: the sink's credential Secret
-carried no `logweir-binding`, or one written for another policy, sink or
-endpoint, so nothing was composed or dialled for it; the other sinks are still
-attempted. An older controller knows no `refused` value and reads such a run by
-its exit code alone (`Failed`). The set of values is closed: `ok`, `failed`,
-`refused`, and `none:unconfigured`.
-
-`none` is not a sink and cannot collide with one, and `unconfigured` is deliberately not `failed`:
-a sink that refused and an alert with nowhere to go are different findings that an operator fixes
-in different places. **Do not read a bare exit 0 as delivered.** Before this line existed, "nothing
-was configured" and "every sink accepted" were the same machine-readable answer — empty stdout,
-exit 0 — so a `secretKeyRef` that had been rotated, renamed or left blank made a caller record a
-delivery that reached nobody. A delivery Job that delivered nothing did not deliver; the
-controller's retries exhaust and `NotificationsDelivered=False` is the correct record of it.
-
-**The exit codes.**
-
-| code | meaning |
-|---|---|
-| **0** | every configured sink accepted, and at least one was configured |
-| **1** | at least one configured sink did not accept (`notify-result=…:failed` says which), or was refused before anything was built or dialled because its credential Secret is not bound to this policy, sink and endpoint (`notify-result=…:refused`, FX-20), **or** no sink was configured at all (`notify-result=none:unconfigured`) |
-| **3** | the event document is missing, unreadable, larger than a ConfigMap can hold, of another `format_version` major, or malformed — **nothing was posted** |
-
-**2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
-Global Constraint 11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and
-signed" and 4 for "signing or lock-proof failed"; `notify deliver` signs nothing and writes no
-artifact, so either code would make a delivery failure indistinguishable from a drill result to
-every reader of the exit contract, including `weirkeeper::conditions::reason_for_exit`.
-
-**1 and 3 are distinguishable without parsing prose.** A refusal posted nothing, so it prints no
-`notify-result=` line at all; a delivery failure prints one per configured sink, and a delivery with
-nowhere to go prints `none:unconfigured`. A controller reads the exit code *and* the lines, which is
-what D3 §3.4 specifies.
-
-**A failed notification never rewrites a backup result.** This subcommand writes no Kubernetes
-object of any kind — it reads a file, posts to sinks, and exits. Delivery failures reach a `Backup`
-only through what the protection controller chooses to write on `protectionpolicies/status`.
-
-**Sink credentials never reach stdout, stderr, a `tracing` field or a `Debug` output.** The routing
-key travels in the PagerDuty request body and is never printed; every sink URL that reaches a
-display surface is reduced to `scheme://host` by `redact_url` first, on the success arm and the
-failure arm alike. All three streams are asserted together, over the shipped process with a routing
-key really set, because a pod log has no stream selector and a `tracing` field is a surface a log
-aggregator reads.
-
-**The event's `summary` is the only free prose, and a claim in it is edited, not obeyed and not
-fatal.** If the controller's `summary` contains a phrase claiming exhaustive verification, the
-phrase is replaced with `[claim removed]`, the edit is reported on a named log line, and the alert
-**is still delivered** — Logweir verifies a sample, and dropping the page would punish the responder
-for the controller's wording. Identifiers are never scanned: `exhaustive` is a legal DNS-1123 label,
-so a `ProtectionPolicy` named `exhaustive-backups` delivers normally. The one hard refusal is a
-`verification_scope` outside `sampled`/`degraded`/`none`, which reads an enumerated field this
-product serializes and cannot be tripped by a naming choice.
-
-**Timeouts are the drill path's**: 5 s to connect and 10 s overall per POST, so three sinks cost at
-most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
+Withdrawn in v1 (release notes, item 73): the subcommand is gone with the
+alert sinks it served, and an argv that names it is refused by clap
+(`unrecognized subcommand 'notify'`).
 
 ### `logweir check run`'s exit codes, its frames and the one key it may write (D2 §4.2)
 
@@ -3260,20 +3162,10 @@ spend).
   it supports, and **refuses** a document whose major is higher than it
   supports, rather than guessing at a shape it has never seen.
 
-  **One document is a deliberate exception and it is named here rather than
-  left to be discovered: the protection event**
-  (`application/vnd.logweir.protection-event+json;version=1.0.0`,
-  [formats/protection-event.md](formats/protection-event.md)). It **refuses**
-  unknown fields instead of ignoring them. The policy above is about SIGNED,
-  ARCHIVAL documents read years later by something that was not there when
-  they were written; the protection event is neither — it is a control message
-  passed between the protection controller and a delivery Job whose image the
-  same chart pins, and the thing a lenient reader would silently drop is an
-  alert detail an on-call responder then never learns. **The cost is real and
-  is stated:** a minor bump that adds a field is *not* backward-compatible for
-  an older runner, which exits 3 and posts nothing, so the controller and the
-  runner image upgrade together. The chart already pins both, so this binds a
-  hand-edited deployment rather than a supported upgrade.
+  The protection event
+  ([formats/protection-event.md](formats/protection-event.md)) was the one
+  exception: it refused unknown fields. It is no longer written (release
+  notes, item 73).
 
 - **CLI flags and exit codes are stable within a major.** A given Logweir
   major version does not remove or repurpose a flag, nor change the meaning

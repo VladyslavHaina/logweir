@@ -581,14 +581,12 @@ fn run() -> ExitCode {
         )));
         // D3 W6 (PLAT-14.2) pushes the TWELFTH — the `ProtectionPolicy`
         // reconciler that turns runs that already happened into a freshness
-        // verdict, and a verdict that changed into exactly one delivery Job
-        // per alert transition. It takes the runner image because it CREATES
-        // Jobs (`logweir notify deliver` in the runner image) and NO archive
-        // handle: protection reads `Backup` status and the catalog's own
-        // materialised view, never an object store. `tests/linkage.rs`'s
-        // controller count moved in this same commit.
+        // verdict. It creates no Job and holds NO archive handle: protection
+        // reads `Backup` status and the catalog's own materialised view, never
+        // an object store. `tests/linkage.rs`'s controller count moved in the
+        // commit that added it.
         controllers.push(Box::pin(
-            weirkeeper::controllers::protection_policy::controller(client.clone(), runner.clone()),
+            weirkeeper::controllers::protection_policy::controller(client.clone()),
         ));
         // D3 W7 (PLAT-14.3) pushes the THIRTEENTH — the `RehearsalSchedule`
         // reconciler that turns a cron, a qualifying recovery point and ONE

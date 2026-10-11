@@ -5545,8 +5545,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "admissionPolicy.enabled",
         "admissionPolicy.consoleServiceAccountName",
         "admissionPolicy.extraPrincipals",
-        // D3 W14 / NOTIFY-INSECURE-SINK-UNEXPOSED — the installation-only hatch.
-        "notify.allowInsecureSinks",
         // D3 W13 — the two controller windows `weirkeeper::diagnostics` reads,
         // and the two RBAC-only components.
         "controller.failFastSeconds",
@@ -5718,7 +5716,10 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         );
     }
     // The schema accepts exactly this set — `additionalProperties: false` means
-    // a key in values.yaml that the schema forgot refuses every install.
+    // a key in values.yaml that the schema forgot refuses every install. A
+    // WITHDRAWN key is the one exception: the schema accepts it only so the
+    // render can refuse it by name, and values.yaml no longer shows it.
+    const WITHDRAWN: [&str; 1] = ["notify"];
     let schema: serde_json::Value =
         serde_json::from_str(&read("charts/logweir/values.schema.json"))
             .expect("the schema parses");
@@ -5726,6 +5727,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         .as_object()
         .expect("a properties object")
         .keys()
+        .filter(|k| !WITHDRAWN.contains(&k.as_str()))
         .cloned()
         .collect();
     let written: BTreeSet<String> = values

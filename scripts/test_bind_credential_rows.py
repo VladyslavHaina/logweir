@@ -15,6 +15,7 @@ write when the facts are clean.
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import importlib.util
 import io
@@ -234,9 +235,6 @@ def row_every_form_agrees_with_the_products_fixture():
     for case in FIXTURE["retention"]:
         assert bc.retention_binding(case["uid"], case["destinationSpec"],
                                     case["scope"]) == case["binding"], case
-    for case in FIXTURE["notification"]:
-        assert bc.notification_binding(case["uid"], case["sink"],
-                                       case["endpoint"]) == case["binding"], case
     for case in FIXTURE["kafka"]:
         assert bc.kafka_binding(case["uid"], case["spec"]) == case["binding"], case
 
@@ -282,43 +280,18 @@ def row_an_inline_archive_secret_binds_to_its_location_only():
     assert fake.patches == []
 
 
-EU = bc.notification_binding("p-uid", "pagerduty", "https://events.eu.pagerduty.com/v2/enqueue")
-DEFAULT = bc.notification_binding("p-uid", "pagerduty", None)
-
-
-def row_a_protection_policy_route_is_bound_to_its_own_entry():
-    policy = {
-        "metadata": {"name": "p", "uid": "p-uid"},
-        "spec": {"notifications": {"routes": [
-            {"name": "oncall", "pagerDuty": {"routingKeySecretRef": {"name": "pd"},
-                                             "endpoint": "https://events.eu.pagerduty.com/v2/enqueue"}},
-            {"name": "backup", "pagerDuty": {"routingKeySecretRef": {"name": "pd"}}},
-        ]}},
-        "status": {"credentialBindings": [
-            {"route": "oncall", "sink": "pagerduty", "secretName": "pd", "binding": EU},
-            {"route": "backup", "sink": "pagerduty", "secretName": "pd", "binding": DEFAULT},
-        ]},
-    }
-    objects = {"protectionpolicies": [policy], "secrets": [secret("pd")]}
-    fake = Fake(copy.deepcopy(objects))
-    code, _, err = run(fake, "--kind", "ProtectionPolicy", "--name", "p", "--secret", "pd")
-    assert code == 3 and "--route" in err, err
-    fake = Fake(copy.deepcopy(objects))
-    code, out, err = run(fake, "--kind", "ProtectionPolicy", "--name", "p", "--route", "oncall",
+def row_a_protection_policy_is_refused_by_name():
+    """Alert sinks are withdrawn: nothing presents a ProtectionPolicy's
+    credential any more, so the tool refuses the kind, by name."""
+    said = io.StringIO()
+    with contextlib.redirect_stderr(said):
+        code, _, _ = run(Fake(clean()), "--kind", "ProtectionPolicy", "--name", "p",
                          "--secret", "pd")
-    assert code == 0 and EU in out, (out, err)
-    assert "events.eu.pagerduty.com" in out, out
-    # F2: the route's endpoint was edited a moment ago and the status still
-    # names the old one — the tool binds neither.
-    edited = copy.deepcopy(objects)
-    edited["protectionpolicies"][0]["spec"]["notifications"]["routes"][0]["pagerDuty"][
-        "endpoint"] = "https://attacker.example/v2/enqueue"
-    fake = Fake(edited)
-    code, _, err = run(fake, "--kind", "ProtectionPolicy", "--name", "p", "--route", "oncall",
-                       "--secret", "pd", "--apply", "--confirm-endpoint",
-                       "oncall/pagerduty: https://attacker.example/v2/enqueue")
-    assert code == 3 and "lags an edit" in err, err
-    assert fake.patches == []
+    assert code == bc.EXIT_USAGE and "'ProtectionPolicy'" in said.getvalue(), said.getvalue()
+    # CONTROL: a kind it still binds is not a usage error.
+    code, _, err = run(Fake(clean()), "--kind", "RetentionPolicy", "--name", "p",
+                       "--secret", "pd")
+    assert code != bc.EXIT_USAGE, err
 
 
 def row_a_kubectl_failure_is_exit_one_and_usage_is_exit_two():
