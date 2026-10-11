@@ -27,12 +27,10 @@ So this chart renders, in that mode, nothing that anything in the cluster could
 dial: no Service, no Ingress (refused by name), and no ingress rule in the
 NetworkPolicy. `shared` is the only mode that may be exposed through either.
 
-Stated the other way round, because it is the answer to PLAT-17.1's residue and
-to `ui.yaml`'s whole header: turning this component on CANNOT produce an
-unauthenticated shared console. The legacy proxy's model is "anyone who can
-reach the Service acts as the ServiceAccount". The in-cluster administrator mode
-has no Service to reach, and shared mode authenticates and authorizes every
-request before it reaches a route.
+Stated the other way round, because it is the answer to PLAT-17.1's residue:
+turning this component on CANNOT produce an unauthenticated shared console. The
+in-cluster administrator mode has no Service to reach, and shared mode
+authenticates and authorizes every request before it reaches a route.
 
 AND THE PRICE OF THE ADMINISTRATOR MODE, SAID OUT LOUD: `create
 pods/portforward` in this namespace is equivalent to full console administrator
@@ -75,11 +73,9 @@ and its one-line refusal naming the field are the signal.
 ---------------------------------------------------------------------------
 THE TOKEN, THE FILESYSTEM, AND THE THREE MOUNTS
 ---------------------------------------------------------------------------
-`automountServiceAccountToken: true`. This is the one optional component beside
-the legacy proxy that needs its token, and for the opposite reason: the proxy
-attaches its token to requests a BROWSER composed, while this service composes
-every Kubernetes call itself through one sealed adapter after authenticating and
-authorizing the actor. The mounted token is the projected, time-bound kind
+`automountServiceAccountToken: true`. This service composes every Kubernetes
+call itself through one sealed adapter after authenticating and authorizing the
+actor. The mounted token is the projected, time-bound kind
 (BoundServiceAccountTokenVolume, the default since Kubernetes 1.21), which is
 what D0 means by "projected token".
 

@@ -41,7 +41,7 @@
 // agree about what an observation means and about what is too old to present as
 // current.
 
-import { CONSOLE, LEGACY, apiClient, mayOperate, mode } from "../client.js";
+import { CONSOLE, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
   askCheck,
@@ -504,20 +504,6 @@ export const CONNECTION_CHECK_REFUSED_SENTENCE =
   "The controller has refused this connection, so there is nothing to dial with: a check would " +
   "be created, fail to render a plan and record no row. Fix the object first; the controller's " +
   "own reason is beside this sentence.";
-
-/** Why a `kubectl proxy` console has no control here.
- *
- *  REVIEW F6. `renderConnectionCheck` had an `unavailable` branch that nothing
- *  ever set, which is a dead state in a panel whose whole job is to say what
- *  is true. There IS a real answer for it: the check routes are the product
- *  API's, the legacy proxy serves read-only summaries of the three D2 kinds
- *  (D2 section 7.4) and creates none of them, so in that mode the control
- *  could only fail at the click. Saying so up front is what the discovery
- *  panel beside it already does. */
-export const CONNECTION_CHECK_LEGACY_SENTENCE =
-  "This console is reading through a kubectl proxy, which serves read-only summaries of check " +
-  "requests and creates none. A connection check needs the product API; the connection probe " +
-  "above is what this mode can show.";
 
 /** The controller's refusal reason for this connection, or `""`.
  *
@@ -1457,14 +1443,9 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
       preflight: null,
       // THE OBJECT'S OWN, from the read this view already did. `lastTest` is
       // the product API's summary of the newest connectivity check for this
-      // connection; in legacy mode it is simply absent, which the panel
-      // renders as "none recorded" rather than as "none ran".
+      // connection; when it is absent the panel renders "none recorded"
+      // rather than "none ran".
       lastTest: (object || {}).lastTest || null,
-      // F6: the branch is no longer dead. `mode()` is `null` until the page
-      // has decided, and an undecided page is not a legacy one -- the check is
-      // deliberately `=== LEGACY` and not `!== CONSOLE`.
-      unavailable: mode() === LEGACY,
-      unavailableReason: CONNECTION_CHECK_LEGACY_SENTENCE,
     },
     remembered || {},
     check || {},

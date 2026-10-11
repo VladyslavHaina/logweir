@@ -1896,8 +1896,8 @@ nothing from inside it.
 
 `/ui/` serves an allowlist built once at startup: the top-level `*.html`,
 `*.js` and `*.css` files of the configured directory and the same three
-extensions directly inside `pages/` — the selection `Dockerfile.ui` makes, and
-nothing else. `README.md`, the `tests/` directory and its throwaway keypair, any
+extensions directly inside `pages/` — the selection `Dockerfile.console` copies,
+and nothing else. `README.md`, the `tests/` directory and its throwaway keypair, any
 other subdirectory, any other extension, dotfiles and symbolic links are never
 in the map. A request path is looked up **exactly**, with no decoding,
 normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
@@ -1908,11 +1908,9 @@ Two entries are the service's own and not files: the page icon
 (`favicon.svg`), and **`runtime.js`**, served compiled in
 (`assets.rs` `CONSOLE_RUNTIME_JS`) in place of the file under `ui/`. It sets the
 empty namespace context the page reads and `window.LOGWEIR_CONSOLE = {servedBy:
-"logweir-api"}`, which is how the page knows it is behind this service even
-when its first `GET /api/v1/session` fails: a failed probe then reads "can't
-reach the service; retry" and never falls back to the legacy `kubectl proxy`
-paths (console-ux-1 review L1). It carries no credential and nothing per
-request. The legacy UI image serves the file, which sets no marker.
+"logweir-api"}`. A failed first `GET /api/v1/session` reads "can't reach the
+service; retry" (console-ux-1 review L1). It carries no credential and nothing
+per request.
 
 ## Shared mode
 
@@ -2522,12 +2520,9 @@ maximum duration with a terminal `end` event.
 The service ships as one image and one optional Helm component.
 
 **The image is `logweir-console`, built by `Dockerfile.console`.** It carries
-`/usr/local/bin/logweir-api` and, at `/ui`, the same twenty-six static files the
-`logweir-ui` image carries — the same two globs, from the same one `ui/`
-directory in the source tree, so there is one copy of the page in the repository
-and two images that copy from it. `scripts/check-image-api.sh` hashes every file
-the image will serve against that directory (as
-`scripts/check-image-ui.sh` does for the other), requires all three licence
+`/usr/local/bin/logweir-api` and, at `/ui`, the twenty-six static files of the
+one `ui/` directory in the source tree. `scripts/check-image-api.sh` hashes every
+file the image will serve against that directory, requires all three licence
 files, requires the CA bundle, and refuses an image carrying any key-shaped path
 anywhere outside the system trust store: this is the one image in the tree that
 *mounts* key material at runtime, and none of it is ever built into a layer.
@@ -2569,9 +2564,8 @@ O1 (`docs/kubernetes.md` §15.4). `controller.watchNamespaces` replaces the
 controller's cluster-wide binding with one RoleBinding per execution namespace
 plus a ClusterRole for the two cluster-scoped trust kinds only, and the
 controller watches exactly those namespaces; the chart refuses shared mode
-without the list, with a list that includes the release namespace, beside the
-legacy `ui.enabled` proxy, and with a product binding in a namespace no
-controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
+without the list, with a list that includes the release namespace, and with a
+product binding in a namespace no controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
 has the `kubectl auth can-i` matrix and the migration. `kubernetes.source` is always `inCluster` and there is
 no chart value for the other source — a pod that read a kubeconfig would act
 with whatever identity that file carried, and the RBAC argument above would be
@@ -2631,8 +2625,7 @@ modes (PLAT-19.2): with a namespace bound Ordinary the console signs the
 configured administrator's confirmation, which is an authorization only
 because the installation chose that policy; under Governed the administrator
 is the requester of everything it submits, so it can never approve one of its
-own requests. What stays unavailable is the legacy `kubectl proxy` page, which
-cannot sign a confirmation at all (D0) and keeps today's governed flow.
+own requests.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

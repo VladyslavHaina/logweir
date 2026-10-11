@@ -29,7 +29,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { decoded, wireItem } from "./console-fixture.js";
 
-import { CONSOLE, LEGACY, apiClient, resetMode, selectMode, sessionToken } from "../client.js";
+import { CONSOLE, apiClient, resetMode, selectMode, sessionToken } from "../client.js";
 import { connectArchive, listD3 } from "../operation-watch.js";
 import { mountCatalog } from "../pages/catalog.js";
 import {
@@ -107,12 +107,6 @@ async function sharedConsole(token) {
   session.csrfToken = token === undefined ? "poc-session-token-1" : token;
   resetMode();
   return selectMode({ probe: async () => ({ ok: true, status: 200, body: session }) });
-}
-
-/** Pins legacy mode: what a `kubectl proxy` path filter answers. */
-async function legacyMode() {
-  resetMode();
-  return selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
 }
 
 /** A product-API list envelope around `items`. */
@@ -460,19 +454,12 @@ test("poc_p1_each_mode_writes_its_own_authority_sentence", () => {
   assert.equal(shared.getElementById("colophon-serving").children[0].tagName, "CODE",
     "a code segment is an element, never parsed markup");
 
-  const legacy = mastheadDocument();
-  applyModeCopy(legacy, LEGACY);
-  assert.match(legacy.getElementById("masthead-tagline").textContent,
-    /runs with the authority of the kubeconfig that started the proxy serving it/,
-    "the legacy page keeps its disclosure");
-  assert.match(legacy.getElementById("colophon-serving").textContent, /Served by kubectl proxy/);
-
   // Before the probe answers, or for a word this build does not know, nothing
   // changes: the neutral copy is true of both.
   const undecided = mastheadDocument();
   assert.equal(applyModeCopy(undecided, null), false);
   assert.equal(undecided.getElementById("masthead-tagline").textContent, "neutral tagline");
-  assert.deepEqual(Object.keys(MODE_COPY).sort(), [CONSOLE, LEGACY].sort());
+  assert.deepEqual(Object.keys(MODE_COPY), [CONSOLE]);
 });
 
 test("poc_p1_the_shell_writes_the_decided_mode_s_sentence_when_the_probe_answers", async () => {
@@ -485,13 +472,6 @@ test("poc_p1_the_shell_writes_the_decided_mode_s_sentence_when_the_probe_answers
   assert.match(shared.getElementById("masthead-tagline").textContent, /Logweir product API/,
     "the shared console's own sentence, once the probe said console");
   assert.equal(renders, 1, "and its grants replaced the namespace list, one more render");
-
-  await legacyMode();
-  const legacy = mastheadDocument();
-  modeDecided({ mode: LEGACY }, legacy, { allowed: ["a"], selected: "a" }, () => { renders += 1; });
-  assert.match(legacy.getElementById("masthead-tagline").textContent, /kubeconfig/,
-    "the legacy page's disclosure, once the probe was refused");
-  assert.equal(renders, 1, "and no render: legacy mode has no grants");
 });
 
 // ===========================================================================
@@ -742,6 +722,5 @@ test("sweep_the_latest_point_s_completion_instant_says_when_it_is_the_creation_i
 
 test("the_suite_leaves_the_mode_undecided", async () => {
   // Other files decide their own mode; this one leaves none behind.
-  await legacyMode();
   resetMode();
 });

@@ -1,6 +1,6 @@
-// client.spec.js -- the mode is chosen once, the two modes answer the pages
-// with the same shape, and a disagreement from either server lands beside the
-// field it is about.
+// client.spec.js -- the session state is decided once, the console answers the
+// pages in the custom resource's shape, and a disagreement from the server
+// lands beside the field it is about.
 //
 // EVERY TEST HERE DRIVES THE REAL TRANSPORT. `ui/api.js`'s one call site is
 // stubbed at the platform boundary, so the identifier under assertion is the
@@ -14,8 +14,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   CONSOLE,
-  LEGACY,
   LIST_PAGE_BUDGET,
+  UNAVAILABLE,
   apiClient,
   bindingRevision,
   rolesFor,
@@ -83,12 +83,6 @@ async function console_(document) {
   return selectMode({ probe: async () => ({ ok: true, status: 200, body: document || SESSION() }) });
 }
 
-/** Pins legacy mode: what a `kubectl proxy` path filter answers. */
-async function legacy() {
-  resetMode();
-  return selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-}
-
 const VALUES = Object.freeze({
   name: "orders-prod", servers: "kafka-0.orders.svc:9093", role: "source",
   mode: "scramSha512", username: "logweir-reader", secret: "orders-scram", tls: true,
@@ -144,25 +138,8 @@ test("concurrent_first_calls_share_the_one_probe", async () => {
   ]);
   assert.equal(probes, 1, "the in-flight probe is shared, not restarted");
   for (const answer of answers) {
-    assert.equal(answer.mode, LEGACY);
+    assert.equal(answer.mode, UNAVAILABLE);
   }
-});
-
-test("a_refusal_a_body_that_is_not_a_session_and_no_answer_are_all_legacy_mode", async () => {
-  for (const reply of [
-    { ok: false, status: 403, body: null },
-    { ok: true, status: 200, body: { items: [] } },
-    { ok: true, status: 200, body: null },
-  ]) {
-    resetMode();
-    const record = await selectMode({ probe: async () => reply });
-    assert.equal(record.mode, LEGACY, JSON.stringify(reply) + " is not the product API");
-    assert.equal(sessionDocument(), null);
-    assert.deepEqual(grantedNamespaces(), []);
-  }
-  resetMode();
-  const thrown = await selectMode({ probe: async () => { throw new Error("no route"); } });
-  assert.equal(thrown.mode, LEGACY, "a transport failure is a page that is not behind the API");
 });
 
 test("the_session_grants_are_the_namespace_list_in_console_mode", async () => {
@@ -173,12 +150,6 @@ test("the_session_grants_are_the_namespace_list_in_console_mode", async () => {
   assert.deepEqual(context.allowed, ["team-a"]);
   assert.equal(context.selected, "team-a", "one grant selects itself");
   assert.equal(applyGrants(context, grantedNamespaces()), false, "and applying them twice changes nothing");
-  await legacy();
-  assert.equal(
-    applyGrants({ allowed: ["a"], selected: "a" }, grantedNamespaces()),
-    false,
-    "legacy mode has no grants to apply: the namespace is the explicit selection PLAT-13.1 introduced",
-  );
 });
 
 test("a_capability_the_session_withholds_is_refused_before_the_network", async () => {
@@ -558,46 +529,9 @@ test("a_console_field_error_lands_beside_the_field_and_the_draft_is_kept", async
   }
 });
 
-test("a_legacy_field_error_lands_beside_the_same_field_from_the_same_page_table", async () => {
-  await legacy();
-  const status = {
-    kind: "Status", status: "Failure", reason: "Invalid", code: 422,
-    message: "KafkaCluster.logweir.dev \"orders-prod\" is invalid",
-    details: {
-      name: "orders-prod", kind: "kafkaclusters",
-      causes: [
-        { reason: "FieldValueInvalid", field: "spec.bootstrapServers[0]",
-          message: "must be host:port with no scheme or userinfo" },
-        { reason: "FieldValueRequired", field: "spec.auth.username",
-          message: "scramSha512 requires a username" },
-      ],
-    },
-  };
-  const wire = transport((u, init) =>
-    (init.method || "GET") === "POST" ? { status: 422, body: status } : undefined);
-  const key = formKey("team-a", CLUSTER_FORM);
-  keepDraft(key, VALUES, CLUSTER_DRAFT_FIELDS);
-  try {
-    let caught = null;
-    try {
-      await createOnce(apiClient(), "team-a", "kafkaclusters", consoleBody(), {});
-    } catch (error) {
-      caught = error;
-    }
-    assert.ok(caught !== null);
-    const rendered = fieldErrors(caught, CLUSTER_FIELD_PATHS);
-    assert.deepEqual(rendered.fields.servers, ["must be host:port with no scheme or userinfo"]);
-    assert.deepEqual(rendered.fields.username, ["scramSha512 requires a username"]);
-    assert.equal(readDraft(key).servers, VALUES.servers);
-  } finally {
-    dropDraft(key);
-    wire.restore();
-  }
-});
-
 test("the_client_s_own_checks_refuse_the_same_body_in_both_modes_without_sending_it", async () => {
   const bad = clusterBody(Object.assign({}, VALUES, { servers: "kafka-0.orders.svc" }));
-  for (const pin of [console_, legacy]) {
+  for (const pin of [console_]) {
     await pin();
     const wire = transport(() => ({ status: 201, body: fixture("console/connection.json") }));
     try {
@@ -813,30 +747,6 @@ test("the_declared_topic_mapping_reaches_the_product_api_and_never_the_custom_re
   } finally {
     wire.restore();
   }
-
-  // LEGACY MODE: the custom resource has no field for it, so the object sent
-  // to the API server carries none -- and is otherwise exactly the object the
-  // caller built, which is what "and is otherwise byte-identical" means.
-  await legacy();
-  wire = transport((u, init) =>
-    init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
-  try {
-    const sending = object();
-    await apiClient().create("team-a", "restores", sending);
-    const sent = JSON.parse(wire.seen[0].init.body);
-    assert.equal("topicMapping" in sent, false,
-      "the API server would prune it; this page does not send it: " + JSON.stringify(sent));
-    const expected = object();
-    delete expected.topicMapping;
-    assert.deepEqual(sent, expected, "and nothing else about the object moved");
-    // THE CALLER'S OWN OBJECT IS NOT MUTATED. `withoutTopicMapping` copies; a
-    // version that deleted in place would take the rows away from the wizard
-    // state that is still rendering them.
-    assert.deepEqual(sending.topicMapping, object().topicMapping);
-  } finally {
-    wire.restore();
-    resetMode();
-  }
 });
 
 test("plan_bytes_this_page_never_prepared_are_refused_before_anything_is_sent", async () => {
@@ -924,128 +834,6 @@ test("no_token_from_the_session_is_ever_written_to_browser_storage", async () =>
     }
   }
 });
-
-// ================================================================ legacy mode
-
-test("legacy_mode_reads_the_kubernetes_api_and_hands_the_object_through_unchanged", async () => {
-  await legacy();
-  const list = fixture("preview/namespaces/default/kafkaclusters.json");
-  const wire = transport(() => ({ status: 200, body: list }));
-  try {
-    const collection = await apiClient().list("default", "kafkaclusters");
-    assert.equal(wire.seen[0].url, "/apis/logweir.dev/v1alpha1/namespaces/default/kafkaclusters");
-    assert.deepEqual(collection, list, "what the API server sent is what the page reads");
-    assert.equal(collection.items[0].__contract, undefined, "and nothing was added to it");
-  } finally {
-    wire.restore();
-  }
-});
-
-test("a_legacy_response_that_is_not_the_contract_is_a_contract_failure_the_page_renders", async () => {
-  await legacy();
-  const wire = transport(() => ({ status: 200, body: { items: [{ metadata: { name: "x" } }] } }));
-  try {
-    await assert.rejects(
-      () => apiClient().list("default", "kafkaclusters"),
-      (error) => {
-        assert.ok(isContractFailure(error), "not an empty table: a named failure");
-        assert.equal(error.contract.path, "spec");
-        return true;
-      },
-    );
-  } finally {
-    wire.restore();
-  }
-});
-
-// ====================================== every mount half goes through the client
-
-test("every_page_s_mount_half_reads_through_the_one_client_and_renders", async () => {
-  // THE MUTANT THIS EXISTS FOR IS ONE THAT ACTUALLY HAPPENED. Pointing the
-  // pages at `ui/client.js` replaced their `import { get, list }` with one
-  // import of the adapter, and two call sites kept calling the bare
-  // identifiers -- which are no longer defined. Every page module still
-  // PARSED, every render test still passed (they call the render halves
-  // directly), and the page showed `list is not defined` in an error box. The
-  // whole behaviour suite was green. This drives the MOUNT halves.
-  await legacy();
-  const pages = await Promise.all([
-    import("../pages/clusters.js"),
-    import("../pages/schedules.js"),
-    import("../pages/backups.js"),
-    import("../pages/history.js"),
-    import("../pages/keys.js"),
-  ]);
-  const [clusters, schedules, backups, history, keys] = pages;
-  const preview = (name) => fixture("preview/" + name);
-  const wire = transport((u) => {
-    if (u.indexOf("/trustrosters") !== -1) {
-      return { status: 200, body: preview("trustrosters.json") };
-    }
-    for (const [plural, file] of [
-      ["kafkaclusters", "namespaces/default/kafkaclusters.json"],
-      ["backupschedules", "namespaces/default/backupschedules.json"],
-      ["backups", "namespaces/default/backups.json"],
-      ["restores", "namespaces/default/restores.json"],
-      ["approvals", "namespaces/default/approvals.json"],
-    ]) {
-      if (u.indexOf("/" + plural) !== -1) {
-        const list = preview(file);
-        const name = u.split("/" + plural + "/")[1];
-        return { status: 200, body: name === undefined ? list : list.items[0] };
-      }
-    }
-    return undefined;
-  });
-  // The tiny surface a mount half touches: what `render.replace` needs, plus
-  // the two lookups a form's wiring makes. Finding no control is a rendered
-  // page with nothing to wire, which is what a DOM-free mount of a form page
-  // is.
-  function fakeNode() {
-    return {
-      children: [],
-      get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
-      removeChild() { return this.children.shift(); },
-      appendChild(child) { this.children.push(child); return child; },
-      querySelector() { return null; },
-      querySelectorAll() { return []; },
-    };
-  }
-  const parse = (html) => [{ html: html }];
-  const lifecycle = { signal: undefined, isCurrent: () => true };
-  const mounts = [
-    ["clusters", (n) => clusters.mountClusters(n, "default", parse, lifecycle)],
-    ["cluster detail", (n) => clusters.mountClusterDetail(n, "default", "orders-prod", parse, lifecycle)],
-    ["schedules", (n) => schedules.mountSchedules(n, "default", parse, lifecycle)],
-    ["backups", (n) => backups.mountBackups(n, "default", parse, lifecycle)],
-    ["backup detail", (n) =>
-      backups.mountBackupDetail(n, "default", "orders-hourly-20260912-080000", parse, lifecycle)],
-    ["history", (n) => history.mountHistory(n, "default", parse, lifecycle)],
-    ["keys", (n) => keys.mountKeys(n, parse, undefined, lifecycle)],
-  ];
-  try {
-    for (const [name, mount] of mounts) {
-      const target = fakeNode();
-      await mount(target);
-      const html = (target.children[target.children.length - 1] || {}).html || "";
-      assert.ok(
-        html.indexOf("class=\"error\"") === -1,
-        name + " rendered an error box instead of its view: " + html.slice(0, 300),
-      );
-      assert.ok(html.length > 200, name + " rendered nothing worth looking at");
-    }
-    assert.ok(wire.seen.length >= mounts.length, "each mount reached the transport");
-    for (const request of wire.seen) {
-      assert.ok(
-        request.url.indexOf("/apis/logweir.dev/v1alpha1/") === 0,
-        "and every one of them addressed the mode that was selected: " + request.url,
-      );
-    }
-  } finally {
-    wire.restore();
-  }
-});
-
 
 // =========================== the second read of a detail, and the whole list
 
@@ -1235,10 +1023,6 @@ test("the_session_s_roles_and_binding_revision_are_carried_and_never_guessed", a
     shared.namespaces[0].capabilities.restoreCreate,
     "and the FLAGS are still what decides whether a call is made; a role decides nothing here",
   );
-
-  await legacy();
-  assert.deepEqual(rolesFor("team-a"), [], "legacy mode has no product roles");
-  assert.equal(bindingRevision(), "", "and no binding table: the API server's RBAC is the story");
 });
 
 test("a_session_grant_that_omits_its_roles_is_a_contract_failure", async () => {
@@ -1250,8 +1034,8 @@ test("a_session_grant_that_omits_its_roles_is_a_contract_failure", async () => {
   });
   assert.equal(
     record.mode,
-    LEGACY,
-    "a session document that is not one leaves the page in legacy mode rather than half-read",
+    UNAVAILABLE,
+    "a session document that is not one leaves the page unavailable rather than half-read",
   );
 });
 

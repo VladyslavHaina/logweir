@@ -9,12 +9,9 @@
 # build output that could differ from what this gate scans.
 #
 # WHAT THIS DOES NOT PROVE: that the page is safe to run. It is not a sandbox
-# check. The page is served by `kubectl proxy`, which attaches the viewer's own
-# kubeconfig credential to every request it forwards, so the page runs with the
-# viewer's entire cluster authority. That residual is documented in
-# `ui/README.md` and in `docs/kubernetes.md`, and it is the reason this gate
-# exists at all: a page holding that much authority must not be able to pull a
-# byte of code or a font from anywhere but the directory it was served from.
+# check. The page acts with a console session's authority; a page holding
+# authority must not be able to pull a byte of code or a font from anywhere but
+# the directory it was served from, which is the reason this gate exists.
 #
 # WHY A LINT GATE AND NOT A RUNTIME CHECK. STANDING RULE 7: a lint gate never
 # reaches the network. Nothing here fetches, resolves or pings anything; it

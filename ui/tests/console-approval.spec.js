@@ -86,11 +86,6 @@ async function consoleMode(approver) {
   return selectMode({ probe: async () => ({ ok: true, status: 200, body: document }) });
 }
 
-async function legacyMode() {
-  resetMode();
-  return selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-}
-
 const VIEW_URL = "/api/v1/namespaces/team-a/restores/restore-x/approval-request";
 const CLICK_URL = "/api/v1/namespaces/team-a/restores/restore-x/console-approval";
 
@@ -144,19 +139,6 @@ test("a_session_without_the_approver_capability_sends_no_click", async () => {
     await assert.rejects(
       apiClient().approveInConsole("team-a", "restore-x", "sha256:" + "5e".repeat(32)),
     );
-    assert.equal(wire.seen.length, 0, "nothing was sent");
-  } finally {
-    wire.restore();
-  }
-});
-
-test("legacy_mode_shows_no_request_and_has_no_click", async () => {
-  await legacyMode();
-  const wire = transport(() => undefined);
-  try {
-    const api = apiClient();
-    assert.equal(await api.approvalRequest("team-a", "restore-x"), null);
-    await assert.rejects(api.approveInConsole("team-a", "restore-x", "sha256:" + "5e".repeat(32)));
     assert.equal(wire.seen.length, 0, "nothing was sent");
   } finally {
     wire.restore();

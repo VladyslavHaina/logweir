@@ -4270,9 +4270,7 @@ a `TrustPolicy` governs it.
 server in a bound namespace are kept, as they always were, and refused with the
 reasons above; a v1 approval, a console-only document under Governed, a
 document for another UID or plan, or a self-countersigned one creates **no**
-ConfigMap and **no** Job. The legacy `kubectl proxy` page cannot produce a v2
-document at all (D0: "Ordinary confirmation is unavailable through this legacy
-direct-CR UI").
+ConfigMap and **no** Job.
 
 ### Two-person approval in the console (PROD-16.2)
 
@@ -5754,35 +5752,16 @@ no browser. On top of that, `scripts/live/d1/run.py`'s `L-06-2-cli` re-derives
 every recorded row with the page's own function on a real machine and then
 requires the name the **real** `logweir-api` gave an object it created to equal
 the name the page derives for that same live scope. What this buys an operator
-is that the three doors produce **one object**:
+is that the two doors produce **one object**:
 
 | Door | Who derives the name | What else differs |
 |---|---|---|
 | `kubectl create -f config/samples/backup-manual.yaml` | you do, or you pick any free DNS-1123 name | no idempotency annotations |
 | `POST /api/v1/namespaces/{ns}/backups` with `Idempotency-Key` | the API, from the authenticated `(issuer, subject)` | `api.logweir.dev/idempotency-scope-sha256`, `…/request-sha256`, `…/request-id`, `…/actor` |
-| the console's "Back up now" behind `kubectl proxy` | the page, from the same rule with an **empty** issuer and subject | `logweir.dev/request-sha256` over the request the page built |
 
-`spec` and the four labels are **identical** across all three; only the
-annotations differ, and they differ because they are hashes of different
-documents. The legacy page's issuer and subject are empty because a browser
-behind `kubectl proxy` holds neither — the credential is attached by the proxy,
-out of the page's sight — so in that mode the name is decided by
-`(namespace, route, key)` alone. The key is 128 random bits minted per draft,
-and a collision would be an `AlreadyExists` whose stored
-`logweir.dev/request-sha256` decides replay versus conflict, which is what the
-product API does with its own annotation.
-
-**The legacy page copies the policy digest and never computes one.**
-`spec.scheduleRef.runPolicySha256` is `weirkeeper::policy::run_policy_sha256`
-over a canonical document, the reconciler recomputes it, and a mismatch is a
-terminal refusal. So the browser reads `status.policy.runPolicySha256` off the
-schedule, and only when `status.policy.generation` equals the
-`metadata.generation` it is about to copy — the controller's own statement that
-the two describe one revision. When the controller is behind, the page refuses
-by name, says which number is behind, and points here. The same holds for the
-in-cluster UI ServiceAccount's authority: it holds `get`, `list` and `create` on
-`backups` and no `patch`, `update` or `delete`, because a run's inputs are
-frozen and a second run is a second object.
+`spec` and the four labels are **identical** across both; only the
+annotations differ. (The legacy `kubectl proxy` page, a third door, was
+withdrawn in v1, release-notes item 73.)
 
 ### Consumer position evidence: `spec.consumerGroups`
 
@@ -7858,8 +7837,8 @@ code lives only on the pod.
 
 [install.md](install.md) is the installation and uninstall procedure. Older
 error messages saying “docs/kubernetes.md install step 1” refer to that guide's
-keypair, roster and Secret preparation. See §16, Serving the UI, for the local
-proxy and its authority.
+keypair, roster and Secret preparation. §16, Serving the UI, says how the
+console serves the page.
 
 `logweir-operator` grants `update` and `patch` on BackupSchedules. CEL in the
 CRD, not RBAC, decides what may change: since PLAT-05.1 every field except
@@ -8621,121 +8600,16 @@ install that forwards no addressing publishes an empty block — not
 
 ## 16. Serving the UI
 
-The local UI serves static files from `ui/` through `kubectl proxy` after the
-install and roster setup in [install.md](install.md). The optional Helm UI is
-an in-cluster alternative with a different credential boundary (§19).
-
-Serve the directory and the Kubernetes API from one process:
-
-```bash
-kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
-```
-
-Then open `http://127.0.0.1:8001/ui/`.
-
-**One process, one origin, and that is the whole design.** `kubectl proxy` serves
-the static files under `--www-prefix` **and** proxies the Kubernetes API on the
-same origin, `127.0.0.1:8001`, attaching the viewer's own kubeconfig credential
-to every request it forwards, server side. The page therefore addresses
-`/apis/logweir.dev/v1alpha1/...` as a relative path on the origin that served
-it: not a cross-origin request, no preflight, no granted header, and
-**no bearer token, key or credential of any kind is ever placed in the page**.
-It stores nothing either -- no browser storage, no cookie of its own.
-
-A write is the same story. `POST /apis/logweir.dev/v1alpha1/namespaces/<ns>/restores`
-goes to the proxy's own origin, so it is not cross-origin, triggers no preflight
-and needs no granted header. `kubectl proxy`'s own defaults admit it: the shipped
-v1.35.0 client's `--reject-methods='^$'` is a regular expression that matches only
-the empty string, so POST, PUT and PATCH all pass.
-
-`kubectl port-forward` cannot serve this page. It forwards a port to a pod, gives
-the browser no credential, and leaves every call to the apiserver a cross-origin
-request to a server that sends no CORS headers unless it was started with
-`--cors-allowed-origins`, which no adopter has set.
-
-### What that costs, said plainly
-
-`kubectl proxy` forwards every API path except pod exec and attach, on the same
-origin as the page, under the viewer's kubeconfig. So the page runs with the
-**viewer's entire cluster authority**, not with the roles `logweir.yaml` ships:
-`logweir-viewer`, `logweir-operator` and `logweir-approver` bind the **user**,
-and under this serving path they bind nothing at all about the page. Anyone who
-runs the UI from a cluster-admin kubeconfig gives the shipped bundle
-cluster-admin. That residual is why there is no telemetry in this bundle, why
-nothing in it is fetched from anywhere else, and why its contents are listed by
-digest in the release notes.
-
-**Two flags are the one-line escalation of exactly that residual, and neither may
-change:**
-
-- `--address=127.0.0.1` -- the proxy binds loopback only.
-- `--disable-filter` -- **never pass it.** The default, `false`, keeps the
-  `--accept-hosts` cross-site request filter on; the shipped client's default is
-  `--accept-hosts='^localhost$,^127\.0\.0\.1$,^\[::1\]$'`.
-
-**Changing either turns a local page holding your cluster authority into a network service holding it.**
-On the LAN, unauthenticated, with your cluster credential attached to every
-request it receives.
-
-### The hardened alternative: a kubeconfig that holds less
-
-The residual above is the viewer's own authority, so the way to narrow it is to
-start the proxy under a kubeconfig that holds less. Bind a subject to
-`logweir-viewer` (read) and, if the page should be able to write,
-`logweir-operator` -- and nothing else:
-
-```bash
-kubectl --context docker-desktop create rolebinding logweir-ui-viewer \
-  --clusterrole=logweir-viewer --user=logweir-ui -n <namespace>
-kubectl --context docker-desktop create rolebinding logweir-ui-operator \
-  --clusterrole=logweir-operator --user=logweir-ui -n <namespace>
-```
-
-Then build a throwaway kubeconfig that carries that subject and nothing else,
-and serve from it. The context in it is **named `docker-desktop` on purpose**, so
-the serving command above is unchanged and still names its context explicitly:
-
-```bash
-export KUBECONFIG="$PWD/logweir-ui.kubeconfig"
-kubectl config set-cluster docker-desktop --server=https://127.0.0.1:6443 --certificate-authority=<ca.crt> --embed-certs=true
-kubectl config set-credentials logweir-ui --client-certificate=<logweir-ui.crt> --client-key=<logweir-ui.key> --embed-certs=true
-kubectl config set-context docker-desktop --cluster=docker-desktop --user=logweir-ui --namespace=<namespace>
-kubectl config use-context docker-desktop
-kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
-```
-
-`kubectl config` writes the kubeconfig itself and takes no `--context`. Other
-commands name either `--context docker-desktop` for this guide's local examples
-or the deliberately selected `$LOGWEIR_CONTEXT` in the production CRD-upgrade
-procedure.
-
-Under that kubeconfig a 403 from the page is the API server refusing
-`logweir-ui`, which is the story the page tells: every error it shows carries the
-API server's own `reason` and `message`, verbatim, because the page's whole
-authorisation story is "the API server evaluated the viewer's RBAC".
-
-
-### What the page can and cannot write
-
-`api.js` validates every write against a frozen allowlist of five plurals --
-`kafkaclusters`, `backupschedules`, `backups`, `restores`, `approvals` -- and
-refuses anything else before the request is built. `trustrosters` is deliberately
-absent: it is cluster-scoped, it carries the public key material every approval
-check reads, and a namespace tenant that could write one could widen its own
-allowlist. The page also has exactly one update beyond `create`: a JSON-merge
-patch over a `BackupSchedule` touching `spec.suspend` and nothing else. (The
-CRD itself leaves every field but `spec.sourceRef` mutable since PLAT-05.1;
-the page's other schedule edits are the console's `PUT` below, which a merge
-patch against the API server cannot replace.)
-
-Those are the page's limits, not the cluster's. The API server's limits are
-whatever the kubeconfig that started the proxy carries, which is the subject of
-"What that costs" above, and they are the ones that actually hold.
+The UI is served by the console, `logweir-api` ([install.md](install.md) §5e):
+the page and a bounded product API on one origin, with every request authorized
+for the session's own identity and namespace grants. The legacy `kubectl proxy`
+page — local, under the viewer's kubeconfig, or in-cluster through the chart's
+`ui.*` values and the `logweir-ui` image under a ServiceAccount — was withdrawn
+in v1 (release-notes item 73), and the chart refuses `ui.*` by name.
 
 ### Destinations, topic discovery and readiness are console-only
 
-Three surfaces landed with D2 and none of them is reachable through
-`kubectl proxy`:
+Three surfaces landed with D2:
 
 | tab | routes it uses |
 |---|---|
@@ -8743,18 +8617,7 @@ Three surfaces landed with D2 and none of them is reachable through
 | `#/clusters` (a connection's detail) | `.../connections/{name}/topic-discoveries`, `.../topic-discoveries/{id}`, `/topics`, `:cancel` |
 | `#/schedules` and `#/restore` step 5 | `POST .../preflights`, `.../preflights/{id}`, `/details`, `:cancel` |
 
-Every one of those is a `/api/v1/...` route on `logweir-api`. The custom
-resources behind them (`BackupDestination`, `TopicDiscovery`, `Preflight`) are
-in the same API group the proxy already forwards, so a page COULD have read them
-directly -- and deliberately does not. The legacy in-cluster UI ServiceAccount
-has no binding for the three kinds, `api.js`'s writable allowlist above is
-unchanged, and a page that asked anyway would render a 403 it did not cause.
-Instead the client refuses each call by name, in the page, with a sentence
-saying which API serves the flow. Run the console (`logweir-api`) to use them.
-
-The `#/destinations` tab is in the navigation in both modes on purpose: the mode
-is decided once at boot, after the first paint, so a tab that appeared only in
-console mode would appear and vanish under a reader.
+Every one of those is a `/api/v1/...` route on `logweir-api`.
 
 **What a readiness result does and does not claim.** A `Preflight` is a real
 check Job with the destination's and the connection's own credentials. Its
@@ -8864,18 +8727,6 @@ a red verdict sends `readinessAcknowledgement`, which the API records as the
 annotation `logweir.dev/readiness-ack` -- the API reads no preflight and gates
 on nothing.
 
-**In `kubectl proxy` mode all three are refused by name.** There is no preview
-route in front of the proxy and the browser will not evaluate cron to fill the
-gap; the replace is built on the product API's `expectedGeneration`
-precondition, which a JSON-merge patch against kube-apiserver would not have;
-and a manual run's name is derived by the API from the authenticated subject
-(issuer, subject, namespace, route, key), which the browser does not hold -- so
-a browser-minted name would not be the name `kubectl create -f` and the API
-produce. The in-cluster UI ServiceAccount also has no `create` on `backups`;
-`charts/logweir/templates/ui/ui.yaml` grants `create` on approvals,
-`kafkaclusters`, `backupschedules` and `restores` and nothing else, and adding
-that verb is a chart change with its own review (D1 section 8.5).
-
 **What the console can and cannot say about a run.** `Backup`'s projection
 carries `trigger` and `scheduleRef`, so the Backups table renders the run kind
 from `spec.trigger.kind` alone -- `Scheduled`, `CatchUp`, `Retry`, `Manual` --
@@ -8884,8 +8735,7 @@ being rendered as `Scheduled` from the coarser `triggeredBy`. The projection
 carries **no `status.selection`**, so a run's coverage label cannot be rendered
 in console mode; the page says so and names PLAT-09.2 for the projection, and
 renders the label, the selection mode, the counts and the `TopicsResolved=False`
-reason wherever the object does carry them, which in `kubectl proxy` mode is
-every run. `ScheduleStatusView` likewise carries `policy`, `nextRuns` and
+reason wherever the object does carry them. `ScheduleStatusView` likewise carries `policy`, `nextRuns` and
 `activeRuns` and not `lastSlot`, `missedSlots`, `pendingRun` or `history`, and
 the card names those four rather than leaving empty rows.
 
@@ -8896,9 +8746,9 @@ changed one column on `#/backups`, `#/history` and `#/schedules`. The routes are
 
 | tab | what it reads |
 |---|---|
-| `#/operations?ns=&kind=&name=&uid=` | `GET .../operations/{kind}/{name}` and its SSE stream `.../events` in console mode; the `Backup`/`Restore` custom resource itself in legacy mode |
+| `#/operations?ns=&kind=&name=&uid=` | `GET .../operations/{kind}/{name}` and its SSE stream `.../events` |
 | `#/protection` | `GET .../protection-policies[/{name}]`, or the `ProtectionPolicy` custom resource |
-| `#/catalog` | `GET .../catalogs[/{name}]`, `/points`, `/signers` and the one create, `POST .../catalogs`; the `RecoveryCatalog` custom resource carries the status half in legacy mode and the point list is console-only |
+| `#/catalog` | `GET .../catalogs[/{name}]`, `/points`, `/signers` and the one create, `POST .../catalogs` |
 | `#/keys` | `GET /api/v1/trust-policies`, or the cluster-scoped `TrustPolicy`, with `TrustRoster/default` as the named fallback |
 
 **The operation view follows a run and cancels nothing.** The stream is one
@@ -8907,10 +8757,7 @@ carrying no header and no token in its identifier; it reconnects with backoff
 and falls back to polling after three failed connects, because a proxy that will
 not carry `text/event-stream` never starts. Closing the view closes a
 connection. There is no cancel route in v1 and the page offers no control that
-pretends there is. In legacy mode there is no normalized state at all -- the ten
-words are `logweir-api`'s, computed from a table this page does not implement a
-second time -- so the view renders the controller's own `status.progress` and
-says which fact it is showing.
+pretends there is.
 
 **The read route and the stream send two different shapes, and that is the
 server's decision.** `GET .../operations/{kind}/{name}` answers the envelope
@@ -8998,21 +8845,12 @@ asks the provider at all: it refuses the delete as `VersionedBucket`, because a
 delete by key there writes a marker instead of being refused (§7f, the
 versioned-bucket bullet, including the cases it does not see).
 
-**The legacy in-cluster UI ServiceAccount reads none of the four D3 kinds.**
-`charts/logweir/templates/ui/ui.yaml`'s ClusterRole is unchanged by this change,
-so under the Helm UI the three D3 tabs are console flows and the keys view falls
-back to the roster, by name, with the API server's own refusal rendered. Adding
-`protectionpolicies`, `recoverycatalogs`, `retentionpolicies` and
-`trustpolicies` to that role would let the legacy path read them too; it is a
-chart change with its own review and its own exact-rule table in
-`crates/logweir/tests/chart_lint.rs`.
-
 ### What the console publishes, and what it deliberately does not
 
 The four D3 tabs read the product API's own **flat** views -- a
 `ProtectionPolicyView` carries its identity and its facts at the top level, with
-no `spec`/`status` pair -- and the custom resource in legacy mode. The console
-projects one into the other so a reader sees the same page either way.
+no `spec`/`status` pair. The console projects each onto the custom resource's
+shape for its renderers.
 
 **Three facts the API does not publish, and what stands in each place.**
 
@@ -9041,8 +8879,7 @@ validates membership to pick a badge colour and renders an unrecognised word
 publishes `evaluation {state, reason, serverTime, freshWithinSeconds,
 ageSeconds}`, so the freshness verdict §7.7 asks for is made once, against the
 API's own clock, with the arithmetic on screen. The console renders it and says
-who decided; in legacy mode, where there is no such view, it decides for itself
-against the `Date` header of the answer that carried the object.
+who decided.
 
 **Reading a TrustPolicy needs an administrator binding.** `GET
 /api/v1/trust-policies` is Administrator-only and serves a policy only when it
@@ -9275,31 +9112,26 @@ value alone is not proof of browser interaction: an API client can supply it.
 
 [charts/logweir/README.md](../charts/logweir/README.md) is the canonical chart
 reference, including all values, registry overrides, optional Kafka resources,
-MinIO, demo brokers and the in-cluster UI. [install.md](install.md) path (c)
+MinIO, demo brokers and the console. [install.md](install.md) path (c)
 connects it to the same key, Secret and roster prerequisites as the manifests.
 
-The chart copies its CRDs from `config/`. The UI is packaged separately by
-`Dockerfile.ui`, which copies `ui/` into `/ui` over a pinned kubectl base.
-The chart carries no duplicate UI files or asset ConfigMap. `just smoke-ui`
-compares the image’s served assets with `ui/`.
+The chart copies its CRDs from `config/`. The UI ships inside the console
+image (`Dockerfile.console`); the chart carries no duplicate UI files or asset
+ConfigMap. `just smoke-console` compares the image’s served assets with `ui/`.
 `just chart-check` checks CRD parity, rendered manifests, schema and Helm lint;
 `chart_lint.rs` checks the control-plane contract. Helm installs CRDs from
 `crds/` but does not upgrade or delete them; manage CRD changes separately.
 
-The controller, runner and optional UI images default to mutable `latest`
-tags. All three pull policies default to `Always`; `ui.imagePullPolicy` can
-be overridden for local images. The base manifests and compiled runner default remain digest-pinned;
+The controller, runner and optional console images default to mutable `latest`
+tags. All three pull policies default to `Always`; `api.console.imagePullPolicy`
+can be overridden for local images. The base manifests and compiled runner default remain digest-pinned;
 third-party chart images remain pinned too. The author-only values use locally
 loaded tags with `Never`. Runner pull policy reaches Jobs through
 `LOGWEIR_RUNNER_PULL_POLICY` (§14).
 
-The optional UI uses its own ServiceAccount, not the viewer's kubeconfig.
-Anyone who can reach its Service acts with that account's authority. The
-proxy restricts paths to `/ui/` and the Logweir API; the chart renders no
-Ingress for it (the console's `shared` mode is the one component that may have
-one — [install.md](install.md) §5e).
-The chart reference documents bindings and the port-forward command. For the
-laptop proxy's distinct authority, see §16, Serving the UI.
+The console's `shared` mode is the one component that may have an Ingress
+([install.md](install.md) §5e); the legacy `ui.*` proxy was withdrawn in v1
+(release-notes item 73).
 
 Recorded evidence from 2026-09-12: the local Helm walk and
 [CI run 34718123956](https://github.com/VladyslavHaina/logweir/actions/runs/34718123956)
@@ -11008,15 +10840,6 @@ somebody who does not hold `logweir-operator` — a trust policy decides whose
 keys may sign an approval, so one person holding both could add their own key
 and then approve their own restore. It carries **no `delete`**: deleting a
 policy does not retire a key, it removes the binding that governs a namespace.
-
-#### The legacy in-cluster UI proxy
-
-The optional `ui.enabled` proxy (§16, §19) gains `get`/`list` on
-`backupdestinations`, `topicdiscoveries` and `preflights` and nothing else. No
-`create`, no `patch`: the page has no form for any of them and the new flows
-are console-only. Without the read it would render a destination-backed
-schedule as though its archive were unconfigured. It still holds no verb on
-`configmaps`, so it shows an inventory's **counts** and never its pages.
 
 #### `delete`: exactly two resources, and why the doctrine sentence moved
 

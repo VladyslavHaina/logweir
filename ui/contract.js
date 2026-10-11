@@ -27,11 +27,8 @@
 //      pure function, which is what lets `ui/tests/contract.spec.js` drive all
 //      of them from checked-in fixtures under `node --test`.
 //
-// TWO MODES, ONE FILE. The legacy decoders (`decodeKafkaCluster` and its five
-// siblings) validate a Kubernetes custom resource AND RETURN IT UNCHANGED:
-// nothing is copied out, so nothing can be dropped on the way through. The
-// console decoders (`decodeConnection` and its siblings) read the product API's
-// DTOs, whose field names and shapes are the ones
+// The console decoders (`decodeConnection` and its siblings) read the product
+// API's DTOs, whose field names and shapes are the ones
 // `schemas/logweir-api-v1.openapi.json` publishes. `ui/tests/contract.spec.js`
 // reads that schema file and asserts that every required field named here is
 // required there, so the two cannot drift.
@@ -270,9 +267,9 @@ export function shapeOf(name, required, optional) {
 // `schemas/logweir-api-v1.openapi.json` and names every member the document
 // publishes and a shape omits.
 //
-// ONLY DECLARATIONS ARE RECORDED. `decodeLegacyObject` builds a throwaway
-// shape per call; `declaring` is false by then, so reading a document never
-// grows this list.
+// ONLY DECLARATIONS ARE RECORDED. A shape built after the module has loaded
+// (`declaring` is false by then) is not, so reading a document never grows
+// this list.
 const DECLARED = [];
 let declaring = true;
 
@@ -2251,162 +2248,6 @@ export function decodePolicyChanged(problem) {
     return null;
   }
   return decodeWith(POLICY_CHANGED_DETAIL, detail).value;
-}
-
-// ===========================================================================
-// the legacy custom resources -- config/crd, as kube-apiserver returns them
-// ===========================================================================
-//
-// THESE DECODERS VALIDATE AND RETURN THE OBJECT UNCHANGED. The pages read a
-// custom resource by reaching into it, and copying it field by field here
-// would be the very field loss this module exists to prevent: a key nobody
-// thought to list would vanish on the way through. So the legacy half checks
-// the fields WITHOUT WHICH A PAGE CANNOT RENDER, records every other key it
-// does not know about, and hands back the object the API server sent, byte for
-// byte the same reference.
-
-const LEGACY_META = shapeOf(
-  "ObjectMeta",
-  { name: str },
-  {
-    namespace: str, uid: str, resourceVersion: str, generation: int,
-    creationTimestamp: str, labels: opaque, annotations: opaque,
-    ownerReferences: opaque, finalizers: opaque, managedFields: opaque,
-    deletionTimestamp: str, deletionGracePeriodSeconds: int,
-    selfLink: str, generateName: str,
-  },
-);
-
-/** What each legacy kind must carry for its page to mean anything. The `spec`
- *  entries are the CRD's own required fields; `status` is never required --
- *  the controller has not necessarily written one yet, and a page that refused
- *  an unreconciled object would refuse every object one second old. */
-const LEGACY_SPECS = Object.freeze({
-  kafkaclusters: shapeOf("KafkaCluster.spec", { bootstrapServers: listOf(str) }),
-  backupschedules: shapeOf("BackupSchedule.spec", {
-    schedule: str, sourceRef: objectOf(NAME_REF), topics: listOf(str),
-  }),
-  backups: shapeOf("Backup.spec", { sourceRef: objectOf(NAME_REF), topics: listOf(str) }),
-  restores: shapeOf("Restore.spec", {
-    planBytes: opaque, approvalRef: objectOf(NAME_REF), backupSetRef: str, pointInTime: str,
-  }),
-  approvals: shapeOf("Approval.spec", {
-    subjectRef: objectOf(SUBJECT_REF), planHash: str,
-    approvalBytes: opaque, sidecarBytes: opaque,
-  }),
-  trustrosters: shapeOf("TrustRoster.spec", {}),
-  // D3 (PLAT-14.2, PLAT-15.1, PLAT-16.2, PLAT-19.1). Four kinds this page
-  // READS and never writes. Each required field below is the one the CRD
-  // itself requires and the one the page's renderer cannot do without:
-  // a ProtectionPolicy with no `protects` names nothing to protect, a
-  // RecoveryCatalog with no destination names no archive, a RetentionPolicy
-  // with no `scope` has no prefix its plan could be bounded by, and a
-  // TrustPolicy with no `keys` array is not a trust policy. `status` is never
-  // required, here as everywhere: an object one second old has none.
-  protectionpolicies: shapeOf("ProtectionPolicy.spec", { protects: opaque, objectives: opaque }),
-  recoverycatalogs: shapeOf("RecoveryCatalog.spec", {}),
-  retentionpolicies: shapeOf("RetentionPolicy.spec", { scope: opaque }),
-  trustpolicies: shapeOf("TrustPolicy.spec", { keys: listOf(opaque) }),
-});
-
-/** The `kind` a legacy object of each plural declares. Checked, because a
- *  proxy misconfigured onto another group would otherwise render silently.
- *
- *  ON A LIST IT IS THE LIST'S OWN `kind` THAT CARRIES THIS. Kubernetes omits
- *  `apiVersion` and `kind` on the items inside a `List`, so the per-item check
- *  below never fires for a list member and could not be made to; what stands
- *  there instead is the required `spec` fields, and what stands for the list is
- *  `<Kind>List` on the envelope, checked in `decodeLegacyList`. */
-const LEGACY_KINDS = Object.freeze({
-  kafkaclusters: "KafkaCluster",
-  backupschedules: "BackupSchedule",
-  backups: "Backup",
-  restores: "Restore",
-  approvals: "Approval",
-  trustrosters: "TrustRoster",
-  protectionpolicies: "ProtectionPolicy",
-  recoverycatalogs: "RecoveryCatalog",
-  retentionpolicies: "RetentionPolicy",
-  trustpolicies: "TrustPolicy",
-});
-
-/** Validates one custom resource of `plural` and RETURNS IT UNCHANGED.
- *  @returns {Decoded} */
-export function decodeLegacyObject(plural, value) {
-  const spec = LEGACY_SPECS[plural];
-  const kind = LEGACY_KINDS[plural];
-  if (spec === undefined) {
-    throw contractFailure("CustomResource", plural, "no legacy shape is defined for this kind");
-  }
-  const dto = kind;
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw contractFailure(dto, "", "expected an object, got " + typeName(value));
-  }
-  const ctx = { unknown: [] };
-  if (typeof value.kind === "string" && value.kind !== kind) {
-    throw contractFailure(dto, "kind", "expected " + kind + ", got " + JSON.stringify(value.kind));
-  }
-  if (value.metadata === undefined || value.metadata === null) {
-    throw contractFailure(dto, "metadata", "the field is required by the contract and is absent");
-  }
-  readShape(LEGACY_META, value.metadata, ctx, dto, "metadata");
-  if (value.spec === undefined || value.spec === null) {
-    throw contractFailure(dto, "spec", "the field is required by the contract and is absent");
-  }
-  readShape(
-    shapeOf(spec.name, spec.required, everyOtherKey(value.spec, spec.required)),
-    value.spec,
-    ctx,
-    dto,
-    "spec",
-  );
-  return { value: value, unknown: ctx.unknown };
-}
-
-/** Validates a legacy list and RETURNS IT UNCHANGED, with every item checked.
- *  @returns {Decoded} */
-export function decodeLegacyList(plural, value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw contractFailure(LEGACY_KINDS[plural] + "List", "", "expected an object, got " + typeName(value));
-  }
-  const listKind = LEGACY_KINDS[plural] + "List";
-  if (typeof value.kind === "string" && value.kind !== listKind) {
-    throw contractFailure(
-      listKind,
-      "kind",
-      "expected " + listKind + ", got " + JSON.stringify(value.kind),
-    );
-  }
-  if (!Array.isArray(value.items)) {
-    throw contractFailure(
-      listKind,
-      "items",
-      "the field is required by the contract and is " + typeName(value.items),
-    );
-  }
-  const unknown = [];
-  for (let i = 0; i < value.items.length; i += 1) {
-    const decoded = decodeLegacyObject(plural, value.items[i]);
-    for (const path of decoded.unknown) {
-      unknown.push("items[" + String(i) + "]." + path);
-    }
-  }
-  return { value: value, unknown: unknown };
-}
-
-// A legacy `spec` is validated for its REQUIRED fields only: every other key
-// it carries is declared optional-and-opaque here so the walk records nothing
-// as unknown for a resource whose CRD simply has more fields than a page
-// reads. The unknown list on the legacy side is therefore about `metadata`,
-// which is Kubernetes' own and stable, and about the kind check above.
-function everyOtherKey(spec, required) {
-  const optional = {};
-  for (const key of Object.keys(spec)) {
-    if (!Object.prototype.hasOwnProperty.call(required, key)) {
-      optional[key] = opaque;
-    }
-  }
-  return optional;
 }
 
 // ===========================================================================

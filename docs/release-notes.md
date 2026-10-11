@@ -3312,18 +3312,38 @@ legacy archive's endpoint, region and addressing. The route now answers `404
 not_found`, and the problem codes `legacy_location_unknown` and
 `legacy_location_mismatch` are no longer published. A legacy schedule's
 archive keeps working as before.
+The legacy `kubectl proxy` page is withdrawn too (C4): the chart's `ui.*`
+values and the objects they rendered, the `logweir-ui` image (main CI now
+publishes three images, and the chart names three), the laptop `just ui`
+path, and the page's legacy mode in `ui/`. The page is served by the console
+(`api.console.*`) only. The chart refuses any `ui` block by name, `ui.* is
+withdrawn`, pointing at the console. An upgraded install that set
+`ui.enabled` loses that page: `helm upgrade` refuses until the block is
+removed, and then Helm deletes the `<release>-ui` Deployment, Service,
+ServiceAccount, ClusterRoles and RoleBindings it rendered. `scripts/helm-demo.sh`
+step 9 now fetches the console's page and session through a port-forward.
 **Do:** create a destination explicitly with `POST .../destinations` (or the
 console's *Create a destination* form), naming the bucket, prefix and endpoint
-your runs used.
+your runs used. Remove `ui:` from every values file; for a page, enable the
+console (`api.console.enabled`, [install.md](install.md) §5e). Delete any
+`<release>-ui` RoleBinding created by hand in another namespace (NOTES.txt
+printed the command): `kubectl delete rolebinding <release>-ui -n <namespace>`.
 **Scope:** product API rows (the route table, the role matrix and the
-published document, one operation fewer) and console contract rows.
-**Rollback:** the product API and console images; an older API serves the
-route and refuses as before.
+published document, one operation fewer), console contract rows, the chart
+gate's named refusal of `ui.*` with its control (`scripts/check-chart.sh`), and
+the console UI suite, where two console-mode rows replace legacy-mode ones
+(every mount half through the console client; the standalone approvals page).
+[UNVERIFIED — no install has been upgraded across this item yet; PROD-14.1's clean install walks helm-demo step 9.]
+**Rollback:** the product API and console images, and the previous chart for
+the page; an older API serves the route and refuses as before, and the
+`logweir-ui` images already published stay pullable.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
 
+- **Before `helm upgrade`, remove any `ui` block from the values file**
+  (item 73): the chart refuses `ui.*` by name. Use the console for the page.
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
   policy deletes nothing from the upgrade on until its catalog's view is
@@ -3511,7 +3531,8 @@ runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
 transaction markers; items 69 and 71 change the runner and the controller and
 need nothing, in either order; item 70 changes the console only; item 73
-changes the product API and the console and needs nothing. To roll back to
+changes the product API, the console, the chart and the published image set,
+and needs any `ui` block removed from values files first. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

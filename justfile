@@ -841,50 +841,6 @@ k8s-demo:
     cargo build -p logweir
     ./scripts/k8s-demo.sh
 
-# Task 25 (slot 18). SERVE THE UI.
-#
-# `kubectl proxy` serves the static files AND proxies the Kubernetes API on the
-# SAME ORIGIN, attaching the viewer's own kubeconfig credential to every
-# request it forwards, server side. That is the whole serving story: tag 1
-# ships no server-side UI component, no image, no sidecar and no HTTP surface
-# of its own, so this is the one zero-config path that gives the page an
-# authenticated, same-origin API to talk to.
-#
-# `kubectl port-forward` cannot do it: it forwards a port to a pod, gives the
-# browser no credential, and leaves every API call a cross-origin request to a
-# server that sends no CORS headers unless it was started with
-# `--cors-allowed-origins`, which no adopter has set.
-#
-# THE CONTEXT IS NAMED, AND THAT IS NOT COSMETIC (STANDING RULE 12). Without
-# `--context docker-desktop` this recipe proxies whatever context happens to be
-# current, with whatever credential that context carries -- on the one command
-# in this product that hands a browser a cluster credential.
-#
-# THE TWO FLAGS THAT MUST NEVER CHANGE are `--address=127.0.0.1` and
-# `--disable-filter` (never pass it; the default `false` keeps the
-# `--accept-hosts` filter on). Changing either turns a local page holding your
-# cluster authority into a network service holding it.
-ui:
-    @echo "Serving the Logweir UI at http://127.0.0.1:8001/ui/"
-    @echo ""
-    @echo "WHAT THIS COSTS, said plainly: kubectl proxy forwards every API path"
-    @echo "except pod exec and attach, on the same origin as the page, under your"
-    @echo "kubeconfig. The page therefore runs with YOUR ENTIRE CLUSTER AUTHORITY,"
-    @echo "not with the four ClusterRoles logweir.yaml ships -- those bind the user,"
-    @echo "and under this serving path they bind nothing about the page. Run this"
-    @echo "from a cluster-admin kubeconfig and you have given the page cluster-admin."
-    @echo "No bearer token, key or credential of any kind is ever placed in the page."
-    @echo ""
-    @echo "Two flags must never change: --address=127.0.0.1 and --disable-filter"
-    @echo "(never pass it). Changing either turns a local page holding your cluster"
-    @echo "authority into a network service holding it."
-    @echo ""
-    @echo "To narrow it, run the proxy under a kubeconfig bound to logweir-viewer"
-    @echo "and logweir-operator and nothing else -- ui/README.md has the four"
-    @echo "kubectl config commands."
-    @echo ""
-    kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
-
 # Task 28 (slot 21). PHASE C's EXIT CRITERION, and install gate X-UIWRITE.
 #
 # The walk spec §1 calls "the whole acceptance surface": a stranger clones,
@@ -945,57 +901,16 @@ helm-demo:
 gate:
     bash scripts/ci-check.sh
 
-# Task 39, appended at the END of this file as STANDING RULE 17 requires of
-# every editor of it. THE UI IMAGE — the third image this project publishes,
-# and the one that replaced the chart's ConfigMap copy of the page.
-
-# THE NAMED PRODUCER of the local `logweir-ui:check` tag — the sibling of
-# `image` and `image-weirkeeper` above. Three images, three Dockerfiles, three
-# producers, three gates: `scripts/check-image.sh` asserts the runner,
-# `scripts/check-image-weirkeeper.sh` the controller and
-# `scripts/check-image-ui.sh` this one, because each of the other two is
-# written around binaries this image does not carry.
-#
-# SECONDS, NOT MINUTES, AND THAT IS WHY THIS RECIPE IS DIFFERENT FROM ITS TWO
-# SIBLINGS. `Dockerfile.ui` compiles nothing: it is two `COPY`s of ~90 KB over
-# a kubectl the Kubernetes project publishes. There is no builder stage, no
-# `aws-lc-sys`, no cross-compile refusal — so unlike `image-weirkeeper` this
-# recipe has no architecture it cannot build, and unlike `image` it is not
-# pinned to linux/amd64 (no engine ELF is involved).
-#
-# `${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}` IS THE SAME VARIABLE `image-weirkeeper`
-# READS, and for the same reason: the developer default is this host's own
-# architecture, and a CI runner sets its own. The base
-# (`registry.k8s.io/kubectl@sha256:59bafa07…`) is a MANIFEST LIST carrying
-# linux/amd64 and linux/arm64, so either value resolves to that architecture's
-# own variant — measured 2026-09-14.
-#
-# SINGLE-PLATFORM AND LOADED, exactly as its two siblings: the local image
-# store holds single-platform images only, so a multi-platform build could not
-# `--load` and would have to `--push`. Nothing in this tree pushes (Global
-# Constraint 17); multi-arch is `release.yml`'s image job and nothing else, and
-# there is deliberately no `image-ui-release` recipe here.
-#
-# DELIBERATELY NOT PART OF `lint`, `test`, `default`, `e2e` OR `gate`: it needs
-# a Docker daemon, and `just gate` must stay runnable on a machine that has
-# none. It is a row in `docs/gates.md`'s stack/cluster table instead.
-image-ui:
-    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.ui -t logweir-ui:check .
-
-# Build the UI image and compare its served files with ui/. Requires Docker.
-smoke-ui: image-ui
-    bash scripts/check-image-ui.sh logweir-ui:check
-
 # THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the twenty-two page files.
 #
-# `Dockerfile.console` COMPILES, which `Dockerfile.ui` does not, so this recipe
-# behaves like `image-weirkeeper` and not like `image-ui`: the platform is
+# `Dockerfile.console` COMPILES, so this recipe behaves like
+# `image-weirkeeper`: the platform is
 # stated once, here, and the Dockerfile REFUSES a cross-compile rather than
 # emulating one (STANDING RULE 10). On an arm64 host the default below builds a
 # linux/arm64 image, which is what a Docker Desktop node on that host can run.
 #
 # DELIBERATELY NOT PART OF `lint`, `test`, `default`, `e2e` OR `gate`, exactly
-# as the other three image recipes are not: an image build must never become a
+# as the other two image recipes are not: an image build must never become a
 # precondition of the Docker-free test run.
 image-console:
     docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.console -t logweir-console:check .

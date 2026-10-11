@@ -10,8 +10,6 @@ import assert from "node:assert/strict";
 import { createRouteLifecycle, namespaceContext, parseHash } from "../app.js";
 import { listen } from "../lifecycle.js";
 import { selectMode } from "../client.js";
-import { mountBackups } from "../pages/backups.js";
-import { mountClusters } from "../pages/clusters.js";
 import {
   initialState,
   mountRestoreWizard,
@@ -21,12 +19,9 @@ import {
 
 
 // THE MODE IS PINNED, NOT PROBED (PLAT-18.1). `ui/client.js` decides once per
-// loaded page whether the product API is in front of it, by asking
-// `GET /api/v1/session`. A mount in this suite must not issue that request:
-// it would show up in the stubbed request log every assertion below counts,
-// and it is not what any of these tests are about. Pinning it to the refusal a
-// `kubectl proxy` path filter gives is the legacy mode these tests exercise,
-// recorded before the first mount and never asked again.
+// loaded page by asking `GET /api/v1/session`. A mount in this suite must not
+// issue that request; every row below hands its page an API double, so the
+// pin only keeps the probe off the wire.
 await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
 
 /** The route identity for a fixture's newest recovery point. */
@@ -54,62 +49,6 @@ function node() {
     },
   };
 }
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise: promise, resolve: resolve };
-}
-
-// A `BackupList` the API server could have returned. THE SPEC IS REAL, and
-// since PLAT-18.1 it has to be: `ui/contract.js` validates what a read
-// returns, so an object with a name and nothing else is a contract failure --
-// which is the whole point of the typed client, and was worth the two lines
-// this helper grew to say it.
-function backup(name) {
-  return {
-    apiVersion: "logweir.dev/v1alpha1",
-    kind: "Backup",
-    metadata: { name: name, namespace: "team-x", uid: "uid-" + name, resourceVersion: "1" },
-    spec: { sourceRef: { name: "orders-prod" }, topics: ["orders"] },
-    status: {},
-  };
-}
-
-function response(items) {
-  return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ items: items })) };
-}
-
-test("a delayed namespace A response cannot overwrite namespace B", async () => {
-  const original = globalThis.fetch;
-  const requests = [];
-  globalThis.fetch = (u, init) => {
-    const next = deferred();
-    requests.push({ u: u, init: init, next: next });
-    return next.promise;
-  };
-  try {
-    const routes = createRouteLifecycle();
-    const target = node();
-    const parse = (html) => [{ html: html }];
-    const a = routes.begin();
-    const aMount = mountBackups(target, "team-a", parse, a);
-    const b = routes.begin();
-    const bMount = mountBackups(target, "team-b", parse, b);
-
-    assert.equal(requests[0].init.signal.aborted, true, "B aborts A's view-owned GET");
-    requests[1].next.resolve(response([backup("from-b")]));
-    await bMount;
-    requests[0].next.resolve(response([backup("from-a")]));
-    await aMount;
-
-    assert.equal(target.children.length, 1);
-    assert.match(target.children[0].html, /from-b/);
-    assert.doesNotMatch(target.children[0].html, /from-a/);
-  } finally {
-    globalThis.fetch = original;
-  }
-});
 
 test("rapid routes, back-forward, and unmount invalidate every old callback", () => {
   const routes = createRouteLifecycle();
@@ -148,54 +87,6 @@ test("route exit removes DOM subscriptions as well as aborting reads", () => {
   routes.begin();
   target.dispatchEvent(new Event("change"));
   assert.equal(calls, 0, "the old listener was removed by its aborted signal");
-});
-
-test("a stale form callback cannot submit into its former namespace", async () => {
-  const original = globalThis.fetch;
-  const seen = [];
-  globalThis.fetch = (u, init) => {
-    seen.push({ u: u, init: init });
-    return Promise.resolve(response([]));
-  };
-  try {
-    let submit;
-    const form = {
-      elements: {
-        name: { value: "old-cluster" },
-        servers: { value: "broker:9092" },
-        role: { value: "source" },
-        mode: { value: "plaintext" },
-        username: { value: "" },
-        secret: { value: "" },
-        passwordKey: { value: "" },
-        tls: { checked: false },
-        tlsCaKind: { value: "none" },
-        tlsCaName: { value: "" },
-        tlsCaKey: { value: "" },
-      },
-      addEventListener(type, handler) {
-        if (type === "submit") {
-          submit = handler;
-        }
-      },
-    };
-    const target = node();
-    target.querySelector = (selector) => selector === "#cluster-form" ? form : null;
-    // The clusters page wires one Test connection control per rendered row.
-    // This fake renders no rows, so the lookup answers with none -- and
-    // answering at all is what keeps the page's own error path out of this
-    // test's way.
-    target.querySelectorAll = () => [];
-    const routes = createRouteLifecycle();
-    const oldView = routes.begin();
-    await mountClusters(target, "old-ns", (html) => [{ html: html }], oldView);
-    routes.begin();
-    await submit({ preventDefault() {} });
-    assert.equal(seen.length, 1, "only the old view's GET ran; no stale POST was sent");
-    assert.match(seen[0].u, /namespaces\/old-ns\/kafkaclusters$/);
-  } finally {
-    globalThis.fetch = original;
-  }
 });
 
 test("restore preparation never renders or posts after its route has left", async () => {

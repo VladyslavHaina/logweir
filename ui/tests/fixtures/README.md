@@ -245,15 +245,15 @@ must not collide here. All six names are distinct.
 
 ## The preview fixtures
 
-`preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in
-the suite reads it. `preview/namespaces/default/<plural>.json` is one populated list per kind --
+`preview/` is what the legacy `ui/tests/preview-server.js` answered the page's Kubernetes reads
+from (withdrawn with the `kubectl proxy` mode, PROD-17.1 C4); today
+`crates/logweir-api/tests/status_mapping.rs` reads it. `preview/namespaces/default/<plural>.json`
+is one populated list per kind --
 clusters in both reachable states, schedules with and without a retention report and one
 suspended, backups in every phase and both verification outcomes, restores that passed, failed
 integrity and still wait for an approval, approvals verified and not -- so every badge kind and
-every panel has something to show. `preview/trustrosters.json` is the cluster-scoped roster. A
-namespace with no directory lists nothing, which is how the empty states are seen; the namespace
-`forbidden` is answered by the server with a 403, which is how the error box is seen. The shapes
-follow the suite fixtures above field for field.
+every panel has something to show. `preview/trustrosters.json` is the cluster-scoped roster.
+The shapes follow the suite fixtures above field for field.
 
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software Foundation. Logweir
 is not affiliated with or endorsed by the ASF.

@@ -10,10 +10,10 @@
 //    Succeeded, and the discovered inventory names the topic this run created
 //    on the broker.
 // 2. STALE NAMESPACE REQUEST (PLAT-13.1, "slow A response after switching to
-//    B" and "stale submit callback"). The only live row is
-//    scripts/plat13-ui-e2e.mjs's multi stage, which needs a deployed legacy UI
-//    proxy. Here: A's list answer is held until after B has rendered, and must
-//    not paint over B; a form left behind in A must write nothing anywhere;
+//    B" and "stale submit callback"). The legacy plat13 harness that once held
+//    the only live row was withdrawn in v1 with the kubectl proxy page. Here:
+//    A's list answer is held until after B has rendered, and must not paint
+//    over B; a form left behind in A must write nothing anywhere;
 //    and a submit after the switch must land in B only -- each read back with
 //    kubectl, not only from the DOM.
 //

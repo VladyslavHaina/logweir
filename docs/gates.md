@@ -120,7 +120,7 @@ historical runs passed.
 |---|---|
 | `just e2e-up`, `just e2e`, `just e2e-down` | Local integration tests against Kafka, MinIO and the pinned engine |
 | `just mvp-demo` | Backup, approved restore into new topics, and verification through the CLI; requires a clean Compose source |
-| `just smoke`, `just smoke-weirkeeper`, `just smoke-ui` | Check locally built runner, controller and UI images |
+| `just smoke`, `just smoke-weirkeeper`, `just smoke-console` | Check locally built runner, controller and console images |
 | [helm-demo.yml](../.github/workflows/helm-demo.yml) | Manual Kubernetes/Helm deployment exercise on an isolated CI kind cluster, including scheduling, restore, verification and UI access |
 | [engine-matrix.yml](../.github/workflows/engine-matrix.yml) | Weekly or manual compatibility checks across engine versions, and the record-semantics and topic-identity suites on each supported Apache Kafka line with the shipped engine |
 | `just laptop-demo`, `just k8s-demo` | Local Kubernetes exercises; select the intended context explicitly |

@@ -1,6 +1,6 @@
 //! The static UI, served byte for byte from an allowlist built at startup.
 //!
-//! THE SAME SELECTION `Dockerfile.ui` MAKES, AND NOTHING ELSE. The top-level
+//! THE SAME SELECTION `Dockerfile.console` COPIES, AND NOTHING ELSE. The top-level
 //! `*.html`, `*.js` and `*.css` files of the configured directory and the same
 //! three extensions directly inside `pages/`. `README.md`, `tests/` (which
 //! carries a throwaway keypair and fixtures), any other subdirectory, any
@@ -19,7 +19,7 @@
 //! refuses, so every console page load logged a CSP violation (PLAT-18.2's
 //! live run). Served from `'self'`, the icon needs no widening of the policy.
 //! A `.svg` FILE under `ui/` is still never selected: the extension list below
-//! is unchanged, so the selection stays `Dockerfile.ui`'s.
+//! is unchanged, so the selection stays `Dockerfile.console`'s.
 //!
 //! READ ONCE, INTO MEMORY. The bytes a browser receives are the bytes this
 //! process read at startup; nothing on disk can swap a file under a running
@@ -62,17 +62,10 @@ pub const CONSOLE_RUNTIME_PATH: &str = "runtime.js";
 /// THE CONSOLE'S `runtime.js`, compiled in and served IN PLACE OF the file
 /// (console-ux-1 review L1).
 ///
-/// The page decides which API is in front of it once, at boot, by asking
-/// `GET /api/v1/session`. A probe is a request, and a request can be slow or
-/// fail: before this, a console whose API answered late, with a 5xx or a 429,
-/// or with a body the page could not decode was read as "not the product API"
-/// and mounted legacy `kubectl proxy` mode behind `logweir-api` -- every page
-/// then read `/apis/...` paths this service does not serve. This file is
-/// served by THIS process with the page itself, so it is deterministic: a page
-/// that loaded it knows it is the Logweir console, and a failed probe becomes
-/// "the service could not be reached; retry", never legacy mode. The legacy
-/// UI (`kubectl proxy --www=./ui`, or the chart's UI Deployment) serves the
-/// file under `ui/`, which carries no such marker.
+/// It marks the page as served by this process (`window.LOGWEIR_CONSOLE`).
+/// The marker told the page a failed session probe was an outage and not the
+/// legacy `kubectl proxy` mode; that mode was withdrawn in v1 (PROD-17.1 C4),
+/// and the page now treats every failed probe as an outage.
 ///
 /// It carries no credential and no per-request value: the namespace context is
 /// the file's empty one, because in console mode the grants come from

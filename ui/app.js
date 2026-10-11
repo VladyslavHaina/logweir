@@ -1,22 +1,18 @@
 // app.js -- the shell: a hash router and the frame around it.
 //
 // A HASH ROUTER, ON PURPOSE. Every route lives after the `#`, so the browser
-// never asks the server for a path other than `/ui/` and its assets. That
-// matters because the static half of `kubectl proxy` is Go's
-// `http.StripPrefix(prefix, http.FileServer(http.Dir(base)))`: a plain file
-// server with no rewrite rule, no custom 404 hook, and no way to be told that
-// `/ui/backups` should return `index.html`. A path-based router would need one.
-// This one needs nothing, which is why there is no 404 page in this tree: no
-// route can produce a path-level 404.
+// never asks the server for a path other than `/ui/` and its assets, which
+// `logweir-api` serves from an exact allowlist. A path-based router would need
+// a rewrite rule; this one needs nothing, which is why there is no 404 page in
+// this tree: no route can produce a path-level 404.
 //
 // THIS MODULE MAKES NO NETWORK REQUEST. `api.js` is the only module that does.
 // The shell shows the shape of the application and the API prefix it will
 // address; the seven views arrive with their own tests.
 
-import { GROUP, VERSION, path } from "./api.js";
+import { path } from "./api.js";
 import {
   CONSOLE,
-  LEGACY,
   SIGNED_OUT,
   UNAVAILABLE,
   unavailableReason,
@@ -56,14 +52,6 @@ import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 
 // The eleven routes, in navigation order. The hash is the whole route.
 //
-// `#/destinations` IS CONSOLE-ONLY, AND IT IS STILL IN THIS LIST. The product
-// API serves saved destinations and `kubectl proxy` does not; the legacy UI
-// ServiceAccount has no binding for the kind either (D2 section 7.4), so a page that
-// tried would render a 403 it did not cause. Hiding the tab in legacy mode
-// would be worse than showing it: the route decides the mode ONCE at boot and
-// the tab would appear and vanish under a reader. So the route is always
-// there, and in legacy mode `ui/client.js` refuses each call BY NAME, with a
-// sentence saying which API serves the flow.
 const ROUTES = [
   { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail, can: "see its connections", takes: "any role", needs: ["connectionsRead"] },
   { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail, can: "see its saved destinations", takes: "any role", needs: ["destinations"] },
@@ -96,9 +84,7 @@ const ROUTES = [
  *  (`nav !== false`) and the session holds ANY of the capability flags it
  *  `needs` -- in the chosen namespace when one is chosen and granted, and in
  *  any namespace otherwise (the keys view is cluster-scoped, so always the
- *  latter). `has(flag, ns)` answers the question; legacy mode answers yes to
- *  everything, because the API server's RBAC is the gate there and the page
- *  cannot know it in advance. A hidden tab is a convenience and never a
+ *  latter). `has(flag, ns)` answers the question. A hidden tab is a convenience and never a
  *  control: every route still refuses by name when an address reaches it. */
 export function visibleRoutes(routes, ns, has) {
   const ask = typeof has === "function" ? has : () => true;
@@ -474,42 +460,22 @@ function view(route) {
     el("p", { class: "pending" }, "This view is not built yet. The shell ships first."),
     el("dl", { class: "facts" }, [
       el("dt", null, "API prefix"),
-      el("dd", null, el("code", null, path("apis", GROUP, VERSION))),
+      el("dd", null, el("code", null, path("api", "v1"))),
       el("dt", null, "Credential"),
-      el("dd", null, "the viewer's own, attached by the proxy; none is held here"),
+      el("dd", null, "the session cookie, which this page never reads; none is held here"),
     ]),
   ];
 }
 
 /** WHAT THE MASTHEAD AND THE COLOPHON SAY ABOUT WHOSE AUTHORITY THIS PAGE
- *  CARRIES, per mode (POC-P1).
- *
- *  The same files are served two ways (`ui/client.js`), and the sentence that
- *  is true of one is false of the other. Behind `kubectl proxy` (legacy) every
- *  request carries the kubeconfig that started the proxy, which is the
- *  residual `ui/README.md` documents and this page must keep saying. Behind
- *  `logweir-api` (the shared console) no kubeconfig is involved at all: the
- *  product API authorises every request for the session's own identity and
- *  namespace grants. The static page used to print the legacy sentence in
- *  BOTH, so a shared console behind an identity provider told every signed-in
- *  user that it ran with a proxy's kubeconfig. `index.html` now carries copy
- *  true of both, and [`applyModeCopy`] writes the decided mode's own.
+ *  CARRIES (POC-P1). Behind `logweir-api` no kubeconfig is involved at all:
+ *  the product API authorises every request for the session's own identity
+ *  and namespace grants. `index.html` carries neutral copy, and
+ *  [`applyModeCopy`] writes the console's own once the probe has answered.
  *
  *  Each value is a list of segments: a string is text, and `["code", text]`
  *  is a `<code>` element. Nothing here is markup, so nothing is parsed. */
 export const MODE_COPY = Object.freeze({
-  [LEGACY]: Object.freeze({
-    tagline: Object.freeze([
-      "A Kubernetes API client. It runs with the authority of the kubeconfig that started " +
-        "the proxy serving it, and it holds no credential of its own.",
-    ]),
-    colophon: Object.freeze([
-      "Served by ", Object.freeze(["code", "kubectl proxy"]),
-      ", which attaches the viewer's own kubeconfig credential to every request it forwards. " +
-        "See ",
-      Object.freeze(["code", "ui/README.md"]), " for what that costs and how to narrow it.",
-    ]),
-  }),
   [CONSOLE]: Object.freeze({
     tagline: Object.freeze([
       "The Logweir console. Every request goes to the Logweir product API, which authorises " +
@@ -563,11 +529,9 @@ export function applyModeCopy(doc, decidedMode) {
 }
 
 /** WHAT THE SHELL DOES ONCE THE MODE IS DECIDED, as a function the suite can
- *  call (`boot` cannot run under node). The authority sentence follows the
- *  decided mode in both directions (POC-P1) -- the legacy page keeps saying it
- *  carries a kubeconfig and the shared console stops saying so -- and in the
- *  shared console the session's grants replace the runtime namespace list,
- *  with one more render when that changed anything. */
+ *  call (`boot` cannot run under node). The console's authority sentence is
+ *  written (POC-P1), and the session's grants replace the runtime namespace
+ *  list, with one more render when that changed anything. */
 export function modeDecided(record, doc, context, rerender) {
   const decided = (record || {}).mode;
   // A signed-out visitor, and a console that could not be reached, are IN the
@@ -632,8 +596,7 @@ export function renderSignIn(reason, hash) {
 }
 
 /** THE PAGE A CONSOLE THAT COULD NOT BE REACHED RENDERS (console-ux-1 review
- *  L1): what the probe got, in words, and Retry -- never the legacy page a
- *  failed probe used to fall back to. Pure. */
+ *  L1): what the probe got, in words, and Retry. Pure. */
 export function renderUnavailable(reason) {
   return (
     "<section class=\"card signin\" id=\"console-unavailable\" role=\"alert\">" +
@@ -649,9 +612,8 @@ export function renderUnavailable(reason) {
 
 /** THE HEADER'S SESSION INDICATOR (MCP-5): who is signed in, in which role
  *  for the chosen namespace, and Sign out. Pure; `identity` is
- *  `ui/client.js`'s `sessionIdentity(ns)`, and `null` renders nothing (legacy
- *  mode, where the kubeconfig that started the proxy is the identity and the
- *  tagline already says so). A localAdmin console names its one actor and
+ *  `ui/client.js`'s `sessionIdentity(ns)`, and `null` renders nothing (no
+ *  session). A localAdmin console names its one actor and
  *  offers no Sign out, because it has no sign-in. */
 export function renderIdentity(identity) {
   if (identity === null || identity === undefined) {
@@ -772,9 +734,9 @@ function render(lifecycle, context, navigated) {
   if (main !== null && decided === null) {
     // BEFORE THE ONE PROBE HAS ANSWERED, NOTHING IS MOUNTED. Every page's
     // first read waits for the mode anyway (`client.js` `ensure`), so this
-    // costs no time; what it prevents is a page painted for the wrong mode --
-    // the legacy namespace prompt shown to a visitor the console is about to
-    // ask to sign in (MCP-1). The probe is bounded at five seconds.
+    // costs no time; what it prevents is a page painted for the wrong state --
+    // a namespace prompt shown to a visitor the console is about to ask to
+    // sign in (MCP-1). The probe is bounded at five seconds.
     replace(main, el("p", { class: "pending", role: "status" }, "Connecting to Logweir..."));
   } else if (main !== null) {
     if (decided === CONSOLE && holdsNoRole()) {
@@ -875,13 +837,10 @@ function boot() {
 
   renderCurrent();
 
-  // WHICH API IS IN FRONT OF THIS PAGE, DECIDED ONCE (PLAT-18.1, decision D0
-  // stage 6). `ui/client.js` asks `GET /api/v1/session` exactly once, records
-  // the answer for the life of the loaded page, and every page read and write
-  // goes through that record. The first render above does not wait for it:
-  // in the legacy deployment the answer is a refusal and only the masthead's
-  // authority sentence changes (`modeDecided`), so the page paints exactly as
-  // fast as it did before.
+  // THE SESSION, DECIDED ONCE (PLAT-18.1, decision D0 stage 6). `ui/client.js`
+  // asks `GET /api/v1/session` exactly once, records the answer for the life of
+  // the loaded page, and every page read and write goes through that record.
+  // The first render above does not wait for it.
   //
   // IN CONSOLE MODE THE GRANTS REPLACE THE RUNTIME LIST. The namespaces come
   // from the session document -- the server knows what this actor may reach --

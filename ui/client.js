@@ -1,22 +1,19 @@
 // client.js -- which API is in front of this page, decided ONCE, and the one
 // object every page reads through.
 //
-// TWO DEPLOYMENTS, ONE PAGE (decision D0, "Static migration" 1-2). The same
-// files are served two ways. Behind `kubectl proxy` the page talks to
-// kube-apiserver at `/apis/logweir.dev/v1alpha1/...` with the viewer's own
-// kubeconfig credential attached by the proxy -- LEGACY MODE, which is what
-// ships today and what `ui.enabled` keeps rendering for a compatibility
-// release. Behind `logweir-api` the same files talk to a bounded product API
-// at `/api/v1/...` on the same origin -- CONSOLE MODE. Nothing else about the
-// page changes: same directory, same hash routes, same deep links.
+// ONE DEPLOYMENT. The page is served by `logweir-api` and talks to its bounded
+// product API at `/api/v1/...` on the same origin -- CONSOLE MODE. The legacy
+// `kubectl proxy` mode was withdrawn in v1 (PROD-17.1 C4, release-notes item
+// 73).
 //
-// THE CHOICE IS MADE ONCE, BY ONE REQUEST. At boot the page asks
+// THE STATE IS DECIDED ONCE, BY ONE REQUEST. At boot the page asks
 // `GET /api/v1/session`. An answer that decodes as a session document is
 // console mode, and that document is also where the namespace grants come
-// from. Anything else -- a refusal from the proxy's path filter, a body that
-// is not JSON, no answer inside the bound below -- is legacy mode. The result
-// is recorded in this module and never asked again: a mode decided per request
-// is a page that can change APIs between a read and the write that follows it.
+// from. A sign-in refusal is signed out; anything else -- a body that is not a
+// session, no answer inside the bound below -- is the service not answering.
+// The result is recorded in this module and never asked again: a state decided
+// per request is a page that can change APIs between a read and the write that
+// follows it.
 //
 // NO TOKEN IS EVER STORED IN THE BROWSER. Console mode authenticates with a
 // session cookie the browser attaches by itself to a same-origin request; this
@@ -26,12 +23,11 @@
 // browser storage anywhere in this tree, and `scripts/check-ui-offline.sh`
 // fails the build over the byte sequences that would introduce one.
 //
-// WHAT A PAGE SEES. Exactly the object it saw before: `{list, get, create,
-// patchSuspend, listCluster}` over Kubernetes-shaped custom resources. In
-// legacy mode that is what the API server sent, validated and passed through
-// unchanged. In console mode the product DTO is decoded strictly and then
-// PROJECTED BACK onto the custom resource's shape, because the product API's
-// objects ARE projections of those resources and the pages are views of them.
+// WHAT A PAGE SEES. `{list, get, create, patchSuspend, listCluster}` over
+// Kubernetes-shaped custom resources: the product DTO is decoded strictly and
+// then PROJECTED BACK onto the custom resource's shape, because the product
+// API's objects ARE projections of those resources and the pages are views of
+// them.
 // Every field the projection cannot supply is named in `ui/README.md` and
 // recorded on the object under `__contract`, never quietly defaulted.
 //
@@ -51,11 +47,6 @@ import {
   consoleSchedulePolicy,
   consoleSetSuspension,
   consoleSub,
-  create,
-  get,
-  list,
-  listCluster,
-  patchSuspend,
   session,
 } from "./api.js";
 import {
@@ -71,8 +62,6 @@ import {
   decodeDestinationUsage,
   decodeDetailPage,
   decodeDiscoveryLatest,
-  decodeLegacyList,
-  decodeLegacyObject,
   decodeManualBackup,
   decodeOperation,
   decodePolicyChanged,
@@ -85,9 +74,7 @@ import { preparedFor } from "./plan.js";
 import { SIGN_IN_CODES, basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
 import { causesFrom, validateRequest } from "./validate.js";
 
-/** The two modes, by name. */
-export const LEGACY = "legacy";
-/** @see LEGACY */
+/** The mode a page with a session is in. */
 export const CONSOLE = "console";
 
 /** THE SHARED CONSOLE WITH NOBODY SIGNED IN (MCP-1, MCP-4). Not a third API:
@@ -102,42 +89,24 @@ export const SIGNED_OUT = "signedOut";
 
 /** The two problem codes a `401` from `/api/v1/session` carries (`docs/api.md`,
  *  *The session and the CSRF token*): no session cookie at all, and one that
- *  expired or no longer authenticates. Anything else -- a Kubernetes `Status`
- *  from a `kubectl proxy` whose own credential failed, an HTML page, a body
+ *  expired or no longer authenticates. Anything else -- an HTML page, a body
  *  that is not a problem document -- is NOT the product API asking for a
- *  sign-in, and stays legacy mode. */
+ *  sign-in. */
 export const SIGNED_OUT_CODES = SIGN_IN_CODES;
 
-/** THE CONSOLE THAT COULD NOT BE REACHED (console-ux-1 review L1). The page
- *  knows it is behind `logweir-api` -- the service served its `runtime.js`
- *  with a marker the legacy file does not carry -- and the session probe did
- *  not give it a session or a sign-in refusal: it timed out, failed on the
- *  network, answered a 5xx or a 429, or answered a body this page could not
- *  decode. That is "the service is not answering right now", and the shell
- *  says so with a Retry. It is NEVER legacy mode: a console that fell back to
- *  legacy read `/apis/...` paths it does not serve, on every page. */
+/** THE CONSOLE THAT COULD NOT BE REACHED (console-ux-1 review L1). The session
+ *  probe did not give the page a session or a sign-in refusal: it timed out,
+ *  failed on the network, answered a 5xx or a 429, or answered a body this
+ *  page could not decode. That is "the service is not answering right now",
+ *  and the shell says so with a Retry. */
 export const UNAVAILABLE = "unavailable";
 
-/** Whether this page was served by `logweir-api`: the marker the service's
- *  compiled-in `runtime.js` sets (`crates/logweir-api/src/assets.rs`
- *  `CONSOLE_RUNTIME_JS`). A deterministic fact about the page, not an answer
- *  from the network. */
-export function servedByConsole(deps) {
-  const d = deps || {};
-  if (typeof d.servedByConsole === "boolean") {
-    return d.servedByConsole;
-  }
-  const marker = globalThis.LOGWEIR_CONSOLE;
-  return marker !== null && typeof marker === "object" && marker.servedBy === "logweir-api";
-}
-
-/** How long the boot probe waits before deciding this is legacy mode. A page
- *  behind a proxy that never answers must still render: the refusal IS the
- *  legacy answer, and a missing refusal cannot be allowed to hang the shell. */
+/** How long the boot probe waits before deciding the service is not
+ *  answering. A missing answer cannot be allowed to hang the shell. */
 export const PROBE_TIMEOUT_MS = 5000;
 
 /** The Kubernetes plural each product plural stands for, and back. ONE table,
- *  so a page names `kafkaclusters` in both modes and nothing else translates. */
+ *  so a page names `kafkaclusters` and nothing else translates. */
 const CONSOLE_PLURAL = Object.freeze({
   kafkaclusters: "connections",
   backupschedules: "schedules",
@@ -180,22 +149,21 @@ export function mode() {
   return decided === null ? null : decided.mode;
 }
 
-/** The decoded session document in console mode, `null` in legacy mode and
- *  before the probe. Never carries a credential: the product API's session
+/** The decoded session document in console mode, `null` in every other state
+ *  and before the probe. Never carries a credential: the product API's session
  *  document carries an actor, grants and flags. */
 export function sessionDocument() {
   return decided === null ? null : decided.session;
 }
 
-/** The namespaces this actor is granted, from `/session` in console mode. An
- *  empty list in legacy mode, where the namespace is the explicit selection
- *  PLAT-13.1 introduced and this page does not list namespaces. */
+/** The namespaces this actor is granted, from `/session` in console mode, and
+ *  an empty list in every other state. */
 export function grantedNamespaces() {
   return decided === null ? [] : decided.namespaces.slice();
 }
 
 /** Whether a signed-in console session holds NO product role in any namespace
- *  (MCP round 2, R2-16). False in legacy mode, before the probe, and for the
+ *  (MCP round 2, R2-16). False outside console mode, before the probe, and for the
  *  localAdmin actor, who is the administrator by construction. */
 export function holdsNoRole() {
   if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
@@ -209,7 +177,7 @@ export function holdsNoRole() {
 
 /** The PRODUCT roles the actor holds in `ns`, as the session reported them.
  *
- *  Empty in legacy mode and in localAdmin mode, and empty is not "none of the
+ *  Empty outside console mode and in localAdmin mode, and empty is not "none of the
  *  above": it is a mode with no roles at all. Nothing on this page branches on
  *  a role -- `granted` below is what decides whether a call is made, because a
  *  capability flag is `implemented && allowed` and a role is neither. This is
@@ -220,21 +188,21 @@ export function rolesFor(ns) {
 }
 
 /** The revision of the administrator's binding table that produced the current
- *  grants, or the empty string when there is none (legacy and localAdmin). The
+ *  grants, or the empty string when there is none (localAdmin). The
  *  product API records it in every audit line; carrying it here is what lets a
  *  reader tie what this page shows to the configuration that allowed it. */
 export function bindingRevision() {
   return decided === null ? "" : decided.bindingRevision;
 }
 
-/** Whether `flag` is granted for `ns`. In legacy mode every capability is
- *  "granted" here and the API server's RBAC is the gate, which is the whole
- *  authorisation story of that mode. Signed out, nothing is. */
+/** Whether `flag` is granted for `ns`: the session's grant in console mode,
+ *  nothing signed out or unreachable, and everything before the probe has
+ *  answered (every call waits for it, so nothing is sent on that answer). */
 export function granted(ns, flag) {
   if (decided !== null && (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE)) {
     return false;
   }
-  if (decided === null || decided.mode !== CONSOLE) {
+  if (decided === null) {
     return true;
   }
   const grant = decided.grants[ns];
@@ -278,7 +246,6 @@ async function ensure() {
 
 async function probe(deps) {
   const ask = typeof deps.probe === "function" ? deps.probe : session;
-  const console_ = servedByConsole(deps);
   const Controller = deps.controller || globalThis.AbortController;
   let controller = null;
   let timer = null;
@@ -288,8 +255,8 @@ async function probe(deps) {
     // right thing to do and it is not enough: a server that accepted the
     // connection and answers nothing leaves the promise pending whatever this
     // page asked of it, and the shell would never render. So the timer
-    // RESOLVES the decision -- legacy, which is what a page that cannot reach
-    // the product API is looking at -- and aborts the request on its way out.
+    // RESOLVES the decision -- the service is not answering -- and aborts the
+    // request on its way out.
     if (typeof Controller === "function") {
       controller = new Controller();
       options = { signal: controller.signal };
@@ -309,21 +276,16 @@ async function probe(deps) {
       return signedOutRecord(signedOutCode(answer));
     }
     if (answer === null || answer === undefined || answer.ok !== true) {
-      // BEHIND THE CONSOLE, A MISSING SESSION IS AN OUTAGE AND NOT A MODE
-      // (review L1). Only a page the console did NOT serve may conclude that
-      // it is behind `kubectl proxy`.
-      return console_ ? unavailableRecord(answer) : legacyRecord();
+      // A MISSING SESSION IS AN OUTAGE AND NOT A MODE (review L1).
+      return unavailableRecord(answer);
     }
     const decoded = decodeSession(answer.body);
     return consoleRecord(decoded.value, decoded.unknown);
   } catch (refused) {
-    // EVERY REFUSAL IS THE SAME ANSWER on a page the console did not serve:
-    // this is not the product API. A path filter's 403, a body that is not a
-    // session document, a decode that found a required field missing, an
-    // abort at the bound above -- each says the page is not behind
-    // `logweir-api`, and legacy mode is what it is behind instead. On a page
-    // the console DID serve, each is the service not answering (review L1).
-    return console_ ? unavailableRecord(null, refused) : legacyRecord();
+    // A body that is not a session document, a decode that found a required
+    // field missing, a failed request: each is the service not answering
+    // (review L1).
+    return unavailableRecord(null, refused);
   } finally {
     if (timer !== null) {
       globalThis.clearTimeout(timer);
@@ -333,12 +295,9 @@ async function probe(deps) {
 
 /** The problem code of a `401` the PRODUCT API gave `/session`, or `null`.
  *
- *  Read narrowly on purpose. A `401` alone is not enough: `kubectl proxy`
- *  forwards `/api/v1/session` to kube-apiserver, which answers `401` with a
- *  Kubernetes `Status` when the proxy's own credential has expired -- a legacy
- *  page with a broken kubeconfig, not a console asking for a sign-in. The
- *  product API's refusal is a problem document whose `code` is one of
- *  [`SIGNED_OUT_CODES`]; a `Status` carries a NUMBER in `code`. */
+ *  Read narrowly on purpose: a `401` alone is not enough. The product API's
+ *  refusal is a problem document whose `code` is one of
+ *  [`SIGNED_OUT_CODES`]. */
 export function signedOutCode(answer) {
   const a = answer || {};
   const body = a.body;
@@ -411,7 +370,7 @@ export function signedOutReason() {
 }
 
 /** WHO THIS PAGE IS SIGNED IN AS, for the header (MCP-5), or `null` when there
- *  is no session to describe (legacy mode, signed out, before the probe).
+ *  is no session to describe (signed out, unreachable, before the probe).
  *
  *  Every value is the session document's own: the display claim, the subject,
  *  the authentication mode and the product roles the binding table granted in
@@ -441,19 +400,16 @@ export function sessionIdentity(ns) {
 }
 
 /** Whether the session publishes `flag` in ANY granted namespace (the
- *  document's top-level `capabilities`, the union the API computes). `true`
- *  in legacy mode, where the API server's RBAC is the gate and the page cannot
- *  know; `false` signed out. For the NAVIGATION only (MCP-33): a hidden tab is
- *  a convenience, and every route still refuses by name when it is reached. */
+ *  document's top-level `capabilities`, the union the API computes); `false`
+ *  signed out or unreachable. For the NAVIGATION only (MCP-33): a hidden tab
+ *  is a convenience, and every route still refuses by name when it is
+ *  reached. */
 export function grantedAnywhere(flag) {
   if (decided === null) {
     return true;
   }
   if (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE) {
     return false;
-  }
-  if (decided.mode !== CONSOLE) {
-    return true;
   }
   const top = (decided.session || {}).capabilities || {};
   return top[flag] === true;
@@ -485,21 +441,6 @@ export function signedOutError() {
   error.reason = "unauthenticated";
   error.code = "unauthenticated";
   return error;
-}
-
-function legacyRecord() {
-  return Object.freeze({
-    mode: LEGACY,
-    session: null,
-    namespaces: Object.freeze([]),
-    grants: Object.freeze(Object.create(null)),
-    roles: Object.freeze(Object.create(null)),
-    // Legacy mode has no product roles and no binding table: the API server's
-    // own RBAC is the whole authorisation story there.
-    bindingRevision: "",
-    token: null,
-    unknown: Object.freeze([]),
-  });
 }
 
 function consoleRecord(document, unknown) {
@@ -1569,23 +1510,10 @@ function mergeOperation(object, operation) {
 // every row, and `scripts/live/d1/run.py`'s `L-06-2-cli` drives the REAL
 // `logweir-api` over the same rows and fails if any name differs. A fixture
 // checked by one side only would pin this function to itself.
-//
-// WHAT LEGACY MODE PUTS IN THE FIRST TWO FIELDS, AND WHY IT IS HONEST.
-// Behind `kubectl proxy` the browser holds no authenticated identity of any
-// kind: the credential is attached by the proxy, out of the page's sight, and
-// there is no session document and no subject. So legacy mode names the two
-// fields it cannot know with the EMPTY string and says so, here and in
-// `ui/README.md`. The consequence is stated rather than hidden: in legacy mode
-// a manual run's name is decided by `(namespace, route, key)` alone, and the
-// key is 128 random bits minted per draft (`mintIntent`), so two people
-// driving two proxies cannot collide by accident -- and if they ever did, the
-// second create would be an `AlreadyExists` whose stored request hash decides
-// replay versus conflict, which is the same answer the product API gives.
 
-/** The route identifier inside a manual run's idempotency scope. It is the
- *  PRODUCT API's route even in legacy mode: the scope is a scope, and two
- *  requests that mean the same thing must hash to the same name whichever
- *  door they came through. */
+
+/** The route identifier inside a manual run's idempotency scope: the PRODUCT
+ *  API's route. */
 export const MANUAL_BACKUP_ROUTE = "POST /api/v1/namespaces/{ns}/backups";
 
 /** `crates/logweir-api/src/routes/backups.rs`'s `NAME_PREFIX`. */
@@ -1596,17 +1524,6 @@ export const MANUAL_SCOPE_FORMAT = "logweir-api/idempotency-scope/v1\n";
 
 /** How many base32 characters of the scope digest the name carries. */
 export const MANUAL_NAME_HASH_CHARS = 26;
-
-/** The annotation a legacy-mode manual run carries, D1 section 8.1's spelling.
- *  The product API writes its own `api.logweir.dev/request-sha256` beside a
- *  scope hash and a request id; this mode has neither an actor nor a request
- *  id to record, so it writes the one value it can compute and compare. */
-export const LEGACY_REQUEST_ANNOTATION = "logweir.dev/request-sha256";
-
-/** What legacy mode puts in the scope's `issuer` and `subject`. See the block
- *  above: the browser holds neither behind `kubectl proxy`, and an invented
- *  value would be a claim about an identity this page cannot see. */
-export const LEGACY_SCOPE_ACTOR = Object.freeze({ issuer: "", subject: "" });
 
 /** RFC 4648 base32, lowercase, unpadded -- `idempotency.rs::base32_lower`. */
 function base32Lower(bytes) {
@@ -1691,18 +1608,6 @@ async function sha256Of(bytes) {
     throw error;
   }
   return new Uint8Array(await subtle.digest("SHA-256", bytes));
-}
-
-/** `sha256:<lowercase hex>` over the UTF-8 bytes of `text` --
- *  `logweir_core::ids::sha256_prefixed`'s form, which is what
- *  [`LEGACY_REQUEST_ANNOTATION`] carries. */
-async function requestHash(text) {
-  const digest = await sha256Of(new TextEncoder().encode(text));
-  let hex = "";
-  for (const byte of digest) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return "sha256:" + hex;
 }
 
 /** The run deadline a manual run inherits when the schedule names none --
@@ -1808,272 +1713,7 @@ export function manualBackupObject(ns, schedule, digest) {
   };
 }
 
-/** The bytes the legacy request hash covers: the request as this page MEANT
- *  it, field by field, in a fixed order.
- *
- *  NOT `JSON.stringify(body)`. Two bodies that mean the same thing can carry
- *  their keys in different orders, and an absent optional and a `null` one are
- *  different strings and the same request; a hash over the raw object would
- *  make a replay depend on how the caller happened to build it. This names the
- *  four values the route actually has and spells an absent one `null`, so the
- *  same intent hashes the same way whoever assembled it -- which is what makes
- *  the stored annotation a usable replay guard. */
-function canonicalRequest(ns, body) {
-  const b = body || {};
-  const reference = b.scheduleRef || {};
-  const ack = b.readinessAcknowledgement || null;
-  return JSON.stringify({
-    route: MANUAL_BACKUP_ROUTE,
-    namespace: String(ns),
-    scheduleRef: {
-      name: String(reference.name || ""),
-      expectedGeneration: typeof reference.expectedGeneration === "number"
-        ? reference.expectedGeneration
-        : null,
-    },
-    readinessAcknowledgement: ack === null
-      ? null
-      : { preflight: String(ack.preflight || ""), state: String(ack.state || "") },
-  });
-}
-
-const legacyApi = Object.freeze({
-  async list(ns, plural, options) {
-    return decodeLegacyList(plural, await list(ns, plural, options)).value;
-  },
-  async get(ns, plural, name, options) {
-    return decodeLegacyObject(plural, await get(ns, plural, name, options)).value;
-  },
-  async create(ns, plural, object) {
-    // PLAT-11.2: `topicMapping` is a field of the PRODUCT API's create
-    // REQUEST and not a field of the custom resource -- `Restore.spec` has no
-    // topic list, and the subset lives in the plan bytes. The API server would
-    // prune it silently; stripping it here means this mode sends exactly the
-    // object it has always sent, and a reviewer reading the legacy path sees
-    // one shape rather than one that depends on the server's pruning rules.
-    const sent = withoutTopicMapping(object);
-    return checked(plural, sent, () => create(ns, plural, sent));
-  },
-  async patchSuspend(ns, name, value) {
-    return patchSuspend(ns, name, value);
-  },
-  // PLAT-19.2. THIS MODE CANNOT KNOW THE INSTALLATION'S APPROVAL POLICY: the
-  // document is mounted into the controller and the console, and `kubectl
-  // proxy` serves neither. `null` is "unknown", and every page reads it as
-  // today's governed flow -- which is also D0's rule for this UI: "Ordinary
-  // confirmation is unavailable through this legacy direct-CR UI".
-  async approvalPolicy() {
-    return null;
-  },
-  async submitGovernedApproval() {
-    throw noRoute(
-      "a governed approval under an explicit approval policy is submitted through the " +
-        "product API console; this page is served by kubectl proxy and has no such route",
-    );
-  },
-  // PROD-16.2. THIS MODE HAS NO SECOND PERSON TO ASK: it is one viewer's own
-  // cluster authority behind `kubectl proxy`, with no session the console
-  // attests. No request is shown and none is approved from here.
-  async approvalRequest() {
-    return null;
-  },
-  async approveInConsole() {
-    throw noRoute(
-      "a two-person approval is given by a second person signed in to the shared console; " +
-        "this page is served by kubectl proxy and has no such route",
-    );
-  },
-  async listCluster(plural, options) {
-    return decodeLegacyList(plural, await listCluster(plural, options)).value;
-  },
-  // ------------------------------------------- D1 W7 (PLAT-04.2/05.1/06.2)
-  //
-  // TWO OF THE THREE ARE CONSOLE-ONLY, AND SAID SO BY NAME. There is no
-  // cadence-preview route in front of `kubectl proxy` -- it is a computation
-  // `logweir-api` performs with the controller's own tz database -- and the
-  // browser will not evaluate cron to fill the gap, because a second
-  // implementation is a second opinion about when a backup runs. The saved
-  // schedule's `status.nextRuns` IS rendered in legacy mode: the controller
-  // computed it, and the page reads the object.
-  //
-  // The policy replace is console-only for a different reason: `ui/api.js`
-  // holds exactly one replace, it is built on the product API's
-  // `expectedGeneration` precondition, and a JSON-merge patch against
-  // kube-apiserver would have neither that precondition nor the API's
-  // pre-write refusals. The CRD's own rules accept the edit either way, so
-  // this is the page's boundary and not the cluster's, and the sentence says
-  // which command does it instead.
-  previewCadence() {
-    return Promise.reject(consoleOnly("Previewing a cadence before saving it"));
-  },
-  editSchedulePolicy() {
-    return Promise.reject(consoleOnly("Editing a schedule's future policy"));
-  },
-  async runBackupNow(ns, body, key) {
-    // THE THIRD ONE IS NO LONGER CONSOLE-ONLY (PLAT-06.2, D1 section 8.5's legacy
-    // column). It was refused here for two reasons and both are now answered:
-    //
-    //   * THE NAME. D1 section 8.2's rule is a pure function of the request scope
-    //     and it now lives in ONE place this file can call
-    //     (`manualBackupName`), pinned against `logweir-api`'s own
-    //     `idempotency.rs` by `ui/tests/fixtures/manual-backup-names.json`.
-    //     The scope's issuer and subject are empty in this mode -- the browser
-    //     holds neither behind `kubectl proxy` -- and the block above says so.
-    //   * THE GRANT. `charts/logweir/templates/ui/ui.yaml` now grants `create`
-    //     on `backups` to the page's ServiceAccount, and nothing else on that
-    //     resource. Before that, sending this would have been a 403 the page
-    //     would then have had to narrate.
-    //
-    // WHAT THIS DOES *NOT* DO: compute a run policy digest. `runPolicySha256`
-    // is `weirkeeper::policy::run_policy_sha256` over a canonical document, the
-    // controller RECOMPUTES it and refuses the run terminally on a mismatch, and
-    // a second implementation in a browser is precisely how a run comes to
-    // record a digest nobody can reproduce. So the digest is COPIED from
-    // `status.policy.runPolicySha256` -- and only when `status.policy.generation`
-    // equals the `metadata.generation` this page is about to copy, which is the
-    // controller's own statement that the two describe the same revision. When
-    // it does not, this refuses by name and says which number is behind.
-    const reference = (body || {}).scheduleRef || null;
-    if (reference === null) {
-      // D1 section 8.2's body B. An ad-hoc run needs a selection, an archive and a
-      // deadline the page would have to assemble itself, with no schedule to
-      // copy and no published digest to carry. That is the product API's job.
-      throw consoleOnly("Backing up an ad-hoc selection with no schedule");
-    }
-    const name = String(reference.name || "");
-    const schedule = decodeLegacyObject(
-      "backupschedules",
-      await get(ns, "backupschedules", name),
-    ).value;
-    const meta = schedule.metadata || {};
-    const spec = schedule.spec || {};
-    const status = schedule.status || {};
-    const generation = typeof meta.generation === "number" ? meta.generation : null;
-    const policy = status.policy || null;
-    const digest = policy === null ? null : policy.runPolicySha256;
-
-    // 409 policy_changed, WITH THE REVISION IN FORCE ATTACHED, exactly as the
-    // product API answers it: the page renders the same sentence and offers
-    // the same next click in both modes.
-    const expected = reference.expectedGeneration;
-    if (typeof expected === "number" && generation !== null && expected !== generation) {
-      const error = new Error(
-        "the schedule's policy is at revision g" + String(generation) + " and this panel was " +
-          "rendered at g" + String(expected) + ". Nothing was created: a manual run copies the " +
-          "revision it names.",
-      );
-      error.kind = "rejected";
-      error.status = 409;
-      error.reason = "policy_changed";
-      error.policy = {
-        currentGeneration: generation,
-        currentRunPolicySha256: typeof digest === "string" ? digest : null,
-      };
-      throw error;
-    }
-    if (generation === null || policy === null || policy.generation !== generation) {
-      const error = new Error(
-        "this page will not create a manual backup of " + name + " yet: the controller has not " +
-          "published a policy digest for revision g" + String(generation) + " (status.policy " +
-          (policy === null ? "is absent" : "is still at g" + String(policy.generation)) + "). A " +
-          "run records the digest of what it will actually do, this mode reads that number from " +
-          "the schedule rather than computing a second one, and a run carrying a digest nobody " +
-          "can reproduce is refused by the controller. Wait for the schedule to be evaluated, " +
-          "or create the run with kubectl from config/samples/backup-manual.yaml.",
-      );
-      error.kind = "refused";
-      error.status = 0;
-      error.reason = "PolicyDigestNotPublished";
-      throw error;
-    }
-
-    const object = manualBackupObject(ns, schedule, digest);
-    const hash = await requestHash(canonicalRequest(ns, body));
-    object.metadata.annotations = { [LEGACY_REQUEST_ANNOTATION]: hash };
-    object.metadata.name = await manualBackupName({
-      issuer: LEGACY_SCOPE_ACTOR.issuer,
-      subject: LEGACY_SCOPE_ACTOR.subject,
-      namespace: ns,
-      route: MANUAL_BACKUP_ROUTE,
-      key: String(key),
-    });
-
-    const context = {
-      name: name,
-      uid: String(meta.uid || ""),
-      generation: generation,
-      runPolicySha256: digest,
-      suspended: spec.suspend === true,
-      activeRuns: Array.isArray(status.activeRuns) ? status.activeRuns : [],
-    };
-    try {
-      const created = decodeLegacyObject(
-        "backups",
-        await checked("backups", object, () => create(ns, "backups", object)),
-      ).value;
-      return { run: created, schedule: context, replayed: false };
-    } catch (refused) {
-      // THE REPLAY, AND THE CONFLICT, DECIDED BY THE OBJECT AND NOT BY MEMORY
-      // (D1 section 8.5's legacy row). A double click, a retry after a timeout and a
-      // "Check status" all derive the SAME name, so the second create is the
-      // API server's own `AlreadyExists`. What that means is decided by
-      // reading the object: the request hash this page wrote is either the one
-      // it would write now -- the same intent, the same request, so the run it
-      // already made IS the answer -- or it is not, and refusing is the only
-      // honest reply. Nothing is patched, replaced or adopted either way.
-      if (refused.reason !== "AlreadyExists") {
-        throw refused;
-      }
-      const existing = decodeLegacyObject(
-        "backups",
-        await get(ns, "backups", object.metadata.name),
-      ).value;
-      const stored = ((existing.metadata || {}).annotations || {})[LEGACY_REQUEST_ANNOTATION];
-      if (stored === hash) {
-        return { run: existing, schedule: context, replayed: true };
-      }
-      // TWO REFUSALS, NOT ONE (review F5). `idempotency.rs:14-20` separates
-      // them deliberately and the product API answers both:
-      //
-      //   * the object carries THIS mode's request hash and it differs -- the
-      //     intent this panel holds was spent on a different request, which is
-      //     `idempotency_conflict`;
-      //   * the object carries no such hash at all -- it was created by
-      //     something else entirely (a `kubectl` object, an operator, another
-      //     console, the product API with its own `api.logweir.dev/*`
-      //     annotations), which is `state_conflict`: "the object was not
-      //     created by this scope and is NEVER adopted".
-      //
-      // Collapsing the second into the first made the page print "the intent
-      // this panel is holding already created a DIFFERENT request's run",
-      // which is a false sentence about somebody else's object. Nothing is
-      // adopted in either branch -- that is the safety property and it was
-      // always held -- so this is honesty, and the page now says which of the
-      // two happened.
-      if (stored === undefined) {
-        const foreign = new Error(
-          "an object named " + object.metadata.name + " already exists in this namespace and " +
-            "this page did not create it: it carries no request hash of this console's. " +
-            "Nothing was created, and nothing was adopted.",
-        );
-        foreign.kind = "rejected";
-        foreign.status = 409;
-        foreign.reason = "state_conflict";
-        throw foreign;
-      }
-      const error = new Error(
-        "the idempotency intent this panel is holding already created a DIFFERENT request's " +
-          "run (" + object.metadata.name + "). Nothing was created.",
-      );
-      error.kind = "rejected";
-      error.status = 409;
-      error.reason = "idempotency_conflict";
-      throw error;
-    }
-  },
-});
-
-// THE CLIENT'S OWN CHECKS RUN IN BOTH MODES, over the body about to be sent,
+// THE CLIENT'S OWN CHECKS RUN over the body about to be sent,
 // and produce the product API's own `FieldError[]` shape. A refusal here is
 // `invalid` with the same `details.causes` a server 422 carries, so a form
 // renders it beside the field it is about without knowing where it came from.
@@ -2427,14 +2067,8 @@ const consoleApi = Object.freeze({
 // D2: destinations, topic discoveries and operation readiness
 // ===========================================================================
 //
-// CONSOLE ONLY, AND SAID SO BY NAME. These three domains exist on the product
-// API and nowhere else this page can reach. `kubectl proxy` would serve the
-// custom resources -- they are in the same API group -- but the legacy UI
-// ServiceAccount has no binding for them (D2 section 7.4 adds `get`/`list` for
-// read-only summaries and NO create), and `ui/api.js`'s `WRITABLE_PLURALS` is
-// deliberately unchanged. So in legacy mode every call below is refused HERE,
-// with a sentence saying which API serves the flow, rather than sent and
-// answered with a 403 the page would then have to narrate.
+// These three domains exist on the product API and are not projected into
+// custom resources.
 //
 // WHO MAY START ONE. The three capability flags `destinations`,
 // `topicDiscovery` and `preflight` are the domains' READ FLOORS: "this build
@@ -2466,11 +2100,10 @@ export const OPERATING_ROLES = Object.freeze(["operator", "administrator"]);
  *  destination, start a discovery or cancel a check. Branching a BUTTON on it
  *  would put a control on screen that the server answers 403 for every time.
  *
- *  AN EMPTY ROLE LIST IS A MODE, NOT A REFUSAL. Legacy mode has no product
- *  roles at all -- the API server's own RBAC is the whole authorisation story
- *  there -- and localAdmin mode has none either: it is one administrator on a
- *  loopback listener, and `authz.rs` answers every action `true` for it. In
- *  both the server is the gate and the control is offered. What this refuses
+ *  AN EMPTY ROLE LIST IS A MODE, NOT A REFUSAL. localAdmin mode has no product
+ *  roles: it is one administrator on a loopback listener, and `authz.rs`
+ *  answers every action `true` for it. There the server is the gate and the
+ *  control is offered. What this refuses
  *  is the case that is actually a refusal: an authenticated actor who HOLDS
  *  roles in this namespace and none of them is Operator or Administrator. */
 export function mayOperate(ns) {
@@ -2542,39 +2175,9 @@ function sending(name, body) {
   return body;
 }
 
-// The refusal every D2 method answers in legacy mode.
-function consoleOnly(what) {
-  return noRoute(
-    what + " is served by the Logweir product API and not by the Kubernetes API this page is " +
-      "talking to. Open the console (`logweir-api`) to use it, or drive the custom resources " +
-      "with kubectl; this page will not pretend to a route it cannot reach.",
-  );
-}
-
-const legacyChecks = Object.freeze({
-  destinations() { return Promise.reject(consoleOnly("Saved destinations")); },
-  destination() { return Promise.reject(consoleOnly("Saved destinations")); },
-  createDestination() { return Promise.reject(consoleOnly("Creating a destination")); },
-  updateDestinationAccess() { return Promise.reject(consoleOnly("Rotating destination access")); },
-  testDestination() { return Promise.reject(consoleOnly("Testing destination access")); },
-  destinationUsage() { return Promise.reject(consoleOnly("What uses a destination")); },
-  latestDiscoveries() { return Promise.reject(consoleOnly("Topic discovery")); },
-  startDiscovery() { return Promise.reject(consoleOnly("Topic discovery")); },
-  discovery() { return Promise.reject(consoleOnly("Topic discovery")); },
-  discoveryTopics() { return Promise.reject(consoleOnly("Topic discovery")); },
-  cancelDiscovery() { return Promise.reject(consoleOnly("Cancelling a discovery")); },
-  startPreflight() { return Promise.reject(consoleOnly("Operation readiness")); },
-  preflight() { return Promise.reject(consoleOnly("Operation readiness")); },
-  preflightDetails() { return Promise.reject(consoleOnly("Operation readiness")); },
-  cancelPreflight() { return Promise.reject(consoleOnly("Cancelling a preflight")); },
-  checkOperation() { return Promise.reject(consoleOnly("A check's status")); },
-});
-
 // Every D2 read returns the DECODED DTO, not a projection into a custom
-// resource. The five older kinds are projected because their pages were
-// written against `kubectl proxy`'s shape and both modes must render the same
-// string; these three have no legacy page to agree with, so the DTO IS the
-// shape -- and a projection would be a second vocabulary for one set of facts.
+// resource: the DTO IS the shape, and a projection would be a second
+// vocabulary for one set of facts.
 const consoleChecks = Object.freeze({
   async destinations(ns, options) {
     requireDomain(ns, "destinations");
@@ -2750,7 +2353,7 @@ function tokenNow() {
 
 /** THE SESSION'S SYNCHRONISER TOKEN, for the one product-API write that is not
  *  a method of the client object: `ui/operation-watch.js`'s `connectArchive`
- *  (POC-P4). `null` in legacy mode and before the probe has answered.
+ *  (POC-P4). `null` without a session and before the probe has answered.
  *
  *  EVERY UNSAFE REQUEST CARRIES THIS VALUE AND NO OTHER. The product API
  *  refuses a write whose `X-CSRF-Token` does not match the session that sent
@@ -3029,27 +2632,6 @@ function requestBody(plural, object) {
   throw noRoute("the product API has no create route for " + String(plural) + ".");
 }
 
-/** The create body without its product-API-only mapping declaration. Returns
- *  the SAME object when there is none, so every other create is untouched. */
-function withoutTopicMapping(object) {
-  if (
-    object === null || typeof object !== "object" ||
-    (object.topicMapping === undefined && object.ticket === undefined &&
-      object.originalNameConfirmation === undefined)
-  ) {
-    return object;
-  }
-  const copy = Object.assign({}, object);
-  delete copy.topicMapping;
-  // The change ticket is a product-API request field too (PLAT-19.2); legacy
-  // mode signs nothing and records the ticket with `logweir drill approve`.
-  delete copy.ticket;
-  // And so are the typed original topic names (OD-10): the console signs
-  // them, and this mode has no console to sign anything.
-  delete copy.originalNameConfirmation;
-  return copy;
-}
-
 function requestArchive(ref) {
   const out = { url: ref.url };
   if (((ref.secretRef) || {}).name) {
@@ -3176,7 +2758,7 @@ export function apiClient() {
     // future-policy replace and "Back up now". They go through `dispatch` and
     // not `dispatchChecks` because they are the SAME five kinds this facade
     // has always served -- a schedule and a Backup -- rather than a domain of
-    // their own; the legacy half answers the two console-only ones by name.
+    // their own.
     previewCadence(query, options) {
       return dispatch((api) => api.previewCadence(query, options));
     },
@@ -3203,9 +2785,7 @@ export function apiClient() {
     },
 
     // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
-    // discovery and operation readiness. Console mode only; the legacy half
-    // answers each of these with a named refusal rather than a 403 from a
-    // route the page cannot reach.
+    // discovery and operation readiness.
     destinations(ns, options) {
       return dispatchChecks((api) => api.destinations(ns, options));
     },
@@ -3260,24 +2840,19 @@ export function apiClient() {
 function dispatch(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(implementation(decided, consoleApi, legacyApi, signedOutApi)));
+      return Promise.resolve(call(implementation(decided, consoleApi, signedOutApi)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
   return ensure().then((record) =>
-    call(implementation(record, consoleApi, legacyApi, signedOutApi)));
+    call(implementation(record, consoleApi, signedOutApi)));
 }
 
-// WHICH IMPLEMENTATION A DECIDED RECORD USES. Signed out is NOT legacy (MCP-4):
-// the page is behind the product API, so a legacy `/apis/...` read would be
-// answered by a console that does not serve that path.
-function implementation(record, consoleImpl, legacyImpl, signedOutImpl) {
-  if (record.mode === CONSOLE) {
-    return consoleImpl;
-  }
-  // A console that could not be reached is not legacy either (review L1).
-  return record.mode === SIGNED_OUT || record.mode === UNAVAILABLE ? signedOutImpl : legacyImpl;
+// WHICH IMPLEMENTATION A DECIDED RECORD USES: the console's, or the refusals
+// a signed-out or unreachable page answers (MCP-4, review L1).
+function implementation(record, consoleImpl, signedOutImpl) {
+  return record.mode === CONSOLE ? consoleImpl : signedOutImpl;
 }
 
 // Every method of `impl`, answering the refusal for the decided state --
@@ -3307,29 +2882,27 @@ function unavailableError() {
 }
 
 // The D2 half dispatches exactly as the five older kinds do, over its own pair
-// of implementations. A separate pair and not five more methods on the
-// existing ones: the older kinds are PROJECTED into custom resources so both
-// modes render one string, and these three have no legacy page to agree with.
+// of implementations: the older kinds are PROJECTED into custom resources, and
+// these three are not.
 function dispatchChecks(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(implementation(decided, consoleChecks, legacyChecks,
-        signedOutChecks)));
+      return Promise.resolve(call(implementation(decided, consoleChecks, signedOutChecks)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
   return ensure().then((record) =>
-    call(implementation(record, consoleChecks, legacyChecks, signedOutChecks)));
+    call(implementation(record, consoleChecks, signedOutChecks)));
 }
 
 // The signed-out halves: the same method names, each refusing by name.
 const signedOutApi = refusingAll(consoleApi);
 const signedOutChecks = refusingAll(consoleChecks);
 
-/** The two implementations, by name, for the suite and for a reader who wants
- *  to see one without the other. A page never picks: `apiClient` does. */
-export const MODES = Object.freeze({ legacy: legacyApi, console: consoleApi });
+/** The console implementation, by name, for the suite. A page never picks:
+ *  `apiClient` does. */
+export const MODES = Object.freeze({ console: consoleApi });
 
-/** The D2 half of the same pair. */
-export const CHECK_MODES = Object.freeze({ legacy: legacyChecks, console: consoleChecks });
+/** The D2 half of the same. */
+export const CHECK_MODES = Object.freeze({ console: consoleChecks });

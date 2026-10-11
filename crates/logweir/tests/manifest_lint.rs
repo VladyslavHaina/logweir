@@ -3069,20 +3069,19 @@ fn both_dockerfiles_copy_the_fingerprint() {
     }
 }
 
-/// **`Dockerfile.console` is the fourth image and it declares what it runs.**
+/// **`Dockerfile.console` is the third image and it declares what it runs.**
 ///
 /// D0 stage 7 owns it, and four things about it are assertions rather than
 /// style — each one is a way the image can be wrong while every other gate in
 /// this repository stays green, because the other gates need a built image and
 /// this row reads checked-in bytes in microseconds:
 ///
-///   1. It COPYs the page with `Dockerfile.ui`'s TWO globs and never
-///      `COPY ui /ui`. A whole-directory copy takes `ui/README.md` and
+///   1. It COPYs the page with TWO globs and never `COPY ui /ui`. A
+///      whole-directory copy takes `ui/README.md` and
 ///      `ui/tests/` — the second of which carries a throwaway keypair (Global
 ///      Constraint 28) — and keeps taking whatever lands under `ui/` next.
-///   2. It carries all THREE licence files, where `Dockerfile.ui` carries two:
-///      this image ships a statically linked Rust binary, so the dependency
-///      graph's notices travel with it.
+///   2. It carries all THREE licence files: this image ships a statically
+///      linked Rust binary, so the dependency graph's notices travel with it.
 ///   3. It does NOT carry the org-root anchor. That anchor is in the runner and
 ///      the controller because each is an EXECUTION component; this service
 ///      verifies no archive and mints no evidence, and a file that ships

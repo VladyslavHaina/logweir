@@ -7,13 +7,11 @@
 #   0. `--no-exec` only: the image is the AArch64 variant and its binary is an
 #      AArch64 ELF. Every other check here is architecture-independent, so this
 #      one runs first or a wrong-variant image passes for the wrong reason.
-#   1. /ui is the twenty-six shipped files, sha256 for sha256, and NOTHING else
-#      — the same assertion `check-image-ui.sh` makes about the other image
-#      that carries the page, against the same one directory in this tree.
+#   1. /ui is the twenty-six shipped files, sha256 for sha256, and NOTHING else,
+#      against the one `ui/` directory in this tree.
 #   2. The three licences are present, non-empty and at the path both compiling
 #      images use; `THIRD_PARTY_NOTICES.md` is REQUIRED here (this image ships a
-#      statically linked Rust binary) where `check-image-ui.sh` requires its
-#      ABSENCE (that image ships none).
+#      statically linked Rust binary).
 #   3. The absences: no kafka-backup MIT notice, no org-root anchor, no engine.
 #   4. The entrypoint is `/usr/local/bin/logweir-api` and there is no CMD: the
 #      console's MODE comes from the chart's ConfigMap and from nowhere else.
@@ -274,9 +272,7 @@ if [ "$rc" -ne 0 ]; then
   cat "$work/ui.diff" >&2
   fail "check 1 (the page): the files $ref serves are NOT the tree's ui/." \
        "  The diff above is the tree's \`<path>  <sha256>\` list (-) against the" \
-       "  image's (+). BOTH images that carry the page are held to the same one" \
-       "  directory by the same comparison (see scripts/check-image-ui.sh check 1)," \
-       "  so the console and the legacy proxy cannot drift apart silently." \
+       "  image's (+)." \
        "  Rebuild the image (\`just image-console\`) — never edit ui/ to match a" \
        "  stale one."
 fi
@@ -293,9 +289,7 @@ for f in LICENSE NOTICE THIRD_PARTY_NOTICES.md; do
          "  with it: Apache-2.0 requires the licence and the NOTICE (Global" \
          "  Constraint 15, spec §16 clause 5), and MIT, BSD-2-Clause, BSD-3-Clause" \
          "  and Apache-2.0 each require the dependency graph's copyright notices," \
-         "  which is what THIRD_PARTY_NOTICES.md is. \`Dockerfile.ui\` carries only" \
-         "  the first two, and check-image-ui.sh asserts the third is ABSENT there," \
-         "  because that image links no Rust binary at all."
+         "  which is what THIRD_PARTY_NOTICES.md is."
   fi
   rc=0
   diff -u "$f" "$work/logweir-$f" > "$work/lic-$f.diff" 2>&1 || rc=$?
@@ -354,7 +348,7 @@ if [ "$cmd" != "null" ] && [ "$cmd" != "[]" ]; then
        "  It must declare none. \`--config <file>\` is the chart's argument, and a" \
        "  default argument vector here would be a second place the console's MODE —" \
        "  \`localAdmin\` versus \`shared\` — could come from, in a layer no chart" \
-       "  test can see. Same argument Dockerfile.ui makes about --accept-paths."
+       "  test can see."
 fi
 if ! user=$(docker image inspect "$ref" --format '{{.Config.User}}' 2>&1); then
   fail "check 4 (entrypoint): could not read $ref's USER:" "$user"

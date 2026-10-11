@@ -91,26 +91,19 @@ done
 [ "$fail" -eq 0 ] && echo "   ok: $crd_count CRDs, byte for byte"
 
 # ---------------------------------------------------------------- 2. the UI
-# THE ARM IS GONE AND SO IS WHAT IT GUARDED. Task 39 moved the page into the
-# `logweir-ui` image; `charts/logweir/ui/` no longer exists, so there is no copy
-# to `cmp`. Its replacement is `scripts/check-image-ui.sh`, which hashes the
-# files INSIDE THE IMAGE against `ui/` — see this file's header, item 2.
-#
-# WHAT IS ASSERTED HERE INSTEAD is the one thing a chart gate still can say
-# about the page: that the chart carries NO copy of it. A directory that came
-# back — a merge that resurrected it, a `cp -r` someone found convenient —
-# would be a second source of the page that nothing hashes, and the ConfigMap
-# would follow it.
-echo "== 2. the chart carries NO copy of ui/ (the page is the logweir-ui image) =="
+# The page ships inside the console image (`Dockerfile.console`), whose served
+# bytes `scripts/check-image-api.sh` hashes against `ui/`. What a chart gate can
+# say about the page is that the chart carries NO copy of it: a directory that
+# came back would be a second source of the page that nothing hashes.
+echo "== 2. the chart carries NO copy of ui/ (the page is the console image's) =="
 if [ -e "$CHART/ui" ]; then
-  echo "FAIL: $CHART/ui exists. Task 39 deleted it: the page ships as the logweir-ui" >&2
-  echo "      image (Dockerfile.ui, values.yaml's ui.image), asserted by" >&2
-  echo "      scripts/check-image-ui.sh against the bytes a browser receives — run it" >&2
-  echo "      with \`just smoke-ui\`. A copy under the chart is a second source of the" >&2
+  echo "FAIL: $CHART/ui exists. The page ships inside the console image" >&2
+  echo "      (Dockerfile.console), asserted by scripts/check-image-api.sh against the" >&2
+  echo "      bytes a browser receives. A copy under the chart is a second source of the" >&2
   echo "      page that nothing hashes." >&2
   fail=1
 else
-  echo "   ok: no $CHART/ui — the page is delivered by ui.image, not by a ConfigMap"
+  echo "   ok: no $CHART/ui — the page is delivered by api.console.image, not by a ConfigMap"
 fi
 
 # ---------------------------------------------------------------- 7. the pins
@@ -120,17 +113,9 @@ echo "== 7. values.yaml names the tree's own repositories at $LOGWEIR_TAG =="
 values_controller="$(sed -n 's/^controllerImage:[[:space:]]*//p' "$CHART/values.yaml")"
 values_runner="$(sed -n 's/^runnerImage:[[:space:]]*//p' "$CHART/values.yaml")"
 values_bootstrap="$(sed -n 's/^[[:space:]]*bootstrapImage:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}.*$/\1/p' "$CHART/values.yaml")"
-# `ui.image` IS INDENTED AND CARRIES A TRAILING COMMENT (ruling 15's short
-# style), so it is read with its own expression rather than with the two above:
-# two leading spaces, the key, the value up to the first whitespace. `tail -1`
-# because `minio:` and `demoKafka:` carry an `image:` at the same indent and
-# `ui:` is the last block in the file.
-values_ui="$(sed -n 's/^[[:space:]]\{2\}image:[[:space:]]*\([^[:space:]]*\).*$/\1/p' "$CHART/values.yaml" | tail -1)"
-# `api.console.image` IS NESTED ONE LEVEL DEEPER (four spaces), which is what
-# keeps the `tail -1` above pointing at `ui.image`: `api:` comes before `ui:` in
-# values.yaml and its own `image:` is not at two spaces. It is read INSIDE its
-# block rather than by indentation alone, so moving either block cannot silently
-# repoint one expression at the other's value.
+# `api.console.image` IS NESTED (four spaces) and is read INSIDE its block
+# rather than by indentation alone, so moving a block cannot silently repoint
+# the expression at another block's `image:`.
 values_console="$(awk '
   /^api:/     { inapi = 1; next }
   /^[a-zA-Z]/ { inapi = 0 }
@@ -164,27 +149,23 @@ else
   bootstrap_render_note=" --set-string identity.bootstrapImage=<unpublished-test-digest>"
   bootstrap_target_note="an unpublished test-only bootstrap digest"
 fi
-# THE THIRD REPOSITORY, TASK 39. The UI image has no digest pin in the tree to
-# strip a digest off — it is referenced by this chart alone — so its NAMESPACE
-# is taken from the runner's and only the NAME is this chart's. A namespace
-# move therefore carries all three, which is the property arm 7 exists for.
-UI_IMAGE_NAME="logweir-ui"
-ui_repo="${runner_repo%/*}/$UI_IMAGE_NAME"
-# THE FOURTH REPOSITORY, D0 stage 7, derived exactly as the third is and for the
-# same reason: a namespace move must carry all four without editing this gate.
-# The NAME is D0's word for the deliverable (`Dockerfile.console`); the chart's
-# values block and the binary keep the crate's (`api.*`, `logweir-api`), and
+# THE THIRD REPOSITORY, D0 stage 7. The console image has no digest pin in the
+# tree to strip a digest off — it is referenced by this chart alone — so its
+# NAMESPACE is taken from the runner's and only the NAME is this chart's: a
+# namespace move must carry all three without editing this gate. (The legacy
+# `logweir-ui` image was withdrawn in v1, PROD-17.1 C4.) The NAME is D0's word
+# for the deliverable (`Dockerfile.console`); the chart's values block and the
+# binary keep the crate's (`api.*`, `logweir-api`), and
 # charts/logweir/README.md reconciles the two.
 CONSOLE_IMAGE_NAME="logweir-console"
 console_repo="${runner_repo%/*}/$CONSOLE_IMAGE_NAME"
 if [ "${runner_repo%/*}" = "$runner_repo" ]; then
-  echo "FAIL: could not derive the UI repository's namespace from the runner pin '$tree_runner'" >&2
+  echo "FAIL: could not derive the console repository's namespace from the runner pin '$tree_runner'" >&2
   echo "      crates/weirkeeper/src/job.rs's RUNNER_IMAGE must name <host>/<namespace>/<name>@sha256:<64 hex>" >&2
   fail=1
 fi
 want_controller="$controller_repo:$LOGWEIR_TAG"
 want_runner="$runner_repo:$LOGWEIR_TAG"
-want_ui="$ui_repo:$LOGWEIR_TAG"
 want_console="$console_repo:$LOGWEIR_TAG"
 if [ "$values_controller" != "$want_controller" ]; then
   echo "FAIL: values.yaml controllerImage is '$values_controller'; it must be exactly '$want_controller'" >&2
@@ -200,20 +181,12 @@ if [ "$values_console" != "$want_console" ]; then
   echo "FAIL: values.yaml api.console.image is '$values_console'; it must be exactly '$want_console'" >&2
   echo "      (arm 7, D0 stage 7: the namespace is the runner pin's, the name is logweir-console —" >&2
   echo "      the image Dockerfile.console builds — and the tag is this chart's ruling of" >&2
-  echo "      2026-09-12. This is the image the console POD runs; ui.image is the legacy" >&2
-  echo "      kubectl-proxy image, and the two are different principals.)" >&2
-  fail=1
-fi
-if [ "$values_ui" != "$want_ui" ]; then
-  echo "FAIL: values.yaml ui.image is '$values_ui'; it must be exactly '$want_ui'" >&2
-  echo "      (arm 7, Task 39: the namespace is the runner pin's, the name is logweir-ui — the" >&2
-  echo "      image Dockerfile.ui builds and release.yml publishes — and the tag is this chart's" >&2
-  echo "      ruling of 2026-09-12. A kubectl digest here is the page back in a ConfigMap.)" >&2
+  echo "      2026-09-12.)" >&2
   fail=1
 fi
 [ "$values_controller" = "$want_controller" ] && [ "$values_runner" = "$want_runner" ] &&
-  [ "$values_ui" = "$want_ui" ] && [ "$values_console" = "$want_console" ] &&
-  echo "   ok: controllerImage, runnerImage, ui.image and api.console.image are the tree's repositories at $LOGWEIR_TAG"
+  [ "$values_console" = "$want_console" ] &&
+  echo "   ok: controllerImage, runnerImage and api.console.image are the tree's repositories at $LOGWEIR_TAG"
 
 bootstrap_required_diagnostic="identity.bootstrapImage must name a reviewed runner digest"
 if [ -z "$values_bootstrap" ]; then
@@ -341,7 +314,7 @@ done
 # The two Logweir repositories come from arm 7 above, which is why that arm runs
 # first. They are the ONLY references allowed to be a tag here, and the only tag
 # allowed is $LOGWEIR_TAG — exactly.
-echo "== 5. every rendered image is a digest, except the four Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
+echo "== 5. every rendered image is a digest, except the three Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
 images=0
 logweir_tagged=0
 for f in "$RENDERED"/*.yaml; do
@@ -370,19 +343,16 @@ for f in "$RENDERED"/*.yaml; do
     # `<repository>:$LOGWEIR_TAG` — a digest there is this chart's ruling
     # reverted, and any other tag is a value nobody chose.
     #
-    # `logweir-ui` IS NOT MATCHED BY THE RUNNER'S PATTERN, which is worth
+    # `logweir-console` IS NOT MATCHED BY THE RUNNER'S PATTERN, which is worth
     # stating because the names share a prefix: `$runner_repo:*` requires the
-    # colon immediately after `.../logweir`, and `.../logweir-ui:latest` has
-    # `-ui` there. Before Task 39 added the third arm, the UI reference fell
-    # through to the digest arm below and was reported as an un-digested tag.
+    # colon immediately after `.../logweir`.
     case "$ref" in
-      "$controller_repo":*|"$runner_repo":*|"$ui_repo":*|"$console_repo":*|"$controller_repo"@*|"$runner_repo"@*|"$ui_repo"@*|"$console_repo"@*)
+      "$controller_repo":*|"$runner_repo":*|"$console_repo":*|"$controller_repo"@*|"$runner_repo"@*|"$console_repo"@*)
         logweir_tagged=$((logweir_tagged + 1))
         if [ "$ref" != "$controller_repo:$LOGWEIR_TAG" ] &&
            [ "$ref" != "$runner_repo:$LOGWEIR_TAG" ] &&
-           [ "$ref" != "$ui_repo:$LOGWEIR_TAG" ] &&
            [ "$ref" != "$console_repo:$LOGWEIR_TAG" ]; then
-          echo "FAIL: $base references a Logweir image as '$ref'; this chart names all four by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
+          echo "FAIL: $base references a Logweir image as '$ref'; this chart names all three by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
           fail=1
         fi
         continue
@@ -397,7 +367,7 @@ for f in "$RENDERED"/*.yaml; do
         ;;
     esac
     case "$ref" in
-      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the four Logweir images may carry a tag here" >&2; fail=1 ;;
+      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the three Logweir images may carry a tag here" >&2; fail=1 ;;
     esac
   done < <(grep -E '^[[:space:]]+(- )?image:[[:space:]]' "$f")
 done
@@ -413,7 +383,7 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks api.enabled api.console.enabled; do
+for flag in demoKafka.enabled minio.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks api.enabled api.console.enabled; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -1043,10 +1013,9 @@ console_refuses "a shared-console NetworkPolicy with no ingress-controller selec
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.networkPolicy.enabled=true
-# PLAT-17.2 — D0 stage 5 and the legacy proxy. The shared console is not
-# rendered inside the controller's Job-create authority, nor beside the
-# unauthenticated `kubectl proxy` Service, nor with a trusted-proxy gate that
-# has nothing to trust.
+# PLAT-17.2 — D0 stage 5. The shared console is not rendered inside the
+# controller's Job-create authority, nor with a trusted-proxy gate that has
+# nothing to trust.
 console_refuses "a shared console with the controller unscoped" "requires controller.watchNamespaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -1055,10 +1024,23 @@ console_refuses "a shared console whose controller may create Jobs in the key na
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "controller.watchNamespaces={$CONSOLE_EXEC_NS,$NAMESPACE}"
-console_refuses "a shared console beside the legacy kubectl proxy" "with ui.enabled=true is refused" \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
-  --set-string api.console.publicBaseUrl=https://console.example.com \
+# PROD-17.1 C4 — `ui.*` IS WITHDRAWN AND REFUSED BY NAME, whatever it carries
+# (an upgraded values file that kept `ui.enabled: false` included), pointing at
+# the console. The control is the same render without the block.
+console_refuses "the withdrawn ui.* block (ui.enabled=true)" "ui.* is withdrawn" \
   --set ui.enabled=true
+console_refuses "the withdrawn ui.* block (ui.enabled=false)" "use the console, api.console.*" \
+  --set ui.enabled=false
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  > /dev/null 2> "$tmp/ui-withdrawn-control.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: the control for the ui.* refusal — the same render with no ui block — exited $rc" >&2
+  sed 's/^/      /' "$tmp/ui-withdrawn-control.err" >&2
+  fail=1
+else
+  echo "   rc=0  (control: the same render with no ui block renders)"
+fi
 console_refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -1296,7 +1278,7 @@ if [ "$rc" -ne 0 ] || [ ! -f "$package" ]; then
 else
   helm show chart "$package" > "$tmp/package-chart.yaml" 2>&1
   helm template logweir "$package" -n "$NAMESPACE" --set api.enabled=true --set api.console.enabled=true \
-    --set api.console.mode=localAdmin --set api.console.keySecret=k --set ui.enabled=true \
+    --set api.console.mode=localAdmin --set api.console.keySecret=k \
     > "$tmp/package-render.yaml" 2> "$tmp/package-render.err"
   rc=$?
   pkg_ok=1
@@ -1311,7 +1293,7 @@ else
       pkg_ok=0
     fi
   done
-  for image in weirkeeper logweir logweir-console logweir-ui; do
+  for image in weirkeeper logweir logweir-console; do
     if ! grep -F -q "docker.io/vladyslavhaina/$image:sha-$pkg_sha" "$tmp/package-render.yaml"; then
       echo "FAIL: the packaged chart does not install $image at :sha-$pkg_sha" >&2
       pkg_ok=0
@@ -1327,7 +1309,7 @@ else
     pkg_ok=0
   fi
   if [ "$pkg_ok" -eq 1 ]; then
-    echo "   ok: logweir-chart 0.1.0-sha-<commit>, appVersion sha-<commit>, the four images at that tag, labels <= 63"
+    echo "   ok: logweir-chart 0.1.0-sha-<commit>, appVersion sha-<commit>, the three images at that tag, labels <= 63"
   else
     fail=1
   fi
@@ -1338,8 +1320,8 @@ if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
   exit 1
 fi
-echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the logweir-ui image),"
-echo "    helm lint clean, rendered files current, every image a digest except the four Logweir"
+echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the console image's),"
+echo "    helm lint clean, rendered files current, every image a digest except the three Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
 echo "    flag, values.yaml names the tree's own repositories at :$LOGWEIR_TAG, and every"
 echo "    console configuration that would install a console that looks like it works is refused."

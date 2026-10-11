@@ -290,10 +290,9 @@ fn is_digest_reference(reference: &str) -> bool {
 ///
 /// It was twenty-two until D3 W12 added `operation-watch.js` and the three
 /// pages `#/operations`, `#/protection` and `#/catalog` are rendered by. The
-/// NUMBER is asserted rather than taken from the tree for the reason
-/// `check-image-ui.sh` states beside its own copy: a count read from the same
-/// directory the image was built from stays green when files are deleted from
-/// both sides at once.
+/// NUMBER is asserted rather than taken from the tree: a count read from the
+/// same directory the image was built from stays green when files are deleted
+/// from both sides at once.
 fn shipped_ui_files() -> Vec<String> {
     let files: Vec<String> = files_under("ui")
         .into_iter()
@@ -309,23 +308,22 @@ fn shipped_ui_files() -> Vec<String> {
 }
 
 #[test]
-fn both_ui_bearing_image_gates_pin_the_current_shipped_file_count() {
+fn the_ui_bearing_image_gate_pins_the_current_shipped_file_count() {
     let expected = shipped_ui_files().len();
-    for script in ["scripts/check-image-ui.sh", "scripts/check-image-api.sh"] {
-        let source = read(script);
-        for counter in ["tree_count", "image_count"] {
-            let guard = format!("[ \"${counter}\" -ne {expected} ]");
-            assert!(
-                source.contains(&guard),
-                "{script} must pin {counter} to the same {expected}-file UI set as the tree; \
-                 missing `{guard}`"
-            );
-        }
+    let script = "scripts/check-image-api.sh";
+    let source = read(script);
+    for counter in ["tree_count", "image_count"] {
+        let guard = format!("[ \"${counter}\" -ne {expected} ]");
         assert!(
-            !source.contains("twenty-two"),
-            "{script} still documents the pre-operation-pages UI count"
+            source.contains(&guard),
+            "{script} must pin {counter} to the same {expected}-file UI set as the tree; \
+             missing `{guard}`"
         );
     }
+    assert!(
+        !source.contains("twenty-two"),
+        "{script} still documents the pre-operation-pages UI count"
+    );
 }
 
 /// The CLASS, swept: every chart, workflow and Dockerfile sentence that
@@ -341,15 +339,7 @@ fn no_chart_workflow_or_dockerfile_counts_the_old_page_set() {
         .filter(|p| !p.starts_with("charts/logweir/rendered/"))
         .collect();
     paths.extend(files_under(".github/workflows"));
-    paths.extend(
-        [
-            "Dockerfile",
-            "Dockerfile.ui",
-            "Dockerfile.console",
-            "Dockerfile.weirkeeper",
-        ]
-        .map(String::from),
-    );
+    paths.extend(["Dockerfile", "Dockerfile.console", "Dockerfile.weirkeeper"].map(String::from));
     let stale: Vec<String> = paths
         .iter()
         .filter(|p| read(p).contains("twenty-two"))
@@ -410,37 +400,17 @@ fn chart_lint_the_controller_is_probed_by_its_own_binary() {
     }
 }
 
-/// **The UI image's repository, DERIVED** — the namespace of
-/// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
-/// `Dockerfile.ui` builds and what `release.yml` publishes.
+/// **The console image's repository, DERIVED** — the namespace of
+/// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-console`, which is
+/// what `Dockerfile.console` builds.
 ///
-/// It is derived rather than spelt for the reason `scripts/check-chart.sh`'s
-/// arm 7 gives: the UI image has no digest pin in the tree to read a repository
-/// off — this chart is its only reference — so what must not drift is the
-/// NAMESPACE, and taking it from the runner pin is what makes a namespace move
-/// carry all three images at once.
-///
-/// `ui_key` — a UI file's ConfigMap key (`ui/pages/approvals.js` ->
-/// `pages__approvals.js`) — lived here until Task 39 and is DELETED with the
-/// ConfigMap it keyed and with the `logweir.ui.key` template helper. A test
-/// helper for an object nothing renders is a helper the next reader has to
-/// prove is dead, and `cargo clippy -- -D warnings` refuses it anyway.
-fn ui_repository() -> String {
-    let runner = repository_of(&runner_image_constant());
-    let (namespace, _) = runner
-        .rsplit_once('/')
-        .unwrap_or_else(|| panic!("RUNNER_IMAGE's repository `{runner}` names no namespace"));
-    format!("{namespace}/logweir-ui")
-}
-
-/// **The console image's repository, DERIVED** — the same namespace with the
-/// name `logweir-console`, which is what `Dockerfile.console` builds.
-///
-/// D0 stage 7's fourth image, and the two names it carries are deliberate:
-/// D0 owns the word `console` (the file, the image, `api.console.*`) while the
-/// crate, the binary and the landed RBAC values block own `api` — see
-/// `charts/logweir/README.md`. Derived, not spelt, for the reason
-/// `ui_repository` gives above: a namespace move must carry all four.
+/// The two names it carries are deliberate: D0 owns the word `console` (the
+/// file, the image, `api.console.*`) while the crate, the binary and the
+/// landed RBAC values block own `api` — see `charts/logweir/README.md`. It is
+/// derived rather than spelt for the reason `scripts/check-chart.sh`'s arm 7
+/// gives: the console image has no digest pin in the tree to read a repository
+/// off, so what must not drift is the NAMESPACE, and taking it from the runner
+/// pin is what makes a namespace move carry all three images at once.
 fn console_repository() -> String {
     let runner = repository_of(&runner_image_constant());
     let (namespace, _) = runner
@@ -488,29 +458,13 @@ fn chart_lint_crds_are_byte_identical_copies() {
     }
 }
 
-/// **The chart carries NO copy of the UI.** The proxy serves the page from the
-/// `logweir-ui` IMAGE; its only ConfigMap mount is the non-secret namespace
-/// context that the actual browser runtime reads.
-///
-/// RENAMED FROM `chart_lint_ui_copy_is_byte_identical_and_carries_nothing_else`
-/// (STANDING RULE 19), and the rename is the whole change of substance. That
-/// test asserted that `charts/logweir/ui/` — fourteen duplicated files — was
-/// byte-identical to `ui/`. Both the directory and the ConfigMap built from it
-/// are gone, so the assertion it made is not weakened here, it MOVED, to
-/// `scripts/check-image-ui.sh` check 1: that gate computes the sha256 of every
-/// file inside the image that `kubectl proxy --www=/ui` will serve and of every
-/// file under `ui/`, and compares them. A copy in a chart can be right while
-/// the artefact a browser loads is wrong; the image gate reads the artefact.
-///
-/// WHAT THIS TEST CAN STILL SAY, and does: the chart holds no second copy of
-/// the page and the only UI ConfigMap contains one generated runtime context,
-/// not page bytes. A mount at `/ui` would shadow the image and make the image
-/// hash gate meaningless; a narrowly mounted `/ui/runtime` context does not.
+/// **The chart carries NO copy of the UI.** The page ships inside the console
+/// image, and `scripts/check-image-api.sh` check 1 hashes what that image
+/// serves against `ui/`. A copy under the chart would be a second source of the
+/// page that nothing hashes. (The legacy `kubectl proxy` page and its runtime
+/// ConfigMap were withdrawn in v1, PROD-17.1 C4.)
 #[test]
-fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_context() {
-    // The twenty-six are in the tree, where the image gate hashes
-    // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
-    // comparing against the wrong set.
+fn chart_lint_the_chart_carries_no_ui_copy() {
     let shipped = shipped_ui_files();
     assert_eq!(26, shipped.len());
 
@@ -520,68 +474,21 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
         .collect();
     assert!(
         under_chart.is_empty(),
-        "charts/logweir/ui/ is back: {under_chart:?}. Task 39 deleted it — the page is \
-         delivered by `ui.image` (Dockerfile.ui, docker.io/<ns>/logweir-ui), and \
-         scripts/check-image-ui.sh hashes what the image serves against ui/. A copy under the \
-         chart is a second source of the page that nothing hashes."
+        "charts/logweir/ui/ is back: {under_chart:?}. The page is delivered by \
+         `api.console.image` (Dockerfile.console), and scripts/check-image-api.sh hashes what the \
+         image serves against ui/. A copy under the chart is a second source of the page that \
+         nothing hashes."
     );
-
-    // The demo render is the one with `ui.enabled: true`. Its only UI
-    // ConfigMap is one generated JS file describing the same namespace set as
-    // the RoleBindings; it cannot contain an alternate page.
-    let docs = rendered("demo");
-    let ui_configmaps: Vec<String> = docs
-        .iter()
-        .filter(|d| d.kind == "ConfigMap" && d.name().contains("-ui"))
-        .map(|d| d.name())
-        .collect();
-    assert_eq!(
-        1,
-        ui_configmaps.len(),
-        "exactly one runtime ConfigMap is rendered"
-    );
-    assert!(ui_configmaps[0].starts_with("logweir-ui-runtime-"));
-    let runtime = docs
-        .iter()
-        .find(|d| d.kind == "ConfigMap" && d.name() == ui_configmaps[0])
-        .expect("the named runtime ConfigMap exists");
-    assert_eq!(
-        Some(true),
-        runtime.value["immutable"].as_bool(),
-        "runtime JS is immutable once installed"
-    );
-    let context = runtime.value["data"]["runtime.js"]
-        .as_str()
-        .expect("the runtime ConfigMap has its JS context");
-    assert_eq!(
-        "window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({\"allowed\": [\"logweir-system\"], \"selected\": \"logweir-system\"});\n",
-        context,
-        "the single release namespace reaches the browser runtime explicitly"
-    );
-    let ui = find(&docs, "Deployment", "logweir-ui");
-    let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
-    let runtime_volume = volumes
-        .iter()
-        .find(|v| v["name"].as_str() == Some("runtime"))
-        .expect("the proxy mounts its runtime namespace context");
-    assert_eq!(
-        Some(ui_configmaps[0].as_str()),
-        runtime_volume["configMap"]["name"].as_str(),
-        "the runtime volume names the generated context, not a page ConfigMap"
-    );
-    let mounts = container(ui)["volumeMounts"]
-        .as_sequence()
-        .expect("volumeMounts");
-    assert!(
-        mounts.iter().any(|m| m["name"].as_str() == Some("runtime") && m["mountPath"].as_str() == Some("/ui/runtime.js") && m["subPath"].as_str() == Some("runtime.js") && m["readOnly"].as_bool() == Some(true)),
-        "the only ConfigMap mount replaces the read-only runtime context file, never /ui: {mounts:?}"
-    );
-    assert!(
-        !mounts
-            .iter()
-            .any(|m| m["mountPath"].as_str() == Some("/ui")),
-        "nothing may be mounted over /ui: the image remains the page source"
-    );
+    // And no render carries a page ConfigMap for it.
+    for render in ["default", "demo", "msk"] {
+        let docs = rendered(render);
+        assert!(
+            !docs
+                .iter()
+                .any(|d| d.kind == "ConfigMap" && d.name().contains("-ui")),
+            "the {render} render carries a UI ConfigMap"
+        );
+    }
 }
 
 // ================================================ the default render vs logweir.yaml
@@ -847,21 +754,9 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         "values.yaml runnerImage must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
          `:{LOGWEIR_TAG}`"
     );
-    // TASK 39'S THIRD LOGWEIR IMAGE. `ui.image` stopped being a third-party
-    // kubectl digest and became Logweir's own `logweir-ui`, under the namespace
-    // the runner pin names — derived, never spelt, so a namespace move carries
-    // all three. `scripts/check-chart.sh` arm 7 says the same in shell.
-    assert_eq!(
-        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
-        values["ui"]["image"].as_str(),
-        "values.yaml ui.image must be `<the runner pin's namespace>/logweir-ui:{LOGWEIR_TAG}` — \
-         the image Dockerfile.ui builds and release.yml publishes. A `registry.k8s.io/kubectl` \
-         digest here is the page back in a ConfigMap"
-    );
     for (path, v) in [
         ("controllerImage", &values["controllerImage"]),
         ("runnerImage", &values["runnerImage"]),
-        ("ui.image", &values["ui"]["image"]),
     ] {
         let s = v.as_str().unwrap_or_else(|| panic!("{path} is a string"));
         assert!(
@@ -882,12 +777,7 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         is_digest_reference(&runner_image_constant()),
         "weirkeeper::job::RUNNER_IMAGE is still a digest (GC7)"
     );
-    // The THREE third-party images left, still digests, still with provenance.
-    // There were four until Task 39: `ui.image` was a `registry.k8s.io/kubectl`
-    // digest, and that digest did not disappear — it moved to `Dockerfile.ui`'s
-    // `FROM`, where it is still pinned under Global Constraint 7 and where
-    // `scripts/check-image-ui.sh` check 3 holds the image's own label and its
-    // baked inventory to it.
+    // The THREE third-party images, still digests, still with provenance.
     for (path, v) in [
         ("minio.image", &values["minio"]["image"]),
         ("minio.mcImage", &values["minio"]["mcImage"]),
@@ -900,16 +790,6 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
              `latest` ruling"
         );
     }
-    // AND THE UI IMAGE'S BASE IS STILL THE PINNED KUBECTL, in Dockerfile.ui.
-    // Without this the digest would simply have vanished from every assertion
-    // in this file when it left values.yaml.
-    let dockerfile_ui = read("Dockerfile.ui");
-    assert!(
-        dockerfile_ui.contains("FROM registry.k8s.io/kubectl@sha256:"),
-        "Dockerfile.ui must build FROM a DIGEST-pinned registry.k8s.io/kubectl (Global \
-         Constraint 7). That pin moved here from values.yaml's ui.image in Task 39; a tag there \
-         would let the base change under a build nobody re-ran"
-    );
     // The two MinIO images are the compose stack's, byte for byte.
     let compose = read("e2e/compose/docker-compose.yml");
     for path in ["minio.image", "minio.mcImage"] {
@@ -929,21 +809,13 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     // assertions, unchanged in substance: a third-party digest whose provenance
     // nobody wrote down is still the defect they were added for.
     let text = read("charts/logweir/README.md");
-    // `registry.k8s.io/kubectl:v1.34.1` IS STILL HERE AFTER TASK 39 and that is
-    // deliberate: the digest moved from `ui.image` to `Dockerfile.ui`'s `FROM`,
-    // but it is still a third-party image this project redistributes, and the
-    // command and date that resolved it are still what a reader needs.
-    for command in [
-        "docker buildx imagetools inspect apache/kafka:3.7.1",
-        "docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1",
-    ] {
-        assert!(
-            text.contains(command),
-            "charts/logweir/README.md must record the resolution command `{command}` beside the \
-             THIRD-PARTY digest (the kindest/node idiom). It moved here from values.yaml under \
-             ruling 15; do not drop it"
-        );
-    }
+    let command = "docker buildx imagetools inspect apache/kafka:3.7.1";
+    assert!(
+        text.contains(command),
+        "charts/logweir/README.md must record the resolution command `{command}` beside the \
+         THIRD-PARTY digest (the kindest/node idiom). It moved here from values.yaml under \
+         ruling 15; do not drop it"
+    );
     assert!(
         text.contains("2026-09-12"),
         "charts/logweir/README.md must record the date the third-party digests were resolved — \
@@ -966,7 +838,7 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
          the place every explanation lives"
     );
     // The defaults are the shipped install: nothing optional on.
-    for flag in ["minio", "demoKafka", "ui", "retention", "api"] {
+    for flag in ["minio", "demoKafka", "retention", "api"] {
         assert_eq!(
             Some(false),
             values[flag]["enabled"].as_bool(),
@@ -1164,7 +1036,6 @@ fn chart_lint_optional_components_render_nothing_under_defaults() {
             assert!(
                 !n.starts_with("logweir-minio")
                     && !n.starts_with("logweir-kafka-")
-                    && !n.starts_with("logweir-ui")
                     && n != "logweir-s3",
                 "rendered/{name}.yaml carries {}/{n}, an optional component's object, under a render with every flag off",
                 d.kind
@@ -1847,295 +1718,6 @@ fn chart_lint_minio_renders_the_backend_and_the_archive_secret() {
         Some(true),
         values["minio"]["persistence"]["enabled"].as_bool()
     );
-}
-
-/// The proxy's path filter, measured from `ui/api.js` and `ui/pages/*.js`: the
-/// page addresses `/apis/logweir.dev/v1alpha1/…` and nothing on `/api/v1`.
-const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)";
-
-/// **`ui.enabled` renders the proxy with its measured paths, the ServiceAccount,
-/// the RoleBinding to the chart's own role (never `cluster-admin`), the Service
-/// on 8001 — and no Ingress.**
-///
-/// EDITED BY TASK 39, NOT RENAMED: every arm this test had about the args, the
-/// roles, the binding, the Service and the absent Ingress is byte-for-byte what
-/// it was, and they are the arms the name is about. What is gone is the arm
-/// that read the ConfigMap — the fourteen keys, their bytes, the volume `items`
-/// mapping each key back to a path, and the private-key-PEM scan over the
-/// ConfigMap's data. That object no longer renders, so those assertions could
-/// not "stay green unedited": they would panic looking for it. They moved, and
-/// each of them got stronger on the way:
-///
-///   * the twenty-six files' BYTES -> `scripts/check-image-ui.sh` check 1, which
-///     hashes what the image serves against `ui/` rather than what a template
-///     inlined;
-///   * "and nothing else" -> the same check, which fails naming every extra
-///     file (measured: an image built with `COPY ui /ui` reported 53 files and
-///     listed `tests/fixtures/approver.pub.pem`);
-///   * Global Constraint 28's no-key-material scan -> the same check, over the
-///     served set, plus `chart_lint_the_chart_carries_no_copy_of_the_ui_and_mounts_no_configmap`
-///     which holds the ConfigMap and its volume absent.
-#[test]
-fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
-    let docs = rendered("demo");
-    let values: Value =
-        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
-
-    // The Deployment.
-    let ui = find(&docs, "Deployment", "logweir-ui");
-    let c = container(ui);
-    assert_eq!(
-        values["ui"]["image"].as_str(),
-        c["image"].as_str(),
-        "the Deployment's image is values.yaml's ui.image"
-    );
-    assert_eq!(
-        Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
-        c["image"].as_str(),
-        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the twenty-six \
-         shipped files copied in at /ui — under the namespace the runner pin names, at \
-         `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
-         page back in a ConfigMap."
-    );
-    let args: Vec<&str> = c["args"]
-        .as_sequence()
-        .expect("args")
-        .iter()
-        .map(|a| a.as_str().expect("a string arg"))
-        .collect();
-    assert_eq!("proxy", args[0]);
-    for needed in [
-        "--www=/ui",
-        "--www-prefix=/ui/",
-        "--address=0.0.0.0",
-        "--port=8001",
-        ACCEPT_PATHS,
-    ] {
-        assert!(
-            args.contains(&needed),
-            "the proxy's args must carry `{needed}`: {args:?}"
-        );
-    }
-    assert!(
-        !args.iter().any(|a| a.contains("--disable-filter")),
-        "`--disable-filter` must never be passed: the path filter IS the authorisation boundary"
-    );
-    assert!(
-        !args.iter().any(
-            |a| a.starts_with("--accept-paths=") && (a.ends_with("=.*") || a.ends_with("=^.*"))
-        ),
-        "the accept-paths filter must not be the match-all `.*`"
-    );
-    assert_eq!(
-        Some("logweir-ui"),
-        pod_spec(ui)["serviceAccountName"].as_str()
-    );
-    assert_eq!(
-        Some(true),
-        pod_spec(ui)["automountServiceAccountToken"].as_bool(),
-        "the proxy pod needs its token: it is the credential the proxy attaches"
-    );
-    // `tmp` is writable for kubectl; `runtime` is the one read-only, generated
-    // namespace context. The page itself remains in the image.
-    let volumes = pod_spec(ui)["volumes"].as_sequence().expect("volumes");
-    assert_eq!(
-        2,
-        volumes.len(),
-        "the proxy pod carries exactly two volumes — writable `tmp` and read-only runtime context: \
-         {volumes:?}"
-    );
-    assert!(
-        volumes[0]["emptyDir"].is_mapping(),
-        "the first volume is an emptyDir for /tmp: {:?}",
-        volumes[0]
-    );
-    assert!(
-        volumes[1]["configMap"]["name"]
-            .as_str()
-            .is_some_and(|name| name.starts_with("logweir-ui-runtime-")),
-        "the second volume is the content-addressed namespace runtime context"
-    );
-
-    // The ServiceAccount, the roles, the binding.
-    find(&docs, "ServiceAccount", "logweir-ui");
-    let role = find(&docs, "ClusterRole", "logweir-ui");
-    let want: BTreeSet<(Vec<String>, Vec<String>, Vec<String>)> = BTreeSet::from([
-        (
-            vec!["logweir.dev".into()],
-            vec![
-                "approvals".into(),
-                "backups".into(),
-                "backupschedules".into(),
-                "kafkaclusters".into(),
-                "restores".into(),
-            ],
-            vec!["get".into(), "list".into()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
-        ),
-        // D1 §8.5/§8.6 (PLAT-06.2): `backups` joined this rule so legacy mode
-        // can perform "Back up now" instead of refusing it by name. The verb
-        // is `create` and the resource set is otherwise byte-for-byte what it
-        // was; `chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one`
-        // below is the row that pins what `backups` may and may not carry.
-        (
-            vec!["logweir.dev".into()],
-            vec![
-                "approvals".into(),
-                "backups".into(),
-                "backupschedules".into(),
-                "kafkaclusters".into(),
-                "restores".into(),
-            ],
-            vec!["create".into()],
-        ),
-        (
-            vec!["logweir.dev".into()],
-            vec!["backupschedules".into()],
-            vec!["patch".into()],
-        ),
-        // D2 §7.4 — the three kinds Amendment F added, READ ONLY. No
-        // `create`, no `patch`: `ui/api.js`'s `WRITABLE_PLURALS` is unchanged
-        // and the page has no form for any of them; the new flows are
-        // console-only. Without the read a destination-backed schedule renders
-        // as though its archive were unconfigured.
-        (
-            vec!["logweir.dev".into()],
-            vec![
-                "backupdestinations".into(),
-                "preflights".into(),
-                "topicdiscoveries".into(),
-            ],
-            vec!["get".into(), "list".into()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
-        ),
-    ]);
-    assert_eq!(
-        want,
-        rules_of(role),
-        "the page's ClusterRole carries exactly the measured verbs"
-    );
-    // AND NO WRITE VERB ON THE THREE NEW KINDS, asserted separately so the
-    // table above cannot be widened in a diff that reads as a reformatting.
-    for (_, resources, verbs) in rules_of(role) {
-        if resources
-            .iter()
-            .any(|r| r == "backupdestinations" || r == "topicdiscoveries" || r == "preflights")
-        {
-            assert_eq!(
-                verbs,
-                vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
-                "the legacy proxy reads the three new kinds and writes none of them (D2 §7.4): \
-                 {resources:?} carries {verbs:?}"
-            );
-        }
-    }
-    // AND NO VERB ON `configmaps`, which is what keeps the page out of an
-    // inventory's pages: the chunk documents a `TopicDiscovery` owns are
-    // ConfigMaps, and reading them is the console API's job with its own
-    // owner-UID, immutability and digest checks (D2 §5.6).
-    for (groups, resources, _) in rules_of(role) {
-        assert!(
-            !(groups.iter().any(|g| g.is_empty()) && resources.iter().any(|r| r == "configmaps")),
-            "the legacy proxy must hold no verb on `configmaps`"
-        );
-    }
-    let roster = find(&docs, "ClusterRole", "logweir-ui-trustrosters");
-    assert_eq!(
-        BTreeSet::from([(
-            vec!["logweir.dev".to_string()],
-            vec!["trustrosters".to_string()],
-            vec!["list".to_string()] // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
-        )]),
-        rules_of(roster)
-    );
-    let bindings: Vec<&Doc> = docs
-        .iter()
-        .filter(|d| {
-            d.kind == "RoleBinding" && d.value["roleRef"]["name"].as_str() == Some("logweir-ui")
-        })
-        .collect();
-    assert!(
-        !bindings.is_empty(),
-        "the page's role is bound by a RoleBinding"
-    );
-    for rb in bindings {
-        assert_eq!(Some("ClusterRole"), rb.value["roleRef"]["kind"].as_str());
-        assert_eq!(
-            Some("logweir-ui"),
-            rb.value["roleRef"]["name"].as_str(),
-            "the RoleBinding points at the chart's own role — never cluster-admin, never a shipped human role"
-        );
-        assert_eq!(
-            Some("ServiceAccount"),
-            rb.value["subjects"][0]["kind"].as_str()
-        );
-        assert_eq!(Some("logweir-ui"), rb.value["subjects"][0]["name"].as_str());
-    }
-    for crb in docs.iter().filter(|d| d.kind == "ClusterRoleBinding") {
-        assert_ne!(
-            Some("cluster-admin"),
-            crb.value["roleRef"]["name"].as_str(),
-            "no ClusterRoleBinding in the chart names cluster-admin"
-        );
-    }
-    let svc = find(&docs, "Service", "logweir-ui");
-    assert_eq!(Some(8001), svc.value["spec"]["ports"][0]["port"].as_u64());
-    assert_eq!(Some("ClusterIP"), svc.value["spec"]["type"].as_str());
-    assert!(
-        !docs.iter().any(|d| d.kind == "Ingress"),
-        "the chart renders no Ingress: reachability of the Service is the authorisation boundary"
-    );
-}
-
-/// **The legacy page may CREATE a `Backup` and may never edit or delete one
-/// (D1 §8.5/§8.6, PLAT-06.2).**
-///
-/// THE VERB SET FOR ONE RESOURCE, COLLECTED ACROSS EVERY RULE, because that is
-/// the only way a grant actually reads: RBAC unions the rules, so a table that
-/// checked each rule on its own would miss a second rule that added `delete` to
-/// `backups` beside the first one's `create`. This gathers every verb any rule
-/// in this role grants on `backups` and compares the whole set.
-///
-/// WHY EXACTLY THESE THREE. `get` and `list` are what the runs page and the
-/// schedule card have always read. `create` is PLAT-06.2's one addition: a
-/// manual run is an ordinary object (D1 §8.1) and the page creates it directly
-/// in this mode, under the same deterministic name the product API derives.
-/// `patch`, `update` and `delete` are absent BY DESIGN — a run's inputs are
-/// frozen (PLAT-06.1), the task's migration rule is "do not mutate an existing
-/// execution to retry it", and a second run is a second object. A page that
-/// could patch a `Backup` could retarget a frozen plan; a page that could
-/// delete one could erase evidence.
-///
-/// THE MUTANT: add `"delete"` (or `"patch"`, or `"update"`) to the `backups`
-/// rule in `charts/logweir/templates/ui/ui.yaml` and this fails naming the verb,
-/// as does `chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role`'s
-/// whole-table comparison. Removing `create` fails here too, which is what
-/// keeps the legacy button from going back to refusing itself.
-#[test]
-fn chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one() {
-    let want: BTreeSet<String> = ["create", "get", "list"] // engine-token-ok: Kubernetes RBAC verbs the legacy page issues, never an engine subcommand
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    // BOTH RENDERS THAT HAVE A PAGE AT ALL, because `ui.enabled` is off by
-    // default and a grant proved in one values file says nothing about the
-    // other. `demo` is the local lab's shape and `msk` is the managed-cloud
-    // one; they are the two renders `logweir-ui` appears in.
-    for render in ["demo", "msk"] {
-        let docs = rendered(render);
-        let role = find(&docs, "ClusterRole", "logweir-ui");
-        let mut on_backups: BTreeSet<String> = BTreeSet::new();
-        for (groups, resources, verbs) in rules_of(role) {
-            if groups.iter().any(|g| g == "logweir.dev") && resources.iter().any(|r| r == "backups")
-            {
-                on_backups.extend(verbs);
-            }
-        }
-        assert_eq!(
-            want, on_backups,
-            "in the {render} render, the legacy page's ClusterRole must grant exactly get, list \
-             and create on `backups` (D1 §8.5/§8.6): a manual run is an ordinary create, and a \
-             run is never edited or deleted from a browser. Found {on_backups:?}"
-        );
-    }
 }
 
 // ================================================= D3 W13: the console/API principal
@@ -3404,8 +2986,7 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
         assert_eq!(
             Some(format!("{}:{LOGWEIR_TAG}", console_repository()).as_str()),
             c["image"].as_str(),
-            "{render}.yaml: the console pod runs the logweir-console image, never ui.image — \
-             those are two different principals with two different arguments"
+            "{render}.yaml: the console pod runs the logweir-console image"
         );
 
         let has_probe = c.get("readinessProbe").is_some_and(|p| !p.is_null())
@@ -3618,7 +3199,7 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
             Some("/ui"),
             config["uiDirectory"].as_str(),
             "{render}.yaml: /ui is the path Dockerfile.console COPYs the twenty-six shipped files \
-             to, and the same path Dockerfile.ui uses"
+             to"
         );
         assert_eq!(
             Some(mode),
@@ -4000,7 +3581,6 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
     for needle in [
         "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5).",
         "includes the release namespace %q, which holds the shared console's keys",
-        "api.console.mode=shared with ui.enabled=true is refused.",
         "which is not in controller.watchNamespaces",
         "api.console.requireTrustedProxy needs api.console.trustedProxyService",
         "or api.console.trustedProxyCidrs: with nothing to trust",
@@ -4249,7 +3829,7 @@ fn chart_lint_the_two_controller_windows_render_only_when_configured() {
 }
 
 /// **Every PodSpec of the optional components refuses a ServiceAccount token
-/// except the proxy and the short-lived identity bootstrap, which need it.**
+/// except the console and the short-lived identity bootstrap, which need it.**
 /// Under the demo render, every Pod-carrying object is enumerated.
 #[test]
 fn chart_lint_only_api_callers_hold_a_token() {
@@ -4266,7 +3846,11 @@ fn chart_lint_only_api_callers_hold_a_token() {
                 None, automount,
                 "the controller leaves the field unset (the shipped exemption)"
             ),
-            "logweir-ui" => assert_eq!(Some(true), automount, "the proxy pod needs its token"),
+            "logweir-api" => assert_eq!(
+                Some(true),
+                automount,
+                "the console composes its own Kubernetes calls and needs its token"
+            ),
             "logweir-identity-bootstrap" => assert_eq!(
                 Some(true),
                 automount,
@@ -4306,16 +3890,15 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_a
     // `chart_lint_every_rendered_image_is_a_digest_except_the_two_logweir_images_and_the_author_only_example`
     // (Task 39, STANDING RULE 19): there are three Logweir images now, and the
     // number is in the name because the number is the assertion.
-    // D0 stage 7 adds the FOURTH: `logweir-console`, the image the console pod
-    // runs. The test's NAME still says three and is left alone on purpose —
-    // STANDING RULE 19 renames a test when its assertion changes, and this
-    // assertion did not: "every rendered image is a digest except the Logweir
-    // ones at :latest". The COUNT moved, and the count lives in this list,
-    // which is derived from the tree rather than spelt.
+    // D0 stage 7 added `logweir-console`, the image the console pod runs, and
+    // PROD-17.1 C4 withdrew `logweir-ui`. The test's NAME is left alone on
+    // purpose — STANDING RULE 19 renames a test when its assertion changes,
+    // and this assertion did not: "every rendered image is a digest except the
+    // Logweir ones at :latest". The COUNT moved, and the count lives in this
+    // list, which is derived from the tree rather than spelt.
     let logweir_repos = [
         repository_of(&controller_image_pin()),
         repository_of(&runner_image_constant()),
-        ui_repository(),
         console_repository(),
     ];
     let mut total = 0usize;
@@ -4392,7 +3975,7 @@ fn chart_lint_values_schema_types_the_four_flags_as_booleans() {
     let schema: serde_json::Value =
         serde_json::from_str(&read("charts/logweir/values.schema.json"))
             .expect("values.schema.json parses");
-    for flag in ["minio", "demoKafka", "ui", "identity"] {
+    for flag in ["minio", "demoKafka", "identity"] {
         assert_eq!(
             Some("boolean"),
             schema["properties"][flag]["properties"]["enabled"]["type"].as_str(),
@@ -4410,7 +3993,6 @@ fn chart_lint_values_schema_types_the_four_flags_as_booleans() {
         ("minio", "image"),
         ("minio", "mcImage"),
         ("demoKafka", "image"),
-        ("ui", "image"),
     ] {
         assert_eq!(
             Some("string"),
@@ -5062,13 +4644,9 @@ fn chart_lint_the_gate_script_carries_every_arm() {
     let script = read("scripts/check-chart.sh");
     for needle in [
         "cmp -s \"$src\" \"$CHART/crds/$base\"",
-        // TASK 39. Arm 2 was `cmp -s "$src" "$CHART/ui/$rel"` — the byte-copy
-        // loop over the chart's duplicate of `ui/`. The directory is gone, the
-        // loop with it, and what the arm asserts now is that the copy has not
-        // come back. The needle below is the REPLACEMENT NAMED IN THE SCRIPT'S
-        // OWN HEADER, so a future editor who deletes arm 2 outright fails here
-        // rather than quietly losing both halves.
-        "scripts/check-image-ui.sh",
+        // Arm 2 asserts the chart's copy of `ui/` has not come back, and names
+        // the gate that hashes the page the console image serves.
+        "scripts/check-image-api.sh",
         "if [ -e \"$CHART/ui\" ]; then",
         "helm lint \"$CHART\"",
         "helm template \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --include-crds",
@@ -5086,11 +4664,16 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "runner_repo=\"${tree_runner%@sha256:*}\"",
         "$controller_repo:$LOGWEIR_TAG",
         "$runner_repo:$LOGWEIR_TAG",
-        // Task 39: the third repository, its namespace DERIVED from the runner
-        // pin and only its name spelt.
-        "UI_IMAGE_NAME=\"logweir-ui\"",
-        "ui_repo=\"${runner_repo%/*}/$UI_IMAGE_NAME\"",
-        "$ui_repo:$LOGWEIR_TAG",
+        // The third repository, its namespace DERIVED from the runner pin and
+        // only its name spelt.
+        "CONSOLE_IMAGE_NAME=\"logweir-console\"",
+        "console_repo=\"${runner_repo%/*}/$CONSOLE_IMAGE_NAME\"",
+        "$console_repo:$LOGWEIR_TAG",
+        // PROD-17.1 C4: the withdrawn `ui.*` block is refused by name, with
+        // the same render without it as the control.
+        "console_refuses \"the withdrawn ui.* block (ui.enabled=true)\" \"ui.* is withdrawn\"",
+        "console_refuses \"the withdrawn ui.* block (ui.enabled=false)\" \"use the console, api.console.*\"",
+        "control: the same render with no ui block renders",
         // D2 W11: the installation policy's own schema refusals. A policy
         // document `weirkeeper::check::policy` refuses fails CLOSED and
         // SILENTLY, so the schema has to refuse the same values at install
@@ -5222,13 +4805,12 @@ fn chart_lint_examples_and_readme_say_what_they_are() {
     for line in [
         "minio:\n  enabled: true",
         "demoKafka:\n  enabled: true",
-        "ui:\n  enabled: true",
+        "api:\n  enabled: true\n  console:\n    enabled: true\n    mode: localAdmin",
     ] {
         assert!(demo.contains(line), "demo.values.yaml turns on `{line}`");
     }
     let readme = read("charts/logweir/README.md");
     for needle in [
-        "anyone who can reach that Service acts with that",
         "Helm installs `crds/` once",
         "registered trademarks of the Apache Software",
         "kubectl port-forward",
@@ -5243,10 +4825,6 @@ fn chart_lint_examples_and_readme_say_what_they_are() {
     assert!(
         notes.contains("port-forward"),
         "NOTES.txt prints the port-forward command"
-    );
-    assert!(
-        notes.contains("acts with that ServiceAccount's authority"),
-        "NOTES.txt states whose authority the page acts with"
     );
 }
 
@@ -5515,12 +5093,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "demoKafka.nodeSelector",
         "demoKafka.tolerations",
         "demoKafka.affinity",
-        "ui.enabled",
-        "ui.image",
-        "ui.namespaces",
-        "ui.nodeSelector",
-        "ui.tolerations",
-        "ui.affinity",
         // D2 §4.4 / §10 — the installation policy, rendered by
         // `templates/policy.yaml` into the `weirkeeper-policy` ConfigMap.
         "checks.maxActivePerNamespace",
@@ -5706,7 +5278,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("controller", "tolerations"),
         ("minio", "tolerations"),
         ("demoKafka", "tolerations"),
-        ("ui", "tolerations"),
     ] {
         assert_eq!(
             Some(0),
@@ -5725,12 +5296,16 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         .keys()
         .cloned()
         .collect();
-    let written: BTreeSet<String> = values
+    let mut written: BTreeSet<String> = values
         .as_mapping()
         .expect("a mapping")
         .keys()
         .filter_map(|k| k.as_str().map(str::to_string))
         .collect();
+    // A WITHDRAWN key is typed and not shown: the schema accepts it only so a
+    // template can refuse it BY NAME (PROD-17.1 C4: `ui`, refused by
+    // templates/ui/ui.yaml pointing at the console).
+    written.insert("ui".to_string());
     assert_eq!(
         written, typed,
         "values.schema.json is additionalProperties:false, so every top-level key in values.yaml \
@@ -5955,7 +5530,7 @@ fn chart_lint_kafka_maps_every_supported_mechanism_and_refuses_the_rest() {
 }
 
 /// **Node placement reaches every pod the chart renders** — the controller,
-/// MinIO and its seed Job, the UI (from the MSK example) and a demo broker and
+/// MinIO and its seed Job (from the MSK example) and a demo broker and
 /// its seed Job (from the demo example, the only render that carries them).
 #[test]
 fn chart_lint_placement_reaches_every_pod() {
@@ -5980,7 +5555,6 @@ fn chart_lint_placement_reaches_every_pod() {
         ("msk", "Job", "logweir-identity-bootstrap"),
         ("msk", "Deployment", "logweir-minio"),
         ("msk", "Job", "logweir-minio-seed"),
-        ("msk", "Deployment", "logweir-ui"),
     ] {
         let docs = rendered(render);
         let spec = pod_spec(find(&docs, kind, name));
@@ -6031,7 +5605,7 @@ fn chart_lint_placement_reaches_every_pod() {
         }
         checked += 1;
     }
-    assert_eq!(9, checked, "nine pod specs were checked, not {checked}");
+    assert_eq!(8, checked, "eight pod specs were checked, not {checked}");
 
     // AND THE DEFAULT RENDER HAS NONE OF IT: an empty value renders nothing.
     for doc in rendered("default") {
@@ -6071,12 +5645,7 @@ fn chart_lint_image_pull_secrets_reach_both_service_accounts() {
     );
 
     let docs = rendered("msk");
-    for account in [
-        "weirkeeper",
-        "logweir-runner",
-        "logweir-ui",
-        "logweir-identity-bootstrap",
-    ] {
+    for account in ["weirkeeper", "logweir-runner", "logweir-identity-bootstrap"] {
         let sa = find(&docs, "ServiceAccount", account);
         let got: Vec<String> = sa.value["imagePullSecrets"]
             .as_sequence()
@@ -6278,7 +5847,7 @@ fn chart_lint_install_md_carries_bring_your_own_registry() {
         "ecr",
         "controllerImage",
         "runnerImage",
-        "ui.image",
+        "api.console.image",
         "imagePullPolicy",
         "runnerImagePullPolicy",
         "imagePullSecrets",

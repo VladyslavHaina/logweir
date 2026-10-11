@@ -213,8 +213,8 @@ commit's `sha-<commit>` images the version tag without rebuilding them
 | `sha-<commit>` (every push to `main`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.1.0-sha-<commit>` | `sha-<commit>` |
 | `v<X.Y.Z>` or a pre-release such as `v0.2.0-rc.1` (a release tag; the same digests as the tagged commit's `sha-` images) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` (`0.2.0-rc.1`) | `v<X.Y.Z>` |
 
-The packaged chart's four Logweir image defaults (`controllerImage`,
-`runnerImage`, `api.console.image`, `ui.image`) are that same tag — in a
+The packaged chart's three Logweir image defaults (`controllerImage`,
+`runnerImage`, `api.console.image`) are that same tag — in a
 release's chart, that tag pinned by digest
 (`docker.io/vladyslavhaina/weirkeeper:v<X.Y.Z>@sha256:…`), so moving the tag
 later changes nothing an installation pulls — and installing it installs
@@ -283,12 +283,14 @@ a connected managed-identity install; it is not an offline exception.
 
 The [chart reference](../charts/logweir/README.md) documents all values and
 optional components, including MinIO, demo brokers, existing Kafka clusters
-and the UI. The controller, runner and optional UI images default to `latest`,
-with `Always` pull policies for all three (`ui.imagePullPolicy` controls the UI). Base manifests remain digest-pinned. For reproducibility,
+and the console. The controller, runner and optional console images default to
+`latest`, with `Always` pull policies for all three
+(`api.console.imagePullPolicy` controls the console). Base manifests remain
+digest-pinned. For reproducibility,
 override enabled images with published digests and set controller and runner
 pull policies explicitly. `just chart-check` checks rendered resources and
-copied CRDs. The UI ships in `logweir-ui`, built by `Dockerfile.ui`, rather
-than a chart ConfigMap; `just smoke-ui` compares its assets with `ui/`.
+copied CRDs. The UI ships inside `logweir-console`, built by
+`Dockerfile.console`; `just smoke-console` compares its assets with `ui/`.
 
 A running pod does not restart when a tag changes; roll out the deployment or upgrade its image reference. For local images use
 `charts/logweir/examples/author-only.values.yaml`; recorded local and CI walks
@@ -313,8 +315,8 @@ does not run Helm hooks; when using it, provision an existing
 
 ### (d) Bring your own registry
 
-Build the controller and runner images, plus `logweir-ui` when enabling the
-UI, and publish them to a registry your nodes can pull from.
+Build the controller and runner images, plus `logweir-console` when enabling
+the console, and publish them to a registry your nodes can pull from.
 Set `ACCOUNT` and `REGION` for this ECR example. Build the runner for your
 nodes' architecture (`LOGWEIR_IMAGE_PLATFORM=linux/amd64` or `linux/arm64`) and
 the controller natively for its nodes; for an amd64 controller, set
@@ -326,9 +328,9 @@ aws ecr create-repository --repository-name logweir/logweir
 aws ecr get-login-password --region "$REGION" \
   | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
 just image && just image-weirkeeper                              # on a builder of the cluster's arch
-# Include these UI steps only when enabling ui.enabled:
-aws ecr create-repository --repository-name logweir/logweir-ui
-just image-ui
+# Include these console steps only when enabling api.console.enabled:
+aws ecr create-repository --repository-name logweir/logweir-console
+just image-console
 docker tag weirkeeper:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
 docker tag logweir:check    "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0"
 docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0"
@@ -339,23 +341,18 @@ BOOTSTRAP_DIGEST=$(docker buildx imagetools inspect \
 docker run --rm \
   "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir@$BOOTSTRAP_DIGEST" \
   identity bootstrap --help
-docker tag logweir-ui:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
-docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0"
+docker tag logweir-console:check "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-console:v0.1.0"
+docker push "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-console:v0.1.0"
 helm upgrade --install logweir charts/logweir -n logweir-system --create-namespace \
   --set controllerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/weirkeeper:v0.1.0" \
   --set runnerImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir:v0.1.0" \
   --set-string identity.bootstrapImage="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir@$BOOTSTRAP_DIGEST" \
   --set identity.bootstrapImagePullPolicy=IfNotPresent \
-  --set ui.image="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-ui:v0.1.0" \
+  --set api.console.image="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/logweir/logweir-console:v0.1.0" \
   --set imagePullPolicy=IfNotPresent \
   --set runnerImagePullPolicy=IfNotPresent \
   --set 'imagePullSecrets[0].name=my-regcred'
 ```
-
-`Dockerfile.ui` compiles nothing, so the UI image can be built for another
-architecture with `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-ui`.
-The UI image includes its pinned kubectl base; the cluster pulls `logweir-ui`
-and does not need a separate kubectl image.
 
 `imagePullSecrets` is rendered onto the controller ServiceAccount **and the
 runner ServiceAccount**, so the runner Jobs the operator creates inherit it
@@ -616,9 +613,9 @@ distribution RBAC and both NetworkPolicies there. A short-lived hook may read
 only the primary Secret and get/patch only that fixed target Secret. It copies
 the exact established bytes. If the namespace is absent, Helm names it as a
 missing prerequisite; if it already holds a different signer, the hook fails
-closed with restore guidance. Never mint a per-namespace signer. If the UI
-should operate there, also list the namespace under `ui.namespaces`; UI access
-and signing authorization remain separate explicit grants.
+closed with restore guidance. Never mint a per-namespace signer. If the console
+should operate there, also list the namespace under `api.namespaces`; console
+access and signing authorization remain separate explicit grants.
 
 **2. The per-cluster SCRAM credential** — its *name* is yours, whatever
 `KafkaCluster.spec.auth.secretRef` says; its *data key* is fixed at `password`
@@ -923,9 +920,7 @@ The product API is a service, not a page: it authenticates every request,
 resolves the actor's roles from its own binding table and refuses an ungranted
 namespace before it makes any Kubernetes call. So its ServiceAccount's grants
 are the union of what every route may need, and the per-actor narrowing happens
-above them — which is why they are wider than the local proxy's
-(§"Serving the UI") and why the two are separate identities that must not be
-conflated.
+above them.
 
 The chart renders the identity and its roles under `api.enabled` (`<release>-api`
 in the release namespace, bound in `api.namespaces`). `logweir.yaml` does not:
@@ -1012,12 +1007,10 @@ and the order is deliberate: install the principal, satisfy yourself with
 the console.
 
 **The image.** `logweir-console`, built by `Dockerfile.console`: the
-`logweir-api` binary plus the same twenty-six static page files the
-`logweir-ui` image carries, copied from the same one `ui/` directory in the
-source tree. `scripts/check-image-api.sh` hashes what the image will serve
-against that directory, so the console and the legacy proxy cannot drift apart,
-and it refuses an image carrying any key-shaped path. It is published beside the
-other three; §"Bring your own registry" applies to it unchanged
+`logweir-api` binary plus the twenty-six static page files of the one `ui/`
+directory in the source tree. `scripts/check-image-api.sh` hashes what the image
+will serve against that directory, and it refuses an image carrying any
+key-shaped path. It is published beside the other two; §"Bring your own registry" applies to it unchanged
 (`docker tag logweir-console:check …`, and `--set api.console.image=…`).
 
 **Two switches.** `api.console.enabled` requires `api.enabled` and the render
@@ -1066,9 +1059,8 @@ bind anywhere but `127.0.0.1`. The chart renders **no Service**, no Ingress and
 no ingress rule in the NetworkPolicy, so there is nothing in the cluster that a
 monitor or another pod could dial; the identity is the `<release>-api`
 ServiceAccount of §5d, narrowly bound and never a kubeconfig; and readiness is
-not gated on OIDC because there is none. Unlike the in-cluster proxy of
-§"Serving the UI", turning this on cannot make a console that anyone who reaches
-a Service can drive.
+not gated on OIDC because there is none. Turning this on cannot make a console
+that anyone who reaches a Service can drive.
 
 It exists for isolated labs and break-glass administration; it does not expose
 Ordinary confirmation and it is **not** a shared console.
@@ -1096,10 +1088,9 @@ The migration, in order:
    `no` (`charts/logweir/README.md` §`controller.watchNamespaces` has the
    whole matrix). Objects in a namespace left off the list stop being
    reconciled — nothing is deleted — until it is added.
-4. Disable the in-cluster legacy proxy (`ui.enabled=false`): the chart refuses
-   it beside a shared console, because anyone who reaches that Service acts as
-   its ServiceAccount without signing in. The laptop
-   `kubectl proxy --address=127.0.0.1` path stays.
+4. Remove any `ui` block from the values file: the legacy `kubectl proxy` page
+   was withdrawn in v1 (release-notes item 73) and the chart refuses `ui.*` by
+   name.
 5. Enable `api.console` in `shared` mode. Every `roles.bindings` namespace must
    be in `controller.watchNamespaces`. Set `trustedProxyCidrs` to the ingress
    controller's OWN pod range — no wider than `/16`, containing no other pod —
@@ -1128,7 +1119,7 @@ secure in that state. The refusals such a file meets, in the order to fix them:
 |---|---|
 | `api.console.mode=shared requires controller.watchNamespaces` | list the execution namespaces (steps 1–3 above) |
 | `controller.watchNamespaces includes the release namespace` | move Backups/Restores out of the release namespace and drop it from the list |
-| `api.console.mode=shared with ui.enabled=true is refused` | set `ui.enabled=false` (the laptop `kubectl proxy` path stays) |
+| `ui.* is withdrawn` | remove the `ui` block (release-notes item 73) |
 | `api.console.roles.bindings names namespace … which is not in controller.watchNamespaces` | add that namespace to the list, or remove the binding |
 | `api.console.trustedProxyCidrs names … wider than /16` (only with `requireTrustedProxy`) | narrow it to the ingress controller's own pod range |
 
@@ -1677,25 +1668,10 @@ production NetworkPolicy-enforcing CNI.
 
 ## Serving the UI
 
-The local UI serves `ui/` through a Kubernetes API proxy. The chart also
-offers an optional in-cluster UI served from the `logweir-ui` image, built
-from the same files. Its proxy uses a ServiceAccount; see the
-[chart reference](../charts/logweir/README.md#the-uis-authority) for its authority.
-
-```bash
-kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=127.0.0.1
-```
-
-Then open `http://127.0.0.1:8001/ui/`.
-
-`kubectl proxy` runs the page with the **viewer's entire cluster authority**,
-not with the roles `logweir.yaml` ships, and two flags (`--address=127.0.0.1`,
-and never `--disable-filter`) are all that keep it a local page.
-[kubernetes.md](kubernetes.md) §16, *Serving the UI*, is the authority for that
-residual, the two flags and the hardened kubeconfig that holds less; this
-document does not restate it. This page is the **legacy** serving path: the
-supported console is `logweir-api` (§5e), whose identity and roles are its own
-([quickstart.md](quickstart.md), *The supported path*).
+The UI is served by the console, `logweir-api` (§5e);
+[kubernetes.md](kubernetes.md) §16, *Serving the UI*, says how. The legacy
+`kubectl proxy` page — local, or in-cluster through the chart's `ui.*` values
+and the `logweir-ui` image — was withdrawn in v1 (release-notes item 73).
 
 ---
 

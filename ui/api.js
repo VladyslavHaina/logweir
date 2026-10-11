@@ -1,13 +1,11 @@
 // api.js -- the ONLY module in this tree that issues a network request.
 //
-// WHAT THIS MODULE IS. A Kubernetes API client, and nothing else. There is no
-// API server of its own between this page and kube-apiserver; there is no
-// database, no cache and no server-side component of any kind. The page is
-// served by `kubectl proxy --www=./ui --www-prefix=/ui/`, which serves these
-// files AND proxies the Kubernetes API on the SAME ORIGIN, attaching the
-// viewer's own kubeconfig credential to every request it forwards, server
-// side. That is the whole authentication story, and it is why nothing below
-// builds a header carrying a credential: the page has none to carry.
+// WHAT THIS MODULE IS. The client of the product API `logweir-api` serves on
+// the SAME ORIGIN as this page, at `/api/v1/...`: it answers
+// `application/problem+json`, requires `Idempotency-Key` on a durable create
+// and pages with opaque cursors. Nothing below builds a header carrying a
+// credential: the page has none to carry. (The legacy `kubectl proxy` half was
+// withdrawn in v1, PROD-17.1 C4.)
 //
 // RULE 1 -- NO EXTERNAL RESOURCE. Every identifier this module builds is
 // relative to the serving origin. `path(...)` is the only place a URL is
@@ -19,71 +17,27 @@
 // any kind is ever placed in the page, and the page stores nothing: no browser
 // storage, no cookie written here, no header carrying a secret.
 //
-// RULE 3 -- `create` ONLY, PLUS ONE UPDATE. This module exports no delete and
-// no generic patch. `patchSuspend` is the single write beyond `create`, and it
-// sends a JSON-merge patch touching only `spec.suspend`.
+// RULE 3 -- NO REMOVAL. This module exports no delete and no generic patch.
 //
-// TWO MODES, ONE MODULE, ONE CALL SITE (PLAT-18.1, decision D0 stage 6). The
-// first half above is the LEGACY mode: `kubectl proxy` in front of
-// kube-apiserver, `/apis/logweir.dev/v1alpha1/...`, and the viewer's own
-// kubeconfig credential attached server side. The second half below is the
-// CONSOLE mode: `logweir-api` serving this page and a bounded product API at
-// `/api/v1/...` on the SAME ORIGIN, answering `application/problem+json`,
-// requiring `Idempotency-Key` on a durable create and paging with opaque
-// cursors. `ui/client.js` decides which one is in front of the page, ONCE, and
+// ONE CALL SITE. Every request goes through the same one `fetch`. That is the
+// property `crates/logweir/tests/ui_lint.rs::every_api_path_is_relative` holds
+// -- one call site in all of `ui/`, on one line, whose argument every caller
+// built with `path(...)`. `ui/client.js` decides the session state ONCE, and
 // nothing in this file decides anything: it builds identifiers and reads
 // responses.
 //
-// BOTH HALVES GO THROUGH THE SAME ONE `fetch`. That is the property
-// `crates/logweir/tests/ui_lint.rs::every_api_path_is_relative` holds -- one
-// call site in all of `ui/`, on one line, whose argument every caller built
-// with `path(...)`. A second mode that opened a second call site would have
-// put the same-origin claim back out of reach of a grep, which is exactly what
-// this file exists to prevent.
-//
-// STILL NO CREDENTIAL IN THE PAGE, IN EITHER MODE. Legacy mode has none to
-// carry. Console mode uses a session COOKIE the browser attaches by itself to
-// a same-origin request; this module never reads it, never writes one, and
-// stores nothing. The only request-scoped value a caller may hand a write is
-// the synchroniser token the product API's own `/session` response carries,
-// which `ui/client.js` holds in memory for the life of the loaded page and
-// never anywhere else.
+// STILL NO CREDENTIAL IN THE PAGE. The console uses a session COOKIE the
+// browser attaches by itself to a same-origin request; this module never reads
+// it, never writes one, and stores nothing. The only request-scoped value a
+// caller may hand a write is the synchroniser token the product API's own
+// `/session` response carries, which `ui/client.js` holds in memory for the
+// life of the loaded page and never anywhere else.
 //
 // THE ONE NETWORK CALL SITE. There is exactly one call to the browser's fetch
 // API in all of `ui/`, on one line inside `request` below, and every caller
 // hands it an identifier that `path(...)` produced. A reviewer can check both
 // properties with a grep, which is the point: the same-origin claim is
 // mechanically checkable rather than asserted.
-
-/** The API group the six Logweir kinds live in. */
-export const GROUP = "logweir.dev";
-
-/** The served version of that group. */
-export const VERSION = "v1alpha1";
-
-/** The five plurals a page may WRITE. Frozen; `create` and `patchSuspend`
- *  throw a RangeError on anything else -- `trustrosters` included, which is
- *  cluster-scoped and admin-only. `path(...)` bounds the SHAPE of an
- *  identifier; this list bounds the SET OF KINDS the page may write, and
- *  without it the only thing stopping a page creating a trust roster would be
- *  a per-page source review. */
-export const WRITABLE_PLURALS = Object.freeze([
-  "kafkaclusters",
-  "backupschedules",
-  "backups",
-  "restores",
-  "approvals",
-]);
-
-// The field manager every write from this page carries, so `kubectl get -o
-// yaml` shows who wrote each field. It is appended by `create` and by nothing
-// else, and it appears exactly once in this file.
-const FIELD_MANAGER = "?fieldManager=logweir-ui";
-
-// The one plural `patchSuspend` may address. It is checked against
-// WRITABLE_PLURALS on every call like any other plural, so removing that name
-// from the allowlist disarms this write too rather than leaving it behind.
-const SUSPENDABLE_PLURAL = "backupschedules";
 
 // The scheme separator -- a colon followed by two slashes -- spelled as a
 // concatenation rather than as a literal. `every_api_path_is_relative` asserts
@@ -96,7 +50,7 @@ const SUSPENDABLE_PLURAL = "backupschedules";
 const SCHEME_SEPARATOR = ":" + "//";
 
 /** Builds a same-origin, RELATIVE identifier from path segments:
- *  `path("apis", GROUP, VERSION)` -> `"/apis/logweir.dev/v1alpha1"`.
+ *  `path("api", "v1", "session")` -> `"/api/v1/session"`.
  *
  *  Throws a TypeError naming the offending segment if a segment is not a
  *  non-empty string, carries a scheme separator, starts with a slash, or
@@ -130,66 +84,6 @@ export function path(...segments) {
   return "/" + segments.join("/");
 }
 
-/** Lists a namespaced kind. */
-export async function list(ns, plural, options) {
-  const response = await request(
-    path("apis", GROUP, VERSION, "namespaces", ns, plural),
-    readInit(options),
-  );
-  return body(response);
-}
-
-/** Reads one namespaced object by name. */
-export async function get(ns, plural, name, options) {
-  const response = await request(
-    path("apis", GROUP, VERSION, "namespaces", ns, plural, name),
-    readInit(options),
-  );
-  return body(response);
-}
-
-/** Creates one namespaced object. POST, 201 expected, carrying FIELD_MANAGER
- *  and nothing else. Refuses a plural outside WRITABLE_PLURALS before it
- *  reaches the network. */
-export async function create(ns, plural, object) {
-  assertWritable("create", plural);
-  const response = await request(
-    path("apis", GROUP, VERSION, "namespaces", ns, plural) + FIELD_MANAGER,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(object),
-    },
-  );
-  return body(response);
-}
-
-/** The one permitted update: a JSON-merge patch over a BackupSchedule that
- *  touches `spec.suspend` and no other field. The CRD's own
- *  `x-kubernetes-validations` rule seals every other field of `.spec` for every
- *  subject, cluster-admin included; this is the page's half of that. */
-export async function patchSuspend(ns, name, value) {
-  assertWritable("patchSuspend", SUSPENDABLE_PLURAL);
-  const response = await request(
-    path("apis", GROUP, VERSION, "namespaces", ns, SUSPENDABLE_PLURAL, name),
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/merge-patch+json" },
-      body: JSON.stringify({ spec: { suspend: value } }),
-    },
-  );
-  return body(response);
-}
-
-/** Lists a cluster-scoped kind -- `trustrosters`, which no page may write. */
-export async function listCluster(plural, options) {
-  const response = await request(
-    path("apis", GROUP, VERSION, plural),
-    readInit(options),
-  );
-  return body(response);
-}
-
 /** Turns a non-2xx response into an Error carrying `{status, reason, message}`
  *  -- the API server's OWN `reason` and `message`, verbatim -- and, when the
  *  Status names them, its `details` (the object's `name`, `kind` and the
@@ -219,12 +113,10 @@ export function apiError(response, text) {
       if (status.details !== null && typeof status.details === "object") {
         details = status.details;
       }
-      // A PROBLEM DOCUMENT IS READ AS ONE, NOT DUMPED (MCP-4). Something that
-      // is not kube-apiserver can answer a Kubernetes path -- the product
-      // API does, when a legacy read reaches the shared console -- and its
-      // refusal carries `detail` and a string `code` rather than `message`
-      // and `reason`. The page used to print the whole document as the
-      // message: `404 {"type":...,"title":...}`.
+      // A PROBLEM DOCUMENT IS READ AS ONE, NOT DUMPED (MCP-4): it carries
+      // `detail` and a string `code` rather than `message` and `reason`. The
+      // page used to print the whole document as the message:
+      // `404 {"type":...,"title":...}`.
       if (message.length === 0 && typeof status.detail === "string") {
         message = status.detail;
       }
@@ -294,9 +186,6 @@ export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
   // RecoveryCatalog the first request made, and two catalogs for one
   // destination are refused by the server as a duplicate.
   //
-  // THE LEGACY WRITABLE SET IS UNCHANGED. `WRITABLE_PLURALS` above still names
-  // five kinds and `recoverycatalogs` is not one of them: this page creates no
-  // custom resource against kube-apiserver for any D3 kind, in either mode.
   "catalogs",
 ]);
 
@@ -305,9 +194,9 @@ export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
  *  `ui/client.js` and never again.
  *
  *  It resolves `{ok, status, body}` instead of throwing, because the answer
- *  this page is most interested in is the REFUSAL: a plain `kubectl proxy`
- *  with its path filter answers this identifier with a refusal and a body that
- *  is not JSON, and that refusal is what legacy mode looks like from here. */
+ *  this page is most interested in may be the REFUSAL: a `401` asks for a
+ *  sign-in, and anything else that is not a session is the service not
+ *  answering. */
 export async function session(options) {
   const response = await request(path("api", "v1", "session"), readInit(options));
   const text = await response.text();
@@ -633,9 +522,8 @@ export async function consoleSchedulePolicy(ns, name, body, options) {
 /** THE ONE CLOCK THIS PAGE IS ALLOWED TO JUDGE FRESHNESS BY (D3 section 7.7).
  *
  *  The instant of the most recent answer, as the SERVER dated it -- the
- *  `logweir-api` process in console mode, the Kubernetes API server (through
- *  `kubectl proxy`) in legacy mode. Both are HTTP's own `Date` header, which
- *  every one of them sets, and both are a clock the cluster actually saw.
+ *  `logweir-api` process, through HTTP's own `Date` header: a clock the
+ *  cluster actually saw.
  *
  *  WHY NOT `Date.now()`. A keys view that compared `status.evaluatedAt` with
  *  the browser's clock would call a healthy evaluation stale on a laptop five
@@ -800,9 +688,7 @@ export function problemError(response, text) {
 
 // THE ONE NETWORK CALL SITE IN ALL OF `ui/`. Every caller above passes an
 // identifier `path(...)` returned, so every request this page makes is
-// relative to the origin that served the page -- which is the origin
-// `kubectl proxy` is already authenticating to the cluster on the viewer's
-// behalf.
+// relative to the origin that served the page.
 function request(u, init) {
   return fetch(u, init);
 }
@@ -1012,8 +898,8 @@ async function problemBody(response) {
   return parsed(response, text);
 }
 
-// The same reading for the legacy half: a 2xx that is not JSON is named
-// rather than reported as a parser's complaint about a byte.
+// A 2xx that is not JSON is named rather than reported as a parser's
+// complaint about a byte.
 function parsed(response, text) {
   try {
     return JSON.parse(text);
@@ -1047,41 +933,12 @@ function assertClusterReadable(caller, plural) {
 }
 
 // Refuses a product kind this page may not create, by name, before anything is
-// sent. The legacy half's `assertWritable` bounds the kinds a Kubernetes write
-// may name; this bounds the kinds a product write may name, and the two lists
-// are separate because the two APIs expose different sets.
+// sent.
 function assertConsoleWritable(caller, plural) {
   if (CONSOLE_WRITABLE_PLURALS.indexOf(plural) === -1) {
     throw new RangeError(
       caller + "(): " + String(plural) + " has no create route in the product API; the set " +
         "with one is " + CONSOLE_WRITABLE_PLURALS.join(", ") + ".",
-    );
-  }
-}
-
-// Reads a response, raising the API server's own error on a non-2xx.
-async function body(response) {
-  noteServerTime(response);
-  const text = await response.text();
-  if (!response.ok) {
-    throw apiError(response, text);
-  }
-  if (text.length === 0) {
-    return null;
-  }
-  return parsed(response, text);
-}
-
-// Refuses a plural the page may not write, by name, before anything is sent.
-function assertWritable(caller, plural) {
-  if (WRITABLE_PLURALS.indexOf(plural) === -1) {
-    throw new RangeError(
-      caller +
-        "(): " +
-        String(plural) +
-        " is not a kind this page may write; the writable set is " +
-        WRITABLE_PLURALS.join(", ") +
-        ". trustrosters is cluster-scoped and admin-only.",
     );
   }
 }

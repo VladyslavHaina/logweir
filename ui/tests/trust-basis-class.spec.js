@@ -116,25 +116,6 @@ test("legacy_mode_is_green_on_a_valid_only_with_no_block_or_a_current_or_histori
   judgeShapes(legacyAnswers);
 });
 
-test("a_legacy_detail_through_the_transport_gives_the_same_answer", async () => {
-  resetMode();
-  await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-  for (const [label, trust, green] of SHAPES) {
-    const cr = backupCr(trust);
-    const original = globalThis.fetch;
-    globalThis.fetch = () => Promise.resolve({
-      ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(cr)),
-    });
-    let object;
-    try {
-      object = await apiClient().get("team-a", "backups", cr.metadata.name);
-    } finally {
-      globalThis.fetch = original;
-    }
-    assert.equal(isGreen(renderBackupDetail(object)), green, label + ": legacy detail");
-  }
-});
-
 test("the_shared_valid_basis_none_fixture_is_not_green_in_legacy_mode", () => {
   // THE FIXTURE BOTH SIDES READ. `crates/weirkeeper/tests/trust_basis_class.rs`
   // `the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader`

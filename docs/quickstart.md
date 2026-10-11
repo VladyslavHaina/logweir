@@ -21,9 +21,8 @@ release, and what an upgrade requires, is [release-notes.md](release-notes.md).
 **What this path is.** The Helm chart with its managed installation identity,
 the `weirkeeper` controller, the product console (`logweir-api`, in `localAdmin`
 or `shared` mode), and saved `KafkaCluster` connections and `BackupDestination`s.
-The static page behind `kubectl proxy` is a supported **legacy** view of the same
-objects, but the destination, discovery, readiness, catalog and schedule-policy
-steps below are console-only ([kubernetes.md](kubernetes.md) §16). Each step
+The legacy static page behind `kubectl proxy` was withdrawn in v1
+(release-notes item 73). Each step
 is a shipped task with its own docker-desktop evidence; what has not been run —
 this page as one walk on a fresh install, among others — is named in the last
 section.
@@ -139,8 +138,7 @@ from a target. TLS is a checkbox on the form. **A private CA (`auth.tlsCa`) or a
 non-default Secret key (`auth.secretRef.passwordKey`) cannot be set through the
 console yet:** the product API's connection create has no field for either
 (PLAT-07.2), so the console refuses such a connection rather than create one
-without them. Create it with `kubectl` (or through `kubectl proxy`'s legacy
-mode) — set the CA once and both of the runner's TLS clients use it
+without them. Create it with `kubectl` — set the CA once and both of the runner's TLS clients use it
 ([kubernetes.md](kubernetes.md) §20) — and the console then reads it like any
 other.
 

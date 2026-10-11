@@ -55,10 +55,9 @@ A harness's exit code counts too. Anything other than 0 fails every journey read
 that suite, except where `suites.py` states why (`why_rcs`, pinned by
 `test_catalogue.py`):
 - plat10 exits 3 exactly when it records a `blocked` row, and such a row is never a pass.
-- plat12-13 and plat11-2 exit 1 when one of their journeys throws. Each records a
-  journey only after all its checks hold, and stops at the first throw, so earlier rows
-  are fully asserted.
-  - This is accepted only when their result document records their namespace cleanup.
+- plat11-2 exits 1 when one of its journeys throws. It records a journey only after
+  all its checks hold, and stops at the first throw, so earlier rows are fully asserted.
+  - This is accepted only when its result document records its namespace cleanup.
   - The failure is kept as a suite note in `summary.json`.
 
 `summary.ok` needs four things:
@@ -193,8 +192,8 @@ covers their output too.
 | `source-offline` | source offline | native: backup from an offline source; d2 `S11` | durable-resource, archive-data |
 | `cr-loss` | CR loss | d3 `catalog-records-written`, `catalog-reconstruction-after-cr-loss`; plat06 `case-e` | archive-data, evidence, durable-resource |
 | `stale-namespace-request` | stale namespace request | console: slow A never renders over B / left form writes nothing / submit after switch lands in B only | durable-resource |
-| `duplicate-submit` | duplicate submit | plat12-13 double click / lost response / restore resubmission; plat06 `case-g`; native API replay | durable-resource, evidence |
-| `old-point-selection` | old-point selection | plat12-13 older point stays selected; plat11-2 Restore is the preview byte for byte; native: the Restore names the older point, and exactly its records are restored | archive-data, durable-resource |
+| `duplicate-submit` | duplicate submit | plat06 `case-g`; native API replay (the console's double click and lost-response retry are `ui/tests` node rows since the legacy plat12-13 harness was withdrawn, release-notes item 73) | durable-resource, evidence |
+| `old-point-selection` | old-point selection | plat11-2 Restore is the preview byte for byte; native: the Restore names the older point, and exactly its records are restored | archive-data, durable-resource |
 | `selected-point-restore-and-progress` | journey: selected-point restore and durable progress | native: exact records restored; scorecard verified by `logweir drill verify` and `docs/verify_scorecard.py`; progress sampled from the CR and projected by the API | archive-data, evidence, durable-resource |
 | `scheduled-backup-restore` | journey: scheduled backup → restore | **requires: lab-refresh-8**: plat10's three rows blocked on EVIDENCE-FETCH-JOB-UNBUILT | — |
 
