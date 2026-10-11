@@ -6,5 +6,5 @@ ServiceAccount for anyone who reached its Service. The console is
 rather than ignored, so an upgrade cannot lose the page silently.
 */ -}}
 {{- if hasKey .Values "ui" -}}
-{{- fail "ui.* is withdrawn (PROD-17.1, release-notes item 73): the legacy kubectl proxy page and the logweir-ui image are gone. Remove the ui block from your values file and use the console, api.console.* (docs/install.md, \"The console\")." -}}
+{{- fail "ui.* is withdrawn (PROD-17.1, release-notes item 73): the legacy kubectl proxy page and the logweir-ui image are gone. Remove the ui block from your values file and use the console, api.console.* (docs/install.md §5e)." -}}
 {{- end -}}
