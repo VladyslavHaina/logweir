@@ -30,8 +30,9 @@
 //! just e2e-down
 //! ```
 //!
-//! On the default 3.7.1 line (`--slot 4 --profiles auth`, CI's e2e job) only
-//! the first row runs; the ignored rows need a broker that types groups.
+//! CI's e2e job runs every row but the `acl` one, on the default 4.3.1 line
+//! with `--profiles auth` (PROD-01.5a). On the legacy 3.7.1 line the rows
+//! that need typed groups say so and return (`skipped_untyped`).
 //! Each row writes what it observed to `position-evidence/<version>/<row>.json`
 //! under the stack's scratch directory (`harness::demo_dir()`).
 mod harness;
@@ -475,6 +476,24 @@ fn require_typed(broker: &Broker) {
          --kafka 4.3 (the module doc)",
         broker.version()
     );
+}
+
+/// The rows that need typed groups run by default (PROD-01.5a: the default
+/// line, 4.3.1, types them). On the legacy 3.7.1 line, which the weekly
+/// `engine-matrix` still runs the whole suite on, such a row has nothing to
+/// check (every group is excluded there, which the first row asserts): it
+/// says so on stderr and returns.
+fn skipped_untyped(broker: &Broker) -> bool {
+    if types_groups(broker) {
+        return false;
+    }
+    eprintln!(
+        "SKIPPED on Kafka {}: this row needs a broker that types groups (3.9 or 4.x); here \
+         every group is excluded GroupTypeNotCaptured (PROD-04.0 §14.1), which \
+         every_selected_group_gets_one_outcome_in_the_signed_receipt asserts",
+        broker.version()
+    );
+    true
 }
 
 // ============================================================ the pipeline
@@ -1144,10 +1163,11 @@ fn a_group_hidden_from_the_backup_principal_is_never_absent() {
 
 /// **A rebalance during the capture.** See the module doc.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn a_group_that_rebalances_during_the_capture_is_captured_active() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let n = nonce();
     let topic = format!("p041-rebalance-{n}");
     let group = format!("p041-rebalance-g-{n}");
@@ -1254,10 +1274,11 @@ fn a_group_that_rebalances_during_the_capture_is_captured_active() {
 
 /// **TI-04.1-2: a position beyond the end.** See the module doc.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn a_position_beyond_the_end_is_excluded_and_the_end_is_captured() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let n = nonce();
     let topic = format!("p041-end-{n}");
     let (beyond, at_end, within) = (
@@ -1321,10 +1342,11 @@ fn a_position_beyond_the_end_is_excluded_and_the_end_is_captured() {
 /// **Expired records, and offsets the broker no longer holds.** See the
 /// module doc.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn expired_records_and_deleted_offsets_are_never_read_as_positions() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let n = nonce();
     let (expired, other) = (format!("p041-expired-{n}"), format!("p041-other-{n}"));
     let (behind, deleted) = (format!("p041-behind-{n}"), format!("p041-deleted-{n}"));
@@ -1421,10 +1443,11 @@ fn expired_records_and_deleted_offsets_are_never_read_as_positions() {
 /// runner announces the engine step (`progress-phase=-1:engine`), which it
 /// prints after the group capture and before the engine.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn a_partition_added_during_the_capture_is_listed_not_observed() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let n = nonce();
     let topic = format!("p041-grow-{n}");
     let group = format!("p041-grow-g-{n}");
@@ -1523,10 +1546,11 @@ fn a_partition_added_during_the_capture_is_listed_not_observed() {
 
 /// **Source loss after the backup.** See the module doc.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn the_capture_is_readable_after_the_source_topic_and_group_are_gone() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let n = nonce();
     let topic = format!("p041-lost-{n}");
     let group = format!("p041-lost-g-{n}");
@@ -1601,10 +1625,11 @@ fn the_capture_is_readable_after_the_source_topic_and_group_are_gone() {
 /// **Review H1, live: the receipt stays small however many partitions the
 /// selected groups hold.** See the module doc.
 #[test]
-#[ignore = "needs a broker that types groups (3.9 or 4.x)"]
 fn a_large_selection_keeps_the_receipt_small_and_its_positions_verified() {
     let broker = default_broker();
-    require_typed(&broker);
+    if skipped_untyped(&broker) {
+        return;
+    }
     let mut measured = Vec::new();
     for (groups, topics, partitions) in [(100usize, 10usize, 11i32), (10, 20, 12)] {
         let n = nonce();

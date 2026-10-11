@@ -895,7 +895,7 @@ fn the_broker_lines_are_pinned_by_digest_and_match_the_support_matrix() {
     );
     for l in &kafka_images {
         assert_eq!(
-            *l, "image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}",
+            *l, "image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-4.3.1}}",
             "every broker image must be overridable by the pinned KAFKA_IMAGE"
         );
     }
@@ -1641,7 +1641,9 @@ fn a_slot_moves_every_host_port_and_the_default_render_does_not() {
         broker(&base)["environment"].get("CLUSTER_ID").is_none(),
         "the default broker keeps the image's own cluster id"
     );
-    assert_eq!(broker(&base)["image"], "apache/kafka:3.7.1");
+    // The default line (PROD-01.5a): `.env`'s pin, or the compose file's
+    // own default where `.env` names none (engine-matrix writes it so).
+    assert_eq!(broker(&base)["image"], "apache/kafka:4.3.1");
 
     let n = 3;
     let mut env = slot_env(n);
@@ -1737,5 +1739,122 @@ fn a_slot_moves_every_host_port_and_the_default_render_does_not() {
             ("kafka-cluster2", &c2),
         ]),
         "slot {n}'s clusters must each load slot {n}'s own id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. CI's e2e shards (FX-41): every test binary runs in exactly one.
+// ---------------------------------------------------------------------------
+
+/// The step that runs a shard: it selects exactly the shard's `tests`.
+const SHARD_RUN: &str =
+    "cargo test --locked -p e2e --features e2e --test ${{ join(matrix.tests, ' --test ') }} --";
+
+/// The e2e package's test binaries: every `e2e/tests/*.rs`, and every
+/// `e2e/tests/<dir>/main.rs` (cargo builds both kinds).
+fn e2e_test_binaries() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for entry in std::fs::read_dir(root().join("e2e/tests")).expect("e2e/tests") {
+        let path = entry.expect("a directory entry").path();
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        if path.extension().is_some_and(|e| e == "rs") || path.join("main.rs").is_file() {
+            out.insert(stem);
+        }
+    }
+    out
+}
+
+/// What is wrong with `ci.yml`'s `e2e` job against `binaries`: a binary in no
+/// shard (CI never runs it), one in two (it runs twice), a listed name that is
+/// no binary, or a run step that does not select the shard's list.
+fn shard_offences(job: &serde_yaml::Value, binaries: &BTreeSet<String>) -> Vec<String> {
+    let mut shards_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let shards = job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .cloned()
+        .unwrap_or_default();
+    for shard in &shards {
+        let id = serde_yaml::to_string(&shard["shard"]).unwrap_or_default();
+        let id = id.trim().to_string();
+        for t in shard["tests"].as_sequence().into_iter().flatten() {
+            let name = t.as_str().unwrap_or_default().to_string();
+            shards_of.entry(name).or_default().push(id.clone());
+        }
+    }
+    let mut out = Vec::new();
+    if shards.len() < 2 {
+        out.push("the e2e job is not split into shards".to_string());
+    }
+    for b in binaries {
+        match shards_of.get(b).map(Vec::len) {
+            None => out.push(format!("{b} is in no shard: CI would never run it")),
+            Some(1) => {}
+            Some(_) => out.push(format!(
+                "{b} is in shards {:?}: CI runs it twice",
+                shards_of[b]
+            )),
+        }
+    }
+    for name in shards_of.keys().filter(|n| !binaries.contains(*n)) {
+        out.push(format!("a shard lists {name}, which is no e2e test binary"));
+    }
+    let runs = job["steps"]
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["run"].as_str());
+    if !runs.into_iter().any(|r| r.starts_with(SHARD_RUN)) {
+        out.push(format!(
+            "no step runs `{SHARD_RUN}`: the lists select nothing"
+        ));
+    }
+    out
+}
+
+/// **Every e2e test binary is in exactly one shard of CI's `e2e` job**, so a
+/// new file under `e2e/tests/` cannot go silently unrun (FX-41). It runs in
+/// `check` (no feature, no Docker).
+///
+/// Negative controls, over the real job: one binary taken out of its shard
+/// fails it, and one binary listed in a second shard fails it.
+#[test]
+fn every_e2e_test_binary_is_in_exactly_one_ci_shard() {
+    let ci: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/ci.yml")).expect("ci.yml is YAML");
+    let job = &ci["jobs"]["e2e"];
+    let binaries = e2e_test_binaries();
+    assert!(binaries.len() >= 30, "found {} binaries", binaries.len());
+    let found = shard_offences(job, &binaries);
+    assert!(found.is_empty(), "CI's e2e shards: {found:#?}");
+
+    let tests = |i: usize| -> serde_yaml::Sequence {
+        job["strategy"]["matrix"]["include"][i]["tests"]
+            .as_sequence()
+            .expect("a shard lists its tests")
+            .clone()
+    };
+    let mut unassigned = job.clone();
+    let mut first = tests(0);
+    let gone = first.remove(0);
+    unassigned["strategy"]["matrix"]["include"][0]["tests"] = first.into();
+    let found = shard_offences(&unassigned, &binaries);
+    assert_eq!(
+        found,
+        [format!(
+            "{} is in no shard: CI would never run it",
+            gone.as_str().unwrap()
+        )],
+        "a binary taken out of its shard must fail the guard"
+    );
+    let mut twice = job.clone();
+    let mut second = tests(1);
+    let dup = tests(0)[0].clone();
+    second.push(dup.clone());
+    twice["strategy"]["matrix"]["include"][1]["tests"] = second.into();
+    let found = shard_offences(&twice, &binaries);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].starts_with(&format!("{} is in shards", dup.as_str().unwrap())),
+        "a binary in two shards must fail the guard: {found:?}"
     );
 }
