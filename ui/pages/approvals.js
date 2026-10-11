@@ -1402,12 +1402,14 @@ const SHA256 = /^sha256:[0-9a-f]{64}$/;
 
 /** Whether the Approve button is rendered: the SERVER offered it to this
  *  login for a PENDING request it named by a well-formed hash, the login
- *  holds the approver capability, the route agrees with the Restore, and this
- *  console takes approvals at all. Every condition is one the server checks
- *  again on the click; this decides what is DRAWN, never what is allowed. */
+ *  holds the approver capability, the route agrees with the Restore, and the
+ *  server says this console takes approvals under the namespace's policy
+ *  (`consoleApprovalAvailable`, true only for two-person in the shared
+ *  console). Every condition is one the server checks again on the click;
+ *  this decides what is DRAWN, never what is allowed. */
 export function consoleApprovalOffered(view) {
   const v = view || {};
-  if (!twoPersonPolicy(v.policy) || v.policy.consoleApprovalAvailable !== true) {
+  if ((v.policy || {}).consoleApprovalAvailable !== true) {
     return false;
   }
   if (v.restore === null || v.restore === undefined || v.maySubmit === false) {

@@ -755,7 +755,7 @@ unchanged — the controller adds five:
 | # | Check | On failure |
 |---|---|---|
 | 5 | Both destinations resolve and carry `Valid=True` for their current generation | **Hold**, `phase: Pending` with `Admitted=False`, requeued at 30 s. Not terminal: an operator still creating the destination is in the position of an approver who has not signed yet, and `Restore.spec` is immutable |
-| 6 | `spec.planBytes` parses as a restore plan (read only; the bytes are never re-emitted) | `PlanUnparseable`, terminal |
+| 6 | `spec.planBytes` parses as a restore plan (read only; the bytes are never re-emitted). The controller checks this for every `Restore` before its approval is read (check 0c), so it is not reached with a plan that does not parse | `PlanUnparseable`, terminal |
 | 7 | `plan.source.storage` is the source destination's archive location, **exact on all six fields** | `PlanDestinationMismatch`, terminal; the message names both locations and no credential |
 | 8 | `plan.evidence` is the evidence destination's evidence location | `PlanEvidenceDestinationMismatch`, terminal |
 | 9 | Both grants resolve and can be satisfied by ONE pod | `DestinationRoleNotConfigured` / `ExecutionContextConflict`, terminal |
@@ -3356,7 +3356,7 @@ the fresh-install default below, which an upgrade can never reach.
 ### The three modes, and a fresh install's default (PROD-16.1)
 
 The operator sees three modes; the internal names stay, because they are
-inside signed documents and snapshots (`logweir_core::approval_policy::OperatorMode`
+inside signed documents and snapshots (`logweir_core::approval_policy::ApprovalRoute`
 is the one mapping, `logweir.approvalPolicy.internalMode` the chart's half):
 
 | mode | internal | who approves a `Restore` |
@@ -6262,12 +6262,13 @@ the same spec exits `1` — so a UI that maps exit 3 to *"your approval does not
 match this spec"* mislabels that case every time the scratch cluster is down.
 
 The controller removes the ambiguity **at the source**. Before any pod exists
-it runs these six checks, in this order:
+it runs these seven checks, in this order:
 
 | # | Check | `reason`, and what happens |
 |---|---|---|
 | 0 | The object's own name is at most 63 characters | `NameTooLong`, terminal. Nothing is created |
 | 0b | `spec.runnerResources`, when set, is a block the controller applies (*The runner's requests and limits*, below) | `ExecutionSpecInvalid`, **terminal**, naming every refused field. Nothing is created, and the `Approval` is not read |
+| 0c | `spec.planBytes` parses as a restore plan (read once, never re-emitted) | `PlanUnparseable`, **terminal** (`ExecutionSpecInvalid` when `spec` declares a coverage or the original names, which then cannot be compared). Nothing is created, and the `Approval` is not read |
 | 1 | `spec.approvalRef` names something | `ApprovalNotReceived`, **terminal** |
 | 2 | That `Approval` exists and is `Verified=True` | `ApprovalNotVerified`, **held and retried in 30 s** |
 | 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |

@@ -17,7 +17,7 @@ use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::ResourceExt as _;
 use logweir_core::approval_policy::{
-    ApprovalMode, EffectivePolicy, OperatorMode, Requester, RestoreAuthorization,
+    ApprovalMode, ApprovalRoute, EffectivePolicy, Requester, RestoreAuthorization,
 };
 use weirkeeper::crds::approval::{Approval, ApprovalSpec, SubjectKind, SubjectRef};
 use weirkeeper::crds::restore::{
@@ -724,7 +724,7 @@ fn typed_confirmation(
 ///   served there — the confirming principal is
 ///   `urn:logweir:local-admin#admin`, and whoever can reach this console can
 ///   confirm, a residual SECURITY.md states — and `two-person` (PROD-16.2)
-///   never is ([`OperatorMode::allowed_in_local_admin`]).
+///   never is ([`ApprovalRoute::console_may_request`]).
 /// * **The console key exists** (PROD-16.1): under a bound policy the
 ///   console signs, and the managed key is written by the identity hook after
 ///   this pod starts. Until it is there, nothing is created.
@@ -767,12 +767,11 @@ fn refuse_before_create(
     // under it. Nothing below reads the policy's mode or its approver
     // signature on its own.
     let route = approval::route_of(policy)?;
-    let operator_mode = route.operator_mode();
     if !route.console_may_request(state.console_kind()) {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "Namespace {ns} is bound to approval policy {} ({operator_mode}), and this console \
+                "Namespace {ns} is bound to approval policy {} ({route}), and this console \
                  runs in localAdmin mode, whose one identity cannot be two people. Submit through \
                  the shared console. Nothing was created.",
                 policy.name
@@ -785,7 +784,7 @@ fn refuse_before_create(
             return Err(ApiError::new(
                 ProblemCode::PolicyMismatch,
                 format!(
-                    "Namespace {ns} is under approval policy {} ({operator_mode}), which the \
+                    "Namespace {ns} is under approval policy {} ({route}), which the \
                      console signs, and this console's confirmation key is not there yet: the \
                      installation's identity hook writes it once, at install. Try again in a \
                      minute; if it persists, the hook did not finish (`helm status`). Nothing was \
@@ -979,7 +978,7 @@ async fn authorize_submission(
     let Some(policy) = effective.bound() else {
         return Ok(RestoreRoutingView {
             mode: effective.mode().into(),
-            operator_mode: OperatorMode::of(effective).into(),
+            operator_mode: ApprovalRoute::of(effective),
             policy: effective.name().to_string(),
             policy_digest: None,
             legacy: true,
@@ -1013,7 +1012,7 @@ async fn authorize_submission(
     };
     let view = |doc: &RestoreAuthorization| RestoreRoutingView {
         mode: policy.mode.into(),
-        operator_mode: OperatorMode::of(effective).into(),
+        operator_mode: ApprovalRoute::of(effective),
         policy: policy.name.clone(),
         policy_digest: Some(policy.digest()),
         legacy: false,

@@ -12,10 +12,18 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH, TERMINAL_STATE_EXECUTION_SPEC_INVALID,
 };
 use weirkeeper::controllers::restore::{
-    admit, approval_subject_of, original_name_agrees, plan_approval_subject, RestoreAdmission,
-    RestoreError,
+    admit, approval_subject_of, original_name_agrees, parse_plan, RestoreAdmission, RestoreError,
 };
 use weirkeeper::crds::restore::Restore;
+
+/// The reconcile's order (PROD-17.1 B5): the one read of the plan, then the
+/// agreement check over it.
+fn agrees(
+    check: fn(&Restore, &logweir_core::spec::RestoreSpec) -> Result<(), RestoreError>,
+    restore: &Restore,
+) -> Result<(), RestoreError> {
+    parse_plan(restore).and_then(|plan| check(restore, &plan))
+}
 
 const NS: &str = "team-a";
 const NAME: &str = "rst-original";
@@ -249,7 +257,7 @@ fn the_subject_is_read_from_the_signed_document_in_both_spellings() {
         Ok(ApprovalSubject::OriginalName)
     );
     assert_eq!(
-        plan_approval_subject(&original_restore()),
+        ApprovalSubject::of_plan(&parse_plan(&original_restore()).expect("the plan parses")),
         ApprovalSubject::OriginalName
     );
 }
@@ -259,9 +267,17 @@ fn the_subject_is_read_from_the_signed_document_in_both_spellings() {
 /// one direction.
 #[test]
 fn the_declaration_must_say_what_the_plan_says() {
-    assert!(original_name_agrees(&original_restore()).is_ok());
-    assert!(original_name_agrees(&restore(&ordinary_plan(), None, "restore-")).is_ok());
-    assert!(original_name_agrees(&restore(&ordinary_plan(), Some(false), "restore-")).is_ok());
+    assert!(agrees(original_name_agrees, &original_restore()).is_ok());
+    assert!(agrees(
+        original_name_agrees,
+        &restore(&ordinary_plan(), None, "restore-")
+    )
+    .is_ok());
+    assert!(agrees(
+        original_name_agrees,
+        &restore(&ordinary_plan(), Some(false), "restore-")
+    )
+    .is_ok());
     for (label, r) in [
         (
             "an original-name plan declared ordinary",
@@ -276,7 +292,7 @@ fn the_declaration_must_say_what_the_plan_says() {
             restore("not: [a plan", Some(true), ""),
         ),
     ] {
-        match original_name_agrees(&r) {
+        match agrees(original_name_agrees, &r) {
             Err(RestoreError::Refused(state, message)) => {
                 assert_eq!(state, TERMINAL_STATE_EXECUTION_SPEC_INVALID, "{label}");
                 assert!(message.contains("originalName"), "{label}: {message}");
@@ -284,8 +300,12 @@ fn the_declaration_must_say_what_the_plan_says() {
             other => panic!("{label}: expected ExecutionSpecInvalid, got {other:?}"),
         }
     }
-    // An unparseable plan with nothing declared is the runner's to refuse.
-    assert!(original_name_agrees(&restore("not: [a plan", None, "x-")).is_ok());
+    // PROD-17.1 B5: an unparseable plan with nothing declared is no longer
+    // left to the runner; the one read of the plan refuses it by name.
+    match agrees(original_name_agrees, &restore("not: [a plan", None, "x-")) {
+        Err(RestoreError::Refused(state, _)) => assert_eq!(state, "PlanUnparseable"),
+        other => panic!("expected PlanUnparseable, got {other:?}"),
+    }
 }
 
 /// **An original-name restore requires complete verification, and the
@@ -303,9 +323,9 @@ fn a_sampled_original_name_restore_is_refused_before_any_job() {
 
     let sampled = restore(&sampled_original_plan(), Some(true), "");
     // The declaration agrees with the plan on both counts...
-    assert!(coverage_agrees(&sampled).is_ok());
+    assert!(agrees(coverage_agrees, &sampled).is_ok());
     // ... and the plan itself is what is refused.
-    match original_name_agrees(&sampled) {
+    match agrees(original_name_agrees, &sampled) {
         Err(RestoreError::Refused(state, message)) => {
             assert_eq!(state, TERMINAL_STATE_EXECUTION_SPEC_INVALID);
             assert!(
@@ -317,12 +337,12 @@ fn a_sampled_original_name_restore_is_refused_before_any_job() {
         other => panic!("expected ExecutionSpecInvalid, got {other:?}"),
     }
     let complete = original_restore();
-    assert!(coverage_agrees(&complete).is_ok());
-    assert!(original_name_agrees(&complete).is_ok());
+    assert!(agrees(coverage_agrees, &complete).is_ok());
+    assert!(agrees(original_name_agrees, &complete).is_ok());
     // CONTROL: an ordinary sampled restore is what it always was.
     let ordinary = restore(&ordinary_plan(), None, "restore-");
-    assert!(coverage_agrees(&ordinary).is_ok());
-    assert!(original_name_agrees(&ordinary).is_ok());
+    assert!(agrees(coverage_agrees, &ordinary).is_ok());
+    assert!(agrees(original_name_agrees, &ordinary).is_ok());
 }
 
 /// The original-name plan narrowed to a PARTITION SUBSET, in the one
@@ -351,8 +371,8 @@ fn a_subset_original_name_restore_is_refused_before_any_job() {
     use weirkeeper::controllers::restore::coverage_agrees;
 
     let subset = restore(&subset_original_plan(), Some(true), "");
-    assert!(coverage_agrees(&subset).is_ok());
-    match original_name_agrees(&subset) {
+    assert!(agrees(coverage_agrees, &subset).is_ok());
+    match agrees(original_name_agrees, &subset) {
         Err(RestoreError::Refused(state, message)) => {
             assert_eq!(state, TERMINAL_STATE_EXECUTION_SPEC_INVALID);
             assert!(
@@ -365,21 +385,21 @@ fn a_subset_original_name_restore_is_refused_before_any_job() {
         other => panic!("expected ExecutionSpecInvalid, got {other:?}"),
     }
     // CONTROL: the same plan without the subset.
-    assert!(original_name_agrees(&original_restore()).is_ok());
+    assert!(agrees(original_name_agrees, &original_restore()).is_ok());
     // CONTROL: whole topics from a stated window start.
     let windowed = ORIGINAL_PLAN.replace(
         "  point_in_time: \"2026-09-07T14:05:00Z\"\n",
         "  point_in_time: \"2026-09-07T13:00:00Z/2026-09-07T14:05:00Z\"\n",
     );
     assert_ne!(windowed, ORIGINAL_PLAN);
-    assert!(original_name_agrees(&restore(&windowed, Some(true), "")).is_ok());
+    assert!(agrees(original_name_agrees, &restore(&windowed, Some(true), "")).is_ok());
     // CONTROL: the subset under a prefix is PROD-11.1b's, untouched.
     let prefixed = subset_original_plan().replace(
         "    prefix: \"\"\n    original_name:\n      owners: []\n",
         "    prefix: \"restore-\"\n",
     );
     assert_ne!(prefixed, subset_original_plan());
-    assert!(original_name_agrees(&restore(&prefixed, None, "restore-")).is_ok());
+    assert!(agrees(original_name_agrees, &restore(&prefixed, None, "restore-")).is_ok());
 }
 
 /// The CRD's CEL rules keep the declaration beside the only target it

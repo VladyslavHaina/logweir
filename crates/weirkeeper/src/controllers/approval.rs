@@ -1649,20 +1649,13 @@ impl ApprovalOutcome {
                     provenance.map_or("", |p| p.mode.as_str()),
                 )
             }
-            Self::Verified(v) => {
-                let matched = if v.document_expires_at.is_some() {
-                    "subject digest"
-                } else {
-                    "plan hash"
-                };
-                format!(
-                    "the DSSE signature over spec.approvalBytes verified under {} key {} \
-                     (trustSource={}), and the recomputed {matched} matched",
-                    v.authorization_usage.as_str(),
-                    v.matched_key_id,
-                    v.trust_source
-                )
-            }
+            Self::Verified(v) => format!(
+                "the DSSE signature over spec.approvalBytes verified under {} key {} \
+                 (trustSource={}), and the recomputed plan hash matched",
+                v.authorization_usage.as_str(),
+                v.matched_key_id,
+                v.trust_source
+            ),
             Self::Refused(r) => r.to_string(),
             Self::Referent(p) => p.to_string(),
         }

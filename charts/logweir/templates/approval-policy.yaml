@@ -26,12 +26,12 @@ byte-identical to what it was, and every namespace resolves to
 `legacy-governed-v1` — today's governed approval, unchanged.
 
 PROD-16.1 — THE THREE MODES THE OPERATOR SEES, AND THE UNBOUND DEFAULT.
-`approvalPolicy.policies[].mode` may be written `confirm` (one-person
-confirmation in the console) or `strict` (a personal-key approval) beside the
-internal `Ordinary` and `Governed`; this template RENDERS THE INTERNAL NAMES
-(`logweir.approvalPolicy.internalMode`, the chart's half of the one mapping
-`logweir_core::approval_policy::OperatorMode` holds), so an image-only
-rollback reads the same document it always did. `approvalPolicy.default`
+`approvalPolicy.policies[].mode` is `confirm`, `two-person` or `strict` (the
+canonical spelling); the older `Ordinary` and `Governed` (and `Governed` with
+`approverSignature: Console`) are aliases rendering the same bytes. This
+template RENDERS THE INTERNAL NAMES (`logweir.approvalPolicy.internalMode`,
+the chart's half of `logweir_core::approval_policy::ApprovalRoute`), so an
+image-only rollback reads the same document it always did. `approvalPolicy.default`
 (`confirm` | `strict` | empty; `two-person` is not a default) is rendered
 as `defaultMode` ONLY when set: empty leaves the decision to the fresh-install
 marker, which the identity hook writes only on a fresh install with a console

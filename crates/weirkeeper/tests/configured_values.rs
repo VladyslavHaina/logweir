@@ -749,7 +749,7 @@ fn destination_backed_restore() -> Restore {
 
 async fn admit_restore_with(document: String, now: DateTime<Utc>) -> Result<(), String> {
     let (client, _r, _b) = mock_client_recording_bodies(ca_routes(document));
-    admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+    admit_restore_destinations(&destination_backed_restore(), None, &client, NS, now)
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())

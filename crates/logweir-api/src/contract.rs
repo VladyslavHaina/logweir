@@ -3856,33 +3856,6 @@ impl From<logweir_core::approval_policy::ApprovalMode> for ApprovalModeView {
     }
 }
 
-/// PROD-16.1: the approval mode in the operator's words — the one mapping is
-/// `logweir_core::approval_policy::OperatorMode`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
-pub enum OperatorModeView {
-    /// One-person confirmation in the console (internal `Ordinary`).
-    #[serde(rename = "confirm")]
-    Confirm,
-    /// Two-person approval in the console (PROD-16.2: internal `Governed`
-    /// with `approverSignature: Console`): a second person signs in to the
-    /// shared console and clicks Approve.
-    #[serde(rename = "two-person")]
-    TwoPerson,
-    /// A personal-key approval (internal `Governed`, or `legacy-governed-v1`).
-    #[serde(rename = "strict")]
-    Strict,
-}
-
-impl From<logweir_core::approval_policy::OperatorMode> for OperatorModeView {
-    fn from(mode: logweir_core::approval_policy::OperatorMode) -> Self {
-        match mode {
-            logweir_core::approval_policy::OperatorMode::Confirm => Self::Confirm,
-            logweir_core::approval_policy::OperatorMode::TwoPerson => Self::TwoPerson,
-            logweir_core::approval_policy::OperatorMode::Strict => Self::Strict,
-        }
-    }
-}
-
 /// PROD-16.1: why a namespace resolves to its policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3934,7 +3907,7 @@ pub struct RestoreRoutingView {
     /// The mode the namespace's binding requires.
     pub mode: ApprovalModeView,
     /// PROD-16.1: the same mode in the operator's words.
-    pub operator_mode: OperatorModeView,
+    pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
     /// The policy name — `legacy-governed-v1` for an unbound namespace.
     pub policy: String,
     /// The policy snapshot digest the console signed; absent for the legacy
@@ -3974,7 +3947,7 @@ pub struct ApprovalPolicyView {
     pub mode: ApprovalModeView,
     /// PROD-16.1: the same mode in the operator's words: `confirm`,
     /// `two-person` or `strict`.
-    pub operator_mode: OperatorModeView,
+    pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
     /// PROD-16.1: why the namespace resolves to this policy.
     pub basis: PolicyBasisView,
     /// `true` when the namespace resolves to `legacy-governed-v1`.
