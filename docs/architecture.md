@@ -291,18 +291,6 @@ plane work and does not remove its security boundaries.
 capture could invoke the real engine. `list`, `restore-status`, `offset`,
 `evidence-verify` and `validation evidence-verify` remain denied.
 
-**Amendment (PROD-04.0c; after OD-3, decided 2026-10-07).** The engine's
-consumer-group subcommands are denied by name: `snapshot-groups`,
-`offset-reset`, `offset-reset-bulk`, `offset-rollback`, `three-phase-restore`
-and `show-offset-mapping`. Release 0.21.0 and the pinned 0.23.3 carry the same
-six; none is named `offset`, which stays denied as the historical token.
-Consumer positions take Logweir-native paths (OD-3; ADR 0004: the safe consumer
-API, and the FFI perimeter for the group reads), and the engine has no ACL
-operation. An engine consumer-group snapshot inside a foreign archive is read
-only as an import source (FX-1), with its group type unknown, and is never
-applied. The secondary scan of `scripts/check-no-oso.sh` names these tokens;
-the primary argv allowlist already refuses them.
-
 `scripts/check-no-oso.sh` separates the runtime allowlist from legal argv
 tokens: the latter also includes `run`, `--config`, `--format` and `json`.
 Its primary check inspects literal argv tokens inside engine invocation

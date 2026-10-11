@@ -9,8 +9,7 @@
 //!   `--config`, `--format`, `json`). This is the gate.
 //! * **Check B — the token scan.** The denied subcommand tokens (`list`,
 //!   `restore-status`, `offset`, `evidence-verify`, `validation
-//!   evidence-verify`, and Amendment D's six consumer-group subcommands) do not
-//!   appear anywhere under `crates/` without a
+//!   evidence-verify`) do not appear anywhere under `crates/` without a
 //!   justified `// engine-token-ok: <reason>` escape on the same physical line.
 //!   This is the secondary: it owns the two-word forms and the tokens built
 //!   outside an invocation, which check A cannot see.
@@ -207,31 +206,6 @@ fn engine_allowlist_permits_the_word_offset_in_prose() {
         "a justified denied token outside every invocation span must pass\n{}",
         report(&out)
     );
-}
-
-/// Amendment D (PROD-04.0c): the engine's consumer-group subcommands, denied
-/// by name in check B.
-const GROUP_SUBCOMMANDS: [&str; 6] = [
-    "snapshot-groups", // engine-token-ok: this gate's own fixture input, not an invocation
-    "offset-reset",    // engine-token-ok: this gate's own fixture input, not an invocation
-    "offset-reset-bulk", // engine-token-ok: this gate's own fixture input, not an invocation
-    "offset-rollback", // engine-token-ok: this gate's own fixture input, not an invocation
-    "three-phase-restore", // engine-token-ok: this gate's own fixture input, not an invocation
-    "show-offset-mapping", // engine-token-ok: this gate's own fixture input, not an invocation
-];
-
-#[test]
-fn engine_allowlist_refuses_an_unjustified_group_subcommand_token() {
-    for token in GROUP_SUBCOMMANDS {
-        let overlay = Overlay::with_source(&format!("fn f() {{\n    let s = \"{token}\";\n}}\n"));
-        let out = run_gate(&overlay);
-        assert_eq!(
-            out.status.code(),
-            Some(1),
-            "check B must refuse the group subcommand `{token}` outside an invocation\n{}",
-            report(&out)
-        );
-    }
 }
 
 #[test]

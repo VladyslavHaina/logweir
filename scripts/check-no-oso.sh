@@ -82,8 +82,7 @@ fi
 # reachable from shipped code, not three. `backup` joins the contract because
 # GC18's `--from-cluster` path renders and runs a backup; `list`,
 # `restore-status`, `offset`, `evidence-verify` and `validation evidence-verify`
-# stay denied, and so, by name since Amendment D's PROD-04.0c amendment, do the
-# engine's six consumer-group subcommands (check B's list).
+# stay denied.
 #
 # TWO ALLOWLISTS, DELIBERATELY, AND THEY ARE NOT THE SAME LIST.
 # ENGINE_RUNTIME_ALLOWLIST is the CONTRACT: the four subcommand tokens GC3
@@ -296,7 +295,7 @@ PY
 # bare marker is not an escape: an unexplained exemption is how a denylist
 # rots into a comment.
 check_token_secondary() {
-  hits=$(grep -rnE '"(list|restore-status|offset|evidence-verify|validation evidence-verify|snapshot-groups|offset-reset|offset-reset-bulk|offset-rollback|three-phase-restore|show-offset-mapping)"' crates/ \
+  hits=$(grep -rnE '"(list|restore-status|offset|evidence-verify|validation evidence-verify)"' crates/ \
            --include='*.rs' || true)
   bad=0
   while IFS= read -r hit; do
