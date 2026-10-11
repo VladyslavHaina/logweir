@@ -1587,7 +1587,11 @@ carries the condition `RetentionReportWithdrawn=True`, reason
 RetentionPolicy`. The product API's schedule view drops
 `status.retentionReport` (the `RetentionReportView` schema is gone); the create
 and edit routes still accept `retention`, stored and ignored. The console's
-retention panel points at a RetentionPolicy. After the CRD upgrade the API
+retention panel points at a RetentionPolicy. The console's schedule create form
+and Future policy panel no longer offer `keepLast` and `keepDays`; they show
+the RetentionPolicy pointer instead, the console never sends `retention`, and
+saving the policy of a schedule that still carries `spec.retention` removes it,
+with its `RetentionReportWithdrawn` condition. After the CRD upgrade the API
 server drops a stored `status.retentionReport`.
 **Do:** nothing is required. For pruning advice on a destination, create a
 `RetentionPolicy` in `mode: Report` ([kubernetes.md](kubernetes.md) §7f).
