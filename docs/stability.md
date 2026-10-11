@@ -1290,8 +1290,8 @@ build reads host headers. A cross attempt failed on `sys/types.h` in the
 recorded 2026-09-11 trial; the native arm64 build took 182 s with cached base
 layers. These are historical measurements, not build-time guarantees.
 
-Local rebuilds change image digests. `config/manager/deployment.yaml` retains
-a local digest pin; the Helm chart uses `:latest` for the
+Local rebuilds change image digests. The runner pin in
+`crates/weirkeeper/src/job.rs` is a digest; the Helm chart uses `:latest` for the
 Logweir repositories by the owner's 2026-09-12 decision. Third-party chart
 images remain digest-pinned. See the [chart guide](../charts/logweir/README.md)
 for the pull-policy and registry consequences.
@@ -2625,7 +2625,7 @@ here.
 (`application/vnd.logweir.protection-event+json;version=1.0.0`,
 [docs/formats/protection-event.md](formats/protection-event.md)) to every configured sink. It is the
 runner-side half of PLAT-14.2: the protection controller decides what the alert says and has no way
-to send it — `config/rbac/role.yaml` gives it no Secret verb, so it cannot read a routing key, and it
+to send it — its ClusterRole gives it no Secret verb, so it cannot read a routing key, and it
 is given no HTTP egress — so delivery runs as a short Job built from the runner image, with the sink
 credentials projected into that Job and nowhere else.
 

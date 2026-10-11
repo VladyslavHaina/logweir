@@ -1661,8 +1661,8 @@ fn the_check_framework_builds_no_event_handle_before_its_grant_exists() {
         let code = code_only(&src);
         assert!(
             !code.contains("Api<Event>"),
-            "crates/weirkeeper/src/check/{name} builds an `Api<Event>`, which config/rbac/\
-             role.yaml grants nothing on and manifest_lint cannot map to a resource"
+            "crates/weirkeeper/src/check/{name} builds an `Api<Event>`, which the chart's \
+             ClusterRole grants nothing on and manifest_lint cannot map to a resource"
         );
     }
     // And the seam it exists instead of: the converter names the k8s type

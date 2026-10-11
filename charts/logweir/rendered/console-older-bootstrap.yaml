@@ -7,7 +7,7 @@
 # Source: logweir/crds/approvals.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -248,7 +248,7 @@ spec:
 # Source: logweir/crds/backupdestinations.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -747,7 +747,7 @@ spec:
 # Source: logweir/crds/backups.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -1542,7 +1542,7 @@ spec:
 # Source: logweir/crds/backupschedules.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -2247,7 +2247,7 @@ spec:
 # Source: logweir/crds/kafkaclusters.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -2517,7 +2517,7 @@ spec:
 # Source: logweir/crds/preflights.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -3076,7 +3076,7 @@ spec:
 # Source: logweir/crds/protectionpolicies.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -3730,7 +3730,7 @@ spec:
 # Source: logweir/crds/recoverycatalogs.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -4125,7 +4125,7 @@ spec:
 # Source: logweir/crds/rehearsalschedules.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -4631,7 +4631,7 @@ spec:
 # Source: logweir/crds/restores.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -5859,7 +5859,7 @@ spec:
 # Source: logweir/crds/retentionpolicies.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -6443,7 +6443,7 @@ spec:
 # Source: logweir/crds/topicdiscoveries.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -6819,7 +6819,7 @@ spec:
 # Source: logweir/crds/trustpolicies.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -7148,7 +7148,7 @@ spec:
 # Source: logweir/crds/trustrosters.yaml
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same
@@ -7558,32 +7558,30 @@ rules:
       - trustrosters
     verbs: ["get", "list", "watch"]
   # D2 W7 (PLAT-08.1): the seventh kind, in its own rule so the six-kind list
-  # the `logweir-viewer` role shares is untouched. See `config/rbac/role.yaml`.
+  # the `logweir-viewer` role shares is untouched.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
   # D2 W8 (PLAT-09.1): the eighth kind. `list`/`watch` only — the reconciler
-  # never re-reads a discovery, and every granted verb here has a caller. See
-  # `config/rbac/role.yaml`.
+  # never re-reads a discovery, and every granted verb here has a caller.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
   # D3 W8 (PLAT-15.1): the ninth kind, `list`/`watch` for the catalog
   # reconciler's own watch, plus the `get` D3 W6 needs to read the ONE catalog a
-  # `ProtectionPolicy` names. See `config/rbac/role.yaml`.
+  # `ProtectionPolicy` names.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
     verbs: ["get", "list", "watch"]
   # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
   # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
-  # look one up (D2 §6.8). See `config/rbac/role.yaml` for the NOTE FOR W11.
+  # look one up (D2 §6.8).
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
   # `create` is one `Backup` per due slot; `patch` is PLAT-05.2's history
   # migration (D1 §6.8) — a metadata-only merge patch that removes the
   # schedule's ownerReference from a terminal run. No `update`, no `delete`.
-  # See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create", "patch"]
@@ -7611,7 +7609,7 @@ rules:
   # D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule, on the two TRANSIENT
   # check kinds and nothing else. `collect_expired` in each of the two
   # reconcilers, with `DeleteParams { preconditions: { uid } }` and a
-  # per-pass cap. See `config/rbac/role.yaml`.
+  # per-pass cap.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries", "preflights"]
     verbs: ["delete"]
@@ -7635,7 +7633,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["create", "get"]
   # `patch` on the object is the compromise-revocation finalizer and nothing
-  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION). See `config/rbac/role.yaml`.
+  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
     verbs: ["list", "watch", "patch"]
@@ -7644,7 +7642,7 @@ rules:
     verbs: ["patch"]
   # PLAT-14.2 (D3 W6): the `ProtectionPolicy` reconciler's `Controller::new`
   # watch and its `Api::patch_status`. No `get` on the kind and no `update`
-  # anywhere. See `config/rbac/role.yaml`.
+  # anywhere.
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies"]
     verbs: ["list", "watch"]
@@ -7654,7 +7652,7 @@ rules:
   # PLAT-14.3 (D3 W7): the `RehearsalSchedule` reconciler's watch, its referent
   # `get` from `controllers/approval.rs`, its `Api::patch_status`, and the ONE
   # `Restore` it creates per due slot. No `delete`, no `update`, no verb on
-  # `secrets`. See `config/rbac/role.yaml`.
+  # `secrets`.
   - apiGroups: ["logweir.dev"]
     resources: ["rehearsalschedules"]
     verbs: ["get", "list", "watch"]
@@ -7668,8 +7666,7 @@ rules:
   # `Controller::new` watch, its namespace-wide `list` for the two-policies-one-
   # destination conflict check, and its `Api::patch_status`. No `get` on the
   # kind, no `update` anywhere, and no `delete` on anything: the controller
-  # creates the retention Job and does not link the code that deletes. See
-  # `config/rbac/role.yaml`.
+  # creates the retention Job and does not link the code that deletes.
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies"]
     verbs: ["list", "watch"]
@@ -7698,8 +7695,7 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
-  # The eight kinds Amendments F and G added. Read only. See
-  # `config/rbac/viewer_role.yaml`.
+  # The eight kinds Amendments F and G added. Read only.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
@@ -7761,8 +7757,8 @@ rules:
     resources: ["protectionpolicies"]
     verbs: ["update", "patch"]
   # …and flip the ONE field each of the other two leaves mutable:
-  # `spec.suspend` and `spec.syncRequest`. `patch` without `update`. See
-  # `config/rbac/operator_role.yaml`. `retentionpolicies` is NOT here — its
+  # `spec.suspend` and `spec.syncRequest`. `patch` without `update`.
+  # `retentionpolicies` is NOT here — its
   # writes are `logweir-retention-admin`'s.
   - apiGroups: ["logweir.dev"]
     resources:
@@ -8113,8 +8109,7 @@ spec:
               value: ""
             # D2 §4.4 — the installation policy. The override ships empty and
             # the namespace comes from the pod; `templates/policy.yaml` renders
-            # `weirkeeper-policy` into exactly that namespace. See
-            # `config/manager/deployment.yaml` for the whole reasoning.
+            # `weirkeeper-policy` into exactly that namespace.
             - name: LOGWEIR_POLICY_CONFIGMAP
               value: ""
             - name: LOGWEIR_INSTALLATION_NAMESPACE

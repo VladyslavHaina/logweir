@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate chart CRDs, rendering, image references, value types and the install's grants.
+# Validate chart rendering, image references, value types and the install's grants.
 # Use --write to refresh snapshots; default checks do not change tracked files.
 set -uo pipefail
 # --write explicitly refreshes committed render snapshots. Normal checks never edit files.
@@ -52,43 +52,8 @@ fi
 echo "   helm ${helm_version}"
 
 # ---------------------------------------------------------------- 1. CRDs
-# The kind count of `weirkeeper::crds::KINDS`: six from ADR 0008 Amendment A,
-# Amendment F's `BackupDestination`, `TopicDiscovery` and `Preflight`, and
-# Amendment G's `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`,
-# `RecoveryCatalog` and `RetentionPolicy`.
-EXPECTED_CRDS=14
-echo "== 1. crds/ is a byte-identical copy of config/crd/ =="
-crd_count=0
-for src in config/crd/*.yaml; do
-  base="$(basename "$src")"
-  [ "$base" = "kustomization.yaml" ] && continue
-  crd_count=$((crd_count + 1))
-  if [ ! -f "$CHART/crds/$base" ]; then
-    echo "FAIL: $CHART/crds/$base is missing (config/crd/$base exists)" >&2
-    fail=1
-    continue
-  fi
-  cmp -s "$src" "$CHART/crds/$base"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    echo "FAIL: $CHART/crds/$base is not byte-identical to $src (cmp rc=$rc). Copy it:" >&2
-    echo "      cp $src $CHART/crds/$base" >&2
-    fail=1
-  fi
-done
-for extra in "$CHART"/crds/*.yaml; do
-  base="$(basename "$extra")"
-  if [ ! -f "config/crd/$base" ]; then
-    echo "FAIL: $CHART/crds/$base has no counterpart under config/crd/ — a new kind arrives in the emitter first" >&2
-    fail=1
-  fi
-done
-# THE NUMBER IS WRITTEN DOWN ON PURPOSE. The loops above prove the two
-# directories AGREE; only a literal count proves neither of them quietly lost a
-# kind. It tracks `weirkeeper::crds::KINDS`, and changing it is a reviewable
-# diff on this line.
-[ "$crd_count" -eq "$EXPECTED_CRDS" ] || { echo "FAIL: expected $EXPECTED_CRDS CRDs under config/crd/, found $crd_count" >&2; fail=1; }
-[ "$fail" -eq 0 ] && echo "   ok: $crd_count CRDs, byte for byte"
+# Withdrawn with the `config/crd` copy (PROD-17.1 C6): `charts/logweir/crds/` is
+# the one copy, and `just crds-check` holds it to the Rust emitter.
 
 # ---------------------------------------------------------------- 2. the UI
 # THE ARM IS GONE AND SO IS WHAT IT GUARDED. Task 39 moved the page into the
@@ -138,17 +103,18 @@ values_console="$(awk '
     sub(/^    image:[[:space:]]*/, ""); sub(/[[:space:]].*$/, ""); print; exit
   }
 ' "$CHART/values.yaml")"
-# THE TREE'S REFERENCES, WHOLE — each still a digest under Global Constraint 7.
-tree_controller="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' config/manager/deployment.yaml)"
+# THE TREE'S RUNNER REFERENCE, WHOLE — still a digest under Global Constraint 7.
 tree_runner="$(grep -A1 '^pub const RUNNER_IMAGE: &str =' crates/weirkeeper/src/job.rs | sed -n 's/^[[:space:]]*"\(.*\)";$/\1/p')"
 # THE REPOSITORY HALVES, DERIVED. Never spelt in this script: a namespace change
-# in the tree must propagate to the chart without editing this gate.
-controller_repo="${tree_controller%@sha256:*}"
+# in the tree must propagate to the chart without editing this gate. The
+# controller has no digest pin in the tree since the `config/` tree went
+# (PROD-17.1 C6), so its namespace is the runner pin's, like the UI's below.
 runner_repo="${tree_runner%@sha256:*}"
-if [ -z "$controller_repo" ] || [ -z "$runner_repo" ] ||
-   [ "$controller_repo" = "$tree_controller" ] || [ "$runner_repo" = "$tree_runner" ]; then
-  echo "FAIL: could not derive the tree's repositories from its digests (controller '$tree_controller', runner '$tree_runner')" >&2
-  echo "      config/manager/deployment.yaml and crates/weirkeeper/src/job.rs must each pin <repository>@sha256:<64 hex>" >&2
+CONTROLLER_IMAGE_NAME="weirkeeper"
+controller_repo="${runner_repo%/*}/$CONTROLLER_IMAGE_NAME"
+if [ -z "$runner_repo" ] || [ "$runner_repo" = "$tree_runner" ]; then
+  echo "FAIL: could not derive the tree's repositories from the runner digest '$tree_runner'" >&2
+  echo "      crates/weirkeeper/src/job.rs must pin <repository>@sha256:<64 hex>" >&2
   fail=1
 fi
 bootstrap_test_image="$runner_repo@sha256:0000000000000000000000000000000000000000000000000000000000000000"
@@ -188,7 +154,7 @@ want_ui="$ui_repo:$LOGWEIR_TAG"
 want_console="$console_repo:$LOGWEIR_TAG"
 if [ "$values_controller" != "$want_controller" ]; then
   echo "FAIL: values.yaml controllerImage is '$values_controller'; it must be exactly '$want_controller'" >&2
-  echo "      (arm 7: the repository is config/manager/deployment.yaml's, the tag is this chart's ruling of 2026-09-12)" >&2
+  echo "      (arm 7: the namespace is the runner pin's, the name is weirkeeper, the tag is this chart's ruling of 2026-09-12)" >&2
   fail=1
 fi
 if [ "$values_runner" != "$want_runner" ]; then
@@ -1769,7 +1735,7 @@ if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
   exit 1
 fi
-echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the logweir-ui image),"
+echo "ok: charts/logweir — no copy of ui/ (the page is the logweir-ui image),"
 echo "    helm lint clean, rendered files current, every image a digest except the four Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
 echo "    flag, values.yaml names the tree's own repositories at :$LOGWEIR_TAG, and every"

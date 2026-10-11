@@ -135,7 +135,7 @@ volatile `metadata` keys dropped:
 reached `coverage: VisibleUserTopicsOnly`: D1's L-09-5 (the ACL-limited row) is the scenario that
 produces one, and W8's dynamic runs ended at their discovery deadline instead. It is the only
 place in the D1 W7 fixtures where a VALUE was not observed; the shape is the CRD's and
-`config/crd/backups.yaml` is where each field of it is declared.
+`charts/logweir/crds/backups.yaml` is where each field of it is declared.
 
 ## The D3 fixtures (`d3/`)
 

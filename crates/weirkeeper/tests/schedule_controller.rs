@@ -2674,7 +2674,7 @@ fn the_crd_states_the_missed_slot_horizon() {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("the workspace root is two levels above this crate")
-        .join("config/crd/backupschedules.yaml");
+        .join("charts/logweir/crds/backupschedules.yaml");
     let yaml = std::fs::read_to_string(&root).unwrap_or_else(|e| panic!("{}: {e}", root.display()));
     // The rendered YAML wraps long descriptions, so the assertion is on the
     // whitespace-collapsed text rather than on a line.
@@ -2690,7 +2690,7 @@ fn the_crd_states_the_missed_slot_horizon() {
     ] {
         assert!(
             flat.contains(needle),
-            "config/crd/backupschedules.yaml must state {needle:?} so `kubectl explain` does \
+            "charts/logweir/crds/backupschedules.yaml must state {needle:?} so `kubectl explain` does \
              too — re-render with `just crds` after editing crds/backup_schedule.rs"
         );
     }

@@ -46,7 +46,7 @@ Use the desired run's digests when deploying a new version.
 
 | Image | Current reference |
 |---|---|
-| Controller | `config/manager/deployment.yaml` |
+| Controller | `controllerImage` in `charts/logweir/values.yaml` (`:latest`; set a published digest) |
 | Runner | `crates/weirkeeper/src/job.rs`, constant `RUNNER_IMAGE` |
 
 Read pins from those files rather than copying historical build digests.
@@ -169,17 +169,18 @@ other Job working and makes that one exit 127, `executable file not found in
 $PATH`; `bash scripts/check-chart.sh` refuses such a tree and the image
 workflow runs the binary out of the built image before publishing it.
 
-Apply the controller overlay, then give the freshly built controller the local
-runner image explicitly. The overlay cannot rewrite a Rust constant:
+Install the chart with the author-only values, which name the local tags and
+give the controller the local runner image:
 
 ```bash
-kubectl --context docker-desktop apply --server-side -k config/overlays/local-images
-kubectl --context docker-desktop -n logweir-system set env deployment/weirkeeper \
-  LOGWEIR_RUNNER_IMAGE=logweir:check LOGWEIR_RUNNER_PULL_POLICY=Never
+helm install logweir charts/logweir -n logweir-system --create-namespace \
+  -f charts/logweir/examples/author-only.values.yaml
 ```
 
-The overlay sets `imagePullPolicy: Never`. On kind, load both local tags into
-the nodes before using them. Build the runner for the nodes' architecture.
+The values set `imagePullPolicy: Never`. On kind, load both local tags into
+the nodes before using them. Build the runner for the nodes' architecture. The
+kustomize overlay `config/overlays/local-images` was withdrawn in v1 with the
+`config/` tree ([release notes](release-notes.md), item 73).
 
 Older controllers without the environment override need the exact compiled
 runner digest present under its shipped repository name. The historical step
@@ -798,7 +799,7 @@ already-established signer through your protected secret-distribution system:
 
 ```bash
 kubectl --context docker-desktop -n <namespace> \
-  apply -f config/rbac/backup-runner-serviceaccount.yaml
+  apply -f config/samples/backup-runner-serviceaccount.yaml
 ```
 
 Runner Jobs run in the namespace of the `Backup`, `Restore` or `KafkaCluster`
@@ -820,7 +821,7 @@ account:**
 
 ```bash
 kubectl --context docker-desktop -n <namespace> \
-  apply -f config/rbac/retention-serviceaccount.yaml
+  apply -f config/samples/retention-serviceaccount.yaml
 ```
 
 Enforcement Jobs run in the namespace of the `RetentionPolicy` that produced
@@ -901,7 +902,7 @@ restore-side hold reads with it.
 gates, and all three are somewhere else: the `logweir-retention` ServiceAccount
 must exist in the namespace (chart value `retention.enabled`, which renders it
 in the release namespace and every `identity.authorizedRunnerNamespaces` entry;
-or `config/rbac/retention-serviceaccount.yaml` applied by hand — step 4), the run needs an object-store credential whose scope is the
+or `config/samples/retention-serviceaccount.yaml` applied by hand — step 4), the run needs an object-store credential whose scope is the
 policy's own prefix and never `logweir/`, and every run needs an
 administrator's `approve-plan` carrying the current `planSha256`.
 
@@ -1390,7 +1391,7 @@ helm upgrade --kube-context docker-desktop logweir charts/logweir \
   --set admissionPolicy.enabled=true \
   --set admissionPolicy.consoleServiceAccountName=logweir-api
 
-# kustomize: edit the principal first, then apply by hand
+# without the chart value: edit the principal first, then apply by hand
 kubectl --context docker-desktop apply \
   -f config/samples/console-credential-admission-policy.yaml
 ```

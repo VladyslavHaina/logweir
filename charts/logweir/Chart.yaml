@@ -5,7 +5,7 @@
 # `version` is the chart's, `appVersion` the workspace's (`Cargo.toml`), and
 # both are 0.1.0 because nothing has been released: the digests `values.yaml`
 # pins are LOCALLY BUILT measurements (Global Constraint 37,
-# `blocked: images not published`) exactly as `logweir.yaml`'s are, and a chart
+# `blocked: images not published`), and a chart
 # that installs them on a cluster with no access to `docker.io/vladyslavhaina/…` leaves
 # the controller pod in `ImagePullBackOff` — the same recorded, expected result
 # as path (a) of `docs/install.md`.
@@ -13,8 +13,8 @@
 # `kubeVersion` is Global Constraint 25's floor: the six CRDs use CEL
 # validation rules, GA at 1.29.
 #
-# `crds/` holds the six CustomResourceDefinitions as BYTE-IDENTICAL copies of
-# `config/crd/*.yaml` (`scripts/check-chart.sh` compares them with `cmp`).
+# `crds/` holds the CustomResourceDefinitions, the one checked-in copy, which
+# `just crds` writes and `just crds-check` holds to the Rust emitter.
 # Helm installs the contents of `crds/` ONCE, on `helm install`, and NEVER
 # upgrades or deletes them (Helm's own rule for that directory) — see the
 # README for how to upgrade them by hand.

@@ -43,13 +43,10 @@ file.
 One chart that installs Logweir's control plane — the only install since the
 static `logweir.yaml` bundle was withdrawn
 ([release notes](../../docs/release-notes.md), item 73) — and, optionally, its own
-object-store backend, two throwaway Kafka clusters and the UI. It is
-**derived from `config/`**, never the other way round: `scripts/check-chart.sh`
-holds the chart's CRDs byte-identical to the tree (and the page's bytes are
-held to it by `scripts/check-image-ui.sh`, against the image that serves
-them), and
-`crates/logweir/tests/chart_lint.rs` holds the rendered control plane to
-`config/`. [`docs/install.md`](../../docs/install.md) is still the single
+object-store backend, two throwaway Kafka clusters and the UI. `just
+crds-check` holds its CRDs to the Rust emitter, `scripts/check-image-ui.sh`
+holds the page's bytes to `ui/` (against the image that serves them), and
+`manifest_lint.rs` holds the rendered controller role to the code's calls. [`docs/install.md`](../../docs/install.md) is still the single
 install document; this README is the chart's own.
 
 ## What it installs
@@ -78,9 +75,8 @@ install document; this README is the chart's own.
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
-matches the same
-controller, env, security context and RBAC rules as `config/`
-(`chart_lint_default_render_agrees_with_the_install_file`).
+is held to
+the controller's calls by `manifest_lint.rs`.
 
 ## The installation policy (`checks.*`, `runs.*`, `engine.*`, `evidence.*`)
 
@@ -333,7 +329,7 @@ a `RetentionPolicy` lives with the workload it protects. It reads that list even
 when `identity.enabled` is off — the list is about where Jobs run, and only the
 signer distribution beside it is about identity. For a namespace the chart
 does not list there is a fragment,
-`config/rbac/retention-serviceaccount.yaml`, applied once per namespace exactly
+`config/samples/retention-serviceaccount.yaml`, applied once per namespace exactly
 as the runner's is (`docs/install.md` step 4).
 
 **Turning it on deletes nothing and authorises nobody to delete anything.** The
@@ -1087,12 +1083,11 @@ whose read failed for want of it is read once more
 **The chart's defaults name `controllerImage` and `runnerImage` by the `latest`
 TAG, not by a digest. That is the owner's decision of 2026-09-12**, taken after
 the trade-off below was put to them, and it is this chart's ruling alone:
-`config/manager/deployment.yaml` and
-`weirkeeper::job::RUNNER_IMAGE` still pin digests under Global Constraint 7, and
+`weirkeeper::job::RUNNER_IMAGE` still pins a digest under Global Constraint 7, and
 so do the four third-party images this chart can bring (MinIO, `mc`,
 `apache/kafka`, `kubectl`). The two repositories are the tree's own — the gate
-derives them from those two files rather than spelling them — so a namespace
-change propagates here on its own.
+derives them from the runner pin's namespace rather than spelling them — so a
+namespace change propagates here on its own.
 
 `identity.bootstrapImage` is deliberately stricter. Its short-lived container
 can read and atomically patch the retained private signer, so the value must be
@@ -1791,9 +1786,8 @@ helm upgrade logweir charts/logweir -n logweir-system
 without it every CRD that already exists is refused (`conflicts with "helm"`)
 and keeps its old schema, while an `Established` wait still passes.
 
-`charts/logweir/crds/*.yaml` is byte-identical to `config/crd/*.yaml`
-(`scripts/check-chart.sh` compares them with `cmp`), so applying either
-directory is the same act.
+`charts/logweir/crds/*.yaml` is the one copy; `just crds-check` holds it to the
+Rust emitter.
 
 ## Uninstall, and what it leaves behind
 
@@ -1819,8 +1813,9 @@ deleted by Logweir — Global Constraint 6.
 
 ## The checks that hold the chart to the tree
 
-* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): CRDs
-  byte-identical to the tree and no copy of `ui/` under the chart at all;
+* `just crds-check` (in `just gate`): `crds/` is what the Rust emitter renders.
+* `scripts/check-chart.sh` (`just chart-check`, in `just gate`): no copy of
+  `ui/` under the chart at all;
   `identity.bootstrapImage` pinned as `<runner repository>@sha256:<64 hex>`
   with the development override off, an emptied value still refused, plus
   `helm lint` for the defaults and every example as shipped;
@@ -1829,8 +1824,10 @@ deleted by Logweir — Global Constraint 6.
   `<repository>:latest` (and `:latest` on any other image is still refused),
   with the author-only render exempt by name — its whole premise is a locally
   built tag; the schema refusing `--set demoKafka.enabled=yes`; `values.yaml`
-  naming the tree's own repositories at `:latest` — `ui.image` among them, its
-  namespace derived from the runner pin.
+  naming the tree's own repositories at `:latest`, their namespace derived from
+  the runner pin; the runner image ships `logweir-retention`, the console
+  principal's grants are the adapter's both ways, and only the two allowed
+  holders may create a `TrustPolicy`.
 * `scripts/check-image-ui.sh` (`just smoke-ui`; needs a Docker daemon, so it is
   in `docs/gates.md`'s stack/cluster table rather than in `just gate`): the
   twenty-six files the `logweir-ui` image serves, sha256 for sha256 against
@@ -1841,8 +1838,7 @@ deleted by Logweir — Global Constraint 6.
   any public tag moves. The emitted compatible runner digest is what
   `identity.bootstrapImage` pins; no separate workflow or end-user hash step
   exists.
-* `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
-  `config/`; nothing optional renders under defaults; each flag renders
+* `crates/logweir/tests/chart_lint.rs`: nothing optional renders under defaults; each flag renders
   its named objects; the chart carries no copy of `ui/` and mounts no ConfigMap
   into the proxy — the page's bytes are asserted against the image instead, by
   `scripts/check-image-ui.sh`.

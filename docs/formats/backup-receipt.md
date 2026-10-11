@@ -149,7 +149,7 @@ byte-identical bytes here.
 | `covered.to_ms` | integer (int64) | **EXCLUSIVE** end of the covered range, **epoch milliseconds**. Strictly `> from_ms` — invariant 4. |
 
 The window is **half-open**: `[from_ms, to_ms)`. That is the convention
-`config/crd/backups.yaml` already documents for
+`charts/logweir/crds/backups.yaml` already documents for
 `Backup.status.windowCovered.toMs`, which Task 17 fills by copying these two
 integers, so the two documents describe one range under one rule. Task 5 shipped
 invariant 4 as `<=` and a test asserting that `from_ms == to_ms` was a legal

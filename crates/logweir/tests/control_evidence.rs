@@ -471,8 +471,8 @@ impl Doc {
             Doc::StandingAuthorization => {
                 "stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"
             }
-            Doc::RehearsalSchedule => "../config/crd/rehearsalschedules.yaml",
-            Doc::Restore => "../config/crd/restores.yaml",
+            Doc::RehearsalSchedule => "../charts/logweir/crds/rehearsalschedules.yaml",
+            Doc::Restore => "../charts/logweir/crds/restores.yaml",
         }
     }
 
@@ -542,9 +542,12 @@ impl Fields {
         );
         sets.insert(
             Doc::RehearsalSchedule,
-            crd_paths(&read("config/crd/rehearsalschedules.yaml")),
+            crd_paths(&read("charts/logweir/crds/rehearsalschedules.yaml")),
         );
-        sets.insert(Doc::Restore, crd_paths(&read("config/crd/restores.yaml")));
+        sets.insert(
+            Doc::Restore,
+            crd_paths(&read("charts/logweir/crds/restores.yaml")),
+        );
         sets.insert(
             Doc::PutReceipt,
             put_receipt_paths(&read("docs/verify-a-scorecard.md")),
@@ -1420,7 +1423,7 @@ fn a_made_up_or_misattributed_field_is_refused() {
         ),
         (
             "| A schedule cited through the operator guide. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule` |",
-            "a RehearsalSchedule citation must link its definition `../config/crd/rehearsalschedules.yaml`",
+            "a RehearsalSchedule citation must link its definition `../charts/logweir/crds/rehearsalschedules.yaml`",
         ),
     ] {
         let mutated = with_extra_row(&page, row);

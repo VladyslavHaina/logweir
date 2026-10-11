@@ -1191,7 +1191,7 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
     for literal in [
         "author-only",
         "imagePullPolicy: Never",
-        "kubectl --context docker-desktop apply --server-side -k config/overlays/local-images",
+        "-f charts/logweir/examples/author-only.values.yaml",
     ] {
         assert!(
             install.contains(literal),
@@ -1245,16 +1245,13 @@ fn install_md_distinguishes_local_images_and_registry_publication() {
         "docs/install.md carries {} digest literal(s):\n  {}\nIt must not: a locally \
          built image's digest changes on EVERY build, so a digest in prose is a \
          measurement of one build. The document names \
-         `config/manager/deployment.yaml` and `crates/weirkeeper/src/job.rs` as the \
-         places the pinned references live, and the reader reads them from the \
+         `charts/logweir/values.yaml` and `crates/weirkeeper/src/job.rs` as the \
+         places the image references live, and the reader reads them from the \
          checkout. The bare `@sha256:<digest>` placeholder is fine — it carries no hex",
         digests.len(),
         digests.join("\n  ")
     );
-    for source_of_truth in [
-        "config/manager/deployment.yaml",
-        "crates/weirkeeper/src/job.rs",
-    ] {
+    for source_of_truth in ["charts/logweir/values.yaml", "crates/weirkeeper/src/job.rs"] {
         assert!(
             install.contains(source_of_truth),
             "docs/install.md must name `{source_of_truth}` as a place the pinned image \
@@ -1349,7 +1346,7 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     // The managed and low-level paths are deliberately distinct: Helm owns
     // declared runner namespaces; identity-off installs apply the base account.
     assert!(
-        install.contains("config/rbac/backup-runner-serviceaccount.yaml"),
+        install.contains("config/samples/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
     );
     assert!(

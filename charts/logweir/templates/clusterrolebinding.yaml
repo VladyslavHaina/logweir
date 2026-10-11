@@ -1,9 +1,8 @@
 {{- /*
-Binds the `weirkeeper` ClusterRole to the `weirkeeper` ServiceAccount —
-`config/rbac/role_binding.yaml`. A ClusterRoleBinding and not a RoleBinding
-because `TrustRoster` is cluster-scoped and the controller reads it with
-`Api::all`; the subject's namespace is the release namespace, which is the one
-place the source manifest's fixed `logweir-system` becomes a parameter.
+Binds the `weirkeeper` ClusterRole to the `weirkeeper` ServiceAccount. A
+ClusterRoleBinding and not a RoleBinding because `TrustRoster` is
+cluster-scoped and the controller reads it with `Api::all`; the subject's
+namespace is the release namespace.
 
 ONLY WHEN THE CONTROLLER IS NOT SCOPED (D0 stage 5). With
 `controller.watchNamespaces` set, this binding is NOT rendered: the namespaced

@@ -3314,8 +3314,18 @@ console approvals. `just mvp-demo` and `scripts/helm-demo.sh` stay. The
 bundle's three checks moved into `scripts/check-chart.sh`: the runner image
 ships `logweir-retention`, the console principal's grants are the adapter's
 both ways, and only the two allowed holders may create a `TrustPolicy`.
-**Do:** nothing on a chart install. An install made with `kubectl apply -f
-logweir.yaml` keeps running, with no newer bundle to apply; move it to the
+The kustomize `config/` tree goes with it: `config/manager`, `config/rbac`,
+`config/overlays` and the `config/crd` copy. `charts/logweir/crds/` is the one
+CRD copy (`just crds` writes it, `just crds-check` holds it to the emitter),
+the chart's roles carry every grant `config/rbac` did (compared rule for rule,
+by default and in shared mode, before the cut), and the two per-namespace
+ServiceAccount fragments moved to `config/samples/`.
+**Do:** nothing on a chart install. An author-only install from
+`config/overlays/local-images` uses
+`-f charts/logweir/examples/author-only.values.yaml`; a script that applied
+`config/rbac/backup-runner-serviceaccount.yaml` or
+`retention-serviceaccount.yaml` applies them from `config/samples/`. An
+install made with `kubectl apply -f logweir.yaml` keeps running, with no newer bundle to apply; move it to the
 chart. Its CRDs, custom resources, namespace and Secrets stay. Remove the
 bundle's control plane, then install the chart into the same namespace
 ([install.md](install.md) (c); `identity.enabled=false` keeps the signer you
@@ -3333,8 +3343,9 @@ by hand ([the chart README](../charts/logweir/README.md), *Upgrading the CRDs by
 hand*).
 [UNVERIFIED — the move from a bundle install to the chart has not been run; PROD-14.1's clean install runs the chart path only.]
 **Scope:** the chart gate (`just chart-check`) carries the three moved checks;
-`cargo test` rows that read the bundle were removed with it, and the rows that
-read the chart and `config/` are unchanged.
+`cargo test` rows that read only the bundle or the `config/` copies were
+removed with them, and the rows that read RBAC, the controller Deployment and
+the CRDs now read the chart's render and `charts/logweir/crds/`.
 **Rollback:** check out a tree before this item to get the bundle back; no
 image changes.
 

@@ -180,8 +180,8 @@ change. On an older API server the rules are dropped rather than rejected,
 and a dropped immutability rule is worse than no rule: the object would accept
 an edit after approval and nothing would say so.
 
-The CRDs are checked in at [../config/crd/](../config/crd/) and regenerated
-with `just crds`; CI re-renders them and diffs the result, so a schema change
+The CRDs are checked in at [../charts/logweir/crds/](../charts/logweir/crds/) and
+regenerated with `just crds`; CI re-renders them and diffs the result, so a schema change
 arrives as a reviewable diff. Do not hand-edit those files.
 
 | Kind | Scope | What it is |
@@ -2283,7 +2283,7 @@ order.
 `protectionpolicies/status` — and widens one that already existed: `get` joins
 `list`/`watch` on `recoverycatalogs`, for the ONE catalog a policy names
 (narrower than the cluster-wide `list` on `configmaps` the alternative would
-need, which `config/rbac/role.yaml` refuses by name). No `get` on
+need, which the chart's `weirkeeper` ClusterRole refuses). No `get` on
 `protectionpolicies` itself — the reconciler never re-reads a policy the watcher
 handed it — no verb on `secrets`, and no `delete` on anything.
 
@@ -2531,12 +2531,12 @@ codes so that the common question is answered without following any of them.
 **Enforcement needs the retention ServiceAccount in the policy's namespace.**
 Every Job this controller builds requests `logweir-retention`. The chart renders
 it when `retention.enabled` is true, in the release namespace and every
-`identity.authorizedRunnerNamespaces` entry; on the low-level path apply
-`config/rbac/retention-serviceaccount.yaml` ([install.md](install.md) step 4).
+`identity.authorizedRunnerNamespaces` entry; elsewhere apply
+`config/samples/retention-serviceaccount.yaml` ([install.md](install.md) step 4).
 Without it an `Enforce` policy produces a Job whose pod the API server will not
 admit — fail-closed, and nothing is deleted.
 
-The controller never reads either Secret — `config/rbac/role.yaml` grants it no
+The controller never reads either Secret — its ClusterRole grants it no
 verb on `secrets` at all — and never inherits them: the reaper builds its handle
 with `AmazonS3Builder::new()` and the destination's own frozen addressing, never
 `from_env()`, so no ambient `AWS_ENDPOINT_URL` can relocate a deletion
@@ -6209,7 +6209,7 @@ and every run reports `ExecutionInputsUnverified` for its own Job:
 
 ```bash
 export LOGWEIR_CONTEXT=<production-context>
-kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/backups.yaml
+kubectl --context "$LOGWEIR_CONTEXT" apply -f charts/logweir/crds/backups.yaml
 kubectl --context "$LOGWEIR_CONTEXT" wait \
   --for=condition=Established crd/backups.logweir.dev --timeout=60s
 kubectl --context "$LOGWEIR_CONTEXT" get crd/backups.logweir.dev \
@@ -6306,7 +6306,7 @@ Three RBAC notes, because each is easy to get wrong:
 - The controller requests **no verb on `secrets`, and no `pods/exec` or
   `pods/attach`**. The runner's key reaches its pod because kubelet projects it;
   the controller never reads it and cannot start a process inside the pod that
-  holds it. `config/rbac/` carries the request; the chart carries the grant.
+  holds it. The chart's `weirkeeper` ClusterRole carries the grant.
 - **Every status write is a merge `PATCH`, and the role grants no `update`.**
   A `PUT` — `Api::replace_status` in kube — is authorised as the verb `update`
   on `<kind>/status`, which no rule in this install grants; the controller
@@ -7047,7 +7047,7 @@ export LOGWEIR_CONTEXT=<production-context>
 export LOGWEIR_NAMESPACE=<logweir-namespace>
 
 # 1. Apply the additive API schema before any new controller pod can start.
-kubectl --context "$LOGWEIR_CONTEXT" apply -f config/crd/approvals.yaml
+kubectl --context "$LOGWEIR_CONTEXT" apply -f charts/logweir/crds/approvals.yaml
 
 # 2. Wait for API discovery, then verify the provenance object and UID field.
 kubectl --context "$LOGWEIR_CONTEXT" wait \
@@ -7870,7 +7870,8 @@ Secret read, pod exec or pod attach permission, and **no `update` on
 anything**: every status write, the `Forbid` slot reservation included, is a
 merge `PATCH` whose body carries `metadata.resourceVersion` as the
 compare-and-set precondition (§10's three RBAC notes). Inspect
-[config/rbac](../config/rbac/) for the authoritative grants.
+[the chart's ClusterRole](../charts/logweir/templates/clusterrole.yaml) for the
+authoritative grants.
 
 ### The five Amendment G kinds, grant by grant
 
@@ -7980,8 +7981,8 @@ under another repository produced `ErrImageNeverPull`. Retagging resolved that
 case only when the image bytes still matched the pinned digest.
 
 BuildKit provenance changed the observed manifest-list digest even on a cached
-rebuild. Read current pins from `config/manager/deployment.yaml` and
-`crates/weirkeeper/src/job.rs`; historical build digests are not install values.
+rebuild. Read the current runner pin from `crates/weirkeeper/src/job.rs`;
+historical build digests are not install values.
 The local-image path and the registry path are documented in [install.md](install.md).
 Local builds are **author-only** and do not establish public pullability.
 
@@ -8045,7 +8046,7 @@ It is projected into the controller's own pod as environment, with
 `optional: true`:
 
 ```yaml
-# config/manager/deployment.yaml
+# charts/logweir/templates/deployment.yaml
 - name: AWS_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef: { name: logweir-evidence-ro, key: access-key-id, optional: true }
@@ -9428,10 +9429,10 @@ different settings is not an observation this controller stands behind.
 
 **Upgrade: apply the CRD, then the controller.** Helm installs CRDs from
 `crds/` but never upgrades them (§19), so apply
-`config/crd/kafkaclusters.yaml` yourself before rolling the controller:
+`charts/logweir/crds/kafkaclusters.yaml` yourself before rolling the controller:
 
 ```
-kubectl --context <ctx> apply -f config/crd/kafkaclusters.yaml
+kubectl --context <ctx> apply -f charts/logweir/crds/kafkaclusters.yaml
 kubectl --context <ctx> -n <ns> set image deployment/weirkeeper weirkeeper=<new image>
 ```
 

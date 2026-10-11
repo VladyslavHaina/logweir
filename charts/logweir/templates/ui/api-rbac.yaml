@@ -117,8 +117,7 @@ role below already carries.
 AND NO `/status` SUBRESOURCE IS NAMED, WHICH IS NOT AN OMISSION. `get` on
 `recoverycatalogs` returns the whole object, status included; the status
 subresource exists so a WRITER can be authorised separately, not so a reader
-can be denied. `config/rbac/viewer_role.yaml`'s header makes the same argument
-at length. Naming `recoverycatalogs/status` here would grant this service
+can be denied. Naming `recoverycatalogs/status` here would grant this service
 nothing it does not already have and would read, to an auditor, as though the
 console could write one.
 

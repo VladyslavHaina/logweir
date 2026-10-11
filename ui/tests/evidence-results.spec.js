@@ -46,7 +46,7 @@ test("EVIDENCE_RESULTS names Pending, the evidence-fetch Job's in-flight word", 
 });
 
 test("every result the Backup and Restore CRDs document is one the console knows", () => {
-  for (const crd of ["config/crd/backups.yaml", "config/crd/restores.yaml"]) {
+  for (const crd of ["charts/logweir/crds/backups.yaml", "charts/logweir/crds/restores.yaml"]) {
     const documented = documentedResults(crd);
     assert.ok(documented.size >= 3,
       crd + ": the result sentence was not found, so this row would pass on nothing");

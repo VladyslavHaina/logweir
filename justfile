@@ -444,14 +444,16 @@ smoke: image
     bash scripts/check-image.sh logweir:check
     cargo test -p e2e --features e2e --test check_image -- --ignored --test-threads=1
 
-# Task 15b (chain J, slot 5). Regenerate the six checked-in CRDs.
+# Task 15b (chain J, slot 5). Regenerate the checked-in CRDs.
 #
 # THE SIBLING OF `schema`, ABOVE, AND FOR THE SAME REASON. A CRD change is a
-# FORMAT change: the six files under config/crd/ are what `kubectl apply`
-# consumes, what the UI's forms are written against and what Tasks 16-24 read,
+# FORMAT change: the files under charts/logweir/crds/ are what the chart
+# installs, what the UI's forms are written against and what Tasks 16-24 read,
 # so a change to one has to appear as a diff in a pull request rather than as a
-# surprise at apply time. `.github/workflows/ci.yml`'s third drift arm renders
-# into a temporary directory and `diff -u`s these files against it, beside the
+# surprise at apply time. They are the one copy (PROD-17.1 C6);
+# `config/crd/backups.yaml` is a symlink to one of them, kept because the
+# frozen two-reader parity row reads that path. `just crds-check` renders into
+# a temporary directory and `diff -u`s these files against it, beside the
 # scorecard-schema arm that has done the same job since Phase 1.
 #
 # DELIBERATELY NOT PART OF `lint`. This recipe WRITES the tracked files, and a
@@ -464,7 +466,7 @@ smoke: image
 # `crds` and `schema` stay independent: two formats, two gates, no dependency
 # edge between them.
 crds:
-    cargo run -p weirkeeper --example emit_crds -- --out config/crd
+    cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds
 
 # Compare all emitted CRDs without requiring a clean working tree.
 crds-check:
@@ -475,10 +477,10 @@ crds-check:
     trap 'rm -rf "$tmp"' EXIT
     cargo run --locked -p weirkeeper --example emit_crds -- --out "$tmp"
     for crd in "$tmp"/*.yaml; do
-      diff -u "config/crd/$(basename "$crd")" "$crd"
+      diff -u "charts/logweir/crds/$(basename "$crd")" "$crd"
     done
-    for crd in config/crd/*.yaml; do
-      [ "$(basename "$crd")" = kustomization.yaml ] || test -f "$tmp/$(basename "$crd")"
+    for crd in charts/logweir/crds/*.yaml; do
+      test -f "$tmp/$(basename "$crd")"
     done
 
 # Lint the chart and verify CRD copies, rendered manifests and image references.

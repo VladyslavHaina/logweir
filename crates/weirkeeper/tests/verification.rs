@@ -1413,6 +1413,16 @@ async fn no_evidence_credential_starts_and_reports_not_attempted() {
     assert_eq!(verified["message"], json!(UNVERIFIED));
 }
 
+/// The controller Deployment the chart's default render ships.
+fn shipped_deployment() -> Value {
+    use serde::Deserialize as _;
+    let text = read("charts/logweir/rendered/default.yaml");
+    let found = serde_yaml::Deserializer::from_str(&text)
+        .filter_map(|de| Value::deserialize(de).ok())
+        .find(|d| d["kind"] == json!("Deployment") && d["metadata"]["name"] == json!("weirkeeper"));
+    found.expect("the default render carries the weirkeeper Deployment")
+}
+
 /// The shipped Deployment projects `logweir-evidence-ro` with
 /// `optional: true`, so a cluster without that Secret STARTS.
 ///
@@ -1421,12 +1431,7 @@ async fn no_evidence_credential_starts_and_reports_not_attempted() {
 /// actually be made.
 #[test]
 fn the_deployment_marks_the_evidence_secret_optional() {
-    let text = read("config/manager/deployment.yaml");
-    let doc: Value = {
-        // The file leads with a comment block and one `---`.
-        let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
-        serde_yaml::from_str(body).expect("the Deployment is YAML")
-    };
+    let doc = shipped_deployment();
     let env = doc
         .pointer("/spec/template/spec/containers/0/env")
         .and_then(Value::as_array)
@@ -1495,12 +1500,7 @@ fn the_deployment_marks_the_evidence_secret_optional() {
 /// key id — are lost.
 #[test]
 fn the_deployment_sets_a_log_level() {
-    let text = read("config/manager/deployment.yaml");
-    let doc: Value = {
-        // The file leads with a comment block and one `---`.
-        let body = text.split_once("\n---\n").map_or(text.as_str(), |(_, b)| b);
-        serde_yaml::from_str(body).expect("the Deployment is YAML")
-    };
+    let doc = shipped_deployment();
     let containers = doc
         .pointer("/spec/template/spec/containers")
         .and_then(Value::as_array)
@@ -4330,7 +4330,10 @@ fn the_signed_printer_column_never_prints_valid_for_an_unread_verdict() {
     assert_eq!(block["result"], json!("NotAttempted"));
 
     let object = json!({"status": {"evidence": {"verification": block}}});
-    for crd in ["config/crd/backups.yaml", "config/crd/restores.yaml"] {
+    for crd in [
+        "charts/logweir/crds/backups.yaml",
+        "charts/logweir/crds/restores.yaml",
+    ] {
         let doc: Value = serde_yaml::from_str(&read(crd)).expect("the shipped CRD parses");
         let columns = doc["spec"]["versions"][0]["additionalPrinterColumns"]
             .as_array()

@@ -855,7 +855,7 @@ fn node_at<'a>(
 pub struct Rendered {
     /// The kind, as it appears in [`KINDS`].
     pub kind: &'static str,
-    /// The file this document is checked in as, under `config/crd/`.
+    /// The file this document is checked in as, under `charts/logweir/crds/`.
     pub file_name: &'static str,
     /// The YAML text, header comment included.
     pub yaml: String,
@@ -865,7 +865,7 @@ pub struct Rendered {
 const HEADER: &str = "\
 # GENERATED FILE — do not edit by hand.
 #
-# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out config/crd`
+# Rendered by `cargo run -p weirkeeper --example emit_crds -- --out charts/logweir/crds`
 # (`just crds`) from `crates/weirkeeper/src/crds/`. The CI `crd drift` arm
 # re-renders into a temporary directory and `diff -u`s these files against it,
 # so a hand edit here is a red build rather than a silent divergence — the same

@@ -503,8 +503,8 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
     assert_eq!(MEMORY_LIMIT_FLOOR, "32Mi");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for crd in [
-        "config/crd/restores.yaml",
-        "config/crd/rehearsalschedules.yaml",
+        "charts/logweir/crds/restores.yaml",
+        "charts/logweir/crds/rehearsalschedules.yaml",
     ] {
         let text = std::fs::read_to_string(root.join(crd)).expect("the generated CRD");
         for needle in [
@@ -532,9 +532,11 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
             );
         }
     }
-    let restores = std::fs::read_to_string(root.join("config/crd/restores.yaml")).expect("the CRD");
+    let restores =
+        std::fs::read_to_string(root.join("charts/logweir/crds/restores.yaml")).expect("the CRD");
     assert!(restores.contains("ExecutionSpecInvalid"));
     let schedules =
-        std::fs::read_to_string(root.join("config/crd/rehearsalschedules.yaml")).expect("the CRD");
+        std::fs::read_to_string(root.join("charts/logweir/crds/rehearsalschedules.yaml"))
+            .expect("the CRD");
     assert!(schedules.contains("skips the slot as `AuthorizationInvalid`"));
 }

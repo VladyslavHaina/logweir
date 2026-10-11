@@ -107,7 +107,8 @@ Six recipes run separately because they need Docker, Kafka or Kubernetes:
 `e2e`, `smoke`, `smoke-weirkeeper`, `mvp-demo`, `pitr`, and `helm-demo`. Run those relevant to your change. Release readiness
 is tracked in [the release checklist](docs/tag1-checklist.md).
 
-Changes to `charts/logweir/`, `config/crd/` or `ui/` need `just chart-check`.
+Changes to `charts/logweir/` or `ui/` need `just chart-check`; a CRD change
+also needs `just crds` and `just crds-check`.
 The chart's CRDs and shipped UI assets are intentionally copied into the chart
 so it can be distributed independently. Keep those copies byte-identical to
 the canonical files and commit regenerated `charts/logweir/rendered/` output.

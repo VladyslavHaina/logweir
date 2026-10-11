@@ -2,7 +2,7 @@
 The chart's helpers. Every namespaced object renders into `.Release.Namespace`
 and nothing here spells a namespace by name; the release name prefixes only
 the OPTIONAL components (`<release>-minio`, `<release>-kafka-*`, `<release>-ui`),
-while the control plane keeps the names `logweir.yaml` ships — `weirkeeper`,
+while the control plane keeps fixed names — `weirkeeper`,
 `logweir-viewer`/`-operator`/`-approver`, `logweir-runner-egress`,
 `logweir-runner` — because those are cluster-scoped or code-named constants and
 Global Constraint 30 allows one controller per cluster anyway.

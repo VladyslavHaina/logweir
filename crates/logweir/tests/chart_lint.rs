@@ -15,23 +15,11 @@
 //!
 //! # The properties
 //!
-//! * The chart's `crds/` and `ui/` are byte-identical copies of `config/crd/`
-//!   and the twenty-six shipped UI files — asserted here with `std::fs` and in
-//!   the script with `cmp`, so the property holds whichever runs first.
-//! * The DEFAULT render and `config/` agree on the substance of the
-//!   control plane: the Deployment's args, every other env name and value,
-//!   both security contexts, the resources and the ServiceAccount; the same
-//!   four ClusterRoles with the same rules as sets; the same six CRD names.
-//!   **Exactly FOUR differences are permitted**, all of them the chart's image
-//!   ruling of 2026-09-12 (`values.yaml`'s header): the controller image (the
-//!   SAME repository, at `:latest` rather than at `config/`'s digest —
-//!   asserted, not assumed), `imagePullPolicy` (`Always` rather than
-//!   `IfNotPresent`), and the two envs `LOGWEIR_RUNNER_IMAGE` (Task 33) and
-//!   `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), which `config/` does not set
-//!   at all. The runner reference is read from `crates/weirkeeper/src/job.rs`
-//!   and never spelt here (`crd_shape.rs::the_runner_image_is_named_once`
-//!   counts that string under `crates/`). There is no namespace-derived env in
-//!   the shipped Deployment, so nothing else is excepted.
+//! * The chart is the one install and `crds/` the one copy of the CRDs, held
+//!   to the Rust emitter by `just crds-check` (PROD-17.1 C6). The runner
+//!   reference is read from `crates/weirkeeper/src/job.rs` and never spelt
+//!   here (`crd_shape.rs::the_runner_image_is_named_once` counts that string
+//!   under `crates/`); the other Logweir repositories share its namespace.
 //! * `demoKafka`, `minio` and `ui` render NOTHING under the defaults and under
 //!   the minimal example, and render their named objects under the demo
 //!   example: two StatefulSets and a seed Job whose command names the marker
@@ -60,11 +48,6 @@ fn repo() -> PathBuf {
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("could not read {}: {e}", p.display()))
-}
-
-fn read_bytes(rel: &str) -> Vec<u8> {
-    let p = repo().join(rel);
-    std::fs::read(&p).unwrap_or_else(|e| panic!("could not read {}: {e}", p.display()))
 }
 
 /// Every regular file under `rel`, as paths relative to the repository root,
@@ -140,27 +123,6 @@ fn docs_in(rel: &str) -> Vec<Doc> {
 
 fn rendered(name: &str) -> Vec<Doc> {
     docs_in(&format!("charts/logweir/rendered/{name}.yaml"))
-}
-
-/// The documents `config/kustomization.yaml` installs: each base's own
-/// `kustomization.yaml` names its files, and no transformer rewrites them.
-fn config_install() -> Vec<Doc> {
-    let resources = |rel: &str| -> Vec<String> {
-        let k: Value = serde_yaml::from_str(&read(rel)).expect("a kustomization parses");
-        k["resources"]
-            .as_sequence()
-            .unwrap_or_else(|| panic!("{rel} lists no resources"))
-            .iter()
-            .map(|r| r.as_str().expect("a resource is a path").to_string())
-            .collect()
-    };
-    let mut out = Vec::new();
-    for base in resources("config/kustomization.yaml") {
-        for file in resources(&format!("config/{base}/kustomization.yaml")) {
-            out.extend(docs_in(&format!("config/{base}/{file}")));
-        }
-    }
-    out
 }
 
 fn find<'a>(docs: &'a [Doc], kind: &str, name: &str) -> &'a Doc {
@@ -260,23 +222,12 @@ fn runner_image_constant() -> String {
     rest[open + 1..open + 1 + close].to_string()
 }
 
-/// The controller image `config/manager/deployment.yaml` pins, read out of that
-/// file so this test never spells a registry path.
-fn controller_image_pin() -> String {
-    read("config/manager/deployment.yaml")
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("image: "))
-        .expect("config/manager/deployment.yaml names the controller image")
-        .trim()
-        .to_string()
-}
-
 /// The REPOSITORY half of a `<repository>@sha256:<64 hex>` reference.
 ///
-/// DERIVED AND NEVER SPELT. Both Logweir repositories come from the tree —
-/// `config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE` — so a
-/// namespace change there propagates into the chart without editing this file,
-/// and `crd_shape.rs::the_runner_image_is_named_once` keeps finding the runner
+/// DERIVED AND NEVER SPELT. The Logweir repositories come from the tree's one
+/// digest pin, `weirkeeper::job::RUNNER_IMAGE`, so a namespace change there
+/// propagates into the chart without editing this file, and
+/// `crd_shape.rs::the_runner_image_is_named_once` keeps finding the runner
 /// reference named exactly once under `crates/`.
 fn repository_of(reference: &str) -> String {
     let (repository, _) = reference.split_once("@sha256:").unwrap_or_else(|| {
@@ -291,8 +242,8 @@ fn repository_of(reference: &str) -> String {
 
 /// The tag this chart's defaults give the two Logweir images — **the owner's
 /// decision of 2026-09-12**, in place of the digests these values carried
-/// before it. `config/` and `weirkeeper::job::RUNNER_IMAGE` are
-/// untouched by that ruling and still pin digests (Global Constraint 7).
+/// before it. `weirkeeper::job::RUNNER_IMAGE` is untouched by that ruling and
+/// still pins a digest (Global Constraint 7).
 const LOGWEIR_TAG: &str = "latest";
 
 fn is_digest_reference(reference: &str) -> bool {
@@ -383,14 +334,14 @@ fn no_chart_workflow_or_dockerfile_counts_the_old_page_set() {
 }
 
 /// **Chart gap G5: the controller has a liveness and a readiness probe, in
-/// every render and in the install file, and both are the binary's own
+/// every render, and both are the binary's own
 /// `--probe` against its loopback listener.** An `httpGet` probe would need a
 /// pod-IP listener; a `tcpSocket` probe would pass while the runtime is wedged
 /// (the kernel accepts the connection) — only an answered request proves the
 /// runtime turns, which is what `weirkeeper --probe` asks for.
 #[test]
 fn chart_lint_the_controller_is_probed_by_its_own_binary() {
-    let mut deployments: Vec<(String, Value)> = files_under("charts/logweir/rendered")
+    let deployments: Vec<(String, Value)> = files_under("charts/logweir/rendered")
         .into_iter()
         .map(|p| {
             let docs = docs_in(&p);
@@ -398,11 +349,6 @@ fn chart_lint_the_controller_is_probed_by_its_own_binary() {
             (p, container(doc).clone())
         })
         .collect();
-    let install = docs_in("config/manager/deployment.yaml");
-    deployments.push((
-        "config/manager/deployment.yaml".to_string(),
-        container(find(&install, "Deployment", "weirkeeper")).clone(),
-    ));
     assert!(deployments.len() >= 11, "the walk has gone quiet");
     for (source, c) in deployments {
         for (probe, word) in [("livenessProbe", "live"), ("readinessProbe", "ready")] {
@@ -447,11 +393,23 @@ fn chart_lint_the_controller_is_probed_by_its_own_binary() {
 /// helper for an object nothing renders is a helper the next reader has to
 /// prove is dead, and `cargo clippy -- -D warnings` refuses it anyway.
 fn ui_repository() -> String {
+    logweir_repository("logweir-ui")
+}
+
+/// **The controller image's repository, DERIVED** the same way, with the name
+/// `weirkeeper`: the controller has no digest pin in the tree since the
+/// `config/` tree went (PROD-17.1 C6).
+fn controller_repository() -> String {
+    logweir_repository("weirkeeper")
+}
+
+/// A Logweir image's repository: the runner pin's namespace and `name`.
+fn logweir_repository(name: &str) -> String {
     let runner = repository_of(&runner_image_constant());
     let (namespace, _) = runner
         .rsplit_once('/')
         .unwrap_or_else(|| panic!("RUNNER_IMAGE's repository `{runner}` names no namespace"));
-    format!("{namespace}/logweir-ui")
+    format!("{namespace}/{name}")
 }
 
 /// **The console image's repository, DERIVED** — the same namespace with the
@@ -463,51 +421,10 @@ fn ui_repository() -> String {
 /// `charts/logweir/README.md`. Derived, not spelt, for the reason
 /// `ui_repository` gives above: a namespace move must carry all four.
 fn console_repository() -> String {
-    let runner = repository_of(&runner_image_constant());
-    let (namespace, _) = runner
-        .rsplit_once('/')
-        .unwrap_or_else(|| panic!("RUNNER_IMAGE's repository `{runner}` names no namespace"));
-    format!("{namespace}/logweir-console")
+    logweir_repository("logweir-console")
 }
 
 // ============================================================== the copies
-
-/// **The chart's `crds/` is a byte-identical copy of `config/crd/`** — every
-/// file, no extra, no missing one. The script says the same with `cmp`.
-#[test]
-fn chart_lint_crds_are_byte_identical_copies() {
-    let source: BTreeSet<String> = files_under("config/crd")
-        .into_iter()
-        .filter(|p| p.ends_with(".yaml") && !p.ends_with("kustomization.yaml"))
-        .map(|p| p.trim_start_matches("config/crd/").to_string())
-        .collect();
-    let copy: BTreeSet<String> = files_under("charts/logweir/crds")
-        .into_iter()
-        .map(|p| p.trim_start_matches("charts/logweir/crds/").to_string())
-        .collect();
-    // THE NUMBER IS WRITTEN DOWN, and this crate cannot read
-    // `weirkeeper::crds::KINDS` to derive it — `logweir` declares no edge to
-    // `weirkeeper` and adding one to satisfy a test would change the
-    // dependency graph the one-signer and pure-core gates police. ADR 0008
-    // records fourteen kinds: Amendment A's six, Amendment F's three and
-    // Amendment G's five.
-    assert_eq!(
-        14,
-        source.len(),
-        "config/crd holds fourteen CRDs: {source:?}"
-    );
-    assert_eq!(
-        source, copy,
-        "charts/logweir/crds must hold exactly the files config/crd holds"
-    );
-    for name in &source {
-        assert_eq!(
-            read_bytes(&format!("config/crd/{name}")),
-            read_bytes(&format!("charts/logweir/crds/{name}")),
-            "charts/logweir/crds/{name} is not byte-identical to config/crd/{name}; copy it"
-        );
-    }
-}
 
 /// **The chart carries NO copy of the UI.** The proxy serves the page from the
 /// `logweir-ui` IMAGE; its only ConfigMap mount is the non-secret namespace
@@ -607,242 +524,15 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
 
 // ================================================ the default render vs config/
 
-/// **The default render and `config/` agree on the substance of the
-/// control plane.** Args, every other env name and value, both security
-/// contexts, the resources, the ServiceAccount, the four ClusterRoles' rules as
-/// sets, the ClusterRoleBinding's subject, the six CRD names, the
-/// NetworkPolicy's spec.
-///
-/// **EXACTLY FOUR DIFFERENCES ARE PERMITTED, and each is asserted rather than
-/// skipped:**
-///
-/// 1. the controller IMAGE — the SAME REPOSITORY as `config/`'s, at
-///    `:latest` rather than at its digest (the owner's decision of 2026-09-12);
-///    the repository equality is the assertion that keeps this from becoming
-///    "any image at all";
-/// 2. `imagePullPolicy` — `Always` here, `IfNotPresent` there, because a
-///    mutable tag under a policy that does not refresh is a pod running
-///    whatever its node cached first;
-/// 3. `LOGWEIR_RUNNER_IMAGE` (Task 33), whose default is the repository of
-///    `job::RUNNER_IMAGE` at the same tag;
-/// 4. `LOGWEIR_RUNNER_PULL_POLICY` (Task 37), whose default is `Always` for the
-///    same reason as (2).
-///
-/// Everything else — securityContexts, args, the other envs, the SA, the
-/// resources, the rules, the CRD specs, the NetworkPolicy — is still identical.
-#[test]
-fn chart_lint_default_render_agrees_with_the_install_file() {
-    let chart = rendered("default");
-    let install = config_install();
-
-    // The Deployment.
-    let cd = find(&chart, "Deployment", "weirkeeper");
-    let id = find(&install, "Deployment", "weirkeeper");
-    let cc = container(cd);
-    let ic = container(id);
-    // DIFFERENCE 1: the same REPOSITORY, a different reference.
-    let install_image = ic["image"].as_str().expect("config/ names an image");
-    let chart_image = cc["image"].as_str().expect("the render names an image");
-    assert!(
-        is_digest_reference(install_image),
-        "config/ still pins the controller image BY DIGEST (Global Constraint 7): \
-         {install_image}"
-    );
-    assert_eq!(
-        format!("{}:{LOGWEIR_TAG}", repository_of(install_image)),
-        chart_image,
-        "the default render's controller image must be config/'s REPOSITORY at \
-         `:{LOGWEIR_TAG}` — the same repository, the chart's own tag ruling"
-    );
-    assert!(
-        !is_digest_reference(chart_image),
-        "and it is a tag, not a digest: {chart_image}"
-    );
-    // DIFFERENCE 2: the pull policy follows the tag.
-    assert_eq!(
-        Some("IfNotPresent"),
-        ic["imagePullPolicy"].as_str(),
-        "config/'s pull policy, unchanged by this chart's ruling"
-    );
-    assert_eq!(
-        Some("Always"),
-        cc["imagePullPolicy"].as_str(),
-        "the chart's default follows its `:latest` image — Kubernetes' own default for a tag"
-    );
-    assert_eq!(ic["args"], cc["args"], "args differ");
-    assert_eq!(
-        ic["securityContext"], cc["securityContext"],
-        "the container securityContext differs"
-    );
-    assert_eq!(ic["resources"], cc["resources"], "resources differ");
-    assert_eq!(
-        pod_spec(id)["securityContext"],
-        pod_spec(cd)["securityContext"],
-        "the pod securityContext differs"
-    );
-    assert_eq!(
-        pod_spec(id)["serviceAccountName"],
-        pod_spec(cd)["serviceAccountName"],
-        "serviceAccountName differs"
-    );
-    assert!(
-        pod_spec(cd).get("automountServiceAccountToken").is_none(),
-        "the controller PodSpec is the one automount exemption and must leave the field unset, as the source does"
-    );
-    let mut chart_env = env_of(cc);
-    let install_env = env_of(ic);
-    // DIFFERENCE 3: the runner image env, at the same repository and tag.
-    let runner = chart_env
-        .remove("LOGWEIR_RUNNER_IMAGE")
-        .expect("the chart renders LOGWEIR_RUNNER_IMAGE (Task 33's override) on the Deployment");
-    assert_eq!(
-        Some(format!(
-            "{}:{LOGWEIR_TAG}",
-            repository_of(&runner_image_constant())
-        ))
-        .as_deref(),
-        runner["value"].as_str(),
-        "LOGWEIR_RUNNER_IMAGE's default must be weirkeeper::job::RUNNER_IMAGE's REPOSITORY at \
-         `:{LOGWEIR_TAG}`"
-    );
-    // DIFFERENCE 4: the runner pull policy env, which follows that tag.
-    let runner_policy = chart_env.remove("LOGWEIR_RUNNER_PULL_POLICY").expect(
-        "the chart renders LOGWEIR_RUNNER_PULL_POLICY (Task 37's override) on the Deployment — \
-         a runner image named by tag under a policy that never pulls is a Job no kubelet starts",
-    );
-    assert_eq!(
-        Some("Always"),
-        runner_policy["value"].as_str(),
-        "and its default is `Always`, for the same reason the controller's is"
-    );
-    assert_eq!(
-        install_env, chart_env,
-        "the Deployment's env differs between config/ and the default render \
-         (LOGWEIR_RUNNER_IMAGE and LOGWEIR_RUNNER_PULL_POLICY are the two permitted extras, \
-         already removed)"
-    );
-
-    // The four ClusterRoles, as sets of rules.
-    for role in [
-        "weirkeeper",
-        "logweir-viewer",
-        "logweir-operator",
-        "logweir-approver",
-    ] {
-        assert_eq!(
-            rules_of(find(&install, "ClusterRole", role)),
-            rules_of(find(&chart, "ClusterRole", role)),
-            "ClusterRole {role}'s rules differ from config/'s"
-        );
-    }
-    let mut chart_roles = names_of(&chart, "ClusterRole");
-    assert!(
-        chart_roles.remove("logweir-identity-singleton"),
-        "managed Helm must carry the authority-free singleton marker"
-    );
-    // PROD-16.1 fix round: the default render carries NO trust grant (no
-    // console, and the bootstrap feature off until the re-pin; review M2 and
-    // `chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege`).
-    assert!(
-        !chart_roles.contains("logweir-identity-trust"),
-        "the default render must not carry the fresh-install trust grant"
-    );
-    assert_eq!(
-        names_of(&install, "ClusterRole"),
-        chart_roles,
-        "apart from the managed identity's singleton, ClusterRoles must match config/"
-    );
-
-    // The ClusterRoleBinding binds the same role to the same ServiceAccount.
-    let icrb = find(&install, "ClusterRoleBinding", "weirkeeper");
-    let ccrb = find(&chart, "ClusterRoleBinding", "weirkeeper");
-    assert_eq!(icrb.value["roleRef"], ccrb.value["roleRef"]);
-    assert_eq!(
-        icrb.value["subjects"][0]["name"], ccrb.value["subjects"][0]["name"],
-        "the bound ServiceAccount differs"
-    );
-    assert_eq!(
-        Some("logweir-system"),
-        ccrb.value["subjects"][0]["namespace"].as_str(),
-        "rendered with -n logweir-system, the subject's namespace is the release namespace"
-    );
-
-    // Every CRD, by name, and byte-for-byte the same documents.
-    assert_eq!(
-        names_of(&install, "CustomResourceDefinition"),
-        names_of(&chart, "CustomResourceDefinition"),
-        "the CRD names differ"
-    );
-    assert_eq!(14, names_of(&chart, "CustomResourceDefinition").len());
-    for name in names_of(&chart, "CustomResourceDefinition") {
-        assert_eq!(
-            find(&install, "CustomResourceDefinition", &name).value["spec"],
-            find(&chart, "CustomResourceDefinition", &name).value["spec"],
-            "CRD {name}'s spec differs"
-        );
-    }
-
-    // The NetworkPolicy and the controller/runner ServiceAccounts. The
-    // identity bootstrap account is asserted separately with its narrow Role.
-    let base_policy = &find(&install, "NetworkPolicy", "logweir-runner-egress").value["spec"];
-    let mut managed_policy =
-        find(&chart, "NetworkPolicy", "logweir-runner-egress").value["spec"].clone();
-    managed_policy["podSelector"]["matchExpressions"]
-        .as_sequence_mut()
-        .expect("managed policy expressions")
-        .retain(|expression| expression["key"].as_str() != Some("logweir.dev/identity-authority"));
-    assert_eq!(
-        base_policy, &managed_policy,
-        "the Helm policy may only add the identity-authority exclusion; the low-level manifest runs no bootstrap hook"
-    );
-    let runner_sa = find(&chart, "ServiceAccount", "logweir-runner");
-    assert_eq!(
-        Some(false),
-        runner_sa.value["automountServiceAccountToken"].as_bool(),
-        "the runner ServiceAccount sets automountServiceAccountToken: false"
-    );
-    find(&chart, "ServiceAccount", "weirkeeper");
-
-    // The chart additionally carries PLAT-02.1's retained identity objects,
-    // namespaced Role/Binding and short-lived hook Job. Every other kind still
-    // agrees with the base install file.
-    let mut chart_kinds: BTreeSet<String> = chart.iter().map(|d| d.kind.clone()).collect();
-    let install_kinds: BTreeSet<String> = install
-        .iter()
-        .map(|d| d.kind.clone())
-        .filter(|k| k != "Namespace")
-        .collect();
-    chart_kinds.remove("Namespace");
-    let mut expected_kinds = install_kinds;
-    expected_kinds.extend(
-        ["Secret", "ConfigMap", "Role", "RoleBinding", "Job"]
-            .into_iter()
-            .map(str::to_string),
-    );
-    assert_eq!(expected_kinds, chart_kinds, "the only new default-render kinds are PLAT-02.1's retained identity objects and bootstrap resources");
-    // Every namespaced object landed in the release namespace.
-    for d in &chart {
-        if let Some(ns) = d.value["metadata"]["namespace"].as_str() {
-            assert_eq!(
-                "logweir-system",
-                ns,
-                "{}/{} rendered into {ns}, not the release namespace",
-                d.kind,
-                d.name()
-            );
-        }
-    }
-}
-
 /// **`values.yaml` names the tree's own REPOSITORIES at `latest`, and every
 /// other image value is a digest with its provenance beside it.**
 ///
 /// THE OWNER'S DECISION OF 2026-09-12, and the whole of what changed. These two
 /// values named digests until that day; they now name the repository half of
-/// the tree's own two pins, followed by `:latest`. The repositories are DERIVED
-/// from `config/manager/deployment.yaml` and `weirkeeper::job::RUNNER_IMAGE`,
-/// never spelt here, so a namespace change in the tree propagates and a digest
-/// written back into either value is a red.
+/// the tree's runner pin and its namespace, followed by `:latest`. The
+/// repositories are DERIVED from `weirkeeper::job::RUNNER_IMAGE`, never spelt
+/// here, so a namespace change in the tree propagates and a digest written back
+/// into either value is a red.
 ///
 /// THE FOUR THIRD-PARTY IMAGES ARE UNTOUCHED: MinIO, mc, apache/kafka and
 /// kubectl are still digests, and still carry the resolution command and the
@@ -853,12 +543,12 @@ fn chart_lint_default_render_agrees_with_the_install_file() {
 fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     let values: Value =
         serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
-    let controller_repo = repository_of(&controller_image_pin());
+    let controller_repo = controller_repository();
     let runner_repo = repository_of(&runner_image_constant());
     assert_eq!(
         Some(format!("{controller_repo}:{LOGWEIR_TAG}")).as_deref(),
         values["controllerImage"].as_str(),
-        "values.yaml controllerImage must be config/manager/deployment.yaml's REPOSITORY at \
+        "values.yaml controllerImage must be `<the runner pin's namespace>/weirkeeper` at \
          `:{LOGWEIR_TAG}` — the repository so a namespace change propagates, the tag because the \
          owner decided on 2026-09-12 that this chart's defaults name a tag"
     );
@@ -892,13 +582,8 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
         );
     }
     // THE TREE ITSELF IS STILL PINNED BY DIGEST. Global Constraint 7 governs
-    // `config/` and the Rust constant, and this ruling does not
-    // reach them — `repository_of` above would have panicked otherwise, and this
-    // says so out loud.
-    assert!(
-        is_digest_reference(&controller_image_pin()),
-        "config/manager/deployment.yaml still pins the controller image BY DIGEST (GC7)"
-    );
+    // the Rust constant, and this ruling does not reach it — `repository_of`
+    // above would have panicked otherwise, and this says so out loud.
     assert!(
         is_digest_reference(&runner_image_constant()),
         "weirkeeper::job::RUNNER_IMAGE is still a digest (GC7)"
@@ -2486,7 +2171,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
                     !r.contains('/'),
                     "{}: names the subresource `{r}`. A reader gets `status` from the object \
                      itself; naming `/status` grants nothing and reads, to an auditor, as \
-                     though this service could write one (`config/rbac/viewer_role.yaml`)",
+                     though this service could write one",
                     doc.name()
                 );
             }
@@ -3075,11 +2760,11 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
         "only {} rendered variants were found; the walk has gone quiet: {renders:?}",
         renders.len()
     );
-    let controller_role = docs_in("config/rbac/role.yaml");
+    let controller_role = rendered("default");
     let controller_grants = grant_atoms(find(&controller_role, "ClusterRole", "weirkeeper"));
     assert!(
         controller_grants.len() >= 30,
-        "config/rbac/role.yaml's weirkeeper role flattened to {} grants",
+        "the default render's weirkeeper role flattened to {} grants",
         controller_grants.len()
     );
     let mut api_variants = 0usize;
@@ -3132,7 +2817,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
              spends the grant",
         );
 
-        // THE CONTROLLER ACCOUNT. Its role is `config/rbac/role.yaml`'s,
+        // THE CONTROLLER ACCOUNT. Its role is the default render's,
         // which `manifest_lint` holds call for call; this row holds what is
         // BOUND to it to that role and nothing more.
         let watched = string_list(&values["controller"]["watchNamespaces"]);
@@ -3168,7 +2853,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             "weirkeeper",
             &want,
             &reached,
-            "The controller holds `config/rbac/role.yaml`'s weirkeeper role — cluster-wide, or \
+            "The controller holds the weirkeeper role — cluster-wide, or \
              per watched namespace when `controller.watchNamespaces` is set — and nothing else",
         );
         // FX-11: EVERY JOB-OWNING RECONCILER READS ITS JOBS' `FailedCreate`
@@ -4181,14 +3866,14 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
     // one are not pointing at nothing. It carries no namespace, exactly as
     // `backup-runner-serviceaccount.yaml` does not, because a hard-coded one
     // would be wrong in every namespace an enforcement Job actually runs in.
-    let fragment = read("config/rbac/retention-serviceaccount.yaml");
+    let fragment = read("config/samples/retention-serviceaccount.yaml");
     for needle in [
         "name: logweir-retention",
         "automountServiceAccountToken: false",
     ] {
         assert!(
             fragment.contains(needle),
-            "config/rbac/retention-serviceaccount.yaml must carry `{needle}`"
+            "config/samples/retention-serviceaccount.yaml must carry `{needle}`"
         );
     }
     assert!(
@@ -4197,15 +3882,7 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
          lives in, and a hard-coded one would be wrong everywhere"
     );
     assert!(
-        !read("config/rbac/kustomization.yaml").contains("retention-serviceaccount.yaml\n  -")
-            && !read("config/rbac/kustomization.yaml")
-                .lines()
-                .any(|l| l.trim() == "- retention-serviceaccount.yaml"),
-        "the fragment must NOT be listed in config/rbac/kustomization.yaml: installing it with \
-         the base would create the account in the one namespace no enforcement Job runs in"
-    );
-    assert!(
-        read("docs/install.md").contains("config/rbac/retention-serviceaccount.yaml"),
+        read("docs/install.md").contains("config/samples/retention-serviceaccount.yaml"),
         "docs/install.md step 4 must name the fragment; before fix round 1 both this template's \
          header and install.md pointed at a step that covered `logweir-runner` only"
     );
@@ -4333,7 +4010,7 @@ fn chart_lint_every_rendered_image_is_a_digest_except_the_three_logweir_images_a
     // ones at :latest". The COUNT moved, and the count lives in this list,
     // which is derived from the tree rather than spelt.
     let logweir_repos = [
-        repository_of(&controller_image_pin()),
+        controller_repository(),
         repository_of(&runner_image_constant()),
         ui_repository(),
         console_repository(),
@@ -5051,19 +4728,6 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
     }
     // IT IS NOT IN THE INSTALL, and it cannot be: a ValidatingAdmissionPolicy
     // applied to a 1.29 cluster is rejected with `no matches for kind`.
-    let root: Value = serde_yaml::from_str(&read("config/kustomization.yaml"))
-        .expect("the install root's kustomization parses");
-    let resources: Vec<String> = root["resources"]
-        .as_sequence()
-        .expect("a resources list")
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    assert!(
-        !resources.iter().any(|r| r.contains("samples")),
-        "config/samples/ is reachable from no kustomization; the install root names \
-         {resources:?}"
-    );
     assert!(
         !std::path::Path::new(&repo().join("config/samples/kustomization.yaml")).exists(),
         "config/samples/ has no kustomization of its own either"
@@ -5078,7 +4742,6 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
 fn chart_lint_the_gate_script_carries_every_arm() {
     let script = read("scripts/check-chart.sh");
     for needle in [
-        "cmp -s \"$src\" \"$CHART/crds/$base\"",
         // TASK 39. Arm 2 was `cmp -s "$src" "$CHART/ui/$rel"` — the byte-copy
         // loop over the chart's duplicate of `ui/`. The directory is gone, the
         // loop with it, and what the arm asserts now is that the copy has not
@@ -5095,11 +4758,10 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "--set \"$flag=yes\"",
         "HELM_MIN_MAJOR=4",
         "crates/weirkeeper/src/job.rs",
-        "config/manager/deployment.yaml",
         // Task 37: the tag is a named constant, the two repositories are
         // DERIVED from the tree, and arm 5 reads them.
         "LOGWEIR_TAG=\"latest\"",
-        "controller_repo=\"${tree_controller%@sha256:*}\"",
+        "controller_repo=\"${runner_repo%/*}/$CONTROLLER_IMAGE_NAME\"",
         "runner_repo=\"${tree_runner%@sha256:*}\"",
         "$controller_repo:$LOGWEIR_TAG",
         "$runner_repo:$LOGWEIR_TAG",
@@ -6138,8 +5800,8 @@ fn chart_lint_image_pull_secrets_reach_both_service_accounts() {
 
 /// **`environment` is a label on every object the chart renders, and nothing
 /// else.** The six CRDs are the one exception and not an omission: Helm copies
-/// `crds/` verbatim and never templates it, which `check-chart.sh` holds
-/// byte-identical to `config/crd/`.
+/// `crds/` verbatim and never templates it, which `just crds-check` holds to
+/// the Rust emitter.
 #[test]
 fn chart_lint_the_environment_label_is_on_every_rendered_object() {
     let example: Value = serde_yaml::from_str(&read("charts/logweir/examples/msk.values.yaml"))
