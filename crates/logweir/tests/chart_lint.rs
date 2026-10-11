@@ -522,7 +522,33 @@ fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_con
     );
 }
 
-// ================================================ the default render vs config/
+// ================================================ the default render
+
+/// **The default render keeps the runner account tokenless and every namespaced
+/// object in the release namespace.** The last two arms of the removed
+/// comparison with `config/` (PROD-17.1 C6), which no other row asserts.
+#[test]
+fn chart_lint_default_render_keeps_the_runner_tokenless_and_one_namespace() {
+    let chart = rendered("default");
+    let runner_sa = find(&chart, "ServiceAccount", "logweir-runner");
+    assert_eq!(
+        Some(false),
+        runner_sa.value["automountServiceAccountToken"].as_bool(),
+        "the runner ServiceAccount sets automountServiceAccountToken: false"
+    );
+    // Every namespaced object landed in the release namespace.
+    for d in &chart {
+        if let Some(ns) = d.value["metadata"]["namespace"].as_str() {
+            assert_eq!(
+                "logweir-system",
+                ns,
+                "{}/{} rendered into {ns}, not the release namespace",
+                d.kind,
+                d.name()
+            );
+        }
+    }
+}
 
 /// **`values.yaml` names the tree's own REPOSITORIES at `latest`, and every
 /// other image value is a digest with its provenance beside it.**
@@ -3568,7 +3594,7 @@ fn chart_lint_the_console_mode_has_no_default_and_only_shared_is_exposed() {
 ///   and requiring its trusted proxy.
 ///
 /// And the default render keeps the cluster-wide binding and renders no
-/// variable (the install file comparison holds that byte for byte).
+/// variable.
 ///
 /// MUTANT: render the `weirkeeper` ClusterRoleBinding unconditionally, bind the
 /// release namespace, or widen `weirkeeper-cluster-scope` with a namespaced
