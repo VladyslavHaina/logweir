@@ -3346,6 +3346,14 @@ fn execute_with_validated_approval(
         c.spec.target.default_replication_factor,
         &mut topic_preflight,
     )?;
+    // **FX-44: a run that fails from here on tears down what it created**,
+    // by phase 9's rule, and names what it left. Every error return below
+    // that is not a signed `NotPass` (whose path runs phase 9) goes through it.
+    let created = topic_preflight.topics_created.clone();
+    let failed = |e: DrillError| -> DrillError {
+        teardown_after_failure(c, run_id, deleter, &admitted.topic_mapping, &created);
+        e
+    };
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
@@ -3400,7 +3408,8 @@ fn execute_with_validated_approval(
             // `None` for the same reason as the phase-5 branch, with one extra
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
-            let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
+            let signed =
+                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(&failed)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -3425,7 +3434,7 @@ fn execute_with_validated_approval(
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(failed(e)),
     };
     // Every config key Logweir rendered that the engine dropped, from both
     // readbacks. Phase 5's were recorded above; phase 6's arrive here.
@@ -3456,7 +3465,8 @@ fn execute_with_validated_approval(
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
         )
-    })?;
+    })
+    .map_err(&failed)?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
@@ -3508,7 +3518,8 @@ fn execute_with_validated_approval(
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
-    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))?;
+    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
+        .map_err(&failed)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
@@ -3645,6 +3656,8 @@ fn teardown(
                 "{msg}"
             );
         }
+        // FX-44: and the line the controller copies to `status.teardown`.
+        phase9_teardown::print_left(&a.topics_failed);
         // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
         // The attestation is what the controller fetches, verifies with
         // `PAYLOAD_TYPE_TEARDOWN` and copies into `status.teardown`; a key
@@ -3673,6 +3686,66 @@ fn teardown(
                 p.notes = notes;
             }
         }
+    }
+}
+
+/// **FX-44: the teardown of a run that FAILED after its creation step.**
+///
+/// Only the topics this run created (`created`, phase 0's `topics_created`)
+/// are handed to [`phase9_teardown::remove`], by phase 9's own rule: deleted
+/// in `scratch` mode under `teardown: delete`, never in `newTopic` mode, never
+/// under an original name. What it removed is logged; what it could not is a
+/// WARN naming each topic (and the grant, for an authorization refusal) and
+/// the `teardown-failed=` line. Nothing is signed or written to the store:
+/// this path (exit 1, 3 or 4) signs nothing, and still does not.
+fn teardown_after_failure(
+    c: &Ctx,
+    run_id: &str,
+    deleter: &dyn TopicDeleter,
+    mapping: &BTreeMap<String, String>,
+    created: &[String],
+) {
+    let ours: BTreeMap<String, String> = mapping
+        .iter()
+        .filter(|(_, target)| created.contains(target))
+        .map(|(s, t)| (s.clone(), t.clone()))
+        .collect();
+    if ours.is_empty() {
+        return;
+    }
+    let (mode, policy) = (c.spec.target.mode, c.spec.target.teardown.as_str());
+    let (deleted, failed) = phase9_teardown::remove(deleter, &ours, policy, mode);
+    if !deleted.is_empty() {
+        tracing::info!(
+            run_id = %run_id,
+            topics = %deleted.join(","),
+            "the restore failed after it created its target topics; teardown removed {}: {}",
+            deleted.len(),
+            deleted.join(", ")
+        );
+    }
+    if let Some(msg) = phase9_teardown::left_warning(&failed) {
+        tracing::warn!(run_id = %run_id, topics = %failed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(","), count = failed.len(), "{msg}");
+    }
+    phase9_teardown::print_left(&failed);
+    // Not attempted: a `newTopic` restore's topics, or `teardown: keep`.
+    let kept: Vec<&str> = ours
+        .values()
+        .filter(|t| !deleted.contains(t) && !failed.iter().any(|(n, _)| n == *t))
+        .map(String::as_str)
+        .collect();
+    if !kept.is_empty() {
+        tracing::warn!(
+            run_id = %run_id,
+            topics = %kept.join(","),
+            "the restore failed after it created {}; they are left in place ({})",
+            kept.join(", "),
+            if mode == logweir_core::spec::TargetMode::NewTopic {
+                "a newTopic restore never deletes the topics it created"
+            } else {
+                "target.teardown is keep"
+            }
+        );
     }
 }
 

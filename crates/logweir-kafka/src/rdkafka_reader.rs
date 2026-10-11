@@ -1216,6 +1216,14 @@ pub fn is_topic_already_exists(error: &str) -> bool {
     error == rdkafka::types::RDKafkaErrorCode::TopicAlreadyExists.to_string()
 }
 
+/// **FX-44.** Whether a per-topic `delete_topics` failure is the broker's
+/// `TOPIC_AUTHORIZATION_FAILED`: the principal lacks `Delete` on that topic.
+/// Compared against the code's own rendering, as [`is_topic_already_exists`].
+#[must_use]
+pub fn is_topic_authorization_failed(error: &str) -> bool {
+    error == rdkafka::types::RDKafkaErrorCode::TopicAuthorizationFailed.to_string()
+}
+
 impl TopicCreator for RdKafkaReader {
     /// **Guard G-TS.** One `rdkafka::admin::NewTopic` per `NewTopicSpec`, with
     /// `.set(k, v)` called for each entry of `configs` IN ORDER.
@@ -2006,5 +2014,27 @@ mod tests {
                 .map(String::as_str),
             Some("LogAppendTime")
         );
+    }
+
+    /// **FX-44.** The per-topic answer a broker gives a delete the principal
+    /// may not make is named as such, and no other answer is.
+    #[test]
+    fn a_topic_authorization_refusal_is_told_from_other_delete_failures() {
+        use rdkafka::types::RDKafkaErrorCode as Code;
+        assert_eq!(
+            Code::TopicAuthorizationFailed.to_string(),
+            "Broker: Topic authorization failed"
+        );
+        assert!(super::is_topic_authorization_failed(
+            &Code::TopicAuthorizationFailed.to_string()
+        ));
+        for other in [
+            Code::TopicDeletionDisabled,
+            Code::UnknownTopicOrPartition,
+            Code::ClusterAuthorizationFailed,
+            Code::RequestTimedOut,
+        ] {
+            assert!(!super::is_topic_authorization_failed(&other.to_string()));
+        }
     }
 }
