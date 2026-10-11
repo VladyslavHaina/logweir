@@ -3971,7 +3971,9 @@ struct MarkerScan {
 /// selected partitions' segments that the window overlaps (the engine's own
 /// rule, `ReplaySelection::segment_overlaps`) AND in every segment after the
 /// window's end: a marker there closes a transaction that can have records in
-/// the window. Segments wholly before the window's start are skipped. Each is
+/// the window. Segments whose last record is before the window's start are
+/// skipped (out-of-order timestamps can put a closing marker there:
+/// `docs/stability.md` lists it as not detected). Each is
 /// streamed through the bounded `kbak::scan_segment` (one stored segment and a
 /// few hundred KiB held at a time).
 ///

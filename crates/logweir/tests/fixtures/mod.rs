@@ -930,6 +930,11 @@ pub enum Drill {
     /// the store does not hold or that are not KBAK segments: the run is not
     /// refused, and its scorecard says the check could not read them.
     HoldsUnreadableSegmentsAfterTheWindow,
+    /// **PROD-01.1a (review R-f).** `StatesAWindowStart`, with a segment
+    /// whose last record is an hour BEFORE the stated start holding an abort
+    /// marker: neither the engine nor the marker check reads it, so the run
+    /// is not refused.
+    HoldsAMarkerBeforeAStatedStart,
 }
 
 /// **PROD-01.1a.** The fixture segment's records: one data record and, for
@@ -1482,7 +1487,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::StatesAPartitionSelection => format!(
             "restore:\n  point_in_time: \"../{FIXTURE_WINDOW_END}\"\n  partitions:\n    orders: [0]\n"
         ),
-        Drill::StatesAWindowStart => {
+        Drill::StatesAWindowStart | Drill::HoldsAMarkerBeforeAStatedStart => {
             format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_START}/{FIXTURE_WINDOW_END}\"\n")
         }
         Drill::HoldsTransactionMarkersAndAllowsThem => {
@@ -1652,6 +1657,17 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         facts.topics[0].partitions[0]
             .segments
             .push(after_window(0, key, &bytes));
+    }
+    if shape == Drill::HoldsAMarkerBeforeAStatedStart {
+        let ts = ts(FIXTURE_WINDOW_START).timestamp_millis() - 3_600_000;
+        let mut abort = archived_records(Drill::HoldsTransactionMarkers, ts)[2].clone();
+        abort.offset = FIXTURE_WINDOW_RECORDS;
+        let bytes = kbak_segment(&[abort]);
+        let key = "logweir/fixture-archive/orders/0/before-start.kbak";
+        archive.put_create_only(key, &bytes).unwrap();
+        let mut seg = after_window(0, key, &bytes);
+        (seg.start_timestamp, seg.end_timestamp, seg.uploaded_at) = (ts, ts, ts);
+        facts.topics[0].partitions[0].segments.push(seg);
     }
     if shape == Drill::HoldsUnreadableSegmentsAfterTheWindow {
         let absent = "logweir/fixture-archive/orders/0/after-absent.kbak";
@@ -1857,6 +1873,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         | Drill::HoldsAnUnreadableSegment
         | Drill::HoldsAMarkerAfterTheWindow
         | Drill::HoldsUnreadableSegmentsAfterTheWindow
+        | Drill::HoldsAMarkerBeforeAStatedStart
         | Drill::LeavesATopicBehind => {}
     }
 

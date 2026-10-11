@@ -2872,14 +2872,16 @@ restored segment once more before the engine runs, and a point-in-time restore
 of an old window also reads the archive's tail after it. It reads the shape only,
 so a record of your own with that shape is counted too. A transaction open at
 backup time whose marker is not archived, a transaction opened after the backup
-began, one whose marker is in an unreadable segment after the window, and a
-marker of another encoding version are not detected
+began, one whose marker is in an unreadable segment after the window, one whose
+marker is in a segment whose last record is before a stated window start, and
+a marker of another encoding version are not detected
 ([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
 **Do:** nothing, unless you restore transactional topics (Kafka Streams or
 Connect exactly-once, Flink): to restore one as it is, add
 `restore.allow_transaction_markers: true` to its plan and approve the changed
 plan. A `RehearsalSchedule` cannot state the field, so its slots over such an
-archive are refused and `lastFailed.reason` names the refusal.
+archive are refused and `lastFailed.reason` names the refusal; a standing
+authorization never admits a plan that states it.
 **Scope:** the shape predicate on hand-built records (a marker of each type,
 a user record of the same shape, a 7-byte value and a non-zero key prefix
 not caught); the whole run over doubles, refused in both target modes with no

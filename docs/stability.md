@@ -1376,8 +1376,8 @@ markers and five aborted or open-transaction records came back as data, and the 
 
 Since PROD-01.1a, before it creates anything on the target, a restore reads the selected
 partitions' segments that its window overlaps and every segment after the window's end (a marker
-there can close a transaction with records in the window; segments wholly before the window's
-start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
+there can close a transaction with records in the window; segments whose last record is before
+the window's start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
 `x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
 or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
 message names the topics, the partitions and the count. To restore such an archive as it is, state
@@ -1385,7 +1385,9 @@ message names the topics, the partitions and the count. To restore such an archi
 changed plan needs a new approval. Under the override the check is skipped, and the signed
 scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
 cannot state the override, so its slots over such an archive are refused and its
-`lastFailed.reason` names the refusal. A segment in the window that the check cannot decode refuses
+`lastFailed.reason` names the refusal, nor does a standing authorization: a `Restore` under
+`spec.authorization` whose plan states the override is refused as outside the signed scope, because
+no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
 the run with `GuardRefused`. A segment after the window that the store does not hold or the check
 cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
 output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
@@ -1399,7 +1401,9 @@ with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, a
 past it. These cases are not detected, and their records are still restored as data: a
 transaction open at backup time whose marker is not in the archive, a transaction opened after the
 backup began, a transaction whose marker is in a segment after the window that could not be read
-(the note above says so), and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
+(the note above says so), a transaction whose marker is in a segment whose last record is before a
+stated window start (out-of-order timestamps put it there, and the engine skips that segment too),
+and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
 
 ### Recovery-point selection uses segment first and last timestamps
 

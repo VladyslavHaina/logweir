@@ -2841,3 +2841,23 @@ fn segments_after_the_window_the_check_cannot_read_are_noted_not_refused() {
         sc.sample.coverage_note
     );
 }
+
+/// **PROD-01.1a (review R-f).** A segment whose last record is before the
+/// plan's stated window start is read by neither the engine nor the marker
+/// check, so its abort marker does not refuse the run. The control is
+/// `a_marker_after_the_window_still_refuses_the_restore` (the same marker
+/// after the window, refused).
+///
+/// KILLS: the before-start filter removed (the run is refused).
+#[test]
+fn a_marker_before_a_stated_start_is_not_read() {
+    let f = fixtures::orchestrator_fixture(Drill::HoldsAMarkerBeforeAStatedStart);
+    execute_with(&f.args, &f.run_id, &f.ctx).expect("not refused");
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert!(
+        !sc.sample.coverage_note.contains("transaction-marker"),
+        "{}",
+        sc.sample.coverage_note
+    );
+}
