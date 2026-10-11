@@ -3,78 +3,46 @@
 // hash and the two names the next two creates will use.
 //
 // THE BYTES ARE THE PRODUCT OF THIS PAGE. `../plan.js` renders the runner's
-// own document, this page shows it, hashes it and submits it -- and between
-// the `<pre>` a viewer reads and the string `create` sends there is no
-// transformation of any kind. Not a parse, not a re-emit, not a normalise, not
-// a trim. The sha256 on screen is the sha256 the controller recomputes only if
-// those are the same bytes, and "nearly the same bytes" is a different
-// document with a different hash that `logweir drill approve` would sign
-// instead.
+// own document; this page shows it, hashes it and submits it with no
+// transformation in between (no parse, re-emit, normalise or trim). The
+// controller recomputes the on-screen sha256 only over the same bytes.
 //
 // TWO NAMES, MINTED BEFORE EITHER CREATE. `Restore.spec.approvalRef` and
-// `Approval.spec.subjectRef` name each other and both specs are CEL-immutable
-// (`self == oldSelf`, spec section 3.2), so neither reference can be filled in
-// afterwards and two peer "create" buttons with no stated order cannot produce
-// a working pair. So: mint both names from the plan bytes, create the
-// `Restore` FIRST with `spec.approvalRef.name` set to an approval that does
-// not exist yet, and let the reconciler requeue at 30 s on
-// `ApprovalNotVerified` until it does (spec section 7 amendment 4; Task 20's
-// requeue). The same suffix on both is what lets an operator read the pair off a
-// `kubectl get` without a join.
+// `Approval.spec.subjectRef` name each other and both specs are immutable, so
+// both names are minted from the plan bytes, the `Restore` is created FIRST
+// naming an approval that does not exist yet, and the reconciler requeues on
+// `ApprovalNotVerified` until it does. The shared suffix pairs them in
+// `kubectl get`.
 //
-// AND NO KEY IS EVER SEEN HERE. This page does not mint an approval, does not
-// generate a keypair, does not upload or proxy one, and offers no "Approve"
-// button that produces a signature (Global Constraint 28). It prints the exact
-// command an approver runs on their own machine, and the approvals page takes
-// the two documents that command wrote.
+// AND NO KEY IS EVER SEEN HERE. This page mints no approval, generates or
+// proxies no keypair and offers no button that produces a signature. It prints
+// the command an approver runs on their own machine.
 //
 // EDITING IS CREATING. `Restore.spec` is immutable, so there is no in-place
 // edit: "edit" prefills a NEW draft, whose bytes hash differently, and the
 // page says so above the form.
 //
-// ONE CHOSEN RECOVERY POINT (PLAT-11.1). This page no longer picks a Backup
-// for you. A recovery point is chosen -- from a history row, from a schedule
-// card, or from this page's own selector -- and travels in the route as
-// `#/restore?ns=<ns>&backup=<name>&uid=<uid>`. The UID is the identity and the
-// name is for reading: a Backup deleted and recreated under the same name is a
-// different run over a different archive, and a page that resolved by name
-// would follow the new one without saying so. Because the identity is in the
-// address, a newer Backup completing mid-wizard cannot move the selection: the
-// list is read again and the same UID is found again. A point that has gone,
-// or that is not Succeeded, is a REFUSAL naming it -- no plan, no hash, no
-// submit -- because the alternative is a wizard that quietly restores from
-// something else.
+// ONE CHOSEN RECOVERY POINT, by UID, in the route
+// (`#/restore?ns=<ns>&backup=<name>&uid=<uid>`; see `restoreRouteParams`). A
+// newer Backup completing mid-wizard cannot move the selection, and a point
+// that has gone or is not Succeeded is a REFUSAL naming it, never a quiet
+// restore from something else.
 //
-// TRANSPORT SECURITY IS NEVER DERIVED (D-SEAMS S5, defect UI-HTTPDOWNGRADE).
-// Addressing style and plaintext transport are two controls and this page
-// keeps them apart: `path_style` addressing says how a bucket is named in a
-// URL, and it has never had the authority to turn off encryption in transit.
-// The plan's insecure-transport flag is set by one explicit checkbox, which
-// defaults OFF, and by nothing else -- not by the addressing style, not by the
-// shape of an endpoint, not by any environment value.
+// TRANSPORT SECURITY IS NEVER DERIVED. `path_style` says how a bucket is named
+// in a URL; the plan's insecure-transport flag is set by one explicit
+// checkbox, default OFF, and never by the addressing style, an endpoint's
+// shape or an environment value.
 //
-// THE TARGET IS CHOSEN BY IDENTITY (PLAT-07.2). Step 4's select carries each
-// saved connection's UID, not its name, and the draft keeps the pair. A
-// KafkaCluster RENAMED between opening the wizard and submitting it keeps the
-// selection -- same object, same brokers, same credential, and the plan is
-// built from what it says now. One DELETED AND RECREATED under the same name is
-// a REFUSAL naming both uids: it is a different set of brokers reached with a
-// different credential, and writing a restore into it because the label matched
-// is exactly the substitution PLAT-11.1 removed from the recovery point. Both
-// wizard sides read the same probe words as the clusters page, from
-// `../select.js`, so "connection probe" means the same thing in all three
-// places and nothing here says "ready".
+// THE TARGET IS CHOSEN BY IDENTITY. Step 4 carries each connection's UID: a
+// rename keeps the selection; a delete-and-recreate under the same name is a
+// REFUSAL naming both uids. The probe words come from `../select.js`, as on
+// the clusters page, and nothing here says "ready".
 //
-// ONE GUIDED SUBMIT (PLAT-12.1). "Create the Restore" is the only action, and
-// it does the whole journey in order: check that the plan about to be sent is
-// the plan on screen, create the Restore idempotently -- its name is minted
-// from those bytes, so the same plan submitted twice, or retried after a lost
-// response, resolves to the Restore the first request made -- and then open
-// what it needs next. Under today's approval semantics every Restore waits for
-// a verified Approval: when one already authorises this exact Restore, that is
-// the Restore's operation view; otherwise it is the Restore's approval page,
-// Awaiting approval. There is no second button that navigates without
-// creating, and no create that forgets where it was going.
+// ONE GUIDED SUBMIT. "Create the Restore" checks that the plan sent is the
+// plan on screen, creates the Restore idempotently (its name is minted from
+// the bytes, so a retry resolves to the first create), then opens its
+// operation view when an Approval already authorises it, else its approval
+// page.
 
 import { CONSOLE, apiClient } from "../client.js";
 import {
@@ -200,33 +168,30 @@ export const WIZARD_FORM = "restore-wizard";
 export const WIZARD_DRAFT_FIELDS = Object.freeze([
   "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "targetClusterUid",
   "endpoint", "region", "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
-  // PLAT-11.2: which failed run this draft belongs to, so a retry never picks
-  // up an ordinary restore's kept prefix (`applyWizardDraft`).
+  // Which failed run this draft belongs to, so a retry never picks up an
+  // ordinary restore's kept prefix (`applyWizardDraft`).
   "retryOf",
-  // PLAT-11.2: the chosen subset is an edit like any other, and a draft that
-  // dropped it would restore a plan over every topic the point froze -- which
-  // is precisely the choice the operator made and this page lost.
+  // The chosen subset: a draft that dropped it would restore every topic the
+  // point froze.
   "topics",
-  // PLAT-08.2: the evidence store is its own choice. A saved point keeps the
-  // evidence destination it chose BY IDENTITY (name beside uid); a legacy
-  // point keeps whether the evidence store shares the archive store's
-  // settings, and its own four when it does not. None is a credential.
+  // The evidence store: a saved point keeps the evidence destination BY
+  // IDENTITY (name beside uid); a legacy point keeps whether it shares the
+  // archive store's settings, and its own four when it does not.
   "evidenceDestination", "evidenceDestinationUid",
   "evidenceSameAsArchive", "evidenceEndpoint", "evidenceRegion", "evidencePathStyle",
   "evidenceAllowHttp",
-  // PLAT-15.2: which catalog point the draft was made for (`""` for a Backup),
-  // and the topic list typed for it -- a catalog point publishes none.
+  // Which catalog point the draft was made for (`""` for a Backup), and the
+  // topic list typed for it: a catalog point publishes none.
   "catalogPointId", "catalogTopics",
-  // FX-5: a replication factor the operator SET (`null` while the default
-  // stands). A default is not kept: it is worked out again from what this
-  // page reads on the next mount, so it can follow the target's broker count.
+  // A replication factor the operator SET (`null` while the default stands).
+  // A default is not kept: it is worked out again on the next mount, so it can
+  // follow the target's broker count.
   "replicationFactor",
-  // FX-8: whether the plan accepts a point-in-time selection by producer
-  // time -- `producerTime` or the empty string. A choice like any other.
+  // Whether the plan accepts a point-in-time selection by producer time:
+  // `producerTime` or the empty string.
   "timeBasis",
-  // PROD-08.1a: whether the plan asks for complete coverage -- `complete` or
-  // the empty string -- and its record bound AS TYPED (the empty string for
-  // none). Choices like any other.
+  // Complete coverage (`complete` or the empty string) and its record bound AS
+  // TYPED (the empty string for none).
   "coverage", "completeMaxRecords",
 ]);
 
@@ -245,13 +210,12 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   // or `topicMapping[i].target`; the longest-prefix match sends every one of
   // them to the subset control they are about.
   ["topicMapping", "topics"],
-  // PLAT-08.2: the two saved references, each beside the control it is about.
+  // The two saved references, each beside the control it is about.
   ["evidenceDestinationRef", "evidenceDestination"],
   ["spec.evidenceDestinationRef", "evidenceDestination"],
-  // PLAT-19.2: the change ticket a Governed policy requires (D0).
+  // The change ticket a Governed policy requires.
   ["ticket", "ticket"],
-  // OD-10 (PROD-15.1): the original topic names re-typed on a one-person
-  // confirmation, beside the field they are typed into.
+  // The original topic names re-typed on a one-person confirmation.
   ["originalNameConfirmation", "originalNameTyped"],
 ]);
 
@@ -262,38 +226,26 @@ const NOT_INPUTS = Object.freeze(["archive", "backupSet"]);
  *  comparison with an existing Restore is exact. */
 const RESTORE_SPEC_RULES = Object.freeze({});
 
-/** The evidence prefix, and it is NOT a field an operator sets. Global
- *  Constraint 6: `logweir` writes only under `logweir/`, and
- *  `Store::from_url` refuses an evidence prefix that is not exactly that --
- *  trailing slash included. A plan that named another one would be refused at
- *  phase 0 after the approver had already signed it. */
+/** The evidence prefix, not an operator field: `logweir` writes only under
+ *  `logweir/` and `Store::from_url` refuses any other evidence prefix,
+ *  trailing slash included. A plan naming another would be refused at phase 0
+ *  after the approver had signed it. */
 const EVIDENCE_PREFIX = "logweir/";
 
 /** The default api surface. The mount half takes an override so the behaviour
- *  suite can hand in a stub that RECORDS every write and a stub that THROWS on
- *  one; there is no DOM and no network under `node --test`, and a page whose
- *  write half could only be exercised in a browser is a page whose write half
- *  is exercised nowhere. */
+ *  suite can hand in stubs that record or throw on every write. */
 const API = apiClient();
-
-// ------------------------------------------- the recovery point (PLAT-11.1)
 
 /** THE ROUTE'S RECOVERY POINT: `#/restore?ns=<ns>&backup=<name>&uid=<uid>`.
  *
- *  `uid` is the IDENTITY and `backup` is the display name. A Backup's UID is
- *  the one identifier here that cannot be re-used: an object deleted and
+ *  `uid` is the IDENTITY and `backup` the display name: an object deleted and
  *  recreated under the same name is a different run over a different archive,
- *  and a wizard that resolved by name alone would follow the new one silently.
- *  The name travels beside it so a refusal can still say which point was asked
- *  for when nothing answers to the UID. A link that carries only `backup`
- *  still works -- it resolves by name and then PINS the UID it found -- which
- *  is what keeps a hand-typed or older link usable.
+ *  and resolving by name would follow it silently. The name lets a refusal
+ *  say which point was asked for. A link with only `backup` resolves by name
+ *  and then PINS the UID it found.
  *
- *  Extracted here rather than in `app.js` for `approvalRouteParams`'s reason:
- *  that module touches `window` at module scope and cannot be imported under
- *  `node --test`, so a hand-off written inline there is a hand-off no test in
- *  either language can reach -- and two values swapped in it leave the whole
- *  suite green. */
+ *  Here rather than in `app.js`, which touches `window` at module scope and
+ *  cannot be imported under `node --test`. */
 export function restoreRouteParams(hash) {
   const text = typeof hash === "string" ? hash : "";
   const route = { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "", step: 0 };
@@ -315,25 +267,20 @@ export function restoreRouteParams(hash) {
     } else if (key === "ns" && value.length > 0) {
       route.ns = value;
     } else if (key === "catalog") {
-      // PLAT-15.2: a catalog-verified point, named by the catalog that lists
-      // it and by its content-derived id. Every other value the link may carry
-      // (the receipt key, the digests) is IGNORED here: the wizard reads the
-      // point again from the product API and builds the binding from that
-      // answer, never from an address somebody could have edited.
+      // A catalog-verified point, named by its catalog and its content-derived id.
+      // Anything else the link carries is IGNORED: the wizard reads the point
+      // again from the product API, never from an address somebody could edit.
       route.catalog = value;
     } else if (key === "point") {
       route.point = value;
     } else if (key === "retryOf") {
-      // PLAT-11.2: the failed Restore this one retries. It is carried for the
-      // PREFIX it derives and for the banner that names it, and for nothing
-      // else -- the wizard reads no field of that object and writes to none.
+      // The failed Restore this one retries, carried only for the prefix it
+      // derives and the banner that names it.
       route.retryOf = value;
     } else if (key === "step") {
-      // MCP-29: WHICH OF THE SIX STEPS IS ON SCREEN, 1 to 6. A deep link to a
-      // step; `0` -- no step named, or a value that is not one -- opens the
-      // first. It selects what is SHOWN and nothing else: every step's inputs
-      // are on the page whichever one is visible, so the plan, its hash and
-      // the readiness binding do not depend on it.
+      // Which of the six steps is on screen, 1 to 6; `0` opens the first. It
+      // selects what is SHOWN only: the plan, its hash and the readiness binding do
+      // not depend on it.
       route.step = /^[1-6]$/.test(value) ? Number(value) : 0;
     }
   }
@@ -357,7 +304,7 @@ export function restorePointRoute(ns, backup) {
   );
 }
 
-/** THE SAME ADDRESS ON ANOTHER STEP (MCP-29): `hash` with `step=` set to the
+/** THE SAME ADDRESS ON ANOTHER STEP: `hash` with `step=` set to the
  *  1-based `index + 1`, every other parameter kept exactly as it was spelled.
  *  The wizard writes this into the address as the reader moves between steps,
  *  so a reload or a copied link opens the step that was on screen. Pure. */
@@ -380,45 +327,24 @@ export function restoreSelectorRoute(ns) {
   return "#/restore" + (n.length > 0 ? "?ns=" + encodeURIComponent(n) : "");
 }
 
-// ----------------------------------- the fresh-target retry (PLAT-11.2, PLAT-12.2)
-
-/** How many characters of the failed Restore's name the retry prefix carries.
- *
- *  Eight, off the END. A minted restore name is `rst-` plus a content-derived
- *  suffix (`logweir-api`'s `idempotency.rs`), so the tail is the part that
- *  distinguishes two runs; taking it keeps the prefix short enough to leave a
- *  long topic name inside the broker's 249. A collision between two tails is
- *  not a correctness problem -- it would make two retries share a prefix, and
- *  the readiness check's `target.mappedTopics` row refuses the second by
- *  name -- which is why this is allowed to be a tail rather than a hash. */
+/** How many characters of the failed Restore's name the retry prefix carries:
+ *  eight, off the END. A minted name is `rst-` plus a content-derived suffix,
+ *  so the tail distinguishes runs and leaves room for a long topic name within
+ *  the broker's 249. A tail collision only makes two retries share a prefix,
+ *  and the readiness check's `target.mappedTopics` row refuses the second. */
 export const RETRY_TAIL_CHARS = 8;
 
-/** THE PREFIX A FRESH-TARGET RETRY USES, and why it cannot be the default one.
+/** THE PREFIX A FRESH-TARGET RETRY USES. `defaultTopicPrefix` is a pure
+ *  function of the point, so a retry with it renders the same bytes, mints the
+ *  same Restore and Approval names, collides with the failed run and would be
+ *  authorised by its Approval.
  *
- *  `defaultTopicPrefix` is a PURE FUNCTION OF THE RECOVERY POINT. That is
- *  exactly right for a first restore and exactly wrong for a retry: retrying
- *  the same point with the same prefix renders the same plan bytes, which mint
- *  the same Restore name and the same Approval name -- so the retry would
- *  collide with the failed run's own name and, worse, would be authorised by
- *  the Approval bound to it. PLAT-12.2's clause is that "retrying failed work
- *  creates a new execution with deliberate fresh-target/approval handling
- *  rather than colliding with the old name", and this function is the
- *  deliberate part.
- *
- *  DETERMINISTIC, so retrying twice is the same retry: the same failed run
- *  gives the same prefix, the same bytes, the same minted name, and the second
- *  submit is the idempotent replay every other create in this wizard is. It
- *  reads no clock -- the instant comes from the point, as everywhere else. */
+ *  Deterministic, so retrying twice is the same idempotent retry. It reads no
+ *  clock. */
 export function freshTargetPrefix(pointInTime, retryOf) {
-  // AN INPUT THAT IS NOT AN INSTANT HAS NO DEFAULT PREFIX, and saying so is
-  // this function's job rather than throwing. The retry route reaches the
-  // SELECTOR first -- `#/restore?ns=...&retryOf=...` names no recovery point, on
-  // purpose, because a `Restore` carries a backup set id and not the `Backup`
-  // it came from -- so there is no point in time to derive from until one is
-  // chosen. The first cut called `defaultTopicPrefix` unconditionally and a
-  // live journey met the whole page replaced by `defaultTopicPrefix(): - is
-  // not an instant this page can read`. `prefixFor` has always had this arm
-  // for the same reason.
+  // Not an instant, no prefix: the retry route opens the selector with no point
+  // chosen (a `Restore` carries a backup set id, not its `Backup`), so there is
+  // nothing to derive from until one is chosen.
   if (typeof pointInTime !== "string" || Number.isNaN(new Date(pointInTime).getTime())) {
     return "";
   }
@@ -440,17 +366,10 @@ export function restoreRetryRoute(ns, backup, restoreName) {
   return restorePointRoute(ns, backup) + "&retryOf=" + encodeURIComponent(name);
 }
 
-/** The link a FAILED Restore offers: the wizard's selector, carrying which run
- *  is being retried but choosing no point.
- *
- *  IT CANNOT NAME THE POINT, AND THAT IS A PROPERTY OF THE OBJECT RATHER THAN
- *  A SHORTCUT. `Restore.spec` carries `backupSetRef` -- a backup SET id inside
- *  the archive -- and no reference to the `Backup` that produced it, so a page
- *  looking at a Restore knows which archive set to read and not which recovery
- *  point object it came from. Guessing one by searching the namespace for a
- *  Backup with a matching set id would be this page inventing an identity the
- *  product does not record. So the operator chooses the point, on the
- *  selector, with the retry travelling beside the choice. */
+/** The link a FAILED Restore offers: the selector, carrying the retry but no
+ *  point. `Restore.spec` carries `backupSetRef` and no reference to the
+ *  `Backup` that produced it, so the operator chooses the point; this page
+ *  does not guess one by set id. */
 export function restoreRetryFromOperationRoute(ns, restoreName) {
   const name = typeof restoreName === "string" ? restoreName : "";
   return restoreSelectorRoute(ns) +
@@ -458,16 +377,13 @@ export function restoreRetryFromOperationRoute(ns, restoreName) {
     "retryOf=" + encodeURIComponent(name);
 }
 
-/** The banner a retry opens with: what it is retrying, what is different, and
- *  the three things it does NOT do.
+/** The banner a retry opens with: what it retries, what differs, and what it
+ *  does NOT do.
  *
- *  THE OLD APPROVAL IS NEVER REUSED, AND THAT IS STRUCTURAL RATHER THAN
- *  PROMISED. `restoreBody` takes `spec.approvalRef.name` from the prepared
- *  document's minted names and from nowhere else, and the names are minted
- *  from the plan bytes -- so a plan with a fresh prefix mints a different
- *  Approval name, and no route through this module can send the failed run's
- *  own Approval reference. The controller's `PlanHashMismatch` refusal is the
- *  backstop if one ever were. */
+ *  The old Approval is never reused: `restoreBody` takes
+ *  `spec.approvalRef.name` only from the names minted from the plan bytes, so
+ *  a fresh prefix mints a different Approval name. The controller's
+ *  `PlanHashMismatch` refusal is the backstop. */
 export function renderRetryBanner(state) {
   const s = state || {};
   const of = typeof s.retryOf === "string" ? s.retryOf : "";
@@ -502,15 +418,8 @@ export const RETRY_OLD_RUN_SENTENCE =
 
 /** Whether a `Backup` is a recovery point a plan can be built from:
  *  `phase: Succeeded`, a non-empty `status.backupId`, AND a covered window of
- *  two integers.
- *
- *  THE WINDOW IS PART OF IT, because every other field of the plan is derived
- *  from it: the point in time defaults to the window's end, the sample window
- *  is the window itself, and the default topic prefix is a function of that
- *  instant. A `Succeeded` run with no `windowCovered` -- which is what a run
- *  that completed before the controller wrote its status looks like for a
- *  moment -- is not a point this page can offer; it is a row in the catalog
- *  table with nothing to restore from. */
+ *  two integers. The window is required because the point in time, the sample
+ *  window and the default topic prefix all derive from it. */
 export function isRecoveryPoint(backup) {
   const status = (backup || {}).status || {};
   const covered = status.windowCovered || {};
@@ -531,9 +440,8 @@ export function isRecoveryPoint(backup) {
  *  order from the order they ran. A tie keeps list order, which is
  *  `kubectl`'s. Pure; no clock. */
 export function recoveryPoints(backups, accept) {
-  // `accept` widens the filter for a caller that can offer more than a run's
-  // own window -- the schedule detail offers a run from its catalog row
-  // (PLAT-15.2) -- and leaves the ORDER, which is this function's, alone.
+  // `accept` widens the filter (the schedule detail offers a run from its
+  // catalog row) and leaves the ORDER alone.
   return itemsOf(backups)
     .filter(typeof accept === "function" ? accept : isRecoveryPoint)
     .map((point, index) => ({ point: point, index: index }))
@@ -652,19 +560,10 @@ export function matchesQuery(haystack, query) {
   return true;
 }
 
-/** THE SIGNED VERDICT A POINT CARRIES, by the Backups page's own badge rule
- *  (`backups.js` `backupBadge`) and in BOTH modes (POC-P2).
- *
- *  This used to print `status.evidence.verification.result` as a word. A
- *  shared-console LIST item carries no `status.evidence` at all -- the product
- *  API publishes the run's verdict on a list as `OperationSummary`
- *  (`verificationState`, `verifiedSuccess`), which `ui/client.js` keeps under
- *  `status.__summary` -- so every point the shared console offered read
- *  `unverified`, beside an API that said `verificationState: valid,
- *  verifiedSuccess: true`. The badge rule already reads the summary when the
- *  object carries no recorded block, and is green exactly when the Backups
- *  and History tables are: never for a verdict that is not `Valid` on an
- *  accepted basis with exit 0, and never "unverified" for one that is. */
+/** THE SIGNED VERDICT A POINT CARRIES, by the Backups page's badge rule
+ *  (`backups.js` `backupBadge`), in BOTH modes: a shared-console list item has
+ *  no `status.evidence`, only the API's `OperationSummary` under
+ *  `status.__summary`, which the badge rule reads. */
 export function pointSigned(backup) {
   return backupBadge(((backup || {}).status) || {});
 }
@@ -673,29 +572,17 @@ export function pointSigned(backup) {
  *  attests the manifest (see [`archiveAvailability`]). */
 export const MANIFEST_ATTESTED = "manifest attested by its verified receipt";
 
-/** WHAT "ARCHIVE AVAILABILITY" MEANS TODAY, and it is a statement about the
- *  STATUS and not about the bucket. Logweir holds no list capability against
- *  an archive and this page holds no bucket credential at all, so the nearest
- *  thing to availability the cluster can tell it is whether the run that wrote
- *  the set recorded its manifest.
+/** WHAT "ARCHIVE AVAILABILITY" MEANS: a statement about the STATUS, not the
+ *  bucket. Logweir holds no list capability against an archive and this page
+ *  holds no bucket credential.
  *
- *  TWO RECORDS SAY SO, AND THE SECOND IS THE ONE A CONTROLLER WRITES (POC-P2).
- *  `status.manifestKey` is a field of the `Backup` CRD that no controller in
- *  this tree writes (`weirkeeper` records the signed receipt under
- *  `status.evidence` instead), so reading it alone called every real point
- *  "no manifest recorded" -- in legacy mode, and in the shared console, where
- *  the product API projects the same absent field. The receipt IS the record:
- *  a backup receipt names its manifest key exactly when its run exited 0
- *  (`logweir-core` `backup_receipt.rs`, "exit_code == 0 iff
- *  archive.manifest_key is non-empty"), so a receipt the controller verified,
- *  on a run that exited 0, attests the manifest. That is the badge rule's
- *  green condition, read the same way in both modes: the recorded block when
- *  the object carries one, else the list summary's `verifiedSuccess`. A point
- *  with neither is still offered, and says what is not known.
- *
- *  PLAT-15.1's durable catalog is what turns this into a real answer: it
- *  records, per set, whether the objects are still there. Until then this page
- *  says exactly what it knows and no more. */
+ *  No controller writes the CRD's `status.manifestKey`, so the record is the
+ *  receipt: a backup receipt names its manifest key exactly when its run
+ *  exited 0 (`logweir-core` `backup_receipt.rs`), so a verified receipt on a
+ *  run that exited 0 attests the manifest. That is the badge rule's green
+ *  condition in both modes (the recorded block, else the list summary's
+ *  `verifiedSuccess`). A point with neither is still offered, and says what
+ *  is not known. */
 export function archiveAvailability(backup) {
   const status = (backup || {}).status || {};
   if (typeof status.manifestKey === "string" && status.manifestKey.length > 0) {
@@ -716,46 +603,34 @@ function receiptVerified(status) {
   return validVerification(s) !== null && s.exitCode === 0;
 }
 
-// ------------------------------------ the catalog-verified point (PLAT-15.2)
+// A CATALOG POINT IS A SIGNED RECEIPT IN AN ARCHIVE, NOT A CUSTOM RESOURCE.
+// The durable catalog lists every point an archive holds, so a cluster that
+// lost its `Backup` objects, or a fresh install over an old archive, still has
+// them. The catalog decides only where the controller could not look: a point
+// is offered from it only when
 //
-// A RECOVERY POINT IS A SIGNED RECEIPT IN AN ARCHIVE, NOT A CUSTOM RESOURCE.
-// The durable catalog (D3 section 5) lists every point an archive holds, read
-// back from object storage by a sync Job and judged by the controller against
-// the namespace's trust -- so a cluster that lost every `Backup` object, or a
-// fresh installation pointed at an archive another one wrote, still has the
-// points. This section is how the wizard restores one of them.
+//   * the API published the row `selectable: true` (the controller's "the
+//     archive can serve it" and "its receipt verifies under a key this
+//     namespace accepts", joined with the namespace's `Backup` verdicts);
+//   * that join was COMPLETE (`backupVerdictsIncomplete` absent): an
+//     unfinished join cannot say that no `Backup` refused this receipt;
+//   * the row carries the point id, the set id, the receipt key and both
+//     digests, unredacted;
+//   * and, when offered from a `Backup` the controller could not verify, that
+//     Backup's OWN verdict is absent or `NotAttempted` and the row is its
+//     receipt's.
 //
-// THE RULE IS D3 section 5.5 step 4 AND THE CONTROLLER-VERDICT PRECEDENCE
-// RULE (`dffe118`, `95c2279`): the catalog decides only where the controller
-// could not look. A point is offered from the catalog only when
-//
-//   * the product API published the row `selectable: true` -- the
-//     controller's own conjunction of "the archive can serve it" and "its
-//     receipt verifies under a key this namespace accepts", joined server
-//     side with the namespace's `Backup` verdicts (`backupVerdict`);
-//   * that join was COMPLETE (`backupVerdictsIncomplete` absent) -- a join the
-//     API could not finish cannot say that no `Backup` refused this receipt,
-//     and this page does not guess;
-//   * the row carries everything the plan binding needs, unredacted: the
-//     point id, the backup set id, the receipt key, and both digests;
-//   * and, when the offer came from a `Backup` (a destination-backed run the
-//     controller could not verify itself, so it wrote no window), that
-//     Backup's OWN verdict is absent or `NotAttempted` -- never a reached
-//     refusal -- and the row is the one for that run's receipt.
-//
-// AND THE PLAN IS BOUND TO THE POINT, NOT TO A NAME. The plan carries
-// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}` and
-// `source.backup` pinned to the point's set; the runner re-reads the receipt
-// and the manifest those name BEFORE it constructs a client and refuses a
-// mismatch with exit 3 `PointBindingMismatch` (execution contract v2). The
-// approver signs those bytes, so the approval covers WHICH archive object the
-// restore recovers from.
+// THE PLAN IS BOUND TO THE POINT, NOT TO A NAME: `source.point {point_id,
+// receipt_key, receipt_sha256, manifest_sha256}` and `source.backup`. The
+// runner re-reads the receipt and manifest before it constructs a client and
+// refuses a mismatch (exit 3 `PointBindingMismatch`), so the approval covers
+// WHICH archive object is restored.
 
 /** How many points one catalog page read asks for. */
 export const CATALOG_POINT_PAGE = 200;
 
 /** How many cursor pages the wizard follows looking for one point. The view is
- *  at most 5000 points (D3 section 5.3), so 25 pages of 200 read all of it. */
+ *  at most 5000 points, so 25 pages of 200 read all of it. */
 export const CATALOG_POINT_PAGE_BUDGET = 25;
 
 /** The marker the product's archive-key redactor leaves behind. A key that
@@ -775,16 +650,14 @@ const MINTED_SET_ID =
   /^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([0-9]{8})-([0-9]{6})(?:-r[1-9])?)$/;
 
 /** Whether `id` is a set id the catalog sync's redactor reads as an IDENTITY
- *  (`check_contract.rs` `is_set_id`): a UUID -- a manual run's set id is the
- *  `Backup`'s own UID -- or a scheduled run's `<schedule uid>-<yyyymmdd>-
- *  <hhmmss>`, `-r<k>` for a retry, whose slot is an instant chrono accepts:
- *  a real date and time, the year `0000` and a leap second (`...60`)
- *  included, exactly as the Rust side's round trip does (review L-4).
- *  `ui/tests/fixtures/set-ids.json` is read by this side's test and by the
- *  redactor's, so the two agree, edges included.
+ *  (`check_contract.rs` `is_set_id`): a UUID (a manual run's `Backup` UID) or
+ *  a scheduled run's `<schedule uid>-<yyyymmdd>-<hhmmss>`, `-r<k>` for a
+ *  retry, whose slot is an instant chrono accepts (the year `0000` and a leap
+ *  second included). `ui/tests/fixtures/set-ids.json` is read by both sides'
+ *  tests, so the two agree.
  *
- *  Used only to say WHY a binding came back redacted -- never to decide an
- *  offer: the offer is refused on the marker itself. */
+ *  Used only to say WHY a binding came back redacted; the offer is refused on
+ *  the marker itself. */
 export function isMintedSetId(id) {
   const m = MINTED_SET_ID.exec(typeof id === "string" ? id : "");
   if (m === null) {
@@ -810,27 +683,23 @@ export function isMintedSetId(id) {
  *  restorable from the console: the key `backup run` writes is
  *  `logweir/backups/<set id>/<run id>.receipt.json`, the run id already
  *  spends the key's ONE free component, so the set id must be a public form.
- *  The common ones are named, as examples (review L-4): a SHA-256 digest is
- *  public too, and so is a scheduled run's own id. */
+ *  The common ones are named as examples: a SHA-256 digest is public too, and
+ *  so is a scheduled run's own id. */
 const CHOSEN_SET_ID_RULE =
   "a set id chosen for `logweir backup run` survives when it is a public form -- for " +
   "example a UUID, or lower-case letters, digits, `.`, `-`, `_` and `=` under 40 characters";
 
 /** WHY A POINT'S PLAN BINDING CAME BACK REDACTED -- one sentence, or `null`
- *  when neither binding field carries the marker (FX-17).
+ *  when neither binding field carries the marker.
  *
  *  The binding is `source.backup` (the set id) and `source.point.receipt_key`;
- *  the catalog sync passes both through the product's redactor, and a field
- *  that comes back as its output cannot be put into a plan. The sentence says
- *  which field, and the cause the published values still let this page tell
- *  apart:
- *    * the SET ID went: the redactor did not read it as an identity. Runners up
- *      to v0.2.0-rc.1 did that to every scheduled run's set id, which is the
- *      PoC's whole first Catalog page (FX-17); a chosen set id outside the
- *      public forms does it too;
- *    * only the KEY went, beside a set id this product mints: the run id in
- *      it was withheld, which runners older than v0.2.0-rc.1 did
- *      (CATALOG-RECEIPTKEY-REDACTED, the ULID exemption);
+ *  the catalog sync passes both through the product's redactor. The causes
+ *  the published values still tell apart:
+ *    * the SET ID went: the redactor did not read it as an identity (runners
+ *      up to v0.2.0-rc.1 did that to every scheduled run's set id; so does a
+ *      chosen set id outside the public forms);
+ *    * only the KEY went, beside a set id this product mints: runners older
+ *      than v0.2.0-rc.1 withheld the run id in it;
  *    * only the KEY went, beside a set id someone chose: that id and the run
  *      id are two free components, one more than an archive key may carry. */
 export function redactedBindingReason(entry) {
@@ -872,13 +741,11 @@ export function redactedBindingReason(entry) {
  *  window and never needs the catalog's). */
 export const DEFERRING_VERDICTS = Object.freeze(["NotAttempted"]);
 
-// THE RUN'S OWN VERDICT, AS READ FOR THIS OFFER. A console-mode `Backup` LIST
-// does not publish a run's verification (`ui/client.js` merges it only on a
-// detail read, and even then keeps only three of the operation's six words),
-// so "no verdict on this object" there means "not published", never "the
-// controller wrote none". The verdict an offer relies on is therefore READ --
-// `readOwnVerdict`, one operation read -- and kept beside the object here, out
-// of the object itself.
+// THE RUN'S OWN VERDICT, AS READ FOR THIS OFFER. A console-mode `Backup` list
+// does not publish a run's verification, so "no verdict" there means "not
+// published", never "the controller wrote none". The verdict an offer relies
+// on is READ (`readOwnVerdict`, one operation read) and kept here, beside the
+// object.
 const ownVerdicts = new WeakMap();
 
 /** The word a console-mode run's verdict reads as until it has been read:
@@ -980,24 +847,15 @@ export function catalogMayAnswerFor(backup) {
   return verdict === null || DEFERRING_VERDICTS.indexOf(verdict) !== -1;
 }
 
-/** THE POINTS IN TIME A RUNNER ACCEPTS FOR A COVERED WINDOW
- *  (WIZARD-DEFAULT-PIT-EXCLUSIVE).
+/** THE POINTS IN TIME A RUNNER ACCEPTS FOR A COVERED WINDOW.
  *
- *  A covered window -- `Backup.status.windowCovered`, or a catalog point's
- *  `coveredFrom`/`coveredTo` -- is HALF-OPEN: `fromMs` is the oldest segment's
- *  inclusive start and `toMs` is the newest segment's end PLUS ONE
- *  millisecond, the first instant the archive does not cover
- *  (`crates/logweir/src/backup/phase_run.rs`, `docs/stability.md`). The
- *  runner's `archive.coverage` check then refuses a point in time AT OR
- *  BEFORE the floor (`PointInTimeBeforeCoverage`: a restore window of one
- *  instant restores nothing) and one AFTER the newest record
- *  (`PointInTimeAfterCoverage`) -- `oldest < pit <= newest`
- *  (`crates/logweir/src/check/kinds/restore.rs` `coverage_row`). So the
- *  closed range a plan may name is `[fromMs + 1, toMs - 1]`, and its end is
- *  the default. `null` when that range is empty or the window is unreadable.
- *  The restore window itself stays closed at both ends (the engine's filter
- *  is `timestamp >= start && timestamp <= end`), so the default restores the
- *  newest record. */
+ *  A covered window (`Backup.status.windowCovered`, or a catalog point's
+ *  `coveredFrom`/`coveredTo`) is HALF-OPEN: `toMs` is the newest segment's end
+ *  plus one millisecond. The runner's `archive.coverage` check accepts only
+ *  `oldest < pit <= newest` (`check/kinds/restore.rs` `coverage_row`), so a
+ *  plan may name `[fromMs + 1, toMs - 1]`, and its end is the default. `null`
+ *  when that range is empty or the window is unreadable. The engine's restore
+ *  window is closed at both ends, so the default restores the newest record. */
 export function restorableWindow(covered) {
   const c = covered || {};
   if (typeof c.fromMs !== "number" || typeof c.toMs !== "number") {
@@ -1069,9 +927,8 @@ export function catalogPointOffer(entry, page) {
   if (typeof e.receiptKey !== "string" || e.receiptKey.trim().length === 0) {
     return no("the catalog published no receipt key for this point");
   }
-  // ONE REASON FOR A REDACTED BINDING, whichever of its two fields carries
-  // the marker (FX-17). The set id used to fall through to "no usable backup
-  // set id" below -- true of `[redacted]`, and no help to anyone.
+  // One reason for a redacted binding, whichever of its two fields carries the
+  // marker.
   const redacted = redactedBindingReason(e);
   if (redacted !== null) {
     return no(redacted);
@@ -1115,24 +972,20 @@ export function catalogRowsForBackup(backup, points) {
   });
 }
 
-/** CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW: whether a `Backup` the controller
- *  wrote no window for may be restored from the catalog's, and from which row.
+/** Whether a `Backup` the controller wrote no window for may be restored from
+ *  the catalog's, and from which row.
  *
  *  Only a `Succeeded` run with a set, whose OWN verdict is absent or
  *  `NotAttempted`, and for which exactly one catalog row answers that
- *  [`catalogPointOffer`] offers. A run whose verdict the controller reached --
- *  `Invalid`, `Untrusted`, or a word this build does not know -- is never made
- *  restorable by a row. A run still
- *  `Pending` (its evidence-fetch Job is reading the receipt) is not offered
- *  either: the console waits for the controller's own answer rather than
- *  pre-empting it with the catalog's, which is stricter than the server-side
- *  join (`catalog_view::is_reached_refusal` defers on `Pending`) and never
- *  looser.
+ *  [`catalogPointOffer`] offers. A verdict the controller reached (`Invalid`,
+ *  `Untrusted`, or a word this build does not know) is never made restorable
+ *  by a row. A `Pending` run is not offered either: the console waits for the
+ *  controller's own answer, which is stricter than the server-side join
+ *  (`catalog_view::is_reached_refusal` defers on `Pending`) and never looser.
  *
- *  FX-35: A RUN WITH ITS OWN WINDOW is bound to the row for its OWN receipt,
- *  so that its plan carries the same `source.point` as the catalog flow's: the
- *  run must have reported its receipt digest, and its own verdict may also be
- *  `Valid` -- the controller and the catalog then agree. */
+ *  A RUN WITH ITS OWN WINDOW is bound to the row for its OWN receipt, so its
+ *  plan carries the same `source.point` as the catalog flow's: it must have
+ *  reported its receipt digest, and its own verdict may also be `Valid`. */
 export function backupCatalogOffer(backup, points, page) {
   const b = backup || null;
   const no = (reason) => ({ offer: false, reason: reason, entry: null });
@@ -1161,10 +1014,9 @@ export function backupCatalogOffer(backup, points, page) {
     return no("no catalog row answers this run's receipt");
   }
   if (rows.length > 1) {
-    // TWO DIFFERENT FACTS (the PLAT-15.2 review's L-2). With no digest the
-    // run cannot say which of its set's points is its own; WITH one, every
-    // row is that same receipt, listed more than once -- by more than one
-    // catalog over this archive -- and the page will not pick a catalog.
+    // Two different facts: with no digest the run cannot say which of its set's
+    // points is its own; with one, every row is that same receipt listed by more
+    // than one catalog over this archive, and the page will not pick a catalog.
     return no(backupReceiptOf(b) === null
       ? "the catalog lists " + String(rows.length) + " points for this run's set and the run " +
         "reported no receipt digest to choose between them"
@@ -1176,12 +1028,10 @@ export function backupCatalogOffer(backup, points, page) {
   return verdict.offer ? { offer: true, reason: null, entry: rows[0] } : no(verdict.reason);
 }
 
-// WHICH CATALOG A ROW WAS READ FROM, kept beside the row and not on it. A page
-// that reads several catalogs (the schedule detail) hands its renderers one
-// flat list of rows; the offer needs the catalog's NAME for the link and the
-// page's flags (`viewExpired`, `backupVerdictsIncomplete`) for the rule, and
-// neither is a field of the API's row. A WeakMap keeps them out of the row
-// itself, so a decoded row stays exactly what the API published.
+// WHICH CATALOG A ROW WAS READ FROM, kept beside the row and not on it. The
+// offer needs the catalog's NAME and the page's flags (`viewExpired`,
+// `backupVerdictsIncomplete`), neither a field of the API's row; a WeakMap
+// keeps a decoded row exactly what the API published.
 const catalogSources = new WeakMap();
 
 /** Records that `row` was read from catalog `catalog`, which reads the
@@ -1209,18 +1059,15 @@ export function catalogSourceOf(row) {
   return row !== null && typeof row === "object" ? (catalogSources.get(row) || null) : null;
 }
 
-/** [`backupCatalogOffer`] over rows read from possibly several catalogs, each
- *  carrying its source: the offer, plus the catalog its row came from. A row
- *  with no recorded source is never offered -- the link would have no catalog
- *  to name.
+/** [`backupCatalogOffer`] over rows read from possibly several catalogs: the
+ *  offer, plus the catalog its row came from. A row with no recorded source is
+ *  never offered: the link would have no catalog to name.
  *
- *  ONLY A CATALOG OVER THE RUN'S OWN DESTINATION ANSWERS FOR IT (the PLAT-15.2
- *  review's L-1). A catalog over another destination that happens to list the
- *  same set id -- a copied archive, a second bucket -- describes other bytes,
- *  and the wizard would refuse the link it offered
+ *  ONLY A CATALOG OVER THE RUN'S OWN DESTINATION ANSWERS FOR IT. Another
+ *  destination listing the same set id (a copied archive, a second bucket)
+ *  describes other bytes, and the wizard would refuse the link it offered
  *  (`an_offer_from_a_backup_must_be_read_through_the_destination_that_run_froze`).
- *  A run with no `spec.destinationRef` carries an inline archive no catalog
- *  reads, so it is never offered from one. */
+ *  A run with no `spec.destinationRef` is never offered from one. */
 export function backupCatalogOfferFrom(backup, points) {
   const own = String(((((backup || {}).spec || {}).destinationRef) || {}).name || "");
   if (own.length === 0) {
@@ -1360,25 +1207,19 @@ export function catalogLegacyArchive(catalog) {
   return { url: legacy.url, secretName: typeof secret.name === "string" ? secret.name : "" };
 }
 
-/** THE CHOSEN CATALOG POINT, IN THE SHAPE EVERY STEP OF THIS WIZARD READS.
+/** THE CHOSEN CATALOG POINT, IN THE SHAPE EVERY STEP OF THIS WIZARD READS:
+ *  the identity, set, covered window, topics and frozen destination a `Backup`
+ *  carries, plus `catalogPoint`, the binding. So the steps, the draft, the
+ *  readiness request and the submit build ONE plan from ONE point.
  *
- *  The six steps were written over a `Backup`, and they read five things off
- *  it: its identity, its set, its covered window, its topics and its frozen
- *  destination. A catalog point has all five, from different places, and this
- *  puts them where the steps look -- so the steps, the draft, the readiness
- *  request and the submit build ONE plan from ONE point, and the one field a
- *  Backup never had -- `catalogPoint`, the binding -- rides beside them.
+ *  THE DESTINATION IS FROZEN HERE, AT MOUNT: its UID and location digest as
+ *  served now become `spec.destinationRef.uid` and `status.locationDigest`,
+ *  which [`confirmFrozenDestination`] re-checks before the create. A
+ *  destination deleted, recreated or moved meanwhile is a refusal, not a
+ *  different archive.
  *
- *  THE DESTINATION IS FROZEN HERE, AT MOUNT. A destination-backed catalog's
- *  point is read through that destination; its UID and location digest as the
- *  API served them now are recorded as `spec.destinationRef.uid` and
- *  `status.locationDigest`, which is what [`confirmFrozenDestination`]
- *  re-checks before the create: a destination deleted, recreated or moved
- *  while the plan was being reviewed is a refusal, not a different archive.
- *
- *  THE TOPICS START EMPTY, or as the `Backup` the point was offered from froze
- *  them (FX-35). The catalog view does not publish a point's topic list, so
- *  the operator names or confirms the topics to restore; the readiness check
+ *  THE TOPICS START EMPTY, or as the offering `Backup` froze them: the view
+ *  publishes no topic list, so the operator names them, the readiness check
  *  reads the manifest for exactly those names, and the runner restores
  *  nothing the set does not hold. */
 export function catalogRecoveryPoint(catalog, entry, destination, backup) {
@@ -1423,8 +1264,8 @@ export function catalogRecoveryPoint(catalog, entry, destination, backup) {
       coveredTo: e.coveredTo,
       locationId: location === null ? null : location.locationId,
       runId: e.runId,
-      // PROD-05.1: the point's recorded topic layout, when the view lists it
-      // -- what the replication-factor default reads (`sourceFactsOfEntry`).
+      // The point's recorded topic layout, when the view lists it: what the
+      // replication-factor default reads (`sourceFactsOfEntry`).
       topics: Array.isArray(e.topics) ? e.topics : null,
       topicsOmitted: Number.isInteger(e.topicsOmitted) ? e.topicsOmitted : null,
       backup: backup === null || backup === undefined
@@ -1504,16 +1345,16 @@ export const CATALOG_BINDING_SENTENCE =
   "matches is refused (exit 3, PointBindingMismatch) -- the restore never runs from a " +
   "different object than the one the approver signed for.";
 
-/** What a Backup-bound plan with no point binding cannot do (FX-35). */
+/** What a Backup-bound plan with no point binding cannot do. */
 export const POINT_UNBOUND_SENTENCE =
   "This plan is NOT bound to a recovery point: it names the backup set only, so the run reads " +
   "no backup receipt, and its signed scorecard reports each topic's timestamp type NOT " +
   "RECORDED and its configuration as unknown.";
 
 /** The review's line on what the run reads each topic's timestamp type and
- *  configuration from (FX-35): the receipt the plan is bound to, with each
- *  selected topic's configuration coverage as the catalog's view lists it, or
- *  NOT RECORDED and why the plan is not bound. */
+ *  configuration from: the receipt the plan is bound to, with each selected
+ *  topic's configuration coverage as the catalog's view lists it, or NOT
+ *  RECORDED and why the plan is not bound. */
 export function recordedFactsText(state) {
   const s = state || {};
   const binding = pointBindingOf(s.point);
@@ -1544,8 +1385,6 @@ export function recordedFactsText(state) {
   }).join("; ");
 }
 
-// ---------------------------------------------------------------- the steps
-
 /** Step 1 -- the archive. A `KafkaCluster` with `role: source`, and the
  *  archives this namespace's `Backup` objects name.
  *
@@ -1562,8 +1401,8 @@ export function renderArchiveStep(state) {
       cell(meta.name) + "<span class=\"cell-sub\">" +
         cell(((cluster.spec || {}).bootstrapServers || []).join(", ")) + "</span>",
       cell(status.clusterId),
-      // A CELL, NOT A PARAGRAPH (MCP-28): the badges and the age, with the
-      // explanation one hover away.
+      // A cell, not a paragraph: the badges and the age, with the explanation one
+      // hover away.
       probeSummary(probeState(cluster, s.now, s.freshSeconds)),
       cell(archiveFor(s, meta.name)),
       cell(archiveSecretFor(s, meta.name)),
@@ -1594,16 +1433,12 @@ export function renderArchiveStep(state) {
 /** THE SOURCE SIDE'S OWN BINDING: the saved connection the chosen recovery
  *  point was taken from, resolved against the connections that exist now.
  *
- *  A `Backup` records `spec.sourceRef.name` and no uid -- the reference was
- *  written before saved connections had identities -- so this resolves BY NAME
- *  and says what it resolved to, including the uid it pinned. That is the
- *  honest statement available here: the archive this restore reads is on
- *  object storage and does not depend on the source cluster still existing, so
- *  a source that is gone is a NOTE and not a refusal -- unlike the target,
- *  which the run writes into.
- *
- *  The probe beside it is the same probe the clusters page renders, with the
- *  same freshness budget and the same refusal to call anything ready. */
+ *  A `Backup` records `spec.sourceRef.name` and no uid, so this resolves BY
+ *  NAME and says what it resolved to, uid included. The archive is on object
+ *  storage and does not need the source cluster, so a source that is gone is
+ *  a NOTE and not a refusal, unlike the target, which the run writes into.
+ *  The probe beside it is the clusters page's, with the same freshness budget
+ *  and the same refusal to call anything ready. */
 export function renderSourceBinding(state) {
   const s = state || {};
   const point = s.point || null;
@@ -1630,19 +1465,14 @@ export function renderSourceBinding(state) {
 
 /** The NAME of the Secret the runner reads the archive with -- never a value.
  *
- *  `ArchiveRef` is `{url, secretRef}` and both halves belong to the `Restore`
- *  this wizard creates: `spec.sourceArchive.url` says where the archive is and
- *  `spec.sourceArchive.secretRef.name` says what reaches it. The controller
- *  injects the object-store credential into the runner Job ONLY when that
- *  second half is present, so a `Restore` submitted without it is admitted by
- *  the API server -- the field is optional in the CRD -- and then fails at the
- *  ARCHIVE rather than at admission: the Job starts, reaches for the first
- *  object, and cannot read it.
+ *  The controller injects the object-store credential into the runner Job
+ *  only when `spec.sourceArchive.secretRef.name` is present. The CRD makes it
+ *  optional, so a `Restore` without it is admitted and then fails at the
+ *  ARCHIVE, when the Job reaches for the first object.
  *
- *  Prefilled from the Backup object's own archive reference, which is where
- *  this page read the URL beside it. Blank when that archive names none, which
- *  is an archive reached anonymously or by an instance role -- a real
- *  configuration, and the reason this is an input and not a refusal. */
+ *  Prefilled from the Backup's own archive reference. Blank when that names
+ *  none (an archive reached anonymously or by an instance role), which is why
+ *  this is an input and not a refusal. */
 export function renderArchiveCredentialField(state) {
   const s = state || {};
   const destination = savedDestinationName(s);
@@ -1674,18 +1504,11 @@ export function renderArchiveCredentialField(state) {
   );
 }
 
-/** The three object-store settings NO Kubernetes object in this product
- *  records, and the evidence bucket.
- *
- *  `ArchiveRef` is `{url, secretRef}` -- a location and a credential name --
- *  so an endpoint, a region and the `path_style` flag are nowhere in the
- *  cluster's own view. The runner reads them out of THESE BYTES and from
- *  nowhere else, which is why they are inputs here rather than something an
- *  operator edits into the downloaded plan afterwards: a plan edited after it
- *  was hashed is a plan the approval no longer covers.
- *
- *  The evidence PREFIX is not among them. Global Constraint 6 fixes it, and a
- *  plan naming another one is refused at phase 0 after the signature. */
+/** The three object-store settings no Kubernetes object in this product
+ *  records (endpoint, region, `path_style`), and the evidence bucket. The
+ *  runner reads them from THESE BYTES only, so they are inputs here: a plan
+ *  edited after it was hashed is a plan the approval no longer covers. The
+ *  evidence PREFIX is not among them (`EVIDENCE_PREFIX`). */
 export function renderStoreFields(state) {
   const s = state || {};
   const store = ((s.fields || {}).source) || {};
@@ -1756,15 +1579,11 @@ export const EVIDENCE_DESTINATION_SENTENCE =
   "choosing another one keeps the archive where it is and changes only where the evidence goes, " +
   "which is part of the plan an approver signs.";
 
-/** THE EVIDENCE DESTINATION, CHOSEN BY IDENTITY (PLAT-08.2, D2 section 9).
- *
- *  `Restore.spec` carries TWO saved references, `sourceDestinationRef` and
- *  `evidenceDestinationRef`, and the controller checks the plan's evidence
- *  block against the second one (D2 section 3.6, check 8). Until this control
- *  existed the page always sent the SOURCE destination twice, so a restore
- *  could not keep its evidence apart from the archive it reads. The option
- *  VALUE is the uid: a destination deleted and recreated under the same name
- *  is a different store reached with a different credential. */
+/** THE EVIDENCE DESTINATION, CHOSEN BY IDENTITY. `Restore.spec` carries
+ *  `sourceDestinationRef` and `evidenceDestinationRef`, and the controller
+ *  checks the plan's evidence block against the second. The option VALUE is
+ *  the uid: a destination deleted and recreated under the same name is a
+ *  different store reached with a different credential. */
 export function renderEvidenceDestinationField(state, errors) {
   const s = state || {};
   const e = errors || {};
@@ -1810,14 +1629,11 @@ export const EVIDENCE_SAME_STORE_SENTENCE =
   "another store: the evidence store then gets controls of its own, and nothing on the archive " +
   "side changes them -- nor do they change the archive side.";
 
-/** THE LEGACY EVIDENCE STORE'S OWN SETTINGS (PLAT-08.2, second half of defect
- *  UI-HTTPDOWNGRADE). The plan has two storage blocks and the runner reaches
- *  each with its own four settings; this page used to write the archive's four
- *  into both, so an evidence bucket on another store could not be named at
- *  all. The default is the old behaviour, SAID on screen as a ticked box, so an
- *  existing walkthrough's plan bytes do not move; unticking it gives the
- *  evidence store an endpoint, a region, an addressing box and an explicit
- *  insecure-transport box of its own, and the last defaults OFF and is set by
+/** THE LEGACY EVIDENCE STORE'S OWN SETTINGS. The runner reaches each of the
+ *  plan's two storage blocks with its own four settings. The default, a ticked
+ *  "same as the archive" box, keeps the evidence block equal to the
+ *  archive's; unticking it gives the evidence store its own endpoint, region,
+ *  addressing and an insecure-transport box that defaults OFF and is set by
  *  nothing but itself. */
 export function renderEvidenceStoreFields(state) {
   const s = state || {};
@@ -1862,8 +1678,8 @@ export const EVIDENCE_INSECURE_TRANSPORT_WARNING =
   "connection, with the evidence credential in the clear. It is independent of the archive " +
   "store's box and of every addressing box, and it defaults to off.";
 
-/** Said beside the addressing checkbox, so a reader knows what it does and --
- *  as of decision D2 section 13.2, task W13a -- what it does NOT do. */
+/** Said beside the addressing checkbox, so a reader knows what it does and
+ *  what it does NOT do. */
 export const ADDRESSING_NOTE =
   "path_style addressing says where a bucket's name goes in a URL: after the host rather " +
   "than in front of it, which is what most on-premises object stores need. It says nothing " +
@@ -1871,21 +1687,12 @@ export const ADDRESSING_NOTE =
 
 /** THE ONE CONTROL THAT ALLOWS PLAINTEXT TRANSPORT, and it is checked by hand.
  *
- *  Until this was split out, the wizard set the plan's insecure-transport flag
- *  from the ADDRESSING checkbox (defect UI-HTTPDOWNGRADE): an operator ticking
- *  "path_style" for a MinIO or Ceph endpoint -- which is what every
- *  on-premises store needs -- silently also told the runner it could send the
- *  archive credential and every restored record over an unencrypted
- *  connection. The two are independent controls over independent things, and
- *  D-SEAMS S5 states the rule for the whole product: neither addressing style,
- *  nor endpoint shape, nor any environment value may enable plaintext
- *  transport. So the flag has its own box, it defaults OFF, and nothing in
- *  this page reads any other control to set it.
- *
- *  IT IS A PLAN FIELD, NOT A PAGE SETTING. The runner reads it out of the
- *  signed bytes, so an approver sees it in the document they sign -- which is
- *  the other half of why deriving it was a defect: the derived value went into
- *  a signed document nobody had stated. */
+ *  Addressing and transport are independent: ticking `path_style` for an
+ *  on-premises store must not let the runner send the archive credential and
+ *  every record unencrypted. No addressing style, endpoint shape or
+ *  environment value enables plaintext, so the flag has its own box, default
+ *  OFF, and nothing else on this page sets it. It is a PLAN field: the runner
+ *  reads it from the signed bytes, so the approver sees it in what they sign. */
 export function renderInsecureTransportField(state) {
   const s = state || {};
   const store = ((s.fields || {}).source) || {};
@@ -1909,15 +1716,7 @@ export const INSECURE_TRANSPORT_WARNING =
   "value from the environment -- and it defaults to off. Tick it only for a store on your " +
   "own machine.";
 
-/** The sentence step 2 prints under the point this wizard is bound to.
- *
- *  It replaces the old reload advice, and it replaces it because the advice
- *  was true: this page used to pick the newest `Succeeded` Backup for itself,
- *  and Task 28 measured three `Backup` objects arriving in six minutes against
- *  a two-minute schedule -- with the chosen set, the covered window, the plan
- *  bytes, the plan hash and BOTH minted names moving under the operator on
- *  every reload. The identity now lives in this page's address, so a reload
- *  finds the same point and a newer completion does not move it. */
+/** The sentence step 2 prints under the point this wizard is bound to. */
 export const POINT_PINNED_SENTENCE =
   "this point is named in this page's address by its UID, so a newer backup completing while " +
   "you read this does not move it: a reload, and every re-read this page makes, resolve to " +
@@ -1930,19 +1729,15 @@ export const NO_SUCCEEDED_SENTENCE =
   "a set no completed run wrote is a set the runner will not find.";
 
 /** Printed as the WHOLE page when no run in this namespace has completed with
- *  a backup set: the wizard builds a plan document from a completed run's
- *  set and covered window, and without one there is nothing to hash. Before
- *  Task 28a this case threw inside the plan renderer and the page was an
- *  error box (Task 28a's review, measured pre-existing at 352a4b8). */
+ *  a backup set: the plan is built from a completed run's set and covered
+ *  window, and without one there is nothing to hash. */
 export const NO_COMPLETED_BACKUP_SENTENCE =
   "no Backup in this namespace has completed with a backup set yet; the restore wizard " +
   "needs one to build a plan document. Wait for a scheduled run to reach phase Succeeded, " +
   "or create a Backup, then reload this page. The runs the namespace does hold are listed " +
   "below.";
 
-/** The `Backup`s a plan can be built from: see [`isRecoveryPoint`]. Kept under
- *  its old name because it is what the mount half asks before it offers a
- *  wizard at all. Pure. */
+/** The `Backup`s a plan can be built from: see [`isRecoveryPoint`]. Pure. */
 export function completedBackups(backups) {
   return itemsOf(backups).filter(isRecoveryPoint);
 }
@@ -1955,11 +1750,10 @@ export function renderNoCompletedBackup(ns, backups, catalogOffers) {
   const offered = (((catalogOffers || {}).offers) || []).length > 0;
   return (
     "<h2>Restore wizard</h2>" +
-    // A NAMESPACE WITH NO COMPLETED BACKUP MAY STILL HOLD AN ARCHIVE (PLAT-15.2):
-    // the cluster lost its objects, or this is a fresh installation pointed at
-    // an archive another one wrote. The connected archives' points come first,
-    // and the "wait for a scheduled run" advice is only the whole story when
-    // there are none.
+    // A NAMESPACE WITH NO COMPLETED BACKUP MAY STILL HOLD AN ARCHIVE (a cluster
+    // that lost its objects, a fresh installation): the connected archives'
+    // points come first, and the "wait for a scheduled run" advice is the whole
+    // story only when there are none.
     (offered
       ? ""
       : "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE +
@@ -1979,11 +1773,10 @@ export const CONNECT_ARCHIVE_HINT =
   "installation -- connect the archive: its catalog lists every point it holds, and a point " +
   "the catalog verifies is restorable from here without any Backup object.";
 
-/** Every `Backup` in the list with its set, its covered range CONVERTED TO RFC
- *  3339 (interface I22: the field is two integers, and a viewer reading
- *  `1757253900000` learns nothing) and its phase -- and the chosen one, named.
- *  This is the CATALOG, not the selector: it shows the running and failed runs
- *  too, because "what is here" is the question it answers. */
+/** Every `Backup` in the list with its set, its covered range converted to RFC
+ *  3339 (the field is two epoch-millisecond integers) and its phase, and the
+ *  chosen one, named. This is the CATALOG, not the selector: it shows the
+ *  running and failed runs too, because "what is here" is its question. */
 export function renderCatalogTable(backups, chosenName, grid) {
   const rows = itemsOf(backups).map((backup) => {
     const status = backup.status || {};
@@ -1997,8 +1790,7 @@ export function renderCatalogTable(backups, chosenName, grid) {
       cell(name === chosenName && typeof name === "string" ? name + " (chosen)" : name),
     ];
   });
-  // A DATAGRID WHERE THE CALLER NAMES ONE: 258 runs are 258 rows, and the
-  // selector used to lay out every one of them below its own table (MCP-26).
+  // A datagrid where the caller names one: 258 runs are 258 rows.
   return table(
     ["BACKUP SET", "COVERED", "RECORDS", "PHASE", "BACKUP"],
     rows,
@@ -2049,7 +1841,7 @@ export function renderRecoveryPointStep(state) {
       ["archive", cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point))],
     ]) +
     "<p class=\"note\">" + POINT_PINNED_SENTENCE + "</p>" +
-    // FX-35: A PLAN THAT IS NOT BOUND SAYS SO, and why.
+    // A plan that is not bound says so, and why.
     "<p class=\"caveat\" id=\"point-unbound\">" + esc(POINT_UNBOUND_SENTENCE) +
     (typeof s.unboundReason === "string" && s.unboundReason.length > 0
       ? " Not bound because " + messageText(s.unboundReason) + "."
@@ -2099,7 +1891,7 @@ export function renderCatalogPointStep(state) {
         "</code>"],
       ["manifest sha256", "<code id=\"point-manifest-sha256\">" + esc(c.manifestSha256) +
         "</code>"],
-      // PROD-03.0: the point's schema-dependent topics, before any is named.
+      // The point's schema-dependent topics, before any is named.
       ["schema registry", "<span id=\"point-schema-dependency\">" +
         esc(pointSchemaDependencyText(s)) + "</span>"],
       ["offered from", c.backup === null || c.backup === undefined
@@ -2119,8 +1911,6 @@ export function renderCatalogPointStep(state) {
     "</section>"
   );
 }
-
-// ------------------------------------------------------------- the selector
 
 /** The selector's blurb: what a row is and what choosing one does. */
 export const SELECTOR_SENTENCE =
@@ -2152,15 +1942,12 @@ export function renderPointSelector(state) {
     const topics = Array.isArray(spec.topics) ? spec.topics : [];
     const schedule = (spec.scheduleRef || {}).name;
     return [
-      // THE ACTION IS THE FIRST COLUMN (MCP-25). It was the tenth, and at
-      // 1440 px the table overflowed its card and clipped exactly that column
-      // -- the one thing the selector is for -- with no visible scrollbar.
+      // The action is the first column, where an overflowing table cannot clip
+      // it.
       //
-      // A RETRY ARRIVING HERE KEEPS ITS IDENTITY (PLAT-11.2). The operation
-      // view of a failed Restore knows which run failed and not which Backup
-      // it came from -- `Restore.spec` carries a backup SET id, not the
-      // point's name or uid -- so the retry link lands on this selector and
-      // the choice of point is made here, with `retryOf` travelling on.
+      // A RETRY ARRIVING HERE KEEPS ITS IDENTITY: `Restore.spec` carries a backup
+      // SET id, not the point's name or uid, so the retry link lands on this
+      // selector and the point is chosen here, with `retryOf` travelling on.
       "<a class=\"button\" href=\"" +
         esc(typeof s.retryOf === "string" && s.retryOf.length > 0
           ? restoreRetryRoute(s.ns, point, s.retryOf)
@@ -2168,10 +1955,8 @@ export function renderPointSelector(state) {
         "\">" + (typeof s.retryOf === "string" && s.retryOf.length > 0
           ? "Retry to a fresh target from this point"
           : "Restore this point") + "</a>",
-      // The run, with its schedule and slot beneath it rather than in two
-      // columns of their own.
-      // THE ARCHIVE UNDER THE RUN (R2-17): as its own last column it was the
-      // one a 1024 px window clipped, with no sign the table scrolled.
+      // The run, with its schedule, slot and archive beneath it rather than in
+      // columns of their own, which a narrow window clipped.
       cell(meta.name) +
         "<span class=\"cell-sub\">" +
         (typeof schedule === "string" && schedule.length > 0 ? "schedule " + esc(schedule) : "no schedule") +
@@ -2212,10 +1997,8 @@ export function renderPointSelector(state) {
     "role=\"status\"></p><button type=\"button\" id=\"point-more\">Show more recovery points" +
     "</button></div>" +
     listVerifiedNote(points) +
-    // THE CONNECTED ARCHIVES' POINTS ARRIVE LATER (MCP-26): the selector is on
-    // screen as soon as the Backups are read, and this section is filled in
-    // when the catalog read answers, rather than the whole page waiting for
-    // the slowest read it makes.
+    // The connected archives' points arrive later: this section is filled in when
+    // the catalog read answers, rather than the page waiting for its slowest read.
     "<div id=\"catalog-offers-slot\">" +
     (s.catalogOffers === undefined
       ? "<p class=\"pending\" id=\"catalog-offers-pending\" role=\"status\">Reading the " +
@@ -2227,8 +2010,6 @@ export function renderPointSelector(state) {
     "</section>"
   );
 }
-
-// ------------------------------------------------------------- the refusals
 
 /** THE REFUSAL a selected point that is gone, or that is not a recovery point,
  *  gets. It names the identity that was asked for and offers the selector; it
@@ -2292,11 +2073,9 @@ export function renderPointInTimeStep(state) {
     fieldErrorLine("point-in-time", errors.pointInTime) +
     "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
     "</div>" +
-    // THE COMPLAINT CARRIES AN ID, and it needs one: the `window` line above
-    // states the same sentence unconditionally (it is the bound, printed
-    // beside the input), so "the page contains the window message" is true of
-    // every state and cannot tell a refused point from an accepted one. A live
-    // journey asserted exactly that and its own negative control caught it.
+    // The complaint carries an id: the `window` line above states the same
+    // sentence in every state, so only the id tells a refused point from an
+    // accepted one.
     (complaint === null
       ? ""
       : "<p class=\"complaint\" id=\"point-in-time-complaint\">" + complaint + "</p>") +
@@ -2306,7 +2085,7 @@ export function renderPointInTimeStep(state) {
   );
 }
 
-/** Step 3's time-basis box (FX-8): whether this plan accepts a point-in-time
+/** Step 3's time-basis box: whether this plan accepts a point-in-time
  *  selection by PRODUCER time over a `LogAppendTime` topic, written into the
  *  plan as `restore.time_basis: producerTime` and nowhere else.
  *
@@ -2330,7 +2109,7 @@ export function renderTimeBasisField(state) {
   );
 }
 
-/** What the time-basis box means, under it (FX-8). Code spans render through
+/** What the time-basis box means, under it. Code spans render through
  *  `messageText`. The field's name is HERE and not in the label: a code span
  *  inside the inline label split it across three ragged pieces at 390 px. */
 export const TIME_BASIS_NOTE =
@@ -2342,10 +2121,9 @@ export const TIME_BASIS_NOTE =
   "clocks and the signed scorecard says so. This page cannot see each topic's timestamp " +
   "type: the run reads it from the archive and its backup receipt.";
 
-/** The warning the review step carries when the plan opts in (FX-8 review
- *  M-2). The page cannot know which topics are `LogAppendTime` before the
- *  run, so it says what the opt-in does and that it cannot see that, rather
- *  than naming topics. */
+/** The warning the review step carries when the plan opts in. The page cannot
+ *  know which topics are `LogAppendTime` before the run, so it says what the
+ *  opt-in does and that it cannot see that, rather than naming topics. */
 export const TIME_BASIS_OPTED_WARNING =
   "This plan accepts a point in time read on the producers' clocks: for a topic that is " +
   "`LogAppendTime`, the restore takes the records whose producer timestamps are at or before " +
@@ -2353,7 +2131,7 @@ export const TIME_BASIS_OPTED_WARNING =
   "that topic. This page cannot see which topics are `LogAppendTime`; the run reads that " +
   "from the archive and its backup receipt.";
 
-/** The review step's time-basis line (FX-8), from the plan's own value. */
+/** The review step's time-basis line, from the plan's own value. */
 export function timeBasisText(state) {
   const s = state || {};
   return ((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME
@@ -2366,16 +2144,10 @@ export function timeBasisText(state) {
 /** The sentence step 4 prints when no `KafkaCluster` in the namespace carries
  *  `role: target`, and the source cluster is preselected instead.
  *
- *  IT IS A LABEL AND NOT AN AUTHORISATION, AND THE CRD SAYS SO.
- *  `crates/weirkeeper/src/crds/kafka_cluster.rs` documents `role` as "a
- *  free-form string ... a label the adopter picks and the controller reports,
- *  and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what
- *  actually authorises a target, never a role written next to the address it
- *  authorises". The runner agrees: `drill/phase0_admit.rs` branches on
- *  `spec.target.mode`, and all three cluster checks -- the allowlist, the
- *  target != source rule and the marker topic -- live in the `Scratch` arm
- *  alone. The `NewTopic` arm is EMPTY, with a comment saying the source
- *  cluster is exactly where a point-in-time recovery belongs. */
+ *  The role is a label, not an authorisation: the CRD documents it as a
+ *  free-form label, `TrustRoster.allowedClusterIds` is what authorises a
+ *  target, and the runner's phase 0 applies its three cluster checks (the
+ *  allowlist, target != source, the marker topic) in the `Scratch` arm only. */
 export const TARGET_ROLE_SENTENCE =
   "no cluster is labelled role: target; the source cluster is preselected. The role is a " +
   "label, not an authorisation: for mode newTopic the runner accepts any reachable target, " +
@@ -2392,31 +2164,20 @@ export const SCRATCH_MARKER_WARNING =
   "unless the target proves it is scratch by carrying one. The runner checks the broker; " +
   "this line only checks the object.";
 
-/** Printed under step 3, in place of the convenience sentence it used to carry.
- *
- *  The old sentence said the client-side window check was a convenience and
- *  never the gate, which was true of a check that only complained. Since
- *  PLAT-11.1 this page REFUSES a point outside the disclosed coverage and sends
- *  nothing, so the sentence had to change with the behaviour -- but the second
- *  half of it is still true and still worth saying: the archive's own manifest
- *  is what guard G-WIN reads, and this page has never seen one. */
+/** Printed under step 3: this page refuses a point outside the disclosed
+ *  coverage, but the archive's own manifest, which guard G-WIN reads and this
+ *  page has never seen, is the last word. */
 export const WINDOW_REFUSAL_SENTENCE =
   "This page refuses a point outside the coverage above before anything is sent, and keeps " +
   "every value you typed. It is not the last word: the runner reads the archive's own " +
   "manifest and guard G-WIN refuses a point it does not cover, which is a narrower window " +
   "than this one when the archive holds less than the run recorded.";
 
-// ------------------------ the topic subset, its mapping and the limits (PLAT-11.2)
-
-/** The longest name a Kafka broker accepts for a topic.
- *
- *  249 AND NOT 255, and it is not this page's number: it is
- *  `logweir_core::guard::MAX_TOPIC_NAME_CHARS`, which the API's own
- *  `validate::is_topic_name` and the CRD's `TOPIC_NAME_PATTERN` both hold to.
- *  The two halves are pinned against each other by
- *  `ui/tests/fixtures/restore-limits.json`, which this page's suite reads and
- *  `crates/logweir-api/tests/resources.rs` compares with the Rust constants --
- *  so a drift in either language fails a test in both. */
+/** The longest name a Kafka broker accepts for a topic: 249, as
+ *  `logweir_core::guard::MAX_TOPIC_NAME_CHARS`, the API's
+ *  `validate::is_topic_name` and the CRD's `TOPIC_NAME_PATTERN`. Pinned
+ *  against the Rust constants by `ui/tests/fixtures/restore-limits.json`,
+ *  which this page's suite and `crates/logweir-api/tests/resources.rs` read. */
 export const MAX_TOPIC_NAME_CHARS = 249;
 
 /** Whether `name` is a name a Kafka broker would accept: the same four ASCII
@@ -2440,19 +2201,10 @@ export function isKafkaTopicName(name) {
 
 /** THE ONE PLACE THE TOPIC PREFIX IS WRITTEN, and it writes BOTH keys.
  *
- *  THE RUNNER'S GRAMMAR CARRIES TWO, AND READS A DIFFERENT ONE PER MODE.
- *  `logweir_core::spec::target_topic_prefix` takes `target.topic_naming.prefix`
- *  for `newTopic` and `target.topic_mapping_prefix` for `scratch`. The wizard
- *  offers both modes in step 4, and until this function existed only the first
- *  was updated by an edit: `initialState` set the two equal once and the prefix
- *  input, a restored draft and an edit prefill each moved one of them. In
- *  `scratch` mode the preview, the declared mapping and the product API's rail
- *  therefore all used a prefix THE RUN DOES NOT USE -- a direct falsification
- *  of "submitted topics/mapping equal the preview" for that mode, found by the
- *  independent review and reproduced.
- *
- *  So there is one setter, every write goes through it, and the two keys are
- *  equal by construction rather than by three call sites remembering. Nothing
+ *  `logweir_core::spec::target_topic_prefix` reads `target.topic_naming.prefix`
+ *  for `newTopic` and `target.topic_mapping_prefix` for `scratch`. One setter
+ *  keeps the two equal by construction, so in either mode the preview, the
+ *  declared mapping and the API's rail use the prefix the run uses. Nothing
  *  else in this module assigns either key. */
 export function setTopicPrefix(state, value) {
   const s = state || {};
@@ -2465,7 +2217,7 @@ export function setTopicPrefix(state, value) {
   target.topicMappingPrefix = next;
 }
 
-/** PROD-15.1: whether this plan restores under the ORIGINAL topic names --
+/** Whether this plan restores under the ORIGINAL topic names --
  *  `newTopic` mode with the choice ticked. Scratch never does: the identity
  *  ban stays in scratch mode. */
 export function originalNameChosen(state) {
@@ -2473,7 +2225,7 @@ export function originalNameChosen(state) {
   return target.mode === "newTopic" && target.originalName === true;
 }
 
-/** PROD-15.1: THE ONE PLACE THE ORIGINAL-NAME CHOICE IS WRITTEN.
+/** THE ONE PLACE THE ORIGINAL-NAME CHOICE IS WRITTEN.
  *
  *  On: `topicNaming.prefix` becomes the empty string -- the identity mapping
  *  the plan's `topic_naming: {prefix: "", original_name: {...}}` is -- and the
@@ -2511,7 +2263,7 @@ export function setOriginalName(state, on, noOwner) {
   }
 }
 
-/** PROD-15.1: a restore under the original topic names REQUIRES complete
+/** A restore under the original topic names REQUIRES complete
  *  verification, so choosing it selects `sample.coverage: complete` -- here,
  *  on a draft that comes back, and on every write of the coverage controls.
  *  A record bound already chosen is kept. A no-op for every other plan. */
@@ -2526,7 +2278,7 @@ export function requireCompleteCoverage(state) {
   s.fields.sample.coverage = COVERAGE_COMPLETE;
 }
 
-/** PROD-15.1: why the coverage box is ticked and locked for a restore under
+/** Why the coverage box is ticked and locked for a restore under
  *  the original topic names -- said beside the box. */
 export const ORIGINAL_NAME_COVERAGE_SENTENCE =
   "Complete coverage is required for a restore under the original topic names, so it was " +
@@ -2536,7 +2288,7 @@ export const ORIGINAL_NAME_COVERAGE_SENTENCE =
   "record with the archive and names one the archive does not hold. The runner refuses a " +
   "sampled plan under the original names (OriginalNameNeedsCompleteCoverage).";
 
-/** PROD-15.1: what the original-name choice means, beside the box. */
+/** What the original-name choice means, beside the box. */
 export const ORIGINAL_NAME_SENTENCE =
   "Restore under the ORIGINAL topic names: each topic is recreated under its own name -- a " +
   "new generation of the name, not the original topic -- instead of beside it under a prefix. " +
@@ -2546,14 +2298,14 @@ export const ORIGINAL_NAME_SENTENCE =
   "Terraform) manages a name. It needs its own approval subject, originalName: an ordinary " +
   "approval cannot authorise it. Stop every producer of these names first.";
 
-/** PROD-15.1: the owner statement the plan signs as `owners: []`. */
+/** The owner statement the plan signs as `owners: []`. */
 export const ORIGINAL_NAME_NO_OWNER_STATEMENT =
   "No declarative owner -- a Strimzi KafkaTopic, a GitOps or Terraform definition -- manages " +
   "any of these names. (The runner cannot look for one itself; an owner recreates a deleted " +
   "name and reverts the restored topic's settings. To restore although an owner manages a " +
   "name, its reconciliation paused, write the plan by hand with owner_path: true.)";
 
-/** PROD-15.1: the approval subject a plan on screen needs, in words. */
+/** The approval subject a plan on screen needs, in words. */
 export function approvalSubjectText(state) {
   return originalNameChosen(state)
     ? "originalName -- a restore under the ORIGINAL topic names; only an approval signed for " +
@@ -2561,22 +2313,12 @@ export function approvalSubjectText(state) {
     : "ordinary";
 }
 
-/** The prefix the RUN will map through, for the mode this plan is in -- the
+/** The prefix the RUN will map through, for the mode this plan is in: the
  *  JavaScript half of `logweir_core::spec::target_topic_prefix` over the
- *  domain this page can produce.
- *
- *  THE RUNNER HAS A THIRD ARM AND THIS HAS TWO, and the difference is
- *  unreachable here: `target_topic_prefix` falls back to
- *  `default_topic_prefix(<the recovery point>)` when a `newTopic` spec states
- *  no `topic_naming` at all, and `ui/plan.js` renders that key through
- *  `needed()`, which throws on an absent or empty value. So every document
- *  this wizard can render states a prefix, and the fallback arm describes a
- *  plan the page cannot emit.
- *
- *  It exists so the preview cannot be a statement about the other mode's key
- *  even if the two ever came apart again: `topicMapping` reads THIS, and a row
- *  asserts it equals what `renderPlanBytes` emits for the same fields in both
- *  modes. */
+ *  domain this page can produce. The runner's third arm (a `newTopic` spec
+ *  with no `topic_naming`) is unreachable here: `ui/plan.js` throws on an
+ *  absent prefix. `topicMapping` reads this, and a row asserts it equals what
+ *  `renderPlanBytes` emits for the same fields in both modes. */
 export function effectivePrefix(state) {
   const target = ((state || {}).fields || {}).target || {};
   return target.mode === "scratch"
@@ -2603,7 +2345,7 @@ export function mappedTopicName(prefix, topic) {
  *  what discovery resolved and the controller wrote back -- and a subset is
  *  only meaningful against it. A topic that is not in it is refused here and
  *  again by the readiness check's `plan.bindings` row
- *  (`PlanTopicsNotInRecoveryPoint`, D2 section 6.3). */
+ *  (`PlanTopicsNotInRecoveryPoint`). */
 export function frozenTopicsOf(state) {
   const spec = (((state || {}).point) || {}).spec || {};
   return Array.isArray(spec.topics) ? spec.topics.slice() : [];
@@ -2621,12 +2363,10 @@ export function selectedTopics(state) {
   const wanted = new Set(chosen.map(String));
   const frozen = frozenTopicsOf(s);
   const inOrder = frozen.filter((t) => wanted.has(String(t)));
-  // A SELECTION THE FROZEN LIST DOES NOT HOLD IS KEPT, NOT DROPPED. It is what
-  // `mappingProblems` refuses by name; silently discarding it would leave the
-  // page submitting a different subset from the one it was showing.
-  // A SET, NOT `indexOf` IN A LOOP (PLAT-18.2): with a 2,000-topic point the
-  // quadratic scan was most of a keystroke's render time. Same membership,
-  // strict equality both ways.
+  // A selection the frozen list does not hold is KEPT, not dropped:
+  // `mappingProblems` refuses it by name, and dropping it would submit a
+  // different subset from the one shown. A Set, because with a 2,000-topic
+  // point the quadratic scan was most of a keystroke's render time.
   const frozenSet = new Set(frozen);
   const extra = chosen.filter((t) => !frozenSet.has(t));
   return inOrder.concat(extra);
@@ -2658,14 +2398,10 @@ export function mappingProblems(state) {
   const problems = Object.create(null);
   const frozen = frozenTopicsOf(s);
   const chosen = selectedTopics(s);
-  // THE DUPLICATE CHECK READS THE RAW LIST, NOT THE CANONICAL ONE, AND THAT
-  // IS THE WHOLE REASON IT IS REACHABLE. `selectedTopics` filters the frozen
-  // list, so it collapses a repeated entry to one -- and a page that silently
-  // deduplicated would submit a list that is not the list it was given, which
-  // is exactly the class of surprise this task exists to remove. So the raw
-  // array is what is checked, and a duplicate is REFUSED rather than quietly
-  // fixed. (A checkbox cannot produce one; a restored draft, an "edit this
-  // restore" prefill and a caller constructing a state can.)
+  // The duplicate check reads the RAW list: `selectedTopics` collapses a
+  // repeated entry, and a page that silently deduplicated would submit a list
+  // it was not given. A checkbox cannot produce one; a restored draft, an edit
+  // prefill or a constructed state can.
   const raw = Array.isArray((s.fields || {}).topics) ? s.fields.topics : [];
   const rawSeen = new Set();
   for (const source of raw) {
@@ -2707,8 +2443,8 @@ export function mappingProblems(state) {
     }
     seen.set(target, source);
   }
-  // PROD-15.1: the original names ARE the identity mapping, and the one
-  // statement it needs is the owner statement.
+  // The original names ARE the identity mapping, and the one statement it
+  // needs is the owner statement.
   if (originalNameChosen(s)) {
     if ((((s.fields || {}).target) || {}).originalNameNoOwner !== true) {
       problems.originalName =
@@ -2777,10 +2513,9 @@ export function renderTopicSubset(state) {
     "<p class=\"blurb\">" + esc(SUBSET_SENTENCE) + "</p>" +
     (frozen.length === 0
       ? "<p class=\"note\" id=\"no-frozen-topics\">" + esc(NO_FROZEN_TOPICS) + "</p>"
-      // A DATAGRID IN LIST FORM (PLAT-18.2): a point can freeze thousands of
-      // topics, so the boxes get Clarity's filter and pagination. Every box
-      // stays in the document -- the ones off the page are hidden, not
-      // removed -- because `refresh` reads the selection off every box.
+      // A datagrid in list form: a point can freeze thousands of topics. Every
+      // box stays in the document (off-page ones are hidden, not removed) because
+      // `refresh` reads the selection off every box.
       : datagrid({ id: "subset-topics", label: "topics",
         scope: String(((((s.point || {}).metadata) || {}).uid) || (s.point || {}).uid || "") },
         "<ul class=\"topic-subset\">" + boxes + "</ul>")) +
@@ -2789,12 +2524,9 @@ export function renderTopicSubset(state) {
     "<button type=\"button\" id=\"select-no-topics\">Clear</button>" +
     "</div>" +
     fieldErrorLine("topic-subset", errors.topics) +
-    // THE REFUSAL IS COMPUTED HERE AND SHOWN ON THE KEYSTROKE, not only after
-    // a submit has been refused. `errorsOf` carries what the SERVER said about
-    // the last attempt; a page that only rendered those would leave an
-    // operator looking at a mapping this page has already decided it will not
-    // send. The window refusal in step 3 works the same way, for the same
-    // reason (PLAT-11.1).
+    // The refusal is computed here and shown on the keystroke, not only after a
+    // refused submit: `errorsOf` carries what the SERVER said about the last
+    // attempt, and the page would otherwise show a mapping it will not send.
     (typeof problems.topics === "string"
       ? "<p class=\"complaint\" id=\"subset-complaint\">" + messageText(problems.topics) + "</p>"
       : "") +
@@ -2829,17 +2561,10 @@ export const MAPPING_RULE_SENTENCE =
   "no per-topic rename in this version. Two source topics therefore cannot map to one target " +
   "name unless the same topic is listed twice, which is refused here and again by the API.";
 
-// ------------------------------------------------- what recovery changes (D3 3.5)
-
-/** Why a pre-run partition count is not shown, and who owes it.
- *
- *  A PROJECTION GAP, NAMED RATHER THAN GUESSED. Per-topic partition counts
- *  exist in this product only AFTER a run -- `Restore.status.completion
- *  .newTopics[].partitions`, built from `target_diff.would_create` -- and
- *  neither `Backup.status` nor the product API's `Backup` projection carries
- *  the archive manifest's counts. The runner reads the manifest; this page has
- *  never seen one. So the count is absent and said to be absent, which is the
- *  difference between this line and a number a page invented. */
+/** Why a pre-run partition count is not shown. Before a run the counts exist
+ *  only in the archive manifest, which this page never reads, and in a
+ *  catalog view that lists the point's layout; an absent count is said to be
+ *  absent, never invented. */
 export const PARTITION_COUNT_NOT_PUBLISHED =
   "Partition counts are shown before the run only when a recovery catalog's view lists this " +
   "point's topic layout, which it does for a backup whose receipt records it (format 1.3.0 and " +
@@ -2851,8 +2576,8 @@ export const PARTITION_COUNT_NOT_PUBLISHED =
   "recovery point, and it hangs off a connection rather than off this Backup.";
 
 /** The selected topics' SOURCE partition counts, as the catalog's view of this
- *  point records them (PROD-05.1) -- the counts the restore creates each topic
- *  with -- or `null` when it records none of them. */
+ *  point records them (the counts the restore creates each topic with), or
+ *  `null` when it records none of them. */
 export function partitionCountsText(state) {
   const facts = sourceFactsOf(state);
   if (!Array.isArray(facts.topics)) {
@@ -2878,15 +2603,10 @@ export function partitionCountsText(state) {
     (missing > 0 ? "; not recorded for " + String(missing) + " of the selected topics" : "") + ")";
 }
 
-// ------------------------------------------------ the replication factor (FX-5)
-//
-// EVERY CONSOLE RESTORE USED TO ASK FOR ONE REPLICA. `initialState` wrote
-// `replicationFactor: 1` and step 4 printed it read-only, so a topic restored
-// into a three-broker cluster came back on one broker and nothing on screen
-// said that was a choice. The factor is now a DEFAULT worked out from what this
-// page can read, said with where it came from, and an INPUT -- and a factor the
-// target's brokers cannot hold is refused here, by the readiness check's own
-// code, before anything is sent.
+// THE REPLICATION FACTOR is a DEFAULT worked out from what this page can
+// read, said with where it came from, and an INPUT. A factor the target's
+// brokers cannot hold is refused here, by the readiness check's own code,
+// before anything is sent.
 
 /** The replication factor every created topic is asked for, from the PLAN's
  *  own field: `target.default_replication_factor` in the runner's grammar.
@@ -2938,7 +2658,7 @@ export function sourceFactorNote(state) {
 }
 
 /** What this page knows of the SOURCE's recorded topic layout before anything
- *  is read (PROD-05.1). */
+ *  is read. */
 export const SOURCE_FACTS_NOT_READ = Object.freeze({
   topics: null, catalog: "", pointId: "", omitted: null,
   why: "the recovery catalogs of this namespace have not been read",
@@ -2949,7 +2669,7 @@ export const SOURCE_FACTS_NOT_READ = Object.freeze({
  *  many the page says it stopped rather than reading on. */
 export const MAX_SOURCE_CATALOGS = 4;
 
-/** THE CATALOG'S IDENTITY OF A BACKUP'S POINT (D3 section 5.1): `lwp1-` and the
+/** THE CATALOG'S IDENTITY OF A BACKUP'S POINT: `lwp1-` and the
  *  first 32 hex digits of its receipt's sha256 -- `logweir::catalog::record::
  *  point_id` over the same bytes -- or `""` for a digest not in that shape. */
 export function pointIdOfReceiptDigest(digest) {
@@ -2976,8 +2696,8 @@ export function sourceFactsOfEntry(entry, catalogName) {
       replicationFactor: count(t.replicationFactor),
       configCoverage: typeof t.configCoverage === "string" ? t.configCoverage : null,
       owner: typeof t.owner === "string" ? t.owner : null,
-      // PROD-03.0: the topic's schema dependency, or `null` -- NOT ASSESSED,
-      // never "not schema-dependent".
+      // The topic's schema dependency, or `null`: NOT ASSESSED, never "not
+      // schema-dependent".
       schemaDependency: schemaDependencyOf(t.schemaDependency),
     }));
     return facts;
@@ -2995,10 +2715,8 @@ export function sourceFactsOfEntry(entry, catalogName) {
   return facts;
 }
 
-// ------------------------------------------------- schema dependency (PROD-03.0)
-
-/** What the review says, in as many words, about a topic whose archived
- *  records carry Confluent wire-format framing. The sentence the brief fixes. */
+/** What the review says about a topic whose archived records carry Confluent
+ *  wire-format framing. */
 export const SCHEMA_REGISTRY_NOT_CAPTURED =
   "Registry not captured: applications may not read these records after restore.";
 
@@ -3177,7 +2895,7 @@ export function sourceFactsWhy(state) {
 }
 
 /** READ THE SOURCE'S RECORDED TOPIC LAYOUT for the point on the state, once,
- *  before the first paint (PROD-05.1).
+ *  before the first paint.
  *
  *  A CATALOG POINT carries its row already: nothing is read. A BACKUP's point
  *  is named in the catalog by its receipt's digest ([`pointIdOfReceiptDigest`])
@@ -3287,15 +3005,12 @@ export const REPLICATION_HELP =
   "it to go back to the default. The readiness check in step 5 validates it against the " +
   "target's brokers when it runs, and the restore asks for exactly this many replicas.";
 
-/** THE FACTOR CAN DIFFER FROM THE SOURCE'S, AND WHAT THAT COSTS (FX-5 review
- *  M1). A default worked out from the TARGET's brokers knows nothing of the
- *  source's factor: a source kept on one replica comes back on three, and every
- *  restored byte is stored three times, or a source kept on five comes back on
- *  three. Said beside the basis on step 4 and under the review row on step 6
- *  whenever [`replicationMayDiffer`] -- unless the catalog's view records the
- *  selected topics' factor and the plan asks for exactly it. `ui/README.md` and
- *  `docs/quickstart.md` (section 7) carry the same sentence, and
- *  `ui/tests/replication-factor.spec.js` holds all three to it. */
+/** THE FACTOR CAN DIFFER FROM THE SOURCE'S, AND WHAT THAT COSTS. A default
+ *  from the TARGET's brokers knows nothing of the source's factor. Said beside
+ *  the basis on step 4 and under the review row on step 6 whenever
+ *  [`replicationMayDiffer`]. `ui/README.md` and `docs/quickstart.md` carry the
+ *  same sentence, and `ui/tests/replication-factor.spec.js` holds all three to
+ *  it. */
 export const REPLICATION_DIFFERS_NOTE =
   "This factor can differ from the source's, and the target's storage follows it: a topic the " +
   "source kept at replication factor 1, restored at 3, takes three times the storage it took " +
@@ -3309,25 +3024,17 @@ export function replicationMayDiffer(choice) {
   return !(Number.isInteger(c.source) && c.value === c.source);
 }
 
-/** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC (PROD-05.1), as a
- *  recovery catalog's view of this point records it: one entry per topic of
+/** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC, as a recovery
+ *  catalog's view of this point records it: one entry per topic of
  *  `selectedTopics(state)`, `null` where the view records none, or `null` for
  *  all when the page knows no topic layout for the point ([`sourceFactsWhy`]
  *  says why). `replicationDefault` takes the largest.
  *
- *  WHERE IT COMES FROM. Since PROD-05.1 the backup run reads the factor from
- *  the source cluster's metadata before the engine starts (the smallest
- *  replica count of the topic's partitions) and records it in the receipt's
- *  `topic_configuration`. Only where that read named none does it fall back
- *  to the archive manifest's `source_replication_factor`. When the read was
- *  unavailable, a topic the manifest records no factor for has none, and this
- *  function returns `null` for it. The catalog point record copies it, the
- *  catalog's sync lists it for an `Available` point whose record agreed with
- *  its verified receipt, and the product API publishes it as
- *  `PointView.topics[]`. A catalog point carries its row; a Backup's point
- *  is looked up by its receipt's digest ([`refreshSourceFacts`]). A topic
- *  discovery of the source is NOT a substitute: it lists the cluster as it is
- *  now, not the point. */
+ *  The backup run records it in the receipt's `topic_configuration` (from the
+ *  source's metadata, else the manifest's `source_replication_factor`), and
+ *  the API publishes it as `PointView.topics[]`. A topic discovery of the
+ *  source is NOT a substitute: it lists the cluster as it is now, not the
+ *  point. */
 export function sourceReplicationFactorsOf(state) {
   const facts = sourceFactsOf(state);
   if (!Array.isArray(facts.topics)) {
@@ -3356,13 +3063,10 @@ export function sourceReplicationFactorsOf(state) {
  *     `DEFAULT_REPLICATION_CEILING` (`brokers`, `ceiling`);
  *   - neither: the grammar's own 1, and said as such (`grammar`).
  *
- *  ONE VALUE, AND THE LARGEST, when the selected topics' factors differ. The
- *  grammar has one `target.default_replication_factor` and the runner applies
- *  it to every topic; a factor per topic would extend the signed plan's
- *  grammar, which is the runner's versioned contract and not this page's. The
- *  largest brings no topic back on fewer replicas than its source had unless
- *  the target cannot hold them (and then the cap is said), and what a topic
- *  that gains replicas costs is storage, never durability.
+ *  ONE VALUE, AND THE LARGEST: the runner applies the grammar's one
+ *  `target.default_replication_factor` to every topic, and the largest brings
+ *  no topic back on fewer replicas than its source had unless the target
+ *  cannot hold them (and then the cap is said).
  *
  *  Returns `{value, basis, source, brokers}`: `source` the factor the source
  *  side gave, `brokers` the count the cap read -- each `null` when unknown. */
@@ -3393,31 +3097,19 @@ export const BROKERS_NOT_READ = Object.freeze({
 /** THE TARGET'S BROKER COUNT, from the newest successful topic discovery of the
  *  TARGET connection -- or no count, with the reason, and never a guess.
  *
- *  WHY A DISCOVERY. It is the one record of the count this console can read:
- *  `TopicDiscovery.status.result.brokerCount`, which the product API publishes
- *  as `brokerCount`. A `KafkaCluster`'s status records reachability and the
- *  cluster id and no count. The readiness check reads a count too, in its
- *  `target.authenticated` row, but the `Preflight` status keeps that only
- *  inside the row's message, and the check is bound to a plan that already
- *  names a factor.
+ *  A discovery's `brokerCount` is the one record of the count this console can
+ *  read: a `KafkaCluster`'s status has none, and a `Preflight` keeps it only
+ *  inside a row's message. A discovery of a connection replaced or edited
+ *  since, or read with another principal, is not used, and the step says so.
  *
- *  OF THIS CONNECTION, AS IT IS. A discovery of a connection replaced or
- *  edited since, or read with another principal, is `stale` about another
- *  connection or another identity (`connectionReplaced`, `connectionChanged`,
- *  `principalChanged`): its count is not used, and the step says so.
- *
- *  PAST ITS FRESHNESS ALONE, IT STILL SETS THE DEFAULT (FX-5 review L5). An
- *  inventory goes stale in minutes (`checks.discovery.freshSeconds`, 900 s by
- *  default) because topics come and go; a cluster's broker count rarely
- *  changes. So when `expired` is the ONLY stale reason -- the same connection
- *  object, generation and principal -- the count is kept with `fresh: false`:
- *  it sets the default, said with the instant it was read, and refuses nothing
- *  ([`replicationProblems`] refuses on a fresh count only, because an old count
- *  could refuse a factor a cluster grown since would hold). It lasts as long
- *  as the controller keeps the discovery: `checks.discovery.retentionSeconds`
- *  after its observation (86400 s, a day, by default), collected on the
- *  controller's hourly pass. That bound is the server's: this page never
- *  compares an instant with the browser's clock.
+ *  PAST ITS FRESHNESS ALONE, IT STILL SETS THE DEFAULT: topics come and go,
+ *  broker counts rarely change. When `expired` is the ONLY stale reason the
+ *  count is kept with `fresh: false`: it sets the default, said with the
+ *  instant it was read, and refuses nothing ([`replicationProblems`] refuses
+ *  on a fresh count only: an old count could refuse a factor a grown cluster
+ *  would hold). It lasts as long as the controller keeps the discovery
+ *  (`checks.discovery.retentionSeconds`); this page never compares an instant
+ *  with the browser's clock.
  *
  *  Legacy mode has no topic discovery at all, and the read's own refusal is
  *  the reason shown.
@@ -3506,8 +3198,8 @@ export function replicationChoice(state) {
       brokersAsOf: asOf,
     };
   }
-  // PROD-05.1: WHERE THE SOURCE'S FACTOR WAS READ, said in the basis -- the
-  // catalog and the point -- and how many selected topics it covered.
+  // Where the source's factor was read, said in the basis (the catalog and the
+  // point), and how many selected topics it covered.
   const factors = sourceReplicationFactorsOf(s);
   const facts = sourceFactsOf(s);
   return Object.assign(replicationDefault(factors, fact.count), {
@@ -3592,7 +3284,7 @@ export function replicationBasisText(choice) {
     "target's broker count is known to this console";
 }
 
-/** WHERE THE SOURCE'S FACTOR WAS READ (PROD-05.1): `, as recovery catalog
+/** WHERE THE SOURCE'S FACTOR WAS READ: `, as recovery catalog
  *  `primary` records point `lwp1-...``, the largest of several selected
  *  topics, and how many it does not cover. Empty for a choice that names no
  *  catalog -- the rule's own rows. */
@@ -3723,18 +3415,14 @@ export function renderReplicationField(state) {
 }
 
 /** The verification this restore will perform, from the PLAN's sample block --
- *  and never the word "exhaustive".
- *
- *  D3 section 3.5's rule is that the counts are labelled exactly and that the
- *  last clause is not optional: a sampled comparison presented without it
- *  reads as a full one. Before the run there are no counts, so what is said is
- *  what was ASKED FOR -- `sample.records_per_partition` and `sample.anchor`,
- *  both plan fields -- with the same closing clause `verificationScopeSentence`
- *  ends with after the run. No level in this version compares every record. */
+ *  and never the word "exhaustive". Before the run there are no counts, so it
+ *  says what was ASKED FOR (`sample.records_per_partition`, `sample.anchor`)
+ *  with the closing clause `verificationScopeSentence` ends with after the
+ *  run: a sampled comparison presented without it reads as a full one. */
 export function verificationPlanSentence(state) {
   const sample = ((state || {}).fields || {}).sample || {};
-  // PROD-08.1a: A PLAN THAT ASKS FOR COMPLETE COVERAGE says so, and says what
-  // the result will tell -- never that it will pass.
+  // A plan that asks for complete coverage says so, and says what the result
+  // will tell, never that it will pass.
   if (sample.coverage === COVERAGE_COMPLETE) {
     return "This restore will compare every record of every restored partition with the archive " +
       "(complete coverage)" + (typeof sample.completeMaxRecords === "number"
@@ -3753,7 +3441,7 @@ export function verificationPlanSentence(state) {
   );
 }
 
-/** PROD-08.1a: the advanced choice of complete coverage, in step 4's limits
+/** The advanced choice of complete coverage, in step 4's limits
  *  panel.
  *
  *  AN EXPLICIT, ADVANCED CHOICE AND NEVER THE DEFAULT. It sits inside a closed
@@ -3767,8 +3455,8 @@ export function verificationPlanSentence(state) {
 export function renderCoverageChoice(state) {
   const s = state || {};
   const sample = (s.fields || {}).sample || {};
-  // PROD-15.1: REQUIRED, not chosen, for a restore under the original topic
-  // names -- the box is ticked and LOCKED, and the reason is beside it.
+  // REQUIRED, not chosen, for a restore under the original topic names: the
+  // box is ticked and LOCKED, and the reason is beside it.
   const required = originalNameChosen(s);
   const chosen = required || sample.coverage === COVERAGE_COMPLETE;
   const bound = sample.completeMaxRecords === undefined || sample.completeMaxRecords === null
@@ -3803,7 +3491,7 @@ export const COVERAGE_BOUND_HELP =
   "partition. Past it, the partitions left are not compared and the run signs covered: false, " +
   "which is not a pass. Leave it empty for no bound beyond the run's deadline.";
 
-/** The review step's coverage line (PROD-08.1a), from the plan's own values. */
+/** The review step's coverage line, from the plan's own values. */
 export function coverageText(state) {
   const sample = ((state || {}).fields || {}).sample || {};
   if (sample.coverage !== COVERAGE_COMPLETE) {
@@ -3825,9 +3513,9 @@ export function coverageText(state) {
  *  than this page guessing a number. An unticked box clears both. */
 export function setCoverage(state, complete, boundText) {
   const sample = state.fields.sample;
-  // PROD-15.1: a restore under the original topic names is never sampled --
-  // an unticked box (the locked control reads as it is drawn, but a stale
-  // form or an older draft may not) cannot clear what that choice requires.
+  // A restore under the original topic names is never sampled: an unticked
+  // box (from a stale form or an older draft) cannot clear what that choice
+  // requires.
   if (complete !== true && !originalNameChosen(state)) {
     delete sample.coverage;
     delete sample.completeMaxRecords;
@@ -3844,14 +3532,10 @@ export function setCoverage(state, complete, boundText) {
   }
 }
 
-/** Resume: not implemented, said before the run and not after it.
- *
- *  PLAT-11's own scope line puts "advanced in-place recovery and crash resume"
- *  in product expansion, and the runner has no resume: a Restore that fails
- *  part way is a failed Restore, and the way forward is a NEW one to a fresh
- *  target (which is what this wizard's retry does). Saying so here is the
- *  migration note PLAT-11.2 asks for -- "clearly identify unimplemented
- *  resume" -- in the one place an operator decides to start a restore. */
+/** Resume: not implemented, said before the run, where an operator decides to
+ *  start a restore. A Restore that fails part way is a failed Restore, and the
+ *  way forward is a NEW one to a fresh target, which this wizard's retry
+ *  does. */
 export const RESUME_NOT_IMPLEMENTED =
   "Resume is not implemented. A restore that fails part way through cannot be continued from " +
   "where it stopped: there is no checkpoint to resume from, the topics it had already created " +
@@ -3899,14 +3583,10 @@ export const NO_CUTOVER_GUIDANCE =
  *  the prefix PREFILLED with `default_topic_prefix`'s own output for the
  *  chosen instant.
  *
- *  EVERY CLUSTER, BECAUSE THE RUNNER'S GUARD IS THE GATE AND THIS IS NOT.
- *  Until Task 28a this select was built from `role === "target"` alone, so a
- *  namespace with one `role: source` cluster -- which is what Demo 1 is, and
- *  what `scripts/k8s-demo.sh` runs a `newTopic` restore against, green --
- *  rendered an EMPTY select, left `target.bootstrapServers` empty, and made
- *  the plan grammar throw. The page was refusing what the product supports.
- *  So: list them all, say what each is labelled, preselect the sensible one,
- *  and let phase 0 decide. */
+ *  EVERY CLUSTER, because the runner's guard is the gate and this is not: a
+ *  namespace with only a `role: source` cluster can run a `newTopic` restore
+ *  into it. So list them all, say what each is labelled, preselect the
+ *  sensible one, and let phase 0 decide. */
 export function renderTargetStep(state) {
   const s = state || {};
   const fields = s.fields || {};
@@ -3977,7 +3657,7 @@ export function renderTargetStep(state) {
   );
 }
 
-/** PROD-15.1: the original-name choice -- `newTopic` mode only -- and, once
+/** The original-name choice -- `newTopic` mode only -- and, once
  *  chosen, the owner statement the plan signs. */
 export function renderOriginalNameChoice(state) {
   const s = state || {};
@@ -4044,28 +3724,16 @@ export const READINESS_CAVEAT_SENTENCE =
   "credential can be rotated, a topic created and an ACL changed in the minute after it, and the " +
   "execution-time guards remain the authority whatever this says.";
 
-/** Step 5 -- operation readiness for this exact plan.
+/** Step 5 -- operation readiness for this exact plan: a real `Preflight`,
+ *  bound to this plan's hash, whose verdict comes from a check Job's recorded
+ *  result. The target's probe status stays, labelled as context: it is the
+ *  controller's periodic dial, not a check of this restore.
  *
- *  WHAT CHANGED IN D2, AND WHY IT IS A DIFFERENT KIND OF THING. This step used
- *  to show the TARGET CLUSTER'S probe status and one sentence about what the
- *  run would attempt. Neither was a check of this restore: a probe is the
- *  controller's own periodic dial of the brokers, and the sentence was a
- *  description of an intention. An operator reading a step called "preflight"
- *  and seeing "reachable: true" could reasonably have concluded that the
- *  restore had been checked, and nothing had been.
- *
- *  Now the step carries a real `Preflight`, bound to this plan's hash, whose
- *  verdict comes from a check Job's own recorded result. The cluster status
- *  stays, because it is useful context, but it is labelled as what it is and
- *  it is no longer the thing the step is about.
- *
- *  THE STALE BANNER IS COMPUTED HERE FROM THE HASH ON SCREEN, and it is the
- *  SECOND of two guards. The first is the product API's: `GET
- *  .../preflights/{id}?planHash=` recomputes `applicable` and `staleReasons`
- *  server side against the plan the caller is looking at. This one exists
- *  because the wizard changes the plan locally, without asking anything, and
- *  an operator editing a field must see the result go stale on that keystroke
- *  and not on the next round trip. */
+ *  THE STALE BANNER IS COMPUTED HERE FROM THE HASH ON SCREEN, as the second of
+ *  two guards. The API's `GET .../preflights/{id}?planHash=` recomputes
+ *  `applicable` and `staleReasons` server side; this one exists because the
+ *  wizard changes the plan locally, and an edit must show the result stale on
+ *  that keystroke, not on the next round trip. */
 export function renderPreflightStep(state, prepared) {
   const s = state || {};
   const p = prepared || {};
@@ -4121,8 +3789,7 @@ export function renderPreflightStep(state, prepared) {
       : renderPreflight(result)) +
     "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
     "<p class=\"note\" id=\"readiness-source-destination\">" +
-    // ITS NAMES AND DIGEST AS CODE, not as literal backticks (MCP round 2,
-    // R2-10): the sentence spells them the way every message here does.
+    // Its names and digest as code, not as literal backticks.
     messageText(readinessSourceSentence(s.point)) + "</p>" +
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
@@ -4137,45 +3804,32 @@ export function renderPreflightStep(state, prepared) {
   );
 }
 
-// --------------------------------- the readiness gate before a submit (PLAT-11.2)
-
 /** Why the submit is refused by the readiness check on screen, or `null`.
  *
- *  THIS IS THE CLAUSE "NO EXISTING TARGET TOPIC IS OVERWRITTEN BY THE ORDINARY
- *  PATH", MADE INTO A REFUSAL THIS PAGE MAKES FIRST. The collision itself is
- *  detected server-side and always was -- `target.mappedTopics` answers
- *  `MappedTopicExists` (D2 section 6.3, 5 m expiry) and the runner's phase 0
- *  refuses the run whatever a console does -- but until this function existed
- *  the wizard rendered that `notReady` verdict and then let the operator spend
- *  an approver's signature on the plan anyway. A refusal that is displayed and
- *  not enforced is a refusal an incident walks straight past.
+ *  "No existing target topic is overwritten by the ordinary path", as a
+ *  refusal this page makes first: `target.mappedTopics` answers
+ *  `MappedTopicExists` and the runner's phase 0 refuses the run anyway, but a
+ *  refusal displayed and not enforced is one an incident walks past.
  *
- *  FIVE ARMS, IN THE ORDER AN OPERATOR MEETS THEM:
+ *  The arms, in the order an operator meets them:
  *
- *   1. NOTHING HAS RUN for this plan -- which is also legacy mode, whose
- *      absent `Preflight` route leaves the result absent.
- *   2. THE RESULT IS ABOUT ANOTHER PLAN -- the prefix changed, the subset
- *      changed, the point in time changed. Any edit that moves the plan bytes
- *      moves the hash, and D2 section 6.6's invalidation rule says the verdict
- *      stops describing what is about to be submitted. A change of TARGET is
- *      handled one step earlier, in `selectTarget`, because two clusters can
- *      render identical bytes.
- *   3. IT HAS BEEN INVALIDATED (`stale: true`) -- an expiry, a referent that
- *      moved, a policy or CA that changed. Asked BEFORE completion, because an
- *      invalidated check is about inputs that are no longer these whether or
- *      not it has finished. (`target.mappedTopics` expires in five minutes,
- *      the shortest budget in the catalogue and exactly the check a slow
- *      review outlives.)
+ *   1. NOTHING HAS RUN for this plan (legacy mode too: it has no `Preflight`
+ *      route).
+ *   2. THE RESULT IS ABOUT ANOTHER PLAN: any edit that moves the plan bytes
+ *      moves the hash. A change of TARGET is handled in `selectTarget`,
+ *      because two clusters can render identical bytes.
+ *   3. IT HAS BEEN INVALIDATED (`stale: true`), asked before completion: an
+ *      invalidated check is about other inputs, finished or not
+ *      (`target.mappedTopics` expires in five minutes).
  *   4. IT HAS NOT FINISHED.
  *   5. IT FINISHED WITHOUT BECOMING APPLICABLE.
- *   6. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
- *      by its own check id and code. One shape is not a refusal: a draft's
- *      `approval.state` `skipped`/`SubjectNotCreated` when EVERY other
- *      blocking check is `ready` (see [`isDraftApprovalRow`]).
+ *   6. THE VERDICT IS NOT `ready`, named by check id and code, except a
+ *      draft's `approval.state` `skipped`/`SubjectNotCreated` when every other
+ *      blocking check is `ready` ([`isDraftApprovalRow`]).
  *
- *  Pure: no DOM, no network, no clock. The freshness judgement is the
- *  SERVER's (`applicable`/`stale`, recomputed on every GET against the caller's
- *  own plan hash), never a comparison this page makes against a browser clock. */
+ *  Pure: no DOM, no network, no clock. Freshness is the SERVER's judgement
+ *  (`applicable`/`stale`, recomputed on every GET against the caller's plan
+ *  hash), never a comparison against a browser clock. */
 export function readinessRefusal(state, prepared) {
   const s = state || {};
   const p = prepared || {};
@@ -4183,14 +3837,10 @@ export function readinessRefusal(state, prepared) {
   const result = readiness.preflight || null;
   const hash = typeof p.hash === "string" ? p.hash : "";
   if (result === null) {
-    // NOT A REFUSAL, AND DELIBERATELY NOT ONE. D2 section 6.3's rule is about
-    // a verdict that has stopped applying, not about the absence of one, and
-    // the readiness check is advisory by construction: the runner's phase 0 is
-    // the authority and refuses a collision whether or not a console asked
-    // first. Refusing here would also make every restore in this product
-    // conditional on a route legacy mode does not have. So an unchecked plan
-    // may be submitted, and step 6 says in words that nothing has looked for
-    // an existing target topic yet.
+    // NOT A REFUSAL, DELIBERATELY. The readiness check is advisory: the
+    // runner's phase 0 refuses a collision whether or not a console asked
+    // first, and refusing here would make every restore depend on a route
+    // legacy mode does not have. Step 6 says that nothing has looked yet.
     return null;
   }
   const boundHash = typeof readiness.boundHash === "string" ? readiness.boundHash : "";
@@ -4208,9 +3858,9 @@ export function readinessRefusal(state, prepared) {
       "not a verdict about what you are about to submit. Run it again."
     );
   }
-  // THE CREDENTIAL IS NOT IN THE PLAN (review M1(a)): a check of a point with
-  // no saved destination read the archive with the Secret it was started with,
-  // and the Restore projects the one on screen now.
+  // The credential is not in the plan: a check of a point with no saved
+  // destination read the archive with the Secret it was started with, and
+  // the Restore projects the one on screen now.
   const boundSecret = typeof readiness.boundSecret === "string" ? readiness.boundSecret : null;
   const secretNow = String(s.archiveSecretName || "").trim();
   if (boundSecret !== null && boundSecret !== secretNow) {
@@ -4222,14 +3872,10 @@ export function readinessRefusal(state, prepared) {
       ". A check is about the credential the restore will use; run it again."
     );
   }
-  // STALENESS IS ASKED ABOUT BEFORE COMPLETION, and the order matters. A check
-  // that has been INVALIDATED -- by a target swap, an expiry, a referent that
-  // moved -- is about inputs that are no longer these, whether or not it has
-  // finished: waiting for its verdict would be waiting for an answer to the
-  // old question. `stale` is the field that says exactly that, and the product
-  // API sets it only when it means it; `applicable: false` ALONE does not, and
-  // is checked below, because it is also what every freshly started check
-  // reports before it completes.
+  // Staleness is asked about before completion: a check INVALIDATED by a
+  // target swap, an expiry or a moved referent answers the old question,
+  // finished or not. `stale` says exactly that; `applicable: false` alone
+  // does not, because every freshly started check reports it.
   if (result.stale === true) {
     const reasons = (Array.isArray(result.staleReasons) ? result.staleReasons : [])
       .map((r) => staleReasonLine(r))
@@ -4253,20 +3899,16 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.state !== "ready") {
-    // FAIL-CLOSED (review L2): a row with a gating this build does not
-    // recognise is blocking.
+    // Fail-closed: a row with a gating this build does not recognise is
+    // blocking.
     const gating = (Array.isArray(result.checks) ? result.checks : []).filter(isBlockingRow);
     const blocking = gating.filter((c) => (c || {}).state !== "ready");
     const others = blocking.filter((c) => !isDraftApprovalRow(c));
-    // ONE RULE FOR THE GATE, THE STEPPER AND THE HEADLINE (`render.js`'s
-    // `readyButForDraftApproval`), so step 5 cannot read Done under a
-    // headline that says anything but ready (MCP round 2, R2-12).
-    // THE ONE ROW A DRAFT CANNOT MAKE READY (DRAFT-PREFLIGHT-NEVER-READY). See
-    // [`isDraftApprovalRow`]: every blocking check but that one is `ready`, the
-    // aggregate is `unknown` for that reason alone, and the Restore this click
-    // creates is exactly what turns the row into a real approval verdict. At
-    // least one OTHER blocking check must have come back `ready`, for the
-    // aggregate's own reason: nothing checked is not everything passed.
+    // One rule for the gate, the stepper and the headline (`render.js`'s
+    // `readyButForDraftApproval`), so step 5 cannot read Done under a headline
+    // that is not ready. The one row a draft cannot make ready
+    // ([`isDraftApprovalRow`]) does not refuse when every other blocking check
+    // is `ready` and at least one is: nothing checked is not everything passed.
     if (readyButForDraftApproval(result)) {
       return null;
     }
@@ -4284,31 +3926,18 @@ export function readinessRefusal(state, prepared) {
 
 /** The approval row of a readiness check run against a DRAFT plan.
  *
- *  DRAFT-PREFLIGHT-NEVER-READY. The controller answers `approval.state` for a
- *  plan no Restore has been created for with `skipped` + `SubjectNotCreated`
- *  (`weirkeeper::controllers::preflight::approval_rows`, `ApprovalFacts::Draft`)
- *  -- there is no Approval to verify because no approver has been asked yet --
- *  and `logweir_core::check_contract::aggregate` DELIBERATELY makes a skipped
- *  blocking row `unknown` overall, because a verdict about an unfinished
- *  subject is not `ready`. Both rules are right and stay as they are. But the
- *  wizard used to refuse every verdict that was not `ready`, so after ANY
- *  readiness check the Create button was refused, and the only way to submit
- *  was not to run the check at all.
+ *  For a plan no Restore exists for, the controller answers `approval.state`
+ *  `skipped` + `SubjectNotCreated`, and `check_contract::aggregate` makes a
+ *  skipped blocking row `unknown` overall. Both rules are right. This page
+ *  lets a draft be submitted when that is the only row not ready, because the
+ *  click that creates the Restore is what makes the row answerable. The rule
+ *  is about the NEXT action, so it lives here and not as a second aggregate on
+ *  the API response. Phase 0 and the controller's admission still refuse an
+ *  unverified approval.
  *
- *  WHY THE CONSOLE AND NOT A `draftReady` FIELD ON THE API RESPONSE. The API
- *  projects the controller's verdict; it has no idea whether its caller is
- *  about to create the subject or has just opened a page about it. "A draft
- *  may be submitted when this is the only thing not ready" is a rule about the
- *  NEXT action, and the next action is this page's: the click that creates
- *  the Restore is the one that makes the row answerable. Putting it on the
- *  wire would add a second aggregate beside the real one for every client to
- *  misread as the verdict. The runner's phase 0 and the controller's
- *  admission still refuse an unverified approval whatever this page decides.
- *
- *  PRECISELY THIS SHAPE, NOTHING WIDER: the id, the `skipped` state and the
- *  `SubjectNotCreated` code together. `approval.state` `notReady` (an Approval
- *  that exists and does not verify), a `skipped` row with another code, or any
- *  other check that is `unknown` or `skipped` all still refuse by id and code. */
+ *  PRECISELY THIS SHAPE: the id, `skipped` and `SubjectNotCreated` together.
+ *  `approval.state` `notReady`, a `skipped` row with another code, or any other
+ *  check that is `unknown` or `skipped` still refuses by id and code. */
 export { isDraftApprovalRow };
 
 /** Said when no readiness check has run for the plan on screen.
@@ -4325,31 +3954,19 @@ export const READINESS_NOT_RUN_WARNING =
   "creates the topics, with nothing restored. Run the check in step 5 to find out before an " +
   "approver signs rather than after.";
 
-/** What a restore copies, said where the plan is reviewed, above Create (FX-6).
+/** What a restore copies, said where the plan is reviewed, above Create.
  *
- *  WITH THE PLAN, NOT THE APPROVAL. It follows the plan's own notes and comes
- *  before the approval-policy block: directly above Create it sat under that
- *  block's heading in the same style, and read as part of the approval.
+ *  It follows the plan's own notes and comes before the approval-policy
+ *  block, so it does not read as part of the approval.
  *
- *  A PASSING DRILL DOES NOT RULE IT OUT. Phase 7 compares the restored topic with
- *  the ARCHIVE, never with the source. What the pinned engine changes while it
- *  writes the archive is on both sides and passes: it captures with
- *  `READ_UNCOMMITTED` and keeps commit and abort markers as records, archives
- *  the producers' timestamps for a `LogAppendTime` topic, and keeps one copy of
- *  a repeated header key. A record that selection by each segment's first and
- *  last timestamps skips is outside both sides, and passes too. The rest can
- *  fail a drill: a full restore that drops a record below the floor fails its
- *  count check, so can a correct point-in-time restore, and so does a sampled
- *  record whose own `x-original-offset` the restore replaced. PROD-01.1
- *  measured every clause (its decision record, section 2) and wrote this
- *  sentence (section 8.3); `docs/stability.md` and `docs/verify-a-scorecard.md`
- *  carry the long form with the evidence rows.
+ *  A PASSING DRILL DOES NOT RULE IT OUT. Phase 7 compares the restored topic
+ *  with the ARCHIVE, never the source, so what the engine changes while it
+ *  writes the archive is on both sides and passes. `docs/stability.md` and
+ *  `docs/verify-a-scorecard.md` carry the long form with the evidence rows.
  *
- *  ON EVERY REVIEW STEP, NOT A CHOSEN ONE. The console cannot tell which of a
- *  plan's topics are transactional or out of order -- the archive records
- *  neither -- so the sentence is not narrowed to any topic, and every plan names
- *  at least one. Since PROD-01.1a the runner refuses an archive holding
- *  transaction markers unless the plan allows them, and the sentence says so. Code spans render through `messageText`, never as backticks (O2). */
+ *  On every review step: the archive records neither which topics are
+ *  transactional nor which are out of order, so the sentence is not narrowed
+ *  to a topic. Code spans render through `messageText`, never as backticks. */
 export const RESTORE_SEMANTICS_SENTENCE =
   "Restores copy the archive as written: an archive holding transaction markers is refused " +
   "unless the plan allows them, and under that allowance, or for an open transaction the check " +
@@ -4370,10 +3987,9 @@ export function renderPlanStep(prepared, state) {
   const s = state || {};
   const submission = s.submission || {};
   const pending = submission.phase === "pending";
-  // THE READINESS GATE, ON THE BUTTON AND IN WORDS BESIDE IT (PLAT-11.2). A
-  // disabled control with no sentence is a page that has stopped working for
-  // a reason it will not say, so the refusal is rendered whether or not the
-  // reader can see the button's state.
+  // The readiness gate, on the button and in words beside it: a disabled
+  // control with no sentence is a page that has stopped working for a reason
+  // it will not say.
   const blocked = readinessRefusal(s, p);
   const errors = errorsOf(s);
   const beside = (s.errorsUnmatched || []).concat(
@@ -4384,8 +4000,8 @@ export function renderPlanStep(prepared, state) {
     ? "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>"
     : "<p class=\"complaint\" id=\"plan-problem\">The plan cannot be rendered from these values, " +
       "so there is no hash and nothing to submit: " + messageText(p.problem) + "</p>";
-  // THE FACTOR THE PLAN ASKS FOR, AND WHERE IT CAME FROM (FX-5), where the plan
-  // is reviewed -- and the refusal beside it, before Create rather than after.
+  // The factor the plan asks for and where it came from, where the plan is
+  // reviewed, with the refusal beside it, before Create rather than after.
   const replicationRefused = replicationProblems(s).replicationFactor;
   return (
     "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
@@ -4398,17 +4014,17 @@ export function renderPlanStep(prepared, state) {
       ["Approval metadata.name", renderable ? "<code>" + esc(p.approvalName) + "</code>" : cell(null)],
       ["replication factor", "<span id=\"review-replication\">" + messageText(replicationText(s)) +
         "</span>"],
-      // FX-8: THE CLOCK THE POINT IS READ ON, beside the plan that states it.
+      // The clock the point is read on, beside the plan that states it.
       ["time basis", "<span id=\"review-time-basis\">" + esc(timeBasisText(s)) + "</span>"],
-      // FX-35: WHERE THE RUN READS EACH TOPIC'S TIMESTAMP TYPE AND CONFIGURATION.
+      // Where the run reads each topic's timestamp type and configuration.
       ["recorded by the point", "<span id=\"review-recorded\">" +
         messageText(recordedFactsText(s)) + "</span>"],
-      // PROD-08.1a: HOW MUCH THE RUN WILL VERIFY, beside the plan that says so.
+      // How much the run will verify, beside the plan that says so.
       ["coverage", "<span id=\"review-coverage\">" + esc(coverageText(s)) + "</span>"],
-      // PROD-03.0: WHAT THE RESTORED RECORDS NEED FROM A REGISTRY.
+      // What the restored records need from a registry.
       ["schema registry", "<span id=\"review-schema-dependency\">" +
         esc(schemaDependencyText(s)) + "</span>"],
-      // PROD-15.1: THE APPROVAL SUBJECT, distinct where the approver reads it.
+      // The approval subject, distinct where the approver reads it.
       ["approval subject", "<span id=\"review-approval-subject\">" +
         esc(approvalSubjectText(s)) + "</span>"],
     ]) +
@@ -4422,7 +4038,7 @@ export function renderPlanStep(prepared, state) {
       ? "<p class=\"caveat\" id=\"review-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
         "</p>"
       : "") +
-    // FX-8 review M-2: A PLAN THAT OPTS IN IS WARNED, where it is reviewed.
+    // A plan that opts in is warned, where it is reviewed.
     (((s.fields || {}).timeBasis) === TIME_BASIS_PRODUCER_TIME
       ? "<p class=\"caveat\" id=\"review-time-basis-warning\">" +
         messageText(TIME_BASIS_OPTED_WARNING) + "</p>"
@@ -4455,11 +4071,8 @@ export function renderPlanStep(prepared, state) {
     (pending ? " aria-busy=\"true\"" : "") +
     ">Create the Restore</button>" +
     "</div>" +
-    // ONE ARM FOR "NOTHING HAS RUN", AND IT CARRIES LEGACY MODE TOO. An earlier
-    // draft had a second arm keyed on `state.readiness.unavailable`, which
-    // NOTHING in this wizard ever sets -- a refusal-bypass and a sentence no
-    // reader could reach. Legacy mode has no readiness route, so its result is
-    // absent, so it lands here and reads the same true sentence.
+    // One arm for "nothing has run", legacy mode included: it has no readiness
+    // route, so its result is absent.
     (blocked === null
       ? ((s.readiness || {}).preflight
         ? ""
@@ -4475,17 +4088,15 @@ export function renderPlanStep(prepared, state) {
   );
 }
 
-/** With one step on screen (MCP-29), a sentence about step 5 carries the way
- *  there. */
+/** With one step on screen, a sentence about step 5 carries the way there. */
 const GO_TO_READINESS =
   "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-readiness\" " +
   "data-go-step=\"4\">" +
   "Go to step 5: Operation readiness</button></p>";
 
 /** The way back to the replication factor's input, beside its refusal. The
- *  caption names the input, not the step's whole title: a caption never wraps
- *  (MCP-8), and the step title made this button 370 px wide, past a 390 px
- *  screen. */
+ *  caption names the input, not the step's title: a caption never wraps, and
+ *  the title made this button wider than a 390 px screen. */
 const GO_TO_TARGET =
   "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-replication\" " +
   "data-go-step=\"3\">" +
@@ -4501,16 +4112,15 @@ export const GUIDED_SUBMIT_SENTENCE =
   "because its name is minted from these bytes.";
 
 
-/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2), in
- *  the three modes an operator sees (PROD-16.1): `confirm` (one person clicks
- *  Create; no key), `two-person` (PROD-16.2) and `strict` (an approver's
- *  personal key).
+/** The approval step under the namespace's EFFECTIVE policy, in the three
+ *  modes an operator sees: `confirm` (one person clicks Create; no key),
+ *  `two-person` and `strict` (an approver's personal key).
  *
  *  `policy` is the product API's `ApprovalPolicyView`, or `null` when the mode
- *  cannot know it (legacy `kubectl proxy`) or the read failed -- and `null`
- *  renders exactly today's out-of-band instructions, which is the fail-safe
- *  reading: nothing here ever tells an operator a Restore will run on their
- *  confirmation unless the console said the namespace is under `confirm`. */
+ *  cannot know it (legacy `kubectl proxy`) or the read failed. `null` renders
+ *  the out-of-band instructions, the fail-safe reading: nothing here tells an
+ *  operator a Restore will run on their confirmation unless the console said
+ *  the namespace is under `confirm`. */
 export function approvalPolicyBlock(policy, ticket, ticketErrors) {
   const p = policy !== null && typeof policy === "object" ? policy : null;
   if (p !== null && p.legacy === false && p.mode === "ordinary" &&
@@ -4538,7 +4148,7 @@ export function approvalPolicyBlock(policy, ticket, ticketErrors) {
       "are involved." + fresh + "</p>"
     );
   }
-  // PROD-16.2: two-person. A `Governed` policy whose operator mode is
+  // Two-person. A `Governed` policy whose operator mode is
   // `two-person` takes its approval from a second person in the console: no
   // key, no command, nothing to copy. Any other word keeps the strict text
   // below, so an unknown mode never reads as "no key needed".
@@ -4601,7 +4211,7 @@ export function approvalPolicyBlock(policy, ticket, ticketErrors) {
   );
 }
 
-/** THE FROZEN POLICY'S ANSWER for a created Restore (PLAT-19.2 / PLAT-12.1):
+/** THE FROZEN POLICY'S ANSWER for a created Restore:
  *  the product API's `authorization` block, carried on the created object by
  *  `ui/client.js` as `__contract.authorization`. `null` in legacy mode, where
  *  the page falls back to reading the Approval itself.
@@ -4624,11 +4234,9 @@ export function frozenDecision(restore) {
 /** Whether an outcome is about a plan this page is no longer showing.
  *
  *  An attempt records the plan it sent (`about`, see `createMutation`). A
- *  field edited while that attempt was outstanding leaves the two apart: the
- *  page then shows one plan and holds an outcome about another, and every
- *  sentence that says "submit again" is false of it. An attempt that recorded
- *  nothing (there is none in this file, and a caller may still pass one) is
- *  treated as being about what is shown, which is the older behaviour. */
+ *  field edited while that attempt was outstanding leaves the two apart, and
+ *  every sentence that says "submit again" is false of it. An attempt that
+ *  recorded nothing is treated as being about what is shown. */
 export function outcomeIsElsewhere(submission, prepared) {
   const about = ((submission || {}).about) || {};
   const hash = (prepared || {}).hash;
@@ -4737,22 +4345,18 @@ export function shownStep(state) {
  *  window, a target with no mode or no prefix, a target cluster whose
  *  recorded status is not reachable, or a readiness check that refuses this
  *  plan. When the five input steps are whole, the plan step is the current one
- *  and reads `ready`. `shown` is the step on screen (MCP-29: the wizard shows
- *  one step at a time); the two differ whenever the reader goes back to look.
+ *  and reads `ready`. `shown` is the step on screen; the two differ whenever
+ *  the reader goes back to look.
  *
- *  STEP 5 IS NOT DONE UNTIL A CHECK SAYS SO (MCP-27). It read `done` as soon as
- *  the target's recorded probe was reachable, beside "No readiness check has
- *  run for this plan". Now it is `done` only when a readiness check for THIS
- *  plan came back applicable and ready (`readinessRefusal` answers `null` for
- *  a held result); `unchecked` when none has run -- passable, because the
- *  check is advisory and Create is allowed with a warning -- and `attention`
- *  when a held check refuses the plan, which Create refuses too.
+ *  STEP 5 IS NOT DONE UNTIL A CHECK SAYS SO: `done` only when a readiness check
+ *  for THIS plan came back applicable and ready; `unchecked` when none has run
+ *  (passable: the check is advisory); `attention` when a held check refuses
+ *  the plan, which Create refuses too.
  *
- *  THIS DECIDES NOTHING THE RUNNER DECIDES. It reads the same state the six
- *  sections read and summarises it; the create button is never gated on it,
- *  because the client-side checks are a convenience and never the gate. Pure:
- *  no DOM, no network, no clock. `prepared` is the plan on screen, when the
- *  caller has it, so a held check bound to another plan reads as such. */
+ *  THIS DECIDES NOTHING THE RUNNER DECIDES, and the create button is never
+ *  gated on it. Pure: no DOM, no network, no clock. `prepared` is the plan on
+ *  screen, when the caller has it, so a held check bound to another plan
+ *  reads as such. */
 export function stepStates(state, prepared) {
   const s = state || {};
   const fields = s.fields || {};
@@ -4766,21 +4370,17 @@ export function stepStates(state, prepared) {
   const target = targetCluster(s);
   const targetStatus = (target || {}).status || {};
   const targetSpec = (target || {}).spec || {};
-  // A CHOSEN POINT ALWAYS CARRIES A SET. `isRecoveryPoint` requires a non-empty
-  // `status.backupId`, and `resolvePoint` hands back a point only when that
-  // holds, so `state.point !== null` implies this. It is still read rather than
-  // assumed, because step 2 is `todo` for a state with no point at all -- which
-  // is what the selector and the refusal pages render over.
+  // A chosen point always carries a set (`resolvePoint` hands back only a
+  // recovery point). It is still read, because step 2 is `todo` for a state
+  // with no point at all.
   const setChosen =
     chosen !== null &&
     typeof ((chosen.status || {}).backupId) === "string" &&
     chosen.status.backupId.length > 0;
-  // PLAT-11.2: step 4 now carries the subset and the mapping too, so it is
-  // whole only when those hold. The stepper still decides nothing -- the
-  // create button is gated by `validateRestore` and by the readiness check,
-  // not by this -- but a step whose mapping is refused must not read "done".
+  // Step 4 carries the subset and the mapping, so a refused mapping keeps it
+  // from reading "done".
   const mapping = mappingProblems(s);
-  // FX-5: and the replication factor, which step 4 now carries as an input.
+  // And the replication factor.
   const replication = replicationProblems(s);
   const held = ((s.readiness || {}).preflight) || null;
   const readinessRefused = held !== null && readinessRefusal(s, prepared) !== null;
@@ -4798,11 +4398,8 @@ export function stepStates(state, prepared) {
   ];
   const attention = [
     false,
-    // Step 2 has no `attention` state: a point either resolved -- in which case
-    // it carries a set and the step is done -- or it did not, in which case
-    // this stepper is not on screen. The arm that used to stand here described
-    // a chosen run with no backup set, which `isRecoveryPoint` no longer lets
-    // through.
+    // Step 2 has no `attention` state: a point either resolved, and carries a
+    // set, or this stepper is not on screen.
     false,
     !whole[2],
     (target !== null &&
@@ -4825,9 +4422,9 @@ export function stepStates(state, prepared) {
     if (i === 5) {
       status = firstOpen === 5 ? "ready" : "todo";
     } else if (whole[i]) {
-      // STEP 5 SAYS WHAT ITS HEADLINE SAYS (review L1): a check whose one
-      // unresolved blocking row is the draft's approval is passable -- Create
-      // requests the approval -- and it is not `done`.
+      // Step 5 says what its headline says: a check whose one unresolved
+      // blocking row is the draft's approval is passable (Create requests the
+      // approval) and it is not `done`.
       status = attention[i]
         ? "attention"
         : (i === 4 && held === null
@@ -4870,7 +4467,7 @@ function stepWord(step) {
 
 /** The stepper: an ordered list of the six steps, each a button that shows its
  *  step, carrying the step's number, its title and its state in words. The
- *  step on screen is marked `aria-current="step"` (MCP-29). */
+ *  step on screen is marked `aria-current="step"`. */
 export function renderStepper(state, prepared) {
   const items = stepStates(state, prepared)
     .map((step) => {
@@ -4891,9 +4488,8 @@ export function renderStepper(state, prepared) {
   return "<ol class=\"stepper\" aria-label=\"The six steps\">" + items + "</ol>";
 }
 
-/** The wizard's footer (MCP-29, Clarity's wizard anatomy): Back, where you are,
- *  and Next. The last step has no Next -- its primary action is Create the
- *  Restore, inside the step. */
+/** The wizard's footer: Back, where you are, and Next. The last step has no
+ *  Next: its primary action is Create the Restore, inside the step. */
 export function renderWizardNav(state) {
   const shown = shownStep(state);
   const last = shown === STEPS.length - 1;
@@ -4929,10 +4525,9 @@ export async function renderRestoreWizard(state) {
 /** The same wizard over a plan already prepared -- so the mount half knows the
  *  exact hash it put on screen, and can refuse to submit any other.
  *
- *  ONE STEP AT A TIME (MCP-29). All six sections are rendered, and every one
- *  but the step on screen is `hidden`: the page used to be one 22,686 px
- *  column. The stepper above and Back / Next below move between them; nothing
- *  is created until step 6's own button. */
+ *  ONE STEP AT A TIME. All six sections are rendered and every one but the
+ *  step on screen is `hidden`. The stepper above and Back / Next below move
+ *  between them; nothing is created until step 6's own button. */
 export function renderPreparedWizard(state, prepared) {
   const s = state || {};
   return (
@@ -4961,8 +4556,8 @@ export function renderPreparedWizard(state, prepared) {
 }
 
 /** WHICH STEP A FIELD'S MESSAGE BELONGS TO, so a refused submit shows the step
- *  that holds the input it is about (MCP-29). A message with no input of its
- *  own (`archive`, `backupSet`) is shown beside the submit, in step 6. */
+ *  that holds the input it is about. A message with no input of its own
+ *  (`archive`, `backupSet`) is shown beside the submit, in step 6. */
 export const FIELD_STEP = Object.freeze({
   archiveSecret: 0,
   evidenceDestination: 0,
@@ -5011,16 +4606,11 @@ export async function preparePlanOrProblem(state) {
 
 /** The page's own checks on the values a Restore is created from, by input.
  *
- *  A point that is not an instant at all is here, because the API server
- *  refuses it (`format: date-time`) -- and so, SINCE PLAT-11.1, is a point
- *  outside the coverage the selected recovery point discloses. That second one
- *  used to be a grey complaint on the reasoning that the client-side checks are
- *  a convenience and never the gate. They still are not the gate: guard G-WIN
- *  in the runner refuses a point the archive does not cover, against the
- *  manifest, and this function cannot see a manifest. What changed is that the
- *  page now refuses to spend an approver's signature on a document phase 0 was
- *  always going to refuse -- so the check is a REFUSAL THIS PAGE MAKES FIRST,
- *  not a second gate, and nothing is sent when it fires. */
+ *  A point that is not an instant (the API refuses it, `format: date-time`)
+ *  or that lies outside the coverage the recovery point discloses is refused
+ *  here, and nothing is sent. This is not the gate: guard G-WIN in the runner
+ *  refuses a point the manifest does not cover. It is the page refusing to
+ *  spend an approver's signature on a document phase 0 would refuse. */
 export function validateRestore(state) {
   const s = state || {};
   const fields = s.fields || {};
@@ -5036,15 +4626,9 @@ export function validateRestore(state) {
   if (epochMs(fields.pointInTime) === null) {
     problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
   } else if (windowComplaint(fields.pointInTime, coveredOf(s)) !== null) {
-    // THE DISCLOSED COVERAGE IS A BOUND, NOT A HINT (PLAT-11.1). The window is
-    // CLOSED AT BOTH ENDS: a point equal to `fromMs` or to `toMs` is inside
-    // it, and only a point strictly outside is refused. The refusal is the
-    // page's own and nothing is sent, so every value the operator typed stays
-    // where it was -- which is the difference between this and the grey
-    // complaint it replaces, which let a plan be built for a point the archive
-    // never covered and left phase 0 to say so after an approver had signed
-    // it. Guard G-WIN in the runner is still the gate; this is the page
-    // refusing to waste a signature on a document that cannot pass it.
+    // The disclosed coverage is a bound, CLOSED AT BOTH ENDS: only a point
+    // strictly outside is refused. Nothing is sent, so every typed value stays
+    // where it was; guard G-WIN in the runner is still the gate.
     problems.pointInTime =
       "outside the coverage this recovery point discloses -- " +
       windowMessage(coveredOf(s).fromMs, coveredOf(s).toMs) +
@@ -5053,15 +4637,12 @@ export function validateRestore(state) {
   if (TARGET_MODES.indexOf(target.mode) === -1) {
     problems.mode = "one of " + TARGET_MODES.join(", ");
   }
-  // THE SUBSET AND THE MAPPING (PLAT-11.2), in one call so the page and the
-  // product API refuse the same five things in the same words. It REPLACES
-  // the bare non-empty prefix check that used to stand here: an empty prefix
-  // is one of its five, and it is the identity map rather than a missing
-  // value.
+  // The subset and the mapping, in one call so the page and the product API
+  // refuse the same five things in the same words.
   Object.assign(problems, mappingProblems(s));
-  // THE REPLICATION FACTOR (FX-5): a value a broker cannot place, or one above
-  // the brokers a fresh discovery of the target read -- the readiness check's
-  // `ReplicationFactorExceedsBrokers`, refused here first and by name.
+  // The replication factor: a value a broker cannot place, or one above the
+  // brokers a fresh discovery of the target read (the readiness check's
+  // `ReplicationFactorExceedsBrokers`, refused here first and by name).
   Object.assign(problems, replicationProblems(s));
   const resolvedTarget = resolveTarget(s);
   if (resolvedTarget.state === "recreated") {
@@ -5117,18 +4698,15 @@ export function wizardDraftValues(state) {
   const target = f.target || {};
   const source = f.source || {};
   return {
-    // WHICH RUN THIS DRAFT WAS MADE FOR, beside the set it was made for. A
-    // retry shares the recovery point -- and therefore the backup set -- with
-    // the run it retries, so `backupSetRef` alone would let an ordinary
-    // restore's kept prefix apply to a retry and put the failed run's own
-    // target names back. That is the collision the fresh prefix exists to
-    // avoid, restored from a draft.
+    // Which run this draft was made for, beside its set: a retry shares the set
+    // with the run it retries, so `backupSetRef` alone would let an ordinary
+    // restore's kept prefix put the failed run's own target names back.
     retryOf: typeof s.retryOf === "string" ? s.retryOf : "",
     backupSetRef: f.backupSetRef,
     pointInTime: f.pointInTime,
     mode: target.mode,
     topicPrefix: target.topicPrefix,
-    // PROD-15.1: the choice and the owner statement, as booleans.
+    // The choice and the owner statement, as booleans.
     originalName: target.originalName === true,
     originalNameNoOwner: target.originalNameNoOwner === true,
     targetCluster: s.targetClusterName,
@@ -5139,9 +4717,8 @@ export function wizardDraftValues(state) {
     allowHttp: source.allowHttp === true,
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
-    // A LIST, KEPT AS TEXT (FX-5's class sweep): `keepDraft` keeps strings and
-    // booleans only, and an array here was dropped without a word -- the
-    // subset came back as every frozen topic under "your edits are back".
+    // A list, kept as text: `keepDraft` keeps strings and booleans only, and an
+    // array would be dropped without a word.
     topics: draftList(selectedTopics(s)),
     evidenceDestination: evidenceDestinationName(s),
     evidenceDestinationUid: ((s.evidenceDestination || {}).uid) || "",
@@ -5152,17 +4729,16 @@ export function wizardDraftValues(state) {
     evidenceAllowHttp: (f.evidence || {}).allowHttp === true,
     catalogPointId: isCatalogPoint(s.point) ? catalogPointUid(s.point) : "",
     catalogTopics: draftList(isCatalogPoint(s.point) ? frozenTopicsOf(s) : []),
-    // FX-5: A FACTOR THE OPERATOR SET, AS TEXT -- `keepDraft` keeps strings and
-    // booleans only, so a number here would be dropped without a word -- and
-    // the empty string while the default stands, so the next mount works the
-    // default out again from what it reads.
+    // A factor the operator SET, as text (`keepDraft` keeps strings and
+    // booleans only), and the empty string while the default stands, so the
+    // next mount works the default out again.
     replicationFactor: s.replicationChosen === true
       ? String(replicationFactorOf(s))
       : "",
-    // FX-8: the opt-in, as the one value or the empty string.
+    // The opt-in, as the one value or the empty string.
     timeBasis: f.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "",
-    // PROD-08.1a: the coverage choice as text -- `keepDraft` keeps strings and
-    // booleans only.
+    // The coverage choice as text: `keepDraft` keeps strings and booleans
+    // only.
     coverage: (f.sample || {}).coverage === COVERAGE_COMPLETE ? COVERAGE_COMPLETE : "",
     completeMaxRecords: (f.sample || {}).coverage === COVERAGE_COMPLETE &&
         (f.sample || {}).completeMaxRecords !== undefined
@@ -5206,10 +4782,10 @@ export function applyWizardDraft(state, draft) {
   if ((typeof d.retryOf === "string" ? d.retryOf : "") !== retrying) {
     return false;
   }
-  // AND FOR THE SAME KIND OF POINT (PLAT-15.2). A catalog point and a Backup can
-  // share a backup set -- the catalog lists the Backup's own receipt -- and a
-  // draft made over one must not become edits to the other: their topic lists
-  // and bindings are different documents. An older draft carries no
+  // AND FOR THE SAME KIND OF POINT. A catalog point and a Backup can share a
+  // backup set (the catalog lists the Backup's own receipt), and a draft made
+  // over one must not become edits to the other: their topic lists and
+  // bindings are different documents. An older draft carries no
   // `catalogPointId` and reads as the Backup draft it was.
   const pointKey = isCatalogPoint((state || {}).point) ? catalogPointUid(state.point) : "";
   if ((typeof d.catalogPointId === "string" ? d.catalogPointId : "") !== pointKey) {
@@ -5225,13 +4801,11 @@ export function applyWizardDraft(state, draft) {
   if (typeof d.mode === "string") {
     state.fields.target.mode = d.mode;
   }
-  // THE UID FIRST, THE NAME AS THE LEGACY PATH. A draft kept before PLAT-07.2
-  // carries a name and no uid; it is resolved by name and PINNED to whatever
-  // uid answers, exactly as an existing `sourceRef.name` is. A draft that
-  // carries a uid is applied even when that uid no longer answers, BECAUSE the
-  // refusal has to be reachable: dropping an unresolvable selection here would
-  // silently restore the default target, which is the substitution this page
-  // refuses everywhere else.
+  // THE UID FIRST, THE NAME AS THE LEGACY PATH. A draft with a name and no uid
+  // is resolved by name and PINNED to whatever uid answers, as an existing
+  // `sourceRef.name` is. A draft that carries a uid is applied even when that
+  // uid no longer answers, BECAUSE the refusal has to be reachable: dropping
+  // the selection would silently restore the default target.
   if (typeof d.targetClusterUid === "string" && d.targetClusterUid.length > 0) {
     selectTarget(state, d.targetClusterUid, typeof d.targetCluster === "string" ? d.targetCluster : "");
   } else if (typeof d.targetCluster === "string" && d.targetCluster.length > 0) {
@@ -5243,34 +4817,31 @@ export function applyWizardDraft(state, draft) {
   if (typeof d.topicPrefix === "string" && d.topicPrefix.length > 0) {
     setTopicPrefix(state, d.topicPrefix);
   }
-  // PROD-15.1: the original-name choice comes back only as a ticked box in
-  // `newTopic` mode; anything else leaves the prefix the draft kept.
+  // The original-name choice comes back only as a ticked box in `newTopic`
+  // mode; anything else leaves the prefix the draft kept.
   if (d.originalName === true) {
     setOriginalName(state, true, d.originalNameNoOwner === true);
   }
-  // FX-5: a factor the operator SET comes back as set. An empty one -- or an
-  // older draft with none -- leaves the default to be worked out again from
-  // what this mount reads, which is the point of not keeping a default.
+  // A factor the operator SET comes back as set. An empty one (or none) leaves
+  // the default to be worked out again from what this mount reads.
   if (typeof d.replicationFactor === "string" && d.replicationFactor.length > 0) {
     setReplicationFactor(state, d.replicationFactor);
   }
-  // FX-8: the opt-in comes back only as the one value it can be; an older
-  // draft with none, or anything else, leaves the box unticked.
+  // The opt-in comes back only as the one value it can be; anything else
+  // leaves the box unticked.
   state.fields.timeBasis = d.timeBasis === TIME_BASIS_PRODUCER_TIME ? TIME_BASIS_PRODUCER_TIME : "";
-  // PROD-08.1a: the coverage choice comes back only as the one value it can
-  // be; an older draft with none leaves the plan sampled.
+  // The coverage choice comes back only as the one value it can be; a draft
+  // with none leaves the plan sampled.
   setCoverage(state, d.coverage === COVERAGE_COMPLETE,
     typeof d.completeMaxRecords === "string" ? d.completeMaxRecords : "");
-  // PROD-15.1: a draft kept before complete coverage was required for a
-  // restore under the original names comes back complete, never sampled.
+  // A draft under the original names comes back complete, never sampled.
   requireCompleteCoverage(state);
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
-  // THE ARCHIVE BLOCK FROM THE ARCHIVE CONTROLS, AND ONLY THE ARCHIVE BLOCK
-  // (PLAT-08.2). The evidence block follows below from its own kept values --
-  // or, for a draft kept before the evidence store had controls of its own,
-  // from the "same store" rule that draft was made under.
+  // THE ARCHIVE BLOCK FROM THE ARCHIVE CONTROLS, AND ONLY THE ARCHIVE BLOCK.
+  // The evidence block follows below from its own kept values, or, for an
+  // older draft, from the "same store" rule that draft was made under.
   for (const block of legacyStorage ? [state.fields.source] : []) {
     if (typeof d.endpoint === "string") {
       block.endpoint = d.endpoint;
@@ -5281,10 +4852,8 @@ export function applyWizardDraft(state, draft) {
     if (typeof d.pathStyle === "boolean") {
       block.pathStyle = d.pathStyle;
     }
-    // AND NEVER FROM THE ADDRESSING STYLE. This is the other half of defect
-    // UI-HTTPDOWNGRADE: a draft restored after a refusal used to re-derive the
-    // insecure-transport flag from `pathStyle`, so even a plan whose box was
-    // never ticked came back with it set.
+    // And never from the addressing style: the insecure-transport flag comes
+    // back only as it was kept.
     if (typeof d.allowHttp === "boolean") {
       block.allowHttp = d.allowHttp;
     }
@@ -5350,9 +4919,9 @@ export function draftFrom(object, fields) {
     nextTarget.mode = target.mode;
   }
   if ((target.topicNaming || {}).originalName === true) {
-    // PROD-15.1: an original-name Restore prefills the choice; its scratch
-    // prefix stays the one the fields carry (the runner's probe namespace),
-    // and the owner statement is the operator's to make again.
+    // An original-name Restore prefills the choice; its scratch prefix stays
+    // the one the fields carry (the runner's probe namespace), and the owner
+    // statement is the operator's to make again.
     nextTarget.originalName = true;
     nextTarget.originalNameNoOwner = false;
     nextTarget.topicPrefix = "";
@@ -5365,8 +4934,8 @@ export function draftFrom(object, fields) {
   }
   const next = Object.assign({}, base, { target: nextTarget });
   if (nextTarget.originalName === true && nextTarget.mode === "newTopic") {
-    // PROD-15.1: and the complete coverage that choice requires, on a copy of
-    // the sample block (this builds a fields object; it mutates nothing).
+    // And the complete coverage that choice requires, on a copy of the sample
+    // block (this builds a fields object; it mutates nothing).
     next.sample = Object.assign({}, base.sample || {}, { coverage: COVERAGE_COMPLETE });
   }
   if (typeof spec.pointInTime === "string") {
@@ -5378,8 +4947,6 @@ export function draftFrom(object, fields) {
   return next;
 }
 
-// -------------------------------------------------------------- the plan half
-
 /** Step 6's one state transition: the plan bytes, hashed and named.
  *
  *  The bytes are rendered ONCE and read from `state.planBytes` by everything
@@ -5387,51 +4954,37 @@ export function draftFrom(object, fields) {
  *  page with two documents and one hash. */
 export async function preparePlan(state) {
   const s = state || {};
-  // ONE FUNCTION PRODUCES THE PLAN, FOR REVIEW AND FOR SUBMISSION (PLAT-18.1).
+  // ONE FUNCTION PRODUCES THE PLAN, FOR REVIEW AND FOR SUBMISSION.
   // `preparePlanDocument` renders, hashes and mints ONCE per distinct document
-  // and hands back the SAME FROZEN OBJECT for the same bytes, so the document
-  // the review step shows and the document the submit sends are one object and
-  // not two that happen to be equal.
+  // and hands back the SAME FROZEN OBJECT for the same bytes, so the review and
+  // the submit hold one object, not two that happen to be equal.
   return preparePlanDocument(
     s.fields,
     typeof s.planBytes === "string" ? { bytes: s.planBytes } : undefined,
   );
 }
 
-// EVERYTHING BETWEEN THE TWO MARKERS BELOW IS THE SUBMIT REGION, and
+// EVERYTHING BETWEEN THE TWO MARKERS BELOW IS THE SUBMIT REGION:
 // `crates/logweir/tests/ui_lint.rs::the_wizard_never_reserialises_the_plan_bytes`
-// asserts that six string-transforming tokens -- the two JSON entry points, the
-// structured clone, the two whitespace/Unicode normalisers and the plan
-// document's file extension -- appear nowhere inside it. The token list is
-// spelled out in the Rust test and deliberately NOT here, because a comment
-// naming the tokens would itself be a hit; this paragraph sits outside the
-// region for the same reason.
-//
-// The behaviour arm asserts the same property the only way that can actually
-// hold it -- by byte comparison over a fixture whose plan ends in two spaces
-// and a newline and carries a non-ASCII name. JavaScript has no string
-// identity operator, so an `===` arm would hold under a mutant that
-// reserialised to an equal string and would fail to catch the one that did
-// not.
+// asserts that six string-transforming tokens appear nowhere inside it. The
+// list is spelled out in that test and NOT here, because a comment naming the
+// tokens would itself be a hit. The behaviour arm compares bytes over a
+// fixture whose plan ends in two spaces and a newline and carries a non-ASCII
+// name.
 
 // SUBMIT-REGION-BEGIN
 
 /** The object `create` posts. `metadata.name` is the minted restore name and
- *  `spec.approvalRef.name` is the minted approval name, which DOES NOT EXIST
- *  YET -- the reconciler requeues at 30 s on `ApprovalNotVerified` until it
- *  does (interface I19). `spec.planBytes` is the string from `prepared`,
- *  unchanged.
+ *  `spec.approvalRef.name` the minted approval name, which DOES NOT EXIST YET
+ *  (the reconciler requeues on `ApprovalNotVerified` until it does).
+ *  `spec.planBytes` is the string from `prepared`, unchanged.
  *
- *  `spec.sourceArchive` is BOTH HALVES of `ArchiveRef`: the URL, and the name
- *  of the Secret the runner reads the archive with. The second is what makes
- *  the first usable -- the controller injects the object-store credential into
- *  the runner Job only when `secretRef` is set -- and an object that omitted it
- *  is accepted by the API server and fails later, at the archive.
+ *  `spec.sourceArchive` carries BOTH HALVES of `ArchiveRef`, the URL and the
+ *  Secret name: without the name the controller injects no credential and the
+ *  run fails at the archive.
  *
- *  THE KEY IS ABSENT AND NEVER `null` WHEN THERE IS NO NAME. `secretRef` is an
- *  OBJECT in the CRD schema, and `status` and `spec` are both structural: a
- *  literal `null` is a type error the API server reports as a 422 over a field
- *  the operator deliberately left blank. */
+ *  THE KEY IS ABSENT AND NEVER `null` WHEN THERE IS NO NAME: `secretRef` is an
+ *  OBJECT in the structural CRD schema, and a literal `null` is a 422. */
 export function restoreBody(state, prepared) {
   const s = state || {};
   const p = prepared || {};
@@ -5455,18 +5008,17 @@ export function restoreBody(state, prepared) {
     target: {
       clusterRef: { name: s.targetClusterName },
       mode: target.mode,
-      // PROD-15.1: the original-name declaration rides beside the empty
-      // prefix, and only for that plan: every other object is what it was.
+      // The original-name declaration rides beside the empty prefix, and only
+      // for that plan: every other object is what it was.
       topicNaming: originalNameChosen(s)
         ? { prefix: "", originalName: true }
         : { prefix: target.topicPrefix },
     },
     deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
   };
-  // PROD-08.1a: the coverage the plan asks for, DECLARED on the Restore -- the
-  // controller refuses an object whose declaration and plan disagree, so the
-  // two come from the same field. Absent for a sampled plan: the object every
-  // earlier restore was.
+  // The coverage the plan asks for, DECLARED on the Restore: the controller
+  // refuses an object whose declaration and plan disagree, so the two come
+  // from the same field. Absent for a sampled plan.
   const sample = fields.sample || {};
   if (sample.coverage === COVERAGE_COMPLETE) {
     spec.coverage = COVERAGE_COMPLETE;
@@ -5476,9 +5028,9 @@ export function restoreBody(state, prepared) {
   }
   if (typeof destination.name === "string" && destination.name.length > 0) {
     spec.sourceDestinationRef = { name: destination.name };
-    // THE EVIDENCE DESTINATION THE OPERATOR CHOSE (PLAT-08.2) -- the point's
-    // own unless step 1 named another. Never a fallback to the source: a
-    // refused choice has already stopped the submit in `validateRestore`.
+    // The evidence destination the operator chose: the point's own unless
+    // step 1 named another. Never a fallback to the source: a refused choice
+    // has already stopped the submit in `validateRestore`.
     spec.evidenceDestinationRef = { name: evidenceDestinationName(s) };
   }
   return {
@@ -5486,38 +5038,30 @@ export function restoreBody(state, prepared) {
     kind: "Restore",
     metadata: { name: p.restoreName },
     spec: spec,
-    // THE MAPPING THE PREVIEW SHOWED, DECLARED BESIDE THE REQUEST (PLAT-11.2).
-    // `Restore.spec` has no topic list -- the subset lives in the plan bytes --
-    // so this rides on the create REQUEST and is dropped by the API server in
-    // legacy mode, where the CRD's structural schema prunes what it does not
-    // declare. That asymmetry is deliberate and it is not a hole: the product
-    // API recomputes every row from the prefix it stores and refuses a request
-    // whose preview and submission disagree, and in legacy mode the plan bytes
-    // -- which carry the same list, from the same `selectedTopics` call -- are
-    // what phase 0 reads. One function produces both.
-    // AND ONLY IN `newTopic`. In `scratch` the runner maps through the PLAN's
-    // `topic_mapping_prefix`, which the product API never parses, so it holds
-    // no value it could check a declaration against and refuses one by name
-    // (`topicMapping`/`unsupported_for_mode`). Sending it there would be this
-    // page asking for a verdict nobody can give. The preview is still exact in
-    // both modes -- `effectivePrefix` reads the key the run reads -- and in
-    // `scratch` the rails are the page's own and phase 0's.
+    // THE MAPPING THE PREVIEW SHOWED, DECLARED BESIDE THE REQUEST.
+    // `Restore.spec` has no topic list (the subset lives in the plan bytes), so
+    // this rides on the create REQUEST: the product API recomputes every row
+    // and refuses a request whose preview and submission disagree; in legacy
+    // mode the CRD's schema prunes it and phase 0 reads the same list from the
+    // plan bytes. Only in `newTopic`: in `scratch` the API cannot check a
+    // declaration (it never parses `topic_mapping_prefix`) and refuses one by
+    // name (`topicMapping`/`unsupported_for_mode`).
     topicMapping: target.mode === "scratch" ? undefined : topicMapping(s),
-    // PLAT-19.2: the change ticket, a field of the create REQUEST that the
-    // console signs into the authorization document. Sent only under an
-    // explicit binding; an unbound namespace signs nothing.
+    // The change ticket, a field of the create REQUEST that the console signs
+    // into the authorization document. Sent only under an explicit binding; an
+    // unbound namespace signs nothing.
     ticket: ticketFor(s),
-    // OD-10 (PROD-15.1): the original topic names the requester re-typed,
-    // sent only on a one-person confirmation of an original-name restore --
-    // the console signs them into the authorization document, and the
-    // controller and the runner hold them to the plan again.
+    // The original topic names the requester re-typed, sent only on a
+    // one-person confirmation of an original-name restore: the console signs
+    // them into the authorization document, and the controller and the runner
+    // hold them to the plan again.
     originalNameConfirmation: typedConfirmationRequired(s)
       ? { typedTopics: parseTypedTopics(s.originalNameTyped) }
       : undefined,
   };
 }
 
-/** OD-10: what a requester confirming alone is asked to do, beside the field. */
+/** What a requester confirming alone is asked to do, beside the field. */
 export const ORIGINAL_NAME_TYPED_SENTENCE =
   "This namespace is confirmed by one person (confirm). A restore under the ORIGINAL topic " +
   "names is confirmed only by RE-TYPING every original topic name below, exactly, one per " +
@@ -5525,7 +5069,7 @@ export const ORIGINAL_NAME_TYPED_SENTENCE =
   "plan again (the owner's decision OD-10). A namespace where a second person approves needs " +
   "no typed names.";
 
-/** OD-10: whether this submission is a one-person confirmation of a restore
+/** Whether this submission is a one-person confirmation of a restore
  *  under the original topic names -- the one case the typed names are owed. */
 export function typedConfirmationRequired(state) {
   const s = state || {};
@@ -5544,7 +5088,7 @@ export function parseTypedTopics(text) {
     .filter((t) => t.length > 0);
 }
 
-/** OD-10: what the typed names get wrong against the topics this plan
+/** What the typed names get wrong against the topics this plan
  *  restores, or `null` when they are exactly them -- each once, nothing else.
  *  The product API answers the same refusal (`typed_topics_mismatch`). */
 export function typedTopicsProblem(state) {
@@ -5582,7 +5126,7 @@ export function typedTopicsProblem(state) {
     "restores (" + parts.join("; ") + ")";
 }
 
-/** OD-10: the typed-names field, rendered only when it is owed. */
+/** The typed-names field, rendered only when it is owed. */
 export function renderTypedConfirmation(state, typedErrors) {
   const s = state || {};
   if (!typedConfirmationRequired(s)) {
@@ -5611,11 +5155,10 @@ function ticketFor(state) {
   return bound && ticket.length > 0 ? ticket : undefined;
 }
 
-/** A refusal the namespace's approval POLICY makes before anything is sent
- *  (PLAT-19.2), or `null`: a `confirm` policy this console cannot sign yet --
- *  PROD-16.1: its confirmation key is not there (the identity hook writes it
- *  once, at install). The product API refuses the same request; this says so
- *  first. */
+/** A refusal the namespace's approval POLICY makes before anything is sent,
+ *  or `null`: a `confirm` policy whose confirmation key is not there yet (the
+ *  identity hook writes it once, at install). The product API refuses the
+ *  same request; this says so first. */
 export function policyRefusal(state) {
   const p = (state || {}).approvalPolicy;
   if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "ordinary" &&
@@ -5623,7 +5166,7 @@ export function policyRefusal(state) {
     return "namespace policy " + String(p.name) + " is confirm, and this console does not " +
       "offer it yet: its confirmation key is not there; try again in a minute";
   }
-  // PROD-16.2: a two-person namespace through a console that cannot take
+  // A two-person namespace through a console that cannot take
   // part (the in-cluster administrator console, or no key yet). The product
   // API refuses the same request with nothing created; this says so first.
   if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "governed" &&
@@ -5641,11 +5184,10 @@ export function policyRefusal(state) {
 export function approvalRoute(state, prepared, restore) {
   const s = state || {};
   const p = prepared || {};
-  // THE SUBJECT IS THE OBJECT THAT WAS CREATED (PLAT-19.2, found live). In
-  // console mode the product API mints the Restore's name (`rst-...`) and
-  // the page's `restoreName` is never an object; routing to it opened an
-  // approvals page about a Restore that does not exist. The created object's
-  // own name and `spec.approvalRef` win whenever there is one.
+  // The subject is the object that was created: in console mode the API
+  // mints the Restore's name (`rst-...`) and the page's `restoreName` is never
+  // an object, so the created object's own name and `spec.approvalRef` win
+  // whenever there is one.
   const meta = (restore || {}).metadata || {};
   const ref = (((restore || {}).spec || {}).approvalRef || {}).name;
   const subject = typeof meta.name === "string" && meta.name.length > 0 ? meta.name : p.restoreName;
@@ -5703,15 +5245,14 @@ export async function submitRestore(state, deps, lifecycle, options) {
   if (!active(lifecycle)) {
     return null;
   }
-  // AND AGAINST A FRESH READ OF THE CHECK (PLAT-08.2): a destination edited
-  // during the draft moves no byte of the plan and does make its verdict stale.
+  // And against a fresh read of the check: a destination edited during the
+  // draft moves no byte of the plan and does make its verdict stale.
   if (!await confirmReadiness(s, api, prepared, lifecycle)) {
     return null;
   }
-  // THE READINESS GATE IS CHECKED HERE AND NOT ONLY ON THE BUTTON (PLAT-11.2),
-  // for `validateRestore`'s own reason: a disabled attribute is a rendering,
-  // and this is the arm that holds when `submitRestore` is called directly --
-  // by the harness, by a test, or by a click that raced a re-render.
+  // The readiness gate is checked here and not only on the button: a
+  // disabled attribute is a rendering, and this is the arm that holds when
+  // `submitRestore` is called directly or a click raced a re-render.
   const blocked = readinessRefusal(s, prepared);
   if (blocked !== null) {
     throw refusal(blocked, { planHash: prepared.hash });
@@ -5726,7 +5267,7 @@ export async function submitRestore(state, deps, lifecycle, options) {
         "signed into the confirmation the approver countersigns",
     });
   }
-  // OD-10: a one-person confirmation of an original-name restore needs every
+  // A one-person confirmation of an original-name restore needs every
   // original topic name re-typed, exactly, before anything is sent.
   const typedProblem = typedTopicsProblem(s);
   if (typedProblem !== null) {
@@ -5754,8 +5295,7 @@ export async function submitRestore(state, deps, lifecycle, options) {
   return { outcome: created.outcome, object: created.object, route: route, prepared: prepared };
 }
 
-/** Where a submitted Restore goes next, UNDER THE FROZEN APPROVAL POLICY
- *  (PLAT-19.2 / PLAT-12.1).
+/** Where a submitted Restore goes next, UNDER THE FROZEN APPROVAL POLICY.
  *
  *  1. The product API answered `confirmed`: the namespace is bound Ordinary
  *     and the console's signed confirmation IS the Approval the Restore
@@ -5794,8 +5334,8 @@ export async function restoreDestination(api, state, prepared, restore) {
  *  touches no field of the plan.
  *
  *  The read carries no route signal: a submit in flight is a durable operation
- *  and navigation must not cancel it (PLAT-13.2), and this read is part of
- *  that operation. */
+ *  and navigation must not cancel it, and this read is part of that
+ *  operation. */
 export async function confirmClusters(state, api) {
   const s = state || {};
   try {
@@ -5807,13 +5347,10 @@ export async function confirmClusters(state, api) {
         "). Nothing was sent; the plan and every value you typed are still here.",
     });
   }
-  // AND THE LABEL FOLLOWS THE IDENTITY (review finding F4). `restoreBody`
-  // spells `target.clusterRef.name` from `state.targetClusterName`, so a
-  // connection renamed between opening the wizard and submitting it would be
-  // sent under the name it no longer has. The schedule form already does this
-  // (`submitSchedule` sends `resolved.name`); this is the same rule for a
-  // restore, and it touches `state.fields` not at all -- the plan bytes and
-  // the reviewed-hash guard are unaffected.
+  // And the label follows the identity: `restoreBody` spells
+  // `target.clusterRef.name` from `state.targetClusterName`, so a connection
+  // renamed meanwhile is sent under its current name (as `submitSchedule`
+  // does). `state.fields`, the plan bytes and the reviewed hash are untouched.
   const resolved = resolveTarget(s);
   if (resolved.state === "selected") {
     s.targetClusterName = resolved.name;
@@ -5867,9 +5404,8 @@ export async function confirmFrozenDestination(state, api, lifecycle) {
       archive: problem + ". Nothing was sent; the reviewed plan is still here.",
     });
   }
-  // AND THE EVIDENCE DESTINATION, WHEN IT IS ANOTHER ONE (PLAT-08.2). It was
-  // pinned by uid and location digest when it was chosen; the same interval
-  // this read protects for the archive applies to it, and the same answer: a
+  // AND THE EVIDENCE DESTINATION, WHEN IT IS ANOTHER ONE. It was pinned by
+  // uid and location digest when chosen, and the same answer applies: a
   // replacement under the same name is not the store the plan names.
   const pin = s.evidenceDestination || {};
   if (typeof pin.uid === "string" && pin.uid.length > 0 && pin.uid !== live.uid) {
@@ -5907,22 +5443,18 @@ export async function confirmFrozenDestination(state, api, lifecycle) {
 }
 
 /** Re-reads the readiness check on screen, at the last edge before create,
- *  against the reviewed plan's hash (PLAT-08.2, D2 section 6.6).
+ *  against the reviewed plan's hash.
  *
- *  THE VERDICT ON SCREEN IS A MEMORY, and the inputs it was about can move
- *  while an operator reviews: a destination's access rotated, a CA replaced, a
- *  connection edited -- each changes a referent's generation and the product
- *  API then answers `stale` with `referentChanged:<Kind>/<name>`, while the
- *  plan bytes, and so the hash, stay exactly the same. A page that trusted its
- *  cached `ready` would submit past that. So the held check is read again
- *  here, the answer replaces the cached one (staleness stays one-way, see
- *  [`mergeReadiness`]), and `readinessRefusal` then judges the fresh one.
+ *  THE VERDICT ON SCREEN IS A MEMORY: a rotated access, a replaced CA or an
+ *  edited connection changes a referent's generation, and the API then
+ *  answers `stale` (`referentChanged:<Kind>/<name>`) while the plan hash stays
+ *  the same. So the held check is read again, the answer replaces the cached
+ *  one (staleness stays one-way, see [`mergeReadiness`]), and
+ *  `readinessRefusal` judges the fresh one.
  *
- *  No held check means nothing to re-read, and that is `readinessRefusal`'s
- *  "nothing has run" arm, unchanged. A read that fails, or a 2xx answer that
- *  carries no check, is a refusal: "I could not find out" is not "it is still
- *  ready". No route signal, for
- *  [`confirmClusters`]'s reason. */
+ *  No held check means nothing to re-read ("nothing has run"). A failed read,
+ *  or a 2xx answer with no check, is a refusal: "I could not find out" is not
+ *  "it is still ready". No route signal, for [`confirmClusters`]'s reason. */
 export async function confirmReadiness(state, api, prepared, lifecycle) {
   const s = state || {};
   const held = (s.readiness || {}).preflight || null;
@@ -5945,10 +5477,9 @@ export async function confirmReadiness(state, api, prepared, lifecycle) {
   if (!active(lifecycle)) {
     return false;
   }
-  // AN ANSWER WITHOUT A CHECK IS NOT AN ANSWER (PLAT-08.2 review L2). A 2xx
-  // with no `item` -- a proxy's empty body, an older API -- would leave
-  // `mergeReadiness` holding the cached verdict, which is the "I could not find
-  // out" case wearing a success status. It is refused the same way.
+  // An answer without a check is not an answer: a 2xx with no `item` (a
+  // proxy's empty body, an older API) would leave `mergeReadiness` holding
+  // the cached verdict, so it is refused the same way.
   const fresh = (answer || {}).item;
   if (fresh === null || typeof fresh !== "object" || Array.isArray(fresh)) {
     throw refusal(
@@ -5965,8 +5496,6 @@ export async function confirmReadiness(state, api, prepared, lifecycle) {
 }
 
 // SUBMIT-REGION-END
-
-// --------------------------------------------------------------- private half
 
 function archiveFor(state, clusterName) {
   for (const backup of itemsOf(state.backups)) {
@@ -6000,16 +5529,11 @@ function backupsOf(state) {
   });
 }
 
-/** THE COVERED WINDOW, READ FROM `windowCovered.fromMs`/`toMs`.
- *
- *  Interface I22 names those two keys and they are integers. A page that read
- *  `covered.from`/`covered.to` would get `undefined` twice, default step 3 to
- *  nothing, and render the window message with `Invalid Date` on both bounds --
- *  which is what the behaviour suite's window row exists to catch. */
+/** THE COVERED WINDOW, READ FROM `windowCovered.fromMs`/`toMs`, two integers. */
 function coveredOf(state) {
-  // THE RANGE A PLAN MAY NAME, NOT THE RAW WINDOW (WIZARD-DEFAULT-PIT-EXCLUSIVE):
-  // `windowCovered.toMs` is exclusive and the runner refuses the floor itself,
-  // so every check, message and default on this page reads `restorableWindow`.
+  // THE RANGE A PLAN MAY NAME, NOT THE RAW WINDOW: `windowCovered.toMs` is
+  // exclusive and the runner refuses the floor itself, so every check, message
+  // and default on this page reads `restorableWindow`.
   const chosen = chosenBackup(state);
   const window = restorableWindow(((chosen || {}).status || {}).windowCovered);
   return window === null ? { fromMs: undefined, toMs: undefined } : window;
@@ -6034,15 +5558,9 @@ function completedAt(backup) {
   return epochMs(((backup || {}).metadata || {}).creationTimestamp);
 }
 
-/** THE POINT THIS STATE IS BOUND TO, and nothing else.
- *
- *  This used to be a search: with no `backupSetRef` it answered with the
- *  newest `Succeeded` object, which meant the page chose for the operator and
- *  changed its mind whenever a schedule completed (Task 28 measured it doing
- *  exactly that). It is now a field, resolved ONCE by `resolvePoint` from the
- *  identity in the route, and every later render reads the same object. There
- *  is no fallback: a state with no point renders the selector or a refusal,
- *  never a plan. */
+/** THE POINT THIS STATE IS BOUND TO, resolved ONCE by `resolvePoint` from the
+ *  route's identity. There is no fallback: a state with no point renders the
+ *  selector or a refusal, never a plan. */
 function chosenBackup(state) {
   return ((state || {}).point) || null;
 }
@@ -6114,8 +5632,6 @@ function windowComplaint(value, covered) {
   return null;
 }
 
-// --------------------------------------------------------------- mount half
-
 /** The wizard, over one namespace and one route identity.
  *
  *  `params` is [`restoreRouteParams`]'s answer for the current hash. Three
@@ -6131,15 +5647,10 @@ function windowComplaint(value, covered) {
 export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycle) {
   const api = deps || API;
   const selection = params || {};
-  // EVERY READ THAT DOES NOT WAIT ON ANOTHER STARTS NOW, TOGETHER (MCP-26).
-  // At 258 points the wizard was usable after 12.4 s while the API answered
-  // the Backups in 3.0 s and the catalog's points in 6.6 s: the reads were
-  // made one after another -- connections and Backups, then the approval
-  // policy, then the catalogs, then every page of their points -- and the
-  // page rendered nothing until the last one answered. Now the approval
+  // EVERY READ THAT DOES NOT WAIT ON ANOTHER STARTS NOW, TOGETHER: the approval
   // policy and, on the selector, the connected archives' points are read
-  // beside the two lists; the selector renders as soon as the Backups are
-  // in, and the catalog section fills in when its read answers.
+  // beside the two lists. The selector renders as soon as the Backups are in,
+  // and the catalog section fills in when its read answers.
   const selector = !(String(selection.uid || "").length > 0 ||
     String(selection.backup || "").length > 0 || String(selection.catalog || "").length > 0);
   const policyRead = readApprovalPolicy(api, ns, lifecycle);
@@ -6162,17 +5673,17 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
     const clusters = collections[0];
     const backups = collections[1];
-    // PLAT-15.2: A CATALOG POINT IS ITS OWN MOUNT, and it never falls back to
-    // a Backup. A link naming a catalog and a point that do not resolve is a
-    // refusal naming them, exactly as a Backup UID that does not resolve is.
+    // A CATALOG POINT IS ITS OWN MOUNT, and it never falls back to a Backup. A
+    // link naming a catalog and a point that do not resolve is a refusal naming
+    // them, exactly as a Backup UID that does not resolve is.
     if (typeof selection.catalog === "string" && selection.catalog.length > 0) {
       await mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups,
         policyRead);
       return;
     }
     const resolved = resolvePoint(backups, selection);
-    // FX-35: A BACKUP'S RESTORE IS BOUND TO ITS RECOVERY POINT, through the
-    // catalog flow's own resolution, or says why it is not.
+    // A Backup's restore is bound to its recovery point, through the catalog
+    // flow's own resolution, or says why it is not.
     const bound = resolved.state === "selected"
       ? await bindBackupToPoint(api, ns, resolved.point, backups,
         catalogReadersOf(api, ns, lifecycle), lifecycle)
@@ -6182,9 +5693,9 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
     const destinationName = savedDestinationName({ point: resolved.point });
     // THE POINT'S DESTINATION AND THE OTHER SAVED DESTINATIONS, TOGETHER. The
-    // list is for the evidence selector (PLAT-08.2); a read that fails costs
-    // the choice and nothing else: the point's own destination is still
-    // offered, and the page says the others were not read.
+    // list is for the evidence selector; a read that fails costs the choice and
+    // nothing else: the point's own destination is still offered, and the page
+    // says the others were not read.
     const kept = readDraft(formKey(ns, WIZARD_FORM));
     const keptName = kept !== null && typeof kept.evidenceDestination === "string"
       ? kept.evidenceDestination : "";
@@ -6234,9 +5745,9 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       state.unboundReason = bound.reason;
     }
     if (state.pointState === "none") {
-      // THE CONNECTED ARCHIVES' POINTS, beside the Backups (PLAT-15.2). A
-      // namespace that lost every Backup object still has its archive, and the
-      // selector is where an operator looks for something to restore.
+      // THE CONNECTED ARCHIVES' POINTS, beside the Backups. A namespace that lost
+      // every Backup object still has its archive, and the selector is where an
+      // operator looks for something to restore.
       if (completedBackups(backups).length === 0) {
         state.catalogOffers = await (offersRead || readCatalogOffers(ns,
           catalogReadersOf(api, ns, lifecycle), lifecycle));
@@ -6265,10 +5776,9 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       replace(node, parse(renderPointRefusal(state)));
       return;
     }
-    // PLAT-19.2: the namespace's effective approval policy, for the submit
-    // step's words. NOT a gate: routing uses the answer the create returns,
-    // and an unread policy renders today's governed instructions. It was
-    // started with the lists.
+    // The namespace's effective approval policy, for the submit step's words.
+    // NOT a gate: routing uses the answer the create returns, and an unread
+    // policy renders the governed instructions. It was started with the lists.
     state.approvalPolicy = await policyRead;
     if (!active(lifecycle)) {
       return;
@@ -6286,15 +5796,15 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
         dropDraft(key);
       }
     }
-    // PROD-05.1: THE SOURCE'S RECORDED TOPIC LAYOUT, from the catalog's view of
-    // this Backup's point, before the first paint.
+    // THE SOURCE'S RECORDED TOPIC LAYOUT, from the catalog's view of this
+    // Backup's point, before the first paint.
     await refreshSourceFacts(state, api, lifecycle);
     if (!active(lifecycle)) {
       return;
     }
-    // FX-5: THE TARGET'S BROKER COUNT BEFORE THE FIRST PAINT, for the target the
-    // draft left selected, so the factor on screen is never one that moves a
-    // moment after it is read.
+    // THE TARGET'S BROKER COUNT BEFORE THE FIRST PAINT, for the target the draft
+    // left selected, so the factor on screen never moves a moment after it is
+    // read.
     await refreshTargetBrokers(state, api, lifecycle);
     if (!active(lifecycle)) {
       return;
@@ -6420,10 +5930,9 @@ export async function resolveCatalogChoice(api, ns, selection, backups, readers,
     return refused("the catalog names neither a saved destination nor an archive");
   }
   if (backup !== null) {
-    // A RUN IS RESTORED FROM THE DESTINATION IT WAS WRITTEN TO (D2 section
-    // 3.12), so an offer that came from a Backup must be read through the
-    // destination that run froze -- the same name, the same object, the same
-    // location digest.
+    // A run is restored from the destination it was written to, so an offer
+    // that came from a Backup must be read through the destination that run
+    // froze: the same name, the same object, the same location digest.
     const frozen = (((backup.spec || {}).destinationRef) || {}).name || "";
     if (frozen !== destinationName) {
       return refused(
@@ -6446,7 +5955,7 @@ export async function resolveCatalogChoice(api, ns, selection, backups, readers,
   };
 }
 
-/** FX-35: THE CATALOG POINT A BACKUP'S RESTORE IS BOUND TO, or why there is none.
+/** THE CATALOG POINT A BACKUP'S RESTORE IS BOUND TO, or why there is none.
  *
  *  The point is named by the run's own receipt digest ([`pointIdOfReceiptDigest`],
  *  read from the run's operation when the list does not carry it) and looked
@@ -6545,13 +6054,13 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
     replace(node, parse(renderCatalogPointRefusal(ns, choice)));
     return;
   }
-  // The evidence selector's other destinations (PLAT-08.2) are not read for a
-  // catalog point: `undefined` offers the point's own destination, as before.
+  // The evidence selector's other destinations are not read for a catalog
+  // point: `undefined` offers the point's own destination.
   const state = initialState(ns, clusters, backups, selection, choice.destination, undefined,
     choice);
-  // PLAT-19.2: the namespace's effective approval policy, read exactly as the
-  // Backup-point mount reads it, so a catalog point's submission is routed by
-  // the same policy as any other restore -- started with the lists (MCP-26).
+  // The namespace's effective approval policy, read as the Backup-point mount
+  // reads it (started with the lists), so a catalog point's submission is
+  // routed by the same policy as any other restore.
   state.approvalPolicy = await (policyRead || readApprovalPolicy(api, ns, lifecycle));
   if (!active(lifecycle)) {
     return;
@@ -6569,8 +6078,8 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
       dropDraft(key);
     }
   }
-  // PROD-05.1: the catalog row's own topic layout (no read), then FX-5's
-  // target broker count, before the first paint, as for a Backup.
+  // The catalog row's own topic layout (no read), then the target's broker
+  // count, before the first paint, as for a Backup.
   await refreshSourceFacts(state, api, lifecycle);
   if (!active(lifecycle)) {
     return;
@@ -6680,7 +6189,7 @@ export function renderCatalogOffers(ns, offers) {
   const rows = list.map((offer) => {
     const e = offer.entry || {};
     return [
-      // The action first, for the selector's reason (MCP-25).
+      // The action first, for the selector's reason.
       "<a class=\"button\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
         "\">Restore this point</a>",
       cell(offer.catalog) + "<span class=\"cell-sub\"><code>" + cell(e.pointId) + "</code></span>",
@@ -6732,8 +6241,6 @@ async function readApprovalPolicy(api, ns, lifecycle) {
   }
 }
 
-/** Renders the wizard over `state` -- with its mutation record and its field
- *  messages -- and wires what was rendered to the plan it shows. */
 /** The wizard's text inputs: each commits its value to the state on `change`
  *  (blur or Enter), not on every keystroke, because a commit re-renders the
  *  plan and its hash. */
@@ -6765,13 +6272,11 @@ export function editingWizard(node) {
 
 /** Renders the wizard from `state` and wires it.
  *
- *  `landing` IS AN ANSWER ARRIVING, not the reader acting: a followed check's
- *  read, a mutation settling, a cancel answered. SUCH A REPAINT WAITS FOR THE
- *  READER (P13's class): the wizard commits a text input on `change`, so a
- *  repaint under an input being typed into rendered it from the state and the
- *  keystrokes since the last commit were gone. The answer is already in
- *  `state`; the paint is owed, and the reader's own commit -- the `change`
- *  that ends the edit -- renders it with everything else. */
+ *  `landing` is an answer arriving (a followed check's read, a mutation
+ *  settling, a cancel answered), not the reader acting. Such a repaint WAITS
+ *  FOR THE READER: inputs commit on `change`, so a repaint under an input
+ *  being typed into would lose the uncommitted keystrokes. The answer is
+ *  already in `state`; the reader's own commit renders it. */
 async function renderAndWire(node, state, parse, api, lifecycle, landing) {
   if (landing === true && editingWizard(node)) {
     state.paintOwed = true;
@@ -6802,11 +6307,10 @@ async function renderAndWire(node, state, parse, api, lifecycle, landing) {
   if (!active(lifecycle)) {
     return false;
   }
-  // THE STEP THE READER IS ON, REPAINTED, KEEPS THEIR PLACE (P16): a follow's
-  // answer, a click's pending and settled states, an edit re-rendering its own
-  // step. A step that was not the one on screen -- the first paint, Next,
-  // Back, the stepper, a refused submit jumping to its field -- is new
-  // content, and opens where `showWizardStep` puts it (the P16 review's HIGH).
+  // The step the reader is on, repainted, keeps their place. A step that was
+  // not on screen (the first paint, Next, Back, the stepper, a refused submit
+  // jumping to its field) is new content, and opens where `showWizardStep`
+  // puts it.
   const step = shownStep(state);
   (state.paintedStep === step ? replaceInPlace : replace)(
     node, parse(renderPreparedWizard(state, prepared)));
@@ -6815,7 +6319,7 @@ async function renderAndWire(node, state, parse, api, lifecycle, landing) {
   return true;
 }
 
-/** SHOW ONE STEP (MCP-29): record it, write it into the address, re-render
+/** SHOW ONE STEP: record it, write it into the address, re-render
  *  from the same state and move focus to the step. `index` outside the six is
  *  ignored. Exported for the suite, which drives it over a fake node. */
 export async function showWizardStep(node, state, parse, api, lifecycle, index) {
@@ -6838,7 +6342,7 @@ export async function showWizardStep(node, state, parse, api, lifecycle, index) 
   return true;
 }
 
-/** A DEEP LINK TO A STEP OPENS AT THAT STEP'S HEADING (`&step=`, MCP-29), by
+/** A DEEP LINK TO A STEP OPENS AT THAT STEP'S HEADING (`&step=`), by
  *  the rule Next and Back follow ([`showStepStart`]). Focus is left where the
  *  route put it. */
 function openAtNamedStep(node, state, selection) {
@@ -6851,15 +6355,11 @@ function openAtNamedStep(node, state, selection) {
   }
 }
 
-/** THE STEP OPENS AT ITS HEADING (the P16 review's HIGH): Next, Back, the
- *  stepper and a `&step=` deep link scroll the step's section to the top of
- *  the viewport, its heading just under it -- explicitly, and never by leaving
- *  it to the browser. The old `nearest` did nothing for a section taller than
- *  the viewport that already covered it, which every long step is: once the
- *  swap stopped moving the page, Next at the bottom of step 1 left step 2
- *  open 1935 px below its heading, and a swap that clamped the page to 0 left
- *  the heading at 605 px of an 844 px phone under the masthead and the
- *  stepper. Exported for the suite. */
+/** THE STEP OPENS AT ITS HEADING: Next, Back, the stepper and a `&step=`
+ *  deep link scroll the step's section to the top of the viewport,
+ *  explicitly. `nearest` does nothing for a section taller than the viewport
+ *  that already covers it, which every long step is. Exported for the
+ *  suite. */
 export function showStepStart(section) {
   if (section === null || section === undefined || typeof section.scrollIntoView !== "function") {
     return false;
@@ -6895,35 +6395,25 @@ function syncStepAddress(lifecycle, index) {
  *  [`restoreRouteParams`] -- and it is the only thing that decides which point
  *  this state is bound to.
  *
- *  THIS IS ALSO THE RE-READ, and there is no other one: every fresh look at
- *  the namespace -- a reload, a route change and back, the re-mount that
- *  discarding a draft performs -- comes back through `mountRestoreWizard` into
- *  this function with the SAME `selection`, and `resolvePoint` resolves it
- *  against the list that was just read rather than against the object the
- *  previous state happened to be holding. So a Backup that completed since does not
- *  become the choice, and a point DELETED since resolves to `missing` -- a
- *  refusal on the next render -- instead of a stale object the page keeps
- *  drawing a plan from. Absent, `pointState` is `none` and the mount half
- *  renders the selector; present and unresolvable, it is `missing` or
- *  `unusable` and the mount half renders a refusal. In neither case is a plan
- *  built, and in NO case does this function look for "the newest one instead":
- *  that search is the defect PLAT-11.1 removes.
+ *  THIS IS ALSO THE RE-READ, and there is no other: every fresh look at the
+ *  namespace comes back here with the SAME `selection`, resolved against the
+ *  list just read. A Backup completed since does not become the choice, and a
+ *  point deleted since resolves to `missing`, a refusal. Absent, `pointState`
+ *  is `none` (the selector); unresolvable, `missing` or `unusable` (a
+ *  refusal). No plan is built in either case, and nothing here looks for
+ *  "the newest one instead".
  *
  *  THE FIELDS OBJECT IS COMPLETE FROM THE FIRST RENDER, because a plan is
- *  hashed as a whole and an approver signs a whole document. A wizard that
- *  built half a document and left the rest to a later edit would be offering
- *  to invalidate its own approval. Every value below is either read from the
- *  chosen point, read from a Kubernetes object, fixed by a constraint, or
- *  editable in a step -- and the three object-store settings that no CRD
- *  records (endpoint, region and the `path_style` flag) plus the explicit
- *  insecure-transport flag are editable in step 1 rather than left out,
- *  because the runner reads them from these bytes and from nowhere else. */
+ *  hashed and signed as a whole. Every value is read from the point or a
+ *  Kubernetes object, fixed by a constraint, or editable in a step; the three
+ *  object-store settings no CRD records and the insecure-transport flag are
+ *  editable in step 1, because the runner reads them from these bytes only. */
 export function initialState(ns, clusters, backups, selection, savedDestination, destinations,
   catalogChoice) {
-  // PLAT-15.2: a catalog-verified point the mount half has already resolved
-  // and checked ([`resolveCatalogChoice`]). It REPLACES the Backup resolution
-  // -- there may be no Backup at all -- and nothing below searches for a
-  // different point when it is absent.
+  // A catalog-verified point the mount half has already resolved and checked
+  // ([`resolveCatalogChoice`]). It REPLACES the Backup resolution (there may
+  // be no Backup at all), and nothing below searches for a different point
+  // when it is absent.
   const chosenFromCatalog = ((catalogChoice || {}).point) || null;
   const resolved = chosenFromCatalog !== null
     ? {
@@ -6935,18 +6425,16 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
       renamed: false,
     }
     : resolvePoint(backups, selection);
-  // PLAT-11.2 / PLAT-12.2: a retry of a failed run, or "" for an ordinary
-  // restore. It changes exactly one value -- the default topic prefix -- and
-  // through that value it changes the plan bytes, the plan hash and both
-  // minted names, which is the whole of "a new execution rather than a
-  // collision with the old name".
+  // A retry of a failed run, or "" for an ordinary restore. It changes only
+  // the default topic prefix, and through it the plan bytes, the plan hash and
+  // both minted names.
   const retryOf = typeof (selection || {}).retryOf === "string" ? selection.retryOf : "";
   const point = resolved.point;
   const spec = (point || {}).spec || {};
   const status = (point || {}).status || {};
   const covered = status.windowCovered || {};
   // THE DEFAULT IS THE LAST INSTANT THE RUNNER ACCEPTS, `toMs - 1`, never the
-  // exclusive `toMs` itself (WIZARD-DEFAULT-PIT-EXCLUSIVE).
+  // exclusive `toMs` itself.
   const restorable = restorableWindow(covered) || {};
   const pointInTime = rfc3339(restorable.toMs);
   const archive = spec.archive || {};
@@ -6963,8 +6451,8 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
   const archiveSecretName = destinationName.length > 0 ? "" :
     (typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "");
   const target = firstTarget(clusters);
-  // `allowHttp` STARTS FALSE AND IS NEVER DERIVED (D-SEAMS S5). It is set by
-  // the one explicit checkbox in step 1 and by nothing else.
+  // `allowHttp` STARTS FALSE AND IS NEVER DERIVED. It is set by the one
+  // explicit checkbox in step 1 and by nothing else.
   const store = destinationSettings ||
     { region: "", endpoint: "", pathStyle: false, allowHttp: false };
   const prefix = retryOf.length > 0
@@ -6977,8 +6465,8 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     backups: backups,
     // THE ROUTE'S IDENTITY, KEPT FOR EVERY RE-MOUNT: for a catalog point the
     // catalog and the point id, and the run it was offered from when there
-    // was one -- or, for a Backup's route bound to its point (FX-35), that
-    // Backup, so a re-mount binds it again.
+    // was one; for a Backup's route bound to its point, that Backup, so a
+    // re-mount binds it again.
     selection: chosenFromCatalog === null
       ? { uid: resolved.uid, backup: resolved.name }
       : {
@@ -6993,8 +6481,8 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
         retryOf: retryOf,
       },
     catalogTopicsText: chosenFromCatalog === null ? "" : spec.topics.join(", "),
-    // MCP-29: the step on screen, 0-based. The route's `step` (1 to 6) when it
-    // named one, the first step otherwise.
+    // The step on screen, 0-based: the route's `step` (1 to 6) when it named
+    // one, the first step otherwise.
     step: stepIndexOf((selection || {}).step),
     point: point,
     pointState: resolved.state,
@@ -7007,11 +6495,10 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     archiveSecretName: archiveSecretName,
     savedDestination: destinationSettings === null ? null : savedDestination,
     savedDestinationProblem: destinationProblem,
-    // PLAT-08.2: WHERE THE EVIDENCE GOES, as its own choice. A saved point
-    // starts on its own destination -- inherited, nothing re-entered -- and may
-    // name another saved destination; a legacy point starts with its evidence
-    // store sharing the archive store's settings, said on screen as a ticked
-    // box, so an existing walkthrough's bytes do not move.
+    // WHERE THE EVIDENCE GOES, as its own choice. A saved point starts on its
+    // own destination and may name another saved destination; a legacy point
+    // starts with its evidence store sharing the archive store's settings,
+    // said on screen as a ticked box.
     evidenceDestinations: Array.isArray(destinations) ? destinations : [],
     evidenceDestinationsUnavailable: savedPoint && destinations === null,
     evidenceDestination: destinationSettings === null ? null : destinationPin(savedDestination),
@@ -7026,23 +6513,23 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     // first thing the draft keeps is an identity rather than a label.
     targetClusterUid: clusterUid(target),
     targetClusterState: target === null ? "none" : "selected",
-    // FX-5: whether the operator SET the replication factor, and what this page
+    // Whether the operator SET the replication factor, and what this page
     // knows of the target's broker count. Nothing is read yet: the mount half
     // reads the target's latest discovery before the first paint
     // (`refreshTargetBrokers`), and the default follows it.
     replicationChosen: false,
     targetBrokers: BROKERS_NOT_READ,
-    // PROD-05.1: the source's recorded topic layout for this point, read by
-    // the mount half before the first paint (`refreshSourceFacts`).
+    // The source's recorded topic layout for this point, read by the mount
+    // half before the first paint (`refreshSourceFacts`).
     sourceFacts: SOURCE_FACTS_NOT_READ,
     editing: null,
     deadlineSeconds: 3600,
     fields: {
       backupSetRef: status.backupId,
       topics: Array.isArray(spec.topics) ? spec.topics : [],
-      // THE RECOVERY POINT BINDING (PLAT-15.2): present for a catalog point,
-      // ABSENT for a Backup -- whose plan is therefore the document it always
-      // was, byte for byte.
+      // THE RECOVERY POINT BINDING: present for a catalog point, ABSENT for a
+      // Backup, whose plan is therefore the document it always was, byte for
+      // byte.
       point: pointBindingOf(point),
       pointInTime: pointInTime,
       source: Object.assign(
@@ -7069,9 +6556,8 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
         // retry's fresh prefix therefore applies in BOTH modes.
         topicMappingPrefix: prefix,
         markerTopic: "logweir.scratch",
-        // NOT A LITERAL ANY MORE (FX-5): the default from what is known, which
-        // before any read is nothing -- so the grammar's 1, said as such on
-        // screen -- and the mount half moves it when the target's broker count
+        // The default from what is known: before any read, the grammar's 1, said
+        // as such on screen; the mount half moves it when the target's broker count
         // is read. Never a factor nobody stated.
         replicationFactor: replicationDefault(sourceReplicationFactorsOf(), null).value,
         teardown: "delete",
@@ -7092,8 +6578,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
         bucket: savedPoint
           ? (destinationSettings === null ? "" : destinationSettings.bucket)
           : legacyEvidenceBucket(archiveUrl),
-        // Evidence never inherits the archive prefix. Global Constraint 6 is
-        // the saved-destination evidence location too.
+        // Evidence never inherits the archive prefix: it is always `logweir/`.
         prefix: EVIDENCE_PREFIX,
       }),
     },
@@ -7101,18 +6586,10 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
 }
 
 /** WHERE A POINT WITH NO DESTINATION WRITES ITS EVIDENCE: the archive's own
- *  bucket (PoC defect P5).
- *
- *  This used to be the literal `logweir-evidence`. The controller reads an
- *  inline-archive run's scorecard ONLY through its own archive handle
- *  (`LOGWEIR_ARCHIVE_URL`), and only in that handle's bucket; the runner writes
- *  it with the archive's credential, the one that already wrote this point's
- *  receipt under `<archive bucket>/logweir/`. A plan naming any other bucket
- *  restored the data and then published no verification and no completion
- *  (`weirkeeper` `destination::legacy_evidence_scope`). The archive's bucket is
- *  the one the archive credential is known to write, and on an installation
- *  whose handle is over its archive -- the chart's default -- the one the
- *  controller reads. The field stays editable; the readiness check warns
+ *  bucket. The controller reads an inline-archive run's scorecard only through
+ *  its own archive handle, in that handle's bucket, and the archive credential
+ *  is known to write there (`weirkeeper` `destination::legacy_evidence_scope`).
+ *  The field stays editable; the readiness check warns
  *  (`destination.evidenceReadable`) when the plan names a bucket the
  *  controller will not read. An archive URL with no bucket leaves the field
  *  EMPTY, so the plan is refused as incomplete rather than pointed anywhere. */
@@ -7210,8 +6687,6 @@ function savedDestinationResolved(state) {
       savedDestinationStore((state || {}).savedDestination, name) !== null);
 }
 
-// ------------------------------------ the evidence destination (PLAT-08.2)
-
 /** The three public facts that pin a saved destination: its name, its uid and
  *  the location digest its controller published. */
 function destinationPin(destination) {
@@ -7223,10 +6698,10 @@ function destinationPin(destination) {
   };
 }
 
-/** A saved destination's EVIDENCE store: its bucket rooted at Global
- *  Constraint 6's `logweir/`, reached with its own endpoint, region,
- *  addressing and transport -- `BackupDestination::evidence_storage_url`,
- *  field for field. `null` when the destination publishes no usable storage. */
+/** A saved destination's EVIDENCE store: its bucket rooted at `logweir/`,
+ *  reached with its own endpoint, region, addressing and transport --
+ *  `BackupDestination::evidence_storage_url`, field for field. `null` when the
+ *  destination publishes no usable storage. */
 export function evidenceStoreOf(destination) {
   const d = destination || {};
   const store = savedDestinationStore(d, d.name);
@@ -7267,7 +6742,6 @@ export function evidenceDestinationOptions(state) {
   return out;
 }
 
-/** The evidence destination's NAME, or "" for a legacy point. */
 /** The Secret a readiness request names for an inline archive, or `null` for
  *  a request that names none (a saved destination's check). */
 export function readinessSecretOf(request) {
@@ -7284,17 +6758,15 @@ function boundSecretOf(about) {
   return typeof a.archiveSecret === "string" ? a.archiveSecret : null;
 }
 
-/** THE ARCHIVE SECRET, AND WHAT A CHANGE OF IT DOES TO A HELD CHECK (review
- *  M1(a)).
+/** THE ARCHIVE SECRET, AND WHAT A CHANGE OF IT DOES TO A HELD CHECK.
  *
  *  For a point with no saved destination the readiness check reads the
- *  archive with the Secret the Restore will project -- that is P3's whole
- *  claim -- and the Secret is not in the plan bytes, so a plan-hash
- *  comparison cannot see it move. A change marks a held verdict stale exactly
- *  as a change of target or evidence destination does (`referentChanged`,
- *  kind `Secret`), and `readinessRefusal` also compares the Secret the check
- *  was started with against the one on screen, so the Create stays refused
- *  until the check is run again with this Secret. */
+ *  archive with the Secret the Restore will project, and the Secret is not in
+ *  the plan bytes, so a plan-hash comparison cannot see it move. A change
+ *  marks a held verdict stale (`referentChanged`, kind `Secret`), as a change
+ *  of target or evidence destination does, and `readinessRefusal` compares
+ *  the check's Secret with the one on screen, so Create stays refused until
+ *  the check runs again. */
 export function setArchiveSecret(state, value) {
   const next = String(typeof value === "string" ? value : "").trim();
   const before = String(state.archiveSecretName || "").trim();
@@ -7315,6 +6787,7 @@ export function setArchiveSecret(state, value) {
   state.archiveSecretName = typeof value === "string" ? value : "";
 }
 
+/** The evidence destination's NAME, or "" for a legacy point. */
 export function evidenceDestinationName(state) {
   const pin = (state || {}).evidenceDestination || null;
   return pin !== null && typeof pin.name === "string" ? pin.name : "";
@@ -7380,7 +6853,7 @@ export function selectEvidenceDestination(state, uid, name, item) {
  *  store's four transport-and-address settings into the evidence block. The
  *  caller decides whether the box is ticked; a saved point is never touched.
  *  The bucket and the prefix are never copied: evidence has its own bucket
- *  and Global Constraint 6's prefix. */
+ *  and the `logweir/` prefix. */
 export function syncEvidenceStore(state) {
   const s = state || {};
   if (savedDestinationName(s).length > 0) {
@@ -7412,40 +6885,19 @@ function targetAuth(cluster) {
  *  print. */
 export function selectTarget(state, uid, name) {
   const wanted = typeof uid === "string" ? uid : "";
-  // D2 SECTION 6.6's SECOND INVALIDATION CAUSE, AND IT IS NOT THE PLAN HASH.
-  // A readiness result is applicable only while
-  // "`binding.inputsDigest ==` the API's recomputation from current objects",
-  // and the reasons include `referentChanged:<Kind>/<name>` -- "Choosing
-  // another target or destination, or a recreated one, changes a referent UID,
-  // so the result is stale". The hash arm cannot see that: two `KafkaCluster`
-  // objects with the same bootstrap servers and the same auth render IDENTICAL
-  // plan bytes, so swapping between them left a `ready` verdict about the
-  // OTHER cluster in place and the submit was allowed. The review found it,
-  // and the harness's own journey had been sitting in exactly that blind spot.
-  //
-  // So a change of the selected UID drops the cached verdict here. The gate
-  // then falls to its "nothing has run" arm, which says in words that nothing
-  // has looked for an existing target topic on THIS cluster, and the operator
-  // re-runs the check. Dropping it is the fail-closed half of the choice: the
-  // alternative is re-reading the preflight with `?planHash=` and believing a
-  // verdict until the round trip answers.
+  // A CHANGE OF TARGET INVALIDATES A HELD CHECK, AND THE PLAN HASH CANNOT SEE
+  // IT: two `KafkaCluster`s with the same bootstrap servers and auth render
+  // identical plan bytes. A result applies only while its inputs digest
+  // matches current objects (`referentChanged:<Kind>/<name>` otherwise), so a
+  // change of the selected UID marks the cached verdict stale here.
   const changed = wanted !== state.targetClusterUid;
   const held = (state.readiness || {}).preflight || null;
   if (changed && held !== null) {
-    // MARKED STALE, NOT DELETED. Deleting it dropped the verdict -- which was
-    // already better than keeping a green one about another cluster -- but it
-    // landed the page on the "nothing has run" arm, which WARNS and permits
-    // the submit. D2 section 6.6 puts a referent change and a plan-hash change
-    // under ONE rule ("otherwise `applicable=false, stale=true` with
-    // `staleReasons` ..."), so the two must produce the same answer: refused
-    // until the check is run again. Marking it makes the existing stale arm
-    // fire, with `referentChanged` and the cluster named -- the server's own
-    // vocabulary, not a sentence this page invented for the occasion.
-    //
-    // The mark is this page's, and it is allowed to be: it is strictly more
-    // conservative than the server's own recomputation, which would answer
-    // `referentChanged` for exactly this input. Nothing here turns a stale
-    // verdict into a fresh one.
+    // MARKED STALE, NOT DELETED: a deleted verdict would land on the "nothing
+    // has run" arm, which permits the submit. A referent change and a plan-hash
+    // change are one rule, refused until the check runs again, with
+    // `referentChanged` and the cluster named. The mark is never less
+    // conservative than the server's own recomputation.
     state.readiness = Object.assign({}, state.readiness, {
       preflight: Object.assign({}, held, {
         applicable: false,
@@ -7460,11 +6912,10 @@ export function selectTarget(state, uid, name) {
   }
   state.targetClusterUid = wanted;
   if (wanted.length === 0) {
-    // THE EMPTY OPTION CLEARS THE NAME TOO (review finding F1). A refused
-    // selector opens on `<option value="">`, and leaving the refused NAME
-    // behind would let `resolveClusterSelection` fall back to resolving by
-    // name -- onto the very object the refusal is about, which is the
-    // substitution the refusal exists to prevent.
+    // THE EMPTY OPTION CLEARS THE NAME TOO: a refused selector opens on
+    // `<option value="">`, and a refused NAME left behind would let
+    // `resolveClusterSelection` resolve by name onto the very object the
+    // refusal is about.
     state.targetClusterName = "";
   } else if (typeof name === "string" && name.length > 0) {
     state.targetClusterName = name;
@@ -7480,9 +6931,9 @@ export function selectTarget(state, uid, name) {
   state.fields.target.auth = targetAuth(cluster);
 }
 
-/** READS THE SELECTED TARGET'S LATEST TOPIC DISCOVERIES for its broker count
- *  (FX-5), puts the count -- or why there is none -- on the state, and then
- *  the default factor on the plan, unless the operator set one.
+/** READS THE SELECTED TARGET'S LATEST TOPIC DISCOVERIES for its broker count,
+ *  puts the count -- or why there is none -- on the state, and then the
+ *  default factor on the plan, unless the operator set one.
  *
  *  A read that fails is a fact with a reason, never a throw: legacy mode,
  *  which has no topic discovery, refuses it by name and that refusal is the
@@ -7519,14 +6970,9 @@ export async function refreshTargetBrokers(state, api, lifecycle) {
 }
 
 /** The cluster step 4 preselects: one labelled `role: target` if the namespace
- *  has one, else the SOURCE cluster, else the first cluster there is.
- *
- *  NEVER `null` WHEN THE NAMESPACE HAS A CLUSTER. The old version returned
- *  `null` for a namespace whose only cluster is `role: source`, which left
- *  `target.bootstrapServers` empty and made `renderPlanBytes` throw -- on the
- *  one-cluster `newTopic` walk that IS Demo 1. The runner has no such rule
- *  (`drill/phase0_admit.rs`'s `TargetMode::NewTopic` arm is empty), so the
- *  page had invented a requirement the product does not have. */
+ *  has one, else the SOURCE cluster, else the first cluster there is. Never
+ *  `null` when the namespace has a cluster: the runner's `newTopic` arm has no
+ *  target-role rule, and an empty target makes `renderPlanBytes` throw. */
 function firstTarget(clusters) {
   const all = itemsOf(clusters);
   for (const cluster of all) {
@@ -7579,9 +7025,9 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       boundHash: record.phase === "succeeded"
         ? ((record.about || {}).planHash || "")
         : ((state.readiness || {}).boundHash || ""),
-      // THE SECRET THE CHECK READ WITH (review M1(a)). It is not in the plan
-      // bytes, so the hash above cannot see it change; `readinessRefusal`
-      // compares it with the Secret the Restore would project.
+      // THE SECRET THE CHECK READ WITH. It is not in the plan bytes, so the hash
+      // above cannot see it change; `readinessRefusal` compares it with the
+      // Secret the Restore would project.
       boundSecret: record.phase === "succeeded"
         ? boundSecretOf(record.about)
         : ((state.readiness || {}).boundSecret === undefined
@@ -7643,16 +7089,12 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
   }
 }
 
-/** BRINGS A FOCUSED STATUS LINE INTO VIEW ABOVE THE STICKY FOOTER (MCP round
- *  3, R3-1). A readiness click disables its button, focus moves to the
- *  step's status line (`disableKeepingFocus`, `restoreFocus` -- both with
- *  `preventScroll`), and the repaint left that line, and the verdict under
- *  it, behind the Back/Next bar at 390 px. So once the step is painted, a
- *  status that holds focus is scrolled to the NEAREST edge, which honours
- *  the `scroll-margin-bottom` `style.css` gives every wizard focus target --
- *  the footer's height. Nothing moves when focus is elsewhere: this never
- *  takes the page away from what the reader is looking at. Exported for the
- *  suite. */
+/** BRINGS A FOCUSED STATUS LINE INTO VIEW ABOVE THE STICKY FOOTER. A
+ *  readiness click moves focus to the step's status line with
+ *  `preventScroll`, which can leave it behind the Back/Next bar on a narrow
+ *  screen. So a status that holds focus is scrolled to the NEAREST edge,
+ *  honouring the footer-high `scroll-margin-bottom` from `style.css`. Nothing
+ *  moves when focus is elsewhere. Exported for the suite. */
 export function keepStatusInView(node, selector) {
   const status = node === null || node === undefined || typeof node.querySelector !== "function"
     ? null
@@ -7669,16 +7111,13 @@ export function keepStatusInView(node, selector) {
   return true;
 }
 
-/** WHAT `nearest` LEAVES UNDER THE BAR IS MOVED ABOVE IT (P16's sweep of R3-1).
- *  Chrome honours `scroll-margin-bottom` only when `scrollIntoView` scrolls,
- *  and with `block: "nearest"` it does not scroll an element whose border box
- *  is already inside the viewport: a focused status at 734-771 px, under the
- *  sticky bar whose top was at 738, stayed there (measured in Chromium over
- *  the real console at 390 x 844). So after the nearest edge is honoured, an
- *  element whose bottom is still below the bar's top is scrolled up until its
- *  bottom sits where the scroll margin puts it -- never past its own top.
- *  Nothing moves where the page cannot measure (the suites' fakes, unless a
- *  row gives them a layout). Exported for the suite. */
+/** WHAT `nearest` LEAVES UNDER THE BAR IS MOVED ABOVE IT. Chrome honours
+ *  `scroll-margin-bottom` only when `scrollIntoView` scrolls, and with
+ *  `block: "nearest"` it does not scroll an element already inside the
+ *  viewport, even under the sticky bar. So an element whose bottom is still
+ *  below the bar's top is scrolled up until its bottom sits where the scroll
+ *  margin puts it, never past its own top. Nothing moves where the page
+ *  cannot measure (the suites' fakes). Exported for the suite. */
 export function clearOfWizardNav(node, element) {
   const nav = node === null || node === undefined || typeof node.querySelector !== "function"
     ? null
@@ -7715,13 +7154,11 @@ function scrollMark(node) {
   return view && typeof view.scrollY === "number" ? view.scrollY : null;
 }
 
-/** A READER WHO SCROLLED SINCE THE ASK IS NOT MOVED (the P16 review's
- *  MEDIUM). The follow keeps the focused status clear of the footer only
- *  while the page is where the ask -- or the follow's own last repair -- left
- *  it. Once the reader has scrolled, even to put the status behind the bar,
- *  their offset is theirs until the next ask: the repaint keeps it
- *  (`replaceInPlace`) and nothing else moves it. `null` marks are the fakes'
- *  (no window): the status is asked for, as before. Exported for the suite. */
+/** A READER WHO SCROLLED SINCE THE ASK IS NOT MOVED. The follow keeps the
+ *  focused status clear of the footer only while the page is where the ask --
+ *  or the follow's own last repair -- left it. Once the reader has scrolled,
+ *  their offset is theirs until the next ask. `null` marks are the fakes' (no
+ *  window): the status is asked for. Exported for the suite. */
 export function readerStayed(node, mark) {
   if (mark === READER_LEFT) {
     return false;
@@ -7734,14 +7171,11 @@ export function readerStayed(node, mark) {
 const READER_LEFT = Object.freeze({ left: true });
 
 /** BRINGS STEP 5'S VERDICT HEAD INTO VIEW ABOVE THE STICKY FOOTER when its
- *  check turns terminal (review L7 of MCP round 3's R3-1). The status line is
- *  kept clear at the click ([`keepStatusInView`]); the verdict lands later,
- *  below it, and at 390 px it landed behind the footer. So when the follow
- *  paints a terminal check and focus is inside step 5 -- the reader is
- *  looking at it -- the headline (`.preflight-head` of that check) is scrolled
- *  to its nearest edge, which honours the footer-high `scroll-margin-bottom`
- *  `style.css` gives it. Focus anywhere else moves nothing. Exported for the
- *  suite. */
+ *  check turns terminal. The verdict lands below the status line kept clear
+ *  at the click ([`keepStatusInView`]), so when focus is inside step 5 the
+ *  check's `.preflight-head` is scrolled to its nearest edge, honouring the
+ *  footer-high `scroll-margin-bottom`. Focus anywhere else moves nothing.
+ *  Exported for the suite. */
 export function keepVerdictInView(node, check) {
   const id = String(((check || {}).id) || "");
   if (id.length === 0 || node === null || node === undefined ||
@@ -7770,12 +7204,9 @@ export function keepVerdictInView(node, check) {
  *  perfectly unchanged), so a fresher `applicable: true` must not erase it.
  *  Only a NEW check, started for the current choices, does.
  *
- *  `unverifiable` IS NOT ONE OF THOSE MARKS (defect P8's class). It is the
- *  SERVER saying what it could not compare in THAT answer -- above all the
- *  create answer's "this response did not recompute staleness; read the
- *  preflight itself" -- and a fresher read is exactly the answer it asks for.
- *  Carrying it one-way left a replayed check reading "could not be checked"
- *  after the read that did check it. */
+ *  `unverifiable` IS NOT ONE OF THOSE MARKS: it is the SERVER saying what it
+ *  could not compare in THAT answer (above all the create answer's "read the
+ *  preflight itself"), and a fresher read is the answer it asks for. */
 export function mergeReadiness(held, fresh) {
   if (fresh === null || fresh === undefined) {
     return held === undefined ? null : held;
@@ -7801,15 +7232,12 @@ export function mergeReadiness(held, fresh) {
   return Object.assign({}, fresh, { applicable: false, stale: true, staleReasons: reasons });
 }
 
-/** Re-reads the check step 5 started until it is terminal, or the longest
- *  time a check may take has passed (`lifecycle.js`'s `followCheck`; this
- *  step's 90 s was poc-upgrade-3's P15), asking the product API about the plan
- *  on screen NOW (`?planHash=`), and repaints when the answer changes. Before
- *  PLAT-08.2 the wizard showed only the create answer -- a check that had not
- *  run yet -- and never learned its verdict. THE CREATE ANSWER IS NOT A READ
- *  (P8), even when it is terminal. A failed re-read is not a verdict: the one
- *  on screen stays what the check last recorded, and the submit re-reads it
- *  again anyway. */
+/** Re-reads the check step 5 started until it is terminal or the longest
+ *  time a check may take has passed (`lifecycle.js`'s `followCheck`), asking
+ *  the API about the plan on screen NOW (`?planHash=`), and repaints when the
+ *  answer changes. THE CREATE ANSWER IS NOT A READ, even when terminal. A
+ *  failed re-read is not a verdict: the one on screen stays, and the submit
+ *  re-reads it anyway. */
 function followRestoreReadiness(node, state, parse, api, lifecycle) {
   const first = (state.readiness || {}).preflight || null;
   if (first === null || typeof first.id !== "string" || typeof api.preflight !== "function") {
@@ -7837,22 +7265,18 @@ function followRestoreReadiness(node, state, parse, api, lifecycle) {
         followStopped(next) !== followStopped(now);
       state.readiness = Object.assign({}, state.readiness, { preflight: next });
       if (moved) {
-        // WHETHER THE READER HAS SCROLLED SINCE THE ASK, before this repaint:
-        // one who has -- away from the status, or behind the bar -- is not
-        // pulled back to it every two seconds (the P16 review's MEDIUM).
+        // Whether the reader has scrolled since the ask, before this repaint: one
+        // who has is not pulled back to the status every two seconds.
         const stayed = readerStayed(node, state.readinessMark);
         const painted = await renderAndWire(node, state, parse, api, lifecycle, true);
-        // EVERY REPAINT KEEPS THE FOCUSED STATUS ABOVE THE FOOTER (P16), not
-        // only the click's: `pending -> running` repainted step 5 with nothing
-        // after it, and the page the swap had moved stayed moved -- the status
-        // at 943 px of an 844 px viewport until the verdict.
+        // Every repaint keeps the focused status above the footer, not only the
+        // click's.
         if (painted === true && stayed) {
           keepStatusInView(node, "#restore-readiness-status");
         }
         state.readinessMark = stayed ? scrollMark(node) : READER_LEFT;
-        // THE VERDICT, WHEN IT LANDS, IS BROUGHT ABOVE THE FOOTER TOO (review
-        // L7 of R3-1): the status line was kept clear at the click, and the
-        // verdict under it arrives later, through this repaint.
+        // The verdict, when it lands, is brought above the footer too: it arrives
+        // later, through this repaint.
         if (painted === true && next.terminal === true && (now === null || now.terminal !== true)) {
           keepVerdictInView(node, next);
         }
@@ -7885,12 +7309,10 @@ export function restoreReadinessRequest(state, prepared) {
   };
   if (isCatalogPoint(point)) {
     // A CATALOG POINT IS NAMED BY ITS CATALOG AND ITS ID, and by nothing else:
-    // one check answers `recoveryPoint.state` about ONE point (CRD rule P10),
-    // and the catalog row is the one the plan is bound to. The controller
-    // re-reads that row when the check runs -- joined with every Backup
-    // verdict on the same receipt, including the run this offer came from --
-    // so a point that became Missing or refused since this page read it is
-    // not ready.
+    // one check answers `recoveryPoint.state` about ONE point, the one the plan
+    // is bound to. The controller re-reads that row when the check runs, joined
+    // with every Backup verdict on the same receipt, so a point that became
+    // Missing or refused since this page read it is not ready.
     const c = point.catalogPoint;
     request.restore.catalogPoint = { catalog: c.catalog, pointId: c.pointId };
   } else if (typeof meta.name === "string" && meta.name.length > 0) {
@@ -7946,10 +7368,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (!active(lifecycle)) {
       return;
     }
-    // THE CATALOG POINT'S TOPIC LIST (PLAT-15.2), read FIRST: it is the list
-    // the subset boxes below are drawn from, so a new list replaces the subset
-    // with every topic it names, and the boxes are read only when the list did
-    // not change in this edit.
+    // THE CATALOG POINT'S TOPIC LIST, read FIRST: the subset boxes below are
+    // drawn from it, so a new list replaces the subset with every topic it
+    // names, and the boxes are read only when the list did not change.
     let topicsRetyped = false;
     if (catalogTopics !== null && isCatalogPoint(state.point)) {
       const typed = parseTopicList(valueOf(catalogTopics));
@@ -7961,11 +7382,11 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (point !== null) {
       state.fields.pointInTime = valueOf(point);
     }
-    // FX-8: the box and only the box writes the opt-in.
+    // The box and only the box writes the opt-in.
     if (timeBasis !== null) {
       state.fields.timeBasis = timeBasis.checked === true ? TIME_BASIS_PRODUCER_TIME : "";
     }
-    // PROD-08.1a: the box decides, the bound is read beside it.
+    // The box decides, the bound is read beside it.
     if (coverage !== null) {
       setCoverage(state, coverage.checked === true,
         coverageBound === null ? "" : valueOf(coverageBound));
@@ -7973,9 +7394,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (mode !== null) {
       state.fields.target.mode = valueOf(mode);
     }
-    // PROD-15.1: the box decides, the owner statement beside it; leaving
-    // `newTopic` mode clears the choice (scratch never restores under the
-    // original names).
+    // The box decides, the owner statement beside it; leaving `newTopic` mode
+    // clears the choice (scratch never restores under the original names).
     if (originalName !== null || state.fields.target.originalName === true) {
       setOriginalName(state, originalName !== null && originalName.checked === true,
         originalNameNoOwner !== null && originalNameNoOwner.checked === true);
@@ -7996,9 +7416,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       const before = state.targetClusterUid;
       const picked = readClusterSelection(node, "target-cluster");
       selectTarget(state, picked.uid, picked.name);
-      // FX-5: ANOTHER TARGET IS ANOTHER BROKER COUNT. Its discovery is read
-      // before the repaint, so the default and the refusal describe the
-      // cluster the select now shows and never the one it showed before.
+      // Another target is another broker count: its discovery is read before
+      // the repaint, so the default and the refusal describe the cluster the
+      // select now shows.
       if (state.targetClusterUid !== before) {
         try {
           await refreshTargetBrokers(state, api, lifecycle);
@@ -8013,16 +7433,15 @@ function wire(node, state, parse, api, lifecycle, prepared) {
         }
       }
     }
-    // FX-5: THE FACTOR, ONLY WHEN THE OPERATOR TYPED ONE. The input shows the
-    // default, and every commit of any field reads every control; reading the
-    // default back as a value someone set would stop it following the target.
+    // THE FACTOR, ONLY WHEN THE OPERATOR TYPED ONE. The input shows the
+    // default and every commit reads every control; reading the default back
+    // as a value someone set would stop it following the target.
     if (replication !== null && typedSinceRender(replication)) {
       setReplicationFactor(state, valueOf(replication));
     }
-    // THE ARCHIVE CONTROLS WRITE THE ARCHIVE BLOCK (PLAT-08.2). Until the
-    // evidence store had controls of its own, this loop wrote the same four
-    // values into BOTH blocks; now the evidence block gets them only through
-    // `syncEvidenceStore`, and only while the "same store" box says so.
+    // The archive controls write the archive block only; the evidence block
+    // gets them through `syncEvidenceStore`, and only while the "same store"
+    // box says so.
     for (const block of [state.fields.source]) {
       if (endpoint !== null) {
         block.endpoint = valueOf(endpoint);
@@ -8033,13 +7452,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       if (pathStyle !== null) {
         block.pathStyle = pathStyle.checked === true;
       }
-      // TWO BOXES, TWO FIELDS, AND NO ARROW BETWEEN THEM (D-SEAMS S5, defect
-      // UI-HTTPDOWNGRADE). The line that used to stand here read
-      // `pathStyle.checked` into `allowHttp`, on the reasoning that an
-      // on-premises store needs both -- which is true of some deployments and
-      // is not a reason for a page to write a security setting nobody asked
-      // for into a document an approver signs. `allowHttp` is this checkbox
-      // and only this checkbox.
+      // Two boxes, two fields, no arrow between them: `allowHttp` is this
+      // checkbox and only this checkbox, never derived from `pathStyle`.
       if (allowInsecure !== null) {
         block.allowHttp = allowInsecure.checked === true;
       }
@@ -8100,11 +7514,10 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (archiveSecret !== null) {
       setArchiveSecret(state, valueOf(archiveSecret));
     }
-    // THE SUBSET, READ FROM THE BOXES THAT ARE ON SCREEN (PLAT-11.2) -- and
-    // only when there ARE boxes, so a refusal page or a point with no frozen
-    // list cannot empty the selection behind the operator's back. The list is
-    // canonicalised through `selectedTopics` so the plan bytes, and therefore
-    // the hash an approver signs, do not move with the order of the clicks.
+    // THE SUBSET, READ FROM THE BOXES ON SCREEN, and only when there ARE boxes,
+    // so a refusal page or a point with no frozen list cannot empty the
+    // selection. The list is canonicalised through `selectedTopics` so the plan
+    // bytes, and the hash, do not move with the order of the clicks.
     const boxes = node.querySelectorAll(".topic-box");
     if (boxes.length > 0 && !topicsRetyped) {
       const ticked = [];
@@ -8116,27 +7529,18 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       state.fields.topics = ticked;
       state.fields.topics = selectedTopics(state);
     }
-    // FX-5: a default over the SELECTED topics follows the selection; a factor
-    // the operator set does not move.
+    // A default over the SELECTED topics follows the selection; a factor the
+    // operator set does not move.
     syncReplicationDefault(state);
     if (!active(lifecycle)) {
       return;
     }
-    // THE EDIT IS KEPT BEFORE ANYTHING ELSE, and a settled outcome about the
-    // previous plan is cleared: it described bytes that are no longer these.
-    //
-    // WHICH OUTCOMES AN EDIT CLEARS. An outcome about these BYTES -- a refusal,
-    // a 422, a conflict -- described bytes that are no longer these, so it
-    // goes. An outcome about whether an OBJECT EXISTS does not: editing a
-    // field does not un-create a Restore, and does not settle one whose fate
-    // is unknown.
-    //
-    // That is the defect this rule replaces. A create that timed out was NOT
-    // cancelled and may still be accepted; clearing the record on the next
-    // edit took its attempt number with it, so the late 201 for that Restore
-    // found no answerable attempt and was dropped -- leaving an object nobody
-    // was ever told about. Now the record is kept, and `submissionStatus` says
-    // which plan it is about and links to it by name.
+    // THE EDIT IS KEPT BEFORE ANYTHING ELSE. An outcome about these BYTES (a
+    // refusal, a 422, a conflict) described bytes that are no longer these, so
+    // it is cleared. An outcome about whether an OBJECT EXISTS is not: a create
+    // that timed out may still be accepted, and clearing its record would drop
+    // the late 201 and leave an object nobody was told about.
+    // `submissionStatus` says which plan it is about and links to it by name.
     keepDraft(key, wizardDraftValues(state), WIZARD_DRAFT_FIELDS);
     if (record.state.phase === "failed" && record.state.kind !== "unknown") {
       record.clear();
@@ -8186,15 +7590,15 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     }
   }
   // THE TICKET IS NOT IN THE PLAN BYTES, so typing it re-renders nothing: it
-  // is read into the state and sent beside the create body (PLAT-19.2).
+  // is read into the state and sent beside the create body.
   const ticket = node.querySelector("#change-ticket");
   if (ticket !== null) {
     listen(ticket, "input", () => {
       state.ticket = valueOf(ticket);
     }, lifecycle);
   }
-  // OD-10: THE TYPED NAMES ARE NOT IN THE PLAN BYTES either; read into the
-  // state and sent beside the create body.
+  // THE TYPED NAMES ARE NOT IN THE PLAN BYTES either; read into the state and
+  // sent beside the create body.
   const typedNames = node.querySelector("#original-name-typed");
   if (typedNames !== null) {
     listen(typedNames, "input", () => {
@@ -8229,16 +7633,12 @@ function wire(node, state, parse, api, lifecycle, prepared) {
 
   wireRestoreReadiness(node, state, parse, api, lifecycle, prepared);
 
-  // The stepper: each entry scrolls its section into view and hands it focus,
-  // so a keyboard reader lands where a pointer reader looks. Motion follows
-  // the reader's own preference.
   wireTargetSearch(node, lifecycle);
 
-  // ONE STEP AT A TIME (MCP-29). The stepper's buttons, Back, Next and every
-  // "go to step" link show THEIR step: the state records it, the address
-  // records it (so a reload or a copied link opens the same step), the wizard
-  // re-renders from the same state -- no read, no new plan -- and focus moves
-  // to the step's own heading, which a screen reader then announces.
+  // ONE STEP AT A TIME. The stepper's buttons, Back, Next and every "go to
+  // step" link show THEIR step: the state and the address record it (a reload
+  // or a copied link opens the same step), the wizard re-renders from the same
+  // state (no read, no new plan) and focus moves to the step's own heading.
   for (const control of node.querySelectorAll(".stepper-link, .wizard-go")) {
     listen(control, "click", () => {
       if (!active(lifecycle)) {
@@ -8285,10 +7685,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }
       dropDraft(key);
       record.clear();
-      // THE IDENTITY GOES BACK IN. This is the wizard's one re-read of the
-      // namespace, and a re-read that dropped the route's `uid` would rebuild
-      // the page with no point at all -- or, under the behaviour this task
-      // replaces, with whichever run happened to be newest by then.
+      // THE IDENTITY GOES BACK IN: this is the wizard's one re-read of the
+      // namespace, and dropping the route's `uid` would rebuild the page with no
+      // point at all.
       mountRestoreWizard(node, state.ns,
         Object.assign({}, state.selection, { step: shownStep(state) + 1 }), parse, api, lifecycle);
     }, lifecycle);
@@ -8326,10 +7725,9 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       }
       return;
     }
-    // A REFUSED SUBMIT SHOWS THE STEP ITS FIRST FIELD MESSAGE IS ABOUT (MCP-29):
-    // with one step on screen, a message beside an input three steps back is a
-    // message nobody sees. Once, on the settlement -- an edit made afterwards
-    // does not pull the reader back.
+    // A refused submit shows the step its first field message is about, once,
+    // on the settlement: with one step on screen, a message three steps back is
+    // a message nobody sees.
     if (settled.phase === "failed") {
       state.jumpToErrors = true;
     }
@@ -8357,17 +7755,11 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       // name minted from it -- so an outcome that arrives after the fields have
       // changed can still be told, and named, for what it is.
       record.run(async () => {
-        // THE CONNECTIONS ARE READ AGAIN FIRST (PLAT-07.2). The target was
-        // resolved against the list this view read when it mounted, and the
-        // window that matters is the one between reviewing a plan and
-        // submitting it. The re-read REPLACES the list the state resolves
-        // against and NOTHING ELSE: the plan's own fields are untouched, so
-        // `preparePlan` renders the same bytes and the reviewed-hash guard
-        // still compares the hash that was on screen. What changes is that
-        // `validateRestore` now refuses a target whose uid has stopped
-        // answering -- including one deleted and recreated under the same
-        // name. A read that fails is a refusal, not a shrug: the draft is
-        // kept, and "I could not find out" is not "it is still there".
+        // THE CONNECTIONS ARE READ AGAIN FIRST: the window that matters is between
+        // reviewing a plan and submitting it. The re-read replaces only the list
+        // the state resolves against, so `preparePlan` renders the same bytes and
+        // the reviewed-hash guard still holds, while `validateRestore` now refuses
+        // a target whose uid stopped answering. A failed read is a refusal.
         await confirmClusters(state, api);
         const result = await submitRestore(state, api, lifecycle, { reviewedHash: reviewed });
         return result === null ? { outcome: "abandoned" } : result;
@@ -8376,21 +7768,15 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   }
 }
 
-/** THE SELECTOR'S SEARCH, filtered IN PLACE.
+/** THE SELECTOR'S SEARCH, filtered IN PLACE: the query hides the rows that do
+ *  not match rather than re-rendering the table, which would replace the input
+ *  being typed into. Each row carries its haystack in `data-search`.
  *
- *  The rows are all rendered and the query hides the ones that do not match,
- *  rather than re-rendering the table on every keystroke: a re-render replaces
- *  the input the operator is typing into and takes the caret with it. Each row
- *  carries its own haystack in `data-search`, so the filter never counts
- *  positions and never has to be told the list again.
- *
- *  `hidden` AND NOTHING ELSE. Below 768 px (Clarity's `sm` width) the
- *  stylesheet turns every `table.grid` row into a card with `display: block`,
- *  and an author rule beats the user agent's `[hidden] { display: none }`; the
- *  stylesheet's base section therefore restates `[hidden]` with `!important`,
- *  so the attribute an assistive technology reads is also the one that hides
- *  the row, and no page writes an inline style (PLAT-18.2's token lint
- *  forbids one). */
+ *  `hidden` AND NOTHING ELSE. Below 768 px the stylesheet makes every
+ *  `table.grid` row a card with `display: block`, which beats the user
+ *  agent's `[hidden]`; the stylesheet restates `[hidden]` with `!important`,
+ *  so the attribute assistive technology reads is the one that hides the row,
+ *  and no page writes an inline style (the token lint forbids one). */
 function wireSelector(node, state, lifecycle) {
   const search = node.querySelector("#point-search");
   if (search === null) {
@@ -8401,11 +7787,9 @@ function wireSelector(node, state, lifecycle) {
   const moreBar = node.querySelector("#point-more-bar");
   const more = node.querySelector("#point-more");
   const count = node.querySelector("#point-count");
-  // THE SELECTOR SHOWS A PAGE OF MATCHES, NOT ALL OF THEM (MCP-26). 258 points
-  // were 258 rows laid out at once -- a 50,000 px page at 1440 px and three
-  // times that at 1024. The search still reads EVERY row; what is shown is the
-  // first `limit` that match, and "Show more" adds a page. A row past the
-  // limit is `hidden`, never removed, exactly as a row the search excludes.
+  // The selector shows a page of matches: the search reads EVERY row, the
+  // first `limit` that match are shown, and "Show more" adds a page. A row
+  // past the limit is `hidden`, never removed.
   let limit = SELECTOR_PAGE_SIZE;
   const filter = () => {
     if (!active(lifecycle)) {
@@ -8455,7 +7839,7 @@ function wireSelector(node, state, lifecycle) {
 }
 
 /** How many matching recovery points the selector shows at once, and adds per
- *  "Show more" (MCP-26). Clarity's datagrid default page. */
+ *  "Show more". Clarity's datagrid default page. */
 export const SELECTOR_PAGE_SIZE = 20;
 
 /** THE TARGET SELECTOR'S SEARCH, filtered in place.
