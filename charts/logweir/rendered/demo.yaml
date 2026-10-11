@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 # Rendered by scripts/check-chart.sh (just chart-check):
-#   helm template logweir charts/logweir -n logweir-system -f charts/logweir/examples/demo.values.yaml
+#   helm template logweir charts/logweir -n logweir-system -f charts/logweir/examples/demo.values.yaml --set identity.renderedOffline=false
 # It is checked in so a template change lands as a diff a reviewer reads; the
 # gate compares a temporary render and fails on drift.
 ---

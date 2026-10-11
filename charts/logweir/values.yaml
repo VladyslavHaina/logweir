@@ -36,6 +36,7 @@ identity:
   bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:ea106328eb5f9364a4682e640ba258242c6fc949b5d2198140c57bf719a13968 # rev 2fe8d907, amd64
   bootstrapImagePullPolicy: IfNotPresent
   allowMutableBootstrapImageForDevelopment: false
+  renderedOffline: null         # null: helm install only; true: Argo CD, kubectl apply (install.md); false: preview
   bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
     consoleKey: true            # PROD-16.1: console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust

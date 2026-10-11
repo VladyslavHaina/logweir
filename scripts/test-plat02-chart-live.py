@@ -61,6 +61,9 @@ OWNER = os.environ.get("LOGWEIR_CHART_LIVE_OWNER", "plat01-02-live")
 LOCK_OWNER_FILE = pathlib.Path("/tmp/logweir-roadmap-run/k8s.lock/owner")
 KUBECTL = ["kubectl", "--context", "docker-desktop"]
 HELM = ["helm", "--kube-context", "docker-desktop"]
+# `helm template` cannot ask the cluster, and the chart refuses such a render
+# unless it says it is a preview (PROD-14.1, `identity.renderedOffline`).
+PREVIEW = ["--set", "identity.renderedOffline=false"]
 LAB_NS = "logweir-scram-local"
 LAB_DEPLOYMENT = "weirkeeper"
 LAB_RELEASE = "scram-local"
@@ -705,7 +708,7 @@ def chart_cluster_objects(docs: List[Any]) -> List[Tuple[str, str]]:
 def render_cluster_objects() -> List[Tuple[str, str]]:
     found = set()
     for variant in RENDER_VARIANTS:
-        text = run(HELM + ["template", LAB_RELEASE, str(CHART), "-n", LAB_NS, *variant]).stdout
+        text = run(HELM + ["template", LAB_RELEASE, str(CHART), "-n", LAB_NS, *PREVIEW, *variant]).stdout
         found.update(chart_cluster_objects(list(yaml.safe_load_all(text))))
     return sorted(found)
 
@@ -1528,7 +1531,7 @@ def phase_race() -> None:
         if not hooks:
             # `--no-hooks` releases may record none; render the same chart and
             # keep the documents Helm marks as hooks.
-            hooks_text = run(HELM + ["template", release, str(CHART), "-n", namespace]).stdout
+            hooks_text = run(HELM + ["template", release, str(CHART), "-n", namespace, *PREVIEW]).stdout
             hooks = [
                 doc
                 for doc in yaml.safe_load_all(hooks_text)

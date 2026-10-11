@@ -106,13 +106,18 @@ bootstrap_test_image="$runner_repo@sha256:00000000000000000000000000000000000000
 # A PINNED DEFAULT IS RENDERED AS SHIPPED. Only a pre-publication checkout (an
 # empty value) substitutes the test-only digest, so the committed snapshots
 # carry the exact bootstrap reference a default install pulls.
+#
+# EVERY RENDER HERE IS A PREVIEW (PROD-14.1). `helm template` cannot ask a
+# cluster, and the chart refuses such a render unless `identity.renderedOffline`
+# says what it is; `false` renders what `helm install` creates, which is what
+# the snapshots and the arms below hold. Arm 12 is the refusal and `true`.
 if [ -n "$values_bootstrap" ]; then
-  bootstrap_render_args=()
-  bootstrap_render_note=""
+  bootstrap_render_args=(--set identity.renderedOffline=false)
+  bootstrap_render_note=" --set identity.renderedOffline=false"
   bootstrap_target_note="the pinned bootstrap digest"
 else
-  bootstrap_render_args=(--set-string "identity.bootstrapImage=$bootstrap_test_image")
-  bootstrap_render_note=" --set-string identity.bootstrapImage=<unpublished-test-digest>"
+  bootstrap_render_args=(--set identity.renderedOffline=false --set-string "identity.bootstrapImage=$bootstrap_test_image")
+  bootstrap_render_note=" --set identity.renderedOffline=false --set-string identity.bootstrapImage=<unpublished-test-digest>"
   bootstrap_target_note="an unpublished test-only bootstrap digest"
 fi
 # THE THIRD REPOSITORY, D0 stage 7. The console image has no digest pin in the
@@ -190,7 +195,7 @@ else
 fi
 
 for unsafe_policy in Always IfNotPresent; do
-  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" \
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --set identity.renderedOffline=false \
     --set-string identity.bootstrapImage=logweir:mutable-development \
     --set identity.allowMutableBootstrapImageForDevelopment=true \
     --set "identity.bootstrapImagePullPolicy=$unsafe_policy" \
@@ -203,7 +208,7 @@ for unsafe_policy in Always IfNotPresent; do
     echo "   rc=$rc  (mutable bootstrap with $unsafe_policy refused, as required)"
   fi
 done
-helm template "$RELEASE" "$CHART" -n "$NAMESPACE" \
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --set identity.renderedOffline=false \
   --set-string identity.bootstrapImage=logweir:mutable-development \
   --set identity.allowMutableBootstrapImageForDevelopment=true \
   --set identity.bootstrapImagePullPolicy=Never > /dev/null 2> "$tmp/bootstrap-mutable-Never.err"
@@ -1260,7 +1265,7 @@ if [ "$rc" -ne 0 ] || [ ! -f "$package" ]; then
   fail=1
 else
   helm show chart "$package" > "$tmp/package-chart.yaml" 2>&1
-  helm template logweir "$package" -n "$NAMESPACE" --set api.enabled=true --set api.console.enabled=true \
+  helm template logweir "$package" -n "$NAMESPACE" --set identity.renderedOffline=false --set api.enabled=true --set api.console.enabled=true \
     --set api.console.mode=localAdmin --set api.console.keySecret=k \
     > "$tmp/package-render.yaml" 2> "$tmp/package-render.err"
   rc=$?
@@ -1727,6 +1732,98 @@ check_trust_creators() {
 check_enforcement_image || fail=1
 check_console_grants || fail=1
 check_trust_creators || fail=1
+
+# ---------------------------------------------------------------- 12. offline renders
+# PROD-14.1. `lookup` decides the identity's create-once objects, and it
+# answers nothing under `helm template` and Argo CD. Argo CD applies the empty
+# placeholders as PreSync hooks and deletes and re-creates them on every sync
+# (its default hook policy), and `kubectl apply` re-creates the install-only
+# trust grant that nothing then deletes. So a render that cannot ask the
+# cluster is refused unless `identity.renderedOffline` says what it is, and
+# `true` renders no placeholder and no grant. Every render here is offline;
+# each control is the same render with the other answer, and renders exactly
+# what its case says is absent.
+echo "== 12. an offline render is refused unless identity.renderedOffline says what it is =="
+OFFLINE_SHAPE=(-f "$EXAMPLES/console-fresh-install.values.yaml" --set-json 'identity.authorizedRunnerNamespaces=["team-a"]')
+offline_diagnostic="identity.renderedOffline is unset and this render cannot ask the cluster"
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${OFFLINE_SHAPE[@]}" > /dev/null 2> "$tmp/offline-unset.err"
+rc=$?
+if [ "$rc" -eq 0 ] || ! grep -F -q "$offline_diagnostic" "$tmp/offline-unset.err"; then
+  echo "FAIL: an offline render with identity.renderedOffline unset was not refused by name (rc=$rc)" >&2
+  sed 's/^/      /' "$tmp/offline-unset.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (an offline render with identity.renderedOffline unset: refused by name)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" --set identity.enabled=false > /dev/null 2> "$tmp/offline-noidentity.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: control: with identity.enabled=false an offline render must not be refused (rc=$rc)" >&2
+  sed 's/^/      /' "$tmp/offline-noidentity.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (control: identity.enabled=false renders; the refusal is the identity's)"
+fi
+# One render per answer, and per adoption mode: the offline objects, then the
+# preview of the same values as the control.
+offline_ok=1
+for mode in true false; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${OFFLINE_SHAPE[@]}" \
+    --set "identity.renderedOffline=$mode" > "$tmp/offline-$mode.yaml" 2> "$tmp/offline-$mode.err"
+  rc=$?
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$EXAMPLES/identity-external.values.yaml" \
+    --set "identity.renderedOffline=$mode" > "$tmp/offline-external-$mode.yaml" 2> "$tmp/offline-external-$mode.err"
+  rc_external=$?
+  if [ "$rc" -ne 0 ] || [ "$rc_external" -ne 0 ]; then
+    echo "FAIL: identity.renderedOffline=$mode did not render (rc=$rc, external rc=$rc_external)" >&2
+    sed 's/^/      /' "$tmp/offline-$mode.err" "$tmp/offline-external-$mode.err" >&2
+    offline_ok=0
+  fi
+done
+placeholders() { grep -c '^    logweir.dev/identity-state: uninitialized$' "$1"; }
+grant() { grep -c -E "^  name: $RELEASE-identity-trust$" "$1"; }
+arg() { grep -c -F -x -- "            - $2" "$1"; }
+if [ "$offline_ok" -eq 1 ]; then
+  off="$tmp/offline-true.yaml"; pre="$tmp/offline-false.yaml"
+  # The offline install: the hook Jobs still run and still manage the console
+  # key, but nothing the chart renders can empty a filled object or grant.
+  got="placeholders=$(placeholders "$off") grant=$(grant "$off") trust-arg=$(arg "$off" --installation-trust-policy) marker-arg=$(arg "$off" --mark-fresh-install-confirm) console-arg=$(arg "$off" --console-secret-name) distribute=$(grep -c -E "^  name: $RELEASE-identity-distribute-" "$off")"
+  if [ "$got" != "placeholders=0 grant=0 trust-arg=0 marker-arg=0 console-arg=1 distribute=1" ]; then
+    echo "FAIL: identity.renderedOffline=true must render no placeholder and no trust grant, and still both hook Jobs; got $got" >&2
+    offline_ok=0
+  fi
+  # Control: the same values as a preview render all five placeholders (the
+  # signer, its public record, the console key, its public record, team-a's
+  # copy), the grant (three names: the ClusterRole, the binding, its roleRef)
+  # and both trust arguments.
+  got_pre="placeholders=$(placeholders "$pre") grant=$(grant "$pre") trust-arg=$(arg "$pre" --installation-trust-policy) marker-arg=$(arg "$pre" --mark-fresh-install-confirm) console-arg=$(arg "$pre" --console-secret-name)"
+  if [ "$got_pre" != "placeholders=5 grant=3 trust-arg=1 marker-arg=1 console-arg=1" ]; then
+    echo "FAIL: control: the preview of the same values must render the five placeholders, the grant and both trust arguments; got $got_pre" >&2
+    offline_ok=0
+  fi
+  # Adoption works offline too: the external Secret is still named, and the
+  # managed copy is the operator's to create. Control: its preview renders two.
+  got_ext="placeholders=$(placeholders "$tmp/offline-external-true.yaml") external-arg=$(arg "$tmp/offline-external-true.yaml" --external-secret-name) preview-placeholders=$(placeholders "$tmp/offline-external-false.yaml")"
+  if [ "$got_ext" != "placeholders=0 external-arg=1 preview-placeholders=2" ]; then
+    echo "FAIL: identity.externalSecret with identity.renderedOffline=true: expected no placeholder and the adoption argument (preview: two); got $got_ext" >&2
+    offline_ok=0
+  fi
+  # No answer ever renders private key material: no PEM block anywhere, and
+  # every identity Secret the preview renders is empty.
+  pem="$(cat "$tmp"/offline-*.yaml | grep -c -E 'BEGIN [A-Z ]*PRIVATE KEY|PRIVATE KEY-----')"
+  nonempty="$(cat "$tmp"/offline-*.yaml | awk '
+    /^---/ { secret = 0; identity = 0 }
+    /^kind: Secret$/ { secret = 1 }
+    /app.kubernetes.io\/component: (signing-identity|console-confirmation)$/ { identity = 1 }
+    /^data:/ { if (secret && identity && $0 != "data: {}") n++ }
+    END { print n + 0 }')"
+  if [ "$pem" -ne 0 ] || [ "$nonempty" -ne 0 ]; then
+    echo "FAIL: an offline or preview render carries key material (PEM lines $pem, identity Secrets with data $nonempty)" >&2
+    offline_ok=0
+  fi
+  [ "$offline_ok" -eq 1 ] && echo "   ok: true renders no placeholder and no grant ($got); the preview control renders them ($got_pre); adoption offline ($got_ext); no key material"
+fi
+[ "$offline_ok" -eq 1 ] || fail=1
 
 echo
 if [ "$fail" -ne 0 ]; then

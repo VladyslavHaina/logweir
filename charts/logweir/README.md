@@ -78,6 +78,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `identity.bootstrapImage` | a reviewed runner digest (rev `2fe8d907`, amd64) | must be `@sha256`; an emptied value refuses to render |
 | `identity.bootstrapImagePullPolicy` | `IfNotPresent` | |
 | `identity.allowMutableBootstrapImageForDevelopment` | `false` | only the author-only override, with `Never` |
+| `identity.renderedOffline` | `null` | `true` for Argo CD and `helm template \| kubectl apply`: no placeholders, no trust grant (*The identity lifecycle*); `false` only for a preview; unset, such a render is refused |
 | `identity.bootstrapFeatures.consoleKey` | `true` | `false` only with a bootstrap image older than the console-key flags |
 | `identity.publicConfigMapName` | `logweir-signing-trust` | public key, key id, algorithm, trust reference |
 | `identity.authorizedRunnerNamespaces` | `[]` | existing namespaces given the same signer and runner prerequisites |
@@ -465,8 +466,14 @@ helm install logweir charts/logweir -n logweir-system --create-namespace \
 ### The identity lifecycle
 
 Managed identity needs connected `helm install`, `upgrade` and `rollback` with
-credentials for every `lookup`; never apply offline `helm template` output with
-`identity.enabled=true`. The bootstrap and distribution Jobs are
+credentials for every `lookup`. A render that cannot ask the cluster
+(`helm template`, `helm lint`, `--dry-run=client`, Argo CD) is refused, because
+it would render the empty placeholders again. For Argo CD or `helm template |
+kubectl apply` set `identity.renderedOffline: true`, which renders no placeholder
+and no fresh-install trust grant, and create the empty retained objects once
+first ([install.md, *Argo CD and other offline renders*](../../docs/install.md#argo-cd-and-other-offline-renders)).
+`identity.renderedOffline: false` renders what `helm install` would, for a
+preview that is never applied. The bootstrap and distribution Jobs are
 `post-install,post-upgrade,post-rollback` hooks, so a rollback validates only
 when its target has them. The retained Secret, ConfigMap and singleton are
 creation-only `pre-install,pre-upgrade` hooks: no rollback overwrites a live

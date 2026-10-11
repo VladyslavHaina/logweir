@@ -4861,6 +4861,17 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
              with its default, the empty ones included — ruling 15"
         );
     }
+    // PROD-14.1: `identity.renderedOffline` is shown UNSET, its default: Helm's
+    // `lookup` decides, and a render that cannot ask the cluster is refused
+    // (scripts/check-chart.sh arm 12). A `true` or `false` here would make
+    // every offline render of the published chart pass silently.
+    assert!(
+        values["identity"]
+            .as_mapping()
+            .is_some_and(|identity| identity.get("renderedOffline").is_some())
+            && values["identity"]["renderedOffline"].is_null(),
+        "values.yaml must carry `identity.renderedOffline: null`"
+    );
     // AND THE DEFAULTS ARE TODAY'S BEHAVIOUR: each new key renders nothing.
     assert_eq!(Some(""), values["environment"].as_str());
     assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());

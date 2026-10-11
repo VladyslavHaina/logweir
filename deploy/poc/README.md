@@ -466,6 +466,7 @@ kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/cha
 #     not harmless: stop, or accept losing the demo topics and re-seed them
 #     afterwards.
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  --dry-run=server --kube-context "$CTX" \
   -f deploy/poc/logweir.values.yaml --show-only templates/demo-kafka/kafka.yaml \
   | kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" diff -l app.kubernetes.io/component=demo-kafka -f -
 # 2. Controller, runner and console images TOGETHER. The approval bindings are
@@ -525,8 +526,10 @@ helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
 ```
 
 Keep `--dry-run=server` on `helm template`. Without it the chart's `lookup`
-sees no cluster and renders the identity Secrets and ConfigMaps that
-`helm upgrade` creates only when they are absent. The dry run then reports
+sees no cluster, and the chart refuses the render (`identity.renderedOffline`,
+[install.md](../../docs/install.md#argo-cd-and-other-offline-renders)); a chart
+from before PROD-14.1 rendered the identity Secrets and ConfigMaps that
+`helm upgrade` creates only when they are absent, and the dry run reported
 false conflicts on them (manager `ureq`, four on the PoC).
 
 Do not save that render to a file: it carries the demo MinIO's root credential

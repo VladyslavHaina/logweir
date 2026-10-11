@@ -25,7 +25,9 @@
 #      are otherwise pulled into a temporary directory (network access to their
 #      repositories). Dex's rendered configuration must carry no secret.
 #
-# Nothing is applied and no cluster is contacted. Every subprocess that can
+# Nothing is applied and no cluster is contacted, so each candidate Logweir render
+# says it is a preview (`identity.renderedOffline=false`; the chart refuses an
+# offline render that does not). Every subprocess that can
 # reach the network runs under a timeout.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
@@ -151,11 +153,12 @@ elif [ "$(basename "$package")" != "logweir-chart-$LOGWEIR_CHART_VERSION.tgz" ];
   echo "FAIL: the package is $(basename "$package"), versions.env expects logweir-chart-$LOGWEIR_CHART_VERSION" >&2
   fail=1
 else
-  render logweir "$package" "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml
-  bounded 60 helm lint "$package" -f deploy/poc/logweir.values.yaml > "$work/lint.log" 2>&1 \
+  render logweir "$package" "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml --set identity.renderedOffline=false
+  bounded 60 helm lint "$package" -f deploy/poc/logweir.values.yaml --set identity.renderedOffline=false > "$work/lint.log" 2>&1 \
     || { echo "FAIL: helm lint of the package" >&2; cat "$work/lint.log" >&2; fail=1; }
 fi
 RELEASE=logweir render logweir-checkout charts/logweir "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
+  --set identity.renderedOffline=false \
   --set "controllerImage=$(image_ref weirkeeper)" \
   --set "runnerImage=$(image_ref logweir)" \
   --set "api.console.image=$(image_ref logweir-console)"
@@ -242,6 +245,7 @@ fi
   "docker.io/vladyslavhaina/logweir-console:$R2_TAG" "mode: shared"
 # Item 6, statically: the candidate refuses R2's unmigrated shared console.
 if helm template logweir charts/logweir -n "$LOGWEIR_NAMESPACE" -f deploy/poc/rehearsals/r2-f49849d.values.yaml \
+     --set identity.renderedOffline=false \
      > /dev/null 2> "$work/item6.err"; then
   echo "FAIL: the candidate chart ACCEPTED R2's unmigrated shared-console values (release-note item 6)" >&2
   fail=1

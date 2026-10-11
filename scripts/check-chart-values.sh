@@ -242,6 +242,7 @@ identity.enabled|default|-|--set|false
 identity.bootstrapImage|default|-|--set-string|example.invalid/fx10-probe/logweir@sha256:0000000000000000000000000000000000000000000000000000000000000f10
 identity.bootstrapImagePullPolicy|default|-|--set-string|Always
 identity.allowMutableBootstrapImageForDevelopment|default|--set-string identity.bootstrapImage=example.invalid/fx10-probe/logweir:probe --set-string identity.bootstrapImagePullPolicy=Never|--set|true
+identity.renderedOffline|default|-|--set|true
 identity.publicConfigMapName|default|-|--set-string|fx10-signing-trust
 identity.authorizedRunnerNamespaces|default|-|--set-json|["team-x"]
 identity.kubernetesApiCIDRs|default|-|--set-json|["10.96.0.1/32"]

@@ -1299,12 +1299,14 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
     );
     assert!(
         install.contains("connected Helm operation")
-            && install.contains("offline `helm template`")
-            && install.contains("unsupported with\n`identity.enabled=true`")
+            && install.contains("is **refused by name**")
+            && install.contains("`identity.renderedOffline: true`")
+            && install.contains("never\nfor output you apply")
             && install.contains("exact\nIPv4 `/32` or IPv6 `/128`")
             && install.contains("TCP 443\nand 6443")
             && install.contains("Other API ports are unsupported"),
-        "managed identity docs must refuse unsafe offline renders and state exact API CIDR/port requirements"
+        "managed identity docs must say an offline render is refused, name the offline answer \
+         (PROD-14.1) and state exact API CIDR/port requirements"
     );
     assert!(
         install.contains("Only the bootstrap/distributor **processes and their projected API tokens** are\nshort-lived")
@@ -2250,6 +2252,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         (
             "the engine is build 3",
             "0003-restore-checkpoint-interval-and-hash.patch",
+        ),
+        // PROD-14.1 (item 83): a render that cannot ask the cluster is
+        // refused; the value that answers it.
+        (
+            "an offline render is refused",
+            "`identity.renderedOffline`",
         ),
     ];
     assert_eq!(
