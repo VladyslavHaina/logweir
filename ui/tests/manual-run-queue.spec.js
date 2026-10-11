@@ -1,14 +1,12 @@
-// manual-run-queue.spec.js -- P10: a manual run waiting for a slot in its
+// manual-run-queue.spec.js -- a manual run waiting for a slot in its
 // namespace's manual-run pool reads "Queued (limit N active)", in both modes,
 // from the object's own `status.queue.limit`.
 //
-// THE DEFECT THIS FOLLOWS. Nothing bounded "Back up now": one operator's
-// hundred accepted runs became a hundred runner pods. The controller now
-// queues the runs above `runs.maxManualBackupsActivePerNamespace` with
-// `phase: Queued` and `status.queue.limit`, and the API publishes the same
-// ceiling as the item's `queue.limit`. These rows hold the page to it: the
-// number is COPIED, never computed, and a run that is not queued is rendered
-// exactly as before. Each behaviour has its negative control beside it.
+// The controller queues runs above `runs.maxManualBackupsActivePerNamespace`
+// with `phase: Queued` and `status.queue.limit`, and the API publishes the
+// same ceiling as the item's `queue.limit`. These rows hold the page to it:
+// the number is COPIED, never computed, and a run that is not queued renders
+// unchanged. Each behaviour has its negative control beside it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -61,7 +59,7 @@ test("a_queued_run_names_its_ceiling_and_every_other_phase_is_unchanged", () => 
   assert.equal(runPhaseBadge(undefined), phaseBadge(undefined));
 });
 
-// P10 review M2: a queued restore's badge carries its approval's deadline,
+// A queued restore's badge carries its approval's deadline,
 // copied from `status.queue.authorizationExpiresAt`. NEGATIVE CONTROL: no
 // deadline, no clause; a non-string one is ignored.
 test("a_queued_restore_names_its_approval_deadline", () => {

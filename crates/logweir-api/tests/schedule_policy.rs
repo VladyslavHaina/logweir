@@ -1,4 +1,4 @@
-//! `PUT /api/v1/namespaces/{ns}/schedules/{name}` (PLAT-05.1, D1 §5).
+//! `PUT /api/v1/namespaces/{ns}/schedules/{name}` (D1 §5).
 //!
 //! THE FOUR THINGS THIS ROUTE HAS TO GET RIGHT, and what each test is for.
 //!
@@ -19,9 +19,9 @@ mod support;
 use serde_json::{json, Value};
 use support::{FakeKube, TestApp, NS_A};
 
-/// A schedule as it stands BEFORE PLAT-04.2 and PLAT-05.1: no time zone, no
-/// deadlines, no catch-up, no retries, no dynamic selection. Every stored
-/// object in an installation upgraded into this release looks like this.
+/// A schedule in the oldest stored shape: no time zone, no deadlines, no
+/// catch-up, no retries, no dynamic selection. Every stored object in an
+/// installation upgraded from it looks like this.
 fn seed_legacy(fake: &FakeKube, name: &str) -> Value {
     fake.seed(
         "backupschedules",
@@ -468,7 +468,7 @@ fn every_published_cel_rule_is_one_this_build_can_name() {
     assert!(checked >= 4, "the CRD rule lists shrank unexpectedly");
 
     // A message this build has never heard of stays unnamed rather than being
-    // guessed at — which is what the pre-D1-W2 CRD on the lab produces live.
+    // guessed at -- which is what an older CRD produces live.
     assert!(SpecRule::classify(
         "BackupSchedule.logweir.dev \"x\" is invalid: spec: Invalid value: \"object\": only \
          spec.suspend is mutable; create a new BackupSchedule instead"
@@ -595,12 +595,11 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
 
 /// **One typo, one field code, on all three cadence routes.**
 ///
-/// A console branches on `errors[].code` to highlight the cadence input. This
-/// used to hold on the edit form and the preview and silently fail on the
-/// create form, because `POST .../schedules` answered `invalid_cron` while the
-/// other two answered `schedule_invalid` — the code D1 §0.2 fixes and
-/// `docs/api.md` publishes. There is no field-code registry to catch that, so
-/// this is the registry.
+/// A console branches on `errors[].code` to highlight the cadence input, so
+/// `POST .../schedules`, the edit route and the preview must all answer
+/// `schedule_invalid` -- the code D1 §0.2 fixes and `docs/api.md` publishes.
+/// There is no field-code registry to catch a route's own spelling, so this
+/// is the registry.
 ///
 /// KILLS: a route reintroducing its own spelling; a route that stops naming
 /// `schedule` as the field; the unknown-zone code drifting the same way.
@@ -653,9 +652,8 @@ async fn the_three_cadence_routes_answer_one_code() {
         );
     }
 
-    // The zone half of the same rule, on all THREE routes. `POST
-    // .../schedules` grew `timeZone` with PLAT-10.1's guided form, and this
-    // loop is what holds it to the shared constant rather than to a third
+    // The zone half of the same rule, on all THREE routes: this loop holds the
+    // create route's `timeZone` to the shared constant rather than to a third
     // spelling.
     edit_body["schedule"] = json!("0 2 * * *");
     edit_body["timeZone"] = json!("Mars/Olympus");
@@ -712,7 +710,7 @@ async fn the_three_cadence_routes_answer_one_code() {
     app.fake.assert_strict();
 }
 
-/// **A pre-PLAT-05.1 schedule needs no rewrite, and an edit adds only what was
+/// **A schedule in the oldest stored shape needs no rewrite, and an edit adds only what was
 /// sent.**
 ///
 /// D1 §5.7: one stored version, no conversion webhook, no object rewrite. The
@@ -751,7 +749,7 @@ async fn a_pre_plat_05_1_schedule_reads_and_edits_without_a_rewrite() {
         json!({"kind": "daily", "hour": 3, "minute": 0})
     );
 
-    // A minimal edit: exactly the fields the pre-PLAT-04.2 form has.
+    // A minimal edit: exactly the fields the oldest form has.
     let minimal = json!({
         "expectedGeneration": 4,
         "schedule": "0 4 * * *",

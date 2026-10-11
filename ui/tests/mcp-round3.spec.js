@@ -1,20 +1,10 @@
-// mcp-round3.spec.js -- the four small console rows the third human-like pass
-// (MCP round 3, 2026-09-25, on sha-a54fb823) left open, each with the
-// behaviour it replaced as its NEGATIVE CONTROL:
-//
-//   R3-1  wizard step 5 at 390 px: after a readiness click, focus moved to the
-//         status line and the repaint left it -- and the verdict under it --
-//         behind the sticky Back/Next bar.
-//   R2-10 step 5's source sentence printed raw Markdown backticks around the
-//         destination name and the frozen locationDigest; the other step
-//         texts built the same way (step 4's complaints, step 6's plan
-//         problem, the catalog-point refusal) did too.
-//   R3-2  the catalog offered "Restore this point" to a viewer, whom the
-//         route then refuses; the same link on the Backups and Schedules
-//         pages did the same.
-//   R3-3  the header of a session with no role anywhere said "choose a
-//         namespace to see your role" beside a card saying "You have no role
-//         in any namespace yet".
+// mcp-round3.spec.js -- four small console rows, each with the behaviour it
+// replaced as its NEGATIVE CONTROL: the focused status (and the verdict
+// under it) is never left behind the sticky Back/Next bar at 390 px; names
+// and digests in the step texts are code, never raw Markdown backticks;
+// "Restore this point" (and its siblings) is offered only to a role that
+// can restore; and the header of a session with no role anywhere agrees with
+// its card.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -68,9 +58,7 @@ function paragraph(html, id) {
   return html.slice(at, html.indexOf("</p>", at));
 }
 
-// ===========================================================================
-// R3-1: the focused status is never left under the sticky footer
-// ===========================================================================
+// THE FOCUSED STATUS IS NEVER LEFT UNDER THE STICKY FOOTER.
 
 test("r3_1_every_wizard_focus_target_keeps_the_footers_height_clear_below_it", () => {
   const css = readFileSync(UI + "style.css", "utf8");
@@ -117,9 +105,7 @@ test("r3_1_the_readiness_click_brings_its_status_into_view_once_the_step_is_pain
     "NEGATIVE CONTROL: the listener asks for the status once the step is painted");
 });
 
-// ===========================================================================
-// R2-10: names and digests in the step texts are code, never raw backticks
-// ===========================================================================
+// NAMES AND DIGESTS IN THE STEP TEXTS ARE CODE, never raw backticks.
 
 test("r2_10_step_5s_source_sentence_shows_its_destination_and_digest_as_code", () => {
   const state = savedState();
@@ -166,9 +152,7 @@ test("r2_10_the_other_step_texts_built_the_same_way_show_code_too", () => {
   assert.ok(!refusal.includes("`"), "NEGATIVE CONTROL: no literal backtick in the refusal");
 });
 
-// ===========================================================================
-// R3-2: "Restore this point" is offered only to a role that can restore
-// ===========================================================================
+// "RESTORE THIS POINT" IS OFFERED ONLY TO A ROLE THAT CAN RESTORE.
 
 async function signedInAs(session) {
   resetMode();
@@ -234,9 +218,7 @@ test("r3_2_a_role_that_cannot_restore_reads_who_can_instead_of_a_link", async ()
   }
 });
 
-// ===========================================================================
-// R3-3: the header of a session with no role anywhere agrees with its card
-// ===========================================================================
+// THE HEADER OF A SESSION WITH NO ROLE ANYWHERE AGREES WITH ITS CARD.
 
 test("r3_3_a_session_with_no_role_anywhere_reads_no_role_yet_in_the_header", async () => {
   const session = fixture("console/session-viewer.json");
@@ -262,14 +244,12 @@ test("r3_3_a_session_with_no_role_anywhere_reads_no_role_yet_in_the_header", asy
   }
 });
 
-// ===========================================================================
-// Fix round (review of poc-fixes-5): L6 and L7
-// ===========================================================================
+// THE REMAINING LINKS, and the verdict that lands later.
 
 test("r3_2_the_schedules_latest_point_and_a_failed_restores_retry_ask_the_same_grant", async () => {
-  // REVIEW L6: the sweep missed two links a viewer was still offered -- the
-  // schedule detail's "Restore from this point" and the operation page's
-  // "Retry to a fresh target", which opens the wizard for a NEW Restore.
+  // Two more links a viewer must not be offered: the schedule detail's
+  // "Restore from this point" and the operation page's "Retry to a fresh
+  // target", which opens the wizard for a NEW Restore.
   const point = fixture("wizard-backups.json").items.find((b) => recoveryPoints({ items: [b] }).length > 0);
   const failed = { kind: "restore", console: true, terminal: true, state: "failed",
     name: "rst-failed", result: {} };
@@ -318,9 +298,8 @@ function stepWithVerdict() {
 }
 
 test("l7_a_verdict_landing_while_the_reader_is_on_step_5_is_brought_above_the_footer", () => {
-  // REVIEW L7 of R3-1: the status line was kept clear at the click, and the
-  // verdict under it -- which lands later, through the follow -- was left
-  // behind the sticky footer at 390 px.
+  // The status line is kept clear at the click, and so is the verdict under
+  // it, which lands later, through the follow.
   const t = stepWithVerdict();
   t.node.querySelector("#restore-readiness-status").focus();
   assert.equal(keepVerdictInView(t.node, { id: "pf-v", terminal: true }), true);
@@ -338,8 +317,8 @@ test("l7_a_verdict_landing_while_the_reader_is_on_step_5_is_brought_above_the_fo
 });
 
 test("l7_the_step_5_follow_asks_for_the_verdict_when_its_check_turns_terminal", () => {
-  // THE WIRING, read from the source for the same reason as R3-1's: the fake
-  // views the wizard mounts in have no layout.
+  // THE WIRING, read from the source: the fake views the wizard mounts in have
+  // no layout.
   const source = readFileSync(UI + "pages/restore-wizard.js", "utf8");
   const follow = source.slice(source.indexOf("function followRestoreReadiness("),
     source.indexOf("/** The exact step-5 request for one recovery point."));

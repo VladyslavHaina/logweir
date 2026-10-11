@@ -1,31 +1,23 @@
-// reading-place.spec.js -- poc-upgrade-4's P16 and its class: a repaint that
-// lands while a check is still running must not throw the reader's place away.
+// reading-place.spec.js -- a repaint that lands while a check is still
+// running must not throw the reader's place away.
 //
-// WHAT THE LIVE ROUND SAW (poc-upgrade-4, 16:56Z, `console/p15/DISC_R3.log`).
-// Restore step 5 at 390 x 844: after Check readiness, `keepStatusInView` put
-// the focused status at 661-716 px (scrollY 282). At the first follow read,
-// pending -> running, step 5 was repainted and the page jumped to scrollY 0:
-// the status sat at 943-998 px, below the 844 px viewport, until the verdict.
-//
-// WHY. Every page repaints through `render.js`'s `replace`, which empties the
-// view and fills it again. Chromium moved the page during that swap -- over
-// the real console it took 282 px to 0 and 336 px to 38 inside the one call
-// (a browser measure, `claude/artifacts/poc-fixes-6/`) -- and the follow's
-// `show` had nothing after its repaint that put the reader back; the click's
-// listener did (`keepStatusInView`), which is why the click passed live.
+// Every page repaints through `render.js`'s `replace`, which empties the view
+// and fills it again, and Chromium moves the page during that swap (over the
+// real console it took a 282 px offset to 0 inside the one call). On a phone,
+// a follow read that repainted step 5 would leave the focused status below
+// the viewport until the verdict, unless the follow puts the reader back.
 //
 // THE FAKES CANNOT LAY A PAGE OUT, SO EACH ROW GIVES THEM THE PART IT NEEDS.
 // The `render.js` rows run in `fake-dom.js` with a window and element rects
 // written by the row: a document position per element, the viewport being
 // that position less `scrollY`, and a browser that clamps the offset when the
-// emptied view is laid out -- which is what the live page did. The follower
-// rows mount each page in `fake-view.js` with a window whose `swapped()`
-// moves the page to 0 on every view swap, as Chromium did; they see the
-// OFFSET and not focus (fake-view keeps no focus). Focus identity across the
-// swap is the `fake-dom` rows' part.
+// emptied view is laid out. The follower rows mount each page in
+// `fake-view.js` with a window whose `swapped()` moves the page to 0 on every
+// view swap, as Chromium did; they see the OFFSET and not focus (fake-view
+// keeps no focus). Focus identity across the swap is the `fake-dom` rows'
+// part.
 //
-// Every row carries its NEGATIVE CONTROL: an assertion that fails on the code
-// before this fix.
+// Every row carries its NEGATIVE CONTROL.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -63,8 +55,6 @@ const UI = fileURLToPath(new URL("../", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
 const clone = (value) => JSON.parse(JSON.stringify(value));
-
-// ------------------------------------------------------ a page with a layout
 
 /** A window over `doc` at `y`, 844 px tall (the live phone), counting every
  *  programmatic scroll. */
@@ -118,10 +108,7 @@ function layingOutWhenEmptied(view, win) {
   };
 }
 
-// ===========================================================================
-// render.js: a repaint keeps the reader's place
-// ===========================================================================
-
+// RENDER.JS: A REPAINT KEEPS THE READER'S PLACE.
 test("p16_a_repaint_that_empties_the_view_leaves_the_page_where_the_reader_was", () => {
   const doc = fakeDocument();
   const win = windowOver(doc, 282);
@@ -141,9 +128,9 @@ test("p16_a_repaint_that_empties_the_view_leaves_the_page_where_the_reader_was",
   assert.equal(doc.activeElement, status, "focus is on the NEW status element");
   assert.equal(doc.activeElement.getAttribute("id"), "restore-readiness-status");
 
-  // THE MODEL CAN FAIL: the same swap without the place kept ends at 0 --
-  // and that is plain `replace`, the swap for NEW content, which leaves the
-  // scroll to the page that shows it (the P16 review's HIGH).
+  // THE MODEL CAN FAIL: the same swap without the place kept ends at 0 -- and
+  // that is plain `replace`, the swap for NEW content, which leaves the scroll
+  // to the page that shows it.
   for (const swap of [(n, kids) => append(clear(n), kids), replace]) {
     const other = fakeDocument();
     const bare = windowOver(other, 282);
@@ -236,10 +223,7 @@ test("p16_a_focus_target_the_browser_refuses_is_not_a_landing", () => {
   assert.equal(doc.activeElement, verdict, "a fallback that takes focus keeps it");
 });
 
-// ===========================================================================
-// restore step 5: the status is kept above the sticky bar after every repaint
-// ===========================================================================
-
+// RESTORE STEP 5: the status is kept above the sticky bar after every repaint.
 /** The sticky bar at 738-844 and the focused status at document position `y`. */
 function barAndStatus(y, scrollY) {
   const doc = fakeDocument();
@@ -287,11 +271,11 @@ test("p16_a_status_in_the_viewport_but_under_the_bar_is_moved_above_it", () => {
 });
 
 test("p16_the_step_5_follow_keeps_the_status_in_view_after_every_repaint", () => {
-  // THE WIRING, read from the source for the reason R3-1's rows give: the
-  // fake views the wizard mounts in have no layout. The follow's `show` asks
-  // for the status after EVERY painted repaint -- not only the verdict's --
-  // and only while the reader has not scrolled since the ask, so a reader
-  // who scrolled away while the check runs is not pulled back to it.
+  // THE WIRING, read from the source because the fake views the wizard mounts
+  // in have no layout. The follow's `show` asks for the status after EVERY
+  // painted repaint -- not only the verdict's -- and only while the reader has
+  // not scrolled since the ask, so a reader who scrolled away while the check
+  // runs is not pulled back to it.
   const source = readFileSync(UI + "pages/restore-wizard.js", "utf8");
   const follow = source.slice(source.indexOf("function followRestoreReadiness("),
     source.indexOf("/** The exact step-5 request for one recovery point."));
@@ -304,10 +288,7 @@ test("p16_the_step_5_follow_keeps_the_status_in_view_after_every_repaint", () =>
     "the verdict is asked for last, so the headline wins when it lands");
 });
 
-// ===========================================================================
-// Every follower: a non-terminal repaint keeps the page
-// ===========================================================================
-
+// EVERY FOLLOWER: a non-terminal repaint keeps the page.
 /** A window at 282 px that the browser moves to 0 on every view swap. */
 function movingWindow() {
   const win = {
@@ -455,11 +436,7 @@ test("p16_restore_step_5s_non_terminal_repaint_keeps_the_page", async () => {
   });
 });
 
-// ===========================================================================
-// Fix round (review of poc-fixes-6): new content opens at its start, and a
-// reader who scrolled is not moved
-// ===========================================================================
-
+// NEW CONTENT OPENS AT ITS START, and a reader who scrolled is not moved.
 /** A LAYOUT FOR THE WIZARD'S FAKES, and a browser whose swap moves nothing:
  *  every step section sits at document position 400 and is 7000 px tall (a
  *  long step), the status at 943 (55 px), the sticky bar at 738-844. Rects are
@@ -511,7 +488,7 @@ async function withWizardLayout(win, view, body) {
 }
 
 /** A window at `y` whose swaps move nothing: the offset a plain `replace`
- *  leaves is the one the page had -- what the tip before this fix kept. */
+ *  leaves is the one the page had. */
 function stillWindow(y) {
   const win = {
     scrollX: 0, scrollY: y, innerHeight: 844, swaps: 0,
@@ -525,9 +502,9 @@ function stillWindow(y) {
 for (const [from, control, to] of [[1, "#wizard-next", 2], [3, "#wizard-back", 2]]) {
   test("p16_review_" + control.slice(1).replace("-", "_") + "_from_step_" + String(from) +
     "_opens_step_" + String(to) + "_at_its_heading", async () => {
-    // THE REVIEW'S HIGH: at 390 x 844, Next at the bottom of step 1 opened
-    // step 2 with its heading at -1935 px -- `replace` had put the old offset
-    // back, and `nearest` does nothing for a section that covers the viewport.
+    // At 390 x 844, Next at the bottom of step 1 must open step 2 at its heading:
+    // putting the old offset back would leave the heading at -1935 px, and
+    // `nearest` does nothing for a section that covers the viewport.
     const ns = "p16-steps-" + String(from);
     const g = gate();
     const wizard = wizardApi(ns, g, { reads: 0, settled: false });
@@ -571,9 +548,9 @@ test("p16_review_a_deep_link_to_a_step_opens_at_its_heading", async () => {
 });
 
 test("p16_review_a_reader_who_scrolled_the_status_behind_the_bar_is_not_pulled_back", async () => {
-  // THE REVIEW'S MEDIUM: the reader put the status at 793-848, behind the bar
-  // (top 738), after the click; the next repaint pulled the page 132 px back,
-  // 150 -> 282, because the band behind the bar counted as "on screen".
+  // The reader put the status at 793-848, behind the bar (top 738), after the
+  // click; the next repaint must not pull the page back to 282 because the
+  // band behind the bar counted as "on screen".
   const ns = "p16-reader";
   const g = gate();
   const box = { reads: 0, settled: false };
@@ -605,10 +582,9 @@ test("p16_review_a_reader_who_scrolled_the_status_behind_the_bar_is_not_pulled_b
 });
 
 test("p16_review_a_route_mount_is_new_content_and_keeps_no_old_offset", async () => {
-  // `replace` is the swap for new content again: a mount's first paint opens
-  // where the browser puts it (here, the fake browser's 0), not at the offset
-  // the previous page was read to (the review's LOW-1: only the "Reading ..."
-  // placeholder's height kept that true on the tip).
+  // `replace` is the swap for new content: a mount's first paint opens where
+  // the browser puts it (here, the fake browser's 0), not at the offset the
+  // previous page was read to.
   const g = gate();
   const mounts = {
     "the restore wizard": async (view) => {

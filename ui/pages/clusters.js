@@ -17,15 +17,15 @@
 // this page, and `no_secret_value_is_rendered` asserts the rendered output for
 // a SCRAM cluster names the Secret and carries no credential word at all.
 //
-// THE CREATE FORM KEEPS WHAT WAS TYPED (PLAT-13.2). Its values are an
+// THE CREATE FORM KEEPS WHAT WAS TYPED. Its values are an
 // in-memory draft (`../lifecycle.js`), so a refused field, an API refusal, a
 // lost response or a trip to another route leaves them in place. The create is
 // idempotent by name: submitting the same draft again after an unknown outcome
 // resolves to the object the first request made, and a different object under
 // that name is reported as a conflict and never touched.
 //
-// THE FORM TAKES CONTRACT v1's REFERENCES AND NEVER A VALUE (PLAT-07.1,
-// PLAT-07.2). `spec.auth.secretRef.passwordKey` names the data key inside the
+// THE FORM TAKES CONTRACT v1's REFERENCES AND NEVER A VALUE.
+// `spec.auth.secretRef.passwordKey` names the data key inside the
 // Secret that holds the SASL password -- absent means `password`, which is what
 // every earlier release projected -- and `spec.auth.tlsCa` names exactly one
 // key of a Secret or a ConfigMap holding the private CA that signs the brokers'
@@ -34,12 +34,11 @@
 // `the_cluster_form_has_no_password_input` asserts both against the rendered
 // bytes so a field added later cannot quietly become one.
 //
-// AND `status.reachable` IS A CONNECTION PROBE, NEVER "READY" (PLAT-07.2, D2
-// section 9). The badge, the stale label and the controller's own refusal
-// reason all come from `../select.js`, which is also what the schedule form and
-// the restore wizard select a saved connection with -- so the three surfaces
-// agree about what an observation means and about what is too old to present as
-// current.
+// AND `status.reachable` IS A CONNECTION PROBE, NEVER "READY". The badge,
+// the stale label and the controller's own refusal reason all come from
+// `../select.js`, which is also what the schedule form and the restore
+// wizard select a saved connection with -- so the three surfaces agree about
+// what an observation means and about what is too old to present as current.
 
 import { CONSOLE, apiClient, mayOperate, mode } from "../client.js";
 import {
@@ -125,7 +124,7 @@ export const CLUSTER_DRAFT_FIELDS = Object.freeze([
   "clientCertSecret", "tls", "tlsCaKind", "tlsCaName", "tlsCaKey", "intent",
 ]);
 
-/** PROD-01.3 security follow-up: the WRITE-ONLY inputs of the console-mode
+/** The WRITE-ONLY inputs of the console-mode
  *  form. The product API no longer accepts the NAME of an existing Secret --
  *  a connection that could name any Secret could make Logweir present another
  *  team's credential to brokers of its author's choosing -- so in console mode
@@ -138,26 +137,17 @@ export const WRITE_ONLY_CLUSTER_FIELDS = Object.freeze([
   "enteredPassword", "enteredCertificatePem", "enteredPrivateKeyPem",
 ]);
 
-/** The modes a SASL password goes with (PROD-01.3 added two). */
+/** The modes a SASL password goes with. */
 export const SASL_MODES = Object.freeze(["scramSha512", "scramSha256", "plain"]);
 
-// ------------------------------------------------ who names the connection
-//
-// DEFECT P7 (poc-install, 2026-09-24). In console (shared) mode this form
-// offered a required "name" field and the product API threw it away: the
-// create route has no name member (`CreateConnectionRequest` is `role`,
-// `bootstrapServers`, `auth`, `markerTopic`, `additionalProperties: false`)
-// and mints `conn-<26 base32>` from the request's idempotency scope, as
-// `docs/api.md` says of every create it serves. An operator who typed
-// `source` got `conn-u5cb27icdjt5vdf6sc4wehb4nb` and was told nothing.
-//
-// The API contract is the one that holds (it names schedules `sch-...`,
-// restores `rst-...` and runs `logweir-manual-...` the same way), so the console
-// stops offering a choice it cannot honour. What the typed name used to do --
-// make a double click, a lost response or a retry ONE connection -- is done by
-// an INTENT held in the draft, exactly as "Back up now" holds its own
-// (`schedules.js`'s `RUN_NOW_DRAFT_FIELDS`): random, minted once per draft,
-// sent as the idempotency seed and never as a name.
+// WHO NAMES THE CONNECTION. In console mode the product API mints the name
+// (`conn-<26 base32>`, from the request's idempotency scope, as it names
+// schedules, restores and manual runs): the create route has no name
+// member. So the form offers no name field, and what a typed name would do
+// -- make a double click, a lost response or a retry ONE connection -- is
+// done by an INTENT held in the draft, as "Back up now" holds its own:
+// random, minted once per draft, sent as the idempotency seed and never as a
+// name.
 
 /** Whether the server, not this form, names a new connection: console mode. */
 export function connectionNamesMinted() {
@@ -175,9 +165,9 @@ export const CONNECTION_NAME_MINTED_SENTENCE =
  *  random hex characters, inside the product API's 8-to-128 key budget.
  *
  *  A PLATFORM WITH NO RANDOM SOURCE GETS A REFUSAL, not a counter: a counter
- *  restarts on every load and would replay one load's create in the next --
- *  review F1/F3's defect. Called inside the mutation's executor, so the
- *  refusal lands in the form's status region. */
+ *  restarts on every load and would replay one load's create in the next.
+ *  Called inside the mutation's executor, so the refusal lands in the form's
+ *  status region. */
 export function mintConnectionIntent() {
   const source = globalThis.crypto;
   if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
@@ -220,7 +210,7 @@ export const CLUSTER_FIELD_PATHS = Object.freeze([
   ["spec.auth.tlsCa.configMapKeyRef.name", "tlsCaName"],
   ["spec.auth.tlsCa", "tlsCaName"],
   ["spec.auth.tls", "tls"],
-  // PROD-01.3: the mTLS reference (legacy) and the write-only entry (console).
+  // The mTLS reference (legacy) and the write-only entry (console).
   ["spec.auth.clientCertificate", "clientCertSecret"],
   ["spec.auth.credential.password", "enteredPassword"],
   ["spec.auth.credential", "enteredCertificatePem"],
@@ -310,11 +300,9 @@ export function caWords(tlsCa) {
 /** `status.reachable` AS A CONNECTION PROBE, in one badge whose words carry
  *  the state as well as its colour.
  *
- *  It takes a `status` rather than a whole object because that is what its
- *  callers had before PLAT-07.2 and what the design suite exercises it with;
- *  the judgement itself lives in `../select.js`, so this page, the schedule
- *  form and both wizard sides say the same words about the same field. An
- *  unset `reachable` with no reason at all is `never probed` -- not the absent
+ *  The judgement lives in `../select.js`, so this page, the schedule form and
+ *  both wizard sides say the same words about the same field. An unset
+ *  `reachable` with no reason at all is `never probed` -- not the absent
  *  marker and not a claim either way, because "the controller has not written
  *  anything yet" is itself worth saying. */
 export function reachableBadge(status, now, freshSeconds) {
@@ -331,7 +319,7 @@ export function probeCell(object, now, freshSeconds) {
 }
 
 /** The newest probe's own reason, when it differs from the verdict it sits
- *  beside (MCP-9): its code visible and its meaning one disclosure away. */
+ *  beside: its code visible and its meaning one disclosure away. */
 export function laterProbeDisclosure(state) {
   const note = laterProbeNote(state);
   if (note.length === 0) {
@@ -351,22 +339,17 @@ export const NO_CLUSTER_SENTENCE =
  *  (verdict, staleness, age and the newest probe's own reason), CLUSTER-ID,
  *  AUTH, and one Re-read probe control per row.
  *
- *  THE PROBE COLUMN IS CALLED WHAT IT IS. It was headed REACHABLE and rendered
- *  a bare `reachable` badge with the observed instant two columns away, so a
- *  five-hour-old success and a five-second-old one looked identical at a
- *  glance. The column is now the probe's verdict, the stale label when the
- *  observation is past the freshness budget, and the controller's own reason
- *  beside it -- and the word `ready` appears nowhere, because nothing on this
- *  page has decided that anything is.
+ *  THE PROBE COLUMN IS CALLED WHAT IT IS: the probe's verdict, the stale
+ *  label when the observation is past the freshness budget, and the
+ *  controller's own reason, so an old success and a fresh one never look
+ *  alike. The word `ready` appears nowhere: nothing on this page has decided
+ *  that anything is.
  *
  *  `now` is epoch milliseconds, defaulted to the caller's clock by
  *  `probeState`; a test passes one so a freshness verdict is reproducible. */
 export function renderClusterList(input, ns, now, freshSeconds) {
-  // FIVE COLUMNS, NOT EIGHT (MCP round 2, R2-2 / R2-3 / R2-4). The table was
-  // wider than its card at 1440 px -- the Re-read probe button was clipped --
-  // and a NoExitCode gloss made a row 220 px tall in a narrow REASON column.
-  // The role is the name's second line, the observation's age sits in the
-  // probe cell as it does in the wizard (MCP-28), and the newest probe's own
+  // Five columns: the role is the name's second line, the observation's age
+  // sits in the probe cell as in the wizard, and the newest probe's own
   // reason is one disclosure away, its code still visible to grep for.
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
@@ -424,7 +407,7 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
       // so for a connection that names a Secret the cell says the key is not
       // published. "Absent means the key every earlier release projected" is a
       // statement about the object, and only the mode that reads the object
-      // may make it (FX-48: the class of the Restore detail's Integrity table).
+      // may make it.
       ["credential key", typeof ref.passwordKey === "string" && ref.passwordKey.length > 0
         ? esc(ref.passwordKey)
         : (typeof ref.name === "string" && ref.name.length > 0
@@ -453,30 +436,24 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
   );
 }
 
-// ===========================================================================
-// THE "TEST CONNECTION" PANEL (PLAT-03.1's check kind, PLAT-07.2's control)
-// ===========================================================================
+// THE "TEST CONNECTION" PANEL creates a `Preflight` of operation
+// `sourceConnection`: the controller resolves this `KafkaCluster`, renders a
+// check plan carrying that connection and nothing else, and runs ONE
+// isolated Job that projects this connection's own credential and dials the
+// brokers. What comes back is `connection.resolved`,
+// `connection.credentialProjected`, `connection.authenticated`,
+// `connection.clusterIdentity`, `runner.*` and `configuration.policy`, each
+// with its own state, code, remedy and observed instant. None of it is
+// computed here.
 //
-// WHAT IT DOES NOW. It creates a `Preflight` of operation `sourceConnection`:
-// the controller resolves this `KafkaCluster`, renders a check plan carrying
-// that connection and nothing else, and runs ONE isolated Job that projects
-// this connection's own credential and dials the brokers. What comes back is
-// `connection.resolved`, `connection.credentialProjected`,
-// `connection.authenticated`, `connection.clusterIdentity`, `runner.*` and
-// `configuration.policy`, each with its own state, closed-vocabulary code,
-// remedy and the instant it was observed. None of it is computed here.
+// A `ready` verdict authorises nothing and is a statement about the moment
+// the Job ran, which is why every row's `observedAt` and `expiresAt` are
+// rendered. The connection probe panel above is a different fact: the
+// controller's own cadence.
 //
-// AND WHAT IT STILL IS NOT. A `ready` verdict authorises nothing (D2 section
-// 6.8) and it is a statement about the moment the Job ran, which is why every
-// row carries its own `observedAt` and `expiresAt` and why they are rendered.
-// The connection probe panel above is a different fact: the controller's own
-// cadence, recorded minutes ago.
-//
-// AND IT ASKS NOTHING ABOUT TOPICS. `connection.topicsDescribable` is about
-// NAMED topics -- `TopicNotFound` and `TopicNotAuthorized` are facts about a
-// name the requester chose -- and this request names none, so the runner emits
-// no such row and this panel claims none. "Discover topics" below is the
-// control that answers what this principal can see.
+// AND IT ASKS NOTHING ABOUT TOPICS: `connection.topicsDescribable` is about
+// NAMED topics and this request names none. "Discover topics" below answers
+// what this principal can see.
 
 /** The identity of the connection check in the mutation registry. */
 export const CONNECTION_CHECK_FORM = "connection-check";
@@ -529,19 +506,13 @@ export function connectionCheckRequest(name) {
   return { operation: "sourceConnection", sourceConnection: { connectionRef: String(name) } };
 }
 
-/** What a reload can still say about the last check.
- *
- *  A CONNECTIVITY CHECK OUTLIVES THE PAGE THAT STARTED IT. The panel's rows
- *  live in the loaded page; the `Preflight` lives in the namespace until the
- *  collector takes it. Until the API labelled these objects, a reload found
- *  nothing at all and the panel read as though no check had ever run, which
- *  invited a second one for an answer that already existed.
+/** What a reload can still say about the last check: the `Preflight`
+ *  outlives the page that started it, and `lastTest` summarises it.
  *
  *  IT IS A SUMMARY AND NEVER THE ROWS. `lastTest` carries the id, the
  *  aggregate, the instant and whether the verdict still applies -- no codes
- *  and no remedies -- so it says what happened and points at the check rather
- *  than reprinting a verdict the reader cannot act on from here. A STALE test
- *  is labelled and never rendered as health: it is the same rule the probe
+ *  and no remedies -- so it says what happened and points at the check. A
+ *  STALE test is labelled and never rendered as health, the rule the probe
  *  badge keeps one panel above. */
 export function renderLastConnectionCheck(test) {
   const t = test || null;
@@ -612,37 +583,26 @@ export function renderConnectionCheck(view) {
   );
 }
 
-// ===========================================================================
-// THE TOPIC DISCOVERY PANEL (PLAT-09.1)
-// ===========================================================================
+// THE TOPIC DISCOVERY PANEL. A `TopicDiscovery` is a bounded inventory: a
+// check Job dials this connection with its own credential, asks the broker
+// for metadata, and stores what came back. It is the only control on this
+// page that makes anything DIAL; the probe panel re-reads a status the
+// controller wrote on its own schedule.
 //
-// WHAT A DISCOVERY IS, AND WHAT IT IS NOT. A `TopicDiscovery` is a bounded
-// inventory: a check Job dials this connection with this connection's own
-// credential, asks the broker for metadata, and stores what came back. It is
-// the only control on this page that makes anything DIAL -- the probe panel
-// above it re-reads a status the controller wrote on its own schedule, which
-// is why that one says "connection probe" and this one does not borrow the
-// word.
+// A SUCCESSFUL LISTING IS NOT A COMPLETE ONE: an all-topics Metadata
+// request silently omits every topic the principal cannot DESCRIBE. So
+// `visibility.state` is `unknown` for a listing that worked, which is that
+// field's HEALTHY default, and "complete" appears only inside
+// `attestedComplete`, an administrator's claim rendered with its author and
+// "not verified by Logweir".
 //
-// AND A SUCCESSFUL LISTING IS NOT A COMPLETE ONE. An all-topics Metadata
-// request silently omits every topic the principal cannot DESCRIBE: no error,
-// no count, nothing to notice. So `visibility.state` is `unknown` for a
-// listing that worked perfectly, `unknown` is that field's HEALTHY default,
-// and the word "complete" appears on this page only inside
-// `attestedComplete` -- which is an administrator's claim, rendered with its
-// author and with "not verified by Logweir" attached.
+// TWO SLOTS, NEVER ONE: `?latest=true` answers `{latestAttempt,
+// lastSuccessful}`, and neither may hide the other.
 //
-// TWO SLOTS, NEVER ONE. `?latest=true` answers `{latestAttempt,
-// lastSuccessful}`. A failed attempt must not hide the last inventory that
-// worked, and a working inventory must not hide that the newest attempt
-// failed, so both are rendered and each says which it is.
-//
-// A SHORT PAGE IS NOT THE LAST PAGE. `scan.complete: false` means the eight-
-// chunk budget was spent before the end of the result -- which is exactly what
-// a sparse `q` over a large inventory looks like. Treating a short page as the
-// end would silently show an operator four topics out of five thousand. So the
-// control below follows `page.nextCursor` and says, in words, what it is
-// doing.
+// A SHORT PAGE IS NOT THE LAST PAGE: `scan.complete: false` means the
+// eight-chunk budget was spent before the end of the result (a sparse `q`
+// over a large inventory). The control follows `page.nextCursor` and says,
+// in words, what it is doing.
 
 /** The identity of the discovery form in the draft and mutation registries. */
 export const DISCOVERY_FORM = "topic-discovery";
@@ -768,10 +728,10 @@ export function renderDiscoveryPanel(view) {
   const latest = v.latestAttempt || null;
   const successful = v.lastSuccessful || null;
   // WHAT THE INPUTS SHOW is what the reader typed (`v.typed`, read off the
-  // live controls before a repaint -- P13's class) over the filters last
-  // APPLIED. The two are kept apart because the applied filters are what
-  // "Show more" pages with: a cursor is bound to them, and typed text nobody
-  // submitted must not become a filter a cursor was never issued for.
+  // live controls before a repaint) over the filters last APPLIED. The two
+  // are kept apart because the applied filters are what "Show more" pages
+  // with: a cursor is bound to them, and typed text nobody submitted must not
+  // become a filter a cursor was never issued for.
   const filters = Object.assign({}, v.filters || {}, v.typed || {});
   const state = v.state || {};
   const pending = state.phase === "pending";
@@ -947,7 +907,7 @@ export function validateCluster(values, options) {
     problems.username = v.mode + " needs the SASL username";
   }
   if (consoleMode) {
-    // THE CREDENTIAL IS TYPED, NEVER NAMED (PROD-01.3 security follow-up).
+    // THE CREDENTIAL IS TYPED, NEVER NAMED.
     if (sasl && (typeof v.enteredPassword !== "string" || v.enteredPassword.length === 0)) {
       problems.enteredPassword = v.mode + " needs the SASL password, entered once here";
     }
@@ -987,7 +947,7 @@ export function validateCluster(values, options) {
       "scramSha512 over TLS, mtls for a client certificate, or leave TLS off for a plaintext " +
       "listener";
   }
-  // PROD-01.3: PLAIN only over TLS (the named reason), and mTLS needs TLS.
+  // PLAIN only over TLS (the named reason), and mTLS needs TLS.
   if (v.mode === "plain" && v.tls !== true) {
     problems.tls = "PlainWithoutTls: SASL/PLAIN sends the password itself, so it is accepted " +
       "only with TLS on";
@@ -1029,7 +989,7 @@ export function renderClusterForm(view) {
     "<form id=\"cluster-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     (v.minted === true
-      // P7: NO FIELD FOR A CHOICE THE SERVER DOES NOT HONOUR.
+      // NO FIELD FOR A CHOICE THE SERVER DOES NOT HONOUR.
       ? "<div class=\"field\" id=\"cluster-name-minted\"><p class=\"label\">name</p>" +
         "<p class=\"help\">" + esc(CONNECTION_NAME_MINTED_SENTENCE) + "</p>" +
         line("cluster-name", "name") + "</div>"
@@ -1118,7 +1078,7 @@ export function renderClusterForm(view) {
   );
 }
 
-/** CONSOLE MODE: the credential, typed once (PROD-01.3 security follow-up).
+/** CONSOLE MODE: the credential, typed once.
  *  Every input renders EMPTY -- a draft never holds these and nothing renders
  *  them back -- and the password input is `type="password"` with
  *  `autocomplete="new-password"`. */
@@ -1241,7 +1201,7 @@ export function clusterBody(values, options) {
  *  `invalid` error carrying the field messages, without a request, when the
  *  page's own checks refuse; see `createOnce` for what a retry resolves to. */
 export async function submitCluster(ns, values, deps) {
-  // P7: IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no name to
+  // IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no name to
   // check, and `metadata.name` carries the draft's INTENT -- the one value
   // `ui/client.js` composes the idempotency key from. `requestBody` never
   // sends it: the create body has no name member.
@@ -1276,8 +1236,6 @@ export function clusterFormView(ns) {
     minted: connectionNamesMinted(),
   };
 }
-
-// --------------------------------------------------------------- mount half
 
 /** Reads the namespace's clusters and renders them. On any API error -- a 403
  *  from the viewer's own RBAC included -- the API server's OWN reason and
@@ -1364,14 +1322,12 @@ async function readDiscoveries(api, ns, name, lifecycle) {
 }
 
 /** A CHECK ON SCREEN THAT NOTHING READS IS A CHECK LEFT "NOT FINISHED" FOR
- *  GOOD (poc-upgrade-3's P15, its second face). The started check's rows are
- *  remembered across visits (`checkViews`), and a follow ends with the route
- *  that started it: a reader who left while a check ran came back to "this
- *  page reads it again until then" and nothing did. Likewise a discovery the
- *  read shows unfinished -- started here before, or by anybody -- used to sit
- *  at `pending` until a reload. So a mount follows each of them again, unless
- *  a live follow already reads it or this page already stopped following it;
- *  the follow is bounded by the check's own deadline as every follow is. */
+ *  GOOD. The started check's rows are remembered across visits
+ *  (`checkViews`), but a follow ends with the route that started it, and a
+ *  discovery the read shows unfinished may have been started by anybody. So
+ *  a mount follows each of them again, unless a live follow already reads it
+ *  or this page already stopped following it; the follow is bounded by the
+ *  check's own deadline as every follow is. */
 function resumeFollows(node, ns, name, parse, lifecycle, api, discovery) {
   const unfinished = (check) => check !== null && check !== undefined &&
     typeof check.id === "string" && check.id.length > 0 && check.terminal !== true &&
@@ -1403,13 +1359,12 @@ const detailViews = new Map();
 const checkViews = new Map();
 
 /** What the reader has put into the discovery form and the topic filters,
- *  read off the live controls, or `null` when none is on screen (P13's class).
+ *  read off the live controls, or `null` when none is on screen.
  *
- *  THE WHOLE DETAIL REPAINTS on every answer this view waits for -- each read
- *  of a followed "Test connection", the probe re-read, the discovery's own
- *  record, a page of topics -- and it rendered those inputs from the view
- *  alone, so text typed while a check was being followed was gone when its
- *  next read landed. Nothing here is a credential: names and filters. */
+ *  THE WHOLE DETAIL REPAINTS on every answer this view waits for (a followed
+ *  check's read, the probe re-read, the discovery's record, a page of topics),
+ *  so typed text must be read before the repaint or it is lost. Nothing here
+ *  is a credential: names and filters. */
 export function readDiscoveryTyped(node) {
   const typed = {};
   const text = (id, field) => {
@@ -1463,7 +1418,7 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
   detailViews.set(key, { object: object, discovery: stored });
   // THE MOUNT'S FIRST PAINT IS NEW CONTENT; every later paint -- a check or a
   // discovery answering, a click's pending and settled states -- repaints the
-  // detail the reader is on, and keeps their place there (P16).
+  // detail the reader is on, and keeps their place there.
   (first === true ? replace : replaceInPlace)(
     node,
     parse(renderClusterDetail(object, undefined, undefined, undefined, view, checkView)),
@@ -1473,30 +1428,17 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
   wireDiscovery(node, ns, name, parse, lifecycle, api, object, view);
 }
 
-// THE ATTEMPT TOKEN. One per ACCEPTED click, minted here and carried into the
-// idempotency key `ui/client.js` composes. A double click cannot mint two,
-// because the second event is refused by the record's own machine before this
-// is reached; a DELIBERATE second test -- the whole point of the control --
-// mints a new one, so the product API creates a new `Preflight` instead of
-// replaying the first for ever. That replay is precisely the re-read this
-// control stopped being.
+// THE ATTEMPT TOKEN. One per ACCEPTED click, carried into the idempotency
+// key `ui/client.js` composes. A double click cannot mint two (the record's
+// machine refuses the second event); a DELIBERATE second test mints a new
+// one, so the product API creates a new `Preflight` instead of replaying
+// the first.
 //
-// AN ORDINAL ALONE IS NOT A TOKEN, AND THAT WAS REVIEW FINDING F1. The first
-// cut composed `"<ns>.<name>.attempt-" + <module counter>`, and a module
-// counter starts at zero on every page load -- so the FIRST click in one load
-// and the FIRST click in the next composed the same key, byte for byte. The
-// product API names a created object `sha256(issuer, subject, ns, route, key)`,
-// so a repeated key with an identical body is a REPLAY: an operator who read
-// `AuthenticationFailed`, fixed the Secret, reloaded and clicked again got the
-// first check's stale rows back as the new verdict, for as long as the old
-// object lived (`policy.preflight.retentionSeconds`, default an hour). The
-// reviewer reproduced the collision across two browser sessions.
-//
-// So the token is a per-LOAD nonce composed with the per-click ordinal. The
-// nonce makes two loads differ; the ordinal makes two clicks in one load
-// differ. Neither alone is enough, and neither is a clock: two tabs opened in
-// the same millisecond collide, which is the argument `schedules.js`'s
-// `mintIntent` already records for the manual-run intent.
+// AN ORDINAL ALONE IS NOT A TOKEN: a module counter restarts on every page
+// load, so the first click of two loads would compose the same key and
+// replay a stale verdict for as long as the old object lives. So the token
+// is a per-LOAD nonce with the per-click ordinal; neither is a clock, which
+// two tabs could share.
 let attempts = 0;
 let loadNonce = null;
 
@@ -1508,13 +1450,11 @@ export const CONNECTION_NONCE_BYTES = 16;
 
 /** Mints this page load's nonce, once.
  *
- *  A BROWSER WITH NO RANDOM SOURCE GETS A REFUSAL AND NOT A WEAKER TOKEN, for
- *  `mintIntent`'s reason in this control's own terms: a token this page could
- *  not make unique is a token that silently replays a verdict about a broker
- *  that has changed since. There is no counter fallback, because the counter
- *  fallback IS the defect F1 named. It is minted lazily rather than at module
- *  scope so that importing this page in a context without `crypto` is not
- *  itself a throw. */
+ *  A BROWSER WITH NO RANDOM SOURCE GETS A REFUSAL AND NOT A WEAKER TOKEN: a
+ *  token this page could not make unique would silently replay a verdict
+ *  about a broker that has changed since, so there is no counter fallback.
+ *  It is minted lazily rather than at module scope so that importing this
+ *  page in a context without `crypto` is not itself a throw. */
 export function connectionNonce() {
   if (loadNonce !== null) {
     return loadNonce;
@@ -1536,20 +1476,11 @@ export function connectionNonce() {
   return loadNonce;
 }
 
-/** One started check, in the shape `mutationStatus` reads.
- *
- *  IT RENDERED `(uid )` WITH A HOLE IN IT, and the lab saw it. Every other
- *  create on this page goes through `lifecycle.js`'s `createOnce`, which
- *  answers with the stored OBJECT, so the status line reads
- *  `result.object.metadata.{name,uid}`. A console create answers with the
- *  product API's DTO instead, which carries the same two facts under its own
- *  names -- `id` IS `metadata.name` and `uid` IS `metadata.uid`, as the
- *  `Preflight` schema declares them -- so this projects them back rather than
- *  teaching the shared status helper a second shape. `item` is kept beside it
- *  because the panel's own watcher reads that.
- *
- *  A MISSING uid STAYS MISSING. Nothing here invents one: if the server ever
- *  answered without it the line would say so rather than print a name twice. */
+/** One started check, in the shape `mutationStatus` reads: the console's DTO
+ *  carries `id` (`metadata.name`) and `uid` (`metadata.uid`) under its own
+ *  names, so they are projected back to `result.object.metadata` rather than
+ *  teaching the shared status helper a second shape. `item` is kept beside
+ *  it for the panel's own watcher. A missing uid stays missing. */
 export function startedPreflight(made) {
   const m = made || {};
   const item = m.item || null;
@@ -1635,14 +1566,13 @@ function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, disc
 }
 
 /** Re-reads a started check until a read answers terminal, or the longest time
- *  a check may take has passed (`lifecycle.js`'s `followCheck`; this panel's
- *  thirty seconds was poc-upgrade-3's P15).
+ *  a check may take has passed (`lifecycle.js`'s `followCheck`).
  *
- *  EVERY READ IS GUARDED BY THE ROUTE (PLAT-13.1). The wait is `api.wait` when
- *  the caller supplies one; in a browser it is one `setTimeout` per read and
- *  nothing is left running when the route leaves, because the next read checks
- *  `active` before it issues. A newer check on this panel ends the follow of
- *  an older one, and each answer repaints the detail as it was last painted. */
+ *  EVERY READ IS GUARDED BY THE ROUTE. The wait is `api.wait` when the caller
+ *  supplies one; in a browser it is one `setTimeout` per read and nothing is
+ *  left running when the route leaves, because the next read checks `active`
+ *  before it issues. A newer check on this panel ends the follow of an older
+ *  one, and each answer repaints the detail as it was last painted. */
 function followConnectionCheck(node, ns, name, parse, lifecycle, api, first) {
   const checkKey = formKey(ns, CONNECTION_CHECK_FORM, name);
   const detailKey = formKey(ns, DISCOVERY_FORM, name);
@@ -1669,12 +1599,8 @@ function followConnectionCheck(node, ns, name, parse, lifecycle, api, first) {
  *  the two slots again, because a finished attempt may now be the last
  *  successful inventory too.
  *
- *  THE PANEL USED NOT TO READ A STARTED DISCOVERY AGAIN AT ALL: "Discover
- *  topics" painted the create answer, `pending`, and it stayed `pending` until
- *  the reader reloaded. A timer that kept reading after its reader stopped
- *  looking was the worry, and the follow answers it: it ends with the route,
- *  at the first terminal read, or at the discovery's own deadline, and it
- *  says in words when it gave up. */
+ *  The follow ends with the route, at the first terminal read, or at the
+ *  discovery's own deadline, and says in words when it gave up. */
 function followDiscovery(node, ns, name, parse, lifecycle, api, first) {
   // A DISCOVERY ALREADY FOLLOWED IS LEFT TO ITS FOLLOW, which re-reads the
   // slots when it ends: a second ask that replayed it adds no second follow
@@ -1733,8 +1659,7 @@ function followDiscovery(node, ns, name, parse, lifecycle, api, first) {
  *  A STARTED DISCOVERY IS FOLLOWED (`followDiscovery`), as every check this
  *  console starts is: until a read answers terminal, the route leaves, or the
  *  discovery's own deadline passes -- and then the panel says so and offers
- *  to run it again. It used not to be read again at all, and "Discover
- *  topics" left `pending` on screen until a reload. */
+ *  to run it again. */
 function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
   const key = formKey(ns, DISCOVERY_FORM, name);
   const mutation = mutationFor(key);
@@ -1778,8 +1703,8 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
         request.expectedTopics = expected;
       }
       // ASKED AGAIN, NOT REPLAYED, once the inventory these parameters made is
-      // spent (P14's class): a failed or stale discovery is a new key's
-      // question, and a fresh identical one is the server's to reuse.
+      // spent: a failed or stale discovery is a new key's question, and a fresh
+      // identical one is the server's to reuse.
       mutation.run(() => askCheck({
         intent: key,
         question: JSON.stringify(request),
@@ -1882,18 +1807,17 @@ function readTopics(node, ns, name, parse, lifecycle, api, object, view, filters
 }
 
 
-/** THE "TEST CONNECTION" CONTROL, ON THE DETAIL VIEW.
+/** THE PROBE RE-READ, ON THE DETAIL VIEW.
  *
- *  It is a READ, and the panel says so: the page re-reads this KafkaCluster and
- *  renders whatever the controller has recorded since. It cannot make the
- *  controller dial -- `spec` is immutable, this page's whole write surface is
- *  five creates and one suspend patch, and the re-probe cadence is the probe
- *  Job's own TTL -- so a control that claimed to force a dial would be lying in
- *  the same way a stale probe rendered as current lies.
+ *  It is a READ, and the panel says so: the page re-reads this KafkaCluster
+ *  and renders whatever the controller has recorded since. It cannot make
+ *  the controller dial (`spec` is immutable and the re-probe cadence is the
+ *  probe Job's own TTL), so a control that claimed to force a dial would lie
+ *  the way a stale probe rendered as current lies.
  *
- *  IT IS BOUND TO THE ROUTE'S LIFETIME LIKE EVERY OTHER READ (PLAT-13.1): the
- *  answer is dropped when the view is gone, so a slow re-read cannot paint a
- *  probe from namespace A over namespace B. */
+ *  IT IS BOUND TO THE ROUTE'S LIFETIME LIKE EVERY OTHER READ: the answer is
+ *  dropped when the view is gone, so a slow re-read cannot paint a probe
+ *  from namespace A over namespace B. */
 function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery, check) {
   const form = node.querySelector("form.probe-test");
   if (form === null) {
@@ -1986,7 +1910,7 @@ function wireRowProbe(node, ns, parse, lifecycle, api, form) {
         // THE UID IS CHECKED BEFORE ANYTHING IS PAINTED. A cluster deleted and
         // recreated under the same name between the list read and this one is
         // a DIFFERENT connection, and writing its probe into the old row would
-        // be the exact substitution this task forbids everywhere else.
+        // be the substitution this page refuses everywhere else.
         if (clusterUid(object) !== uid) {
           paintRow(node, parse, uid, renderRecreatedRow(name, uid, clusterUid(object)));
           return;
@@ -2026,8 +1950,8 @@ function paintRow(node, parse, uid, html) {
     if (row.getAttribute("data-cluster-uid") !== uid) {
       continue;
     }
-    // THE PROBE CELL BY ITS CLASS, not by counting columns: the table's
-    // columns changed once (R2-3) and a count would repaint the wrong cell.
+    // THE PROBE CELL BY ITS CLASS, not by counting columns, which have
+    // changed before.
     const probe = row.querySelector(".probe-cell");
     if (probe !== null) {
       replace(probe, parse(html));
@@ -2035,7 +1959,6 @@ function paintRow(node, parse, uid, html) {
   }
 }
 
-/** The form's values, read from the DOM and trimmed where a name is involved. */
 /** EVERY NAMED CONTROL OF A FORM, BY NAME, WHATEVER THE FORM IS.
  *
  *  The three readers beside this one know their form's fields and name each
@@ -2089,10 +2012,11 @@ export function readFormValues(form) {
   return values;
 }
 
+/** The form's values, read from the DOM and trimmed where a name is involved. */
 export function readClusterValues(form) {
   const e = form.elements;
   return {
-    // ABSENT IN CONSOLE MODE (P7): the server names the connection.
+    // ABSENT IN CONSOLE MODE: the server names the connection.
     name: e.name === undefined ? "" : String(e.name.value).trim(),
     servers: String(e.servers.value),
     role: String(e.role.value).trim(),
@@ -2102,8 +2026,8 @@ export function readClusterValues(form) {
     secret: e.secret === undefined ? "" : String(e.secret.value).trim(),
     passwordKey: e.passwordKey === undefined ? "" : String(e.passwordKey.value).trim(),
     clientCertSecret: e.clientCertSecret === undefined ? "" : String(e.clientCertSecret.value).trim(),
-    // CONSOLE-MODE WRITE-ONLY VALUES (PROD-01.3): read for the one submit, on
-    // no draft list, and never trimmed (a password is exactly what was typed).
+    // CONSOLE-MODE WRITE-ONLY VALUES: read for the one submit, on no draft
+    // list, and never trimmed (a password is exactly what was typed).
     enteredPassword: e.enteredPassword === undefined ? "" : String(e.enteredPassword.value),
     enteredCertificatePem: e.enteredCertificatePem === undefined
       ? "" : String(e.enteredCertificatePem.value),
@@ -2131,7 +2055,7 @@ function wireForm(node, ns, parse, lifecycle, api) {
       return;
     }
     // THE INTENT SURVIVES EVERY KEYSTROKE: it is minted on the first submit
-    // and belongs to the draft until the connection exists (P7).
+    // and belongs to the draft until the connection exists.
     keepDraft(key, withIntent(readClusterValues(form), readDraft(key)), CLUSTER_DRAFT_FIELDS);
     if (mutation.state.phase === "succeeded") {
       mutation.clear();

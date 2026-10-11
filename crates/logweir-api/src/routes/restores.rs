@@ -46,7 +46,7 @@ use crate::validate;
 pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/restores";
 /// The create route identifier.
 pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/restores";
-/// The governed approval submission route identifier (PLAT-19.2).
+/// The governed approval submission route identifier.
 pub const ROUTE_SUBMIT_APPROVAL: &str = "POST /api/v1/namespaces/{ns}/restores/{name}/approval";
 /// The largest submitted sidecar, 64 KiB.
 pub const MAX_SIDECAR_BYTES: usize = 64 * 1024;
@@ -127,8 +127,8 @@ fn validate_topic_mapping(
             ));
             continue;
         }
-        // PROD-15.1: the identity map is the one mapping an original-name
-        // restore has, and it is refused everywhere else.
+        // The identity map is the one mapping an original-name restore has, and it
+        // is refused everywhere else.
         if row.target == row.source && !original_name {
             errors.push(FieldError::new(
                 format!("topicMapping[{index}].target"),
@@ -305,10 +305,9 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
         ));
     }
     let prefix = &request.target.topic_naming.prefix;
-    // PROD-15.1: `originalName: true` is the one request whose prefix is
-    // empty — a restore under the original topic names, into topics that do
-    // not exist (OD-2) — and only in `newTopic` mode. Every other request
-    // keeps the non-empty prefix it always needed.
+    // `originalName: true` is the one request whose prefix is empty -- a restore
+    // under the original topic names, into topics that do not exist -- and only
+    // in `newTopic` mode. Every other request keeps its non-empty prefix.
     let original_name = request.target.topic_naming.original_name == Some(true);
     if original_name {
         if !matches!(request.target.mode, RestoreMode::NewTopic) {
@@ -355,17 +354,13 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
     // be sent to fix the wrong field.
     //
     // AND ONLY FOR `newTopic`, WHICH IS A FAIL-CLOSED REFUSAL AND NOT A GAP.
-    // `logweir_core::spec::target_topic_prefix` reads
-    // `target.topic_naming.prefix` for `newTopic` and the PLAN's own
-    // `topic_mapping_prefix` for `scratch` -- and this route never parses the
-    // plan, so in `scratch` mode it does not hold the string the run will
-    // actually map through. A check against `topicNaming.prefix` would then be
-    // a verdict about a value the runner does not read: it would pass a
-    // declaration that disagrees with the run and fail one that agrees with
-    // it. This service does not perform a check on a value it does not have,
-    // so the declaration is defined for `newTopic` and is refused by name for
-    // `scratch`. The independent review found the previous code claiming both
-    // modes while checking one.
+    // `logweir_core::spec::target_topic_prefix` reads `target.topic_naming.prefix`
+    // for `newTopic` and the PLAN's own `topic_mapping_prefix` for `scratch`,
+    // and this route never parses the plan, so in `scratch` mode it does not
+    // hold the string the run will map through. A check against
+    // `topicNaming.prefix` would be a verdict about a value the runner does not
+    // read, so the declaration is defined for `newTopic` and refused by name for
+    // `scratch`.
     if let Some(rows) = request.topic_mapping.as_deref() {
         if matches!(request.target.mode, RestoreMode::Scratch) {
             errors.push(FieldError::new(
@@ -389,7 +384,7 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
             "must be from 60 to 86400",
         ));
     }
-    // PROD-08.1a: the record bound bounds a complete verification and nothing
+    // The record bound bounds a complete verification and nothing
     // else — the CEL rule on `Restore.spec` and the runner's phase 0 refuse the
     // same pair; refusing it here names the field before anything is stored.
     if let Some(bound) = request.complete_max_records {
@@ -469,14 +464,14 @@ pub fn build(
                 },
                 topic_naming: TopicNaming {
                     prefix: request.target.topic_naming.prefix.clone(),
-                    // PROD-15.1: stored only when true, so every other
-                    // request stores the object it always did.
+                    // Stored only when true, so every other request stores the object it always
+                    // did.
                     original_name: (request.target.topic_naming.original_name == Some(true))
                         .then_some(true),
                 },
             },
             deadline_seconds: request.deadline_seconds,
-            // PROD-08.1a: the declaration, verbatim. The controller holds it
+            // The declaration, verbatim. The controller holds it
             // to the plan's own `sample.coverage` before anything runs.
             coverage: request.coverage.map(|c| match c {
                 RestoreCoverage::Sampled => VerificationCoverage::Sampled,
@@ -549,10 +544,10 @@ pub async fn create(
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateRestoreRequest = read_json(body, MAX_JSON_BODY).await?;
     let point_in_time = validate_create(&request)?;
-    // PLAT-19.2: a governed request's confirmation lives beside the Approval
-    // under `<approvalRef>-confirmation`, and that name must still be a name.
-    // PROD-16.1: the policies as this request sees them, the fresh-install
-    // marker applied — read BEFORE anything is created.
+    // A governed request's confirmation lives beside the Approval under
+    // `<approvalRef>-confirmation`, and that name must still be a name. The
+    // policies as this request sees them, the fresh-install marker applied, are
+    // read BEFORE anything is created.
     let policies = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?;
@@ -577,7 +572,7 @@ pub async fn create(
     // Canonical form for the request hash: equivalent RFC 3339 spellings of
     // one instant are one request. `planBytes` is NOT canonicalised.
     request.point_in_time = point_in_time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-    // P10: THE PER-ACTOR CREATE LIMIT, after every refusal that is about the
+    // THE PER-ACTOR CREATE LIMIT, after every refusal that is about the
     // request itself (a malformed restore does not spend the window) and
     // before the object exists. The ceiling on how many restores RUN at once
     // is the controller's manual-restore pool.
@@ -594,7 +589,7 @@ pub async fn create(
         |name, annotations| build(&ns, name, annotations, &request, point_in_time),
     )
     .await?;
-    // PLAT-19.2 — ROUTE BY THE FROZEN POLICY. The Restore exists (and has a
+    // ROUTE BY THE FROZEN POLICY. The Restore exists (and has a
     // UID) before anything is signed; a replay of an interrupted request
     // completes the sequence by reading what is already there.
     let authorization = authorize_submission(
@@ -621,7 +616,7 @@ pub async fn create(
     ))
 }
 
-/// **OD-10 (PROD-15.1 review M1), decided by the owner on 2026-10-09.** On a
+/// **Typed confirmation of an original-name restore.** On a
 /// one-person-confirmation namespace (`confirm`, internal `Ordinary`) the
 /// requester may confirm a restore under the ORIGINAL topic names alone, but
 /// only by RE-TYPING every original topic name, exactly; the console signs
@@ -698,8 +693,8 @@ fn refuse_typed_confirmation(
 }
 
 /// What a create request asks the console to sign beside the plan hash: the
-/// change ticket (PLAT-19.2) and, on a one-person confirmation of an
-/// original-name restore, the typed topic names (OD-10).
+/// change ticket and, on a one-person confirmation of an original-name
+/// restore, the typed topic names.
 struct SignedBesideThePlan<'a> {
     ticket: Option<&'a str>,
     confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
@@ -716,27 +711,24 @@ fn typed_confirmation(
     })
 }
 
-/// PLAT-19.2's refusals that must come BEFORE the Restore exists, so a refused
+/// The refusals that must come BEFORE the Restore exists, so a refused
 /// submission leaves nothing behind.
 ///
-/// * **Only the modes `localAdmin` may serve** (PROD-16.1, amending review
-///   H1 and D0's "does not expose Ordinary"): `confirm` and `strict` are
-///   served there — the confirming principal is
+/// * **Only the modes `localAdmin` may serve**: `confirm` and `strict` are
+///   served there -- the confirming principal is
 ///   `urn:logweir:local-admin#admin`, and whoever can reach this console can
-///   confirm, a residual SECURITY.md states — and `two-person` (PROD-16.2)
-///   never is ([`ApprovalRoute::console_may_request`]).
-/// * **The console key exists** (PROD-16.1): under a bound policy the
-///   console signs, and the managed key is written by the identity hook after
-///   this pod starts. Until it is there, nothing is created.
+///   confirm, a residual SECURITY.md states -- and `two-person` never is
+///   ([`ApprovalRoute::console_may_request`]).
+/// * **The console key exists**: under a bound policy the console signs, and
+///   the managed key is written by the identity hook after this pod starts.
+///   Until it is there, nothing is created.
 /// * **The ticket** (D0: "required in Governed, optional in Ordinary"), and
 ///   none in an unbound namespace, which signs nothing.
-/// * **No `approvalRef.name` ending in `-confirmation` under Governed**
-///   (review L4): it would collide with another Restore's confirmation
-///   object.
-/// * **A requester a two-person approval can compare** (PROD-16.2): under a
-///   policy whose approval the console signs, the requester is one of the two
-///   people every reader tells apart
-///   (`logweir_core::approval_policy::console_principal`).
+/// * **No `approvalRef.name` ending in `-confirmation` under Governed**: it
+///   would collide with another Restore's confirmation object.
+/// * **A requester a two-person approval can compare**: under a policy whose
+///   approval the console signs, the requester is one of the two people every
+///   reader tells apart (`logweir_core::approval_policy::console_principal`).
 ///
 /// # Errors
 ///
@@ -763,7 +755,7 @@ fn refuse_before_create(
         }
         return Ok(());
     };
-    // PROD-16.2: THE ROW OF THE APPROVAL TABLE, and what THIS console may do
+    // THE ROW OF THE APPROVAL TABLE, and what THIS console may do
     // under it. Nothing below reads the policy's mode or its approver
     // signature on its own.
     let route = approval::route_of(policy)?;
@@ -795,7 +787,7 @@ fn refuse_before_create(
         }
         Err(reason) => return Err(ApiError::new(ProblemCode::InternalError, reason)),
     }
-    // PROD-16.2: under a two-person policy the requester is one of the two
+    // Under a two-person policy the requester is one of the two
     // people every reader compares. An identity that cannot be compared (or
     // is a machine's) could never be told apart from an approver's, so no
     // request is made for it: nothing would ever be able to approve it.
@@ -815,18 +807,16 @@ fn refuse_before_create(
                 ),
             ));
         }
-        // PROD-16.2 (the coordinator's addition 6): NOTHING IS REQUESTED HERE
-        // THAT A SECOND PERSON COULD NOT BE SHOWN IN FULL. The approver sees
-        // every topic and the name it is restored under, the source, the
-        // target cluster, the window and the coverage, from this plan; a plan
-        // too large for that, unreadable, or carrying a value a page cannot
-        // show faithfully would wait for an approval nobody is ever offered.
-        // So the largest restore this mode accepts is the largest one it can
-        // show (`logweir_core::approval_scope::MAX_SCOPE_TOPICS`); a larger
-        // one is split, or approved under a strict policy.
-        // Review S-2: the ticket is shown to the approver as well, by the same
-        // rule; a ticket the scope would refuse would make a request nobody
-        // can ever approve. Refused here, by name, without echoing it.
+        // NOTHING IS REQUESTED HERE THAT A SECOND PERSON COULD NOT BE SHOWN IN
+        // FULL. The approver sees every topic and the name it is restored under,
+        // the source, the target cluster, the window and the coverage, from this
+        // plan; a plan too large for that, unreadable, or carrying a value a page
+        // cannot show faithfully would wait for an approval nobody is ever offered.
+        // So the largest restore this mode accepts is the largest one it can show
+        // (`logweir_core::approval_scope::MAX_SCOPE_TOPICS`); a larger one is split,
+        // or approved under a strict policy. The ticket is shown to the approver by
+        // the same rule, so a ticket the scope would refuse is refused here, by
+        // name, without echoing it.
         if let Some(ticket) = request.ticket.as_deref() {
             if !logweir_core::approval_scope::showable(ticket) {
                 actor.audit.set_failure("ticket_not_showable");
@@ -913,17 +903,17 @@ fn existing_is_ours(
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
         && doc.authorization_mode == policy.mode
-        // PROD-15.1: and the approval subject this Restore declares.
+        // And the approval subject this Restore declares.
         && doc.approval_subject.as_deref() == restore_approval_subject(restore).wire()
         // A replay must also carry the ticket it signed; `None` is "any"
         // (the approval route, which reads the confirmation as it is).
         && ticket.is_none_or(|t| doc.ticket.as_deref() == t)
-        // OD-10: and the typed names it signed; `None` is "any", as above.
+        // And the typed names it signed; `None` is "any", as above.
         && confirmation.is_none_or(|c| doc.original_name_confirmation.as_ref() == c);
     ours.then_some(doc)
 }
 
-/// **PROD-15.1.** The approval subject a stored Restore needs, from its own
+/// The approval subject a stored Restore needs, from its own
 /// declaration (`spec.target.topicNaming.originalName`) — what the console
 /// signs into the authorization document and nothing else. The controller
 /// holds the declaration to the plan before any Job exists, and refuses an
@@ -946,8 +936,8 @@ fn policy_identity(effective: &EffectivePolicy) -> String {
     }
 }
 
-/// **PLAT-19.2's console half**: sign what the namespace's frozen policy
-/// requires, store it, and say where the submission goes next.
+/// **The console's half of policy routing**: sign what the namespace's
+/// frozen policy requires, store it, and say where the submission goes next.
 ///
 /// * unbound — nothing is signed; today's governed flow (`awaitingApproval`);
 /// * Ordinary — the console-signed document IS the Approval the Restore
@@ -1146,7 +1136,7 @@ async fn authorize_submission(
 }
 
 /// `POST .../restores/{name}/approval` — **a governed approver submits the
-/// countersignature** (PLAT-19.2, D0 "Governed approval submission"), or, in
+/// countersignature** (D0 "Governed approval submission"), or, in
 /// an UNBOUND namespace, records today's v1 approval files
 /// ([`record_legacy_approval`]). An Ordinary namespace has nothing to approve
 /// and answers `policy_mismatch`.
@@ -1182,7 +1172,7 @@ pub async fn submit_approval(
     authorize(&state, &actor, &ns, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: SubmitApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
-    // NO PRIVATE KEY IS EVER STORED (review L3; D0). The page refuses it
+    // NO PRIVATE KEY IS EVER STORED (D0). The page refuses it
     // first; this is the same rule where the bytes are written. The text is
     // never echoed.
     let keyed: Vec<FieldError> = [
@@ -1263,7 +1253,7 @@ pub async fn submit_approval(
     let Some(policy) = effective.bound() else {
         return Err(not_governed());
     };
-    // BY THE TABLE (PROD-16.2): only the personal-key row takes a
+    // BY THE TABLE: only the personal-key row takes a
     // countersignature.
     match approval::route_of(policy)? {
         logweir_core::approval_policy::ApprovalRoute::PersonalKey => {}
@@ -1439,10 +1429,8 @@ pub async fn submit_approval(
 /// `controllers::approval::PAYLOAD_TYPE_APPROVAL`).
 const PAYLOAD_TYPE_APPROVAL_V1: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
 
-/// **Recording today's approval through the console** — an UNBOUND namespace
-/// (`legacy-governed-v1`). Found by the live journeys: the approvals page
-/// offered the v1 form in console mode and the product API had no route to
-/// record it, so an approver had to use kubectl.
+/// **Recording today's approval through the console** -- an UNBOUND
+/// namespace (`legacy-governed-v1`), so an approver need not use kubectl.
 ///
 /// The route records the two files `logweir drill approve` wrote, EXACTLY as
 /// they arrived, as the Approval the Restore's `spec.approvalRef` names. It
@@ -1507,7 +1495,7 @@ async fn record_legacy_approval(
             ),
         )]));
     }
-    // PROD-15.1: the signed approval subject must be the one this Restore
+    // The signed approval subject must be the one this Restore
     // needs, refused here as the plan hash is — before an Approval exists
     // that the controller would refuse (`ApprovalSubjectMismatch`).
     let signed_subject = serde_json::from_str::<serde_json::Value>(&approval_bytes)

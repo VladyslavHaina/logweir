@@ -1,4 +1,4 @@
-//! `TRUSTPOLICY-DELETE-DROPS-REVOCATION`, the API half: what `trust.state`
+//! A deleted TrustPolicy does not drop a revocation, the API half: what `trust.state`
 //! and `GET /api/v1/trust-policies` publish once a namespace no longer
 //! resolves through the policy that recorded a `KeyCompromise` revocation.
 //!

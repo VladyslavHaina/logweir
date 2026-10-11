@@ -1,11 +1,10 @@
 //! Rate and connection limits for the unauthenticated login surface and for
 //! streams.
 //!
-//! THE SIGN-IN LIMIT, AND THE THREAT IT ANSWERS (FX-13, settled after three
-//! security reviews; the design record is the FX-13 result's *Security review
-//! follow-up*). `/auth/login` and `/auth/callback` are the only routes an
-//! unauthenticated caller can reach that do work. The limit is per client, it
-//! bounds LOAD, and it has no global budget. In full:
+//! THE SIGN-IN LIMIT, AND THE THREAT IT ANSWERS. `/auth/login` and
+//! `/auth/callback` are the only routes an unauthenticated caller can reach
+//! that do work. The limit is per client, it bounds LOAD, and it has no
+//! global budget. In full:
 //!
 //! 1. IT BOUNDS LOAD, NOT CREDENTIALS. There is nothing to guess here. An OIDC
 //!    sign-in takes no password at this service. A callback reaches the
@@ -18,16 +17,14 @@
 //!    the provider makes authorization codes single-use, short-lived and
 //!    unguessable (RFC 6749 §4.1.2 and §10.10) and binds each to the verifier
 //!    (RFC 7636). More attempts buy an attacker nothing but load. THE LOGIN
-//!    STATE IS SINGLE-USE PER REPLICA (FX-13a): the cookie is sealed and
-//!    stateless and opens for `LOGIN_STATE_SECONDS` (600 s), but
-//!    `login::callback` redeems its `state` in the process's record
-//!    (`login::UsedStates::redeem`) before it exchanges the code, so a replay
-//!    on the same replica is refused `login_state_replayed` with no token
-//!    request. A replay on another replica costs one token request per
-//!    replica, and again after that replica restarts or evicts the entry; it
-//!    cannot obtain a second sign-in from a code the provider has exchanged.
-//!    Before FX-13a one cookie armed any number of callbacks inside the
-//!    callback key's own budget, each a token request (point 3).
+//!    STATE IS SINGLE-USE PER REPLICA: the cookie is sealed and stateless
+//!    and opens for `LOGIN_STATE_SECONDS` (600 s), but `login::callback`
+//!    redeems its `state` in the process's record (`login::UsedStates::redeem`)
+//!    before it exchanges the code, so a replay on the same replica is
+//!    refused `login_state_replayed` with no token request. A replay on
+//!    another replica costs one token request per replica, and again after
+//!    that replica restarts or evicts the entry; it cannot obtain a second
+//!    sign-in from a code the provider has exchanged.
 //!
 //! 2. NO AMPLIFICATION: AT MOST ONE PROVIDER REQUEST PER REQUEST. Readiness
 //!    warms the discovery and JWKS caches before a replica takes traffic
@@ -64,8 +61,8 @@
 //!    AVAILABILITY DECIDES WHERE. With no budget over all clients, it takes
 //!    enough addresses to spend the provider's quota for this client. With
 //!    one, it takes far fewer: a global cap here GUARANTEES the outage at a
-//!    volume far below any provider's quota — the old peer key was such a
-//!    cap, and one client locked everyone out; a 600-a-minute ceiling is 30
+//!    volume far below any provider's quota -- a single shared key is such a
+//!    cap, and one client locks everyone out; a 600-a-minute ceiling is 30
 //!    addresses, or one IPv6 customer's `/56`. For a recovery tool, operators
 //!    signing in during an incident outrank a tighter bound, so there is NO
 //!    GLOBAL BUDGET and nothing refuses a client that is within its own. For
@@ -109,8 +106,8 @@
 //! embeds instead, so IPv4 clients behind a translator are not one budget.
 //!
 //! A BUCKET IS NOT AN IDENTITY. D0 allows forwarded values for transport
-//! facts only — never for an identity or a grant (amended 2026-10-07 for this
-//! key). The forwarded address chooses which counter a request is charged to,
+//! facts only -- never for an identity or a grant. The forwarded address
+//! chooses which counter a request is charged to,
 //! and a counter can only refuse: it authenticates no one, authorizes nothing
 //! and is never an audit actor. A forged header from an untrusted peer is not
 //! read at all, so it cannot move a request out of its peer's bucket.
@@ -189,12 +186,12 @@ const NAT64_WELL_KNOWN_PREFIX: u128 = 0x0064_ff9b_0000_0000_0000_0000;
 /// - an address in the well-known NAT64 prefix `64:ff9b::/96` (RFC 6052) as
 ///   the IPv4 address it embeds: behind a server-side NAT64 or SIIT
 ///   translator every IPv4 client arrives in that one `/96`, and folding it to
-///   its `/64` would put them all in one budget (FX-13 review L1). A client
-///   cannot pick such a source address without the translator answering for
-///   it. A network-specific prefix (RFC 8215's `64:ff9b:1::/48`, or any
-///   other) places the IPv4 bits by its own length, which this service does
-///   not know, so it folds to its `/64` like any IPv6 address — the pre-FX-13
-///   single budget for those clients, never a bypass;
+///   its `/64` would put them all in one budget. A client cannot pick such a
+///   source address without the translator answering for it. A
+///   network-specific prefix (RFC 8215's `64:ff9b:1::/48`, or any other)
+///   places the IPv4 bits by its own length, which this service does not
+///   know, so it folds to its `/64` like any IPv6 address -- one budget for
+///   those clients, never a bypass;
 /// - any other IPv6 address as its [`IPV6_KEY_PREFIX`] network;
 /// - an IPv4 address as itself.
 #[must_use]
@@ -505,10 +502,9 @@ mod tests {
         // A different peer has its own window.
         assert_eq!(limiter.check_at(ip(2), start), Decision::Allowed);
 
-        // Past the window the allowance returns — and only the allowance:
-        // the renewed window is limited again (review, informational: a
-        // window that was never renewed left a key unlimited after its first
-        // minute, and only an unrelated row noticed).
+        // Past the window the allowance returns -- and only the allowance: the
+        // renewed window is limited again, so a key is never left unlimited after
+        // its first minute.
         let later = start + Duration::from_secs(61);
         for i in 0..3 {
             assert_eq!(limiter.check_at(ip(1), later), Decision::Allowed, "{i}");
@@ -582,7 +578,7 @@ mod tests {
         assert_eq!(bucket_of(v6("::ffff:203.0.113.5")), v6("203.0.113.5"));
         assert_ne!(bucket_of(v6("::ffff:203.0.113.6")), v6("203.0.113.5"));
         assert_eq!(bucket_of(v6("203.0.113.5")), v6("203.0.113.5"));
-        // NAT64's well-known prefix embeds the IPv4 client (review L1): two
+        // NAT64's well-known prefix embeds the IPv4 client: two
         // IPv4 clients behind the translator are two buckets, and one of them
         // is the same bucket as that client arriving natively. A
         // network-specific prefix is an ordinary /64.

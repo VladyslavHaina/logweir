@@ -1,4 +1,5 @@
-// FX-20: the console never makes a NEW destination name an existing Secret.
+// credential-binding.spec.js -- the console never makes a NEW destination
+// name an existing Secret.
 //
 // A destination that could name any existing Secret could make Logweir sign
 // requests with a credential its author cannot read and send them to an
@@ -85,7 +86,7 @@ test("fx20_the_inline_archive_secret_field_says_what_the_secret_must_carry", asy
     "the field says what the Secret must carry, beside it");
 });
 
-// FX-20c: the destination's Test access renders the binding row a refused
+// The destination's Test access renders the binding row a refused
 // grant produces -- the grant by its `spec.access` field, its destination, its
 // Secret, and whether the binding was absent or foreign -- under a verdict
 // that is not ready. The fixture is the one the product API's row
@@ -114,8 +115,8 @@ test("fx20c_test_access_renders_the_refused_grant_by_name_under_a_not_ready_verd
   assert.match(row, new RegExp(
     "data-field=\"message\">archiveWrite \\(Secret <code>lwd-primary-archive-write</code>: " +
     "foreign binding\\)"));
-  // REVIEW LOW-2: the remedy gives this destination its own Secret, and never
-  // tells anyone to bind the refused Secret here.
+  // The remedy gives this destination its own Secret, and never tells anyone
+  // to bind the refused Secret here.
   assert.match(row, /remedy: .*its own Secret.*scripts\/bind-credential\.py/);
   assert.doesNotMatch(row, /status\.credentialBinding/);
   assert.match(row, /archiveWrite=CredentialBindingMismatch/);
@@ -124,9 +125,9 @@ test("fx20c_test_access_renders_the_refused_grant_by_name_under_a_not_ready_verd
   // The archive-write row is still listed as knowable only at execution.
   assert.match(html, /Only knowable at execution time/);
 
-  // CONTROL: the F6 result as it was BEFORE this row existed -- every other
-  // row ready, the aggregate `ready` -- names no grant and reads green. The
-  // assertions above fail on it.
+  // CONTROL: a result without the binding row -- every other row ready, the
+  // aggregate `ready` -- names no grant and reads green. The assertions above
+  // fail on it.
   const before = Object.assign({}, item, {
     state: "ready",
     reason: "Ready",
@@ -137,7 +138,7 @@ test("fx20c_test_access_renders_the_refused_grant_by_name_under_a_not_ready_verd
   assert.match(old, /badge-green">ready/);
 });
 
-// FX-20c review M-1: a RetentionPolicy whose run was refused on its
+// A RetentionPolicy whose run was refused on its
 // credential's binding is published `enforcement: RecommendationOnly` and
 // `guarantees.ageExpiry: NotEnforced` (with `Enforced=False/
 // CredentialBindingMismatch`) by the controller

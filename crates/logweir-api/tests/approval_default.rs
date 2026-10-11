@@ -1,4 +1,4 @@
-//! PROD-16.1 at the product API: on a FRESH install every namespace without a
+//! Approval defaults at the product API: on a FRESH install every namespace without a
 //! binding is one-person confirmation in the console (`confirm`), so the first
 //! restore needs no key; an UPGRADED install keeps `legacy-governed-v1` until
 //! an administrator opts in; an explicit binding always wins.
@@ -11,9 +11,9 @@
 //! stored confirmation is verified here with the same `verify_detached` the
 //! controller and the runner use.
 //!
-//! THE SECURITY REVIEW'S ROWS: on an install that existed before PROD-16.1, a
-//! marker patched into the ConfigMap — bare, or as a claim naming a policy
-//! that is missing, replaced, not hook-made, or that trusts no console key —
+//! THE SECURITY ROWS: on an install that existed before the marker, a
+//! marker patched into the ConfigMap -- bare, or as a claim naming a policy
+//! that is missing, replaced, not hook-made, or that trusts no console key --
 //! changes nothing: legacy, nothing signed.
 
 mod support;
@@ -229,7 +229,7 @@ async fn a_fresh_install_confirms_an_unbound_namespace_in_one_request() {
 }
 
 /// **An upgrade never weakens approval, and a patched marker changes
-/// nothing** (the PROD-16.1 security review). An upgraded install: an identity
+/// nothing**. An upgraded install: an identity
 /// ConfigMap with no marker, or none at all. Then the ATTACKS on it, one
 /// object edit each: a bare `confirm`; a claim naming a policy that does not
 /// exist; a claim beside a policy of that name an administrator wrote (no
@@ -367,9 +367,9 @@ async fn the_managed_key_is_read_when_the_identity_hook_has_written_it() {
     ));
     std::fs::create_dir_all(&dir).expect("dir");
     let key_file = dir.join("confirmation.key");
-    // THE FIX ROUND (review L5): only the MANAGED key file may be missing at
-    // start. An operator-named file that is missing is a refusal to start,
-    // naming it — a mistyped path is not "the hook has not run yet".
+    // Only the MANAGED key file may be missing at start. An operator-named file
+    // that is missing is a refusal to start, naming it -- a mistyped path is not
+    // "the hook has not run yet".
     let refused = ApprovalSettings::load(
         None,
         Some(&key_file),

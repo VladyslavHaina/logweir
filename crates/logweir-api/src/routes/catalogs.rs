@@ -1,6 +1,5 @@
 //! `GET`/`POST /api/v1/namespaces/{ns}/catalogs`, plus the point view and the
-//! signer panel — PLAT-15.1's read half and PLAT-15.2's "connect an existing
-//! archive".
+//! signer panel -- the catalog's read half and "connect an existing archive".
 //!
 //! # Availability and verification are two columns, never one
 //!
@@ -86,9 +85,7 @@ pub const BACKUP_SCAN_PAGE: u32 = 500;
 /// The most `Backup` pages one point request reads — 2 000 objects.
 pub const MAX_BACKUP_SCAN_PAGES: usize = 4;
 
-// ======================================================================
-// The catalog projection
-// ======================================================================
+// THE CATALOG PROJECTION.
 
 /// What the last sync found, by verdict. **Ten counts, not two**: "how many
 /// points are there" and "how many can I restore from" are different numbers.
@@ -369,9 +366,7 @@ pub fn view(catalog: &RecoveryCatalog, now: DateTime<Utc>) -> CatalogView {
     }
 }
 
-// ======================================================================
-// The point view
-// ======================================================================
+// THE POINT VIEW.
 
 /// One location a point was seen at.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -672,7 +667,7 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
         point_id: bounded(&entry.point_id, 128),
         backup_id: bounded(&entry.backup_id, 128),
         run_id: bounded(&entry.run_id, 64),
-        // FX-33: an entry whose record could not be read (no receipt digest)
+        // An entry whose record could not be read (no receipt digest)
         // carries no instants, and is shown with none rather than as 1970. A
         // point with a record keeps every instant it states, 0 included.
         recovery_point_at: recorded
@@ -711,7 +706,7 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
                 config_coverage: t.config_coverage.as_deref().map(|c| bounded(c, 32)),
                 owner: t.owner.as_deref().map(|o| bounded(o, 32)),
                 // ONE rule, the core's: an owner the run never looked for is
-                // `unknown`, never `adminApi` (fix round, M2).
+                // `unknown`, never `adminApi`.
                 apply_route: logweir_core::topic_configuration::apply_route(
                     t.owner.is_some(),
                     entry
@@ -895,9 +890,7 @@ pub struct SignerPageResponse {
 pub const FINGERPRINT_COMMAND: &str =
     "openssl pkey -pubin -in <key>.pem -outform DER | openssl dgst -sha256";
 
-// ======================================================================
-// Envelopes and the create request
-// ======================================================================
+// ENVELOPES AND THE CREATE REQUEST.
 
 /// A page of catalogs.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -1117,9 +1110,7 @@ fn build(
     }
 }
 
-// ======================================================================
-// Routes
-// ======================================================================
+// ROUTES.
 
 /// `GET .../catalogs`.
 pub async fn list(
@@ -1460,7 +1451,7 @@ fn verify_page(
     let computed = weirkeeper::catalog_view::page_digest(&lines);
     // The published spelling carries a `sha256:` prefix and the function
     // returns bare hex; accept either and refuse anything else, which is the
-    // same normalisation RET-DIGEST-PREFIX landed on the retention side.
+    // same normalisation the retention side uses.
     let recorded_bare = recorded.strip_prefix("sha256:").unwrap_or(recorded);
     let computed_bare = computed.strip_prefix("sha256:").unwrap_or(&computed);
     if recorded_bare.len() != 64
@@ -1519,7 +1510,7 @@ mod tests {
         }
     }
 
-    /// **FX-33 fix round, L1: a point with a record keeps a window that
+    /// **A point with a record keeps a window that
     /// starts at the epoch.** A topic written with CreateTime 0 makes a real
     /// `covered.from_ms` of 0; it is published as 1970-01-01, so the console
     /// can offer the point. CONTROL: a row whose record could not be read (no

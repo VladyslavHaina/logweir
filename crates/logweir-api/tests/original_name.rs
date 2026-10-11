@@ -1,4 +1,4 @@
-//! **PROD-15.1 at the product API**: a restore under the ORIGINAL topic names
+//! **Original topic names at the product API**: a restore under the ORIGINAL topic names
 //! is a distinct request (`target.topicNaming.originalName: true`, `newTopic`,
 //! `prefix: ""`), stored as a distinct declaration, shown with a distinct
 //! approval subject, and the console signs that subject — `originalName` —
@@ -24,7 +24,7 @@ fn signing_id() -> String {
     "a".repeat(64)
 }
 
-/// A fresh install (PROD-16.1): an unbound namespace is one-person
+/// A fresh install: an unbound namespace is one-person
 /// confirmation in the console, so a create signs a v2 document at once.
 fn fresh_install() -> TestApp {
     let key = SigningKey::generate_ed25519();
@@ -93,7 +93,7 @@ fn original_body() -> Value {
     body
 }
 
-/// OD-10: the same request with the original topic names re-typed (the
+/// The same request with the original topic names re-typed (the
 /// golden plan restores `orders` and `payments`).
 fn typed_original_body(names: &[&str]) -> Value {
     let mut body = original_body();
@@ -205,7 +205,7 @@ async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subjec
         .starts_with("{\"formatVersion\":\"2.1.0\","));
     // The declared coverage is stored beside the declaration.
     assert_eq!(stored["spec"]["coverage"], "complete");
-    // OD-10: what the requester typed is signed beside the subject.
+    // What the requester typed is signed beside the subject.
     assert_eq!(
         doc.original_name_confirmation
             .as_ref()
@@ -215,7 +215,7 @@ async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subjec
     app.fake.assert_strict();
 }
 
-/// **OD-10 (review M1): a one-person confirmation needs every original topic
+/// **A one-person confirmation needs every original topic
 /// name re-typed, exactly**, refused by name before anything is created: no
 /// typed names, a missing name, a name typed in another case. KILLS: the API
 /// signing an original-name confirmation without the typed names, or with
@@ -293,7 +293,7 @@ async fn typed_names_are_refused_where_they_would_replace_nothing() {
     assert_eq!(legacy.fake.count("restores", NS_A), 0);
 }
 
-/// **OD-10: a strict (Governed) namespace still needs the second person.**
+/// **A strict (Governed) namespace still needs the second person.**
 /// An original-name request is stored and confirmed by the console only as
 /// `<approvalRef>-confirmation`, which authorises nothing; the Approval the
 /// Restore references does not exist until an approver countersigns. Typed
@@ -338,11 +338,11 @@ async fn a_strict_namespace_still_needs_the_second_person_for_an_original_name_r
         vec![format!("{approval_ref}-confirmation")],
         "only the confirmation, which authorises nothing"
     );
-    // **Review 2, L5: that confirmation carries the SUBJECT ALONE (no typed
+    // **That confirmation carries the SUBJECT ALONE (no typed
     // names: a strict namespace has a second person), and a document that
     // carries the subject is format 2.1.0.** Written 2.0.0 it would be
     // refused by every reader, and the strict path would never verify.
-    // KILLS: the version taken from the typed names only (mutant R2-10).
+    // KILLS: the version taken from the typed names only.
     let confirmation = last_approval_posted(&app.fake);
     let bytes = confirmation["spec"]["approvalBytes"]
         .as_str()
@@ -676,8 +676,8 @@ fn creation_stopped_cr() -> Value {
 }
 
 /// **After a lost race the Restore view names every topic the run created
-/// and left** (the orchestrator's ruling of 2026-10-09: nothing is deleted
-/// under an original name, so the operator must be told what is there). The
+/// and left**: nothing is deleted under an original name, so the operator
+/// must be told what is there. The
 /// view carries the controller's two lists verbatim and the one instruction;
 /// the console fixture `console/restore-creation-stopped.json` IS this
 /// projection, decoded and rendered by `ui/tests/original-name.spec.js`, so
@@ -710,7 +710,7 @@ fn the_restore_view_names_the_topics_a_stopped_creation_step_left() {
         projected["targetTopicsAppeared"]["leftInstruction"],
         logweir_core::guard::LEFT_TOPIC_SENTENCE
     );
-    // Review 2, L6: `newTopics` is what the run created (what it left),
+    // `newTopics` is what the run created (what it left),
     // never the name someone else created.
     assert_eq!(projected["newTopics"], json!(["orders"]), "{projected}");
     // The run's operation names the closed state beside it.
@@ -735,7 +735,7 @@ fn the_restore_view_names_the_topics_a_stopped_creation_step_left() {
     );
 }
 
-/// **PROD-15.1 review 2, M2: the THIRD list and the counts, in the Restore
+/// **The THIRD list and the counts, in the Restore
 /// view.** A stop that left a name the run cannot account for carries
 /// `unconfirmed` with `unconfirmedSeen` and its own instruction, word for
 /// word the runner's; the console fixture
@@ -845,7 +845,7 @@ fn the_restore_view_shows_what_a_stop_cannot_account_for_and_how_many() {
     assert_eq!(short["targetTopicsAppeared"]["leftCount"], 2);
 }
 
-/// **PROD-15.1 review 2, L9: the approvals view reads an authorization
+/// **The approvals view reads an authorization
 /// document v2 the way every enforcing reader does.** A 2.0.0 document that
 /// carries `approvalSubject` is refused by the controller and the runner
 /// (the field is format 2.1.0), so the view shows `unknown`, never

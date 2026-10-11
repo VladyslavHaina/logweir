@@ -1,4 +1,4 @@
-//! PROD-08.1a: the product API carries a restore's coverage request in, and
+//! Complete coverage: the product API carries a restore's coverage request in, and
 //! says sampled or complete — with a complete verification's exact counts and
 //! `covered` — on the way out.
 //!
@@ -146,7 +146,7 @@ fn a_forged_pass_beside_covered_false_is_never_a_verified_success() {
 /// **A sampled run never claims complete.** A Restore that asks for nothing
 /// and whose scorecard predates format 1.4.0 reads `requested: sampled`, no
 /// `recorded` coverage (not recorded) and no complete block anywhere; one
-/// whose scorecard says `sampled` reads `recorded: sampled` and lists FX-23's
+/// whose scorecard says `sampled` reads `recorded: sampled` and lists its
 /// unsampled topics; and a status whose coverage says sampled but which
 /// carries a complete block (no reader writes one) never serves the block.
 ///
@@ -330,7 +330,7 @@ fn live_signed_scorecards_flow_through_the_controller_and_the_api() {
         );
         // The `Verified` condition the controller would write over THIS
         // status, from its own badge rule -- not the fixture's: a real
-        // `covered: false` run is `CompleteNotCovered` (review M2), a covered
+        // `covered: false` run is `CompleteNotCovered`, a covered
         // or sampled pass is `Verified`.
         let badge = weirkeeper::verification::restore_badge(&doc["status"]);
         let want = if covered == Some(false) {

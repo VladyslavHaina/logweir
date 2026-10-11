@@ -88,8 +88,8 @@ const VALUES = Object.freeze({
   mode: "scramSha512", username: "logweir-reader", secret: "orders-scram", tls: true,
 });
 
-/** PROD-01.3 security follow-up: a CONSOLE-mode create carries the password
- *  TYPED ONCE and names no Secret. A fixture value, and a credential nowhere. */
+/** A CONSOLE-mode create carries the password TYPED ONCE and names no
+ *  Secret. A fixture value, and a credential nowhere. */
 const TYPED_ONCE = "typed-once-ui-fixture";
 
 function consoleBody(values) {
@@ -99,7 +99,7 @@ function consoleBody(values) {
   );
 }
 
-// ======================================================= the mode is decided
+// THE MODE IS DECIDED.
 
 test("the_mode_is_chosen_once_at_boot_and_never_per_request", async () => {
   resetMode();
@@ -174,7 +174,7 @@ test("a_capability_the_session_withholds_is_refused_before_the_network", async (
   }
 });
 
-// ============================================== console mode reads and writes
+// CONSOLE MODE READS AND WRITES.
 
 test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_reads", async () => {
   await console_();
@@ -222,13 +222,11 @@ function factText(html, label) {
 }
 
 test("fx48_a_shared_console_connection_says_its_credential_key_is_not_published", async () => {
-  // THE SAME CLASS AS THE RESTORE DETAIL'S INTEGRITY TABLE (PoC batch 6, F-4),
-  // on a second page. `ConnectionAuthView` publishes the credential Secret's
-  // NAME and never its data key, and the projection says so on the object
-  // (`__contract.absent`, the row above). The detail read the key off the
-  // projected object, found none, and printed "- (absent means the key every
-  // earlier release projected)": a statement about the KafkaCluster object,
-  // which may well name a key, made from a document that cannot carry one.
+  // `ConnectionAuthView` publishes the credential Secret's NAME and never its
+  // data key, and the projection says so on the object (`__contract.absent`).
+  // The detail must not print "- (absent means the key every earlier release
+  // projected)", a statement about the KafkaCluster object made from a
+  // document that cannot carry a key.
   await console_();
   const wire = transport(() => ({ status: 200, body: fixture("console/connections-list.json") }));
   let first;
@@ -273,18 +271,12 @@ test("fx48_a_shared_console_connection_says_its_credential_key_is_not_published"
 });
 
 test("a_schedule_s_destination_and_its_dynamic_selection_are_projected_and_absence_is_kept", async () => {
-  // THE TWO FIELDS D1 W6 ADDED, AND THE ADAPTER THAT CARRIES THEM. The product
-  // API spells them `destinationRef` and `allUserTopics` on `ScheduleView`;
-  // the pages read `spec.destinationRef` and `spec.allUserTopics`, and
-  // `projectSchedule` is the only place that knows both names.
-  //
-  // WITHOUT THIS ROW EITHER MAPPING COULD BE DELETED AND EVERY SUITE STAYED
-  // GREEN (review R1). `ui/tests/d2.spec.js` asserts what the schedules page
-  // RENDERS from a `spec` handed to it directly, so it never exercises the
-  // step that puts the field there -- and a dropped mapping reads exactly like
-  // a schedule that names no destination, which is a legal and common state.
-  // That is the shape of every silent projection loss: the failure is
-  // indistinguishable from an honest absence.
+  // The product API spells them `destinationRef` and `allUserTopics` on
+  // `ScheduleView`; the pages read `spec.destinationRef` and
+  // `spec.allUserTopics`, and `projectSchedule` is the only place that knows
+  // both names. `d2.spec.js` renders from a `spec` handed to it directly, and a
+  // dropped mapping reads exactly like a schedule that names no destination --
+  // a legal and common state -- so this row is what holds the mapping.
   await console_();
   const wire = transport(() => ({ status: 200, body: fixture("console/schedules-list.json") }));
   try {
@@ -429,8 +421,8 @@ test("console_mode_creates_with_an_idempotency_key_that_is_a_function_of_the_obj
     assert.equal(wire.seen[0].init.headers["Content-Type"], "application/json");
     const sent = JSON.parse(wire.seen[0].init.body);
     assert.deepEqual(Object.keys(sent).sort(), ["auth", "bootstrapServers", "role"]);
-    // PROD-01.3 security follow-up: the password TYPED ONCE, and no Secret
-    // named -- the product API creates and binds the credential Secret.
+    // The password TYPED ONCE, and no Secret named: the product API creates and
+    // binds the credential Secret.
     assert.deepEqual(sent.auth, {
       mode: "scramSha512", tls: true, username: "logweir-reader",
       credential: { password: TYPED_ONCE },
@@ -493,7 +485,7 @@ test("an_idempotency_conflict_reads_as_a_conflict_and_keeps_what_was_typed", asy
   }
 });
 
-// =============================== the server disagrees about a field, in both modes
+// THE SERVER DISAGREES ABOUT A FIELD, in both modes.
 
 test("a_console_field_error_lands_beside_the_field_and_the_draft_is_kept", async () => {
   await console_();
@@ -552,7 +544,7 @@ test("the_client_s_own_checks_refuse_the_same_body_in_both_modes_without_sending
   }
 });
 
-// ============================================= navigation, plans and disposal
+// NAVIGATION, PLANS AND DISPOSAL.
 
 test("a_read_carries_the_route_signal_and_a_create_never_does", async () => {
   await console_();
@@ -682,12 +674,11 @@ test("saved_restore_destinations_round_trip_through_detail_and_list_projection",
 });
 
 test("the_declared_topic_mapping_reaches_the_product_api_and_never_the_custom_resource", async () => {
-  // THE DELIVERY SEAM, WHICH IS THE ONLY PATH THAT CARRIES THE DECLARATION AND
-  // HAD NO TEST (found by the independent review). `restoreBody` builds the
-  // rows and the row in `restore-subset.spec.js` pins THAT; what happens
-  // between it and the wire is here, in both modes, because the two modes must
-  // send DIFFERENT shapes: the product API's create request has a
-  // `topicMapping` field and the custom resource has nowhere to put one.
+  // THE DELIVERY SEAM, the only path that carries the declaration. `restoreBody`
+  // builds the rows (pinned in `restore-subset.spec.js`); what happens between
+  // it and the wire is here, in both modes, because they send DIFFERENT shapes:
+  // the product API's create request has a `topicMapping` field and the custom
+  // resource has nowhere to put one.
   const fields = fixture("plan-fields.json");
   const reviewed = await preparePlanDocument(fields);
   const object = () => ({
@@ -782,7 +773,7 @@ test("plan_bytes_this_page_never_prepared_are_refused_before_anything_is_sent", 
   }
 });
 
-// ================================================================ the storage
+// THE STORAGE.
 
 test("no_token_from_the_session_is_ever_written_to_browser_storage", async () => {
   const document = SESSION();
@@ -835,15 +826,13 @@ test("no_token_from_the_session_is_ever_written_to_browser_storage", async () =>
   }
 });
 
-// =========================== the second read of a detail, and the whole list
+// THE SECOND READ OF A DETAIL, AND THE WHOLE LIST.
 
 test("a_drifted_operation_dto_is_a_rendered_contract_failure_and_not_an_empty_evidence_block", async () => {
-  // THE HOLE THE REVIEW FOUND. `enrich` swallowed every failure of the
-  // operation route, contract failures included, so a server that renamed
-  // `verification.state` produced a backup detail with NO evidence block and
-  // no error -- indistinguishable from "the controller recorded nothing",
-  // which is the exact cell `ui/contract.js`'s header says this client exists
-  // to stop and `ui/README.md` promises is never absorbed.
+  // A failure of the operation route, a contract failure included, must not be
+  // swallowed: a server that renamed `verification.state` would otherwise
+  // produce a backup detail with NO evidence block and no error,
+  // indistinguishable from "the controller recorded nothing".
   await console_();
   const drifted = fixture("console/operation-backup.json");
   drifted.item.verification.verdict = drifted.item.verification.state;
@@ -997,12 +986,11 @@ test("every_request_body_this_client_builds_satisfies_the_published_request_shap
 
 
 test("the_session_s_roles_and_binding_revision_are_carried_and_never_guessed", async () => {
-  // PLAT-17.2 added both to `SessionResponse`, and the drift arm in
-  // `contract.spec.js` is what found it. The page must CARRY them, not derive
+  // `SessionResponse` carries both, and the page must CARRY them, not derive
   // them: inferring "this actor is an operator" from which capability flags
-  // happen to be true would be inventing an authorisation decision the server
-  // already made -- and would invent a different one the moment a domain's
-  // route lands and flips a flag from `implemented && allowed` to true.
+  // happen to be true would invent an authorisation decision the server
+  // already made -- and a different one the moment a route lands and flips a
+  // flag.
   const localAdmin = SESSION();
   await console_(localAdmin);
   assert.deepEqual(
@@ -1092,9 +1080,9 @@ test("a_connectivity_checks_key_is_per_deliberate_test_and_never_per_subject", a
 });
 
 test("a_discoverys_key_carries_the_pages_intent_token_and_a_retry_keeps_it", async () => {
-  // P14's CLASS (poc-fixes-4): the discovery key was the parameters alone, so a
-  // stale inventory was replayed for as long as the controller kept it. The
-  // page's intent token (`askCheck`) now rides in the key.
+  // A discovery key of the parameters alone would replay a stale inventory for
+  // as long as the controller keeps it, so the page's intent token
+  // (`askCheck`) rides in the key.
   await console_();
   const answer = fixture("console/discovery-running.json");
   const wire = transport((u, init) =>

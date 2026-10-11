@@ -22,8 +22,7 @@
 //!
 //! `storage.addressing` and `transport.security` are independent fields, and
 //! the only rule that couples anything is the endpoint SCHEME. This module
-//! never derives one from the other in either direction: that derivation is
-//! defect G5/UI-HTTPDOWNGRADE, and it does not exist here.
+//! never derives one from the other in either direction.
 
 use std::collections::BTreeMap;
 
@@ -142,10 +141,6 @@ pub const MAX_CREDENTIAL_BYTES: usize = 1024;
 
 /// The most schedules or backups `usage` reports.
 pub const MAX_USAGE_ENTRIES: usize = 100;
-
-// ======================================================================
-// Projection
-// ======================================================================
 
 fn addressing_dto(value: core_destination::Addressing) -> AddressingDto {
     match value {
@@ -398,10 +393,6 @@ pub fn summary(object: &BackupDestination) -> DestinationSummary {
         default: is_default(object),
     }
 }
-
-// ======================================================================
-// Validation
-// ======================================================================
 
 /// Strip the `spec.` the pure layer's field paths carry: a 422 names the field
 /// the CLIENT sent, not the field the CRD stores it in.
@@ -748,8 +739,7 @@ pub(crate) fn validate_location(
             check_data_key("transport.caBundle.key", key, errors);
         }
     }
-    // G4/ENGINE-PATHSTYLE: a setting the pinned engine cannot honour is
-    // refused, never advertised.
+    // A setting the pinned engine cannot honour is refused, never advertised.
     if let Err(message) = core_destination::engine_compatible(&location) {
         errors.push(FieldError::new(
             "storage.addressing",
@@ -759,19 +749,15 @@ pub(crate) fn validate_location(
     }
 }
 
-// ======================================================================
-// Building the stored object
-// ======================================================================
-
-/// How a `secret.new` value's Secret is named — FX-20.
+/// How a `secret.new` value's Secret is named.
 ///
 /// A CREATE names it `lwd-<destination>-<role>` (D2 §8.1), deterministic so a
 /// replay of the same request adopts the Secret its earlier attempt wrote. A
-/// ROTATION (`:update-access`) cannot reuse that name — it is taken by the
+/// ROTATION (`:update-access`) cannot reuse that name -- it is taken by the
 /// value being rotated, and this service may neither read nor overwrite a
-/// Secret — and since FX-20 it may not name an existing Secret either, so it
-/// writes the new value under `lwd-<destination>-<role>-<suffix>`, a name
-/// derived from the request id that no earlier Secret holds.
+/// Secret -- and may not name an existing Secret either, so it writes the new
+/// value under `lwd-<destination>-<role>-<suffix>`, a name derived from the
+/// request id that no earlier Secret holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialNaming<'a> {
     /// `lwd-<destination>-<role>`.
@@ -944,8 +930,8 @@ pub fn build_access_named(
     }
 }
 
-/// FX-20: refuse every `secret.existing` that names a Secret `allowed` does
-/// not contain.
+/// Refuse every `secret.existing` that names a Secret `allowed` does not
+/// contain.
 ///
 /// A destination that could name ANY existing Secret could make Logweir sign
 /// requests with a credential its author cannot read and send them — the
@@ -1008,7 +994,7 @@ fn referenced_secrets(access: &AccessBlock) -> std::collections::BTreeSet<String
     .collect()
 }
 
-/// FX-20: the binding a Secret this service writes for `destination` carries
+/// The binding a Secret this service writes for `destination` carries
 /// under `logweir-binding` — the destination's UID and its archive route, the
 /// value its `status.credentialBinding` publishes and every runner expects.
 ///
@@ -1115,10 +1101,6 @@ pub fn build(
     }
 }
 
-// ======================================================================
-// Write-only credential creation
-// ======================================================================
-
 /// The Secret one `secret.new` entry becomes.
 ///
 /// OWNED BY THE DESTINATION, so deleting the destination collects it; the API
@@ -1135,9 +1117,9 @@ fn build_credential_secret(
     let name = destination.meta().name.clone().unwrap_or_default();
     let uid = destination.meta().uid.clone().unwrap_or_default();
     let mut data = BTreeMap::from([
-        // FX-20: THE BINDING, BESIDE THE VALUE IT GUARDS. Public — a UID and
-        // a digest of the location — and what every runner compares before it
-        // signs a request with these keys.
+        // THE BINDING, BESIDE THE VALUE IT GUARDS. Public -- a UID and a digest of
+        // the location -- and what every runner compares before it signs a request
+        // with these keys.
         (
             logweir_core::credential_binding::CREDENTIAL_BINDING_KEY.to_string(),
             BASE64.encode(binding.as_bytes()),
@@ -1225,13 +1207,11 @@ fn planned_credentials(
 
 /// **CHECK EVERY NAME BEFORE WRITING ANYTHING.**
 ///
-/// Two defects share one cause, and this is the fix for both. Writing the
-/// destination first and the credentials second meant a refusal had already
-/// created the destination — so the retry the documentation prescribes came
-/// back as a replay and ADOPTED the foreign Secret the first attempt had
-/// refused. And writing the credentials role by role meant an earlier role's
-/// value was already live when a later role refused, under a message that said
-/// nothing had changed.
+/// Writing the destination before the credentials would let a refusal leave
+/// the destination created, so the prescribed retry would come back as a
+/// replay and ADOPT the foreign Secret the first attempt refused; writing the
+/// credentials role by role would leave an earlier role's value live when a
+/// later role refuses, under a message saying nothing changed.
 ///
 /// Establishing absence needs no read verb: a `dryRun: All` create is still
 /// the `create` verb (see
@@ -1339,8 +1319,8 @@ enum ExistingCredential {
 /// What a credential write actually did.
 ///
 /// TWO LISTS, NOT ONE. A name that was already there is not a name this call
-/// wrote, and the previous shape put both into one `created` vector — which is
-/// how a rotation that rotated nothing came to answer 200.
+/// wrote; one `created` vector holding both would let a rotation that
+/// rotated nothing answer 200.
 #[derive(Debug, Default)]
 struct CredentialOutcome {
     /// Secrets this call created.
@@ -1368,8 +1348,8 @@ async fn create_new_credentials(
 ) -> Result<CredentialOutcome, ApiError> {
     let mut outcome = CredentialOutcome::default();
     let destination_name = destination.meta().name.clone().unwrap_or_default();
-    // FX-20: computed ONCE, before the first write, so a destination with no
-    // UID writes nothing at all.
+    // Computed ONCE, before the first write, so a destination with no UID writes
+    // nothing at all.
     let binding = if planned_credentials(access).is_empty() {
         String::new()
     } else {
@@ -1482,10 +1462,6 @@ fn note_credentials(actor: &Actor, outcome: &CredentialOutcome) {
             .note("credentialSecretsReplayed", &outcome.replayed.join(","));
     }
 }
-
-// ======================================================================
-// Routes
-// ======================================================================
 
 /// `GET .../destinations`.
 pub async fn list(
@@ -1672,9 +1648,9 @@ pub async fn create(
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateDestinationRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_create(&request)?;
-    // FX-20: a NEW destination names no existing Secret. None can carry the
-    // binding of an object that does not exist yet, so every one would be a
-    // Secret written for something else.
+    // A NEW destination names no existing Secret. None can carry the binding of
+    // an object that does not exist yet, so every one would be a Secret written
+    // for something else.
     let mut errors = Vec::new();
     refuse_existing_secrets(
         &request.access,
@@ -1702,13 +1678,12 @@ pub async fn create(
     if request.default == Some(true) {
         refuse_second_default(&state, &ns, &request.name).await?;
     }
-    // THE REPLAY QUESTION IS ASKED FIRST, AND ONLY OF THIS SERVICE'S OWN
-    // RECORD. `created.replayed` cannot answer it here: it says a destination
-    // already existed under this scope, which — with the destination written
-    // before the credentials — is exactly what the FIRST attempt leaves behind
-    // when it refuses a foreign Secret. Deciding from it meant the retry this
-    // API's own documentation prescribes adopted the value that attempt had
-    // just refused.
+    // THE REPLAY QUESTION IS ASKED FIRST, AND ONLY OF THIS SERVICE'S OWN RECORD.
+    // `created.replayed` cannot answer it: it says a destination already existed
+    // under this scope, which -- with the destination written before the
+    // credentials -- is exactly what a FIRST attempt leaves behind when it
+    // refuses a foreign Secret, so the prescribed retry would adopt the value
+    // that attempt refused.
     let replaying = is_own_replay::<BackupDestination, _>(
         &state,
         &actor,
@@ -1770,12 +1745,10 @@ pub async fn create(
 
 /// At most one destination per namespace is the default.
 ///
-/// ONE BOUNDED SELECTOR READ. The previous shape listed a single 200-object
-/// page with no continuation and searched it for an annotation, so a namespace
-/// with more than 200 destinations could accept a second default — precisely
-/// the state the refusal below calls impossible. Selecting on
-/// [`DEFAULT_LABEL`] returns only the holders, of which there is at most one
-/// in a namespace this API has managed alone.
+/// ONE BOUNDED SELECTOR READ. Searching one 200-object page for the annotation
+/// would let a namespace with more destinations accept a second default.
+/// Selecting on [`DEFAULT_LABEL`] returns only the holders, of which there is
+/// at most one in a namespace this API has managed alone.
 ///
 /// THE RESIDUAL, STATED: a default set by hand with only the annotation D2
 /// §3.1 names carries no label, so this check does not see it. It still reads
@@ -1873,9 +1846,9 @@ pub async fn update_access(
         authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
     }
     let object = get_object::<BackupDestination>(&state, &actor, &ns, &name).await?;
-    // FX-20: a rotation keeps or re-arranges the Secrets this destination
-    // already names, and enters every other credential as a value; it never
-    // adopts a Secret written for something else.
+    // A rotation keeps or re-arranges the Secrets this destination already
+    // names, and enters every other credential as a value; it never adopts a
+    // Secret written for something else.
     let mut errors = Vec::new();
     refuse_existing_secrets(
         &request.access,
@@ -1919,9 +1892,9 @@ pub async fn update_access(
     // `:update-access` carries no `Idempotency-Key`, so there is no record
     // that could make an existing name this request's own: it is always a
     // refusal.
-    // A ROTATION WRITES UNDER A NEW NAME (FX-20): the deterministic
-    // `lwd-<destination>-<role>` is held by the value being rotated, which
-    // this service can neither read nor overwrite.
+    // A ROTATION WRITES UNDER A NEW NAME: the deterministic
+    // `lwd-<destination>-<role>` is held by the value being rotated, which this
+    // service can neither read nor overwrite.
     let suffix = rotation_suffix(&request_id);
     let naming = CredentialNaming::Rotation(&suffix);
     refuse_taken_credential_names(&state, &ns, &name, &request.access, naming).await?;

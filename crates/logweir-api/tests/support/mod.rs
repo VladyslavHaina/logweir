@@ -375,8 +375,8 @@ impl FakeKube {
     }
 }
 
-/// The annotations every durable object the API creates must carry
-/// (PLAT-17.2). The fake records a create without them as UNEXPECTED, so every
+/// The annotations every durable object the API creates must carry. The fake
+/// records a create without them as UNEXPECTED, so every
 /// test in this crate that creates an object and calls
 /// [`FakeKube::assert_strict`] is also an attribution guard.
 pub const ATTRIBUTION_ANNOTATIONS: [&str; 5] = [
@@ -1138,10 +1138,10 @@ pub struct Options {
     pub allowed_hosts: Vec<String>,
     pub shared: Option<Arc<SharedMode>>,
     pub kubernetes_principal: String,
-    /// PLAT-19.2: the approval policies and the console key. Default: none —
+    /// The approval policies and the console key. Default: none --
     /// every namespace on `legacy-governed-v1`.
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
-    /// P10: the manual-run create ceilings. Default: the documented ten and
+    /// The manual-run create ceilings. Default: the documented ten and
     /// five per actor, per namespace, per minute.
     pub run_rate_limits: logweir_api::routes::RunRateLimits,
 }
@@ -1365,8 +1365,6 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
     })
 }
 
-// ---------------------------------------------------------------- fixtures
-
 pub fn connection_body() -> Value {
     json!({
         "role": "source",
@@ -1374,9 +1372,9 @@ pub fn connection_body() -> Value {
         "auth": {
             "mode": "scramSha512",
             "username": "scram-user",
-            // PROD-01.3 security follow-up: the password is ENTERED once and
-            // becomes a Secret the API creates; an existing Secret is never
-            // named. A fixture value, and not a credential anywhere.
+            // The password is ENTERED once and becomes a Secret the API creates; an
+            // existing Secret is never named. A fixture value, and not a credential
+            // anywhere.
             "credential": {"password": "fixture-not-a-secret"},
             "tls": false
         }
@@ -1419,8 +1417,6 @@ pub fn fixture(name: &str) -> Value {
     .expect("fixtures are JSON")
 }
 
-// ------------------------------------------------- D2 W12 fixtures and seeds
-
 /// The local administrator's stable actor id, which is what the ownership
 /// annotation on a check created through `TestApp` carries.
 pub const LOCAL_ADMIN_ACTOR: &str = "urn:logweir:local-admin#admin";
@@ -1437,10 +1433,10 @@ pub const ACCESS_KEY_ID: &str = "AKIAD2W12NEVERECHOED";
 /// A `CreateDestinationRequest` whose grants are WORKLOAD IDENTITIES — no
 /// credential Secret at all.
 ///
-/// FX-20: it named EXISTING Secrets (`logweir-s3`, `archive-reader`) until a
-/// create stopped accepting `secret.existing` (no existing Secret can be bound
-/// to a destination that does not exist yet). The rows that are about a
-/// credential use [`destination_body_with_new_credential`] or build their own.
+/// A create does not accept `secret.existing` (no existing Secret can be
+/// bound to a destination that does not exist yet). The rows that are about
+/// a credential use [`destination_body_with_new_credential`] or build their
+/// own.
 pub fn destination_body(name: &str) -> Value {
     json!({
         "name": name,
@@ -1717,8 +1713,6 @@ pub fn seed_running_preflight(fake: &FakeKube, namespace: &str, name: &str, acto
     )
 }
 
-// ------------------------------------------------------- shared-mode harness
-
 use logweir_api::auth::keys::{CookieKeys, VersionedKey};
 use logweir_api::auth::oidc::{OidcSettings, Provider, Secret, TokenAuthMethod};
 use logweir_api::auth::ratelimit::{RateLimiter, StreamSlots};
@@ -1747,9 +1741,9 @@ pub struct SharedOptions {
     pub login_limiter: Option<RateLimiter>,
     /// `requireTrustedProxy`.
     pub require_trusted_proxy: bool,
-    /// PLAT-19.2: the approval policies and the console key.
+    /// The approval policies and the console key.
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
-    /// FX-13a: the bound on the redeemed-state record, when a test needs to
+    /// The bound on the redeemed-state record, when a test needs to
     /// reach it.
     pub used_state_capacity: Option<usize>,
 }
@@ -1836,7 +1830,7 @@ impl SharedApp {
 
     /// A shared-mode app whose provider speaks `http` to `issuer` — the
     /// production `HyperHttpClient` over a real socket, for the rows that
-    /// need the wire (FX-28). `idp` is the document source behind that wire,
+    /// need the wire. `idp` is the document source behind that wire,
     /// kept for its counters and grants.
     pub fn over_http(
         fake: FakeKube,
@@ -1941,7 +1935,7 @@ impl SharedApp {
     }
 
     /// A session for `subject` whose DISPLAY claim is `display_name` — so a
-    /// row can give two different subjects the same display name (P10: the
+    /// row can give two different subjects the same display name (the
     /// run limiter must key on the stable id, never on the display claim).
     pub fn session_cookie_named(
         &self,

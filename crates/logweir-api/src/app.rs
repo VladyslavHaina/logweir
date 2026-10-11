@@ -55,7 +55,7 @@ pub struct SharedMode {
     pub keys: Arc<CookieKeys>,
     /// The per-client limit on the unauthenticated login surface: the
     /// forwarded client behind a trusted proxy, else the peer
-    /// (`crate::http::login_rate_key`, FX-13).
+    /// (`crate::http::login_rate_key`).
     pub login_limiter: RateLimiter,
     /// Per-actor, per-namespace concurrent stream slots, taken by the
     /// operation event stream; see `crate::auth::ratelimit`.
@@ -64,15 +64,15 @@ pub struct SharedMode {
     pub session_max_age_seconds: i64,
     /// The proxy peers whose forwarded headers may be RECORDED, whose
     /// `X-Forwarded-For` chooses the sign-in rate-limit bucket
-    /// (`crate::http::login_rate_key`, FX-13), and who may satisfy the
+    /// (`crate::http::login_rate_key`), and who may satisfy the
     /// entry-point gate: `trustedProxyCidrs`, and the serving endpoints of
-    /// `trustedProxyService` (chart gap G6). Never an identity input.
+    /// `trustedProxyService`. Never an identity input.
     pub trusted_proxies: Arc<crate::trusted_proxy::TrustedProxies>,
     /// Whether the entry point refuses any request that did not arrive
     /// through one of those proxies over HTTPS
     /// (`crate::http::boundary_guard`, `requireTrustedProxy`).
     pub require_trusted_proxy: bool,
-    /// FX-13a: the sign-in states THIS process has redeemed, in memory and
+    /// The sign-in states THIS process has redeemed, in memory and
     /// bounded (`crate::auth::login::UsedStates`). Per replica on purpose: the
     /// provider's single-use code is the backstop across replicas.
     pub used_states: crate::auth::login::UsedStates,
@@ -103,11 +103,11 @@ pub struct Settings {
     /// The Kubernetes identity this process writes as, recorded on every
     /// created object and in every audit line (`kubernetes.principal`).
     pub kubernetes_principal: String,
-    /// PLAT-19.2: the installation's approval policies and the console's
+    /// The installation's approval policies and the console's
     /// confirmation key. `Default` is every namespace on `legacy-governed-v1`
     /// and no key.
     pub approval: Arc<crate::approval::ApprovalSettings>,
-    /// P10: the manual-run create ceilings (`rateLimits` in the configuration
+    /// The manual-run create ceilings (`rateLimits` in the configuration
     /// file). `Default` is the documented ten backups and five restores per
     /// actor, per namespace, per minute.
     pub run_rate_limits: crate::routes::RunRateLimits,
@@ -165,13 +165,13 @@ impl AppState {
         &self.inner.settings.cursor_key
     }
 
-    /// P10: the manual-run create ceilings this process was configured with.
+    /// The manual-run create ceilings this process was configured with.
     #[must_use]
     pub fn run_rate_limits(&self) -> crate::routes::RunRateLimits {
         self.inner.settings.run_rate_limits
     }
 
-    /// P10: this state's manual-run create windows.
+    /// This state's manual-run create windows.
     #[must_use]
     pub fn run_create_windows(&self) -> &crate::routes::RunCreateWindows {
         &self.inner.run_windows
@@ -225,7 +225,7 @@ impl AppState {
         &self.inner.settings.kubernetes_principal
     }
 
-    /// PLAT-19.2: the approval policies and the confirmation key.
+    /// The approval policies and the confirmation key.
     #[must_use]
     pub fn approval(&self) -> &crate::approval::ApprovalSettings {
         &self.inner.settings.approval
@@ -356,7 +356,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{ns}/restores/{name}/approval",
             axum::routing::post(restores::submit_approval),
         )
-        // PROD-16.2: a two-person request as the approver is shown it (a
+        // A two-person request as the approver is shown it (a
         // read), and the second person's click (POST only: no GET approves).
         .route(
             "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
@@ -392,11 +392,9 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
             get(operations::events),
         )
-        // ---------------------------------------------------------------
-        // D3 §10's read families. Every one is a bounded GET with the same
+        // THE D3 READ FAMILIES (D3 §10). Every one is a bounded GET with the same
         // cursor, and the only write among them is the catalog create that
-        // PLAT-15.2's "connect an existing archive" needs.
-        // ---------------------------------------------------------------
+        // "connect an existing archive" needs.
         .route(
             "/api/v1/namespaces/{ns}/protection-policies",
             get(protection::list),
@@ -470,16 +468,15 @@ pub fn router(state: AppState) -> Router {
         .merge(api)
         .merge(auth)
         .fallback(fallback)
-        // THE ACCESS LAYER, ONCE, OVER THE WHOLE ROUTER — AFTER EVERY ROUTE.
-        // `axum`'s layers wrap only the routes that exist when they are
-        // applied, so a layer applied per group, before routes that a later
-        // stage appends, leaves those routes unenforced (review M1). Applied
-        // here, as the last thing before the transport layers, every route
-        // this function can build is inside it; `crate::access::ROUTES`
-        // names each one (`Public` included) or it fails closed, and a request
-        // no route matched reaches `fallback` (404). `tests/route_access.rs`
-        // holds this position in the source and checks, per declared route,
-        // that the layer recorded its decision.
+        // THE ACCESS LAYER, ONCE, OVER THE WHOLE ROUTER -- AFTER EVERY ROUTE.
+        // `axum`'s layers wrap only the routes that exist when they are applied, so
+        // a layer applied per group, before routes a later stage appends, would
+        // leave those routes unenforced. Applied here, as the last thing before the
+        // transport layers, every route this function can build is inside it;
+        // `crate::access::ROUTES` names each one (`Public` included) or it fails
+        // closed, and a request no route matched reaches `fallback` (404).
+        // `tests/route_access.rs` holds this position in the source and checks, per
+        // declared route, that the layer recorded its decision.
         //
         // THE ORIGIN GUARD IS OUTSIDE IT, so a cross-origin write is refused
         // as one before anyone asks who sent it; it reads only the `/api/`

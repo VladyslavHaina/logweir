@@ -519,17 +519,12 @@ async fn logout_clears_the_session_and_needs_the_synchronizer_token() {
     assert!(!cleared.to_ascii_lowercase().contains("domain="));
 }
 
-/// **There is no event stream, authenticated or not — and the limiter the
-/// stream will need already exists and holds.**
+/// **D0's "unauthenticated SSE is refused".**
 ///
-/// **D0's "unauthenticated SSE is refused", now that the stream exists.**
-///
-/// The route landed with D3 W11, so the property is no longer "there is no
-/// route": it is that an anonymous caller never receives a `text/event-stream`
-/// body, that the other spellings a client might guess are still 404, and that
-/// no query parameter — so no token in a URL — is accepted. The slot seam is
-/// exercised here too, because it is what bounds the route now that there is
-/// one.
+/// An anonymous caller never receives a `text/event-stream` body, the other
+/// spellings a client might guess are 404, and no query parameter -- so no
+/// token in a URL -- is accepted. The slot seam that bounds the route is
+/// exercised here too.
 #[tokio::test]
 async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling() {
     let app = app();

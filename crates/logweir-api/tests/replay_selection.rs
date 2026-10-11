@@ -1,4 +1,4 @@
-//! PROD-11.1b (review M1): the product API names a narrowed restore's
+//! The product API names a narrowed restore's
 //! selection on the list row and on the detail, and never serves a subset
 //! restore as a restore of everything.
 //!

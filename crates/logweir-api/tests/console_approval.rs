@@ -1,12 +1,11 @@
-//! PROD-16.2 at the product API — **two-person approval in the console**.
+//! **Two-person approval in the console**, at the product API.
 //!
 //! A namespace bound to a policy whose `approverSignature` is `Console`
 //! (`two-person`): an operator requests, a SECOND person signs in and clicks
-//! Approve, and the console signs the approval. These rows are the console's
-//! half of the threat table in the PROD-16.2 decision record: self-approval
-//! in every spelling, a planted or replayed confirmation, replays and races,
-//! role confusion, cross-site requests, and what the console will and will
-//! not put its signature on.
+//! Approve, and the console signs the approval. These rows cover
+//! self-approval in every spelling, a planted or replayed confirmation,
+//! replays and races, role confusion, cross-site requests, and what the
+//! console will and will not put its signature on.
 //!
 //! They sign for real. The console key is an in-memory Ed25519 key; every
 //! stored document is verified here with the verifier the controller and the
@@ -335,8 +334,6 @@ fn signed_by_console(console: &Console, document: &RestoreAuthorization) -> Stri
     serde_json::to_string(&console.key().sign(&document.to_bytes()).expect("sig")).expect("json")
 }
 
-// ------------------------------------------------------------ log capture
-
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
 
@@ -409,10 +406,6 @@ fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let guard = tracing::subscriber::set_default(subscriber);
     (buffer, guard)
 }
-
-// ---------------------------------------------------------------------------
-// The click
-// ---------------------------------------------------------------------------
 
 /// **Two people, one click, no key.** alice requests; bob signs in, is shown
 /// the request from its verified bytes, and clicks Approve. The stored
@@ -649,10 +642,6 @@ fn trust_of(console: &Console) -> weirkeeper::trust::ResolvedTrust {
         status: None,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Self-approval
-// ---------------------------------------------------------------------------
 
 /// What a refused click leaves: the status and code asked for, nothing
 /// stored under the Restore's approvalRef, and no POST to `approvals`.
@@ -901,10 +890,6 @@ async fn a_request_signed_for_the_local_admin_or_a_service_account_is_never_appr
         assert!(clicked.text().contains(needle), "{tag}: {}", clicked.text());
     }
 }
-
-// ---------------------------------------------------------------------------
-// A planted confirmation, and a signature copied from another request
-// ---------------------------------------------------------------------------
 
 /// **A confirmation planted with `kubectl` in another user's name is never
 /// approved, and none of it is shown.** alice wants to approve her own
@@ -1314,10 +1299,6 @@ async fn a_stored_approval_is_never_approved_again() {
     assert_refused(&app, &second, &clicked, 409, "policy_mismatch");
 }
 
-// ---------------------------------------------------------------------------
-// Replay and races
-// ---------------------------------------------------------------------------
-
 /// **The same approver's second click is a replay; a second approver is a
 /// conflict.** Create-only: the stored approval is bob's, at the instant of
 /// his first click, whatever comes after.
@@ -1459,10 +1440,6 @@ async fn a_request_made_under_another_policy_is_not_approved() {
     assert_eq!(click(&same, &bob, &r.restore, &sha).await.status, 201);
 }
 
-// ---------------------------------------------------------------------------
-// Roles
-// ---------------------------------------------------------------------------
-
 /// **An Administrator who is not an Approver cannot approve**, and is told
 /// so; a viewer and an operator cannot either. Bound as an Approver as well,
 /// the administrator can (and is still held to "not the requester").
@@ -1589,10 +1566,6 @@ async fn the_binding_table_is_read_per_click_and_the_sessions_groups_are_the_sig
     .await;
     assert_eq!(clicked.status, 201, "{}", clicked.text());
 }
-
-// ---------------------------------------------------------------------------
-// Cross-site
-// ---------------------------------------------------------------------------
 
 /// One request with exactly the headers a row names, so a row can leave out
 /// or falsify any of the three things the transport checks.
@@ -1752,14 +1725,10 @@ async fn a_cross_site_request_or_a_get_approves_nothing() {
     assert_eq!(ok.status, 201, "{}", ok.text());
 }
 
-// ---------------------------------------------------------------------------
-// Modes
-// ---------------------------------------------------------------------------
-
 /// **The in-cluster administrator console serves no part of a two-person
-/// approval** (PROD-16.1 review L3, owed to this row): it makes no request
-/// there, shows that nobody can approve through it, and its click is refused
-/// — its one identity cannot be two people.
+/// approval**: it makes no request there, shows that nobody can approve
+/// through it, and its click is refused -- its one identity cannot be two
+/// people.
 #[tokio::test]
 async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_restore() {
     let (_log, _guard) = capture();
@@ -1931,9 +1900,9 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     assert_eq!(policy["ticketRequired"], true);
 }
 
-/// **integrate-10 (PROD-16.2 review S-1's class): PROD-01.1a's override is
-/// shown to the second person**, from the plan the request hashes, because
-/// it changes what the run writes. Control: the same plan without it carries
+/// **The transaction-marker override is shown to the second person**, from
+/// the plan the request hashes, because it changes what the run writes.
+/// Control: the same plan without it carries
 /// no `allowTransactionMarkers`.
 /// KILLS: the field dropped from the approver's view.
 #[tokio::test]
@@ -1969,10 +1938,6 @@ async fn a_plan_allowing_transaction_markers_is_shown_to_the_approver() {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// The combination with PROD-15.1
-// ---------------------------------------------------------------------------
 
 /// **An original-name restore approved by a second person.** The request
 /// carries the `originalName` subject (2.1.0) and NO typed names — typed
@@ -2040,8 +2005,8 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     );
     assert_eq!(item["scope"]["topicsCount"], 2);
     assert_eq!(item["scope"]["target"]["topicPrefix"], "");
-    // Review S-1: the requester's owner statement, as the plan signs it
-    // (the golden states `owners: []`, the wizard's "no declarative owner").
+    // The requester's owner statement, as the plan signs it (the golden
+    // states `owners: []`, the wizard's "no declarative owner").
     assert_eq!(
         item["scope"]["target"]["ownerStatement"],
         json!({"owners": [], "ownerPath": false})
@@ -2079,10 +2044,6 @@ async fn the_request_names_the_two_person_policys_own_digest() {
     personal.approver_signature = ApproverSignature::PersonalKey;
     assert_ne!(request.policy.digest, personal.digest());
 }
-
-// ---------------------------------------------------------------------------
-// The coordinator's addition 5: text somebody else chose
-// ---------------------------------------------------------------------------
 
 /// **A principal reaches the audit record unambiguously, and a refusal
 /// sentence only bounded and cleaned.** An issuer and a subject come from an
@@ -2238,10 +2199,6 @@ async fn a_principal_reaches_the_audit_record_unambiguously_and_a_refusal_only_c
     );
 }
 
-// ---------------------------------------------------------------------------
-// The coordinator's addition 4: the console decides from the table
-// ---------------------------------------------------------------------------
-
 /// **The console decides from `ApprovalPolicy::route`, and refuses the pair
 /// that is no row.** Every route of this service that acts on a policy asks
 /// `logweir_api::approval::route_of`, which is the core's table and nothing
@@ -2374,10 +2331,6 @@ fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
     }
     std::fs::remove_dir_all(&dir).expect("removed");
 }
-
-// ---------------------------------------------------------------------------
-// The coordinator's addition 6: what is approved is what was shown
-// ---------------------------------------------------------------------------
 
 /// A plan of the golden's shape over `topics` (the wizard's own grammar),
 /// as a request body for the two-person namespace.
@@ -2706,7 +2659,7 @@ async fn the_click_refuses_a_request_whose_scope_is_incomplete_whatever_the_view
     assert_eq!(clicked.status, 201, "{}", clicked.text());
 }
 
-/// **Review S-2: a two-person request is made only with a ticket its scope
+/// **A two-person request is made only with a ticket its scope
 /// can show.** A ticket outside printable ASCII (an en dash, an accented
 /// letter, a right-to-left override) is refused at the create, by name,
 /// with nothing created and the ticket not echoed: otherwise the request

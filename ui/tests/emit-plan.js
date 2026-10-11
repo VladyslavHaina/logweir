@@ -30,7 +30,7 @@ import { renderPlanBytes } from "../plan.js";
 
 // ONE OPTIONAL ARGUMENT: the fields fixture's file name under `fixtures/`.
 // Absent, it is `plan-fields.json` -- the Backup-bound plan, with no recovery
-// point binding. `plan-point-fields.json` is PLAT-15.2's catalog-bound plan,
+// point binding. `plan-point-fields.json` is the catalog-bound plan,
 // whose golden `plan-point.golden.yaml` carries `source.point`; the gate diffs
 // both, and `ui_lint.rs` deserialises both. Only a bare file name is accepted,
 // so this tool cannot be pointed outside the fixture directory.

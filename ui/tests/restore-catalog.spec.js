@@ -1,16 +1,9 @@
-// restore-catalog.spec.js -- PLAT-15.2's console arm: restoring a
-// catalog-verified point with no Backup object behind it, and
-// CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW (a run the controller wrote no window
-// for, offered from its catalog row only when its own verdict is absent or
-// NotAttempted).
+// restore-catalog.spec.js -- restoring a catalog-verified point with no Backup
+// object behind it, and a run the controller wrote no window for, offered
+// from its catalog row only when its own verdict is absent or NotAttempted.
 //
 // EVERY ROW CARRIES ITS NEGATIVE CONTROL: the same input with the one fact the
-// behaviour depends on changed, which must flip the answer. A row whose control
-// stays green proves nothing, so the controls are the second half of each row
-// and never a separate, optional one.
-//
-// Pure functions and fake readers, as everything in this directory is: no DOM,
-// no network, no clock.
+// behaviour depends on changed, which must flip the answer.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -201,7 +194,7 @@ async function catalogState(entry, extra) {
     { catalog: "archive", point: POINT }, choice.destination, undefined, choice);
 }
 
-// --------------------------------------------------------- 1. the plan golden
+// 1. THE PLAN GOLDEN.
 
 test("the_catalog_bound_plan_golden_is_what_the_emitter_renders", () => {
   // ARM 2 of the point golden; arm 1 is ui_lint.rs, which deserialises the
@@ -235,7 +228,7 @@ test("a_malformed_binding_is_refused_before_an_approver_is_asked_to_sign_it", ()
   assert.match(renderPlanBytes(fields), /receipt_sha256: "sha256:/);
 });
 
-// ---------------------------------------------------- 2. the offer rule itself
+// 2. THE OFFER RULE ITSELF.
 
 test("a_selectable_complete_unredacted_row_is_offered_and_each_missing_fact_refuses_it", () => {
   assert.deepEqual(catalogPointOffer(row(), page([])), { offer: true, reason: null });
@@ -263,12 +256,10 @@ test("a_selectable_complete_unredacted_row_is_offered_and_each_missing_fact_refu
   }
 });
 
-// ------------------------------- FX-17: a redacted binding, and the PoC's page
+// A redacted binding.
 
-/** A nightly point exactly as the PoC's v0.2.0-rc.1 runner published it
- *  (`logweir-poc`, view page `lwc-cs-adb8df2b8f9038a9face-s797d6-p0`, the
- *  first row of the Catalog view in `poc-batch-1/post/catalog.txt`): the set
- *  id and both keys built from it are the redactor's output. */
+/** A nightly point as a v0.2.0-rc.1 runner published it: the set id and both
+ *  keys built from it are the redactor's output. */
 const POC_SET = "89b585c5-5498-48dc-ae32-090809457ec8-20261008-020000";
 const POC_RUN = "01M4CKTADX268PREVHJAAYXEMZ";
 function pocRow(redacted) {
@@ -284,9 +275,8 @@ function pocRow(redacted) {
 }
 
 test("fx17_a_redacted_binding_is_one_reason_naming_the_field_and_its_cause", () => {
-  // THE PoC'S ROW: not offered, and the ONE reason names both fields, the
-  // redactor, and the repair -- not "no usable backup set id", which is what a
-  // redacted set id fell through to before.
+  // Not offered, and the ONE reason names both fields, the redactor, and the
+  // repair -- not "no usable backup set id".
   const poc = catalogPointOffer(pocRow(true), page([]));
   assert.equal(poc.offer, false);
   assert.match(poc.reason,
@@ -312,8 +302,8 @@ test("fx17_a_redacted_binding_is_one_reason_naming_the_field_and_its_cause", () 
   }), page([]));
   assert.equal(ulid.offer, false);
   assert.match(ulid.reason, /withheld the run id in the key, which runners older than v0\.2\.0-rc\.1/);
-  // An UPPER-case UUID set id is still a UUID to the redactor (review L-4):
-  // the cause is the older runner, not "two chosen components".
+  // An UPPER-case UUID set id is still a UUID to the redactor: the cause is
+  // the older runner, not "two chosen components".
   const upper = catalogPointOffer(row({
     backupId: "3F1C9D2E-8A7B-4C6D-9E0F-1A2B3C4D5E6F", receiptKey: "[redacted].receipt.json",
   }), page([]));
@@ -343,7 +333,7 @@ test("fx17_a_redacted_binding_is_one_reason_naming_the_field_and_its_cause", () 
 });
 
 test("fx17_the_first_page_of_scheduled_points_is_offered_and_says_why_when_it_is_not", () => {
-  // The PoC's first page: twenty nightly points. As v0.2.0-rc.1 published them,
+  // A first page of twenty nightly points. As v0.2.0-rc.1 published them,
   // every row says "not offered" with the redaction reason and the table
   // carries the page's complaint; as a current runner publishes them, every
   // row links the wizard and the complaint is gone.
@@ -374,8 +364,8 @@ test("fx17_the_set_ids_the_controller_mints_are_the_redactors_identities", () =>
     assert.equal(isMintedSetId(id), false, id);
   }
   // The edges the controller never mints but the redactor still reads as
-  // identities (review L-4): an upper-case bare UUID, years 0000 and 0099, a
-  // leap second. The explanation must not call them "chosen components".
+  // identities: an upper-case bare UUID, years 0000 and 0099, a leap second.
+  // The explanation must not call them "chosen components".
   assert.ok(ids.identityEdges.length >= 4);
   for (const id of ids.identityEdges) {
     assert.equal(isMintedSetId(id), true, id);
@@ -383,8 +373,8 @@ test("fx17_the_set_ids_the_controller_mints_are_the_redactors_identities", () =>
 });
 
 test("the_catalog_window_is_half_open_and_a_plan_names_only_what_the_runner_accepts", () => {
-  // WIZARD-DEFAULT-PIT-EXCLUSIVE, for a catalog point: one rule for both kinds
-  // of point. The catalog's window is half-open exactly as a Backup's is.
+  // One rule for both kinds of point: the catalog's window is half-open exactly
+  // as a Backup's is.
   const window = catalogWindow(row());
   assert.equal(window.fromMs, Date.parse("2026-09-22T13:00:00Z"));
   assert.equal(window.toMs, Date.parse("2026-09-22T14:00:00Z"));
@@ -400,7 +390,7 @@ test("the_catalog_window_is_half_open_and_a_plan_names_only_what_the_runner_acce
     false);
 });
 
-// ------------------------------------ 3. CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW
+// 3. A RUN WITH NO WINDOW, offered from its catalog row.
 
 test("a_run_with_no_window_is_offered_from_its_row_only_when_its_own_verdict_defers", () => {
   for (const verdict of [null, "NotAttempted"]) {
@@ -408,14 +398,14 @@ test("a_run_with_no_window_is_offered_from_its_row_only_when_its_own_verdict_def
     assert.equal(offer.offer, true, String(verdict) + ": " + String(offer.reason));
     assert.equal(offer.entry.pointId, POINT);
   }
-  // THE RULE THE DEFECT IS ABOUT: never over a reached refusal.
+  // THE RULE: never over a reached refusal.
   for (const verdict of ["Invalid", "Untrusted", "Pending", "SomethingNew"]) {
     const offer = backupCatalogOffer(unverifiedRun(verdict), [row()], page([]));
     assert.equal(offer.offer, false, verdict);
     assert.match(offer.reason, new RegExp(verdict));
   }
-  // FX-35: a run with its own window is offered the row for its OWN receipt
-  // when the controller verified it, and never without the digest naming it.
+  // A run with its own window is offered the row for its OWN receipt when the
+  // controller verified it, and never without the digest naming it.
   const windowed = unverifiedRun("Valid");
   windowed.status.windowCovered = { fromMs: 1, toMs: 2 };
   assert.equal(backupCatalogOffer(windowed, [row()], page([])).offer, true);
@@ -470,7 +460,7 @@ test("the_latest_point_action_counts_a_catalog_window_run_in_completion_order", 
   assert.equal(latestRestorablePoint([unverifiedRun("Invalid")], points).all.length, 0);
 });
 
-// ------------------------------------------------ 4. resolving a catalog point
+// 4. RESOLVING A CATALOG POINT.
 
 test("the_route_carries_the_catalog_and_the_point_and_nothing_the_page_would_trust", () => {
   const route = restoreCatalogPointRoute(NS, "archive", POINT);
@@ -568,7 +558,7 @@ test("an_offer_from_a_backup_must_be_read_through_the_destination_that_run_froze
   assert.match(gone.reason, /no Backup in this namespace answers/);
 });
 
-// ----------------------------------------- 5. the plan, the check and the body
+// 5. THE PLAN, THE CHECK AND THE BODY.
 
 test("the_catalog_plan_is_bound_to_the_point_and_a_backup_plan_is_not", async () => {
   const state = await catalogState();
@@ -704,10 +694,10 @@ test("the_mount_opens_on_a_catalog_point_and_refuses_one_it_cannot_offer", async
   assert.doesNotMatch(refused, /id="create-restore"/);
 });
 
-// INTEGRATION (plat15-2 x plat19-2): a catalog point's submission is routed by
-// the namespace's approval policy exactly as a Backup point's is. The policy is
-// read by the mount (`readApprovalPolicy`), so the row mounts BOTH paths over
-// the same api double and requires the same policy block from each.
+// A catalog point's submission is routed by the namespace's approval policy
+// exactly as a Backup point's is. The policy is read by the mount
+// (`readApprovalPolicy`), so the row mounts BOTH paths over the same api
+// double and requires the same policy block from each.
 test("a_catalog_point_mount_reads_the_approval_policy_exactly_like_a_backup_point", async () => {
   const GOVERNED = Object.freeze({
     name: "prod-governed", mode: "governed", legacy: false,
@@ -779,7 +769,7 @@ test("a_catalog_point_mount_reads_the_approval_policy_exactly_like_a_backup_poin
   assert.match(unread.html, /Approve it out of band/);
 });
 
-// ------------------------------------------------ 6. the selector and catalog
+// 6. THE SELECTOR AND CATALOG.
 
 test("a_namespace_with_no_backup_offers_the_connected_archives_points", async () => {
   const offers = await readCatalogOffers(NS, readersOver([page([row(),
@@ -810,7 +800,7 @@ test("a_catalog_whose_points_cannot_be_read_is_a_note_never_an_empty_answer", as
 
 test("the_catalog_table_links_through_the_wizards_rule_and_says_why_it_does_not", () => {
   const cells = pointRow(row(), NS, "archive", "primary", page([]));
-  // The RESTORE cell leads the row since the review's class sweep (MCP-25).
+  // The RESTORE cell leads the row.
   assert.ok(cells[0].indexOf(restoreCatalogPointRoute(NS, "archive", POINT).replace(/&/g, "&amp;")) !== -1);
   const refused = pointRow(row({ backupVerdict: "Invalid", selectable: false }), NS, "archive",
     "primary", page([]));
@@ -837,9 +827,9 @@ test("the_offer_from_several_catalogs_names_the_catalog_its_row_came_from", () =
 });
 
 test("only_a_catalog_over_the_runs_own_destination_is_offered_for_it", () => {
-  // The PLAT-15.2 review's L-1. The schedule detail reads every catalog in
-  // the namespace; a catalog over ANOTHER destination listing the same set id
-  // describes other bytes, and the wizard refuses the link it would offer.
+  // The schedule detail reads every catalog in the namespace; a catalog over
+  // ANOTHER destination listing the same set id describes other bytes, and the
+  // wizard refuses the link it would offer.
   const elsewhere = [noteCatalogSource(row(), "copy-archive", page([]), "secondary")];
   const refused = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), elsewhere);
   assert.equal(refused.offer, false);
@@ -868,7 +858,7 @@ test("only_a_catalog_over_the_runs_own_destination_is_offered_for_it", () => {
 });
 
 test("the_schedule_detail_records_the_destination_each_catalog_reads", async () => {
-  // L-1, wired: the reader notes each catalog's `spec.destinationRef.name`
+  // The reader notes each catalog's `spec.destinationRef.name`
   // beside its rows, which is what the offer compares with the run's own.
   const read = await readSchedulePoints(null, NS, null, {
     listCatalogs: async () => ({ items: [
@@ -894,8 +884,8 @@ test("the_schedule_detail_records_the_destination_each_catalog_reads", async () 
 });
 
 test("two_catalogs_listing_the_same_receipt_are_said_as_such_not_as_a_missing_digest", () => {
-  // The PLAT-15.2 review's L-2: with the run's digest present, several rows
-  // are the same receipt listed twice, which is not "no digest to choose".
+  // With the run's digest present, several rows are the same receipt listed
+  // twice, which is not "no digest to choose".
   const twice = [noteCatalogSource(row(), "archive", page([]), "primary"),
     noteCatalogSource(row(), "archive-2", page([]), "primary")];
   const offer = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), twice);
@@ -971,9 +961,8 @@ test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
 test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () => {
   const cp = {
     // The view's own members: two instants, and the freshness in milliseconds.
-    // (Until FX-48 this row carried the catalog ENTRY's `observedFromMs` and
-    // `observedToMs`, which the product API does not publish; no page read
-    // them, and the decoder now refuses a row that carries them.)
+    // The decoder refuses a row carrying the unpublished `observedFromMs` /
+    // `observedToMs`.
     observedFrom: "2026-09-22T13:59:57Z", observedTo: "2026-09-22T13:59:58.5Z",
     observedBeforeRecoveryPointMs: 1500, listing: "complete",
     groups: [
@@ -1004,8 +993,8 @@ test("prod041_a_points_consumer_positions_say_how_fresh_and_what_relates", () =>
 });
 
 test("prod041_a_captured_group_whose_reads_failed_says_so_never_only_none_relate", () => {
-  // Review L5: "0 of 3 relate" alone read like three positions that do not
-  // relate; the failed, beyond-the-end and not-observed counts are said too.
+  // "0 of 3 relate" alone reads like three positions that do not relate; the
+  // failed, beyond-the-end and not-observed counts are said too.
   const cp = {
     observedBeforeRecoveryPointMs: 0, listing: "complete",
     groups: [{ groupId: "g", outcome: "captured", active: false,
@@ -1019,19 +1008,18 @@ test("prod041_a_captured_group_whose_reads_failed_says_so_never_only_none_relate
 });
 
 test("prod041_h1_a_point_selecting_the_most_groups_is_offered_and_counts_what_it_does_not_list", () => {
-  // Review H1's chain, at the console: the catalog now reads a point whose
-  // backup selected 100 groups (the most) as Available -- its receipt carries
-  // counts, never partitions -- and the view lists none of the groups past
-  // its cap of 32, only how many. Such a row is offered for restore like any
-  // other, and its note says the groups were left out of the list.
+  // The catalog reads a point whose backup selected 100 groups (the most) as
+  // Available -- its receipt carries counts, never partitions -- and the view
+  // lists none of the groups past its cap of 32, only how many. Such a row is
+  // offered for restore like any other, and its note says the groups were left
+  // out of the list.
   const big = row({ consumerPositions: { observedFrom: "2026-09-22T13:59:57Z",
     observedTo: "2026-09-22T13:59:58Z", observedBeforeRecoveryPointMs: 2000,
     listing: "complete", groupsOmitted: 100 } });
   assert.deepEqual(catalogPointOffer(big, page([])), { offer: true, reason: null });
   assert.match(consumerPositionsNote(big),
     /100 group\(s\) not listed here; the signed receipt names each/);
-  // NEGATIVE CONTROL: the same point read Unreadable -- what an over-cap
-  // receipt was before the fix -- is not offered.
+  // NEGATIVE CONTROL: the same point read Unreadable is not offered.
   const unreadable = row({ availability: "Unreadable", selectable: false,
     consumerPositions: undefined });
   assert.equal(catalogPointOffer(unreadable, page([])).offer, false);

@@ -46,17 +46,15 @@ function console_(name) {
   return fixture("console/" + name);
 }
 
-// THE VALIDATOR AND THE FIXTURE TABLE LIVE IN `console-fixture.js` (FX-48). The
-// table used to be written out here, by hand, and eleven of the eighty-three
-// files under `fixtures/console/` were in it nowhere -- so nothing held them
-// to the published schema, and one of them was not an instance of it. It is
-// now ONE table, `ui/tests/contract-coverage.spec.js` holds it to the
-// directory listing, and this arm reads it rather than keeping a second copy.
+// THE VALIDATOR AND THE FIXTURE TABLE LIVE IN `console-fixture.js`: ONE
+// table, which `ui/tests/contract-coverage.spec.js` holds to the directory
+// listing, so every file under `fixtures/console/` is held to the published
+// schema. This arm reads it rather than keeping a second copy.
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
-  // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
-  // deleted together with the row that used it, which is exactly the change
-  // this arm exists to notice.
+  // AN EQUALITY, NOT A FLOOR. A floor stays green when a fixture is deleted
+  // together with the row that used it, which is exactly the change this arm
+  // exists to notice.
   const documents = Object.keys(CONSOLE_FIXTURES)
     .filter((name) => CONSOLE_FIXTURES[name].schema !== null);
   assert.equal(documents.length, 88,
@@ -208,7 +206,7 @@ test("an_operation_carries_the_evidence_and_the_recorded_verification", () => {
   assert.ok(decoded.value.item.evidence.payloadKey.length > 0);
 });
 
-// ------------------------------------- the closed sets and the request shapes
+// The closed sets and the request shapes.
 
 test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
   // THE ENUMS WERE HAND-COPIED, AND A HAND-COPIED LIST DRIFTS. A server that
@@ -262,7 +260,7 @@ test("every_request_shape_this_client_builds_is_the_schema_s_own", () => {
     schedules: "CreateScheduleRequest",
     restores: "CreateRestoreRequest",
     "schedules:set-suspension": "SetSuspensionRequest",
-    // D1 W7: the future-policy replace and the manual run.
+    // The future-policy replace and the manual run.
     "schedules:policy": "UpdateSchedulePolicyRequest",
     backups: "CreateBackupRequest",
   };

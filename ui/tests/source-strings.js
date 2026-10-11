@@ -1,16 +1,15 @@
 // source-strings.js -- the string literals of a shipped source file, for the
-// suites that lint what an operator reads: `console-ux.spec.js` (MCP-24, no
-// internal roadmap reference) and `code-spans.spec.js` (O2, no literal
-// backtick). Moved here from `console-ux.spec.js` so both read the SAME lexer.
-// Not a spec: the gate's glob does not collect it.
+// suites that lint what an operator reads: `console-ux.spec.js` (no internal
+// roadmap reference) and `code-spans.spec.js` (no literal backtick), so both
+// read the SAME lexer. Not a spec: the gate's glob does not collect it.
 
 /** The string literals of a source file -- `"..."`, `'...'` and template
  *  literals, a template across as many lines as it spans -- with the line each
- *  starts on; comments and regular-expression literals are skipped (review
- *  L2: a per-line scan lost a multi-line template and was thrown by a quote
- *  inside a regex). For the shell (`html`), every line with its HTML comments
- *  removed, TAGS INCLUDED, so an attribute -- a `title`, an `aria-label` -- is
- *  scanned as well as the text between tags (review L2). */
+ *  starts on; comments and regular-expression literals are skipped (a
+ *  per-line scan would lose a multi-line template and be thrown by a quote
+ *  inside a regex). For the shell (`html`), every line with its HTML
+ *  comments removed, TAGS INCLUDED, so an attribute -- a `title`, an
+ *  `aria-label` -- is scanned as well as the text between tags. */
 export function quotedSegments(text, html) {
   const out = [];
   const source = String(text);

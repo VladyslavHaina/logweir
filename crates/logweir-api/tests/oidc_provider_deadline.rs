@@ -1,4 +1,4 @@
-//! FX-28: a provider that stalls its body is bounded by the provider deadline.
+//! A provider that stalls its body is bounded by the provider deadline.
 //!
 //! THE PROVIDER IS ON THE WIRE. Every other sign-in test serves the provider
 //! in-process (`support::idp::MockIdp`), which never reaches the code this file
@@ -17,11 +17,9 @@
 //!   would answer early and fail the row. The wire records that it sent the
 //!   head and withheld the body, and that the console then hung up on it.
 //! * The bound is this file's own literal, not `PROVIDER_DEADLINE`: a mutant
-//!   that doubles the constant, or the call site's use of it, is still caught
-//!   (the FX-24 review's L1).
-//! * The NEGATIVE CONTROL is the pre-fix code, with the timer around the
-//!   request alone: each stall row then fails "still pending after 15 s"
-//!   (`claude/fx-28.result.md`, the mutant table).
+//!   that doubles the constant, or the call site's use of it, is still caught.
+//! * The NEGATIVE CONTROL is a timer around the request alone: each stall row
+//!   then fails "still pending after 15 s".
 //! * The slow-but-steady row is the positive control: a provider that takes
 //!   six seconds per document, twelve for the callback's two, still signs in.
 //!   So the bound is per request, it is not an idle timer shorter than a slow
@@ -66,8 +64,6 @@ const DISCOVERY: &str = "/.well-known/openid-configuration";
 const JWKS: &str = "/jwks";
 const TOKEN: &str = "/token";
 
-// ------------------------------------------------------------------ the wire
-
 /// What the wire does with one path.
 #[derive(Clone, Copy, Debug)]
 enum Behaviour {
@@ -77,12 +73,12 @@ enum Behaviour {
     /// first `sent` bytes of the body, then nothing.
     StallAfterHead { sent: usize },
     /// Read the request and send nothing at all: the stall is BEFORE the
-    /// response head (FX-28 review M1).
+    /// response head.
     NoHead,
     /// Trickle the head over `head_over`, then send one body byte and stall:
     /// with one deadline over the request and the body the answer comes at
     /// the deadline; with a timer per phase it would come at `head_over`
-    /// plus the deadline (FX-28 review M1).
+    /// plus the deadline.
     SlowHeadThenStall { head_over: Duration },
     /// Send the head, then the body in `chunks` pieces, `gap` apart.
     Steady { chunks: usize, gap: Duration },
@@ -361,8 +357,6 @@ fn hold(mut stream: TcpStream, state: &Arc<Mutex<WireState>>) {
     }
 }
 
-// ------------------------------------------------------------- log capture
-
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
 
@@ -412,7 +406,7 @@ impl Buffer {
 
 /// Capture this thread's log lines. `#[tokio::test]` runs the router on the
 /// test's own thread, so its audit record lands here. EVERY ROW IN THIS FILE
-/// CALLS THIS FIRST, as in `tests/sign_in_state.rs` (FX-37): a row with no
+/// CALLS THIS FIRST, as in `tests/sign_in_state.rs`: a row with no
 /// subscriber can switch a log statement off for a capturing row.
 fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let buffer = Buffer::default();
@@ -424,8 +418,6 @@ fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
     let guard = tracing::subscriber::set_default(subscriber);
     (buffer, guard)
 }
-
-// ------------------------------------------------------------- the console
 
 fn console(wire: &Wire) -> SharedApp {
     SharedApp::over_http(
@@ -553,8 +545,6 @@ async fn assert_stalled_and_bounded(wire: &Wire, elapsed: Duration) {
     );
 }
 
-// ------------------------------------------------------------------- rows
-
 /// **The deadline is ten seconds**, and the rows below measure against that
 /// literal. A changed constant fails here; a changed call site fails them.
 #[test]
@@ -565,7 +555,7 @@ fn the_provider_deadline_is_ten_seconds() {
 }
 
 /// **A provider that accepts the request and never sends a head fails the
-/// sign-in within the deadline** (FX-28 review M1). The deadline covers the
+/// sign-in within the deadline**. The deadline covers the
 /// request phase, not only the body: a timer around the body alone leaves
 /// this row "still pending after 15 s".
 #[tokio::test]
@@ -586,8 +576,8 @@ async fn a_provider_that_stalls_before_its_head_fails_the_login_within_the_deadl
 /// How long the slow-head row's provider takes over its head.
 const SLOW_HEAD: Duration = Duration::from_secs(7);
 
-/// **ONE deadline covers the request and the body together** (FX-28 review
-/// M1). The provider trickles its head over seven seconds, then sends one
+/// **ONE deadline covers the request and the body together.** The provider
+/// trickles its head over seven seconds, then sends one
 /// body byte and stalls. One deadline answers at ten seconds; a timer per
 /// phase (ten for the head, ten more for the body) would answer at about
 /// seventeen, past this row's bound.
@@ -820,8 +810,6 @@ async fn a_provider_document_over_the_cap_is_refused() {
     assert_eq!(response.status, 303, "{}", response.text());
 }
 
-// ------------------------------------------------------- the built binary
-
 /// The built server, killed and reaped when it leaves scope — a panicking
 /// assertion included — with both pipes drained for its whole life.
 struct Server {
@@ -1018,7 +1006,7 @@ fn the_built_binary_answers_a_stalled_sign_in_and_closes_the_connection() {
     );
     let closed = closed.unwrap_or_else(|| panic!("the server kept the connection open: {text}"));
     assert!(closed <= bound, "closed after {closed:?}");
-    // FX-37: the server writes this line before the 503, but a thread of this
+    // The server writes this line before the 503, but a thread of this
     // test drains its pipe, so on a loaded host the line can arrive after the
     // close. Waiting for it measures no deadline: the timings above are fixed.
     let logged = Instant::now() + SLACK;

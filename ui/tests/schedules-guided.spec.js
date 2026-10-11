@@ -1,17 +1,12 @@
-// schedules-guided.spec.js -- PLAT-10.1: the guided create form.
+// schedules-guided.spec.js -- the guided create form.
 //
-// WHAT THIS FILE IS FOR. The tracker's tests for 10.1 are "selected and
-// all-user-topic creation, edit, invalid cron, readiness failure, keyboard use
-// and first-run redirect", against the acceptance "the standard route requires
-// no YAML, raw endpoint reconstruction or manual signing step; invalid fields
-// retain the draft". Each row below is one of those, and each carries its own
-// NEGATIVE CONTROL -- the assertion that fails if the behaviour is removed --
-// because a row that passes against the pre-PLAT-10.1 form is not evidence of
-// anything PLAT-10.1 did.
-//
-// The browser half (a real keyboard, a real redirect, a real Preflight against
-// the lab) is `scripts/plat10-ui-e2e.mjs`. These rows are the ones that can be
-// proved without one, over the exact strings a browser receives.
+// Selected and all-user-topic creation, edit, invalid cron, readiness
+// failure, keyboard use and first-run redirect, against "the standard route
+// requires no YAML, raw endpoint reconstruction or manual signing step;
+// invalid fields retain the draft". Each row carries its own NEGATIVE CONTROL,
+// the assertion that fails if the behaviour is removed. The browser half (a
+// real keyboard, a real redirect, a real Preflight) is
+// `scripts/plat10-ui-e2e.mjs`; these rows are the ones a string can prove.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -129,10 +124,7 @@ function previewFor(values) {
   };
 }
 
-// ===========================================================================
-// The standard route: no YAML, no endpoint, no signature
-// ===========================================================================
-
+// THE STANDARD ROUTE: no YAML, no endpoint, no signature.
 test("the_standard_route_asks_for_a_cadence_a_coverage_and_a_saved_destination", () => {
   const html = renderScheduleForm({
     draft: draft(), clusters: CLUSTERS, destinations: DESTINATIONS, mayOperate: true,
@@ -146,9 +138,8 @@ test("the_standard_route_asks_for_a_cadence_a_coverage_and_a_saved_destination",
   assert.match(html, /<option value="primary"/);
   assert.match(html, /<option value="offsite"/);
 
-  // NEGATIVE CONTROL 1: the hand-typed endpoint is NOT on the standard route.
-  // Before PLAT-10.1 `#schedule-archive` was a required top-level input; if it
-  // comes back out of its disclosure this row fails.
+  // NEGATIVE CONTROL 1: the hand-typed endpoint is NOT on the standard route;
+  // if `#schedule-archive` comes back out of its disclosure this row fails.
   const beforeInline = html.indexOf("Advanced: write to an archive URL");
   const archiveInput = html.indexOf("id=\"policy-create-archive\"");
   assert.ok(beforeInline !== -1, "the inline archive is behind a disclosure");
@@ -172,10 +163,9 @@ test("the_standard_route_asks_for_a_cadence_a_coverage_and_a_saved_destination",
 });
 
 test("every_field_the_body_sends_has_an_input_and_every_input_is_in_the_draft", () => {
-  // THE FORM, THE DRAFT AND THE BODY ARE ONE LIST. A field in the body with no
-  // input is a field the form cannot express; a field in the form that the
-  // draft does not keep is a field a failed submit silently loses -- which is
-  // exactly what 10.1's "invalid fields retain the draft" forbids.
+  // THE FORM, THE DRAFT AND THE BODY ARE ONE LIST. A body field with no input is
+  // one the form cannot express; a form field the draft does not keep is one a
+  // failed submit silently loses.
   const values = draft({ selection: "dynamic", incompleteDiscovery: "Refuse" });
   const html = renderScheduleForm({
     draft: values, clusters: CLUSTERS, destinations: DESTINATIONS, mayOperate: true,
@@ -194,10 +184,7 @@ test("every_field_the_body_sends_has_an_input_and_every_input_is_in_the_draft", 
     "the chosen cluster's identity is part of the draft, not just its name");
 });
 
-// ===========================================================================
-// Selected-topic creation, and all-user-topic creation
-// ===========================================================================
-
+// SELECTED-TOPIC CREATION, AND ALL-USER-TOPIC CREATION.
 test("a_selected_topic_creation_names_the_destination_and_the_compiled_expression", () => {
   const values = draft();
   const body = scheduleBody(values, "30 2 * * *");
@@ -245,15 +232,11 @@ test("an_all_user_topic_creation_sends_the_dynamic_block_and_no_named_topics", (
   assert.equal(validateSchedule(values).incompleteDiscovery, undefined);
 });
 
-// ===========================================================================
-// Invalid cron, and the draft that survives it
-// ===========================================================================
-
+// INVALID CRON, AND THE DRAFT THAT SURVIVES IT.
 test("an_invalid_cadence_is_the_apis_refusal_and_not_this_pages_opinion", () => {
   // THE SHAPE CHECK STAYS AND THE PARSE DOES NOT. `61 * * * *` is five fields
-  // of cron characters, so this page has nothing to say about it: whether a
-  // minute may be 61 is the cadence engine's answer, and 10.1's acceptance is
-  // that the person reads the API's words.
+  // of cron characters; whether a minute may be 61 is the cadence engine's
+  // answer, and the person reads the API's words.
   const typed = draft({ mode: ADVANCED_CRON, cron: "61 * * * *" });
   assert.equal(validateSchedule(typed).cron, undefined,
     "the page does not pre-empt the cron parser");
@@ -327,10 +310,7 @@ test("a_refused_create_renders_the_apis_words_and_re_renders_every_typed_value",
   assert.doesNotMatch(clean, /aria-invalid="true"/);
 });
 
-// ===========================================================================
-// The preview is the only expression this page will save
-// ===========================================================================
-
+// THE PREVIEW IS THE ONLY EXPRESSION THIS PAGE WILL SAVE.
 test("a_preset_cannot_be_created_until_the_api_has_compiled_it", async () => {
   const values = draft();
   const sent = [];
@@ -370,10 +350,7 @@ test("a_preset_cannot_be_created_until_the_api_has_compiled_it", async () => {
   assert.equal(sent[1][2].spec.schedule, "0 4 * * *");
 });
 
-// ===========================================================================
-// Readiness: the check's own verdict, from the readiness route
-// ===========================================================================
-
+// READINESS: the check's own verdict, from the readiness route.
 test("readiness_checks_what_the_form_describes_and_renders_only_what_it_recorded", () => {
   const request = readinessRequestFor(draft());
   assert.deepEqual(request, {
@@ -428,10 +405,7 @@ test("readiness_checks_what_the_form_describes_and_renders_only_what_it_recorded
   assert.ok(green.indexOf(notReady.reason) === -1);
 });
 
-// ===========================================================================
-// Keyboard use, and the first-run redirect
-// ===========================================================================
-
+// KEYBOARD USE, AND THE FIRST-RUN REDIRECT.
 test("every_control_on_the_standard_route_is_a_native_focusable_control", () => {
   // KEYBOARD USE IS A PROPERTY OF THE MARKUP, and this is the half of it a
   // string can carry: every interactive element is an `input`, `select`,
@@ -463,14 +437,11 @@ test("the_first_run_redirect_is_a_deep_link_to_the_schedule_that_was_created", (
   // a link to the LIST and believe it is a link to the schedule it created.
   assert.equal(scheduleDetailRoute("team-a", ""), null);
   assert.equal(scheduleDetailRoute("team-a", undefined), null);
-  // MIGRATION: the list's own deep link is unchanged and is not this one.
+  // The list's own deep link is unchanged and is not this one.
   assert.notEqual(scheduleDetailRoute("team-a", "sch-abc"), "#/schedules?ns=team-a");
 });
 
-// ===========================================================================
-// The two forms are one form
-// ===========================================================================
-
+// THE TWO FORMS ARE ONE FORM.
 test("the_guided_form_and_the_policy_panel_render_from_the_same_field_renderers", () => {
   // The create form's controls are keyed by `CREATE_PANEL` and the edit panel's
   // by the schedule's name, which is what lets both be on screen at once
@@ -495,15 +466,12 @@ test("values_with_no_mode_are_an_advanced_cron_and_no_selection_is_a_named_allow
   assert.equal(guidedValues(draft({ selection: "dynamic" })).selection, "dynamic");
 });
 
-// ===========================================================================
-// The mode this form is used in
-// ===========================================================================
-
+// THE MODE THIS FORM IS USED IN.
 test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => {
   // THE TRANSLATION IS THE ONE PLACE THE TWO REQUEST SHAPES DIFFER, and a field
-  // the custom resource carries that the DTO never sends is a field an operator
-  // set and the API never heard about. This drives `ui/client.js`'s real
-  // console adapter over the real `fetch` boundary.
+  // the custom resource carries that the DTO never sends is one an operator set
+  // and the API never heard about. This drives `ui/client.js`'s real console
+  // adapter over the real `fetch` boundary.
   resetMode();
   await selectMode({
     probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
@@ -558,10 +526,8 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
   assert.equal(sent.sourceRef.name, "orders-prod");
 });
 
-// ===========================================================================
-// PROD-17.1 B1 leftover (w2-retention review I1): `spec.retention` is withdrawn,
-// so neither schedule form offers it and neither sends it
-// ===========================================================================
+// `spec.retention` IS WITHDRAWN, so neither schedule form offers it and
+// neither sends it.
 
 /** Whether `html` carries an input for either withdrawn retention field. */
 const offersRetention = (html) => /name="keep(Last|Days)"/.test(html);
@@ -646,14 +612,12 @@ test("the_schedule_forms_offer_no_retention_and_send_none", async () => {
   assert.ok(!("retention" in edits[0]), "the policy edit carries no retention");
 });
 
-// ===========================================================================
-// Review fix round (2026-09-22): a readiness verdict belongs to the request
-// that produced it, and a refused start keeps the button
-// ===========================================================================
+// A READINESS VERDICT BELONGS TO THE REQUEST THAT PRODUCED IT, and a refused
+// start keeps the button.
 
 test("a_readiness_verdict_goes_stale_when_the_form_no_longer_describes_its_request", () => {
-  // REVIEW MEDIUM-3: check source A with `orders`, get `ready`, switch to
-  // source B -- the form used to keep showing A's `ready` beside B's inputs.
+  // Check source A with `orders`, get `ready`, switch to source B: A's `ready`
+  // must not stay beside B's inputs.
   const ready = decoded("preflight-ready.json").item;
   const checked = readinessKey(readinessRequestFor(draft()));
   const current = renderReadinessVerdict({ readiness: ready, readinessRequest: checked,
@@ -678,8 +642,8 @@ test("a_readiness_verdict_goes_stale_when_the_form_no_longer_describes_its_reque
 });
 
 test("a_refused_readiness_start_keeps_the_button_and_places_its_field_errors", async () => {
-  // REVIEW MEDIUM-3: a 422 (a mistyped topic) or a network error on
-  // startPreflight replaced the Check button with a note until reload.
+  // A 422 (a mistyped topic) or a network error on startPreflight must not
+  // replace the Check button with a note until reload.
   selectMode(CONSOLE);
   const ns = "readiness-refused";
   const key = formKey(ns, SCHEDULE_FORM);
@@ -724,11 +688,10 @@ test("a_refused_readiness_start_keeps_the_button_and_places_its_field_errors", a
 });
 
 test("a_replayed_readiness_check_is_read_before_the_form_believes_it", async () => {
-  // DEFECT P8 (poc-install, 2026-09-24): the "Backup readiness" re-click
-  // showed a REPLAYED check as "ready / does not apply to your current inputs
-  // / could not be checked: this response did not recompute staleness". A
-  // replay is terminal on arrival, the follower stopped at `terminal === true`
-  // before its first read, and the create answer is never recomputed.
+  // A replay is terminal on arrival and its create answer is never recomputed,
+  // so a follower that stopped at `terminal === true` before its first read
+  // would show "ready / does not apply to your current inputs / could not be
+  // checked: this response did not recompute staleness".
   selectMode(CONSOLE);
   const ns = "readiness-replayed";
   const key = formKey(ns, SCHEDULE_FORM);
@@ -777,9 +740,9 @@ test("a_replayed_readiness_check_is_read_before_the_form_believes_it", async () 
 });
 
 test("the_readiness_panel_follows_its_check_until_a_read_is_terminal", async () => {
-  // P8's CLASS, on the list page's standalone "Backup readiness" panel: it
-  // rendered the create answer -- a check that had not run -- and never read
-  // it again.
+  // The list page's standalone "Backup readiness" panel follows the check it
+  // started, rather than rendering the create answer of a check that has not
+  // run.
   selectMode(CONSOLE);
   const ns = "readiness-panel-follow";
   const view = fakeView();
@@ -822,9 +785,9 @@ test("the_readiness_panel_follows_its_check_until_a_read_is_terminal", async () 
 });
 
 test("the_name_field_says_what_console_mode_does_with_it", () => {
-  // REVIEW LOW-5 (PLAT-10.1), then poc-fixes-2 review L5: console mode names
-  // the object sch-<26 base32>, so the console form offers NO name field and
-  // says who names it; the legacy form keeps its field and its help.
+  // Console mode names the object sch-<26 base32>, so the console form offers
+  // NO name field and says who names it; the legacy form keeps its field and
+  // its help.
   const consoleForm = renderScheduleForm({ draft: draft(), clusters: CLUSTERS, mayOperate: true,
     minted: true });
   assert.doesNotMatch(consoleForm, /<input id="schedule-name"/,
@@ -845,10 +808,10 @@ test("the_name_field_says_what_console_mode_does_with_it", () => {
 });
 
 test("a_console_schedule_needs_no_name_and_one_intent_keys_one_draft", async () => {
-  // REVIEW L5. The field's value WAS the idempotency seed, so two different
-  // schedules typed with one name in one window collided (same key, different
-  // body: 409 idempotency_conflict), and a blank name was refused although
-  // the server never used it. Now the draft's random intent is the seed.
+  // The draft's random intent is the idempotency seed, not the name: two
+  // schedules typed with one name would otherwise collide (same key, different
+  // body: 409 idempotency_conflict), and a blank name would be refused although
+  // the server never uses it.
   resetMode();
   await selectMode({
     probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
@@ -885,8 +848,8 @@ test("a_console_schedule_needs_no_name_and_one_intent_keys_one_draft", async () 
 });
 
 test("the_console_schedule_form_mints_one_intent_per_draft_across_a_retry", async () => {
-  // REVIEW L5, mounted: no name input, and the intent minted on the first
-  // submit is the one a retry after an unknown outcome sends again.
+  // Mounted: no name input, and the intent minted on the first submit is the
+  // one a retry after an unknown outcome sends again.
   resetMode();
   await selectMode({
     probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
@@ -933,8 +896,8 @@ test("the_console_schedule_form_mints_one_intent_per_draft_across_a_retry", asyn
 });
 
 test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async () => {
-  // REVIEW MEDIUM-3, mounted: typing into a field the check was about replaces
-  // the verdict slot with the stale note at once.
+  // Mounted: typing into a field the check was about replaces the verdict slot
+  // with the stale note at once.
   selectMode(CONSOLE);
   const ns = "readiness-stale";
   const key = formKey(ns, SCHEDULE_FORM);
@@ -949,8 +912,8 @@ test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async 
     destinations() { return Promise.resolve({ items: DESTINATIONS }); },
     startPreflight() { return Promise.resolve({ item: Object.assign({}, ready, { terminal: true }) }); },
     // THE FOLLOW'S READ, answered, and its clock handed in: without them the
-    // follow retries a read this fake cannot make, on real timers, after the
-    // row has finished (poc-fixes-5).
+    // follow retries a read this fake cannot make, on real timers, after the row
+    // has finished.
     preflight(namespace, id) {
       return Promise.resolve({ item: Object.assign({}, ready, { id: id, terminal: true }) });
     },

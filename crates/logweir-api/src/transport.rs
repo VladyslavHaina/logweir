@@ -1,16 +1,15 @@
 //! The limits on every connection the listener serves: a progress window on
-//! each connection's output and on each request body (FX-24b), a rate floor on
-//! the body's window, and a cap on the connections one peer may hold (FX-24c).
+//! each connection's output and on each request body, a rate floor on the
+//! body's window, and a cap on the connections one peer may hold.
 //!
 //! THE GAP. hyper's HTTP/1 server bounds the request HEAD (`main.rs`'s header
 //! deadline) and nothing after it. A client that sends requests and stops
 //! reading the answers leaves hyper parked in a write the kernel will not take,
 //! and a client that sends a head and then stops sending its body leaves the
 //! handler parked in a body read; neither has a timer, and each holds a
-//! connection permit for as long as the client keeps the socket open. Measured
-//! on the built binary (FX-24 review, 2026-10-08): 256 connections that
-//! pipelined `GET /ui/render.js` and read nothing held every permit, and a real
-//! request was still unanswered at 30 s.
+//! connection permit for as long as the client keeps the socket open (256
+//! connections that pipelined `GET /ui/render.js` and read nothing held every
+//! permit on the built binary).
 //!
 //! THE BOUND IS A WINDOW, NOT A TOTAL. Each guard here opens a window when an
 //! operation goes PENDING, and fails the operation if the window's limit
@@ -19,20 +18,19 @@
 //! steadily keeps its connection however long the answer takes; what ends is
 //! the connection whose client stopped, or, for a body, trickles.
 //!
-//! THE OUTPUT'S FLOOR IS ONE BYTE, AND THAT IS MEASURED, NOT ASSUMED (FX-24c).
-//! The server sees a reader's progress only when the kernel lets it write
-//! again, and the kernel does that in bursts the size of a send buffer: on
-//! macOS a client draining a steady 16 KiB/s woke the writer with 167 KB, then
-//! 12 KB five seconds later, then not at all for 25 s, and a client reading one
-//! byte every twenty seconds got exactly the same first thirty seconds
-//! (instrumented binary, 2026-10-09). A window that wanted 32 KiB cut that
-//! steady reader at 32.5 s, which the one-byte stall served to the end; and the
-//! stall already ends the one-byte reader, at 35.1 s on the same host, because
-//! the kernel stops waking a writer whose client takes almost nothing. So the
-//! output keeps the stall; slow-RATE readers that keep the kernel moving are
-//! the peer cap's to bound, below.
+//! THE OUTPUT'S FLOOR IS ONE BYTE, AND THAT IS MEASURED, NOT ASSUMED. The
+//! server sees a reader's progress only when the kernel lets it write again,
+//! in bursts the size of a send buffer: on macOS a client draining a steady
+//! 16 KiB/s woke the writer with 167 KB, then 12 KB five seconds later, then
+//! not at all for 25 s, and a client reading one byte every twenty seconds got
+//! exactly the same first thirty seconds. A window that wanted 32 KiB cut that
+//! steady reader at 32.5 s, which the one-byte stall served to the end; and
+//! the stall already ends the one-byte reader (at 35.1 s on the same host),
+//! because the kernel stops waking a writer whose client takes almost
+//! nothing. So the output keeps the stall; slow-RATE readers that keep the
+//! kernel moving are the peer cap's to bound, below.
 //!
-//! THE BODY'S FLOOR IS REAL (FX-24c). hyper reads a body as it arrives, with no
+//! THE BODY'S FLOOR IS REAL. hyper reads a body as it arrives, with no
 //! buffer between the client's rate and the frames the handler sees, so a
 //! window on a body measures the client. A body still arriving at the end of a
 //! window must have brought the floor in it; a body that ends inside its
@@ -100,13 +98,13 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// One progress window: opened by the first `Pending`, closed by `floor`
 /// bytes of progress or by the operation settling, failed at `limit`.
 ///
-/// With a floor of one byte this is FX-24b's stall clock: any progress closes
-/// the window. The timer is allocated on the first window, not per connection:
-/// most connections never wait on the kernel at all.
+/// With a floor of one byte this is a plain stall clock: any progress closes
+/// the window. The timer is allocated on the first window, not per
+/// connection: most connections never wait on the kernel at all.
 #[derive(Debug)]
 struct StallClock {
     limit: Duration,
-    /// The least progress, in bytes, that closes an open window (FX-24c).
+    /// The least progress, in bytes, that closes an open window.
     floor: usize,
     sleep: Option<Pin<Box<Sleep>>>,
     /// Bytes moved since the window opened; `None` while no window is open.
@@ -364,7 +362,7 @@ pub fn is_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 /// The cap on the connections one peer outside the trusted-proxy set may hold
-/// at once (FX-24c).
+/// at once.
 ///
 /// WHO IS CAPPED. A peer is one socket address's IP (an IPv4-mapped IPv6
 /// address is the IPv4 address it maps to). A peer the trusted-proxy set
@@ -511,7 +509,7 @@ mod tests {
     //! the output clock; the steady-reader and idle rows fail if the clock is a
     //! total rather than a window; the pending-read row fails if reads are
     //! timed at the transport; the trickling-reader row fails if the output is
-    //! given a floor above one byte (FX-24c measured why it must not be); the
+    //! given a floor above one byte (the module documentation says why); the
     //! clock row fails when progress below the floor closes a window, or when a
     //! settled operation leaves its window open; the body floor rows fail when
     //! any byte closes a body's window, or when the floor is far too high; the
@@ -679,12 +677,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_slow_but_steady_reader_is_never_cut() {
-        // ITS OWN, LONGER LIMIT. How often a reading client lets the writer
-        // progress is the receiver's window-update policy, not the reader's
-        // pace: on macOS a reader taking 64 KiB every 75 ms still left the
-        // writer waiting 315 ms at a time (a probe, 2026-10-08). One second is
-        // several times the gaps a steady reader leaves, so a cut here is the
-        // guard misjudging progress, not the kernel.
+        // ITS OWN, LONGER LIMIT. How often a reading client lets the writer progress
+        // is the receiver's window-update policy, not the reader's pace: on macOS a
+        // reader taking 64 KiB every 75 ms still left the writer waiting 315 ms at a
+        // time. One second is several times the gaps a steady reader leaves, so a
+        // cut here is the guard misjudging progress, not the kernel.
         const STEADY_LIMIT: Duration = Duration::from_secs(1);
         const TOTAL: usize = 8 * 1024 * 1024;
         let (mut server, mut client) = pair_at(STEADY_LIMIT).await;
@@ -807,7 +804,7 @@ mod tests {
     }
 
     /// **The output is judged by the stall alone: a reader that keeps the
-    /// kernel taking bytes, however few, is not cut (FX-24c's decision).**
+    /// kernel taking bytes, however few, is not cut.**
     ///
     /// 64 bytes every 50 ms is 384 bytes a window, a tenth of the body floor.
     /// On the output that is not the client's rate but the kernel's: it wakes
@@ -838,12 +835,12 @@ mod tests {
     }
 
     /// **Progress below the floor keeps a window open; the floor's worth, or
-    /// the operation settling, closes it (FX-24c).** The clock itself, polled
-    /// by hand with a waker nobody listens to.
+    /// the operation settling, closes it.** The clock itself, polled by hand
+    /// with a waker nobody listens to.
     ///
     /// - A window opens; 100 bytes move, far short of a 4 KiB floor; one limit
-    ///   after the window opened it has expired. FX-24b's clock, which any byte
-    ///   closed, would have opened a fresh window there instead.
+    ///   after the window opened it has expired. A clock that any byte closed
+    ///   would have opened a fresh window there instead.
     /// - The floor's worth closes the window: a limit later, a new pending
     ///   operation opens a new one, not an expired one.
     /// - So does settling — the output caught up, the body ended: two limits
@@ -978,9 +975,9 @@ mod tests {
         assert!(started.elapsed() >= LIMIT * 2);
     }
 
-    /// **A body that keeps arriving below the floor fails at the limit
-    /// (FX-24c).** A byte every quarter limit never stalls, so FX-24b's
-    /// clock read it whole, however long it took.
+    /// **A body that keeps arriving below the floor fails at the limit.** A
+    /// byte every quarter limit never stalls, so a plain stall clock would read
+    /// it whole, however long it took.
     #[tokio::test]
     async fn a_body_below_the_floor_fails_at_the_limit() {
         use http_body_util::BodyExt as _;
@@ -997,7 +994,7 @@ mod tests {
     }
 
     /// **A small body that ends inside its window is read whole, however
-    /// slowly (FX-24c).** Ten bytes a byte at a time are far below the floor,
+    /// slowly.** Ten bytes a byte at a time are far below the floor,
     /// but the body is over before its window is: the floor judges a body
     /// still arriving, never one that has arrived. Its own one-second window,
     /// five times the trickle, so a late timer on a loaded host cannot push
@@ -1043,8 +1040,6 @@ mod tests {
         ))));
     }
 
-    // ------------------------------------------------------------ the cap
-
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
     }
@@ -1063,7 +1058,7 @@ mod tests {
     }
 
     /// **A peer outside the trusted set is capped, its neighbours are not, and
-    /// its places come back (FX-24c).**
+    /// its places come back.**
     #[test]
     fn a_peer_outside_the_trusted_set_is_capped_and_its_places_come_back() {
         let limit = PeerLimit::outside(&trusting(&["10.42.0.0/16"]), 3).expect("a set is named");
@@ -1090,7 +1085,7 @@ mod tests {
         );
     }
 
-    /// **The trusted proxy is never capped as one peer (FX-24c).** Every
+    /// **The trusted proxy is never capped as one peer.** Every
     /// browser behind the ingress arrives from its address.
     #[test]
     fn the_trusted_proxy_is_never_capped_as_one_peer() {
@@ -1105,7 +1100,7 @@ mod tests {
         assert_eq!(limit.held_by(ingress), 0);
     }
 
-    /// **Without a trusted-proxy set nothing is capped (FX-24c).** The
+    /// **Without a trusted-proxy set nothing is capped.** The
     /// console cannot then tell its ingress from any other peer.
     #[test]
     fn without_a_trusted_proxy_set_nothing_is_capped() {
@@ -1124,7 +1119,7 @@ mod tests {
     }
 
     /// **The Service source's endpoints are trusted while fresh, and capped
-    /// once stale (FX-24c).** A stale set trusts nobody (`/readyz` is false
+    /// once stale.** A stale set trusts nobody (`/readyz` is false
     /// then), so the cap fails closed with it.
     #[test]
     fn a_trusted_service_endpoint_is_not_capped_while_its_set_is_fresh() {
@@ -1150,7 +1145,7 @@ mod tests {
         assert!(matches!(limit.admit(ingress), Admission::Refused));
     }
 
-    /// **An IPv4-mapped IPv6 peer is the IPv4 peer (FX-24c).** A dual-stack
+    /// **An IPv4-mapped IPv6 peer is the IPv4 peer.** A dual-stack
     /// listener sees IPv4 clients in the mapped form; one client must not get
     /// two shares by connecting both ways.
     #[test]

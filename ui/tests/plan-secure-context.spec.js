@@ -69,8 +69,7 @@ test("plan_js_refuses_a_non_secure_origin", async () => {
       "page whose whole purpose is to show it before the operator signs.",
   );
 
-  // And the message carries no scheme token, which is the one place critique
-  // C M3's wording was changed and the reason it was changed.
+  // And the message carries no scheme token.
   for (const token of ["http" + ":", "https" + ":"]) {
     assert.equal(
       MESSAGE.indexOf(token),

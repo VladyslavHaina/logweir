@@ -1,17 +1,14 @@
-// detail-trust.spec.js -- CONSOLE-DETAIL-TRUST-BASIS-DROPPED (PLAT-18.2
-// re-check, LOW-R3).
+// detail-trust.spec.js -- a console DETAIL view keeps the trust basis.
 //
-// THE DEFECT. A console DETAIL view reads the run's operation route and
-// `ui/client.js` `mergeOperation` folds it into the custom-resource-shaped
-// object the pages render. It copied `result`, `matchedKeyId` and
-// `verifiedAt` and dropped `trust.basis`, so the one badge rule
-// (`validVerification`, `verificationCase`) saw an absent block -- the
-// pre-existing rule -- and a `Valid` verdict on `RecordedBeforeRevocation`
-// read green, as if the compromised key were still trusted. The scorecard
-// caption ("unverified scorecard claim") uses the same rule and inherited the
-// gap. D3 section 7.4: `RecordedBeforeRevocation` is "never green";
-// `Historical` is a pass that carries the retired-key qualifier; `Current` is
-// a plain pass.
+// A console detail reads the run's operation route and `ui/client.js`
+// `mergeOperation` folds it into the custom-resource-shaped object the pages
+// render. A fold that copied `result`, `matchedKeyId` and `verifiedAt` but
+// dropped `trust.basis` would show the badge rule (`validVerification`,
+// `verificationCase`) an absent block -- the pre-existing rule -- so a
+// `Valid` verdict on `RecordedBeforeRevocation` would read green, as if the
+// compromised key were still trusted, and the scorecard caption with it. D3
+// section 7.4: `RecordedBeforeRevocation` is "never green"; `Historical` is a
+// pass that carries the retired-key qualifier; `Current` is a plain pass.
 //
 // These rows drive the real transport (the one platform call stubbed) in BOTH
 // modes and hold the two to one answer per basis. The operation view
@@ -37,20 +34,19 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 const BASES = ["Current", "Historical", "RecordedBeforeRevocation"];
 
 /** The API's combined word for a `Valid` verdict on each basis, as
- *  `crates/logweir-api/src/status.rs` `trust_state` computes it. Since
- *  TRUST-STATE-RBR-VERIFIED a `RecordedBeforeRevocation` verdict arrives as
- *  `untrusted` (D3 section 7.4: "never green"), so the word carries the veto
- *  itself; the basis still travels, for the case the badge names. */
+ *  `crates/logweir-api/src/status.rs` `trust_state` computes it: a
+ *  `RecordedBeforeRevocation` verdict arrives as `untrusted` (D3 section
+ *  7.4: "never green"), so the word carries the veto itself; the basis still
+ *  travels, for the case the badge names. */
 const STATE_OF = {
   Current: "verified",
   Historical: "verifiedHistorical",
   RecordedBeforeRevocation: "untrusted",
 };
 
-/** What a server built before TRUST-STATE-RBR-VERIFIED said for the same
- *  verdicts: `verified` for `RecordedBeforeRevocation`. The console still
- *  vetoes on the basis, so a console in front of an older server gives the
- *  same answer. */
+/** What an older server said for the same verdicts: `verified` for
+ *  `RecordedBeforeRevocation`. The console still vetoes on the basis, so a
+ *  console in front of an older server gives the same answer. */
 const PRE_FIX_STATE_OF = Object.assign({}, STATE_OF, { RecordedBeforeRevocation: "verified" });
 
 function transport(answer) {
@@ -220,9 +216,9 @@ function untrustedBody(name, signature, basis) {
 test("the_controllers_untrusted_result_folds_as_untrusted_in_a_console_detail", async () => {
   // THE CONTROLLER'S OWN SHAPE for D3 section 7.4's compromise rows is
   // `result: Untrusted`, which the operation route's signature column spells
-  // `unknown`. The fold used to write no result for it, so the page said "no
-  // verification was recorded" about a verdict the controller reached. The
-  // API's word says `untrusted`, and so does the page -- in both modes.
+  // `unknown`. The fold must not write no result for it ("no verification was
+  // recorded" about a verdict the controller reached): the API's word says
+  // `untrusted`, and so does the page -- in both modes.
   await consoleMode();
   const object = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
     untrustedBody("console/operation-backup.json", "unknown", "RecordedBeforeRevocation"));
@@ -302,7 +298,7 @@ test("the_old_operation_view_rule_on_the_trust_word_alone_fails_the_rows_above",
     /RecordedBeforeRevocation is never green/);
 
   // And the current server's word needs no basis to be refused: `untrusted`
-  // alone is not green (TRUST-STATE-RBR-VERIFIED).
+  // alone is not green.
   const current = operationFacts(decodeD3Operation(operationBody(
     "console/operation-restore-completed.json", "RecordedBeforeRevocation")).value.item, true);
   const alone = Object.assign({}, current, { trust: Object.assign({}, current.trust, { basis: undefined }) });
@@ -310,10 +306,9 @@ test("the_old_operation_view_rule_on_the_trust_word_alone_fails_the_rows_above",
 });
 
 test("the_old_fold_without_the_trust_word_fails_the_untrusted_rows_above", async () => {
-  // NEGATIVE CONTROL for the fold. Before TRUST-STATE-RBR-VERIFIED the fold
-  // read the signature column alone. Reproduce that output -- a `Valid` on a
-  // `None` basis, and an `unknown` with no result -- and hold it to the rows'
-  // own assertions: the first is green, the second names no case.
+  // NEGATIVE CONTROL for the fold: a fold that read the signature column alone
+  // gives a `Valid` on a `None` basis and an `unknown` with no result; held to
+  // the rows' own assertions, the first is green and the second names no case.
   await consoleMode();
   const valid = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
     untrustedBody("console/operation-backup.json", "valid", "None"));

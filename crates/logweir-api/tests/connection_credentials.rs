@@ -1,12 +1,12 @@
-//! PROD-01.3 security follow-up: a connection's credential is ENTERED once and
+//! A connection's credential is ENTERED once and
 //! becomes a Secret this service creates, bound to the connection; an existing
 //! Secret is never named.
 //!
-//! THE THREAT these rows close. Before the follow-up, `auth.credentialRef`
-//! named "an existing Secret", so a console operator could name another
-//! team's credential Secret (one they cannot read), point the connection's
-//! bootstrap at a host they control, and have Logweir's probe and runner
-//! present that credential there. Each refusal below has its NEGATIVE CONTROL:
+//! THE THREAT these rows close. If `auth.credentialRef` could name "an
+//! existing Secret", a console operator could name another team's credential
+//! Secret (one they cannot read), point the connection's bootstrap at a host
+//! they control, and have Logweir's probe and runner present that credential
+//! there. Each refusal below has its NEGATIVE CONTROL:
 //! the same request shape that is accepted, so a refusal that refused
 //! everything would fail the control.
 
