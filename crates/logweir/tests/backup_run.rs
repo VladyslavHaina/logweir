@@ -1,16 +1,12 @@
-//! `logweir backup run`'s named tests (Task 4).
+//! `logweir backup run`'s named tests.
 //!
 //! **Every test here runs in process**, against a `ClusterReader` double, a
 //! `DataEngine` double and `Store::in_memory` — no socket, no subprocess, no
-//! broker. That is not a convenience: a binary cannot be handed an in-process
-//! double, and with the compose stack down an rdkafka metadata call blocks on
-//! `crates/logweir-kafka/src/rdkafka_reader.rs:16`'s
-//! `const T: Duration = Duration::from_secs(20)`. The tree has already measured
-//! the consequence — `crates/logweir/tests/no_network_in_unit_tests.rs:11-13`
-//! records `tests/doctor.rs::check_7_…` at **26.60 s** against Global
-//! Constraint 22's 15 s per-test bound. The ONE binary-level assertion in
-//! Tasks 4, 5b and 6 lives in `e2e/tests/backup_argv.rs`, behind
-//! `#![cfg(feature = "e2e")]`, because it runs the binary.
+//! broker: a binary cannot be handed an in-process double, and with the
+//! compose stack down an rdkafka metadata call blocks for 20 s
+//! (`crates/logweir-kafka/src/rdkafka_reader.rs`), past Global Constraint
+//! 22's 15 s per-test bound. The binary-level assertion lives in
+//! `e2e/tests/backup_argv.rs`, behind `#![cfg(feature = "e2e")]`.
 //!
 //! `run_with` returns an `ExitCode`, so the refusal rows assert on it and the
 //! outcome rows call `execute_with` — its outcome-returning half — because a
@@ -32,18 +28,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+// Fixtures.
 
 /// The archive prefix every fixture uses.
 ///
-/// It is under `logweir/` for one mechanical reason and no semantic one:
-/// `Store::in_memory` is the only writable store a test can build without a
-/// backend, and `Store::put_create_only` asserts `key.starts_with("logweir/")`
-/// (Global Constraint 6) before it writes anything. So an in-memory ARCHIVE
-/// fixture has to be seeded under that root even though a real archive never
-/// is. Nothing in production reads or writes an archive at this prefix.
+/// Under `logweir/` only because `Store::in_memory` is the only writable store
+/// a test can build without a backend, and `Store::put_create_only` asserts
+/// `key.starts_with("logweir/")` (Global Constraint 6). Nothing in production
+/// reads or writes an archive at this prefix.
 const ARCHIVE_PREFIX: &str = "logweir/";
 
 /// A `BackupSpec` as an adopter writes it. `bootstrap_servers` is
@@ -89,13 +81,10 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
     let allowed_path = dir.path().join("allowed-clusters.json");
     std::fs::write(&spec_path, spec).unwrap();
     std::fs::write(&allowed_path, allowed).unwrap();
-    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key.
-    // Task 5b signs the receipt with `--signing-key`, so every success-path
-    // row needs a real key — and the throwaway fixture key under
-    // `e2e/fixtures/signed/` is reserved for the corpus walkers, which verify
-    // against a checked-in PUBLIC pem. This one lives and dies with the
-    // `TempDir`; the matching public pem is written beside it so the I6 row
-    // can verify what the run signed.
+    // AN EPHEMERAL KEY, GENERATED HERE, and never a committed private key: the
+    // throwaway fixture key under `e2e/fixtures/signed/` is reserved for the
+    // corpus walkers. The matching public pem is written beside it so the I6
+    // row can verify what the run signed.
     let key = SigningKey::generate_p256();
     let key_path = dir.path().join("signer.pem");
     std::fs::write(&key_path, key.to_pkcs8_pem().unwrap()).unwrap();
@@ -148,11 +137,10 @@ fn manifest_of(backup_id: &str) -> (String, Vec<u8>) {
 /// An EMPTY in-memory archive, and the key and bytes the engine double will
 /// write into it for `backup_id` when a run reaches the engine.
 ///
-/// **Empty, and that is FX-7.** A backup run refuses an execution whose set
-/// directory already holds its manifest or a segment (`phase_run::refuse_an_existing_set`), so
-/// a fixture may no longer seed the manifest BEFORE the run: the engine double
-/// writes it DURING the run, through [`run`] / [`exec`], exactly as the real
-/// engine does.
+/// **Empty**: a backup run refuses an execution whose set directory already
+/// holds its manifest or a segment (`phase_run::refuse_an_existing_set`), so
+/// the engine double writes the manifest DURING the run, through [`run`] /
+/// [`exec`], exactly as the real engine does.
 fn archive_for(backup_id: &str) -> (Store, String, Vec<u8>) {
     let (key, bytes) = manifest_of(backup_id);
     (Store::in_memory(ARCHIVE_PREFIX), key, bytes)
@@ -172,9 +160,7 @@ fn empty_archive() -> Store {
     Store::in_memory(ARCHIVE_PREFIX)
 }
 
-// ---------------------------------------------------------------------------
-// Doubles
-// ---------------------------------------------------------------------------
+// Doubles.
 
 /// A `ClusterReader` whose every response is configured by the test. Scoped to
 /// this file: the shared `FakeReader` in `crates/logweir/tests/fixtures/mod.rs`
@@ -182,7 +168,7 @@ fn empty_archive() -> Store {
 /// has no use for.
 struct StubReader {
     cluster_id: Result<String, KafkaError>,
-    /// PROD-02.1: what `partition_marks` answers; `None` is the trait's
+    /// What `partition_marks` answers; `None` is the trait's
     /// default (not read).
     marks: Option<BTreeMap<String, logweir_kafka::capture::TopicMarks>>,
 }
@@ -200,7 +186,7 @@ impl StubReader {
             marks: None,
         }
     }
-    /// PROD-02.1: each named topic's partitions as `(low, high)` pairs.
+    /// Each named topic's partitions as `(low, high)` pairs.
     fn with_marks(mut self, topics: &[(&str, &[(i64, i64)])]) -> Self {
         self.marks = Some(
             topics
@@ -240,12 +226,10 @@ impl ClusterReader for StubReader {
     fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
         Ok(BTreeMap::new())
     }
-    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
-    /// a broker that surfaces neither `log.message.timestamp.type` nor a
-    /// timestamp bound, which is the harmless case: phase 0's preflight then
-    /// treats the broker as the Apache default (`CreateTime`) and refuses
-    /// nothing. G-TS's own arms live in
-    /// `crates/logweir/tests/topic_preflight.rs`.
+    /// Guard **G-TS**. An empty map is a broker that surfaces neither
+    /// `log.message.timestamp.type` nor a timestamp bound: phase 0's preflight
+    /// treats it as the Apache default (`CreateTime`) and refuses nothing.
+    /// G-TS's own arms live in `crates/logweir/tests/topic_preflight.rs`.
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
         Ok(BTreeMap::new())
     }
@@ -435,10 +419,10 @@ impl DataEngine for RecordingEngine {
     }
 }
 
-/// **FX-7.** Any `DataEngine` double, made to WRITE its manifest into the
+/// Any `DataEngine` double, made to WRITE its manifest into the
 /// archive when its `backup` succeeds — which is when the real engine writes
-/// it. A backup run now refuses an execution whose set directory already
-/// holds its manifest or a segment, so the manifest can no longer be seeded before the run.
+/// it. A backup run refuses an execution whose set directory already holds
+/// its manifest or a segment, so the manifest cannot be seeded before the run.
 ///
 /// It writes the manifest of `plan.backup_id`, the id the run actually handed
 /// the engine, via [`manifest_of`]: a row that seeded manifests for several
@@ -537,9 +521,7 @@ fn guard_message(err: BackupError) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase −1: the refusals (exit 3)
-// ---------------------------------------------------------------------------
+// Phase −1: the refusals (exit 3).
 
 /// GC18(c) rail 3 / Global Constraint 4, over the SPEC TEXT — so a forbidden
 /// key survives round-tripping through a struct that has no field for it.
@@ -601,7 +583,7 @@ fn backup_run_refuses_a_glob_topic() {
     );
 }
 
-/// **PROD-05.1 at phase −1.** A declared owner this build cannot record — an
+/// **Owners at phase −1.** A declared owner this build cannot record — an
 /// unplanned topic, another kind, an unusable reference — is refused, exit 3,
 /// before anything is dialled; a valid one is not (the control).
 #[test]
@@ -624,7 +606,7 @@ fn backup_run_refuses_a_declared_owner_it_cannot_record() {
             owners("orders", "external", "  "),
             "must be 1 to 256 characters",
         ),
-        // L3 (fix round): one topic declared twice — which of the two the
+        // One topic declared twice: which of the two the
         // receipt would carry is not the operator's to guess.
         (
             format!(
@@ -653,11 +635,11 @@ fn backup_run_refuses_a_declared_owner_it_cannot_record() {
     }
 }
 
-/// **PROD-05.1: owners reach the receipt.** A Strimzi `KafkaTopic` given with
+/// **Owners reach the receipt.** A Strimzi `KafkaTopic` given with
 /// `--kafka-topic-resources` owns its topic, and a declaration in the plan is
 /// laid over it; without the file and the declaration nothing is owned (the
-/// control). And the receipt says WHERE the run looked (`owner_detection`, fix
-/// round M2): nowhere is an empty list — the owner NOT CHECKED — and an empty
+/// control). And the receipt says WHERE the run looked (`owner_detection`):
+/// nowhere is an empty list — the owner NOT CHECKED — and an empty
 /// `topic_owners: []` is the operator saying no topic has one.
 #[test]
 fn declared_and_detected_owners_reach_the_receipts_model() {
@@ -719,7 +701,7 @@ fn declared_and_detected_owners_reach_the_receipts_model() {
     }
 }
 
-/// **C15 at phase −1** (PROD-00.3f, A-C15-1). An `http://` archive endpoint
+/// **C15 at phase −1.** An `http://` archive endpoint
 /// with `allow_http: false` is refused before any client exists: the pinned
 /// engine (0.22.0 and later) would derive plaintext from the scheme and ignore
 /// the rendered `false`. The same spec with `allow_http: true` is the control
@@ -842,9 +824,7 @@ fn the_rail_4_fixture_names_no_source_cluster_id() {
     assert!(parsed.source_cluster_id.is_none());
 }
 
-// ---------------------------------------------------------------------------
-// Phase −1: what is OBSERVED, and what is not a refusal
-// ---------------------------------------------------------------------------
+// Phase −1: what is OBSERVED, and what is not a refusal.
 
 /// The source cluster id is a MEASURED fact. `BackupPlan` carries no field for
 /// it precisely so an adopter-supplied string cannot stand where one belongs,
@@ -914,9 +894,7 @@ fn a_local_refusal_does_not_need_a_reachable_broker() {
     assert!(msg.contains("glob metacharacter"), "{msg}");
 }
 
-// ---------------------------------------------------------------------------
-// The run, the read-back, and I10
-// ---------------------------------------------------------------------------
+// The run, the read-back, and I10.
 
 /// **I10.** The same fixture, run twice: once with `--backup-id-override`, once
 /// without. The override replaces the derived id in the OUTCOME and in the
@@ -962,13 +940,8 @@ fn backup_id_override_replaces_the_derived_id() {
 }
 
 /// `BackupOutcome.source_auth` is filled from `spec.source.auth` through
-/// `AuthSpec::to_render()` (Task 6 replaced Task 4's explicit `match` with that
-/// call and changed nothing else), so Task 5b has a populated field.
-///
-/// A SCRAM spec is RECORDED faithfully here and never downgraded — and since
-/// Task 6 it is also RENDERED. It used to be refused at render time by Task 3's
-/// typed `RenderError::UnsupportedAuthMode` inside `OsoCliEngine::backup`; that
-/// arm now emits the engine's `security:` block, and
+/// `AuthSpec::to_render()`. A SCRAM spec is RECORDED faithfully here and never
+/// downgraded, and RENDERED as the engine's `security:` block;
 /// `e2e/tests/backup_argv.rs::the_real_engine_accepts_the_rendered_sasl_block`
 /// proves the pinned engine loads it with no dropped key and no parse error.
 /// The broader SCRAM acceptance lives in `crates/logweir/tests/auth_binding.rs`.
@@ -1021,12 +994,9 @@ fn backup_run_records_the_source_auth() {
 /// be attesting without ever having seen the bytes.
 #[test]
 fn the_read_back_reports_the_archives_own_counts_window_and_manifest_digest() {
-    // The spec names BOTH topics the archive reports. Task 4's version named
-    // only `orders` while the double described `orders` and `payments`, and
-    // Task 5b's receipt refuses exactly that document: arm 3 requires the
-    // counted set to BE the named set. Naming both keeps every assertion below
-    // unchanged and makes the fixture a run the product could really have
-    // taken; the filtering half — an archive topic this plan did NOT name — is
+    // The spec names BOTH topics the archive reports: the receipt's arm 3
+    // requires the counted set to BE the named set. The filtering half, an
+    // archive topic this plan did NOT name, is
     // `the_receipt_counts_only_the_topics_the_plan_named` below.
     let f = fixture(
         &spec_yaml("mvp-demo", "[orders, payments]", ""),
@@ -1065,11 +1035,9 @@ fn the_read_back_reports_the_archives_own_counts_window_and_manifest_digest() {
     // one topic's, and not the manifest's own declared range.
     //
     // `covered_to_ms` is the newest `end_timestamp` PLUS ONE MILLISECOND,
-    // because the window is half-open and `to_ms` is EXCLUSIVE (interface I22;
-    // `config/crd/backups.yaml` documents `status.windowCovered.toMs` that way
-    // and `BackupReceipt`'s arm 4 requires `from_ms < to_ms` strictly since
-    // Task 5b). The conversion is `phase_run`'s, once, where the window is
-    // measured.
+    // because the window is half-open and `to_ms` is EXCLUSIVE (interface
+    // I22; `BackupReceipt`'s arm 4 requires `from_ms < to_ms` strictly). The
+    // conversion is `phase_run`'s, once, where the window is measured.
     assert_eq!(outcome.covered_from_ms, 1_755_999_000_000);
     assert_eq!(
         outcome.covered_to_ms, 1_756_000_060_001,
@@ -1127,9 +1095,7 @@ fn a_missing_backup_set_after_a_clean_exit_is_operational() {
     assert!(msg.contains("holds no backup set `mvp-demo`"), "{msg}");
 }
 
-// ---------------------------------------------------------------------------
-// The receipt: I6, I7 and Global Constraint 6 (Task 5b)
-// ---------------------------------------------------------------------------
+// The receipt: I6, I7 and Global Constraint 6.
 
 /// The two keys every receipt row expects, for a given run.
 fn expected_keys(backup_id: &str, run_id: &str) -> (String, String) {
@@ -1154,12 +1120,12 @@ fn verify_receipt(dir: &Path, doc: &[u8], sidecar: &[u8], public_pem: &Path) -> 
 ///
 /// One `run_with` against the in-memory store puts EXACTLY THREE objects under
 /// `logweir/backups/<backup_id>/`, all create-only — the execution claim
-/// (RECEIPT-DUP) and the receipt pair — and the pair verifies
-/// under the receipt's own payload type — signature AND all five invariants,
-/// which is what `--payload-type backup-receipt` checks since Task 5b.
+/// and the receipt pair — and the pair verifies under the receipt's own
+/// payload type: signature AND all five invariants, what `--payload-type
+/// backup-receipt` checks.
 ///
-/// In process, with doubles: no `logweir` binary, no subprocess, no broker
-/// (critique A F1). The signing key is the fixture's EPHEMERAL key.
+/// In process, with doubles: no `logweir` binary, no subprocess, no broker.
+/// The signing key is the fixture's EPHEMERAL key.
 #[test]
 fn backup_run_writes_a_signed_receipt() {
     let f = ok_fixture("mvp-demo");
@@ -1174,7 +1140,7 @@ fn backup_run_writes_a_signed_receipt() {
 
     // EXACTLY THREE objects under this run's evidence prefix: the two the
     // outcome names, and the execution claim every run takes before its
-    // engine starts (RECEIPT-DUP) — the one execution-scoped key there. The
+    // engine starts — the one execution-scoped key there. The
     // archive fixture's own manifest lives at `logweir/mvp-demo/…`, outside
     // this prefix, so the count is about the evidence and nothing else.
     let mut written = store.list_keys("logweir/backups/mvp-demo/").unwrap();
@@ -1228,15 +1194,14 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    // PROD-05.1, PROD-03.0 and PROD-01.4a: every receipt this build signs
-    // carries `topic_configuration`, `schema_dependency` and `generations`, so
-    // it is at least 1.6.0.
+    // Every receipt this build signs carries `topic_configuration`,
+    // `schema_dependency` and `generations`, so it is at least 1.6.0.
     assert_format_at_least(
         &receipt.format_version,
         "1.6.0",
         "the receipt carries topic_configuration, schema_dependency and generations",
     );
-    // PROD-01.4a: one `generations` entry per named topic. This seam's reader
+    // One `generations` entry per named topic. This seam's reader
     // reads no topic IDs, so each ID is null and SAYS so (`notRead`) — never
     // a guessed ID, never omitted.
     let generations = receipt
@@ -1270,7 +1235,7 @@ fn backup_run_writes_a_signed_receipt() {
     );
     assert_eq!(model["orders"].entries, None);
     assert_eq!(model["orders"].owner, None);
-    // FX-4: the block is ALWAYS written, one entry per named topic. This
+    // The block is ALWAYS written, one entry per named topic. This
     // file's `StubReader` implements no configuration read at all, so the
     // coverage it can establish is the WEAKEST: `notCaptured` because the read
     // failed — never `captured`, and never absent.
@@ -1592,9 +1557,6 @@ fn a_rotated_signing_file_does_not_change_the_validated_execution_signer() {
 /// runs: a signed receipt must name the engine image it ran (GC7 pins by
 /// digest, and a receipt naming only a version would be satisfied by any
 /// binary claiming it).
-///
-/// Task 4 left this to Task 5b in as many words, because Task 4 signed
-/// nothing.
 #[test]
 fn an_unnamed_engine_is_refused_before_the_backup_runs() {
     for (version, digest, want) in [
@@ -1861,9 +1823,7 @@ fn the_i7_child_runs_one_backup_and_exits() {
     std::process::exit(0);
 }
 
-// ---------------------------------------------------------------------------
-// Structural claims, read off this directory's own source
-// ---------------------------------------------------------------------------
+// Structural claims, read off this directory's own source.
 
 fn backup_src(name: &str) -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1876,7 +1836,7 @@ const BACKUP_SOURCES: [&str; 3] = ["mod.rs", "phase_minus1_admit.rs", "phase_run
 
 /// **GC18(c) rail 2.** The backup path never scopes a deleter, and therefore
 /// can delete nothing: the topic-deleting call in
-/// `crates/logweir-kafka/src/rdkafka_reader.rs:446-460` refuses every name it
+/// `crates/logweir-kafka/src/rdkafka_reader.rs` refuses every name it
 /// is handed until a scratch namespace has been configured, and nothing here
 /// configures one.
 ///
@@ -1903,26 +1863,14 @@ fn the_backup_path_never_scopes_a_deleter() {
 /// `run` builds the handles; `run_with` and everything below it take them as
 /// parameters. Constructing the reader inside `run_with` would put a 20-second
 /// rdkafka metadata timeout into the default suite for every test in this
-/// file (`rdkafka_reader.rs:16`), which is what Global Constraint 22's 15 s
-/// per-test bound and `scripts/time-unit-suite.sh` exist to catch — but a
-/// timing gate reports a symptom, and this reports the cause.
-///
-/// **Widened in fix round 1 (review F-4).** The row as landed inspected
-/// `pub fn run_with`'s body ALONE, and the reviewer's mutant C put
-/// `RdKafkaReader::connect(` inside `execute_with` — the function `run_with`
-/// delegates to — and survived both source-shape guards. The claim is now
-/// stated as it was always meant: **exactly one function in this directory
-/// constructs a client, and it is `pub fn run`.** Every OTHER function's body
-/// in `mod.rs` is checked, not an enumerated three, so a new seam added
-/// tomorrow is covered without editing this list.
+/// file, past Global Constraint 22's 15 s per-test bound. **Exactly one
+/// function in this directory constructs a client, and it is `pub fn run`**:
+/// every OTHER function's body in `mod.rs` is checked, so a new seam is
+/// covered without editing a list.
 #[test]
 fn only_the_wrapper_constructs_a_client() {
-    // THREE since Task 5b: the receipt needs a WRITABLE store, and
-    // `Store::from_url(` is the constructor for one. It is on this list for
-    // the same reason the other two are — it is a dial token in STANDING RULE
-    // 18's own audit — and adding it is what keeps the claim "only the wrapper
-    // constructs a client" true of the evidence handle as well as the reader
-    // and the archive.
+    // `Store::from_url(` too: the receipt needs a WRITABLE store, and that is
+    // its constructor, a dial token in STANDING RULE 18's own audit.
     const CONSTRUCTORS: [&str; 3] = [
         "RdKafkaReader::connect(",
         "Store::read_only_from_url(",
@@ -1957,9 +1905,8 @@ fn only_the_wrapper_constructs_a_client() {
         );
     }
 
-    // Every named entry point below it names neither. `run_with` is the seam
-    // every named test calls; `execute_with` is the seam's outcome-returning
-    // half and is what mutant C reached through.
+    // Every named entry point below it names neither: `run_with` is the seam
+    // every named test calls, and `execute_with` its outcome-returning half.
     for sig in ["pub fn run_with(", "pub fn execute_with("] {
         let body = fn_body(&mod_rs, sig);
         for c in CONSTRUCTORS {
@@ -2040,7 +1987,7 @@ fn fn_body(src: &str, signature: &str) -> String {
     panic!("`{signature}`'s body is unbalanced");
 }
 
-/// **Critique A F23.** `logweir` and the engine run on the HOST in the drill
+/// `logweir` and the engine run on the HOST in the drill
 /// path, so `http://minio:9000` — the compose SERVICE name — does not resolve
 /// there. `examples/drill.yaml:17` and `:69-71` already use
 /// `http://localhost:9000` for both of its storage blocks, and
@@ -2074,12 +2021,10 @@ fn the_shipped_backup_example_is_host_side() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-4: the receipt's configuration capture coverage, end to end through the
+// The receipt's configuration capture coverage, end to end through the
 // backup seam.
-// ---------------------------------------------------------------------------
 
-/// A source reader that implements the FX-4 read: `orders` answers with an
+/// A source reader that implements the configuration read: `orders`
 /// explicit override and a broker-default `LogAppendTime`; `ledger` is
 /// REFUSED, the way `RdKafkaReader` reports a topic whose DescribeConfigs the
 /// principal may not issue.
@@ -2124,12 +2069,12 @@ fn config_reader() -> Reader {
         })
 }
 
-/// **FX-4, the receipt.** The block is signed with the run, one entry per
+/// **The receipt.** The block is signed with the run, one entry per
 /// named topic: the topic whose manifest record equals Logweir's own read is
 /// `captured` with its effective timestamp type AND its source; the topic
 /// whose read was refused is `captureDenied` — even though the engine left its
-/// manifest record EMPTY, which is exactly what used to read as "no
-/// overrides". And the receipt verifies through the shipped reader.
+/// manifest record EMPTY, which must not read as "no overrides". And the
+/// receipt verifies through the shipped reader.
 #[test]
 fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
     let f = fixture(
@@ -2148,9 +2093,8 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
         vec![segment(2, 1_756_000_000_000, 1_756_000_010_000)],
     );
     let engine = RecordingEngine::ok(vec![orders, ledger]);
-    // FX-7: the archive starts EMPTY and the engine double writes the
-    // manifest during the run (`exec`), as the real engine does — a set that
-    // already holds its manifest is refused before the engine.
+    // The archive starts EMPTY and the engine double writes the manifest
+    // during the run (`exec`), as the real engine does.
     let (store, _k, _b) = archive_for("mvp-demo");
 
     let outcome = exec(&f.args, "run-1", &config_reader(), &engine, &store, &store).unwrap();
@@ -2195,11 +2139,9 @@ fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PROD-01.4a: the receipt's topic IDs, end to end through the backup seam.
-// ---------------------------------------------------------------------------
+// The receipt's topic IDs, end to end through the backup seam.
 
-/// A source reader whose topics CHANGE WHEN THE ENGINE RUNS (review M3):
+/// A source reader whose topics CHANGE WHEN THE ENGINE RUNS:
 /// it answers from the state of `engine_ran`, which only [`ChangesTheTopic`]
 /// sets, from inside the engine's `backup`. So a read taken before the engine
 /// sees the old topic, and only a read taken after it sees the new one,
@@ -2307,7 +2249,7 @@ impl ClusterReader for IdReader {
     }
 }
 
-/// **PROD-01.4a, the receipt.** The block is signed with the run, one entry
+/// **The receipt.** The block is signed with the run, one entry
 /// per named topic: each ID read BEFORE the engine and AFTER it, so a topic
 /// recreated while the engine ran carries two different IDs (and the rule
 /// calls the point changed during its capture); a topic that kept its ID
@@ -2340,7 +2282,7 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
     };
 
     let outcome = exec(&f.args, "run-1", &reader, &changing, &store, &store).unwrap();
-    // Review M3: exactly ONE read happened before the engine ran, and the
+    // Exactly ONE read happened before the engine ran, and the
     // other after it — a read hoisted above the engine would make this 2, and
     // would record A after the engine too.
     assert_eq!(
@@ -2437,9 +2379,7 @@ fn the_signed_receipt_records_each_topics_id_before_and_after_the_engine() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-02.1: the empty capture
-// ---------------------------------------------------------------------------
+// The empty capture.
 
 /// A topic the archive mentions with NO segment: what the engine writes for a
 /// source retention emptied (`"partitions": []`, measured on compose).
@@ -2575,7 +2515,7 @@ fn a_partly_empty_source_is_an_ordinary_backup_that_names_its_empty_partitions()
     );
 }
 
-// ------------------------------------------- PROD-02.1 review F1: the budget
+// The marks block's budget.
 
 /// The marks of `pairs` for one topic, as the reader returns them.
 fn marks_of(
@@ -2632,7 +2572,7 @@ fn pairs_at_the_budget() -> Vec<(i64, i64)> {
     pairs
 }
 
-/// **F1.** A block AT the budget is recorded; one byte over it is not, and
+/// A block AT the budget is recorded; one byte over it is not, and
 /// the reason names the budget. Control: the same partitions one byte
 /// smaller are recorded.
 #[test]
@@ -2657,7 +2597,7 @@ fn the_watermarks_block_is_recorded_up_to_its_budget_and_not_past_it() {
     );
 }
 
-/// **F1, what over the budget means for a run.** An ordinary backup over the
+/// **What over the budget means for a run.** An ordinary backup over the
 /// budget is signed WITHOUT the block (coverage not recorded); an empty
 /// capture over it cannot be proved and stays exit 1, naming the budget.
 #[test]
@@ -2713,7 +2653,7 @@ fn over_the_budget_a_backup_records_no_coverage_and_an_empty_capture_stays_exit_
     assert_eq!(outcome.covered_from_ms, outcome.covered_to_ms);
 }
 
-/// **Review P-f.** One partition whose marks read failed leaves the block
+/// One partition whose marks read failed leaves the block
 /// absent, so nothing captured is exit 1 and nothing is signed. Control: the
 /// same partitions all read are an empty capture.
 #[test]

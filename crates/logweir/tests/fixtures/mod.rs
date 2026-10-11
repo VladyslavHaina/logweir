@@ -84,9 +84,7 @@ pub fn backup_facts_orders(partitions: i32) -> BackupSetFacts {
 /// `pruned` ranges instead of none — for a phase that must detect and report
 /// a coverage gap (the backup could not capture a range) or an
 /// operator-pruned range (retention deliberately removed one) rather than
-/// treating the archive as fully covered (2026-09-04 fix review: the
-/// original `backup_facts_orders` hardcoded both to empty, so no consumer
-/// could build either case).
+/// treating the archive as fully covered.
 pub fn backup_facts_orders_with_coverage(
     partitions: i32,
     gaps: &[(i64, i64)],
@@ -154,7 +152,7 @@ pub fn plan() -> RestorePlan {
 /// wrong-cluster or target-equals-source fixture (phase 0's most
 /// safety-critical checks) needs a `TargetState` reporting a DIFFERENT
 /// cluster id than the "allowed" one, which a hardcoded constant makes
-/// impossible (2026-09-04 fix review).
+/// impossible.
 pub fn target_with(
     cluster_id: &str,
     topic: &str,
@@ -210,17 +208,11 @@ impl ClusterReader for FakeReader {
         Ok(self.state.cluster_id.clone())
     }
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        // `TopicMeta::new`, not a bare struct literal: `TopicMeta` carries a
-        // third field, `error: Option<String>` (Task 10), and a literal
-        // naming only `name`/`partitions` does not compile (2026-09-04 fix
-        // review). Every topic built from `TargetState` is reported healthy.
-        // A topic present but unreadable (errored metadata) is deliberately
-        // NOT buildable from this fixture: phase2_target::run fails the
-        // whole read rather than recording a healthy-looking empty
-        // `TopicState` for it (see phases_2_4.rs,
-        // `a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty`,
-        // which exercises that case with its own small `ClusterReader`
-        // double, not through `TargetState`/`FakeReader`).
+        // `TopicMeta::new`, not a struct literal: every topic built from
+        // `TargetState` is reported healthy. A topic present but unreadable is
+        // deliberately NOT buildable here: phase2_target::run fails the whole
+        // read for one (see phases_2_4.rs,
+        // `a_topic_present_but_unreadable_is_never_recorded_as_absent_or_empty`).
         Ok(self
             .state
             .topics
@@ -244,7 +236,7 @@ impl ClusterReader for FakeReader {
             .map(|t| t.configs.clone())
             .unwrap_or_default())
     }
-    /// Task 8 (guard **G-TS**). `TargetState` describes the target's TOPICS
+    /// Guard **G-TS**. `TargetState` describes the target's TOPICS
     /// and carries no broker-wide configuration, so this answers with an empty
     /// map — the harmless case: phase 0's preflight then treats the broker as
     /// the Apache default (`CreateTime`) and refuses nothing. A hostile broker
@@ -281,15 +273,11 @@ impl TopicDeleter for RecordingDeleter {
 
 /// The ONE place this crate's tests spell the `x-original-offset` header value.
 ///
-/// The engine writes it as `record.offset.to_le_bytes()` — an 8-byte
-/// little-endian i64 [U:crates/kafka-backup-core/src/backup/engine.rs:1846] —
-/// and the restore-side injection matches [U:…/restore/helpers.rs:130]. Every
-/// fixture in this tree used to fabricate it as decimal ASCII
-/// (`off.to_string().into_bytes()`), which decodes to `None` and made
-/// `phase7_verify::compare` fall back to the target's own offset. Because those
-/// fixtures also restored from offset 0, the fallback happened to equal the
-/// right answer and the tests kept passing over a decode that was wrong against
-/// every real archive (Task 10, guard **G-HDR**).
+/// The engine writes it as `record.offset.to_le_bytes()`, an 8-byte
+/// little-endian i64 [U:crates/kafka-backup-core/src/backup/engine.rs:1846],
+/// and the restore-side injection matches [U:…/restore/helpers.rs:130].
+/// Decimal ASCII decodes to `None`, and `phase7_verify::compare` would fall
+/// back to the target's own offset (guard **G-HDR**).
 ///
 /// A helper rather than six literals so the encoding cannot drift between
 /// sites; `no_test_fixture_encodes_an_offset_header_as_ascii`
@@ -338,8 +326,7 @@ pub fn matching_pair(n: usize) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) 
 /// Like `matching_pair`, but the consumed record at `mismatch_at` carries a
 /// DIFFERENT value than the one its archive fingerprint was computed from —
 /// so a reconciliation comparison over the result must report exactly one
-/// mismatch, never a false pass (2026-09-04 fix review: `matching_pair` had
-/// no mismatching counterpart, so no consumer could build this case).
+/// mismatch, never a false pass.
 pub fn matching_pair_with_mismatch(
     n: usize,
     mismatch_at: usize,
@@ -356,8 +343,8 @@ pub fn matching_pair_with_mismatch(
 /// requested 09:00:00, approval_validated 09:00:30, restore 09:02:00..09:05:34,
 /// phase 5 duration 212s, verified 09:09:02.
 ///
-/// All six fields per `task-20-addendum.md` ruling A1 — `phase5_duration_ms`
-/// must be `212_000` for `rto_excluding_preflight_seconds == 512 - 212 == 300`.
+/// `phase5_duration_ms` must be `212_000` for
+/// `rto_excluding_preflight_seconds == 512 - 212 == 300` (ruling A1).
 pub fn timeline() -> Timeline {
     Timeline {
         requested_at: ts("2026-09-03T09:00:00Z"),
@@ -472,8 +459,7 @@ pub fn scorecard_pass() -> Scorecard {
 /// comment and `phase7_verify`'s module doc, both of which state the
 /// limitation. This exists so the scoring and rendering layers have a
 /// `Partial`-with-a-reason document to consume; do not read a test built on it
-/// as end-to-end coverage of compacted topics. Task 21c confirmed against a
-/// live cluster that no e2e drill can drive this row.
+/// as end-to-end coverage of compacted topics.
 pub fn verify_outcome_for_compacted_topic() -> logweir::drill::phase7_verify::VerifyOutcome {
     let mut o = base_verify_outcome();
     o.integrity.result = IntegrityResult::Partial;
@@ -508,7 +494,7 @@ fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
             unexpected_divergence: vec![],
             // Phase 7 ran: every topic's configuration parity was assessed.
             not_assessed: Some(vec![]),
-            // ...and, a scratch drill, nothing was left unreconstructed (FX-3).
+            // ...and, a scratch drill, nothing was left unreconstructed.
             not_reconstructed: Some(vec![]),
         },
         records_restored: 75,
@@ -523,15 +509,10 @@ fn base_verify_outcome() -> logweir::drill::phase7_verify::VerifyOutcome {
 /// `a_signing_failure_exits_4_and_uploads_nothing` can assert the bucket was
 /// never touched.
 ///
-/// `puts()` LISTS THE BUCKET rather than replaying intercepted calls, and
-/// `Deref` hands the real `&Store` to `phase8_score::run` / `phase9_teardown::
-/// persist` (whose signatures take `&Store`, exactly as the brief specifies).
-/// The alternative — a wrapper that records calls and delegates — could not
-/// intercept anything here, because `run` receives the inner `&Store` and
-/// calls it directly; a recorded list would then be empty no matter how many
-/// objects were uploaded, and every "nothing was uploaded" assertion would
-/// pass vacuously. Listing the bucket is also the stronger claim: it observes
-/// what is actually stored, not what was attempted.
+/// `puts()` LISTS THE BUCKET rather than replaying intercepted calls: `Deref`
+/// hands the real `&Store` to `phase8_score::run` / `phase9_teardown::persist`,
+/// which call it directly, so a recording wrapper would see nothing and every
+/// "nothing was uploaded" assertion would pass vacuously.
 pub struct RecordingStore {
     pub inner: logweir_engine_oso::storage::Store,
 }
@@ -597,7 +578,7 @@ pub struct ApprovalFixture {
     pub other_pub: PathBuf,
     /// The scorecard-signing key `phase1_approval::verify` compares the
     /// approver's key against, as an ACTUAL `VerifyingKey` — never a
-    /// caller-supplied string (Task 15 fix round 1, review finding F2). Equal
+    /// caller-supplied string. Equal
     /// to the approver's own key in `approval_self`'s fixture, a distinct
     /// generated key otherwise.
     pub signing_key: logweir_evidence::keys::VerifyingKey,
@@ -795,7 +776,7 @@ pub enum Drill {
     /// its archive fingerprint. Reaches the same final gate by the other
     /// route. Scores `fail-integrity`.
     ReconcilesWithMismatches,
-    /// Task 10 fix round 1 (review F5). Every phase RUNS, the sampled canary
+    /// Every phase RUNS, the sampled canary
     /// reconciles 25/25, every objective is met — and the target's high
     /// watermark is `FIXTURE_WINDOW_RECORDS - 100`, so the restored count
     /// falls BELOW the `[500, 500]` the manifest bounds the window at.
@@ -810,7 +791,7 @@ pub enum Drill {
     /// scratch topic is refused by the broker, per topic — `delete_topics`
     /// returns `Ok(vec![("drill-orders", Err("BROKER: TOPIC_DELETION_DISABLED"))])`.
     ///
-    /// This is the T0-11 shape: a drill that verified correctly and could not
+    /// A drill that verified correctly and could not
     /// clean up. It is the PARTIAL failure (`phase9_teardown::run`'s per-topic
     /// branch), deliberately not `score.rs`'s `refusing_deleter()`, whose whole
     /// call fails and exercises the other branch. The deleter a drill uses
@@ -818,20 +799,20 @@ pub enum Drill {
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill
     /// against a refusing deleter without this shape.
     LeavesATopicBehind,
-    /// **PROD-02.1.** The archive set is an empty capture: its manifest names
+    /// The archive set is an empty capture: its manifest names
     /// the topic with no segment. The run is refused by name as soon as the
     /// manifest is read, before phase 2, and creates nothing.
     ArchivesNoSegment,
-    /// FX-44. Phase 0 creates `drill-orders`, then the engine's restore fails
+    /// Phase 0 creates `drill-orders`, then the engine's restore fails
     /// (exit 1, nothing signed). Teardown removes the topic.
     FailsAfterCreation,
-    /// FX-44. The same, and the broker refuses the deletion for
+    /// The same, and the broker refuses the deletion for
     /// authorization (`TopicAuthorizationFailed`).
     FailsAfterCreationAndCannotDelete,
-    /// FX-44. The restore runs, and phase 7 cannot read the target back
+    /// The restore runs, and phase 7 cannot read the target back
     /// (`NotAuthorized`): exit 1 at phase 7, nothing signed.
     FailsAtVerify,
-    /// Task 10b. The normal point-in-time shape, which no fixture expressed:
+    /// The normal point-in-time shape:
     /// the archive's one segment STRADDLES the window's end, so the records it
     /// holds are partly outside the window and the archive can only ever
     /// fingerprint the ones inside.
@@ -842,48 +823,45 @@ pub enum Drill {
     /// those two fingerprints, the target holds exactly those two records, and
     /// every objective is met. A CORRECT restore, end to end.
     ///
-    /// Until Task 10b that drill scored `fail-integrity` and exited 2: phase
-    /// 7's `claimed` summed the WHOLE `record_count` of every OVERLAPPING
-    /// segment, so `min(25, 3) = 3` was demanded of a window that can supply
-    /// 2, and the selection was `Unverified` about its own sample. Measured on
-    /// the real stack (engine 0.21.0 `sha256:8ff5be71…`, Kafka 3.7.1) on all
-    /// three partitions of a three-partition `point_in_time` restore, with
-    /// `integrity.mismatches: 0`.
+    /// Phase 7's `claimed` counts only the records a window can supply, so
+    /// `min(25, 3) = 3` is never demanded of a window that holds 2 (measured
+    /// on the real stack on all three partitions of a three-partition
+    /// `point_in_time` restore, with `integrity.mismatches: 0`).
     ///
     /// It is the only whole-drill shape whose verdict turns on `claimed`
     /// alone: the sample reconciles perfectly, the restored count is inside
     /// the manifest's `[0, 3]` bound, and every objective is met, so a
     /// non-pass here can have come from nothing else.
     SamplesAcrossAStraddlingSegment,
-    /// **FX-8.** `Passes`, with the plan stating `restore.point_in_time` at
+    /// `Passes`, with the plan stating `restore.point_in_time` at
     /// the sample window's end — the same window — and the manifest recording
     /// no `message.timestamp.type` override: a selection by time whose
     /// timestamp type only a bound receipt's coverage can record (the
     /// broker-default arm, the unknown case and the `CreateTime` control).
     SelectsAtAPoint,
-    /// **FX-8.** The archive manifest records `orders` with the topic
-    /// override `message.timestamp.type=LogAppendTime` — PROD-01.1's `lat`
-    /// row (§2.3) — and the plan states `restore.point_in_time` at the sample
+    /// The archive manifest records `orders` with the topic
+    /// override `message.timestamp.type=LogAppendTime`, and the plan states
+    /// `restore.point_in_time` at the sample
     /// window's end and no `restore.time_basis`. The archive holds producer
     /// time only, so the run is refused `PointInTimeByProducerTime` after the
     /// archive is described and before any target topic is created.
     SelectsALogAppendTimeTopicAtAPoint,
-    /// **FX-8.** The same archive and point, with `restore.time_basis:
+    /// The same archive and point, with `restore.time_basis:
     /// producerTime` in the approved plan: every phase runs exactly as
     /// `Passes`, and the signed scorecard lists `orders` under
     /// `source.time_basis.producer_time`.
     SelectsALogAppendTimeTopicByProducerTime,
-    /// **PROD-08.1.** The plan states `sample.coverage: complete`, and the
+    /// The plan states `sample.coverage: complete`, and the
     /// archive's one segment is a REAL KBAK segment holding exactly the 500
     /// records the target holds: phase 7 hashes and decodes it, computes the
     /// expected output from each record's own timestamp, reads all 500
     /// restored records back and signs a covered, exact complete block.
     VerifiesCompletely,
-    /// **PROD-08.1.** `VerifiesCompletely`, with one restored record (the
+    /// `VerifiesCompletely`, with one restored record (the
     /// 300th, far past the 25-record canary a sampled drill reads) changed on
     /// the target: the complete lane counts it and the drill fails.
     VerifiesCompletelyAndFindsAChangedRecord,
-    /// **FX-23.** `Passes` in every respect, except that the engine's offset
+    /// `Passes` in every respect, except that the engine's offset
     /// report names NO entry: the report an engine leaves when a SIGTERM
     /// stopped it before it finished `orders` (it exits 0, and writes the
     /// report from its `Ok` arm). Phase 7 refuses it, `fail-integrity`, on the
@@ -891,16 +869,16 @@ pub enum Drill {
     /// every objective is met, so a non-pass here can only come from the
     /// orchestrator handing phase 7 the report phase 6 read.
     EngineReportLacksTheTopic,
-    /// **PROD-11.1b.** `Passes`, with the approved plan stating a partition
+    /// `Passes`, with the approved plan stating a partition
     /// subset the archive satisfies, `restore.partitions: {orders: [0]}`, from
     /// the archive's floor (`restore.point_in_time: "../<window end>"`): the
     /// run restores and signs format 2.0.0 (the owner's OD-9 (a)).
     StatesAPartitionSelection,
-    /// **PROD-11.1.** `Passes`, with the approved plan stating a window start
+    /// `Passes`, with the approved plan stating a window start
     /// AT the archive's floor (`restore.point_in_time: "<window start>/<window
     /// end>"`): the restore is the archive's, and the run signs the start.
     StatesAWindowStart,
-    /// PROD-15.1: a restore under the ORIGINAL topic names (`orders` →
+    /// A restore under the ORIGINAL topic names (`orders` →
     /// `orders`, `newTopic`, the approver's no-owner statement, and the
     /// COMPLETE verification such a plan requires, over the same real
     /// segment as `VerifiesCompletely`) into a target whose brokers report
@@ -916,41 +894,41 @@ pub enum Drill {
     /// restored record after it is one offset further on — 501 records on
     /// the target for the archive's 500.
     RestoresUnderTheOriginalNamesWhileAProducerWrites,
-    /// **PROD-08.1a.** `VerifiesCompletely`, with the plan's
+    /// `VerifiesCompletely`, with the plan's
     /// `sample.complete_max_records` at 1: the one partition's 500 archived
     /// records are past the bound, so it is NOT compared and the signed block
     /// says `covered: false` — the run the notification and the metrics must
     /// never read as a pass.
     VerifiesCompletelyPastItsBound,
-    /// **PROD-01.1a.** `Passes`, with the archive's segment holding a commit
+    /// `Passes`, with the archive's segment holding a commit
     /// and an abort marker beside a data record: the run is refused
     /// `TransactionMarkersInArchive` before phase 2.
     HoldsTransactionMarkers,
-    /// **PROD-01.1a.** `HoldsTransactionMarkers`, restored in `newTopic` mode.
+    /// `HoldsTransactionMarkers`, restored in `newTopic` mode.
     HoldsTransactionMarkersInANewTopicRestore,
-    /// **PROD-01.1a.** `HoldsTransactionMarkers`, with
+    /// `HoldsTransactionMarkers`, with
     /// `restore.allow_transaction_markers: true` in the approved plan: the run
     /// passes and its scorecard says so.
     HoldsTransactionMarkersAndAllowsThem,
-    /// **PROD-01.1a.** `Passes`, with an archive segment that is not a KBAK
+    /// `Passes`, with an archive segment that is not a KBAK
     /// segment, which the marker check cannot read.
     HoldsAnUnreadableSegment,
-    /// **PROD-01.1a.** `Passes`, with a second segment AFTER the window's end
+    /// `Passes`, with a second segment AFTER the window's end
     /// holding the abort marker of a transaction (the restore does not read
     /// that segment): refused all the same.
     HoldsAMarkerAfterTheWindow,
-    /// **PROD-01.1a.** `Passes`, with two segments after the window's end that
+    /// `Passes`, with two segments after the window's end that
     /// the store does not hold or that are not KBAK segments: the run is not
     /// refused, and its scorecard says the check could not read them.
     HoldsUnreadableSegmentsAfterTheWindow,
-    /// **PROD-01.1a (review R-f).** `StatesAWindowStart`, with a segment
+    /// `StatesAWindowStart`, with a segment
     /// whose last record is an hour BEFORE the stated start holding an abort
     /// marker: neither the engine nor the marker check reads it, so the run
     /// is not refused.
     HoldsAMarkerBeforeAStatedStart,
 }
 
-/// **PROD-01.1a.** The fixture segment's records: one data record and, for
+/// The fixture segment's records: one data record and, for
 /// the marker shapes, a commit and an abort marker as the engine archives
 /// them (key `00 00 00 0t`, a 6-byte `EndTransactionMarker` value, the two
 /// lineage headers).
@@ -985,11 +963,11 @@ fn archived_records(shape: Drill, ts_ms: i64) -> Vec<ConsumedRecord> {
     out
 }
 
-/// PROD-15.1: where `RestoresUnderTheOriginalNamesWhileAProducerWrites` puts
+/// Where `RestoresUnderTheOriginalNamesWhileAProducerWrites` puts
 /// its one foreign record on the target.
 pub const FOREIGN_RECORD_TARGET_OFFSET: i64 = 300;
 
-/// **PROD-08.1.** CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
+/// CRC-32 (IEEE, reflected), bitwise: the KBAK footer's
 /// checksum, computed here without the decoder's crate.
 pub fn crc32_ieee(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
@@ -1003,7 +981,7 @@ pub fn crc32_ieee(bytes: &[u8]) -> u32 {
     !crc
 }
 
-/// **PROD-08.1.** An uncompressed KBAK v1 segment holding `records` in
+/// An uncompressed KBAK v1 segment holding `records` in
 /// order, encoded from the layout `segment/format.rs:18-46` documents
 /// (`crates/logweir-engine-oso/src/kbak.rs` reads it): a 32-byte header,
 /// length-prefixed records, a CRC-32 and the end magic. Each record is
@@ -1065,7 +1043,7 @@ pub const FIXTURE_SAMPLE_RECORDS: usize = 25;
 /// the canary size, so the two `records_expected` figures cannot be confused.
 pub const FIXTURE_WINDOW_RECORDS: i64 = 500;
 
-/// Task 10b, `Drill::SamplesAcrossAStraddlingSegment`. How far past
+/// `Drill::SamplesAcrossAStraddlingSegment`: how far past
 /// `FIXTURE_WINDOW_END` the straddling segment reaches: one hour, so the
 /// segment unambiguously CUTS ACROSS the window's end rather than touching it
 /// (a segment ending exactly on the end is WHOLLY INSIDE — both bounds are
@@ -1169,7 +1147,7 @@ pub fn orchestrator_facts(segment_bytes: &[u8]) -> BackupSetFacts {
     }
 }
 
-/// Task 10b. `orchestrator_facts` with its one segment moved so it STRADDLES
+/// `orchestrator_facts` with its one segment moved so it STRADDLES
 /// the window's end: `[FIXTURE_WINDOW_START, FIXTURE_WINDOW_END +
 /// STRADDLER_OVERHANG_MS]`, holding `STRADDLER_SEGMENT_RECORDS` of which the
 /// window contains `STRADDLER_IN_WINDOW_RECORDS`.
@@ -1216,10 +1194,10 @@ pub struct FixtureEngine {
     /// Optional replacement written during `restore`, after signer validation
     /// and before scorecard/receipt/teardown persistence.
     pub signing_key_rotation: Option<(PathBuf, String)>,
-    /// FX-23: what `restore` reports the engine's offset report said.
+    /// What `restore` reports the engine's offset report said.
     /// `Absent` (no report) unless a test moves it.
     pub engine_report: logweir_core::engine::EngineReport,
-    /// FX-44: `restore` fails as the engine does when it cannot produce.
+    /// `restore` fails as the engine does when it cannot produce.
     pub fails_restore: bool,
 }
 
@@ -1281,7 +1259,7 @@ impl DataEngine for FixtureEngine {
             }],
             header_preflight_honoured: self.header_honoured,
             unknown_key_warnings: self.preflight_unknown_keys.clone(),
-            // T0-14: this double never renders a `restore.yaml`, so it has no
+            // This double never renders a `restore.yaml`, so it has no
             // real digest to report; the all-zero placeholder says exactly
             // that. The real seam is pinned in
             // `crates/logweir-engine-oso/tests/render_equality.rs`.
@@ -1306,7 +1284,7 @@ impl DataEngine for FixtureEngine {
         }
         let started_at = Utc::now();
         // The offset-mapping report, written EXACTLY where the real engine
-        // writes it (Task 9b): from the `Ok` arm of a completed restore, to
+        // writes it: from the `Ok` arm of a completed restore, to
         // `plan.offset_report`, with a bare write whose failure it does not
         // escalate [U:crates/kafka-backup-core/src/restore/engine.rs:417-427,
         // :1382-1388]. Without this the double would make phase 8's upload
@@ -1344,24 +1322,22 @@ pub struct FixtureClient {
     pub records: BTreeMap<String, Vec<ConsumedRecord>>,
     pub deleted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Every `NewTopicSpec` the drill's creation step handed to `TopicCreator`,
-    /// in order (Task 8, guard **G-TS**).
+    /// in order (guard **G-TS**).
     ///
     /// `Arc`, not a bare `Mutex`, because the client is moved into
     /// `Ctx::client` behind `Box<dyn TargetClient>` and is unreachable from a
-    /// test afterwards — the same reason `FixtureEngine::fingerprint_calls` is
-    /// shared. `fixtures::created_topics` reads it back, and
-    /// `topic_preflight.rs::a_blocked_preflight_creates_no_target_topic` is
-    /// what needs it: the ORDER of the creation step against phase 5's verdict
-    /// is otherwise pinned only behind Docker (Task 8 review, finding 2).
+    /// test afterwards. `fixtures::created_topics` reads it back, and
+    /// `topic_preflight.rs::a_blocked_preflight_creates_no_target_topic`
+    /// needs it: the ORDER of the creation step against phase 5's verdict.
     pub created: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
     /// Topic names whose deletion the broker refuses, and the error string it
     /// refuses with. Empty for every shape but `Drill::LeavesATopicBehind`, so
     /// every other fixture drill tears down exactly as it always did.
     pub refuses_deletion_of: BTreeMap<String, String>,
     /// What DescribeConfigs answers for the broker. Empty — the Apache
-    /// default — for every shape but PROD-15.1's original-name ones.
+    /// default — for every shape but the original-name ones.
     pub broker: BTreeMap<String, String>,
-    /// FX-44: every record read is refused for authorization.
+    /// Every record read is refused for authorization.
     pub refuses_reads: bool,
 }
 
@@ -1370,15 +1346,11 @@ impl ClusterReader for FixtureClient {
         Ok(self.cluster_id.clone())
     }
     /// The topics this target STARTED with, plus every topic the drill has
-    /// created so far (Task 8, guard **G-TS**).
+    /// created so far (guard **G-TS**).
     ///
-    /// The second half is not decoration. Phase 0 refuses a plan whose mapped
-    /// target topics already exist (spec §6.1), so a fixture target that lists
-    /// `drill-orders` from the start is a target every fixture drill is now
-    /// refused against. But a double that went on claiming the topic does not
-    /// exist *after* Logweir created it would be lying in the other direction,
-    /// and phase 7 and phase 9 both read the target after creation. So the
-    /// answer is the honest one: absent at phase 0, present from phase 6.
+    /// Phase 0 refuses a plan whose mapped target topics already exist (spec
+    /// §6.1), and phases 7 and 9 read the target after creation, so the topic
+    /// is absent at phase 0 and present from phase 6.
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
         let mut out = self.topics.clone();
         for spec in self.created.lock().unwrap().iter() {
@@ -1394,9 +1366,8 @@ impl ClusterReader for FixtureClient {
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
         Ok(self.configs.get(topic).cloned().unwrap_or_default())
     }
-    /// Task 8 (guard **G-TS**). Empty: this fixture's broker is the Apache
-    /// default, so phase 0's preflight observes nothing hostile, refuses
-    /// nothing, and the fixture drill still reaches phase 9 exactly as before.
+    /// Guard **G-TS**. Empty: this fixture's broker is the Apache default, so
+    /// phase 0's preflight observes nothing hostile and refuses nothing.
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
         Ok(self.broker.clone())
     }
@@ -1424,7 +1395,7 @@ impl ClusterReader for FixtureClient {
     }
 }
 
-/// Task 8, guard **G-TS**. `TargetClient` now requires a `TopicCreator`
+/// Guard **G-TS**. `TargetClient` requires a `TopicCreator`
 /// because the rendered `restore.yaml` says `create_topics: false`: the target
 /// topics are Logweir's to create. Every `NewTopicSpec` is RECORDED so a test
 /// can assert the exact ordered `configs` vector the drill asked for, and every
@@ -1464,7 +1435,7 @@ impl TopicDeleter for FixtureClient {
 ///
 /// `logweir::drill::execute` (the public entry the CLI calls) constructs the
 /// real `Ctx` itself and therefore needs a live broker and the extracted
-/// engine binary — Task 21c's territory. `execute_with` is the same phase
+/// engine binary. `execute_with` is the same phase
 /// sequence over a `Ctx` the caller supplies, which is what makes the
 /// score-before-sign ordering testable at all here.
 pub struct OrchestratorFixture {
@@ -1480,9 +1451,9 @@ pub struct OrchestratorFixture {
     pub fingerprint_calls: std::sync::Arc<std::sync::Mutex<Vec<SampleSelection>>>,
     /// Shared with the `FixtureClient` inside `ctx`, which is otherwise
     /// unreachable behind `Box<dyn TargetClient>` — every `NewTopicSpec` the
-    /// drill's creation step asked for, in order (Task 8, guard **G-TS**).
+    /// drill's creation step asked for, in order (guard **G-TS**).
     pub created_topics: std::sync::Arc<std::sync::Mutex<Vec<logweir_kafka::reader::NewTopicSpec>>>,
-    /// Every name the drill handed to the target client's deleter (FX-44).
+    /// Every name the drill handed to the target client's deleter.
     pub deleted_topics: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Present only for `Drill::RotatesSigningKey`.
     pub replacement_signing_key: Option<logweir_evidence::keys::VerifyingKey>,
@@ -1500,9 +1471,9 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let window_end_ms = ts(FIXTURE_WINDOW_END).timestamp_millis();
 
     // ---- the spec, and the approval signed over its exact bytes ----
-    // FX-8: the three time-basis shapes state a point in time at the sample
-    // window's end — the window the other shapes restore — and one of them
-    // the opt-in. Every other shape's spec bytes are what they were.
+    // The three time-basis shapes state a point in time at the sample
+    // window's end, the window the other shapes restore, and one of them the
+    // opt-in.
     let restore_block = match shape {
         Drill::SelectsAtAPoint | Drill::SelectsALogAppendTimeTopicAtAPoint => {
             format!("restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n")
@@ -1510,8 +1481,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         Drill::SelectsALogAppendTimeTopicByProducerTime => format!(
             "restore:\n  point_in_time: \"{FIXTURE_WINDOW_END}\"\n  time_basis: producerTime\n"
         ),
-        // PROD-11.1: a selection the fixture archive satisfies.
-        // PROD-11.1b: a subset is written beside the open-start interval.
+        // A selection the fixture archive satisfies; a subset is written
+        // beside the open-start interval.
         Drill::StatesAPartitionSelection => format!(
             "restore:\n  point_in_time: \"../{FIXTURE_WINDOW_END}\"\n  partitions:\n    orders: [0]\n"
         ),
@@ -1523,12 +1494,10 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         }
         _ => String::new(),
     };
-    // PROD-08.1: the complete shapes ask for complete coverage; every other
-    // shape's spec bytes are what they were.
-    //
-    // PROD-15.1: so do the original-name shapes — a restore under the
-    // original topic names REQUIRES complete verification (a sampled one is
-    // refused by name at phase 0), so their archive is the real segment too.
+    // The complete shapes ask for complete coverage, and so do the
+    // original-name shapes: a restore under the original topic names
+    // REQUIRES complete verification (a sampled one is refused by name at
+    // phase 0), so their archive is the real segment too.
     let completely = matches!(
         shape,
         Drill::VerifiesCompletely
@@ -1545,7 +1514,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     } else {
         ""
     };
-    // PROD-15.1: the original-name shapes restore `orders` as `orders`.
+    // The original-name shapes restore `orders` as `orders`.
     let original = matches!(
         shape,
         Drill::RestoresUnderTheOriginalNames
@@ -1644,7 +1613,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     .unwrap();
 
     // ---- the archive: one segment, stored under its own manifest key ----
-    // PROD-01.1a: a real KBAK segment, because the runner reads every
+    // A real KBAK segment, because the runner reads every
     // restored segment for transaction markers before phase 2. The sampled
     // shapes' fingerprints still come from the engine double.
     let segment_bytes = if shape == Drill::HoldsAnUnreadableSegment {
@@ -1663,7 +1632,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     } else {
         orchestrator_facts(&segment_bytes)
     };
-    // PROD-01.1a: segments AFTER the window's end, which the restore does not
+    // Segments AFTER the window's end, which the restore does not
     // read and the marker check does.
     let after_window = |n: i64, key: &str, bytes: &[u8]| SegmentFacts {
         key: key.into(),
@@ -1705,7 +1674,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         segs.push(after_window(0, absent, b""));
         segs.push(after_window(1, garbage, b"not a segment"));
     }
-    // PROD-02.1: an empty capture's manifest — the topic, no segment.
+    // An empty capture's manifest — the topic, no segment.
     if shape == Drill::ArchivesNoSegment {
         for t in &mut facts.topics {
             for part in &mut t.partitions {
@@ -1713,8 +1682,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             }
         }
     }
-    // FX-8: the manifest's topic override, exactly as the engine records it
-    // for a source topic that set one (PROD-01.1 §2.3).
+    // The manifest's topic override, exactly as the engine records it for
+    // a source topic that set one.
     if matches!(
         shape,
         Drill::SelectsALogAppendTimeTopicAtAPoint | Drill::SelectsALogAppendTimeTopicByProducerTime
@@ -1733,7 +1702,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     } else {
         window_end_ms
     };
-    // Task 10b. The straddling shape offers exactly the records the window
+    // The straddling shape offers exactly the records the window
     // holds — `STRADDLER_IN_WINDOW_RECORDS`, not `FIXTURE_SAMPLE_RECORDS` —
     // because that is all `OsoCliEngine::fingerprints` can return for a window
     // whose end falls inside a segment. The spec still asks for 25 per
@@ -1751,39 +1720,22 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // mismatch, and `roll_up` must turn that into `IntegrityResult::Fail`.
         records[0].value = Some(b"tampered".to_vec());
     }
-    // Task 10, guard **G-WIN** second half: the rest of the restored window.
+    // Guard **G-WIN** second half: the rest of the restored window. A healthy
+    // restore of a 500-record window puts 500 records on the target, so
+    // offsets 25..500 are filled in behind the canary. They are NOT part of
+    // the archive fingerprint set and never reach `compare`; they serve the
+    // two reads of the WHOLE topic, `check_restored_count`'s high-watermark
+    // sum and `newest_ts`, which consumes at `hi - 1`.
     //
-    // The manifest says this window holds `FIXTURE_WINDOW_RECORDS` (500)
-    // records, and until Task 10 this fixture's target held only the
-    // `FIXTURE_SAMPLE_RECORDS` (25) the canary reads back — a target holding
-    // 5 % of the window the manifest claims, signed as `Drill::Passes`,
-    // because nothing in phase 7 compared a count against the manifest. It is
-    // the same fixture-invisible false pass G-HDR closes on the header
-    // encoding, one field over, and the fixture is what was wrong: a healthy
-    // restore of a 500-record window puts 500 records on the target.
+    // Their timestamps run BACK from `newest_ms` in the canary's one-second
+    // cadence, so offset 499 lands exactly on `newest_ms`. The canary's own
+    // timestamps are left untouched (every archive fingerprint folds its
+    // record's timestamp in), so offsets 24 and 499 share `newest_ms`; no
+    // assertion depends on the target's timestamps being monotonic in offset.
     //
-    // So offsets 25..500 are filled in behind the canary. They are NOT part of
-    // the archive fingerprint set and never reach `compare`, which is handed
-    // exactly `consume_range(target, partition, 0, sel.count)` = the first 25;
-    // what they are for is the two reads that look at the WHOLE topic —
-    // `check_restored_count`'s high-watermark sum, and `newest_ts`, which
-    // consumes at `hi - 1` and therefore needs a real record at offset 499.
-    //
-    // Their timestamps run BACK from `newest_ms` in the same one-second cadence
-    // the canary uses, so offset 499 lands exactly on `newest_ms` and the
-    // measured RPO is bit-for-bit what it was before this block existed. The
-    // canary's own 25 timestamps are deliberately left untouched — every
-    // archive fingerprint folds its record's timestamp in, so moving them would
-    // rewrite the archive side of a comparison this fixture is not about — with
-    // the one visible consequence that offsets 24 and 499 share `newest_ms`.
-    // `newest_ts` reads `hi - 1` only, so it reads 499's, and no assertion in
-    // this tree depends on the target's timestamps being monotonic in offset.
-    //
-    // Task 10b's shape is the exception and has no filler at all: its manifest
-    // segment claims 3 records, the window holds 2, and a target holding 500
-    // would be outside `expected_restored_count`'s `[0, 3]` bound. Its two
-    // canary records ARE the whole restored topic, so `newest_ts`'s read at
-    // `hi - 1` = offset 1 lands on the newest of them.
+    // The straddling shape has no filler: its manifest segment claims 3
+    // records, the window holds 2, and its two canary records ARE the whole
+    // restored topic.
     if !straddles {
         records.extend(
             (FIXTURE_SAMPLE_RECORDS as i64..FIXTURE_WINDOW_RECORDS).map(|off| {
@@ -1800,7 +1752,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         );
     }
 
-    // PROD-08.1: the complete shapes' archive is a REAL segment of exactly
+    // The complete shapes' archive is a REAL segment of exactly
     // the records the target holds, under its own key, and the manifest
     // describes it: its sha256, its 500 records, its offsets. Phase 7's
     // complete lane decodes it and compares every restored record with it.
@@ -1817,7 +1769,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         if shape == Drill::VerifiesCompletelyAndFindsAChangedRecord {
             records[300].value = Some(b"changed on the target".to_vec());
         }
-        // PROD-15.1: the foreign record. The ARCHIVE is the segment built
+        // The foreign record. The ARCHIVE is the segment built
         // above and is unchanged; only the TARGET gains a record, where a
         // live producer's would land — between two restored ones.
         if shape == Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites {
@@ -1873,7 +1825,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // drill verified correctly and could not clean up" the single variable.
         Drill::Passes
         | Drill::RotatesSigningKey
-        // PROD-15.1. The engine is the passing one: the variables are the
+        // The engine is the passing one: the variables are the
         // plan's target block, the approval's subject and the broker's
         // auto-creation answer.
         | Drill::RestoresUnderTheOriginalNames
@@ -1885,26 +1837,26 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         // The engine is byte-for-byte the passing one: the whole variable is
         // the TARGET's high watermark below.
         | Drill::RestoresOutsideTheManifestBound
-        // Task 10b. The engine is the passing one too: the whole variable is
+        // The engine is the passing one too: the whole variable is
         // the MANIFEST's one segment (moved to straddle the window's end by
         // `orchestrator_facts_straddling`) and the fingerprint set it can
         // therefore offer.
         | Drill::SamplesAcrossAStraddlingSegment
-        // FX-8. The engine is the passing one: the variables are the plan's
+        // The engine is the passing one: the variables are the plan's
         // `restore` block and the MANIFEST's topic override above.
         | Drill::SelectsAtAPoint
         | Drill::SelectsALogAppendTimeTopicAtAPoint
         | Drill::SelectsALogAppendTimeTopicByProducerTime
-        // PROD-08.1. The engine is the passing one: the variables are the
+        // The engine is the passing one: the variables are the
         // plan's coverage, the real segment and the one changed record.
         | Drill::VerifiesCompletely
         | Drill::VerifiesCompletelyAndFindsAChangedRecord
-        // PROD-11.1. The engine is the passing one: the variable is the
+        // The engine is the passing one: the variable is the
         // plan's replay selection (`restore.partitions`, the window start).
         | Drill::StatesAPartitionSelection
         | Drill::StatesAWindowStart
         | Drill::VerifiesCompletelyPastItsBound
-        // PROD-01.1a. The engine is the passing one: the variables are the
+        // The engine is the passing one: the variables are the
         // archive's segment and the plan's override or target mode.
         | Drill::HoldsTransactionMarkers
         | Drill::HoldsTransactionMarkersInANewTopicRestore
@@ -1919,49 +1871,35 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     }
 
     // ---- the target cluster ----
-    // Task 10, guard **G-WIN** second half. `FIXTURE_WINDOW_RECORDS`, not
-    // `FIXTURE_SAMPLE_RECORDS`: the high watermark is a property of the TOPIC,
-    // and a scratch topic Logweir created in this run starts at offset 0, so
-    // its watermark is its record count — which for a healthy restore of this
-    // window is the 500 the manifest claims, never the 25 the canary happens
-    // to read back. `phase7_verify::check_restored_count` compares this sum
-    // against the manifest's own bound and refuses the mismatch, so the old
-    // value now makes every fixture drill `fail-integrity`. That is the check
-    // working, not the check being wrong.
+    // Guard **G-WIN** second half. The high watermark is a property of the
+    // TOPIC, and a scratch topic Logweir created starts at offset 0, so its
+    // watermark is its record count: for a healthy restore of this window the
+    // 500 the manifest claims, which `phase7_verify::check_restored_count`
+    // holds against the manifest's own bound.
     //
-    // `RestoresOutsideTheManifestBound` is the same window 100 records short:
-    // BELOW the manifest's own `[500, 500]`, which is what
-    // `check_restored_count` refuses. 100 and not 1 so the failure text
-    // carries a figure nothing else in this fixture could have produced, and
-    // BELOW rather than above because a restore that lost records is the
-    // shape an operator meets. The target still HOLDS all 500 records, so the
-    // canary's 25 still reconcile and `newest_ts` — which consumes at
-    // `hi - 1` = 399 — still reads a real record; the measured RPO is then
-    // 100 s against the spec's 300 s objective, i.e. still MET, so the
-    // `fail-integrity` this shape scores can only have come from the count.
+    // `RestoresOutsideTheManifestBound` is 100 records short, BELOW the
+    // manifest's `[500, 500]`: a figure nothing else in this fixture could
+    // produce. The target still HOLDS all 500 records, so the canary's 25
+    // reconcile and `newest_ts` (at `hi - 1` = 399) reads a real record; the
+    // measured RPO is 100 s against a 300 s objective, still MET, so the
+    // `fail-integrity` can only come from the count.
     //
-    // Task 10b. `SamplesAcrossAStraddlingSegment` holds exactly the
-    // `STRADDLER_IN_WINDOW_RECORDS` (2) the window contains. The manifest's
-    // one straddling segment puts `expected_restored_count` at `[0, 3]` —
-    // `lower` is 0 because no segment is WHOLLY inside and `upper` is the
-    // straddler's 3 — so 2 is inside the bound and `check_restored_count`
-    // contributes nothing to this drill's verdict either.
+    // `SamplesAcrossAStraddlingSegment` holds the 2 records the window
+    // contains, inside the straddler's `[0, 3]` bound.
     let restored_hi = match shape {
         Drill::RestoresNothing => 0,
         Drill::RestoresOutsideTheManifestBound => FIXTURE_WINDOW_RECORDS - 100,
         Drill::SamplesAcrossAStraddlingSegment => STRADDLER_IN_WINDOW_RECORDS as i64,
-        // PROD-15.1: the archive's 500 and the live producer's one.
+        // The archive's 500 and the live producer's one.
         Drill::RestoresUnderTheOriginalNamesWhileAProducerWrites => FIXTURE_WINDOW_RECORDS + 1,
         _ => FIXTURE_WINDOW_RECORDS,
     };
     let client = FixtureClient {
         cluster_id: FIXTURE_CLUSTER_ID.into(),
-        // The MARKER only. `drill-orders` was here until Task 8's fix round 1:
-        // phase 0 refuses a plan whose mapped target topics already exist
-        // (spec §6.1), so a target that starts with `drill-orders` present is
-        // refused at phase 0 and no fixture drill would reach phase 1. It
-        // appears in `list_topics` from the moment the drill creates it, which
-        // is what phases 7 and 9 read.
+        // The MARKER only: phase 0 refuses a plan whose mapped target topics
+        // already exist (spec §6.1). `drill-orders` appears in `list_topics`
+        // from the moment the drill creates it, which is what phases 7 and 9
+        // read.
         topics: if original {
             Vec::new()
         } else {
@@ -1977,7 +1915,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         .into_iter()
         .collect(),
         records: [(target_topic.to_string(), records)].into_iter().collect(),
-        // PROD-15.1: the original-name shapes' target refuses auto-creation on
+        // The original-name shapes' target refuses auto-creation on
         // its one broker; every other shape keeps the empty Apache default.
         broker: if original {
             target_configs(&[("auto.create.topics.enable", "false")])
@@ -1987,7 +1925,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
         deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         refuses_reads: shape == Drill::FailsAtVerify,
         created: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        // T0-11. The one shape whose broker refuses a deletion; every other
+        // The one shape whose broker refuses a deletion; every other
         // shape gets an empty map and the deleter it always had.
         refuses_deletion_of: if shape == Drill::LeavesATopicBehind {
             [(
@@ -2033,20 +1971,19 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // `None` — so the plan's DEFAULT applies and the offset report
             // lands beside the checkpoint in this run's own workdir, which is
             // the directory `execute_with_outcome` creates and the one
-            // `FixtureEngine::restore` writes into (Task 9b).
+            // `FixtureEngine::restore` writes into.
             offset_report_out: None,
-            // NOT PINNED. The orchestrator fixture drives the whole phase
-            // sequence, and pinning here would put a guard ahead of phase 0 in
-            // ~40 tests that are about other things entirely. Task 22's own
-            // tests call `admit_pinned_approver_key_id` directly and drive the
-            // pinned path through the real binary.
+            // NOT PINNED: pinning here would put a guard ahead of phase 0 in
+            // every test that drives the whole phase sequence. The pinned path
+            // is driven through `admit_pinned_approver_key_id` and the real
+            // binary.
             approver_key_ids: Vec::new(),
             // Execution contract v2's optional bundle members; absent is
             // every existing caller's shape (D3 §4.3, D0 bundle v2).
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
-            // PROD-15.1: no KafkaTopic resources; a row that drives an
+            // No KafkaTopic resources; a row that drives an
             // original-name restore states its owners in the plan.
             kafka_topic_resources: None,
             strimzi_cluster: None,
@@ -2058,23 +1995,23 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             allowed,
             client: Box::new(client),
             engine: Box::new(engine),
-            // A double has no binary to ask for its version (PROD-00.2 L4).
+            // A double has no binary to ask for its version.
             engine_binary: None,
             archive,
             store: logweir_engine_oso::storage::Store::in_memory("logweir"),
             // No projected private CA: the fixture's target is a double, and a
-            // CA path with no TLS transport is refused by `AuthRender` anyway
-            // (PLAT-07.1). `tests/tls_ca.rs` drives the other value.
+            // CA path with no TLS transport is refused by `AuthRender` anyway.
+            // `tests/tls_ca.rs` drives the other value.
             target_tls_ca_file: None,
             target_client_certificate: None,
-            // PROD-15.1: nothing known about the source or owners; an
+            // Nothing known about the source or owners; an
             // original-name row sets what it needs.
             original_name: logweir::drill::phase0_admit::OriginalNameInputs::default(),
-            // FX-4: an unbound plan's coverage — UNKNOWN for every topic.
-            // `tests/config_coverage_drill.rs` drives the captured value.
+            // An unbound plan's coverage: UNKNOWN for every topic.
+            // `tests/orchestrator.rs` drives the captured value.
             source_config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
-            // FX-16: an unbound plan has no set to compare the restored one
-            // with. `tests/orchestrator.rs`'s FX-16 rows set it.
+            // An unbound plan has no set to compare the restored one with;
+            // `tests/orchestrator.rs`'s bound-set rows set it.
             bound_set: None,
         },
         segment_bytes,
@@ -2099,7 +2036,7 @@ pub fn fingerprint_calls(f: &OrchestratorFixture) -> Vec<SampleSelection> {
 /// Every `NewTopicSpec` the drill's creation step handed to the target client,
 /// in order, so a test can assert WHEN in the phase sequence it ran — an empty
 /// list after a run that ended at phase 5 is the assertion that creation
-/// happens after phase 5's verdict (Task 8, guard **G-TS**). Reaches through
+/// happens after phase 5's verdict (guard **G-TS**). Reaches through
 /// `Ctx::client`'s trait object the same way `fingerprint_calls` reaches
 /// through `Ctx::engine`'s.
 pub fn created_topics(f: &OrchestratorFixture) -> Vec<logweir_kafka::reader::NewTopicSpec> {
