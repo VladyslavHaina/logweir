@@ -2410,7 +2410,8 @@ remedy is a new `Restore`.
 **Scope:** `crates/weirkeeper/tests/runner_resources.rs`, `restore_controller.rs` and `status_mapping.rs` with mutants; the CRD, refusal and Job-bytes rows are the PoC upgrade's.
 **Rollback:** an older controller ignores the field again; a `Restore` this
 build refused stays `Failed`. A `RehearsalSchedule` this build skipped fires
-again uncapped under the older controller: suspend it first if it must not run.
+again uncapped under the older controller: suspend it (`spec.suspend: true`, the
+one mutable field) first if it must not run.
 
 #### 22. A console restore asks for a replication factor it can explain, and keeps its topic subset (FX-5)
 
