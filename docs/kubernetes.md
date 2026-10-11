@@ -1620,7 +1620,11 @@ lists at most 3 660 day shards; a walk that hits that bound says
 
 A `Full` rescan pages `logweir/catalog/v1/points/` and *does* resume strictly
 after `status.cursor.rescanStartAfter`. It reports no cursor once it finishes —
-and it always reports one when it has not, whatever stopped it.
+and it always reports one when it has not, whatever stopped it. A resumed
+rescan publishes only the points after the cursor: `status.truncated` is
+`true`, and the `Synced` message says `It is a partial view: <n> point(s) from
+a resumed rescan; the archive holds more`. A walk that did not finish says
+`… from a walk that did not finish; the archive may hold more`.
 
 **The buckets sum to `catalog-counts.total`, on every walk, by construction.** A
 point is begun only when all four of its objects — the record, the receipt, its
@@ -1652,15 +1656,17 @@ listed by no entry. Now:
   `backupId`, `runId` and `receiptKey` are empty, the instants are 0, and
   there is no window, location or topic list. It is never `Available`, so
   never selectable, and nothing reads anything else for it;
-- the view is `viewLimit` entries. When it is full, a point with a record
-  (`Available` or not) takes the place only of an entry whose RECORD gave no
-  facts and that only
-  failed to be read (the record is missing, did not answer, is over its
-  bound, or is of a newer format). It never takes the place of an entry with
-  a record, whatever its state (such an entry may name a backup set that
-  retention keeps for it, and carries the signature and `Conflict` verdicts),
-  nor of bytes that are not a record. The counts name every point, and
-  `status.truncated` says the view is a window;
+- the view is the newest `viewLimit` points with a record, by recovery
+  point, in either `mode` (FX-50; a tie goes to the smaller point id). The
+  walk keeps at most `viewLimit` entries. When the view is full, a point with
+  a record (`Available` or not) first takes the place of an entry whose
+  RECORD gave no facts and that only failed to be read (the record is
+  missing, did not answer, is over its bound, or is of a newer format), and
+  otherwise the place of the oldest listed point with a record, when it is
+  newer. So a backup set's newer receipt is listed whenever its older one
+  is, which retention relies on. Bytes that are not a record keep their
+  place. The counts name every point, and `status.truncated` says the view
+  is a window;
 - a point whose record read did not answer leaves the walk incomplete
   (`catalog-cursor.complete: false`, `catalogRecordsUnread` on the check
   row) until a sync reads that record, because its entry names no set;
