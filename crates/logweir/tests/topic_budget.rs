@@ -1,4 +1,4 @@
-//! FX-33: the topic budget, measured, and the refusals that keep a backup
+//! The topic budget, measured, and the refusals that keep a backup
 //! inside it.
 //!
 //! `logweir_core::topic_budget` states how many topics one backup may name
@@ -41,9 +41,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-// ---------------------------------------------------------------------------
-// Measuring
-// ---------------------------------------------------------------------------
+// Measuring.
 
 fn det(receipt: &BackupReceipt) -> Vec<u8> {
     logweir_core::det_json::to_deterministic_json(receipt).expect("a receipt serialises")
@@ -180,9 +178,7 @@ fn budgeted_shapes() -> Vec<(&'static str, ReferenceShape, bool)> {
     ]
 }
 
-// ---------------------------------------------------------------------------
-// The budget
-// ---------------------------------------------------------------------------
+// The budget.
 
 /// **One topic costs no more than its budget, in the receipt and in the
 /// record; and everything that is not per topic fits the base.**
@@ -210,7 +206,7 @@ fn budgeted_shapes() -> Vec<(&'static str, ReferenceShape, bool)> {
 /// summary.
 #[test]
 fn one_topic_costs_no_more_than_its_budget() {
-    // Everything that is not per topic, at its largest: PROD-04.1's 100
+    // Everything that is not per topic, at its largest: the 100
     // groups of 255-byte ids, the longest keys and version id.
     let full = at_most(&ReferenceShape::FULL);
     assert!(
@@ -304,7 +300,7 @@ fn one_topic_costs_no_more_than_its_budget() {
 
 /// **The acceptance's sizes fit, and the first one over the maximum does
 /// not.** A receipt and record of 70, 105, 113, 300, 500 and 1,000 reference
-/// topics with full recorded configuration and PROD-04.1's largest consumer
+/// topics with full recorded configuration and the largest consumer
 /// summary are each inside the bounds every reader caps at; 5,000 — what an
 /// older build admitted — is over both, and inside the 64 MiB the runner and
 /// the CLI read, which is why it stays restorable from the command line.
@@ -348,9 +344,7 @@ fn the_acceptance_sizes_fit_their_bounds_and_five_thousand_does_not() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The seam: doubles
-// ---------------------------------------------------------------------------
+// The seam: doubles.
 
 const ARCHIVE_PREFIX: &str = "logweir/archive-fixture/";
 const BACKUP_ID: &str = "many-topics";
@@ -726,9 +720,7 @@ fn stored(store: &Store, key: &str) -> Vec<u8> {
         .0
 }
 
-// ---------------------------------------------------------------------------
-// The projection
-// ---------------------------------------------------------------------------
+// The projection.
 
 /// **No real receipt or record is larger than what the run projected for it
 /// before its engine started** — over runs whose topics answer every way a
@@ -1005,9 +997,7 @@ fn the_projection_carries_every_field_the_receipt_defines() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The refusals, through the seam
-// ---------------------------------------------------------------------------
+// The refusals, through the seam.
 
 fn guard_message(result: Result<BackupOutcome, BackupError>) -> String {
     match result {
@@ -1172,8 +1162,7 @@ fn a_receipt_that_would_be_over_the_bound_is_refused_before_the_engine() {
 /// (That the bytes equal the PREVIOUS build's is held by the rows that pin
 /// them: the signed fixtures under `e2e/fixtures/signed/`, the receipt and
 /// record schema drift rows, `the_catalog_sync_body_is_pinned_for_the_
-/// controllers_parser`, and `weirkeeper`'s run-policy digest rows. None of
-/// them is edited by this change.)
+/// controllers_parser`, and `weirkeeper`'s run-policy digest rows.)
 #[test]
 fn the_refusals_change_no_byte_of_what_a_small_backup_signs() {
     let topics = names(2, 11);
@@ -1213,9 +1202,7 @@ fn the_refusals_change_no_byte_of_what_a_small_backup_signs() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The signatures the controller's tests verify
-// ---------------------------------------------------------------------------
+// The signatures the controller's tests verify.
 
 /// Where the controller's tests keep the sidecars they verify.
 const SIDECAR_FIXTURES: &str = "crates/weirkeeper/tests/fixtures/topic-budget";
@@ -1295,9 +1282,7 @@ fn the_controllers_reference_sidecars_are_what_the_signer_writes() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The documentation quotes the test
-// ---------------------------------------------------------------------------
+// The documentation quotes the test.
 
 fn root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

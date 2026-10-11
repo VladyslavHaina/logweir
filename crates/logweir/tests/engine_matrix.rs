@@ -1,8 +1,6 @@
 //! `.github/workflows/engine-matrix.yml` and the three scripts it calls.
 //!
-//! PROD-00.1 (`docs/to-do/decisions/PROD-00-engine-route.md`) found every
-//! scheduled run red (2026-09-14, 2026-09-21, 2026-09-28) for independent
-//! reasons. Each group of tests below pins one of them:
+//! Each group of tests below pins one reason a scheduled run went red:
 //!
 //! 1. `scripts/run-named-tests.sh` reported an EXISTING test missing: under
 //!    `pipefail`, `printf "$listing" | grep -q` fails once the listing outgrows
@@ -16,8 +14,7 @@
 //!    `.matrix/` were never uploaded and `publish` found none.
 //! 5. `publish` would have rewritten the whole hand-written `## Rows` table.
 //!
-//! The review of PROD-00.1 (M1, M2, L6) added the steps that decide whether a
-//! green job means anything:
+//! And the steps that decide whether a green job means anything:
 //!
 //! 6. the row's outcome is derived from what every step did
 //!    (`scripts/engine-matrix-outcome.sh`), never assumed from the floor;
@@ -102,9 +99,7 @@ fn write_executable(path: &Path, body: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 1. run-named-tests.sh
-// ---------------------------------------------------------------------------
+// 1. run-named-tests.sh.
 
 /// A `cargo` whose `--list` prints `first` and then 30,000 more names (about
 /// 1.7 MB, far past any pipe buffer), and which otherwise echoes its argv.
@@ -139,8 +134,8 @@ fn run_named(fake: &tempfile::TempDir, names: &[&str]) -> Ran {
     run_bounded(cmd, 60)
 }
 
-/// The weekly run of 2026-09-28 recorded `fail(lever-not-honoured)` for the
-/// pinned engine because this lookup failed for a test that existed.
+/// A lookup that fails for a test that exists records
+/// `fail(lever-not-honoured)` for the pinned engine.
 #[test]
 fn a_named_test_is_found_in_a_listing_larger_than_a_pipe_buffer() {
     let fake = fake_cargo("wanted_test");
@@ -175,9 +170,7 @@ fn a_missing_name_still_fails_before_anything_runs() {
     assert!(!ran.stdout.contains("ran:"), "{}", ran.transcript());
 }
 
-// ---------------------------------------------------------------------------
-// 2. seed-manifest-check.py and e2e-seed.sh's digest mode
-// ---------------------------------------------------------------------------
+// 2. seed-manifest-check.py and e2e-seed.sh's digest mode.
 
 const PRE_021_MANIFEST: &str = "e2e/fixtures/manifests/0.19.2.json";
 const PRE_021_KEY: &str = "orders/0/00000000000000000000.seg";
@@ -347,8 +340,8 @@ fn seed_with(env: &[(String, String)]) -> (Ran, bool) {
     (ran, marker.exists())
 }
 
-/// `export K=V` lines of `e2e/compose/stack-env.sh --slot <n>`, PROD-01.5's
-/// one source of a slot's variables.
+/// `export K=V` lines of `e2e/compose/stack-env.sh --slot <n>`, the one source
+/// of a slot's variables.
 fn slot_env(slot: u32) -> Vec<(String, String)> {
     let mut cmd = Command::new("bash");
     cmd.arg(root().join("e2e/compose/stack-env.sh"))
@@ -368,10 +361,10 @@ fn slot_env(slot: u32) -> Vec<(String, String)> {
         .collect()
 }
 
-/// PROD-01.5 made the fixture refresh default to 0 on a slot and refuse 1
-/// there; the digest-mode guard tests that COMPUTED value, not the raw
-/// variable (review L5 of PROD-00.1: a guard reading
-/// `${LOGWEIR_SEED_REFRESH_FIXTURES:-1}` refused `optional` on every slot).
+/// The fixture refresh defaults to 0 on a slot and refuses 1 there, so the
+/// digest-mode guard tests that COMPUTED value, not the raw variable (a guard
+/// reading `${LOGWEIR_SEED_REFRESH_FIXTURES:-1}` refuses `optional` on every
+/// slot).
 /// `optional` must pass both stacks' checks and reach the stack; each stack's
 /// own refusal is the negative control.
 #[test]
@@ -440,9 +433,7 @@ fn optional_digests_work_on_a_slot_and_on_the_default_stack() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 5. engine-matrix-rows.py
-// ---------------------------------------------------------------------------
+// 5. engine-matrix-rows.py.
 
 const BEGIN: &str = "<!-- engine-matrix:rows:begin -->";
 const END: &str = "<!-- engine-matrix:rows:end -->";
@@ -562,9 +553,7 @@ fn the_renderer_refuses_and_writes_nothing_on_bad_input() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3, 4. The workflow itself
-// ---------------------------------------------------------------------------
+// 3, 4. The workflow itself.
 
 fn workflow(name: &str) -> Value {
     serde_yaml::from_str(&read(&format!(".github/workflows/{name}"))).unwrap()
@@ -623,7 +612,7 @@ fn the_matrix_runs_the_ci_e2e_setup_and_command() {
             .cloned()
     };
     let ci_command = e2e_command(&ci).expect("the CI e2e job runs the e2e suite");
-    // CI splits the suite into shards by test binary (FX-41); the matrix runs
+    // CI splits the suite into shards by test binary; the matrix runs
     // every binary, so it is the CI command without the shard's selection.
     let shard = " --test ${{ join(matrix.tests, ' --test ') }}";
     assert!(
@@ -649,7 +638,7 @@ fn every_test_the_matrix_names_exists() {
     }
     let doc = workflow("engine-matrix.yml");
     let mut lines = run_lines(&doc["jobs"]["matrix"]);
-    // PROD-01.2: the broker-lines job names tests too.
+    // The broker-lines job names tests too.
     lines.extend(run_lines(&doc["jobs"]["broker-lines"]));
     // The names end at the first shell token (a redirection, `||`, ...).
     let named: Vec<&str> = lines
@@ -712,7 +701,7 @@ fn no_workflow_uploads_an_artifact_from_a_hidden_path() {
 /// Rows at or above the documented full-drill floor run the full drill; rows
 /// below it are declared `unsupported(lever-absent)`. The pinned tag has a
 /// full row on the compose stack's default broker, and one on the newest line
-/// the stack pins (since PROD-01.5a that line is the default).
+/// the stack pins (that line is the default).
 #[test]
 fn the_declared_rows_follow_the_documented_floor() {
     let matrix_doc = read("docs/support-matrix.md");
@@ -729,8 +718,8 @@ fn the_declared_rows_follow_the_documented_floor() {
         .expect("extract-engine.sh names the pinned tag")
         .to_string();
     // The broker a row's `KAFKA_VERSION` selects is kafka-broker-1's image
-    // (the container scripts/engine-matrix-broker.sh reads back). PROD-01.5
-    // wrapped it in `${KAFKA_IMAGE:-…}`, a digest-pinned line that wins over
+    // (the container scripts/engine-matrix-broker.sh reads back), wrapped in
+    // `${KAFKA_IMAGE:-…}`, a digest-pinned line that wins over
     // `KAFKA_VERSION` when set, so the matrix sets the one and never the other.
     let compose: Value = serde_yaml::from_str(&read("e2e/compose/docker-compose.yml")).unwrap();
     let image = compose["services"]["kafka-broker-1"]["image"]
@@ -772,7 +761,7 @@ fn the_declared_rows_follow_the_documented_floor() {
 
     let rows = matrix_rows();
     let mut pin_on_default = false;
-    // PROD-00.3f: the C8 tripwire (the engine's fixed protocol versions on the
+    // The C8 tripwire (the engine's fixed protocol versions on the
     // newest broker line) is a row for THE PIN, not for whichever engine
     // happened to carry it. Moving the pin without moving that row would leave
     // the newest broker exercised only by an engine Logweir no longer ships.
@@ -805,14 +794,12 @@ fn the_declared_rows_follow_the_documented_floor() {
     );
 }
 
-/// **No test the matrix runs may compare the engine with the pin** (PROD-00.3f
-/// review H1). Each full row writes ITS engine's digest into
-/// `third_party/kafka-backup-binary.digest` and `.engine/`, then runs the
-/// `e2e` package. A test there that holds the working digest, or the engine,
-/// to a committed statement of the pin is red on every row that is not the
-/// pin, and cargo stops at the first failing binary, before the drill suites:
-/// run 37728540932 lost the v0.21.0 (floor) and v0.22.0 rows that way to
-/// `e2e/tests/engine_pin.rs`, which now lives in `crates/logweir/tests/`.
+/// **No test the matrix runs may compare the engine with the pin.** Each full
+/// row writes ITS engine's digest into `third_party/kafka-backup-binary.digest`
+/// and `.engine/`, then runs the `e2e` package. A test there that holds the
+/// working digest, or the engine, to a committed statement of the pin is red
+/// on every row that is not the pin, and cargo stops at the first failing
+/// binary, before the drill suites.
 ///
 /// A code line (not a comment) under `e2e/tests/`, at any depth, must not name
 /// a committed statement of the pin: `doctor`'s `ENGINE_PIN`, the controller's
@@ -822,7 +809,7 @@ fn the_declared_rows_follow_the_documented_floor() {
 /// need, and is not a pin statement. `CONTRACT_ENGINE` is gated by design
 /// (`contract_applies`) and is not one either.
 fn pin_statements(code: &str, pinned_digest: &str) -> Vec<String> {
-    // PROD-00.2: Logweir's build is a pin too. Reading
+    // Logweir's build is a pin too. Reading
     // `third_party/kafka-backup-build.env` to RECORD the build-input digest of
     // the engine that ran is what the harness does; comparing an engine with
     // the build's version constant or its digest literal is not.
@@ -954,11 +941,10 @@ fn no_e2e_test_compares_the_engine_with_a_committed_pin() {
 
 /// The `.env` the matrix generates names the engine and never the broker; the
 /// row's broker is the job's `KAFKA_VERSION` alone. The full drill runs
-/// PROD-01.5's `a_slot_moves_every_host_port_and_the_default_render_does_not`,
-/// which renders the stack with every stack variable removed and requires the
-/// compose file's own default broker. A `.env` that carried the row's
-/// `KAFKA_VERSION` turned that row red on the 4.3.1 row (reproduced locally
-/// after the merge of PROD-01.5).
+/// `a_slot_moves_every_host_port_and_the_default_render_does_not`, which
+/// renders the stack with every stack variable removed and requires the
+/// compose file's own default broker, so a `.env` carrying the row's
+/// `KAFKA_VERSION` turns that row red.
 #[test]
 fn the_generated_env_names_the_engine_and_leaves_the_broker_to_the_row() {
     let writes: Vec<String> = run_lines(&workflow("engine-matrix.yml")["jobs"]["matrix"])
@@ -1030,10 +1016,7 @@ fn the_matrix_seed_never_refreshes_the_tracked_fixtures() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 6-10. The steps that decide whether a green job means anything (review M1,
-// M2 and L6 of PROD-00.1)
-// ---------------------------------------------------------------------------
+// 6-10. The steps that decide whether a green job means anything.
 
 const REFUSAL_LOG: &str = "engine: operational: engine 0.19.2 ignored the config key \
      `restore.header_preflight` that logweir rendered; this tag is below the declared floor";
@@ -1145,8 +1128,7 @@ fn classify(steps: &Steps) -> (String, String) {
     (field("outcome"), field("reason"))
 }
 
-/// Review M1: the outcome follows what ran. A, B and C are the reviewer's
-/// three combinations the old inline classifier got wrong.
+/// The outcome follows what ran, over combinations A, B and C.
 #[test]
 fn the_outcome_is_derived_from_what_every_step_did() {
     let s = Steps::full;
@@ -1351,9 +1333,9 @@ fn run_step_text(step: &Value, dir: &Path, env: &[(String, String)]) -> Ran {
     run_bounded(cmd, 60)
 }
 
-/// Review M2, R3: the Record step classifies through the outcome script, fed
-/// by the steps that actually ran, and writes the row from its answer, with
-/// the MEASURED broker in the Kafka column (L6).
+/// The Record step classifies through the outcome script, fed by the steps
+/// that actually ran, and writes the row from its answer, with the MEASURED
+/// broker in the Kafka column.
 #[test]
 fn the_record_step_writes_the_row_the_steps_earned() {
     let doc = workflow("engine-matrix.yml");
@@ -1495,7 +1477,7 @@ fn the_record_step_writes_the_row_the_steps_earned() {
     }
 }
 
-/// Review M2, R2: the verdict step exists, always runs after the Record step,
+/// The verdict step exists, always runs after the Record step,
 /// compares what the row recorded with what it declares, and fails the job on
 /// a mismatch. Every test step is `continue-on-error`, so without it every row
 /// would be green whatever it recorded.
@@ -1552,7 +1534,7 @@ fn the_verdict_step_fails_a_row_that_records_other_than_it_declares() {
     }
 }
 
-/// Review M2, R4: below the floor the seed accepts segments without a digest,
+/// Below the floor the seed accepts segments without a digest,
 /// at or above it the seed requires them.
 #[test]
 fn the_seed_digest_mode_follows_the_row_floor() {
@@ -1565,7 +1547,7 @@ fn the_seed_digest_mode_follows_the_row_floor() {
     );
 }
 
-/// Review M2, R6: a pull request is opened only from `main`, and only when the
+/// A pull request is opened only from `main`, and only when the
 /// repository opts in.
 #[test]
 fn a_pull_request_is_opened_only_from_main_and_only_when_opted_in() {
@@ -1648,7 +1630,7 @@ fn broker_readback_with(fake: &tempfile::TempDir, args: &[&str]) -> Ran {
     run_bounded(cmd, 60)
 }
 
-/// Review L6: the row records the broker the stack actually runs.
+/// The row records the broker the stack actually runs.
 #[test]
 fn the_broker_is_read_back_from_the_running_container() {
     let fake = fake_docker(
@@ -1829,9 +1811,7 @@ fn the_renderer_accepts_an_unmeasured_broker() {
     assert!(after.contains("| v0.21.0 | unmeasured |"), "{after}");
 }
 
-// ---------------------------------------------------------------------------
-// 11. PROD-01.5c: the broker-lines job
-// ---------------------------------------------------------------------------
+// 11. The broker-lines job.
 
 /// The `supported` lines of `e2e/compose/stack-env.sh`'s one table
 /// (`LINE PINNED-VERSION IMAGE-DIGEST STATUS`), in its order.
@@ -1850,15 +1830,15 @@ fn supported_broker_lines() -> Vec<String> {
         .collect()
 }
 
-/// PROD-01.2: the rows `docs/support-matrix.md` cites for each supported
+/// The rows `docs/support-matrix.md` cites for each supported
 /// broker line. The second is `#[ignore]`d (a whole backup and drill).
 const COMPAT_ROWS: [&str; 2] = [
     "the_default_broker_answers_every_capability_check",
     "the_default_broker_backs_up_restores_and_verifies",
 ];
 
-/// What keeps a `broker-lines` job from asserting PROD-01.1's and PROD-01.4's
-/// suites on every supported line with the engine Logweir ships; empty when
+/// What keeps a `broker-lines` job from asserting the contract suites on
+/// every supported line with the engine Logweir ships; empty when
 /// nothing does.
 fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -1919,7 +1899,7 @@ fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
     if down.is_none_or(|d| d <= suites) {
         out.push("the stack is not torn down after the suites".to_string());
     }
-    // PROD-01.2: the compatibility contract's rows, BY NAME and with the
+    // The compatibility contract's rows, BY NAME and with the
     // ignored one included. `docs/support-matrix.md` calls each supported
     // line `supported` on these two rows, so a step that ran neither (a bare
     // filter, or `--exact` on an `#[ignore]`d test without
@@ -1961,7 +1941,7 @@ fn broker_lines_offenders(job: &Value, supported: &[String]) -> Vec<String> {
     out
 }
 
-/// PROD-01.5c: the two suites PROD-01.5 re-ran on 3.9, 4.1 and 4.3 run on
+/// The two contract suites run on
 /// every supported line with the engine `CONTRACT_ENGINE` names, so the
 /// record-semantics contract is ASSERTED there (the `matrix` job's OSO
 /// engines only record it). A line added to stack-env.sh's table as
@@ -2000,7 +1980,7 @@ fn the_broker_lines_job_runs_both_suites_on_every_supported_line_with_the_shippe
     }
     let mut hand_pinned = job.clone();
     hand_pinned["env"]["KAFKA_VERSION"] = Value::from("${{ matrix.line }}");
-    // PROD-01.2's step, three ways of running nothing: the ignored row
+    // The compatibility step, three ways of running nothing: the ignored row
     // filtered out, one row un-named, and the step gone.
     let compat_step = |change: &dyn Fn(&mut Value)| {
         let mut j = job.clone();

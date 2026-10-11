@@ -1,21 +1,18 @@
-//! Tracker defect **RECEIPT-DUP**: a second run of ONE execution must never
-//! invalidate the first run's signed receipt.
+//! A second run of ONE execution must never invalidate the first run's
+//! signed receipt.
 //!
-//! # The defect, as it was
+//! # Why
 //!
-//! A Backup Job re-created from its frozen inputs (PLAT-06.1 case e — the Job
-//! deleted or lost, and re-created by the controller under the SAME execution
-//! id) ran the engine a second time over the same backup set. The engine
-//! writes `<prefix>/<backup_id>/manifest.json` unconditionally, so the second
-//! run REPLACED the manifest the first run's receipt attests, and — because
-//! the topic had advanced between the two runs — the replacement hashes to a
-//! different digest. Every verifier that reads the archive back (the drill's
-//! point binding, `crates/logweir/src/drill/binding.rs`, and the `catalogSync`
-//! deep check, `crates/logweir/src/check/kinds/catalog_sync.rs`) then reports
-//! the FIRST receipt as not describing what the archive holds. Run identity was
-//! idempotent; signed evidence was not.
+//! A Backup Job re-created from its frozen inputs (the Job deleted or lost,
+//! and re-created by the controller under the SAME execution id) runs the
+//! engine a second time over the same backup set. The engine writes
+//! `<prefix>/<backup_id>/manifest.json` unconditionally, so the second run
+//! would REPLACE the manifest the first run's receipt attests, and every
+//! verifier that reads the archive back (the drill's point binding and the
+//! `catalogSync` deep check) would report the FIRST receipt as not describing
+//! what the archive holds.
 //!
-//! # The fix these rows pin
+//! # The rule these rows pin
 //!
 //! Every run claims its execution with a create-only, execution-scoped object —
 //! `logweir/backups/<backup_id>/execution.claim.json` — immediately BEFORE the
@@ -53,9 +50,7 @@ const EXECUTION_ID: &str = "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260923-030000
 /// Where the fixture's first record sits, epoch ms.
 const T0: i64 = 1_790_000_000_000;
 
-// ---------------------------------------------------------------------------
-// Fixture
-// ---------------------------------------------------------------------------
+// Fixture.
 
 struct Fixture {
     dir: tempfile::TempDir,
@@ -161,9 +156,7 @@ impl Fixture {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The verdict: what an archive-reading verifier concludes about one receipt
-// ---------------------------------------------------------------------------
+// The verdict: what an archive-reading verifier concludes about one receipt.
 
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
@@ -217,9 +210,7 @@ fn verdict(evidence: &Store, archive: &Store, receipt_key: &str, key: &Verifying
     Verdict::Valid
 }
 
-// ---------------------------------------------------------------------------
-// Doubles
-// ---------------------------------------------------------------------------
+// Doubles.
 
 fn stub_reader() -> Reader {
     Reader::new("SOURCE-CLUSTER-01")
@@ -367,15 +358,11 @@ impl DataEngine for AdvancingEngine {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The reproduction
-// ---------------------------------------------------------------------------
+// The reproduction.
 
-/// **The RECEIPT-DUP reproduction.** Two runs of ONE execution over a topic
-/// that advanced between them. Before the fix the second run exited 0, wrote a
-/// second receipt, and left the first one reporting `Invalid` (the manifest it
-/// attests had been replaced). The fix: the second run is refused before its
-/// engine starts, writes no receipt, and the first receipt still verifies.
+/// **The reproduction.** Two runs of ONE execution over a topic that advanced
+/// between them: the second run is refused before its engine starts, writes
+/// no receipt, and the first receipt still verifies.
 #[test]
 fn a_second_run_of_one_execution_never_invalidates_the_first_receipt() {
     let f = Fixture::new();
@@ -563,7 +550,7 @@ fn a_store_that_ignores_if_none_match_fails_closed() {
     assert_eq!(engine.runs.get(), 0, "no engine run on an unproven claim");
 }
 
-/// **F4 (review mutant R1).** A store that ERRORS on the exclusivity probe —
+/// A store that ERRORS on the exclusivity probe —
 /// the second create — has not refused it, so nothing is proven: exit 4, no
 /// engine run. Accepting any probe error as proof would start the engine on a
 /// claim that was never shown to be exclusive.
@@ -590,7 +577,7 @@ fn an_error_on_the_exclusivity_probe_is_not_proof() {
     assert_eq!(engine.runs.get(), 0, "no engine run on an unproven claim");
 }
 
-/// **F5 (review mutant R2).** An evidence store that REFUSES the claim put (a
+/// An evidence store that REFUSES the claim put (a
 /// missing `s3:PutObject` on `logweir/*`, here a read-only handle) is exit 4 —
 /// NOT exit 1, which D1 §4.6 would retry `maxRetries` times on a permission
 /// error — with the unproven-claim state and no engine run.
@@ -807,12 +794,10 @@ fn the_python_verifier_agrees_the_first_receipt_still_verifies() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-7: a set an OLDER build wrote carries no claim
-// ---------------------------------------------------------------------------
+// A set an OLDER build wrote carries no claim.
 
-/// **FX-7 — the upgrade window.** An execution whose first run was made by a
-/// build WITHOUT the execution claim (a runner from before RECEIPT-DUP) leaves
+/// **The upgrade window.** An execution whose first run was made by a build
+/// WITHOUT the execution claim leaves
 /// its archive, its receipt and NO claim. A Job re-created after the upgrade
 /// runs this build under the same execution id: it wins a fresh claim, so the
 /// claim alone would start the engine over the older run's set. The set
@@ -903,7 +888,7 @@ fn a_set_with_segments_and_no_manifest_is_refused_too() {
 }
 
 /// An object the engine does NOT write in the configuration Logweir renders —
-/// an upstream archive's consumer-groups snapshot beside the set, which FX-1's
+/// an upstream archive's consumer-groups snapshot beside the set, which some
 /// rows plant on purpose — is not the set: the run writes none of its keys and
 /// invalidates nothing, so it is admitted, and its receipt is signed.
 #[test]
@@ -983,10 +968,7 @@ fn an_archive_that_cannot_be_listed_fails_closed() {
     assert!(f.receipts().is_empty(), "nothing signed");
 }
 
-// ---------------------------------------------------------------------------
-// FX-7 fix round: the set check's two reads, answered on demand (review L-1
-// K1/K2, review L-3)
-// ---------------------------------------------------------------------------
+// The set check's two reads, answered on demand.
 
 /// An archive whose two set-check reads answer what a row chooses, through the
 /// `ObjectAccess` seam `phase_run::refuse_an_existing_set` reads by. Keys are
@@ -1001,7 +983,7 @@ struct SetReads {
 }
 
 impl logweir::check::store::ObjectAccess for SetReads {
-    /// Held to the cap the way `Store::get_capped` is (FX-31): a present
+    /// Held to the cap the way `Store::get_capped` is: a present
     /// object over `max_bytes` is `TooLarge`, unread — which is how the set
     /// check's existence probe (`caps::PROBE`) sees every non-empty object.
     fn get(
@@ -1088,7 +1070,7 @@ const SET_SEGMENT: &str = "topics/orders/partition=0/segment-0000000000000000000
 /// ATTEMPT shapes — a 5xx or a 429 whose first answer already exhausted the
 /// retry budget, an unreachable endpoint on its only try — carry no such
 /// clause, and are what the status arm and the `EndpointUnreachable` arm of
-/// `a_retry_can_change` exist for (review L-3's mutants L3c and L3d).
+/// `a_retry_can_change` exist for.
 const A_503: &str =
     "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
      in 180.2s, after 10 retries, max_retries: 10, retry_timeout: 180s  - Server returned \
@@ -1108,7 +1090,7 @@ const UNREACHABLE: &str = "Generic S3 error: Error performing GET http://minio:9
 const A_400: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in 2ms - \
      Server returned non-2xx status code: 400 Bad Request: <Error><Code>InvalidRequest</Code></Error>";
 
-/// **Review L-1, K1: the set directory is the PLAN's prefix joined to the
+/// **The set directory is the PLAN's prefix joined to the
 /// `backup_id`.** Every other in-process fixture is a filesystem store, whose
 /// prefix is `""`, so only the e2e row guarded this join. Here the set a
 /// claim-less older build wrote sits under `lw-archive/<id>/` on an S3-shaped
@@ -1161,7 +1143,7 @@ fn a_set_under_the_plans_storage_prefix_is_found() {
     );
 }
 
-/// **Review L-1, K2: a manifest GET that fails with anything but `NotFound`
+/// **A manifest GET that fails with anything but `NotFound`
 /// proves nothing** — the LIST answered "no segments", and a denied GET must
 /// not be read as "no manifest, so the set is new". Exit 4: a 403 is a grant to
 /// fix, not something a retry changes.
@@ -1187,7 +1169,7 @@ fn a_manifest_read_that_is_denied_fails_closed_as_exit_4() {
     assert!(err.to_string().contains("s3:GetObject"), "{err}");
 }
 
-/// **Review L-3, option (a): WHICH failure decides the code.** A transient one
+/// **WHICH failure decides the code.** A transient one
 /// (a 5xx the client already retried, an unreachable endpoint) is exit 1
 /// `Operational` — no failure-reason, retried by a schedule with `spec.retry`
 /// under a NEW execution id, which is a different set and therefore safe; a

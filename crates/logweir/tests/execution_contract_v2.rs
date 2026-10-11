@@ -1,8 +1,8 @@
 //! **Execution contract v2 (decision D3 §8, Amendment I) and D0's bundle
 //! contract v2, at the runner.**
 //!
-//! `crates/logweir/tests/approval_bundle_startup.rs` owns PLAT-01.2's rows and
-//! they are unchanged; this file owns what v2 ADDS, and in particular the one
+//! `crates/logweir/tests/approval_bundle_startup.rs` owns the v1 rows; this
+//! file owns what v2 ADDS, and in particular the one
 //! rule that decides whether the transition is a transition or a hole:
 //!
 //! > v1 stays accepted for already-created legacy governed Restores — and a v1
@@ -23,7 +23,7 @@
 //! | v2 blocks are all-or-nothing | `a_standing_authorization_without_its_scope_is_refused`, `a_scope_without_the_standing_kind_is_refused` |
 //! | bundle v2 members are digest-pinned both ways | `every_optional_bundle_member_is_pinned_in_both_directions` |
 //! | unpinned material is never acted on | `bundle_v2_material_without_a_contract_is_refused_by_the_real_binary` |
-//! | a standing authorization is withdrawn (PROD-17.1) | `the_standing_flags_are_refused_by_name`, `a_standing_contract_is_refused_by_name` |
+//! | a standing authorization is withdrawn | `the_standing_flags_are_refused_by_name`, `a_standing_contract_is_refused_by_name` |
 
 use chrono::Utc;
 use logweir::drill::phase1_approval;
@@ -39,10 +39,8 @@ use logweir_evidence::sign::sign_detached;
 use std::collections::BTreeMap;
 use std::process::Command;
 
-// ===========================================================================
-// Fixtures — local to this file on purpose: it must be able to build a
-// contract this repository's shared helpers do not yet produce.
-// ===========================================================================
+// Fixtures, local to this file: it must be able to build a contract the
+// shared helpers do not produce.
 
 /// A restore plan that PARSES, targets a scratch cluster and maps through a
 /// rehearsal prefix. `approval_bundle_startup.rs`'s fixture plan is deliberately
@@ -289,9 +287,7 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
     map
 }
 
-// ===========================================================================
-// The version itself
-// ===========================================================================
+// The version itself.
 
 #[test]
 fn the_controllers_stamp_and_the_runners_expectation_are_one_value() {
@@ -397,18 +393,12 @@ fn a_v1_contract_carrying_v2_material_is_refused_by_name() {
     }
 }
 
-/// **F3: the FIFTH piece of v2 material — `source.point` — and it lives in the
-/// plan, not in the environment.**
-///
-/// The four cases above walk the environment items, which
-/// `execution_contract_from` refuses. A plan carrying `source.point` is v2
-/// material too — `docs/stability.md` and `docs/formats/drill-spec.md` both
-/// say so — and it is refused in `check_v2_bindings`, which is where the plan
-/// is first both parsed and authenticated. The review found the rule
-/// documented and unenforced; this row is what keeps it enforced.
-///
-/// Driven through the real binary because the check is not reachable from the
-/// contract parser: it needs a plan.
+/// **The FIFTH piece of v2 material — `source.point` — lives in the plan, not
+/// in the environment.** A plan carrying `source.point` is v2 material
+/// (`docs/stability.md`, `docs/formats/drill-spec.md`), refused in
+/// `check_v2_bindings`, where the plan is first both parsed and
+/// authenticated. Driven through the real binary because the check is not
+/// reachable from the contract parser: it needs a plan.
 #[test]
 fn a_v1_contract_carrying_a_point_binding_is_refused() {
     let plan = REHEARSAL_PLAN.replace(
@@ -487,7 +477,7 @@ fn the_same_material_under_v2_is_accepted() {
     let fixture = fixture();
     let mut contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
     contract.authorization_kind = wire::AuthorizationKind::Standing;
-    // PLAT-14.3b: a standing contract pins no per-run approval slot.
+    // A standing contract pins no per-run approval slot.
     contract.approval_sha256 = None;
     contract.approval_sidecar_sha256 = None;
     contract.authorization_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
@@ -503,9 +493,7 @@ fn the_same_material_under_v2_is_accepted() {
     assert_eq!(parsed, contract);
 }
 
-// ===========================================================================
-// Each v2 block is all-or-nothing
-// ===========================================================================
+// Each v2 block is all-or-nothing.
 
 #[test]
 fn a_standing_authorization_without_its_signed_document_is_refused() {
@@ -581,13 +569,11 @@ fn a_job_carrying_only_v2_variables_is_incomplete_and_not_standalone() {
     assert!(error.to_string().contains(wire::VERSION_ENV), "{error}");
 }
 
-// ===========================================================================
-// Bundle contract v2's three optional members
-// ===========================================================================
+// Bundle contract v2's three optional members.
 
 /// D0: "document, sidecar, both public keys, policy snapshot/digest, subject
 /// UID". Each optional member is checked in BOTH directions — a pinned digest
-/// with nothing mounted is a lost bundle member (PLAT-01.2's case), and a
+/// with nothing mounted is a lost bundle member, and a
 /// mounted member with no pinned digest is material the controller never
 /// committed to.
 #[test]
@@ -660,8 +646,8 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
     }
 }
 
-/// The five mandatory members are unchanged by v2 — PLAT-01.2's regression,
-/// restated here so a v2 change that loosened one fails in this file too.
+/// The five mandatory members are unchanged by v2, restated here so a v2
+/// change that loosened one fails in this file too.
 #[test]
 fn the_five_mandatory_members_are_still_hash_bound() {
     let fixture = fixture();
@@ -683,9 +669,7 @@ fn the_five_mandatory_members_are_still_hash_bound() {
     }
 }
 
-// ===========================================================================
-// The real binary
-// ===========================================================================
+// The real binary.
 
 struct Mounted {
     _dir: tempfile::TempDir,
@@ -737,11 +721,8 @@ fn standing_contract(
 ) -> ExecutionContract {
     let mut contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
     contract.authorization_kind = wire::AuthorizationKind::Standing;
-    // **PLAT-14.3b: a standing rehearsal's bundle has NO per-run approval
-    // slot**, so the contract pins no digest for one. Before 14.3b the
-    // controller wrote the standing envelope into `approval.json` as a
-    // placeholder and the runner verified it under `PAYLOAD_TYPE_APPROVAL`,
-    // which is exactly why no rehearsal could execute.
+    // A standing rehearsal's bundle has NO per-run approval slot, so the
+    // contract pins no digest for one.
     contract.approval_sha256 = None;
     contract.approval_sidecar_sha256 = None;
     contract.authorization_sha256 = Some(sha256_prefixed(&signed.document));
@@ -818,14 +799,13 @@ fn command(
     command
 }
 
-/// **F6: interface I9's "`refusal-reason=` is the process's FINAL stdout line
-/// for exit 3" is structurally guaranteed again.**
+/// **Interface I9's "`refusal-reason=` is the process's FINAL stdout line
+/// for exit 3" holds structurally.**
 ///
 /// `exiting` prints `refusal-reason=` and then, for a run that has one, the
-/// `teardown-key=` line. The teardown line is now gated on the exit code, so
-/// the invariant holds by construction rather than by the accident that a
-/// guard-refused run has no attested scorecard. This row is the observation
-/// that it holds on a real exit-3 process.
+/// `teardown-key=` line. The teardown line is gated on the exit code, so the
+/// invariant holds by construction; this row observes it on a real exit-3
+/// process.
 #[test]
 fn a_guard_refusal_ends_stdout_with_the_refusal_reason_line() {
     let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
@@ -884,11 +864,9 @@ fn bundle_v2_material_without_a_contract_is_refused_by_the_real_binary() {
     assert!(!transcript.contains("Connection refused"), "{transcript}");
 }
 
-// ===========================================================================
-// Standing rehearsal authorizations are withdrawn (PROD-17.1 C1)
-// ===========================================================================
+// Standing rehearsal authorizations are withdrawn.
 
-/// **The two standing flags are refused by name** (PROD-17.1, s1-c1 R8): a
+/// **The two standing flags are refused by name**: a
 /// Job an older controller built for a `RehearsalSchedule` passes them, and
 /// with a mutable runner tag it can start this image. Exit 1, the withdrawal
 /// named, nothing read. CONTROL: the same invocation without the flag is not
@@ -921,7 +899,7 @@ fn the_standing_flags_are_refused_by_name() {
 }
 
 /// **A contract naming the standing kind is refused by name** before any file
-/// is read, exit 3, whatever is mounted (PROD-17.1, s1-c1 R8). CONTROL: the
+/// is read, exit 3, whatever is mounted. CONTROL: the
 /// same run under the approval contract is not refused for it.
 #[test]
 fn a_standing_contract_is_refused_by_name() {
@@ -1083,9 +1061,7 @@ fn the_evidence_keyring_is_pinned_both_ways_and_is_v2_material() {
     );
 }
 
-// ===========================================================================
 // A tiny helper so every row above reads the same way.
-// ===========================================================================
 
 trait UnwrapErrOrPanic<T, E> {
     fn unwrap_err_or_panic(self, why: &str) -> E;
