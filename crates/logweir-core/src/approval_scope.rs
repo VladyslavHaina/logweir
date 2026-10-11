@@ -1,5 +1,5 @@
-//! **PROD-16.2 — the APPROVAL SCOPE: what a second person must be shown
-//! before they approve, defined once.**
+//! **The APPROVAL SCOPE: what a second person must be shown before they
+//! approve, defined once.**
 //!
 //! Under a two-person policy the second person is the whole control. They
 //! approve what they were shown, so what they are shown must be the WHOLE of
@@ -47,8 +47,8 @@ use crate::spec::{DrillSpec, TargetMode};
 /// restore may name to be requested in a two-person namespace.
 ///
 /// No lower than any restore the product makes on its own: a schedule names
-/// at most 256 topics (`logweir-api`'s `schedules::MAX_TOPICS`), and FX-33's
-/// target for a catalog point is 500. A hand-written plan may name more (the
+/// at most 256 topics (`logweir-api`'s `schedules::MAX_TOPICS`), and a
+/// catalog point's target is 500. A hand-written plan may name more (the
 /// plan document is bounded at 256 KiB, not by a count); such a restore is
 /// split into several of at most this many topics, each requested and
 /// approved on its own, or approved under a `strict` policy.
@@ -150,7 +150,7 @@ pub struct ScopeTarget {
     /// ([`crate::spec::target_topic_prefix`]); empty for a restore under the
     /// original topic names.
     pub topic_prefix: String,
-    /// **For a restore under the original topic names only** (review S-1):
+    /// **For a restore under the original topic names only**:
     /// the requester's statement about declarative owners
     /// (`target.topic_naming.original_name`), which alone decides whether
     /// such a run writes — the console gives the runner nothing else to look
@@ -317,7 +317,7 @@ pub enum ScopeIncomplete {
     OwnersNotShowable,
     /// The plan names a notification sink (a webhook, Slack or PagerDuty):
     /// the run would send its summary there, and the scope does not show
-    /// where (review P2-3).
+    /// where.
     NotificationsNotShown,
     /// A text value is longer than a scope shows, or is not printable ASCII.
     ValueNotShowable {
@@ -448,7 +448,7 @@ const REQUEST_VALUES: [&str; 8] = [
 /// Whether `text` is printable ASCII (space to `~`) of at most
 /// [`MAX_SCOPE_TEXT_CHARS`] characters: no control character, no
 /// right-to-left override, no look-alike outside ASCII. The create holds a
-/// two-person request's ticket to it (review S-2), so no request is made
+/// two-person request's ticket to it, so no request is made
 /// that its scope would refuse.
 #[must_use]
 pub fn showable(text: &str) -> bool {
@@ -571,7 +571,7 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
     let plan: DrillSpec =
         serde_yaml::from_str(text).map_err(|_| ScopeIncomplete::PlanUnreadable)?;
 
-    // ---- the topics, every one --------------------------------------------
+    // The topics, every one.
     let count = plan.source.topics.len();
     if count == 0 {
         return Err(ScopeIncomplete::NoTopics);
@@ -629,11 +629,9 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
         });
     }
 
-    // ---- where the result goes ---------------------------------------------
-    // Review P2-3: the runner sends its summary to every sink the plan names
-    // (and a PagerDuty resolve on a pass). The scope does not show sinks, so
-    // a plan that names one is not approvable in the console; the wizard's
-    // plans name none (`webhooks: []`).
+    // Where the result goes. The scope does not show notification sinks, so a
+    // plan that names one is not approvable in the console; the wizard's plans
+    // name none (`webhooks: []`).
     let sinks = &plan.notifications;
     if !sinks.webhooks.is_empty()
         || sinks.slack_webhook.is_some()
@@ -643,7 +641,7 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
         return Err(ScopeIncomplete::NotificationsNotShown);
     }
 
-    // ---- the target cluster -----------------------------------------------
+    // The target cluster.
     let servers = &plan.target.bootstrap_servers;
     if servers.is_empty()
         || servers.len() > MAX_SCOPE_BOOTSTRAP_SERVERS
@@ -929,11 +927,10 @@ mod tests {
         }
     }
 
-    /// **A plan that allows transaction markers says so in its scope**
-    /// (integrate-10, PROD-16.2 review S-1's class): the override changes what
-    /// the run writes, so the second person sees it. Control: the same plan
-    /// without it.
-    /// KILLS: the field dropped from the scope.
+    /// **A plan that allows transaction markers says so in its scope**: the
+    /// override changes what the run writes, so the second person sees it.
+    /// Control: the same plan without it. KILLS: the field dropped from the
+    /// scope.
     #[test]
     fn a_plan_allowing_transaction_markers_shows_it_in_its_scope() {
         let topics: Vec<String> = vec!["orders".into()];
@@ -1210,12 +1207,11 @@ mod tests {
         );
     }
 
-    /// **Who asked is shown only as it is** (the coordinator's review of
-    /// `138abc58`, item 1). A requester subject carrying a right-to-left
-    /// override could make the approver misread who asked, which is the fact
-    /// they decide on: the scope is incomplete. The same for the ticket and
-    /// the policy's name. NEGATIVE CONTROL: the plain request is complete.
-    /// KILLS: a scope that copies a request field without the rule.
+    /// **Who asked is shown only as it is.** A requester subject carrying a
+    /// right-to-left override could make the approver misread who asked, which
+    /// is the fact they decide on: the scope is incomplete. The same for the
+    /// ticket and the policy's name. NEGATIVE CONTROL: the plain request is
+    /// complete. KILLS: a scope that copies a request field without the rule.
     #[test]
     fn request_text_that_cannot_be_shown_faithfully_leaves_no_scope() {
         let text = plan(&["orders"]);
@@ -1242,7 +1238,7 @@ mod tests {
     }
 
     /// **The requester's owner statement is part of what the second person
-    /// approves** (review S-1, HIGH). For an original-name restore the
+    /// approves**. For an original-name restore the
     /// console gives the runner nowhere else to look, so the plan's
     /// `original_name.owners` / `owner_path` alone decide whether it writes:
     /// the scope carries them as signed, in their three cases, and an owner
@@ -1251,7 +1247,7 @@ mod tests {
     /// NEGATIVE CONTROLS: a plan with `owner_path: true` shows it, with its
     /// owners; `owners: []` shows the empty statement (not "not declared");
     /// a prefixed restore carries no statement at all.
-    /// KILLS: a scope that drops the statement (mutant M13).
+    /// KILLS: a scope that drops the statement.
     #[test]
     fn the_owner_statement_of_an_original_name_plan_is_shown_as_signed() {
         let topics = vec!["orders".to_string(), "payments".to_string()];
@@ -1312,8 +1308,8 @@ mod tests {
         assert_eq!(statement(PREFIXED), Ok(None));
     }
 
-    /// **Review P2-3: a plan that names a notification sink is not
-    /// approvable in the console** — the run would send its result there and
+    /// **A plan that names a notification sink is not approvable in the
+    /// console**: the run would send its result there and
     /// the scope does not show where. Each kind of sink leaves no scope.
     /// NEGATIVE CONTROL: `webhooks: []` (what the wizard writes) and no
     /// block at all are complete.

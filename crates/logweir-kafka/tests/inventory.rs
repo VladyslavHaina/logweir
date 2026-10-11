@@ -1,4 +1,4 @@
-//! D2 **W3** — the bounded Kafka inventory and the validate-only probes.
+//! The bounded Kafka inventory and the validate-only probes.
 //!
 //! EVERY TEST HERE IS SOCKETLESS. The rules live behind
 //! [`logweir_kafka::inventory::InventoryProbe`], so the assembly, the
@@ -44,9 +44,7 @@ fn check_client_config(
     Ok(cfg)
 }
 
-// ---------------------------------------------------------------------------
-// Fakes
-// ---------------------------------------------------------------------------
+// Fakes.
 
 /// A probe that answers from a script and records what it was asked.
 struct FakeProbe {
@@ -146,11 +144,9 @@ fn names(inv: &Inventory) -> Vec<String> {
     inv.entries.iter().map(|e| e.name.clone()).collect()
 }
 
-// ---------------------------------------------------------------------------
-// Internal topics — D2 §5.3
-// ---------------------------------------------------------------------------
+// Internal topics.
 
-/// D2 §12's PLAT-09.1 row `inventory::double_underscore_is_internal`.
+/// `__` and nothing else is internal.
 #[test]
 fn double_underscore_is_internal() {
     for internal in [
@@ -216,9 +212,7 @@ fn include_internal_returns_them_with_the_flag_and_no_exclusion_count() {
     assert_eq!(internal.flags(), "internal");
 }
 
-// ---------------------------------------------------------------------------
-// Ordering, digests and truncation — D2 §5.2 step 6, §5.5
-// ---------------------------------------------------------------------------
+// Ordering, digests and truncation.
 
 #[test]
 fn entries_are_sorted_bytewise_and_the_digest_covers_exactly_what_is_relayed() {
@@ -255,8 +249,7 @@ fn max_topics_truncates_and_names_that_bound() {
     assert_eq!(inv.result.counts.returned, 2);
 }
 
-/// D2 §12's PLAT-09.1 runner row `topics_truncate_at_relay_budget`, at the
-/// assembly layer that decides it.
+/// Truncation at the relay budget, at the assembly layer that decides it.
 #[test]
 fn topics_truncate_at_relay_budget() {
     let l = listing(&[("aaaa", 1), ("bbbb", 1), ("cccc", 1)]);
@@ -299,18 +292,13 @@ fn the_relay_cost_is_the_frame_prefix_plus_the_canonical_line() {
         relay_cost(&entry) as usize,
         TOPIC_FRAME_PREFIX.len() + entry.tsv_line().len()
     );
-    // THE WORST CASE, DERIVED RATHER THAN QUOTED. D2 §5.5 computes the relay
-    // budget from "~24 characters of flags and separators", i.e. 283 bytes of
-    // line and 303 bytes relayed. That understates it: the flag field carries
-    // `internal,expected,error:<Code>`, and the longest code this module can
-    // put there is `ClusterAuthorizationFailed` (26).
-    //
-    // The code set is DERIVED from `classify_error_code` itself — it is the
-    // sweep over librdkafka's own error-code space, not a list retyped here —
-    // so a ninth, longer code added to the classifier moves this arithmetic
-    // instead of quietly invalidating the table the relay budget is built on.
-    // A hand-maintained array is what an independent review flagged; this is
-    // the fix.
+    // THE WORST CASE, DERIVED RATHER THAN QUOTED. "~24 characters of flags and
+    // separators" (283 bytes of line, 303 relayed) understates it: the flag
+    // field carries `internal,expected,error:<Code>`, and the longest code this
+    // module can put there is `ClusterAuthorizationFailed` (26). The code set
+    // is DERIVED from `classify_error_code` itself, the sweep over librdkafka's
+    // own error-code space, so a longer code added to the classifier moves this
+    // arithmetic instead of quietly invalidating the relay budget.
     let kafka_codes = classification_codes();
     assert!(
         kafka_codes.len() >= 6,
@@ -349,13 +337,10 @@ fn the_relay_cost_is_the_frame_prefix_plus_the_canonical_line() {
         "D2 §5.5's worst-case relayed line is 303 bytes; the derived figure is {cost}. If this \
          moves, D2 §5.5's budget table moves with it"
     );
-    // The consequence, stated rather than left implicit: at that shape the
-    // 6 MiB relay budget carries about 19,100 entries, FEWER than the 20,000
-    // D2 §5.5's default `maxTopics` assumes fits. The bound that bites is then
-    // `RelayLimit` rather than `MaxTopics` — both are recorded with their
-    // reason, so nothing is silently lost, but the table's claim that "the
-    // default maxTopics of 20,000 fits even at worst-case names" is false for
-    // a listing whose every entry also carries a flag set.
+    // The consequence: at that shape the 6 MiB relay budget carries about
+    // 19,100 entries, FEWER than the default `maxTopics` of 20,000, so the
+    // bound that bites is `RelayLimit`. Both are recorded with their reason, so
+    // nothing is silently lost.
     assert!(
         (6 * 1024 * 1024) / cost < 20_000,
         "if this becomes false, D2 §5.5's claim holds again and this note should go"
@@ -371,9 +356,7 @@ fn an_untruncated_inventory_names_no_bound() {
     assert_eq!(inv.result.broker_count, Some(3));
 }
 
-// ---------------------------------------------------------------------------
-// Per-entry errors and the visibility SIGNAL — D2 §5.4(i)
-// ---------------------------------------------------------------------------
+// Per-entry errors and the visibility SIGNAL.
 
 #[test]
 fn an_errored_listing_entry_is_relayed_not_dropped_and_raises_the_signal() {
@@ -412,9 +395,7 @@ fn a_listing_whose_only_errors_are_transient_does_not_raise_the_authorization_si
     assert!(!inv.result.topic_authorization_error_in_listing);
 }
 
-// ---------------------------------------------------------------------------
-// Expected topics — D2 §5.2 step 5
-// ---------------------------------------------------------------------------
+// Expected topics.
 
 #[test]
 fn only_expected_names_absent_from_the_listing_are_probed_and_each_only_once() {
@@ -445,9 +426,9 @@ fn an_expected_name_in_the_listing_is_flagged_and_counted_visible() {
     );
 }
 
-/// The PLAT-09.1 acceptance row "ACL-limited principal": a targeted
-/// `TOPIC_AUTHORIZATION_FAILED` is `notAuthorized`, is counted, and does NOT
-/// become a topic line claiming the topic exists.
+/// An ACL-limited principal: a targeted `TOPIC_AUTHORIZATION_FAILED` is
+/// `notAuthorized`, is counted, and does NOT become a topic line claiming the
+/// topic exists.
 #[test]
 fn a_targeted_authorization_failure_is_not_authorized_and_adds_no_topic_line() {
     let l = listing(&[("orders", 6)]);
@@ -527,9 +508,7 @@ fn an_expected_name_with_no_answer_at_all_is_unknown_rather_than_missing() {
     assert_eq!(inv.result.expected.unknown, 1);
 }
 
-// ---------------------------------------------------------------------------
-// collect() — the orchestration, still socketless
-// ---------------------------------------------------------------------------
+// collect(): the orchestration, still socketless.
 
 #[test]
 fn collect_reads_the_cluster_id_and_probes_only_the_missing_expected_names() {
@@ -589,17 +568,12 @@ fn a_failing_listing_fails_the_whole_inventory() {
     assert_eq!(err.code, CheckCode::AuthenticationFailed);
 }
 
-// ---------------------------------------------------------------------------
-// The fault log — D2 §4.2 [VERIFY U5]
-// ---------------------------------------------------------------------------
+// The fault log.
 
-/// D2 §12's PLAT-03.1 unit row `kafka_errors::sasl_failure_via_error_callback`.
-///
-/// THE DEFECT THIS IS ABOUT. A metadata request against a broker that refused
-/// the credential returns a TIMEOUT, because librdkafka retries until the
-/// caller's deadline. Without the callback the check reports
-/// `MetadataTimeout`, and an operator goes looking at the network for a wrong
-/// password.
+/// A metadata request against a broker that refused the credential returns a
+/// TIMEOUT, because librdkafka retries until the caller's deadline; without the
+/// callback the check would report `MetadataTimeout` and send an operator to
+/// the network for a wrong password.
 #[test]
 fn a_sasl_failure_seen_by_the_error_callback_beats_the_calls_own_timeout() {
     let log = FaultLog::new();
@@ -706,9 +680,7 @@ fn a_check_failure_redacts_at_construction() {
     assert!(f.to_string().starts_with("BrokerUnreachable: "));
 }
 
-// ---------------------------------------------------------------------------
-// Error classification — D2 §4.2's Kafka row
-// ---------------------------------------------------------------------------
+// Error classification.
 
 #[test]
 fn every_kafka_error_code_maps_to_the_code_the_catalogue_names() {
@@ -788,7 +760,7 @@ fn an_ssl_error_splits_on_certificate_trust_and_defaults_to_handshake() {
     assert!(!is_certificate_trust_reason(""));
 }
 
-/// D2 §4.2: "unknown ⇒ the generic failure, never success."
+/// Unknown is the generic failure, never success.
 #[test]
 fn an_unclassified_kafka_error_is_never_a_ready_code() {
     for code in [
@@ -819,9 +791,7 @@ fn an_unclassified_kafka_error_is_never_a_ready_code() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Validate-only CreateTopics — D2 §6.7(b)
-// ---------------------------------------------------------------------------
+// Validate-only CreateTopics.
 
 #[test]
 fn a_create_validation_result_maps_to_the_topic_create_row() {
@@ -893,9 +863,9 @@ fn validate_only_is_set_on_every_create_request() {
     );
 }
 
-/// Every admin request this module issues carries an explicit request timeout.
-/// D2's check contract has a `timeoutSeconds`, and an unbounded admin call
-/// would blow it whatever the plan said.
+/// Every admin request this module issues carries an explicit request timeout:
+/// the check contract has a `timeoutSeconds`, and an unbounded admin call would
+/// blow it.
 #[test]
 fn every_admin_call_is_time_bounded() {
     let src = std::fs::read_to_string(
@@ -960,9 +930,7 @@ fn strip_comments(src: &str) -> String {
         .join("\n")
 }
 
-// ---------------------------------------------------------------------------
-// Timeouts
-// ---------------------------------------------------------------------------
+// Timeouts.
 
 #[test]
 fn the_targeted_budget_is_forty_percent_and_no_call_timeout_exceeds_half_the_budget() {
@@ -1001,16 +969,15 @@ fn the_targeted_budget_is_forty_percent_and_no_call_timeout_exceeds_half_the_bud
     }
 }
 
-/// **The guard for the half of D2 §4.2's [VERIFY U5] that a fake cannot see.**
+/// **The guard for the half of the error-callback rule a fake cannot see.**
 ///
-/// Installing a capturing `ClientContext` is not enough: rdkafka 0.36 invokes
-/// `ClientContext::error` only from `Client::poll_event`, which only
-/// `BaseConsumer::poll` reaches. A metadata-only workflow therefore never runs
-/// the callback unless something serves the event queue. This was MEASURED
-/// against the compose broker's SASL listener — without the drain the refusal
-/// is reported as `BrokerUnreachable` — and the live regression for it is
+/// rdkafka 0.36 invokes `ClientContext::error` only from `Client::poll_event`,
+/// which only `BaseConsumer::poll` reaches, so a metadata-only workflow never
+/// runs the callback unless something serves the event queue (measured on the
+/// compose broker's SASL listener: without the drain, `BrokerUnreachable`). The
+/// live regression is
 /// `tests/live.rs::a_refused_scram_credential_is_authentication_failed_and_not_a_timeout`,
-/// which is `e2e`-gated. This is the always-on half.
+/// `e2e`-gated; this is the always-on half.
 #[test]
 fn a_failing_call_serves_the_event_queue_before_it_classifies() {
     let src = std::fs::read_to_string(
@@ -1037,19 +1004,12 @@ fn a_failing_call_serves_the_event_queue_before_it_classifies() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// H3 — the three-way per-topic decision (D2 §5.4 signal (ii))
-// ---------------------------------------------------------------------------
+// The three-way per-topic decision.
 
-/// **The arm an independent review's mutant survived in.**
-///
-/// `TopicAuthorizationFailed ⇒ NotAuthorized` is signal (ii) of D2 §5.4 — the
-/// only thing that turns an ACL-limited principal into visibility `limited`
-/// rather than `unknown`, and "permission-limited" is a named PLAT-09.1
-/// distinguishable outcome. It used to live inside `describe_topic`, where it
-/// was reachable only from a broker with real ACLs; the compose stack has
-/// none, so a planted `=> Unknown` passed all 33 tests and the whole crate
-/// suite. The decision is now `TopicPresence::of_error`, and this is its table.
+/// `TopicAuthorizationFailed ⇒ NotAuthorized` is the only thing that turns an
+/// ACL-limited principal into visibility `limited` rather than `unknown`. The
+/// compose stack has no ACLs, so the decision lives in
+/// `TopicPresence::of_error`, where this table reaches it.
 #[test]
 fn a_per_topic_error_maps_to_exactly_one_presence() {
     assert_eq!(
@@ -1095,8 +1055,7 @@ fn a_per_topic_error_maps_to_exactly_one_presence() {
 }
 
 /// The one place the rdkafka arm may make that decision is
-/// `TopicPresence::of_error`. A second copy inside `describe_topic` is how the
-/// reviewer's mutant became possible in the first place.
+/// `TopicPresence::of_error`, never a second copy inside `describe_topic`.
 #[test]
 fn describe_topic_delegates_the_presence_decision_to_the_pure_table() {
     let src = std::fs::read_to_string(
@@ -1123,9 +1082,7 @@ fn describe_topic_delegates_the_presence_decision_to_the_pure_table() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// H2 — the admin half of [VERIFY U5]
-// ---------------------------------------------------------------------------
+// The admin half of the error-callback rule.
 
 /// **An empty fault log cannot escalate, which is why `fail` dials first.**
 ///
@@ -1133,10 +1090,10 @@ fn describe_topic_delegates_the_presence_decision_to_the_pure_table() {
 /// (`FaultLog`'s header carries the crate-source citations), so on an
 /// admin-first failure — `topic_configs` or `validate_create_topics` as the
 /// FIRST call on a fresh connection, which the `InventoryProbe` seam permits —
-/// the consumer has never dialled and this log is empty. This is that
-/// sequence, over the log itself: empty means the base code stands, which is
-/// exactly the `MetadataTimeout`-for-a-refused-credential defect. Populated —
-/// which is what dialling the consumer achieves — means the refusal wins.
+/// the consumer has never dialled and this log is empty. This is that sequence,
+/// over the log itself: empty means the base code stands (a `MetadataTimeout`
+/// for a refused credential); populated, which is what dialling the consumer
+/// achieves, means the refusal wins.
 #[test]
 fn an_admin_first_failure_has_nothing_to_escalate_until_the_consumer_has_dialled() {
     let log = FaultLog::new();
@@ -1164,7 +1121,7 @@ fn an_admin_first_failure_has_nothing_to_escalate_until_the_consumer_has_dialled
     );
 }
 
-/// The always-on half of the fix: `fail` dials the consumer when nothing has,
+/// The always-on half: `fail` dials the consumer when nothing has,
 /// and `broker_configs` was already safe because it issues its own consumer
 /// `fetch_metadata` first. A double cannot express either — both are about
 /// what a real librdkafka handle has done — so the guard is over the source,
@@ -1218,25 +1175,18 @@ fn an_admin_failure_dials_the_consumer_before_it_classifies() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// PLAT-07.1 — the saved connection's private CA reaches the check client
-// ---------------------------------------------------------------------------
+// The saved connection's private CA reaches the check client.
 
 /// **The check client and the drill client derive TLS from ONE place.**
 ///
-/// PLAT-07.1 put the projected trust anchor inside `AuthConfig::ScramSha512`'s
-/// `tls_ca_file` and extracted `RdKafkaReader::client_config` so the two
-/// security-critical keys — `ssl.endpoint.identification.algorithm` (hostname
-/// verification) and `ssl.ca.location` (which trust anchor) — are assertable
-/// without a socket. `KafkaInventory` builds through that same function, so
-/// this test reads the config the check would dial with and proves both keys
-/// are there.
-///
-/// It matters because the two clients talk to the SAME broker: a check that
-/// did not trust the projected CA would report `TlsTrustFailed` for a
-/// connection a backup uses happily, and a check that turned hostname
-/// verification off would report ready for one the engine's rustls client will
-/// refuse.
+/// The check client builds through `RdKafkaReader::client_config`, so this
+/// reads the config the check would dial with and proves both security-critical
+/// keys, `ssl.endpoint.identification.algorithm` (hostname verification) and
+/// `ssl.ca.location` (which trust anchor), are there. The two clients talk to
+/// the SAME broker: a check that did not trust the projected CA would report
+/// `TlsTrustFailed` for a connection a backup uses happily, and one that turned
+/// hostname verification off would report ready for one the engine's rustls
+/// client refuses.
 #[test]
 fn a_tls_ca_file_reaches_the_check_clients_ssl_ca_location() {
     const CA: &str = "/etc/logweir/trust/source-ca.pem";
@@ -1327,11 +1277,9 @@ fn a_tls_ca_file_reaches_the_check_clients_ssl_ca_location() {
 
 /// The check client's config is built by ONE function, and it is the drill's.
 ///
-/// A behavioural test cannot see "which function built this map" — the map is
-/// identical either way today — so the no-duplication half is a source scan.
-/// It is what stops the two clients drifting again: the copy this replaced had
-/// already drifted, setting `ssl.ca.location` from a field of its own with no
-/// TLS check and no hostname verification at all.
+/// A behavioural test cannot see "which function built this map" (the map is
+/// identical either way), so the no-duplication half is a source scan: it stops
+/// the two clients drifting apart.
 #[test]
 fn the_check_client_builds_no_tls_configuration_of_its_own() {
     let src = std::fs::read_to_string(
@@ -1359,10 +1307,8 @@ fn the_check_client_builds_no_tls_configuration_of_its_own() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-4 / T13: an EMPTY DescribeConfigs answer is a refusal, never an empty
-// configuration — for the readiness checks' inventory probe too.
-// ---------------------------------------------------------------------------
+// An EMPTY DescribeConfigs answer is a refusal, never an empty configuration,
+// for the readiness checks' inventory probe too.
 
 fn empty_resource(
     specifier: rdkafka::admin::OwnedResourceSpecifier,
@@ -1373,12 +1319,11 @@ fn empty_resource(
     })
 }
 
-/// **The mutant the orchestrator named: a denied resource read back as "no
-/// overrides".** rdkafka 0.36.2 returns a refused broker or topic resource as
-/// `Ok` with no entries. Read as an empty map, `target.timestampBound`
-/// reported READY — "the target declares no record-timestamp bound" — for a
-/// principal the cluster had refused. Here the empty answer must be the
-/// caller's failure, and never `Ok`.
+/// **A denied resource is never read back as "no overrides".** rdkafka 0.36.2
+/// returns a refused broker or topic resource as `Ok` with no entries; read as
+/// an empty map, `target.timestampBound` would report READY ("the target
+/// declares no record-timestamp bound") for a principal the cluster refused.
+/// The empty answer must be the caller's failure, never `Ok`.
 #[test]
 fn the_empty_describe_answer_is_never_an_empty_configuration() {
     let on_code = |code: RDKafkaErrorCode| CheckFailure::new(classify_error_code(code, ""), "code");

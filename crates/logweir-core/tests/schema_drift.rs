@@ -26,14 +26,12 @@ fn justfile_schema_version(name: &str) -> String {
         .to_string()
 }
 
-/// **One version per document.** `just schema`/`schema-check` write and
-/// compare the file their justfile variable names; the writer's constant names
-/// the `$id` and the `format_version` it writes. They must be one number, or a
+/// **One version per document.** `just schema`/`schema-check` write and compare
+/// the file their justfile variable names; the writer's constant names the
+/// `$id` and the `format_version` it writes. They must be one number, or a
 /// renumber would regenerate one file and sign documents naming another. The
-/// CURRENT file is each document's newest MINOR's — for the receipt since
-/// PROD-01.4a the 1.6.0 every receipt this build signs carries
-/// (`generations`, beside PROD-03.0's 1.5.0 `schema_dependency`); the older
-/// files are frozen beside it.
+/// CURRENT file is each document's newest MINOR's; the older files are frozen
+/// beside it.
 #[test]
 fn the_justfile_schema_versions_are_the_writers_constants() {
     assert_eq!(
@@ -50,8 +48,8 @@ fn the_justfile_schema_versions_are_the_writers_constants() {
     );
 }
 
-/// The schema is checked in, not generated at build time, so a reviewer sees a
-/// format change as a diff. This test is the gate (spec §12).
+/// The schema is checked in, not generated at build time, so a reviewer sees
+/// a format change as a diff. This test is the gate.
 #[test]
 fn checked_in_schema_matches_the_types() {
     let generated = logweir_core::schema::scorecard_schema();
@@ -69,10 +67,9 @@ fn checked_in_schema_matches_the_types() {
     );
 }
 
-/// The 1.0.0 scorecard schema is FROZEN beside the 1.1.0 one, and still
-/// describes the documents written before the bump — `docs/stability.md`'s "a
-/// new schema file beside the old one". It is no longer regenerated, so this is
-/// the gate that it stays what it was: it names itself 1.0.0 and it has neither
+/// The 1.0.0 scorecard schema is FROZEN beside the newer ones and still
+/// describes the documents written before the bump (`docs/stability.md`'s "a
+/// new schema file beside the old one"): it names itself 1.0.0 and has neither
 /// `topic_parity.not_assessed` nor `target_diff.not_assessed`.
 #[test]
 fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
@@ -127,12 +124,10 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
     );
 }
 
-/// The 1.1.0 scorecard schema is FROZEN beside the 1.2.0 one, the way
-/// FX-4 froze the 1.0.0 one. It still describes every document written between
-/// the two bumps: it names itself 1.1.0, carries FX-4's two `not_assessed`
-/// fields and does NOT describe `topic_parity.not_reconstructed`. The current
-/// schema does, as an OPTIONAL field, so a 1.0.0 or 1.1.0 document without it
-/// still validates against it.
+/// The 1.1.0 scorecard schema is FROZEN: it names itself 1.1.0, carries the two
+/// `not_assessed` fields and does NOT describe
+/// `topic_parity.not_reconstructed`. The current schema does, as an OPTIONAL
+/// field, so a 1.0.0 or 1.1.0 document without it still validates against it.
 #[test]
 fn the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -167,12 +162,10 @@ fn the_frozen_1_1_0_scorecard_schema_is_still_the_1_1_0_schema() {
     );
 }
 
-/// The 1.1.0 scorecard schema is FROZEN beside the 1.3.0 one, the way
-/// FX-4 froze the 1.0.0 one. It still describes every document written before
-/// the bump: it names itself 1.1.0, carries FX-4's `not_assessed` and does NOT
-/// describe `source.time_basis`. The current schema does, as an OPTIONAL field
-/// whose two lists are required inside it, so a document before 1.3.0 without
-/// the block still validates against it.
+/// The frozen 1.1.0 scorecard schema does NOT describe `source.time_basis`. The
+/// current schema does, as an OPTIONAL field whose two lists are required
+/// inside it, so a document before 1.3.0 without the block still validates
+/// against it.
 #[test]
 fn the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -221,9 +214,8 @@ fn the_frozen_1_1_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
-/// The 1.2.0 scorecard schema (FX-3's) is FROZEN beside the 1.3.0 one.
-/// It names itself 1.2.0, carries FX-3's `not_reconstructed` and does NOT
-/// describe `source.time_basis`.
+/// The 1.2.0 scorecard schema is FROZEN: it names itself 1.2.0, carries
+/// `not_reconstructed` and does NOT describe `source.time_basis`.
 #[test]
 fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -250,12 +242,11 @@ fn the_frozen_1_2_0_scorecard_schema_does_not_describe_the_time_basis() {
     );
 }
 
-/// PROD-08.1: FX-8's 1.3.0 scorecard schema is FROZEN beside the 1.4.0 one.
-/// It names itself 1.3.0, carries FX-8's `source.time_basis` and does NOT
-/// describe `integrity.verification`. The current schema does, as an OPTIONAL
-/// field (a document before 1.4.0 without it still validates), whose four
-/// descriptive strings and two range lists are required inside it and whose
-/// `complete` block is optional.
+/// The 1.3.0 scorecard schema is FROZEN: it names itself 1.3.0, carries
+/// `source.time_basis` and does NOT describe `integrity.verification`. The
+/// current schema does, as an OPTIONAL field (a document before 1.4.0 without
+/// it still validates), whose four descriptive strings and two range lists are
+/// required inside it and whose `complete` block is optional.
 #[test]
 fn the_frozen_1_3_0_scorecard_schema_does_not_describe_the_verification() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -328,33 +319,17 @@ fn schema_declares_the_format_version_const() {
     assert!(v["properties"]["format_version"].is_object());
 }
 
-/// Global Constraint 12, as amended: the scorecard stays frozen at
-/// `format_version 1.0.0` with **21 top-level properties and 17 required
-/// ones**. New top-level information ships as a NEW DOCUMENT — the backup
-/// receipt, at its own `format_version` — and never as a new scorecard field.
+/// The scorecard keeps **21 top-level properties and 17 required ones**: new
+/// top-level information ships as a NEW DOCUMENT (the backup receipt), never as
+/// a new scorecard field, while NESTED OPTIONAL fields (`target.auth`,
+/// `evidence.offset_report_*`) may be added.
 ///
-/// # A SHAPE assertion, deliberately, and not a byte diff against a commit
-///
-/// GC12 as amended permits tag 1 to add NESTED OPTIONAL fields (`target.auth`,
-/// `evidence.offset_report_key`/`_sha256`), each paying the full price the
-/// constraint sets. Those change the schema's bytes and must not change these
-/// two counts. A `diff` against a frozen blob here would go red the first time
-/// a sanctioned nested field landed, and the cheapest way to make it green
-/// again would be to delete the check — so the check would be gone at exactly
-/// the moment it started mattering. `checked_in_schema_matches_the_types`
-/// above is the byte-level gate, against the TYPES rather than against a
-/// commit; this is the gate on the FREEZE.
-///
-/// # Both the GENERATED schema and the CHECKED-IN file
-///
-/// Two sources, one assertion, because each alone leaves a step in which a new
-/// top-level field exists and nothing has said so. Against the checked-in file
-/// only, adding a field to `Scorecard` fails `checked_in_schema_matches_the_
-/// types` (stale) and this test still passes; the obvious next move is `just
-/// schema`, and only THEN does the freeze complain. Against the generated
-/// schema only, a hand-edit of the published file goes unnoticed here. Checked
-/// together, a field added to the type fails this test in the same run that
-/// adds it, at assertion time, with the count in the message.
+/// A SHAPE assertion and not a byte diff against a commit: a sanctioned nested
+/// field changes the bytes and must not change these counts, and a diff would
+/// go red exactly then. `checked_in_schema_matches_the_types` is the byte-level
+/// gate against the TYPES. Both the GENERATED schema and the CHECKED-IN file
+/// are counted, so a field added to the type fails here in the same run, and a
+/// hand-edit of the published file does too.
 #[test]
 fn the_scorecard_top_level_shape_is_unchanged() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -401,14 +376,12 @@ fn the_scorecard_top_level_shape_is_unchanged() {
     }
 }
 
-/// The checked-in backup-receipt schema is EXACTLY what the generator emits.
-///
-/// The named test behind the CI drift arm and behind the by-hand acceptance
-/// (`cargo run -p logweir-core --example emit_backup_receipt_schema > /tmp/r.json`
-/// then `diff -u` against the current schema file, which `just schema-check`
-/// names). It fails in both directions: a type change nobody regenerated, and a
-/// hand-edit of the published file. The CURRENT file is the newest MINOR's,
-/// named by the writer's constant (FX-7 fix round): the 1.0.0 file is frozen.
+/// The checked-in backup-receipt schema is EXACTLY what the generator emits
+/// (`cargo run -p logweir-core --example emit_backup_receipt_schema`, the file
+/// `just schema-check` names). It fails in both directions: a type change
+/// nobody regenerated, and a hand-edit of the published file. The CURRENT file
+/// is the newest MINOR's, named by the writer's constant; the older files are
+/// frozen.
 #[test]
 fn backup_receipt_schema_has_no_drift() {
     let generated = logweir_core::schema::backup_receipt_schema();
@@ -534,13 +507,11 @@ fn backup_receipt_schema_pins_its_major_and_types_the_window_as_integers() {
     }
 }
 
-/// **The 1.0.0 receipt schema is FROZEN** (FX-4, and FX-7's fix round,
-/// review M-2) beside the newer ones and still describes every receipt written
-/// before FX-4: it names itself 1.0.0, it has no `config_coverage`, and its
-/// `ReceiptArchive` has no `manifest_version_id`. It is no longer regenerated
-/// (`just schema` writes the current file only), so this is the gate that it
-/// stays what adopters downloaded under that name — `docs/stability.md`'s "a
-/// new schema file beside the old one".
+/// **The 1.0.0 receipt schema is FROZEN** beside the newer ones and still
+/// describes every receipt written before 1.1.0: it names itself 1.0.0, it has
+/// no `config_coverage`, and its `ReceiptArchive` has no `manifest_version_id`.
+/// `just schema` writes the current file only, so this is the gate that it
+/// stays what adopters downloaded under that name.
 #[test]
 fn the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -569,12 +540,10 @@ fn the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema() {
     );
 }
 
-/// **FX-4's 1.1.0 receipt schema is FROZEN** beside the 1.2.0 one (FX-7 merged
-/// after FX-4 and took the next MINOR). It still describes every receipt this
-/// build writes WITHOUT a pin — the [`RECEIPT_FORMAT_VERSION`] document: it
+/// **The 1.1.0 receipt schema is FROZEN** and still describes every receipt
+/// this build writes WITHOUT a pin, the [`RECEIPT_FORMAT_VERSION`] document: it
 /// names itself 1.1.0, it carries `config_coverage`, and its `ReceiptArchive`
-/// has no `manifest_version_id`. `just schema` no longer regenerates it, so
-/// this is the gate that it stays the file FX-4 published.
+/// has no `manifest_version_id`.
 ///
 /// [`RECEIPT_FORMAT_VERSION`]: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
 #[test]
@@ -609,12 +578,11 @@ fn the_frozen_1_1_0_receipt_schema_is_still_fx4s() {
     );
 }
 
-/// **PROD-01.3: PROD-08.1's 1.4.0 scorecard schema is FROZEN** beside the
-/// 1.5.0 one, and still describes every scorecard of a `plaintext` or
-/// `scramSha512` target, which this build writes as 1.4.0: it names itself
-/// 1.4.0, it carries PROD-08.1's `integrity.verification`, and its
-/// `target.auth.mode` description is the closed set of two. The current file
-/// names the five.
+/// **The 1.4.0 scorecard schema is FROZEN**, and still describes every
+/// scorecard of a `plaintext` or `scramSha512` target, which this build writes
+/// as 1.4.0: it names itself 1.4.0, it carries `integrity.verification`, and
+/// its `target.auth.mode` description is the closed set of two. The current
+/// file names the five.
 #[test]
 fn the_frozen_1_4_0_scorecard_schema_is_still_prod_08_1s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -648,11 +616,11 @@ fn the_frozen_1_4_0_scorecard_schema_is_still_prod_08_1s() {
     );
 }
 
-/// **FX-23: PROD-01.3's 1.5.0 scorecard schema is FROZEN** beside the 1.6.0
-/// one, and still describes every scorecard of a PROD-01.3 auth mode that
-/// names no unsampled topic, which this build writes as 1.5.0: it names itself
-/// 1.5.0, its `target.auth.mode` description is the five, and its `sample`
-/// does not describe `unsampled_topics`. The current file does.
+/// **The 1.5.0 scorecard schema is FROZEN**, and still describes every
+/// scorecard of a 1.5.0 auth mode that names no unsampled topic, which this
+/// build writes as 1.5.0: it names itself 1.5.0, its `target.auth.mode`
+/// description is the five, and its `sample` does not describe
+/// `unsampled_topics`. The current file does.
 #[test]
 fn the_frozen_1_5_0_scorecard_schema_does_not_describe_unsampled_topics() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -693,12 +661,11 @@ fn the_frozen_1_5_0_scorecard_schema_does_not_describe_unsampled_topics() {
     assert_eq!(logweir_core::scorecard::UNSAMPLED_TOPICS_SINCE_MINOR, 6);
 }
 
-/// **PROD-11.1: FX-23's 1.6.0 scorecard schema is FROZEN** beside the 1.7.0
-/// one, and still describes every scorecard of a restore that states no
-/// replay selection, which this build writes as 1.6.0 (sampled) or 1.4.0/1.5.0
-/// (complete): it names itself 1.6.0, describes `sample.unsampled_topics`, and
-/// its `source` does not describe `selection`. The current file does, as an
-/// optional block.
+/// **The 1.6.0 scorecard schema is FROZEN**, and still describes every
+/// scorecard of a restore that states no replay selection, which this build
+/// writes as 1.6.0 (sampled) or 1.4.0/1.5.0 (complete): it names itself 1.6.0,
+/// describes `sample.unsampled_topics`, and its `source` does not describe
+/// `selection`. The current file does, as an optional block.
 #[test]
 fn the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -716,9 +683,8 @@ fn the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection() {
             .is_none(),
         "the frozen 1.6.0 schema must not describe the 1.7.0 block"
     );
-    // The file that first described it, PROD-11.1's 1.7.0, frozen since
-    // PROD-11.1b, describes it as an OPTIONAL block (the current 2.0.0 file
-    // requires it: below).
+    // The file that first described it, the frozen 1.7.0, describes it as an
+    // OPTIONAL block (the current 2.0.0 file requires it: below).
     let frozen_1_7: serde_json::Value = serde_json::from_str(include_str!(
         "../../../schemas/logweir-drill-scorecard-1.7.0.json"
     ))
@@ -741,16 +707,15 @@ fn the_frozen_1_6_0_scorecard_schema_does_not_describe_the_selection() {
     assert_eq!(logweir_core::scorecard::SELECTION_SINCE_MINOR, 7);
 }
 
-/// **PROD-11.1b (OD-9 (a)): PROD-11.1's 1.7.0 scorecard schema is FROZEN**
-/// beside the 2.0.0 one, and still describes every document this build
-/// writes as 1.x — a start-only block, and every document with none: it
-/// names itself 1.7.0, pins major 1, and its `SelectionLabel` is a start and
-/// an end with no `partitions` and no `engine_runs`. The current 2.0.0 file
-/// pins major 2 and requires `source.selection` with its partition subsets
-/// and engine runs, so a 1.x document never validates against it and a
-/// subset document never validates against 1.7.0. KILLS: regenerating the
-/// 1.7.0 file; a 2.0.0 file that leaves the subset optional or the major
-/// unpinned.
+/// **The 1.7.0 scorecard schema is FROZEN** beside the 2.0.0 one, and still
+/// describes every document this build writes as 1.x (a start-only block, and
+/// every document with none): it names itself 1.7.0, pins major 1, and its
+/// `SelectionLabel` is a start and an end with no `partitions` and no
+/// `engine_runs`. The 2.0.0 file pins major 2 and requires `source.selection`
+/// with its partition subsets and engine runs, so a 1.x document never
+/// validates against it and a subset document never validates against 1.7.0.
+/// KILLS: regenerating the 1.7.0 file; a 2.0.0 file that leaves the subset
+/// optional or the major unpinned.
 #[test]
 fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -804,7 +769,7 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
     assert_eq!(label["engine_runs"]["minimum"], 1.0);
     let topic = &current["definitions"]["TopicPartitions"]["properties"];
     assert_eq!(topic["partitions"]["minItems"], 1);
-    // Review L5: PS-3's distinct, not-negative partitions and non-empty topic.
+    // PS-3's distinct, not-negative partitions and non-empty topic.
     assert_eq!(topic["partitions"]["uniqueItems"], true);
     assert_eq!(topic["partitions"]["items"]["minimum"], 0.0);
     assert_eq!(topic["topic"]["minLength"], 1);
@@ -815,12 +780,11 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_partition_subsets() {
     assert_eq!(logweir_core::scorecard::PARTITION_SUBSETS_MAJOR, 2);
 }
 
-/// **PROD-15.1: PROD-11.1's 1.7.0 scorecard schema is FROZEN** beside the
-/// 1.8.0 one, format 1's newest minor, and still describes every scorecard of
-/// a restore that states a window start and is not an original-name restore,
-/// which this build writes as 1.7.0: it names itself 1.7.0, describes
-/// `source.selection`, and its `target` does not describe `original_name`. The
-/// 1.8.0 file does, as an optional block.
+/// The frozen 1.7.0 scorecard schema still describes every scorecard of a
+/// restore that states a window start and is not an original-name restore,
+/// which this build writes as 1.7.0: it describes `source.selection`, and its
+/// `target` does not describe `original_name`. The 1.8.0 file does, as an
+/// optional block.
 #[test]
 fn the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -859,17 +823,17 @@ fn the_frozen_1_7_0_scorecard_schema_does_not_describe_the_original_name() {
 }
 
 /// The text of the frozen 1.7.0 scorecard schema, format 1's last file
-/// before PROD-15.1's block.
+/// before the `original_name` block.
 const FROZEN_1_7_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-1.7.0.json");
 
-/// The text of the frozen 1.8.0 scorecard schema (PROD-15.1's), format 1's
-/// last file before PROD-16.2's block.
+/// The text of the frozen 1.8.0 scorecard schema, format 1's last file before
+/// the `approval.console` block.
 const FROZEN_1_8_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-1.8.0.json");
 
-/// The text of the frozen 2.0.0 scorecard schema (PROD-11.1b's), format 2's
-/// last file before PROD-16.2's block.
+/// The text of the frozen 2.0.0 scorecard schema, format 2's last file before
+/// the `approval.console` block.
 const FROZEN_2_0_0_SCORECARD_SCHEMA: &str =
     include_str!("../../../schemas/logweir-drill-scorecard-2.0.0.json");
 
@@ -878,11 +842,11 @@ fn format_1_scorecard_schema() -> String {
     logweir_core::schema::scorecard_format_1_schema(FROZEN_1_8_0_SCORECARD_SCHEMA)
 }
 
-/// The two definitions PROD-16.2's `approval.console` brings with it.
+/// The two definitions the `approval.console` block brings with it.
 const CONSOLE_APPROVAL_DEFINITIONS: [&str; 2] = ["ConsoleApprovalInfo", "ConsolePrincipal"];
 
-/// `schema` with PROD-16.2's block set aside and its `$id` replaced: what is
-/// left must be the file the block was added to.
+/// `schema` with the `approval.console` block set aside and its `$id` replaced:
+/// what is left must be the file the block was added to.
 fn without_the_console_approval(
     mut schema: serde_json::Value,
     id: &serde_json::Value,
@@ -920,13 +884,11 @@ fn checked_in_format_1_scorecard_schema_matches_the_types() {
     );
 }
 
-/// **PROD-15.1's 1.8.0 file is FROZEN, and it is still what that row
-/// published**: the frozen 1.7.0 file, value for value, once its `$id`,
-/// `target.original_name` and the block's two definitions are set aside; it
-/// pins major 1, its selection block is a start and an end, and it does not
-/// describe PROD-16.2's `approval.console`. `just schema` no longer
-/// regenerates it, so this is the gate that it stays that file. KILLS: a hand
-/// edit of the 1.8.0 file; a generator that writes the console block into it.
+/// **The 1.8.0 file is FROZEN**: the frozen 1.7.0 file, value for value, once
+/// its `$id`, `target.original_name` and the block's two definitions are set
+/// aside; it pins major 1, its selection block is a start and an end, and it
+/// does not describe `approval.console`. KILLS: a hand edit of the 1.8.0 file;
+/// a generator that writes the console block into it.
 #[test]
 fn the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_block() {
     let frozen: serde_json::Value =
@@ -972,7 +934,7 @@ fn the_frozen_1_8_0_scorecard_schema_is_the_frozen_1_7_0_plus_the_original_name_
     assert_eq!(format_1, frozen);
 }
 
-/// **PROD-16.2: a MINOR adds optional fields only, and this one adds exactly
+/// **A MINOR adds optional fields only, and this one adds exactly
 /// one block.** The 1.9.0 file is the frozen 1.8.0 file, value for value,
 /// once its `$id`, `approval.console` and the block's two definitions are set
 /// aside; it still pins major 1, its selection block is still a start and an
@@ -1038,7 +1000,7 @@ fn the_format_1_scorecard_schema_is_the_frozen_1_8_0_plus_the_console_approval_b
     assert_eq!(logweir_core::scorecard::CONSOLE_APPROVAL_SINCE_MINOR, 9);
 }
 
-/// **PROD-16.2: PROD-11.1b's 2.0.0 file is FROZEN beside 2.1.0, and 2.1.0 is
+/// **The 2.0.0 file is FROZEN beside 2.1.0, and 2.1.0 is
 /// that file plus the one block.** A partition-subset restore may be approved
 /// in the console like any other, so format 2 gains the same optional block
 /// in its first MINOR. The generated 2.1.0 file, once its `$id`,
@@ -1103,10 +1065,10 @@ fn the_frozen_2_0_0_scorecard_schema_is_the_2_1_0_one_without_the_console_approv
     );
 }
 
-/// **PROD-15.1's block never appears in a 2.x document, so format 2's file
-/// does not describe it** (an original-name restore restores whole topics:
-/// `OriginalNameNeedsWholeTopics`, arm ON-14). KILLS: a format 2 generator
-/// that lets the block through.
+/// **The `original_name` block never appears in a 2.x document, so format 2's
+/// file does not describe it** (an original-name restore restores whole topics:
+/// `OriginalNameNeedsWholeTopics`, arm ON-14). KILLS: a format 2 generator that
+/// lets the block through.
 #[test]
 fn the_format_2_scorecard_schema_does_not_describe_the_original_name() {
     let current: serde_json::Value =
@@ -1127,11 +1089,10 @@ fn the_format_2_scorecard_schema_does_not_describe_the_original_name() {
     assert!(format_1["definitions"]["OriginalNameInfo"].is_object());
 }
 
-/// **FX-7's 1.2.0 receipt schema is FROZEN** beside PROD-05.1's 1.3.0 one. It
-/// still describes every PINNED receipt written before PROD-05.1: it names
-/// itself 1.2.0, carries `config_coverage` and `archive.manifest_version_id`,
-/// and does NOT describe `topic_configuration`. `just schema` no longer
-/// regenerates it, so this is the gate that it stays the file FX-7 published.
+/// **The 1.2.0 receipt schema is FROZEN**: it still describes every PINNED
+/// receipt written before 1.3.0: it names itself 1.2.0, carries
+/// `config_coverage` and `archive.manifest_version_id`, and does NOT describe
+/// `topic_configuration`.
 #[test]
 fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -1159,7 +1120,7 @@ fn the_frozen_1_2_0_receipt_schema_is_still_fx7s() {
     assert!(current["properties"]["topic_configuration"].is_object());
 }
 
-/// **PROD-04.1: PROD-01.3's 1.4.0 receipt schema is FROZEN** beside the current
+/// **The 1.4.0 receipt schema is FROZEN** beside the current
 /// one and has no `consumer_positions`; the current file carries it, optional.
 #[test]
 fn the_frozen_1_4_0_receipt_schema_has_no_consumer_positions() {
@@ -1188,7 +1149,7 @@ fn the_frozen_1_4_0_receipt_schema_has_no_consumer_positions() {
         "consumer_positions is OPTIONAL: a backup that selects no group writes none"
     );
     // AT LEAST 1.5.0, and the minor arm 30 gates on: a renumber at
-    // integration moves both together, never below PROD-01.3's 1.4.0.
+    // integration moves both together, never below 1.4.0.
     let minor: u64 = logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
         .split('.')
         .nth(1)
@@ -1202,7 +1163,7 @@ fn the_frozen_1_4_0_receipt_schema_has_no_consumer_positions() {
     );
 }
 
-/// **PROD-02.1: PROD-04.1's 1.7.0 receipt schema is FROZEN** beside the
+/// **The 1.7.0 receipt schema is FROZEN** beside the
 /// current one and has no `source_watermarks`; the current file carries it,
 /// optional, at the minor arm 41 gates on.
 #[test]
@@ -1241,11 +1202,11 @@ fn the_frozen_1_7_0_receipt_schema_has_no_source_watermarks() {
     );
 }
 
-/// **PROD-01.3: PROD-05.1's 1.3.0 receipt schema is FROZEN** beside the 1.4.0
-/// one, and still describes every receipt of a `plaintext` or `scramSha512`
-/// backup, which this build writes as 1.3.0: it names itself 1.3.0, carries
-/// `topic_configuration`, and its `source.auth.mode` description is the closed
-/// set of two. The current file names the five, from 1.4.0.
+/// **The 1.3.0 receipt schema is FROZEN**, and still describes every receipt of
+/// a `plaintext` or `scramSha512` backup, which this build writes as 1.3.0: it
+/// names itself 1.3.0, carries `topic_configuration`, and its
+/// `source.auth.mode` description is the closed set of two. The current file
+/// names the five, from 1.4.0.
 #[test]
 fn the_frozen_1_3_0_receipt_schema_is_still_prod_05_1s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -1285,7 +1246,7 @@ fn the_frozen_1_3_0_receipt_schema_is_still_prod_05_1s() {
     );
 }
 
-/// **PROD-03.0: PROD-01.3's 1.4.0 receipt schema is FROZEN** beside the 1.5.0
+/// **The 1.4.0 receipt schema is FROZEN** beside the 1.5.0
 /// one, and still describes every 1.4.0 receipt an earlier build signed: it
 /// names itself 1.4.0, names the five auth modes, and has no
 /// `schema_dependency`. The current file adds the field, optional.
@@ -1311,11 +1272,9 @@ fn the_frozen_1_4_0_receipt_schema_is_still_prod_01_3s() {
     );
 }
 
-/// **PROD-01.4a: PROD-03.0's 1.5.0 receipt schema is FROZEN** beside the 1.6.0
-/// one. It still describes every receipt signed before PROD-01.4a: it names
-/// itself 1.5.0, carries `schema_dependency`, `topic_configuration` and the
-/// five auth modes, and does NOT describe `generations`. `just schema` no
-/// longer regenerates it.
+/// **The 1.5.0 receipt schema is FROZEN**: it names itself 1.5.0, carries
+/// `schema_dependency`, `topic_configuration` and the five auth modes, and does
+/// NOT describe `generations`.
 #[test]
 fn the_frozen_1_5_0_receipt_schema_is_still_prod_03_0s() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -1360,11 +1319,9 @@ fn the_frozen_1_5_0_receipt_schema_is_still_prod_03_0s() {
     );
 }
 
-/// **PROD-04.1: PROD-01.4a's 1.6.0 receipt schema is FROZEN** beside the 1.7.0
-/// one. It still describes every receipt signed before PROD-04.1, and every
-/// later one whose backup selects no group: it names itself 1.6.0, carries
-/// `generations` and `schema_dependency`, and does NOT describe
-/// `consumer_positions`. `just schema` no longer regenerates it.
+/// **The 1.6.0 receipt schema is FROZEN**, and still describes every receipt
+/// whose backup selects no group: it names itself 1.6.0, carries `generations`
+/// and `schema_dependency`, and does NOT describe `consumer_positions`.
 #[test]
 fn the_frozen_1_6_0_receipt_schema_is_still_prod_01_4as() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(

@@ -1,14 +1,14 @@
-//! Decision D3 §7.4's table, **every row**, plus the two questions it is the
+//! The trust verdict table, **every row**, plus the two questions it is the
 //! answer to one half of.
 //!
 //! # Why this file is a table test and not thirty assertions
 //!
-//! §7.4 IS a table. A per-row test function can pass while the row above it
-//! silently stopped being reachable — the property is the whole mapping, and a
-//! mapping is only asserted by enumerating it. [`the_whole_table`] walks every
-//! row with its own name; the tests around it assert the things a table cannot
-//! say: the boundary instants, the fail-closed rules, and the four mutants
-//! this module is the natural home of.
+//! The verdict IS a table. A per-row test function can pass while the row above
+//! it silently stopped being reachable — the property is the whole mapping, and
+//! a mapping is only asserted by enumerating it. [`the_whole_table`] walks
+//! every row with its own name; the tests around it assert the things a table
+//! cannot say: the boundary instants, the fail-closed rules, and the four
+//! mutants this module is the natural home of.
 //!
 //! # Nothing here reads a clock
 //!
@@ -105,9 +105,7 @@ fn verdict_at(key: &TrustedKey, signed: &str) -> logweir_core::trust::Verdict {
     )
 }
 
-// ---------------------------------------------------------------------------
-// D3 §7.4's table, every row
-// ---------------------------------------------------------------------------
+// The verdict table, every row.
 
 /// **THE TABLE.** Each row is `(name, verdict, expected result, expected basis,
 /// expected reason)`, and the row's name is what an assertion failure prints —
@@ -246,9 +244,8 @@ fn the_whole_table() {
             TrustBasis::None,
             Some(UntrustReason::KeyUsageMismatch),
         ),
-        // The two rows the W1 review added. Neither is in §7.4's printed
-        // table; both are the fail-closed reading of it, and both were
-        // FAIL-OPEN before review findings F3 and F4.
+        // Two rows the printed table does not list; both are its fail-closed
+        // reading.
         (
             "NotYetValid, claiming a time inside the unopened window",
             decide(
@@ -344,9 +341,7 @@ fn only_current_and_historical_may_render_green() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The boundaries, which a table cannot state
-// ---------------------------------------------------------------------------
+// The boundaries, which a table cannot state.
 
 /// "Signed **at or before** `notAfter`/`retiredAt`" — the boundary instant
 /// itself is inside, and one second later is outside.
@@ -462,12 +457,10 @@ fn a_compromise_with_no_effective_instant_fails_closed() {
     assert_eq!(key.accepted_through(), None);
 }
 
-// ---------------------------------------------------------------------------
-// The OTHER question
-// ---------------------------------------------------------------------------
+// The OTHER question.
 
 /// **Overlap**: two `Active` `EvidenceSigning` keys both sign and both verify.
-/// This is the rotation window PLAT-19.1 exists to make expressible.
+/// This is the rotation window the lifecycle exists to make expressible.
 #[test]
 fn two_active_evidence_keys_overlap() {
     let old = TrustedKey {
@@ -572,9 +565,7 @@ fn the_signing_window_closes_at_not_after_not_after_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The status projections
-// ---------------------------------------------------------------------------
+// The status projections.
 
 /// `status.keys[].effectiveState`, every value the pure layer can produce.
 #[test]
@@ -629,9 +620,7 @@ fn usable_for_verification_separates_full_historical_and_none() {
     assert!(!usable_for_new_signatures(&expired(), now()));
 }
 
-// ---------------------------------------------------------------------------
-// `claimed_signing_time`
-// ---------------------------------------------------------------------------
+// `claimed_signing_time`.
 
 /// The five document types and their fields.
 #[test]
@@ -700,7 +689,7 @@ fn the_scorecard_claim_is_the_last_phase_not_the_first() {
 }
 
 /// Unknown type, missing field, empty phase list and a non-instant all produce
-/// `None` — which refuses — and each one NAMES ITSELF (review finding F7).
+/// `None` (which refuses), and each one NAMES ITSELF.
 #[test]
 fn an_unreadable_claim_is_none_and_names_why() {
     const RECEIPT: &str = "application/vnd.logweir.backup-receipt+json;version=1.0.0";
@@ -762,9 +751,7 @@ fn from_document_always_names_an_absence() {
     assert_eq!(EvidenceClaim::unknown().absence, None);
 }
 
-// ---------------------------------------------------------------------------
-// The rehearsal scope types
-// ---------------------------------------------------------------------------
+// The rehearsal scope types.
 
 /// The scope round-trips through its wire shape, in camelCase.
 #[test]
@@ -850,18 +837,14 @@ fn a_scope_naming_another_mode_is_not_scratch_only() {
     .is_scratch_only());
 }
 
-/// **MUTANT 7 — a `NotYetValid` key verifying green** (review finding F3).
-///
-/// The planted mutation is dropping `decide`'s `NotYetValid` arm. The key
-/// below is the successor staged at §7.6 step 1: `notBefore` next January,
-/// `notAfter` the January after. A document claiming a time inside that
-/// unopened window then satisfies `notBefore <= signed_at < notAfter` and
-/// renders `Valid`/`Current`/GREEN — while `status.keys[]` reports
-/// `usableForVerification: None` for the SAME key at the SAME instant.
-///
-/// The oracle is `usable_for_verification`, deliberately: asserting against a
-/// literal would let the two surfaces drift apart again, and it is the
-/// disagreement between them that is the defect.
+/// **MUTANT 7: a `NotYetValid` key verifying green.** The planted mutation
+/// drops `decide`'s `NotYetValid` arm. The key below is a staged successor
+/// (`notBefore` next January, `notAfter` the January after), so a document
+/// claiming a time inside that unopened window satisfies
+/// `notBefore <= signed_at < notAfter` and would render `Valid`/`Current`/GREEN
+/// while `status.keys[]` reports `usableForVerification: None` for the SAME
+/// key. The oracle is `usable_for_verification`, so the two surfaces cannot
+/// drift apart.
 #[test]
 fn mutant_a_key_whose_window_has_not_opened_verifies_nothing() {
     let key = not_yet_valid();
@@ -897,12 +880,9 @@ fn mutant_a_key_whose_window_has_not_opened_verifies_nothing() {
     );
 }
 
-/// **A claim in the future is not a claim** (review finding F4).
-///
-/// `signed_at` is a field the DOCUMENT controls. Without the `signed_at <= now`
-/// bound a signer may name any instant up to `notAfter` and be trusted as
-/// `Current` today — a fail-open on attacker-influenced input, and the thing
-/// that made the `NotYetValid` hole above reachable.
+/// **A claim in the future is not a claim.** `signed_at` is a field the
+/// DOCUMENT controls: without the `signed_at <= now` bound a signer may name
+/// any instant up to `notAfter` and be trusted as `Current` today.
 #[test]
 fn a_claim_after_now_is_outside_validity() {
     let key = active();
@@ -923,9 +903,7 @@ fn a_claim_after_now_is_outside_validity() {
     assert_eq!(boundary.basis, TrustBasis::Current);
 }
 
-// ---------------------------------------------------------------------------
-// MUTANTS
-// ---------------------------------------------------------------------------
+// Mutants.
 
 /// **MUTANT 1 — a revoked-compromised key verifying without an observation.**
 ///
@@ -985,10 +963,10 @@ fn mutant_a_retired_key_may_not_sign_anything_new() {
 ///
 /// MEASURED: with arm 1 absent, a planted `let now = Utc::now();` inside
 /// `effective_state` left this whole file GREEN and was caught only by the
-/// script. Arm 1 is what makes the behavioural half of this mutant real.
+/// script.
 #[test]
 fn the_verdict_is_a_function_of_its_arguments_and_nothing_else() {
-    // ---- 1. the state resolver reads its argument ------------------------
+    // 1. The state resolver reads its argument.
     let key = active();
     assert_eq!(
         effective_state(&key, at("2025-01-01T00:00:00Z")),
@@ -1001,7 +979,7 @@ fn the_verdict_is_a_function_of_its_arguments_and_nothing_else() {
         "and long after it closed — two instants a clock read could not tell apart"
     );
 
-    // ---- 2. the verdict reads its argument -------------------------------
+    // 2. The verdict reads its argument.
     let first = verdict_at(&key, "2026-06-01T00:00:00Z");
     let second = verdict_at(&key, "2026-06-01T00:00:00Z");
     assert_eq!(first, second, "the same arguments, the same verdict");
@@ -1026,20 +1004,16 @@ fn the_verdict_is_a_function_of_its_arguments_and_nothing_else() {
     );
 }
 
-// ===========================================================================
-// TRUST-UPGRADE-SIGNEDAT — a status that predates `signedAt` is not a document
-// that claims none
-// ===========================================================================
+// A status that predates `signedAt` is not a document that claims none.
 
 /// **The whole rule, in one assertion.** A claim whose absence is
 /// [`ClaimAbsence::NotRecorded`] produces an UNDECIDED verdict: basis
 /// `Unverified`, never green, and `awaits_signing_time()` true so the one
 /// caller that can re-read the document knows to.
 ///
-/// KILLS: "treat `NotRecorded` like `FieldAbsent`" — the basis below would be
-/// `None` and `awaits_signing_time()` false, which is exactly the shipped
-/// behaviour that re-derived five sound 2026-09-14 lab objects from `Valid` to
-/// `Untrusted` without reading one byte of any archive.
+/// KILLS: "treat `NotRecorded` like `FieldAbsent`": the basis below would be
+/// `None` and `awaits_signing_time()` false, which would flip sound objects
+/// from `Valid` to `Untrusted` without reading one byte of any archive.
 ///
 /// ALSO KILLS: "make the undecided verdict `Valid` so nothing flips" — a caller
 /// that reads `result` alone must still refuse, because an undecided verdict is
@@ -1104,7 +1078,7 @@ fn a_compromise_revocation_flips_a_pre_signedat_object_with_no_read() {
     let effective = at("2026-09-10T00:00:00Z");
     let claim = EvidenceClaim::absent(ClaimAbsence::NotRecorded);
 
-    // ---- no key on the policy at all -------------------------------------
+    // No key on the policy at all.
     let stranger = decide(
         None,
         KeyUsage::EvidenceSigning,
@@ -1115,7 +1089,7 @@ fn a_compromise_revocation_flips_a_pre_signedat_object_with_no_read() {
     assert!(!stranger.awaits_signing_time());
     assert_eq!(stranger.reason, Some(UntrustReason::UntrustedSigner));
 
-    // ---- the key exists and carries the wrong usage -----------------------
+    // The key exists and carries the wrong usage.
     let mut approval_only = active();
     approval_only.usages = vec![KeyUsage::GovernedApproval];
     let mismatch = decide(
@@ -1128,7 +1102,7 @@ fn a_compromise_revocation_flips_a_pre_signedat_object_with_no_read() {
     assert!(!mismatch.awaits_signing_time());
     assert_eq!(mismatch.reason, Some(UntrustReason::KeyUsageMismatch));
 
-    // ---- KeyCompromise, no local history: fails closed NOW ----------------
+    // KeyCompromise, no local history: fails closed NOW.
     let mut compromised = active();
     compromised.state = KeyState::Revoked;
     compromised.revoked_at = Some(effective);
@@ -1149,7 +1123,7 @@ fn a_compromise_revocation_flips_a_pre_signedat_object_with_no_read() {
     assert_eq!(revoked.result, TrustResult::Untrusted);
     assert_eq!(revoked.reason, Some(UntrustReason::Revoked));
 
-    // ---- KeyCompromise WITH a controller-written observation ---------------
+    // KeyCompromise WITH a controller-written observation.
     let recorded = decide(
         Some(&compromised),
         KeyUsage::EvidenceSigning,
@@ -1210,9 +1184,8 @@ fn no_document_ever_claims_notrecorded() {
 
 /// The two absences do not say the same thing to an operator.
 ///
-/// KILLS: "give `NotRecorded` `FieldAbsent`'s sentence" — which is how the
-/// defect presented in the first place: five sound receipts reported as
-/// documents that *"carry no signing-time field"*.
+/// KILLS: "give `NotRecorded` `FieldAbsent`'s sentence", which would report
+/// sound receipts as documents that *"carry no signing-time field"*.
 #[test]
 fn notrecorded_says_it_is_about_the_status_and_not_the_document() {
     assert_eq!(ClaimAbsence::NotRecorded.as_str(), "NotRecorded");
