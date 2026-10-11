@@ -1,14 +1,19 @@
 //! **PROD-17.1 B4**: the one runner-log read ([`weirkeeper::runner_log`])
-//! asks for the log's TAIL, so a key at the end of a long log is found.
+//! asks for the log's TAIL, so a key at the end of a long log is found; the
+//! check relay alone reads the head, so nothing printed after its end frame
+//! displaces it.
 //!
 //! The double answers `pods/log` as the kubelet does: `tailLines` selects the
 //! last lines, and `limitBytes` keeps the FIRST bytes of what was selected.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
+use logweir_core::check_contract::{frames, FrameExpectations, Stream, TopicEntry};
 use logweir_core::refusal_detail::{refusal_detail_line, LineToken, RefusingRun};
+use weirkeeper::check::relay::{self, RELAY_LIMIT_BYTES};
 use weirkeeper::refusal::{self, RunnerReason};
 use weirkeeper::runner_log;
 
@@ -81,8 +86,8 @@ fn kubelet_client(log: String) -> (kube::Client, Asked) {
 /// probe, the progress read, and FX-34's exit-3 read.
 ///
 /// The CONTROL is the same double read for its HEAD (`limitBytes` and no
-/// `tailLines`, the shape of the check relay's read before the fold): the
-/// key is not in what comes back, so this double tells a head from a tail.
+/// `tailLines`, the shape of the check relay's read): the key is not in what
+/// comes back, so this double tells a head from a tail.
 ///
 /// KILLS: a bound sent without `tailLines` (the progress and exit-3 arms get
 /// the log's first bytes); a tail taken from the start of the body (the
@@ -103,7 +108,7 @@ async fn a_key_on_the_last_line_of_a_long_log_is_found() {
         assert_eq!(runner_log::key_values(&text, KEY), vec![VALUE], "[{name}]");
         let asked = asked.lock().unwrap().clone();
         assert!(
-            asked[0].contains(&format!("tailLines={}", bound.lines)),
+            asked[0].contains(&format!("tailLines={}", bound.lines.unwrap())),
             "[{name}] {asked:?}"
         );
     }
@@ -145,14 +150,11 @@ async fn a_key_on_the_last_line_of_a_long_log_is_found() {
 }
 
 /// **The check relay and a retention Job's lines are still read whole.** A
-/// 100,000-line log within [`RELAY_LIMIT_BYTES`] comes back byte for byte,
-/// as it did when that read asked for no `tailLines`: the bound asks for as
-/// many lines as it has bytes, and a log has no more lines than bytes.
+/// 100,000-line log within [`RELAY_LIMIT_BYTES`] comes back byte for byte:
+/// the bound asks for no `tailLines`, as before the fold.
 ///
 /// KILLS: a relay bound whose `tailLines` is smaller than the line count of a
 /// log that fits its byte bound (the frames' first lines would be cut).
-///
-/// [`RELAY_LIMIT_BYTES`]: weirkeeper::check::relay::RELAY_LIMIT_BYTES
 #[tokio::test]
 async fn a_log_within_the_relay_bound_is_read_whole() {
     let mut log: String = (0..LINES - 1).map(|i| format!("{i}\n")).collect();
@@ -170,4 +172,99 @@ async fn a_log_within_the_relay_bound_is_read_whole() {
     );
     let asked = asked.lock().unwrap().clone();
     assert!(asked[0].contains("container=runner"), "{asked:?}");
+}
+
+const PLAN_SHA: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const SUBJECT_UID: &str = "9f2b1c44-0000-4000-8000-0000000000a1";
+
+/// A self-consistent relay of `names`: anyone who knows the plan digest and
+/// the subject's UID can print one, since the frames carry checksums and no
+/// secret.
+fn relay_frames(names: &[&str]) -> String {
+    let entries: Vec<TopicEntry> = names.iter().map(|n| TopicEntry::new(n, 3)).collect();
+    let result = br#"{"contract":"logweir.dev/check-result/v1","kind":"topicInventory"}"#;
+    let parts = frames::write_parts(Stream::Result, result).expect("small enough to frame");
+    let mut streams = BTreeMap::new();
+    streams.insert(Stream::Result, (result.to_vec(), parts.len()));
+    let end = frames::end_frame(PLAN_SHA, SUBJECT_UID, &streams, Some(&entries));
+    let mut out = String::new();
+    for e in &entries {
+        out.push_str(&frames::write_topic_line(e).expect("a framable entry"));
+        out.push('\n');
+    }
+    for p in parts {
+        out.push_str(&p);
+        out.push('\n');
+    }
+    out.push_str(&frames::write_end(&end).expect("a framable end"));
+    out.push('\n');
+    out
+}
+
+/// **Text printed after the genuine relay's end frame never displaces it.**
+/// The log is the genuine relay R, then a second self-consistent relay R'
+/// with its own topics, then empty lines until R' and the padding are
+/// [`RELAY_LIMIT_BYTES`] lines, so the log has more lines than a `tailLines`
+/// of that size and more bytes than `limitBytes`. The relay read is the
+/// request `origin/main` sent, byte for byte, so the shared read refuses the
+/// log as main did: R' is a frame after R's end frame.
+///
+/// CONTROL: `tailLines: Some(RELAY_LIMIT_BYTES)` back on
+/// [`runner_log::RELAY`], as the fold first had it, moves the read past R,
+/// and R' verifies.
+#[tokio::test]
+async fn a_relay_printed_after_the_genuine_end_frame_is_refused() {
+    let expect = FrameExpectations {
+        plan_sha256: PLAN_SHA.to_string(),
+        subject_uid: SUBJECT_UID.to_string(),
+    };
+    let genuine = relay_frames(&["orders", "payments"]);
+    let forged = relay_frames(&["printed-after-the-end"]);
+    assert!(relay::decode(&genuine, &expect).is_ok(), "R verifies alone");
+    assert!(relay::decode(&forged, &expect).is_ok(), "R' verifies alone");
+    let padded = usize::try_from(RELAY_LIMIT_BYTES).unwrap();
+    let mut log = String::with_capacity(padded + 4096);
+    log.push_str("cluster-id=M29I2S7FQPyHBEX12Vx7XA\n");
+    log.push_str(&genuine);
+    log.push_str(&forged);
+    log.push_str(&"\n".repeat(padded - forged.lines().count()));
+    let lines = log.split_inclusive('\n').count();
+    assert!(
+        log.len() > padded && lines > padded,
+        "{} bytes, {lines} lines",
+        log.len()
+    );
+
+    // origin/main's relay request: the runner container, `limitBytes`, no
+    // `tailLines`.
+    let (client, asked_main) = kubelet_client(log.clone());
+    let pods: Api<Pod> = Api::namespaced(client, NS);
+    let main_params = LogParams {
+        container: Some("runner".to_string()),
+        limit_bytes: Some(RELAY_LIMIT_BYTES),
+        ..LogParams::default()
+    };
+    let main_text = pods
+        .logs(POD, &main_params)
+        .await
+        .expect("the read answers");
+    let main = relay::decode(&main_text, &expect);
+
+    let (client, asked) = kubelet_client(log);
+    let pods: Api<Pod> = Api::namespaced(client, NS);
+    let text = runner_log::read_text(&pods, POD, &runner_log::RELAY)
+        .await
+        .expect("the read answers");
+    let shared = relay::decode(&text, &expect);
+
+    let refusal = shared.expect_err("a frame after the end frame is refused");
+    assert!(
+        refusal.reason.contains("after the end frame"),
+        "{}",
+        refusal.reason
+    );
+    assert_eq!(Err(refusal), main.map(|_| ()), "refused as main refused");
+    let asked = asked.lock().unwrap().clone();
+    let asked_main = asked_main.lock().unwrap().clone();
+    assert_eq!(asked, asked_main, "the relay request is main's");
 }

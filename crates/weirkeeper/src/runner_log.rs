@@ -1,5 +1,6 @@
 //! A runner pod's log, the one way every controller reads it: one bounded
-//! TAIL read, one key scanner, and one TTL patch for the finished Job.
+//! read (the log's TAIL for every key reader; the check relay's head, see
+//! [`RELAY`]), one key scanner, and one TTL patch for the finished Job.
 //!
 //! Only the plumbing is shared. What a reader may take from the log stays
 //! with that reader: FX-34's line token ([`crate::refusal`]), the place rule
@@ -15,14 +16,14 @@ use serde_json::json;
 
 use crate::controllers::backup::KEY_SCAN_TAIL_LINES;
 
-/// What one `pods/log` read asks for. `lines` is not optional: every read
-/// asks the API server for the log's TAIL. `bytes` (`limitBytes`) counts from
-/// the START of those lines, so a body that reaches it was cut before the
-/// log's last lines; [`read`] also stops taking bytes one past it, whatever
-/// the server sends.
+/// What one `pods/log` read asks for. `lines` (`tailLines`) asks the API
+/// server for the log's TAIL; every bound but [`RELAY`] sets it. `bytes`
+/// (`limitBytes`) counts from the START of those lines, so a body that
+/// reaches it was cut before the log's last lines; [`read`] also stops taking
+/// bytes one past it, whatever the server sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bound {
-    pub lines: i64,
+    pub lines: Option<i64>,
     pub bytes: Option<i64>,
     pub runner_container: bool,
 }
@@ -34,7 +35,7 @@ impl Bound {
             container: self
                 .runner_container
                 .then(|| crate::job::CONTAINER_NAME.to_string()),
-            tail_lines: Some(self.lines),
+            tail_lines: self.lines,
             limit_bytes: self.bytes,
             ..LogParams::default()
         }
@@ -47,36 +48,42 @@ impl Bound {
 /// lines. Every key those reconcilers read is in the last
 /// [`KEY_SCAN_TAIL_LINES`] non-empty lines.
 pub const TERMINAL: Bound = Bound {
-    lines: crate::controllers::restore::TERMINAL_LOG_TAIL_LINES,
+    lines: Some(crate::controllers::restore::TERMINAL_LOG_TAIL_LINES),
     bytes: None,
     runner_container: false,
 };
 
 /// FX-34's exit-3 read ([`crate::refusal::read`]).
 pub const REFUSAL: Bound = Bound {
-    lines: crate::refusal::REFUSAL_LOG_TAIL_LINES,
+    lines: Some(crate::refusal::REFUSAL_LOG_TAIL_LINES),
     bytes: Some(crate::refusal::REFUSAL_LOG_LIMIT_BYTES),
     runner_container: true,
 };
 
 /// D3 §2.4's progress read of a running Job ([`crate::diagnostics::read_progress`]).
 pub const PROGRESS: Bound = Bound {
-    lines: crate::diagnostics::PROGRESS_TAIL_LINES,
+    lines: Some(crate::diagnostics::PROGRESS_TAIL_LINES),
     bytes: Some(crate::diagnostics::PROGRESS_LIMIT_BYTES),
     runner_container: false,
 };
 
-/// A check's relay and a retention Job's lines: the whole log, up to
-/// [`RELAY_LIMIT_BYTES`](crate::check::relay::RELAY_LIMIT_BYTES). A log has
-/// no more lines than bytes, so a log within the byte bound is read whole.
+/// A check's relay and a retention Job's lines: the log's HEAD, its first
+/// [`RELAY_LIMIT_BYTES`](crate::check::relay::RELAY_LIMIT_BYTES), and no
+/// `tailLines`.
+///
+/// THE ONE READ THAT IS NOT A TAIL, ON PURPOSE. The frames are one document,
+/// read from the start and verified whole, and a frame after the end frame is
+/// refused. A tail window would let text printed after the genuine end frame
+/// push it out of the read, and a second self-consistent relay printed there
+/// would then verify.
 pub const RELAY: Bound = Bound {
-    lines: crate::check::relay::RELAY_LIMIT_BYTES,
+    lines: None,
     bytes: Some(crate::check::relay::RELAY_LIMIT_BYTES),
     runner_container: true,
 };
 
-/// Read `bound` of the pod's log: its last `bound.lines` lines, through
-/// [`read_capped`].
+/// Read `bound` of the pod's log: its last `bound.lines` lines, or from its
+/// start when there are none, through [`read_capped`].
 ///
 /// # Errors
 ///
