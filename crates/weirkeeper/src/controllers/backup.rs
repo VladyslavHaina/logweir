@@ -88,16 +88,17 @@ use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
-    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
-    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
-    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
-    REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
-    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
-    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
-    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+    CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_EMPTY_CAPTURE,
+    CONDITION_REASON_GUARD_REFUSED, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED,
+    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
+    REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_OPERATIONAL,
+    REASON_RUNNER_ARGV_ANNOTATION_IGNORED, REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
+    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
+    TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
+    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use crate::controllers::backup_selection;
 use crate::crds::backup::{Backup, FrozenDestination};
@@ -1656,6 +1657,7 @@ fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
 /// `Verified` merged in — a merge PATCH replaces arrays, and a list built
 /// from anything older would delete a condition another pass wrote.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn write_fetch_verdict(
     backups: &Api<Backup>,
     backup: &Backup,
@@ -1664,19 +1666,28 @@ async fn write_fetch_verdict(
     result: &VerificationResult,
     observation: Value,
     facts: serde_json::Map<String, Value>,
+    empty_capture: bool,
     now: DateTime<Utc>,
 ) -> Result<StatusVersion, BackupError> {
     let current = backup
         .status
         .as_ref()
         .and_then(|s| serde_json::to_value(s).ok());
+    let conditions = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_deref())
+        .unwrap_or_default();
+    // PROD-02.1: only beside a pass over the verified bytes (the caller's
+    // `empty_capture` is decided there and nowhere else).
+    let conditions = if empty_capture && result.is_pass() {
+        with_empty_capture(conditions)
+    } else {
+        conditions.to_vec()
+    };
     let (patch, badge) = crate::evidence_fetch::verdict_patch(
         current.as_ref(),
-        backup
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_deref())
-            .unwrap_or_default(),
+        &conditions,
         backup.meta().generation,
         result,
         observation,
@@ -1751,6 +1762,9 @@ async fn evidence_fetch_pass(
     let request = crate::evidence_fetch::Request {
         payload_key: payload_key.clone(),
         sidecar_key: sidecar_key.clone(),
+        // FX-33: what this fetch is FOR, which decides how much of it the
+        // controller will hold (`Request::payload_cap`).
+        payload_type,
     };
     let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
     let mode = destination
@@ -1785,6 +1799,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::pending(payload_type, detail),
                 observation_patch(mode.as_deref(), None, attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1798,6 +1813,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::pending(payload_type, detail),
                 observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1811,6 +1827,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::not_attempted(payload_type, detail),
                 observation_patch(mode.as_deref(), None, attempt, None, None),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1834,6 +1851,7 @@ async fn evidence_fetch_pass(
                 &VerificationResult::not_attempted(payload_type, detail),
                 observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, retry),
                 none,
+                false,
                 now,
             )
             .await?;
@@ -1854,6 +1872,7 @@ async fn evidence_fetch_pass(
                 uid: job_uid,
             };
             let mut facts = serde_json::Map::new();
+            let mut empty_capture = false;
             let result = match relayed {
                 Relayed::Unread { detail } => {
                     // STEP 5's ORPHAN CHECK, FROM THE RELAY'S PRESENCE. Only a
@@ -1878,11 +1897,15 @@ async fn evidence_fetch_pass(
                 }
                 Relayed::Both { payload, sidecar } => {
                     let fetched = sha256_prefixed(&payload);
-                    let document = serde_json::from_slice::<Value>(&payload).ok();
-                    let claimed_id = document
-                        .as_ref()
-                        .and_then(|d| d.get("backup_id"))
-                        .and_then(Value::as_str);
+                    // FX-33: FOLDED, never parsed into a tree. A relayed
+                    // receipt may be as large as the relay carries
+                    // (`MAX_EVIDENCE_PAYLOAD_BYTES`), and a `Value` of it
+                    // would be up to 37 times that, in this shared process,
+                    // in async code under no budget. The five facts read
+                    // below are folded from the bytes by the rules the
+                    // `Value` readers had (`logweir_core::receipt_facts`).
+                    let document = logweir_core::receipt_facts::ReceiptFacts::fold(&payload);
+                    let claimed_id = document.as_ref().and_then(|d| d.backup_id.as_str());
                     let run_id = status
                         .and_then(|s| s.backup_id.clone())
                         .unwrap_or_else(|| plan_backup_id(backup));
@@ -1925,17 +1948,24 @@ async fn evidence_fetch_pass(
                             )
                             .await;
                             if let Some(doc) = document.as_ref() {
-                                if let Some((from_ms, to_ms)) = covered_from_receipt(doc) {
+                                // PROD-02.1's rule, on FX-33's fold: an EMPTY
+                                // window is no window (`covered_from_receipt`).
+                                if let Some((from_ms, to_ms)) =
+                                    doc.covered.filter(|(from, to)| from < to)
+                                {
                                     facts.insert(
                                         "windowCovered".to_string(),
                                         window_covered(from_ms, to_ms),
                                     );
                                 }
                                 if result.is_pass() {
-                                    if let Some(records) = records_from_receipt(doc) {
+                                    // PROD-02.1: the relayed bytes ARE the
+                                    // verified ones (digest = the anchor).
+                                    empty_capture = receipt_is_empty_capture(&payload);
+                                    if let Some(records) = doc.records {
                                         facts.insert("records".to_string(), json!(records));
                                     }
-                                    if let Some((started, finished)) = capture_from_receipt(doc) {
+                                    if let Some((started, finished)) = doc.capture() {
                                         facts.insert(
                                             "capture".to_string(),
                                             json!({ "startedAt": started, "finishedAt": finished }),
@@ -1964,6 +1994,7 @@ async fn evidence_fetch_pass(
                     retry,
                 ),
                 facts,
+                empty_capture,
                 now,
             )
             .await?;
@@ -2235,6 +2266,7 @@ async fn settle_controller_read(
         &VerificationResult::not_attempted(logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT, why),
         crate::evidence_fetch::observation_patch(Some(&mode), None, attempt, None, None),
         serde_json::Map::new(),
+        false,
         now,
     )
     .await?;
@@ -2371,7 +2403,10 @@ async fn controller_read_pass(
     // fetched receipt IS the runner's (the digest agrees), the attested counts
     // only beside a pass.
     let mut facts = serde_json::Map::new();
+    let mut empty_capture = false;
     if fetched == Some(reported.as_str()) {
+        // PROD-02.1: beside a pass over these, the runner's, bytes only.
+        empty_capture = result.is_pass() && observed.as_ref().is_some_and(|o| o.empty_capture);
         if let Some((from_ms, to_ms)) = observed.as_ref().and_then(|o| o.covered) {
             facts.insert("windowCovered".to_string(), window_covered(from_ms, to_ms));
         }
@@ -2405,6 +2440,7 @@ async fn controller_read_pass(
         &result,
         crate::evidence_fetch::observation_patch(Some(mode), None, attempt, None, retry),
         facts,
+        empty_capture,
         now,
     )
     .await?;
@@ -2480,6 +2516,10 @@ pub struct ArchiveObservation {
     /// `BackupReceipt.{started_at, finished_at}` — D3 §2.2's `status.capture`,
     /// copied verbatim from the same verified receipt.
     pub capture: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// **PROD-02.1.** The fetched receipt parses, its arms hold and it is an
+    /// EMPTY CAPTURE ([`receipt_is_empty_capture`]). Acted on ONLY beside a
+    /// passing verdict over these same bytes ([`with_empty_capture`]).
+    pub empty_capture: bool,
 }
 
 /// What the archive-facing half of this reconciler is handed, and the reason
@@ -2561,7 +2601,13 @@ pub fn unobserved_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<Arch
 /// that are decided together, rather than two hops on and off the runtime.
 ///
 /// **FX-31: the sidecar's presence is a `HEAD`, and the receipt is read
-/// under `caps::CONTROLLER_DOCUMENT`.** Presence needs no byte of the
+/// under the controller's receipt cap** (`caps::CONTROLLER_RECEIPT` since
+/// FX-33: the largest receipt Logweir writes, and the cap `verify_evidence`
+/// reads the same document under). **FX-33: and it is FOLDED, not parsed
+/// into a `serde_json::Value`** — the window, the record sum and the two
+/// instants are read from the bytes as they stream past
+/// (`logweir_core::receipt_facts`), by the rules [`covered_from_receipt`],
+/// [`records_from_receipt`] and [`capture_from_receipt`] state. Presence needs no byte of the
 /// sidecar, and reading a whole object to discard it is exactly the unbounded
 /// read FX-31 ends: a tenant's multi-gigabyte object at the sidecar key cost
 /// this shared process its whole size, on every pass and every restart. The
@@ -2584,14 +2630,14 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         return None;
     }
     // Out of the controller's one read budget (FX-31 review F2): the receipt
-    // and the `Value` parsed from it below are held under this reservation.
+    // is held under this reservation while its facts are folded from it.
     let _reservation = keys.receipt.as_ref().map(|_| {
         crate::read_budget::ReadBudget::controller()
             .reserve(crate::read_budget::DOCUMENT_READ_COST_BYTES)
     });
     let (receipt, payload) = match keys.receipt.as_deref() {
         None => (None, false),
-        Some(key) => match store.get_capped(key, caps::CONTROLLER_DOCUMENT) {
+        Some(key) => match store.get_capped(key, caps::CONTROLLER_RECEIPT) {
             Ok((bytes, _version)) => (Some(bytes), true),
             // There, and over the cap: present, and not read.
             Err(logweir_store::StoreError::TooLarge { .. }) => (None, true),
@@ -2604,21 +2650,29 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         .is_some_and(|key| store.head(key).is_ok());
     let document = receipt
         .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
-    let covered = document.as_ref().and_then(covered_from_receipt);
-    let records = document.as_ref().and_then(records_from_receipt);
-    let capture = document.as_ref().and_then(capture_from_receipt);
+        .and_then(logweir_core::receipt_facts::ReceiptFacts::fold);
+    // PROD-02.1: an EMPTY window is no window, as `covered_from_receipt` says.
+    let covered = document
+        .as_ref()
+        .and_then(|d| d.covered)
+        .filter(|(from, to)| from < to);
+    let records = document.as_ref().and_then(|d| d.records);
+    let capture = document
+        .as_ref()
+        .and_then(logweir_core::receipt_facts::ReceiptFacts::capture);
     // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
     // uses (`sha256:<lowercase hex>`), so it can be compared directly with the
     // runner's immutable capture claim during this completion pass. This
     // observation is never published as a fallback claim.
     let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
+    let empty_capture = receipt.as_deref().is_some_and(receipt_is_empty_capture);
     Some(ArchiveObservation {
         presence: EvidencePresence { payload, sidecar },
         covered,
         receipt_sha256,
         records,
         capture,
+        empty_capture,
     })
 }
 
@@ -2639,6 +2693,15 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
 ///
 /// `None` rather than `0` when the block is absent or a value does not fit:
 /// a blank column is honest and a zero is a claim.
+///
+/// **FX-33: THE RULE, over a parsed document.** The controller no longer
+/// parses a receipt into a `Value`: `observe_archive` and the evidence relay
+/// read this sum, [`covered_from_receipt`]'s window and
+/// [`capture_from_receipt`]'s instants through
+/// `logweir_core::receipt_facts::ReceiptFacts::fold`, which keeps nothing per
+/// topic. These three functions remain as the statement of what the fold
+/// must answer; `the_receipt_fold_answers_what_these_functions_answer` holds
+/// it to them.
 #[must_use]
 pub fn records_from_receipt(receipt: &Value) -> Option<i64> {
     let records = receipt.get("records")?.as_object()?;
@@ -4053,13 +4116,55 @@ pub fn window_covered(from_ms: i64, to_ms: i64) -> Value {
 /// Both keys or nothing: a half-read window is worse than an unread one,
 /// because a consumer cannot tell the difference between "the archive covers
 /// from here to unknown" and "the archive covers nothing".
+///
+/// **PROD-02.1: an EMPTY window is no window.** An empty capture's receipt
+/// covers `[t, t)`, no record at all; written to `windowCovered` it would make
+/// the run a recovery point and give protection a newest record at `t - 1`.
+/// So it is `None`, as an unread window is.
 #[must_use]
 pub fn covered_from_receipt(receipt: &Value) -> Option<(i64, i64)> {
     let covered = receipt.get("covered")?;
-    Some((
+    let (from_ms, to_ms) = (
         covered.get("from_ms")?.as_i64()?,
         covered.get("to_ms")?.as_i64()?,
-    ))
+    );
+    (from_ms < to_ms).then_some((from_ms, to_ms))
+}
+
+/// **PROD-02.1.** Whether receipt `bytes` are an EMPTY CAPTURE: they parse as
+/// a receipt, every arm holds (arm 4 admits the empty window only beside the
+/// watermarks arm 45 proves), and the window is empty. Says nothing about the
+/// signature: a caller acts on it only beside a passing verdict over the same
+/// digest-anchored bytes, never on a listing, a log line or unverified bytes.
+#[must_use]
+pub fn receipt_is_empty_capture(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<logweir_core::backup_receipt::BackupReceipt>(bytes)
+        .is_ok_and(|r| r.validate_invariants().is_ok() && r.is_empty_capture())
+}
+
+/// **PROD-02.1.** `conditions` with a `Complete=True` condition's reason and
+/// message naming an EMPTY CAPTURE. Applied on a verdict patch only beside a
+/// pass over a receipt [`receipt_is_empty_capture`] accepts; its status — and
+/// so its transition time — is unchanged.
+#[must_use]
+pub fn with_empty_capture(conditions: &[Condition]) -> Vec<Condition> {
+    conditions
+        .iter()
+        .cloned()
+        .map(|mut c| {
+            if c.r#type == CONDITION_COMPLETE && c.status == "True" {
+                c.reason = Some(CONDITION_REASON_EMPTY_CAPTURE.to_string());
+                c.message = Some(
+                    "the runner exited 0 and its verified receipt is an EMPTY CAPTURE: every \
+                     selected partition's source low and high watermarks were equal before the \
+                     engine, so the source held no record, the archive holds none and this run \
+                     is not a recovery point"
+                        .to_string(),
+                );
+            }
+            c
+        })
+        .collect()
 }
 
 /// What one reconcile did.
@@ -5838,8 +5943,20 @@ async fn reconcile_backup_inner(
         // `windowCovered` predates the trust work and changing when it is
         // written would change the meaning of a field other code already
         // reads (`orphan_state`'s siblings, the protection evaluation).
+        // PROD-02.1: `Complete`'s reason names an EMPTY CAPTURE only beside a
+        // pass over the receipt bytes whose digest is the runner's — the
+        // verified bytes — and never on any other verdict.
+        let terminal_conditions = conditions_in(&terminal);
+        let terminal_conditions = if result.is_pass()
+            && observed.as_ref().is_some_and(|o| {
+                o.empty_capture && o.receipt_sha256.as_deref() == reported_receipt_sha256
+            }) {
+            with_empty_capture(&terminal_conditions)
+        } else {
+            terminal_conditions
+        };
         let mut evidence_patch = second_patch(
-            &conditions_in(&terminal),
+            &terminal_conditions,
             verified,
             crate::verification::verification_patch_value(block),
         );

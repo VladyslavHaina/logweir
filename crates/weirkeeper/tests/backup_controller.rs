@@ -2186,8 +2186,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        46,
-        "the forty-six terminal states that are NOT an exit code — the original ten, plus \
+        47,
+        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2226,7 +2226,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          off `refusal-reason=` like `TargetTopicConfigRefused`, plus PROD-01.3's two — \
          `PlainWithoutTls` (SASL/PLAIN without TLS, refused by the resolver and by the runner) \
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
-         name the connection the Job was built for); \
+         name the connection the Job was built for), plus PROD-01.1a's \
+         `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
+         markers under a plan that does not allow them); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -4366,6 +4368,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
                 // writes no `status.records`.
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -4781,6 +4784,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
                     covered: None,
                     records: None,
                     capture: None,
+                    empty_capture: false,
                 })
             })
         };
@@ -9507,6 +9511,7 @@ async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
                 ),
                 records: Some(42),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9572,6 +9577,7 @@ async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
                 ),
                 records: Some(9001),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9633,6 +9639,7 @@ async fn old_runner_missing_or_unreadable_receipt_is_explicitly_legacy_unbound()
                 receipt_sha256: None,
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -9713,6 +9720,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -10053,6 +10061,7 @@ async fn a_receipt_this_installation_refuses_never_populates_the_records_column(
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -11819,6 +11828,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -12037,6 +12047,7 @@ fn observed_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObs
             receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
             records: None,
             capture: None,
+            empty_capture: false,
         })
     })
 }
@@ -13301,6 +13312,127 @@ mod evidence_fetch_job {
         assert!(last["windowCovered"].is_null());
     }
 
+    /// **FX-33's acceptance, through the relay: the receipt of a backup of
+    /// 500 topics with full recorded configuration, read by an evidence-fetch
+    /// Job, is VERIFIED `Valid`** — and the window, the record count and the
+    /// capture it carries land in the status. Before FX-33 a relay carried at
+    /// most 1 MiB, this receipt is 1.6 MB, and the verdict was `NotAttempted`
+    /// for ever.
+    ///
+    /// The receipt is `logweir_core::topic_budget`'s reference, and the
+    /// sidecar is the committed one `crates/logweir/tests/topic_budget.rs`
+    /// holds to the signer.
+    ///
+    /// KILLS: the receipt relayed under the 1 MiB cap again; the relayed
+    /// receipt's facts taken from something other than its own bytes.
+    #[tokio::test]
+    async fn fx33_a_relayed_receipt_of_500_topics_is_valid_with_its_window() {
+        use logweir_core::topic_budget::{reference_receipt, ReferenceShape};
+        let document = reference_receipt(500, &ReferenceShape::FULL);
+        let r = logweir_core::det_json::to_deterministic_json(&document).expect("serialises");
+        let s = read("crates/weirkeeper/tests/fixtures/topic-budget/reference-500.sig");
+        assert!(
+            r.len() > 1 << 20,
+            "CONTROL: this receipt is over the 1 MiB a relay carried before"
+        );
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let mut backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
+        backup.status.as_mut().expect("status").backup_id = Some(document.backup_id.clone());
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                Some(&r),
+                Some(&s),
+            ),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("Valid"), "{last}");
+        assert_eq!(verification["matchedKeyId"], json!(FIXTURE_KEY_ID));
+        assert_eq!(
+            last["windowCovered"],
+            json!({"fromMs": document.covered.from_ms, "toMs": document.covered.to_ms})
+        );
+        assert_eq!(last["records"], json!(500_i64 * 123_456));
+        assert_eq!(
+            last["capture"]["startedAt"],
+            json!(document
+                .started_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        );
+        assert_eq!(
+            last["evidence"]["observation"]["presence"],
+            json!("Complete")
+        );
+        let (state, _, _) = condition_named(&last, "Verified").expect("Verified");
+        assert_eq!(state, "True");
+    }
+
+    /// **A relay carrying more than a receipt may be is FINAL**: one byte
+    /// over the receipt cap is `NotAttempted` naming the receipt's key and
+    /// the cap, with no retry scheduled and no window — the object will not
+    /// shrink, so three more Jobs are not started to relay the same bytes.
+    /// The pod's own result document says "present, not truncated"; the cap
+    /// is the controller's, applied to what was relayed.
+    ///
+    /// KILLS: the controller trusting what the pod declares or what the plan
+    /// asked; an over-cap relay reported as a relay that failed (retried).
+    #[tokio::test]
+    async fn fx33_a_relay_over_the_receipt_cap_is_final_and_is_never_verified() {
+        let cap = usize::try_from(logweir_core::topic_budget::MAX_RECEIPT_BYTES).expect("fits");
+        let r = vec![b' '; cap + 1];
+        let s = sidecar();
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                Some(&r),
+                Some(&s),
+            ),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("NotAttempted"), "{last}");
+        let detail = verification["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(RECEIPT_KEY) && detail.contains(&format!("{cap}-byte cap")),
+            "the sentence names the receipt and the receipt cap: {detail}"
+        );
+        assert!(
+            last["evidence"]["observation"]["retryAfter"].is_null(),
+            "the object will not shrink: no retry is scheduled: {last}"
+        );
+        assert!(posts(&bodies, "/jobs").is_empty(), "and no other Job");
+        for field in ["windowCovered", "records", "capture"] {
+            assert!(last[field].is_null(), "{field} from bytes nobody read");
+        }
+    }
+
     /// **A JOB THAT ENDS WITHOUT A RELAY IS `NotAttempted` NAMING WHY**, is
     /// retried at +1 m, and is never `Valid`; the last attempt says none
     /// remain.
@@ -13964,6 +14096,7 @@ mod p12_controller_read_retry {
                         records: readable.then_some(75),
                         capture: readable
                             .then(|| (utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                        empty_capture: false,
                     })
                 })
             }
@@ -14594,6 +14727,7 @@ mod p12_controller_read_retry {
                     receipt_sha256: Some(format!("sha256:{}", "b".repeat(64))),
                     records: Some(75),
                     capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                    empty_capture: false,
                 })
             })
         };
@@ -15898,4 +16032,233 @@ async fn fx19_a_terminal_backup_whose_job_is_being_collected_is_not_rejudged() {
         written.iter().any(|b| b.contains("NoExitCode")),
         "without the terminal guard the same Job IS judged a crash: {written:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FX-33: a backup names at most `topic_budget::MAX_BACKUP_TOPICS` topics
+// ---------------------------------------------------------------------------
+
+mod fx_33 {
+    use super::*;
+    use logweir_core::topic_budget::{MAX_BACKUP_TOPICS, SELECTION_TOO_LARGE};
+    use weirkeeper::controllers::backup::{desired_execution_inputs, BackupError};
+    use weirkeeper::crds::kafka_cluster::KafkaCluster;
+
+    fn naming(topics: usize) -> Backup {
+        let mut b = backup();
+        b.spec.topics = (0..topics).map(|i| format!("topic-{i:05}")).collect();
+        b
+    }
+
+    /// **A `Backup` naming more topics than one backup may is refused before
+    /// any Job, by name — and one naming exactly the maximum freezes.** The
+    /// freeze refuses `SelectionTooLarge` with the runner's own sentence
+    /// (both numbers, the reason, the remedy) and says that nothing is left
+    /// out; the run policy refuses `spec.topics`, which is what makes a
+    /// `BackupSchedule` `Ready=False` and the product API answer 422.
+    ///
+    /// This is what an object created BEFORE the upgrade does: it was
+    /// admitted when the controller's own bound was 5,000, and its next run
+    /// is refused here instead of writing a receipt nothing can read.
+    ///
+    /// KILLS: the count refusal removed at the freeze boundary (a plan is
+    /// frozen for 1,001 topics); removed from the run policy (a schedule
+    /// admits a policy every run of which is refused); the selection
+    /// truncated to fit.
+    #[test]
+    fn a_backup_naming_more_than_the_maximum_is_refused_before_any_job() {
+        let cluster: KafkaCluster =
+            serde_json::from_str(&kafka_cluster_json()).expect("the fixture is a KafkaCluster");
+        let at = naming(MAX_BACKUP_TOPICS);
+        let frozen = desired_execution_inputs(&at, &cluster).expect("the maximum freezes");
+        assert_eq!(
+            frozen
+                .inputs
+                .selection
+                .as_ref()
+                .map(|s| s.resolved_topic_count),
+            Some(i64::try_from(MAX_BACKUP_TOPICS).unwrap()),
+            "every one of them is frozen"
+        );
+        assert!(weirkeeper::policy::validate_run_policy(&at.spec).is_ok());
+
+        let over = naming(MAX_BACKUP_TOPICS + 1);
+        match desired_execution_inputs(&over, &cluster) {
+            Err(BackupError::Refused(state, message)) => {
+                assert_eq!(state, "SelectionTooLarge", "{message}");
+                for part in [
+                    SELECTION_TOO_LARGE,
+                    &format!("names {} topics", MAX_BACKUP_TOPICS + 1),
+                    &format!("at most {MAX_BACKUP_TOPICS} may be named"),
+                    "Split the topics across backups",
+                    "No runner Job is created",
+                    "no topic is left out",
+                ] {
+                    assert!(message.contains(part), "`{part}` is not in: {message}");
+                }
+            }
+            other => panic!(
+                "{} topics must be refused: {:?}",
+                MAX_BACKUP_TOPICS + 1,
+                other.map(|f| f.sha256)
+            ),
+        }
+        let errs = weirkeeper::policy::validate_run_policy(&over.spec).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "spec.topics" && e.message.starts_with(SELECTION_TOO_LARGE)),
+            "{errs:?}"
+        );
+    }
+}
+
+// ------------------------------------------------- PROD-02.1: the empty capture
+
+/// A whole 1.8.0 receipt that is an EMPTY CAPTURE: no record, every
+/// partition `low == high`, the empty window `[t, t)`.
+fn empty_capture_document() -> Value {
+    json!({
+        "format_version": "1.8.0",
+        "run_id": "r1",
+        "backup_id": UID,
+        "requested_at": "2026-11-09T03:17:00Z",
+        "started_at": "2026-11-09T03:17:30Z",
+        "finished_at": "2026-11-09T03:19:00Z",
+        "exit_code": 0,
+        "triggered_by": "schedule",
+        "source": {"cluster_id": "c", "bootstrap_servers": ["k:9092"],
+                   "auth": {"mode": "plaintext", "username": null}, "topics": ["orders"]},
+        "engine": {"id": "oso-cli", "version": "0.23.3", "digest": "sha256:00"},
+        "archive": {"manifest_key": "p/b1/manifest.json", "manifest_sha256": "sha256:11",
+                    "prefix": "p"},
+        "records": {"orders": 0_u64},
+        "covered": {"from_ms": 1_760_000_000_000_i64, "to_ms": 1_760_000_000_000_i64},
+        "source_watermarks": {"orders": [[15, 15], [0, 0]]},
+    })
+}
+
+/// **PROD-02.1.** An empty window is never `windowCovered` (an empty capture
+/// is not a recovery point), and only a receipt whose arms hold is an empty
+/// capture: an empty window without the watermarks, or with a partition whose
+/// low and high differ, is not one.
+#[test]
+fn an_empty_capture_is_read_only_from_a_receipt_whose_arms_hold() {
+    use weirkeeper::controllers::backup::receipt_is_empty_capture;
+    let doc = empty_capture_document();
+    assert_eq!(covered_from_receipt(&doc), None);
+    assert!(receipt_is_empty_capture(&serde_json::to_vec(&doc).unwrap()));
+    // The controller's own read (FX-33's fold, integrate-10): the same rule.
+    let store = Store::in_memory("logweir/");
+    store
+        .put_create_only(RECEIPT_KEY, &serde_json::to_vec(&doc).unwrap())
+        .expect("the fixture receipt is written");
+    let keys = EvidenceKeys {
+        receipt: Some(RECEIPT_KEY.to_string()),
+        sidecar: None,
+        receipt_sha256: None,
+    };
+    let observed = observe_archive(&store, &keys).expect("a key was looked up");
+    assert_eq!(observed.covered, None, "an empty window is no window");
+    assert!(observed.empty_capture);
+
+    let mut tampered = empty_capture_document();
+    tampered["source_watermarks"]["orders"][0] = json!([0, 15]);
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&tampered).unwrap()
+    ));
+    let mut unproven = empty_capture_document();
+    unproven
+        .as_object_mut()
+        .unwrap()
+        .remove("source_watermarks");
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&unproven).unwrap()
+    ));
+    let mut ordinary = empty_capture_document();
+    ordinary["covered"]["to_ms"] = json!(1_760_000_000_001_i64);
+    ordinary["records"]["orders"] = json!(1);
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&ordinary).unwrap()
+    ));
+    assert!(!receipt_is_empty_capture(b"not json"));
+}
+
+/// **PROD-02.1, R1's status half.** A run whose VERIFIED receipt is an empty
+/// capture completes `Complete=True` reason `EmptyCapture`, with no
+/// `windowCovered`; the same bytes beside a verdict that is not a pass leave
+/// the reason `Ok`, and the terminal patch (before any signature is checked)
+/// always says `Ok`.
+#[tokio::test]
+async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_receipt() {
+    let bytes = serde_json::to_vec(&empty_capture_document()).unwrap();
+    let observation = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        let doc: Value = serde_json::from_slice(&bytes).expect("JSON");
+        let empty_capture = weirkeeper::controllers::backup::receipt_is_empty_capture(&bytes);
+        Box::pin(async move {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: covered_from_receipt(&doc),
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
+                records: records_from_receipt(&doc),
+                capture: capture_from_receipt(&doc),
+                empty_capture,
+            })
+        })
+    };
+    let run = |verify: bool| {
+        let observation = observation.clone();
+        async move {
+            let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+                &pod_list_terminated(0),
+                log_body(&i7_tail_with_digest()),
+                200,
+                "Complete",
+            ));
+            if verify {
+                reconcile_backup(
+                    &frozen_backup(),
+                    &client,
+                    &observation,
+                    &valid_evidence,
+                    utc(2026, 11, 9, 3, 20),
+                )
+                .await
+            } else {
+                reconcile_backup(
+                    &frozen_backup(),
+                    &client,
+                    &observation,
+                    &unverified_evidence,
+                    utc(2026, 11, 9, 3, 20),
+                )
+                .await
+            }
+            .expect("the reconcile succeeds");
+            let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+            statuses
+        }
+    };
+    let statuses = run(true).await;
+    let (_, reason, _) = condition_named(&statuses[0], "Complete").expect("Complete");
+    assert_eq!(
+        reason, "Ok",
+        "the terminal patch speaks before any signature is checked"
+    );
+    let last = statuses.last().unwrap();
+    let (state, reason, message) = condition_named(last, "Complete").expect("Complete");
+    assert_eq!((state.as_str(), reason.as_str()), ("True", "EmptyCapture"));
+    assert!(message.contains("EMPTY CAPTURE"), "{message}");
+    assert_eq!(last["records"].as_i64(), Some(0));
+    assert!(statuses.iter().all(|s| s["windowCovered"].is_null()));
+
+    // Control: the same bytes, not verified — never EmptyCapture.
+    let statuses = run(false).await;
+    for s in &statuses {
+        if let Some((_, reason, _)) = condition_named(s, "Complete") {
+            assert_eq!(reason, "Ok", "{s}");
+        }
+    }
 }

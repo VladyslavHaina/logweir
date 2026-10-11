@@ -2199,7 +2199,70 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "a guard-refused run says why in its status",
             "refusal-detail=",
         ),
-        // PROD-01.5a and FX-41 (2026-10-10, item 62): CI's default broker
+        // FX-27 and FX-42 (2026-10-10, item 62): every engine document turns
+        // the engine's metrics server off; the key it renders.
+        (
+            "the engine's metrics port stays closed",
+            "metrics: {enabled: false}",
+        ),
+        // FX-35 (2026-10-10, item 63): a restore started from a Backup is
+        // bound to its point; the review row that says what the run reads.
+        (
+            "a restore started from a Backup is bound to its point",
+            "recorded by the point",
+        ),
+        // FX-39 and FX-40 (2026-10-10, item 64): the status lists are cut at
+        // the CRD's bound with their counts, and an `Enforce` run refuses a
+        // partial or expired catalog view by name.
+        (
+            "a retention policy over 500 points keeps enforcing",
+            "ViewIncomplete",
+        ),
+        // FX-33 (2026-10-10, item 65): one backup names at most 1,000
+        // topics; the name a selection over it is refused under, at every
+        // entry, before the engine runs.
+        (
+            "one backup names at most 1,000 topics",
+            "BackupSelectionTooLarge",
+        ),
+        // PROD-16.2 (2026-10-10, item 66): two-person approval in the
+        // console; the policy setting the chart renders for it.
+        (
+            "two-person approval in the console",
+            "approverSignature: Console",
+        ),
+        // PROD-01.1a (2026-10-10, item 67): an archive holding transaction
+        // markers is refused unless the plan allows them; the plan field.
+        (
+            "an archive holding transaction markers is refused",
+            "restore.allow_transaction_markers: true",
+        ),
+        // PROD-02.1 (2026-10-10, item 68): a backup of a source whose
+        // records all expired is a signed empty capture; the reason an
+        // operator reads on the `Backup`.
+        (
+            "a backup of an emptied source is a named empty capture",
+            "EmptyCapture",
+        ),
+        // FX-44 (2026-10-10, item 69): a failed restore removes or names the
+        // scratch topic it created; the line the controller reads it from.
+        (
+            "a failed restore removes or names the scratch topic it created",
+            "teardown-failed=",
+        ),
+        // FX-49 (2026-10-11, item 70): the console's original-name box takes
+        // effect when ticked; the box's own label.
+        (
+            "the original-name box takes effect when ticked",
+            "Restore under the original topic names",
+        ),
+        // FX-50 (2026-10-11, item 71): a catalog's window holds the newest
+        // points; the sentence a partial view's `Synced` message carries.
+        (
+            "a catalog's window holds the newest points",
+            "It is a partial view",
+        ),
+        // PROD-01.5a and FX-41 (2026-10-11, item 72): CI's default broker
         // line is 4.3.1 and its e2e job runs in shards; the variable that
         // still starts the legacy line.
         (

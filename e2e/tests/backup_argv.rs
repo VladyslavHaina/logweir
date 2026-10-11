@@ -873,9 +873,24 @@ fn the_real_engine_accepts_the_rendered_backup_document() {
         &bootstrap(),
     );
 
+    // FX-27: hold the engine's default metrics port for the run. An engine
+    // left with its Prometheus server on cannot bind it and logs "Metrics
+    // server error", then "Skipping metrics keep-alive because the metrics
+    // server is no longer running" (both pass the engine's `RUST_LOG=warn`);
+    // `metrics: {enabled: false}` never tries. If someone else holds the port
+    // the signal is the same. Meaningful on the NATIVE route only: the docker
+    // shim's engine binds inside its container.
+    let metrics_port = std::net::TcpListener::bind("0.0.0.0:8080").ok();
     let out = backup_run_real_engine(&spec).output().expect("logweir");
+    drop(metrics_port);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !format!("{stdout}{stderr}")
+            .to_lowercase()
+            .contains("metrics server"),
+        "the engine started its Prometheus server (FX-27):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     eprintln!("[t4-f1] engine route: {}", engine_bin().display());
     eprintln!("[t4-f1] stdout:\n{stdout}");
 

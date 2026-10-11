@@ -911,6 +911,69 @@ if [ "$rc" -ne 0 ] || ! grep -q "mode: Ordinary" "$tmp/modes.yaml" || ! grep -q 
 else
   echo "   rc=$rc  (the operator mode names render as the internal ones)"
 fi
+# PROD-16.2: TWO-PERSON APPROVAL RENDERS ONLY WITH THE SHARED CONSOLE. The
+# second person is a second identity the provider vouches for: the in-cluster
+# administrator console has one, and an install with no console has nobody to
+# click. A CHART-ONLY refusal (the document is one the binary reads), so it
+# lives here and not in scripts/approval-policy-refusals/. Both spellings of
+# the setting, without a console and with the administrator console; then the
+# control: with the shared console the same policy renders, as the internal
+# names, with `approverSignature: Console` and no operator word.
+TWO_PERSON=(--set approvalPolicy.policies[0].name=pair --set approvalPolicy.policies[0].mode=two-person)
+TWO_PERSON_INTERNAL=(--set approvalPolicy.policies[0].name=pair --set approvalPolicy.policies[0].mode=Governed
+  --set approvalPolicy.policies[0].approverSignature=Console)
+PAIR_KEY=(--set approvalPolicy.confirmationKeySecret=logweir-console-confirmation)
+console_refuses "a two-person policy with no console at all" "api.console.mode=shared" \
+  "${TWO_PERSON[@]}"
+console_refuses "approverSignature: Console with no console at all" "api.console.mode=shared" \
+  "${TWO_PERSON_INTERNAL[@]}"
+console_refuses "a two-person policy with the principal and no console workload" "api.console.mode=shared" \
+  --set api.enabled=true "${TWO_PERSON[@]}"
+console_refuses "a two-person policy with the in-cluster administrator console" "api.console.mode=localAdmin" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" "${PAIR_KEY[@]}" "${TWO_PERSON[@]}"
+console_refuses "approverSignature: Console with the in-cluster administrator console" "cannot be two people" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" "${PAIR_KEY[@]}" "${TWO_PERSON_INTERNAL[@]}"
+two_person_renders() {
+  what="$1"
+  shift
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+    --set-string api.console.publicBaseUrl=https://console.example.com \
+    "${PAIR_KEY[@]}" "$@" \
+    --show-only templates/approval-policy.yaml > "$tmp/two-person.yaml" 2> "$tmp/two-person.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: a two-person policy ($what) with the shared console did not render; rc=$rc" >&2
+    sed 's/^/      /' "$tmp/two-person.err" >&2
+    fail=1
+    return
+  fi
+  if ! grep -q "approverSignature: Console" "$tmp/two-person.yaml" \
+    || ! grep -q "mode: Governed" "$tmp/two-person.yaml" || grep -q "two-person" "$tmp/two-person.yaml"; then
+    echo "FAIL: a two-person policy ($what) must render mode: Governed and approverSignature: Console, and no operator word:" >&2
+    sed 's/^/      /' "$tmp/two-person.yaml" >&2
+    fail=1
+    return
+  fi
+  echo "   rc=$rc  (a two-person policy with the shared console renders Governed + approverSignature: Console; $what)"
+}
+two_person_renders "mode: two-person" "${TWO_PERSON[@]}"
+two_person_renders "mode: Governed, approverSignature: Console" "${TWO_PERSON_INTERNAL[@]}"
+# ... and a policy WITHOUT the setting renders no `approverSignature` key, so an
+# older binary still reads every document that does not ask for two-person.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com "${PAIR_KEY[@]}" \
+  --set approvalPolicy.policies[0].name=prod --set approvalPolicy.policies[0].mode=strict \
+  --show-only templates/approval-policy.yaml > "$tmp/strict-only.yaml" 2> "$tmp/strict-only.err"
+rc=$?
+if [ "$rc" -ne 0 ] || grep -q "approverSignature" "$tmp/strict-only.yaml"; then
+  echo "FAIL: a strict policy renders no approverSignature key" >&2
+  sed 's/^/      /' "$tmp/strict-only.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a strict policy renders no approverSignature key)"
+fi
 console_refuses "shared mode over plain HTTP" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=http://console.example.com

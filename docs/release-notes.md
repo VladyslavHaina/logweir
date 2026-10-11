@@ -53,7 +53,20 @@ the runner will, and reads only that point's own receipt), 58 (FX-22, a `Retenti
 ceiling held back), 59 (FX-48, the shared console shows what the product API publishes and
 sends what its routes require), 60 (PROD-01.2, the compatibility contract, and
 the capability rows a readiness check asks of the endpoint itself), 61 (FX-34, a
-guard-refused Restore or Backup says why in its status) and 62 (PROD-01.5a
+guard-refused Restore or Backup says why in its status), 62 (FX-27 and FX-42, the engine's metrics port stays
+closed and a failed RetentionPolicy read says so), 63 (FX-35, a restore started from a Backup is bound to
+its recovery point), 64 (FX-39 and FX-40, a retention policy over more than
+500 points keeps enforcing, and no run deletes from a partial or expired
+catalog view), 65 (FX-33, one
+backup names at most 1,000 topics, and a backup of many topics stays listed
+and verified), 66 (PROD-16.2,
+two-person approval in the console, no key), 67 (PROD-01.1a, an
+archive holding transaction markers is refused unless the plan allows them), 68
+(PROD-02.1, a backup of a source whose records all expired is a signed, named
+empty capture), 69 (FX-44, a failed restore removes or names the scratch
+topic it created), 70 (FX-49, the console's original-name box takes effect
+when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
+points) and 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in three shards; nothing in the product
 changes) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
@@ -216,7 +229,39 @@ and `Backup` Job gains that argument) and the console's text, and the PoC
 upgrade that carries it moves the controller and the runner image in one
 `helm upgrade`, submits a `Restore` the runner refuses and reads the reason
 on its status and in the console after the pod is gone.
-Item 62 is rows PROD-01.5a and FX-41, proven on the compose stack (4.3.1 and
+Item 62 is fix-now rows FX-27 and FX-42 (its first item), proven by render
+rows, the real-engine backup row on the compose stack and a console row
+through the page's own decoder; it changes the runner's engine documents and
+the console.
+Item 64 is fix-now rows FX-39 and FX-40 (its fail-safe only), proven by
+controller rows over a fake API and a console row; it changes the controller,
+the `RetentionPolicy` CRD (two additive status fields) and the console's legacy
+mode, and the PoC upgrade that carries it reads the two new counts.
+Item 65 is fix-now row FX-33, proven by runner, check, store and controller
+rows, by child-process peak-RSS measurements, and on the compose stack with a
+backup of 500 topics; it changes the runner, the check Jobs, the controller
+and (one line) the product API, signs nothing differently, and
+the PoC upgrade that carries it takes a backup of several hundred topics and
+reads its catalog entry, its verdict and the controller's memory.
+Item 67 is row PROD-01.1a, proven by unit and phase-sequence rows and on the
+compose stack with the shipped engine (the PROD-01.1 transactional fixture,
+refused as a drill and as a `newTopic` restore, restored under the override,
+and a non-transactional twin as the control; a marker after a point-in-time
+window refused); it changes the runner and the controller's list of restore
+refusal codes, and the PoC upgrade that carries it restores one ordinary
+point unchanged.
+Item 68 is PROD-02.1 (narrowed by OD-11), proven by live rows on the compose
+stack over a topic whose records were produced and deleted, by runner,
+catalog and controller rows, and by both verifiers over a corpus; it changes
+the runner, the receipt format (1.8.0), both verifiers and the controller, and
+the PoC upgrade that carries it runs the schedules over an emptied source.
+Item 69 is fix-now row FX-44, proven by unit rows, controller rows over a
+recording API double and the compose ACL row; it changes the runner (the
+failure-path teardown, the warning's grant clause, one more stdout line) and
+the controller (`status.teardown.failed`), and the PoC upgrade that carries it
+runs a scratch `Restore` that fails after creating its topic and reads the
+topic gone, and one whose topic cannot be deleted and reads it on the status.
+Item 72 is rows PROD-01.5a and FX-41, proven on the compose stack (4.3.1 and
 3.7.1) and by the shard guard; it changes CI and the test fixtures only, and
 needs no PoC row.
 
@@ -280,7 +325,7 @@ structs ignore unknown keys.
 
 **Changed.** Three approval modes by name: **confirm** (one person clicks
 Create in the console, no key; internal `Ordinary`), **two-person** (PROD-16.2,
-refused by name) and **strict** (an approver's personal key; `Governed` or
+refused by name here; item 66 adds it) and **strict** (an approver's personal key; `Governed` or
 `legacy-governed-v1`). On a FIRST `helm install` (Helm 3.19+ or 4.x) with a
 console, the managed identity and `identity.bootstrapFeatures.consoleKey: true`,
 the identity hook generates the console's `ConsoleConfirmation` key
@@ -1814,11 +1859,12 @@ the readiness probe and the backup set check GET with a 0-byte cap. The caps:
 - The controller reads a receipt or scorecard under **1 MiB** and a sidecar
   under **64 KiB**. These are the evidence relay's own caps, so a document is
   verifiable through the controller's handle exactly when a relay can carry
-  it.
+  it. (Since item 65 a backup receipt is read under 5,131,072 bytes.)
 - The controller's retention report reads a manifest under 64 MiB, folded as
   it streams, never as a tree.
 - Runner, CLI and check Jobs read documents under 64 MiB, manifests under
-  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB.
+  256 MiB and segments under 1 GiB. The catalog walk keeps its 256 KiB
+  (item 65 replaces it with a cap for each document).
 - The evidence-fetch Job relays nothing for an object over `maxBytes` (before,
   it relayed a prefix the controller refused anyway).
 - Concurrent controller reads share ONE 128 MiB budget, a quarter of the
@@ -1840,7 +1886,9 @@ is about 3.4 KB per topic, so a run that selects more than about **250–300 top
 writes a receipt over 1 MiB. No path verifies such a receipt now, and the run
 is not a recovery point. Before this item, the controller's own handle verified
 it, and an evidence-fetch relay did not. This moves a verdict only to the safer
-side (OD-7's third case), and no signed format changes.
+side (OD-7's third case), and no signed format changes. **Item 65 lifts this
+limit**: a backup receipt has its own cap, 5,131,072 bytes, and one backup
+names at most 1,000 topics.
 **Scope:** store rows (`crates/logweir-store/tests/capped.rs`):
 - the two fences, including a store whose meter shows no body byte was taken;
 - the version read;
@@ -2551,7 +2599,6 @@ which leaves the list its old length beside a stale `truncatedByCap: 0`.) A
 `HELD-BACK` column, or ignore them while the older controller runs. An older
 controller also writes `Enforced=False/NothingToDo` where this build writes
 `NothingFitsCeiling`. Plans and approvals are unaffected.
-
 #### 59. The shared console shows what the product API publishes and sends what its routes require: the schema note, a restore's integrity level, an original-name restore (FX-48)
 
 **Changed.** Three things the product API publishes never reached a page of
@@ -2845,7 +2892,422 @@ always wrote, over this runner or an older one. The runner image first leaves
 THIS controller over an older runner, which does not start (above). Statuses
 already written keep the text they have.
 
-#### 62. CI tests on Apache Kafka 4.3.1, in three shards; nothing in the product changes (PROD-01.5a, FX-41)
+#### 62. The engine's metrics port stays closed; a failed RetentionPolicy read says so (FX-27, FX-42)
+
+**Changed.** Every backup and restore document Logweir renders ends with
+`metrics: {enabled: false}`, so the engine's unauthenticated Prometheus server
+no longer listens on `0.0.0.0:8080` in a runner pod or on the operator's host
+for a CLI run (nothing scraped it). A schedule's retention panel read a failed
+read of the namespace's RetentionPolicies (a refusal, a 5xx, an answer the
+console's decoder rejects) as "no policy" and printed "Logweir never deletes
+from your archive"; it now says the read failed and why, and prints that
+sentence only after a read that succeeded.
+The native engine's race with the target topics phase 0 creates (FX-25) did
+not recur in 30 native restores into freshly created topics on the compose
+stack, after item 39's wait; nothing else changed for it.
+**Do:** nothing.
+**Scope:** a render row per renderer and the ten backup and restore goldens;
+the real-engine backup row on the compose stack, which holds port 8080 for its
+run and fails on any metrics-server line from the engine (native route); the
+panel through the console's own reader and decoder for a 403, a 500 and a
+malformed answer, with a successful empty read as the control.
+**Rollback:** an older runner opens the engine's port 8080 again during a run;
+an older console prints the no-deletion sentence after a failed read.
+
+#### 63. A restore started from a Backup is bound to its recovery point (FX-35)
+
+**Changed.** The console's restore wizard opened on a `Backup` (the *Restore
+this point* link of the History, Backups and Schedules pages) built a plan
+naming `source.backup` only, so the runner read no backup receipt: a 1.3.0
+point restored that way signed each topic's timestamp type NOT RECORDED and
+its configuration `(unknown)`, where the same point restored from the catalog
+recorded both (PoC batch 5, F-3). The wizard now names the run's point by its
+receipt digest, finds it in a catalog over the run's own destination, and
+builds the catalog flow's plan for it: the same `source.point`, with the
+Backup's topics filled in. When no catalog lists the point yet, the plan names
+the set only, as before, and step 2 and the review say it is not bound and
+why. The review's new *recorded by the point* row says where the run reads
+each topic's timestamp type and configuration
+([kubernetes.md](kubernetes.md), *A restore started from a Backup is bound the
+same way*).
+**Do:** nothing. To have a Backup's restore bound, keep a `RecoveryCatalog`
+over its destination synced since the run.
+**Scope:** console rows over the product API's own documents, through the
+console's client and contract decoders (`ui/tests/backups-page-binding.spec.js`):
+the PoC's 1.3.0 point restored from its Backup carries the catalog flow's
+binding byte for byte, with a newer run's point listed first as the wrong
+answer; a run whose point no catalog lists says so and carries no binding.
+Ten mutants, all killed (the binding dropped, the newer run bound, a contract
+declaration removed, the unbound note or the review row wrong). Not proven
+live in this branch: the next PoC upgrade restores a 1.3.0 point from the
+Backups page and reads its review and its scorecard's time basis.
+**Rollback:** the console image; an older console builds the set-only plan
+again. Nothing is stored.
+
+#### 64. A retention policy that keeps or skips more than 500 points keeps enforcing, and an `Enforce` run never deletes from a partial or expired catalog view (FX-39, FX-40)
+
+**Changed.** `status.lastEvaluation`'s lists (`kept`, `candidates`,
+`protected`, `skipped`) are bounded at 500 by the CRD, and the controller wrote
+them whole. A policy that kept more than 500 points (hourly backups under
+`keepDays: 30` keep 720) or skipped more than 500 (a revoked signer) had its
+status write refused by the API server, published nothing new, and stopped
+enforcing. Each list now holds its first 500 entries, and two new counts,
+`protectedCount` and `skippedCount`, stand beside `keptCount` and
+`candidateCount`; the accounting adds up over the counts. An `Enforce` policy
+now starts no run from a catalog view that may not hold every point (a window,
+an unfinished walk, or a catalog that did not say: `Enforced=False/ViewIncomplete`)
+or that is past, or states no, `status.viewExpiresAt`
+(`Enforced=False/ViewExpired`). The message names what helps, the evaluation
+is still published, and nothing is deleted. A `mode: Full` catalog now
+publishes a sync resumed from its cursor as a window (`truncated: true`): that
+sync lists only the archive's tail. Where a walk began is read from the plan
+the sync Job ran under, and a sync whose plan cannot be read is a window too. **On v1 an archive of more than 5000
+points, a view the catalog cut for page space, and a Full catalog whose walk
+does not finish in one sync are never enforced.** Under both reasons
+`status.enforcement` and `guarantees.ageExpiry` still read `LogweirWorker` and
+`LogweirEnforced`, as under `NothingFitsCeiling`; the `Enforced` condition is
+the authority. `Report` policies are unchanged,
+and so is what a run from a complete, current view deletes: its plan and
+`planSha256` are the same, so an approved digest stays approved
+([kubernetes.md](kubernetes.md) §7f).
+**Do:** apply the CRDs before the controller rolls (two additive `status`
+fields). Before the upgrade, read `status.lastEvaluation.viewIncomplete` of
+every `Enforce` policy: where it is `true`, the policy stops deleting until the
+catalog's view is whole. When the catalog's `spec.sync.viewLimit` cut the view,
+re-create the `RecoveryCatalog` with a larger one (`spec.sync` is immutable;
+5000 at most); when its walk stopped, its `Synced` condition says why; a
+`mode: Full` catalog needs a `maxObjectsPerRun` that finishes in one sync, or
+`mode: Index`.
+**Scope:** the controller over a fake API: a policy keeping 720 points and one
+skipping 600 write statuses the generated CRD schema accepts (the uncut list,
+as the control, is refused by `maxItems`) and start their approved run; a small
+policy's status is the pre-FX-39 bytes plus the two counts; an approved plan
+over a window, an unfinished walk, a silent catalog, an expired view and one
+with no expiry starts nothing and names the reason; a complete, current view
+runs the plan rendered directly from the same view; a `Report` policy over a
+partial, expired view is unchanged; a `skipped` list that is not
+`skippedCount` long reads "not recorded"
+(`crates/weirkeeper/tests/retention_policy_controller.rs`). A Full catalog's
+budget-stopped sync and its resumed sync both publish a view a retention pass
+refuses, and the same points in one sync do not
+(`crates/weirkeeper/tests/catalog_controller.rs`).
+The console's legacy mode reads the counts past the bound and applies the same
+`skipped` check (`ui/tests/d3.spec.js`). Over the 437 fixtures of FX-22's plan probe, the plan
+bytes and digests are identical to the build before. Not proven live: the PoC
+upgrade that carries it reads `protectedCount` and `skippedCount` on its
+policies.
+**Rollback:** an older controller writes the lists whole again (a policy over
+500 stops enforcing again) and starts runs from a partial view. It does not
+rewrite `protectedCount` or `skippedCount`; the accounting then compares a
+stale `skippedCount` with fresh counts and reads "not recorded" when they no
+longer add up, or when the `skipped` list it rewrote is not as long as the
+stale `skippedCount` (up to 500). An older catalog controller publishes a
+resumed Full rescan as whole again. Re-applying the older CRDs prunes the two
+fields.
+
+#### 65. One backup names at most 1,000 topics, and a backup of many topics stays listed and verified (FX-33) — required action
+
+**Changed.** A backup receipt records about 3 KB for every topic, and the
+catalog point record copies it. Both were read under caps nobody had tied to a
+topic count. A backup of about 80 topics wrote a record over the catalog
+walk's 256 KiB, and the point **vanished from the catalog without a line**
+(the remedy shown for the count blamed the `archiveRead` grant). A backup of
+about 300 topics wrote a receipt over the controller's 1 MiB and was **never
+verified** (`NotAttempted`, final). Each backup had succeeded. Now one budget
+bounds what a backup signs ([kubernetes.md](kubernetes.md) §7b.5):
+
+- **One backup names at most 1,000 topics**, and its receipt has a budget of
+  5,000 bytes a topic. The largest receipt is 5,131,072 bytes and the
+  largest catalog record 6,131,072 bytes. A topic at broker defaults measures
+  3,090 bytes, and at most 4,003 once the engine has run.
+- **A selection over it is refused before the engine runs**, by name
+  (`BackupSelectionTooLarge`): by count at `logweir backup run`'s phase −1, at
+  the controller's freeze, in a schedule's run policy (`Ready=False`) and in
+  the dynamic selection; and by the bytes the run could sign, after the
+  runner's own configuration read. Nothing is left out to make a selection
+  fit.
+- **The catalog walk, the controller and the evidence relay read a receipt
+  under the same 5,131,072 bytes**, so a point the catalog lists `Available`
+  is one the controller can verify. A scorecard keeps 1 MiB. The controller
+  folds the facts it needs from a receipt and never parses one into a tree:
+  three reads of a 5.09 MB receipt add 9.7 MB of peak memory (25.3 MB as a
+  tree), and one relay of it 26.9 MB.
+- **The catalog lists every point it counts.** A point that is not available
+  says why: a size gives the document's bytes against the bound and names no
+  grant. A point whose record could not be read is listed by its point id
+  alone, with nothing a restore could bind to, and is never selectable; in a
+  full view it gives its place to a point with a record, and an entry with a
+  record gives its place only to a newer one (item 71). A record read that
+  did not answer leaves the walk incomplete until a sync reads it. `counts` and the `Synced` message
+  separate a size and a content fault from a permission or transport
+  failure.
+
+**The maximum is lower than it was.** A dynamic selection resolved up to
+5,000 names, and a named `spec.topics` list had no bound. Neither was safe: a
+5,000-topic receipt is about 15 MB, which no evidence relay carries.
+
+**Do, before the upgrade:** find every `Backup` and `BackupSchedule` that
+names, or last resolved to, more than 1,000 topics, with the two commands in
+[kubernetes.md](kubernetes.md) §7b.5, and split each across schedules. After
+the upgrade such an object is **refused by name at each run**; no topic is
+dropped silently and no partial backup is taken. A recovery point a larger
+backup already wrote is not lost: `logweir restore` and `logweir verify` read
+it. The caps are in bytes: a point whose receipt or record is over its bound
+(an older backup of about 1,650 topics or more at broker defaults) is listed
+`Unreadable` with its size against the bound and is not offered; a smaller
+older point is listed and verified as usual.
+
+**Do, after the runner image rolls:** set each `RecoveryCatalog`'s
+`spec.syncRequest` to a new value. Points of about 80 topics and more that
+the old walk dropped are listed by the new one.
+
+**Scope:** no signed format, invariant arm or frozen schema changes; both
+verifiers accept the same documents they accepted. Runner rows
+(`crates/logweir/tests/topic_budget.rs`): a topic's measured cost against its
+budget, the projection above real runs' documents, and the two refusals
+through the backup seam with no client and no engine call. Check rows
+(`crates/logweir/tests/check_cli.rs`): receipts of 70, 105, 113, 300, 500 and
+1,000 topics listed `Available` and signature-verified; a 5,000-topic point
+listed with its size; nine faults each listed with its own reason. Controller
+rows (`crates/weirkeeper/tests/topic_budget.rs`): the same receipts verified
+`Valid` against committed signatures, the largest framed into 7,037,746 bytes
+of pod log under the 8 MiB the controller reads, and the memory figures above,
+measured in child processes beside a whole-parse control.
+
+Live row (`e2e/tests/topic_budget.rs`, compose stack, Logweir's engine build
+`0.23.3+logweir.2` from the runner image): one `logweir backup run` of 500
+one-partition topics, 188 with real overrides, signed a receipt of 1,650,142
+bytes (3,300 a topic) and a record of 1,691,726 bytes. `catalogSync` over the
+real store listed the point `Available` with its signature verified;
+`evidenceFetch` relayed the receipt whole, and nothing when asked under the
+old 1 MiB; both verifiers accepted it, and so did the controller's
+verification code run over those bytes outside a cluster. A point-bound
+`newTopic` restore of all 500 topics under a prefix passed; its scorecard is
+about 134 KB, both verifiers accept it, every restored topic holds its
+source's records, and every topic was judged against the receipt's recorded
+configuration. A `newTopic` restore does not apply a source's overrides: it
+signs them as not reconstructed, as before this item.
+[UNVERIFIED — no cluster has run this build: the controller and API rows are unit and mock-cluster rows, and the live rows ran the runner and the controller's verification code against the compose stack's real documents. The PoC upgrade that carries this item runs the controller itself.]
+**Rollback:** an older runner accepts larger selections again and an older
+controller reads a receipt under 1 MiB again; nothing is stored differently.
+Roll the runner and the controller together: this controller asks an
+evidence-fetch Job for a receipt of up to 5,131,072 bytes, and an OLDER
+runner image refuses a request over 1 MiB, for every receipt however small,
+so under that pair no backup on a destination the controller cannot read
+itself is verified (`NotAttempted` after four attempts). An older controller
+with this runner works as before.
+
+#### 66. Two-person approval in the console: the second person signs in and clicks Approve, no key (PROD-16.2)
+
+**Added.** A third approval mode, `two-person`
+([kubernetes.md](kubernetes.md#two-person-approval-in-the-console-prod-162) §8):
+a namespace bound to `approvalPolicy.policies[].mode: two-person` runs a restore
+after a SECOND person, signed in to the shared console as an Approver and not
+the requester, opens the Restore's approval page and clicks Approve. Nobody
+holds, copies or pastes a key. The console verifies its own signature on the
+request before it shows or uses any of it, shows the whole scope (the source,
+the recovery point, the target cluster, every topic and the name it is
+restored under), and signs the same document with `approver` and
+`approvedAt` added (authorization document **2.2.0**) with its existing
+`ConsoleConfirmation` key; the controller and the runner re-check the
+signature, the binding, that the approver is a second person (issuer and
+subject, case ignored) and that the approval lies in the request's window. The
+chart renders `mode: Governed` with `approverSignature: Console`, only with
+`api.console.mode: shared`. A scorecard of such a run is **1.9.0** (or **2.1.0**
+for a partition subset) with `approval.console`, and both verifiers
+(`verify_scorecard.py` 1.29.0) print who asked and who approved. Product API:
+`GET .../restores/{name}/approval-request` and `POST
+.../restores/{name}/console-approval` (OpenAPI additive: 58 → 60 operations,
+280 → 295 schemas).
+**Do:** nothing, until you bind a namespace `two-person` (`docs/install.md`
+§5f): bind the approver the console role Approver there. A two-person request
+names at most 1024 topics; split a larger restore or bind it `strict`.
+**Scope:** core, controller, runner, API and console rows over fakes and fixtures
+for every must-have and its negative control (self-approval in every spelling,
+a planted confirmation, an incomplete scope, the role, cross-site, expiry, the
+table of modes, the version rules); the two verifiers agree on a 32-case corpus
+and the parity script; mutants on the identity rule, the role check, the
+console's own-signature check, the scope check and the table. Older runners
+(main and PROD-15.1) refuse a two-person bundle (exit 3); older verifiers accept
+a 1.9.0 scorecard and ignore the block, and 1.28.0 refuses an original-name one.
+Not proven live: the PoC rows in
+[PROD-16.2-console-approval.md](to-do/decisions/PROD-16.2-console-approval.md).
+A `strict` namespace is unchanged byte for byte.
+**Rollback:** remove the two-person policies first: an older controller or
+console refuses to start on `approverSignature`, and an older runner refuses
+the snapshot and every 2.2.0 document; a pending console-approved Restore is
+then refused and submitted again. Scorecards stay valid under older readers.
+SECURITY.md states the residual: whoever controls the console, its key or the
+identity provider can produce both halves.
+
+#### 67. An archive holding transaction markers is refused unless the plan allows them (PROD-01.1a)
+
+**Changed.** The engine archives every transaction commit and abort marker as
+an ordinary record, and a restore wrote each one, with the records of aborted
+transactions beside it, as data every consumer reads. Before it creates
+anything on the target, a restore now reads the segments its window overlaps
+and every segment after the window's end (a marker there can close a
+transaction with records in the window), and counts the records shaped like a
+marker. If there
+are any, the restore is refused, as a drill or as a `newTopic` restore. It
+exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the sentence
+names the topics, partitions and count. The `Restore`'s `exitReason`, the
+product API's `result.exitReason` and the console show the name; the
+`Restore`'s status carries the sentence through item 61's `refusal-detail=`
+line, whose closed list of restore codes gains this one. The plan field
+`restore.allow_transaction_markers: true` restores the archive as before. The
+field is inside `plan_hash`. Under the override the check is skipped, and the
+signed scorecard's `sample.coverage_note` says so. A segment after the window
+that cannot be read does not refuse the run (the restore does not read it);
+the runner's output and the same note say how many. The check reads each
+restored segment once more before the engine runs, and a point-in-time restore
+of an old window also reads the archive's tail after it. It reads the shape only,
+so a record of your own with that shape is counted too. A transaction open at
+backup time whose marker is not archived, a transaction opened after the backup
+began, one whose marker is in an unreadable segment after the window, one whose
+marker is in a segment whose last record is before a stated window start, and
+a marker of another encoding version are not detected
+([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
+**Do:** nothing, unless you restore transactional topics (Kafka Streams or
+Connect exactly-once, Flink): to restore one as it is, add
+`restore.allow_transaction_markers: true` to its plan and approve the changed
+plan. A `RehearsalSchedule` cannot state the field, so its slots over such an
+archive are refused and `lastFailed.reason` names the refusal; a standing
+authorization never admits a plan that states it.
+**Scope:** the shape predicate on hand-built records (a marker of each type,
+a user record of the same shape, a 7-byte value and a non-zero key prefix
+not caught); the whole run over doubles, refused in both target modes with no
+target topic and no scorecard, run under the override with the note, the
+override outside the approved plan refused at phase 1, an unreadable segment
+in the window refused, a marker in a segment after the window refused, and
+unreadable segments after the window noted and not refused; and live on the
+compose stack with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`:
+the transactional row refused as a drill and as a `newTopic` restore with the
+7 archived markers named and nothing on the target, the non-transactional twin
+restored and `pass`, the override's restore `pass` with the note; a
+point-in-time restore whose marker is in a segment after the point refused;
+and PROD-08.1's omitted segment after the window still `pass` sampled and
+`fail-integrity` complete, now with the note).
+**Rollback:** an older runner ignores the plan field and restores such an
+archive without the check, as before. A controller older than this item does
+not know the new code, so for this refusal its status says "the runner gave
+no readable reason" (item 61) while `exitReason` still names it: roll the
+controller with the runner. Plans and approvals are unaffected.
+
+#### 68. A backup of a source whose records all expired is a signed, named empty capture (PROD-02.1)
+
+**Changed.** A scheduled backup of a topic that retention had emptied failed
+exit 1 "operational" (the PoC's nightly schedules, 2026-10-02 to 10-05): the
+engine wrote a manifest with no segment and the run refused it. Now
+`logweir backup run` reads every named partition's low and high watermark
+once before the engine and records them in the receipt (format **1.8.0**,
+optional `source_watermarks`). When nothing was captured and every partition
+was empty, the run exits 0 as an **empty capture**: the summary says so, the
+signed receipt counts no record and carries the empty window `[t, t)`, no
+catalog point is written (`catalog sync` counts it `empty-capture`), and the
+`Backup` completes with reason `EmptyCapture`, set only after the controller
+verifies the receipt, with no `windowCovered`. An empty capture is not a
+recovery point: a `ProtectionPolicy` never counts it (it ages from the last
+real point), and a restore of its set is refused by name, exit 3, before
+anything runs. A partly empty source is an ordinary backup whose summary and
+receipt name the empty partitions. Nothing captured over a partition that
+held records, or with the watermarks unread, is still exit 1. Both verifiers
+(`verify_scorecard.py` 1.30.0) check arms 41–45 and print "coverage not
+recorded" for every receipt without the block, never complete. The block grows
+with the partition count and is recorded only up to 32 KiB (about 430–650
+partitions); a larger source's receipt reads "coverage not recorded", and an
+empty capture of it stays exit 1.
+
+**Scope:** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
+shipped engine `0.23.3+logweir.2`), `crates/logweir/tests/backup_run.rs`,
+`crates/logweir/tests/catalog.rs`, `crates/weirkeeper/tests/backup_controller.rs`,
+`crates/logweir-core/tests/backup_receipt.rs`, the corpus and
+`scripts/check-verifier-parity.sh`. Not proven live in this branch: the
+`Backup` status, which the PoC upgrade that carries it reads over a schedule
+of an emptied source.
+**Rollback:** an older runner fails the empty source exit 1 again; receipts
+already signed keep verifying with this build, and an older verifier refuses
+an empty capture's receipt (arm 4) — the safer verdict.
+
+#### 69. A failed restore removes or names the scratch topic it created (FX-44)
+
+**Changed.** A restore that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), now tears down the topics that step
+created by phase 9's rule: deleted in `scratch` mode under
+`teardown: delete`, never in `newTopic` mode, never a topic it did not
+create. A creation step that stops partway still deletes nothing. It logs
+`the restore failed after it created its target topics; teardown removed 1
+scratch topic: <topic>`. Before, it left them and said nothing, and a
+leftover `drill-` topic refused the next run.
+A topic the broker would not delete is named, on a pass and on a failure, by
+the teardown warning, which now also names the grant when the broker's answer
+was an authorization refusal (``…; the restore principal lacks `Delete` on
+topic `<topic>` ``), and by a new stdout line, `teardown-failed=`, which the
+controller copies to `Restore.status.teardown.failed` (until now declared and
+never written). The product API's `teardown` and the console's Teardown
+section show it, and a `RehearsalSchedule` skips its next slot with
+`LeftoverTopics`. The failure path signs nothing and writes no attestation,
+as before; a pass's signed attestation is unchanged.
+**Do:** nothing. Give the restore identity `Delete` on the scratch prefix.
+**Scope:** unit rows (the failure-path teardown over a fixture drill, only
+the topics the run created, nothing in `newTopic` mode or under `keep`, the
+grant only for an authorization refusal, the line's bounds), controller rows
+over a recording API double (exit 1 and exit 0, an unmapped name dropped, no
+line no block), a rehearsal row (a failed child's block becomes
+`pendingTopics`), and the compose ACL row (`Write`, `Read`, `Delete`, and
+`Write` with `Delete` removed; an existing target topic is not deleted).
+[UNVERIFIED — no controller has read a `teardown-failed=` line on a cluster yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older controller ignores the line; an older runner prints none, and leaves a
+failed run's topics as before.
+
+#### 70. The console's "Restore under the original topic names" box takes effect when ticked (FX-49)
+
+**Changed.** Ticking *Restore under the original topic names* in the restore
+wizard, or its owner statement, now redraws the wizard at once: the owner
+statement, the locked *Verify every record* and the plan appear. Before, nothing
+changed until another field was edited (PoC batch 7, F-1). The approval panel
+now says a `newTopic` restore's topics stay on the target cluster, where it
+printed "nothing is deleted (teardown delete)" (F-5).
+**Do:** nothing.
+**Scope:** console rows only (`ui/tests/original-name.spec.js`,
+`ui/tests/console-approval.spec.js`): the mounted wizard driven by `change`
+events, a scan that every field the wizard re-reads on an edit is listened to,
+and the approval panel's `newTopic` and scratch wording.
+**Rollback:** the console image; an older console needs another field edited
+after the tick.
+
+#### 71. A catalog's `viewLimit` window holds the newest points, and a partial view says so (FX-50)
+
+**Changed.** A `RecoveryCatalog` over more points than `spec.sync.viewLimit`
+listed the first `viewLimit` points its walk met. An `Index` walk meets the
+newest first; a `Full` rescan meets them in point-id order, and a point id is
+a digest. On the PoC a `Full` catalog with `viewLimit: 100` over 386 points
+listed 24 of the 100 newest, and not the newest. The runner now keeps the
+newest `viewLimit` points with a record in either mode, holding at most
+`viewLimit` entries; a tie goes to the smaller point id, the controller's own
+order. An entry whose record gave no facts gives its place first, and a point
+with a record gives its place only to a newer one, so a set's newer receipt
+is listed whenever its older one is. Counts and the histogram still cover the
+whole walk. The `Synced` message of a view from a resumed `Full` rescan now
+ends `It is a partial view: <n> point(s) from a resumed rescan; the archive
+holds more`, and that of a walk that did not finish `… from a walk that did
+not finish; the archive may hold more`. Before, a resumed rescan read "the
+newest 136 of 136 points". `status.truncated` and `status.cursor` are
+unchanged, so an `Enforce` run still refuses both views (item 64).
+**Do:** nothing. A `Full` catalog lists its newest points from its first sync
+after the runner image rolls; set `spec.syncRequest` to a new value to see it
+at once.
+**Scope:** runner rows over an in-memory archive (386 points in both walks; a
+tie at the window's edge; FX-33's window rules in a `Full` rescan) and
+controller rows over a recording API double (the stopped, resumed and whole
+walks' `Synced` messages and `truncated`).
+[UNVERIFIED — no PoC catalog has listed its newest points under this build yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older runner lists the first points its walk meets; an older controller drops
+the sentence.
+
+#### 72. CI tests on Apache Kafka 4.3.1, in three shards; nothing in the product changes (PROD-01.5a, FX-41)
 
 **Changed.** Only how the repository is tested. The e2e fixture's default
 broker, and the line CI's e2e job runs on every pull request, is Apache Kafka
@@ -2868,6 +3330,17 @@ twice. The shards' durations are measured on the pull request's CI run.
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
+
+- **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
+  of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
+  policy deletes nothing from the upgrade on until its catalog's view is
+  whole. Re-create a catalog whose `viewLimit` cut its view with a larger one
+  (`spec.sync` is immutable), and read a stopped walk's `Synced` condition. An
+  archive of more than 5000 points is not enforced on v1.
+- **Before the upgrade, split every `Backup` and `BackupSchedule` that names
+  or resolves to more than 1,000 topics** (item 65). The two commands in
+  [kubernetes.md](kubernetes.md) §7b.5 find them. After the upgrade such a
+  selection is refused by name at each run.
 
 - **Before `helm upgrade`, name the trusted proxy of a shared console the
   chart publishes** (item 53): with `api.console.mode: shared` and
@@ -2964,7 +3437,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61 and 62, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71 and 72, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3030,9 +3503,27 @@ controller and the console's text, and needs `controllerImage` and
 `runnerImage` moved in one upgrade: this controller passes `--line-token` to
 every `Restore` and `Backup` Job, and every runner image published before the
 change exits 1 on it (for a tagged release's runner item 35 already required
-the roll); item 62 changes only how the repository is tested and needs
-nothing. To roll back to
+the roll); item 62 changes the
+runner's engine documents and the console, and needs nothing; item 63 changes the
+console only and needs nothing; item 64 changes the
+controller, the `RetentionPolicy` CRD (two additive status fields) and the
+console, and needs the CRDs applied before the controller rolls; item 65
+changes the runner, the check Jobs, the controller and the product API, and
+needs every `Backup` and `BackupSchedule` that names or resolves
+to more than 1,000 topics split before the upgrade, and each
+`RecoveryCatalog` synced again after the runner image rolls; item 66 changes the controller, the runner, the product API, the
+console and the chart, and needs nothing until a namespace is bound
+`two-person`; item 67 changes the
+runner and the controller's list of restore refusal codes, and needs the two
+rolled together and a plan field for a restore of an archive that holds
+transaction markers; items 69 and 71 change the runner and the controller and
+need nothing, in either order; item 70 changes the console only; item 72
+changes only how the repository is tested and needs nothing. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
+
+0. **Remove every `two-person` policy** (item 66) before rolling an image
+   back: an older controller or console refuses to start on a document that
+   carries `approverSignature`.
 
 1. **Remove `approvalPolicy.default`** (item 29): an older binary refuses a
    document carrying `defaultMode` at start. Expect unbound namespaces of a
@@ -3078,6 +3569,10 @@ nothing. To roll back to
    an older controller passes no `--line-token` and ignores the new line,
    while this controller over an older runner image starts no `Restore` and
    no `Backup`.
+10. Item 65 needs no rollback step of its own: an older runner accepts a
+   selection of more than 1,000 topics again, and an older controller reads a
+   receipt under 1 MiB again, so a backup of about 300 topics and more is
+   `NotAttempted` again. Roll the runner and the controller together.
 
 ---
 

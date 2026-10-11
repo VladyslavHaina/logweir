@@ -304,5 +304,7 @@ pub fn render(plan: &BackupPlan) -> Result<String, RenderError> {
     // one thing a backup must never be able to do (Global Constraints 19, 20).
     // Also deliberately not rendered, at any value: purge_topics, dry_run,
     // header_preflight_external (Global Constraint 4).
+    s.push('\n');
+    s.push_str(crate::yaml::METRICS_OFF);
     Ok(s)
 }

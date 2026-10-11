@@ -1,0 +1,29 @@
+{
+  "item": {
+    "approvalName": "approval-x",
+    "approve": {
+      "offered": false,
+      "refusal": "scopeIncomplete",
+      "sentence": "A second person approves only what they are shown in full, and this restore names 1025 topics, more than the 1024 a request shows. Split it into restores of at most 1024 topics each, requested and approved one by one, or approve it under a strict (personal-key) policy. It cannot be approved in the console."
+    },
+    "confirmationName": "approval-x-confirmation",
+    "confirmationSha256": "sha256:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "expiresAt": "2026-10-10T13:00:00Z",
+    "issuedAt": "2026-10-10T12:00:00Z",
+    "namespace": "team-a",
+    "planHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "approvalSubject": "ordinary",
+    "policy": "prod-pair",
+    "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requester": "https://idp.example#alice",
+    "restore": "restore-x",
+    "restoreUid": "uid-x",
+    "state": "pending",
+    "stateSentence": "The console confirmed this request and it is waiting for a second person to approve it.",
+    "ticket": "CHG-4711",
+    "scopeComplete": false,
+    "scopeIncomplete": "tooManyTopics",
+    "scopeSentence": "A second person approves only what they are shown in full, and this restore names 1025 topics, more than the 1024 a request shows. Split it into restores of at most 1024 topics each, requested and approved one by one, or approve it under a strict (personal-key) policy."
+  },
+  "requestId": "01M4JX07HA3SERHAG00YFRGV6G"
+}

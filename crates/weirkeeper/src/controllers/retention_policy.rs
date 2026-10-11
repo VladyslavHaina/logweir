@@ -94,7 +94,9 @@ use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unc
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
-use crate::crds::retention_policy::{RetentionEnforcementRun, RetentionMode, RetentionPolicy};
+use crate::crds::retention_policy::{
+    RetentionEnforcementRun, RetentionMode, RetentionPolicy, EVALUATION_LIST_BOUND,
+};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError, ResolvedDestination};
 use crate::job::RunnerOwner;
@@ -219,6 +221,13 @@ pub const REASON_NOTHING_TO_DO: &str = "NothingToDo";
 /// remove" beside a held-back count above zero is the defect FX-22 is about,
 /// on the one condition an operator reads to learn why nothing is deleted.
 pub const REASON_NOTHING_FITS_CEILING: &str = "NothingFitsCeiling";
+/// `Enforced=False`: the catalog view does not hold every point of the
+/// archive (a window, an unfinished walk, or the catalog did not say), so no
+/// run starts from it (FX-40). The evaluation is still published.
+pub const REASON_VIEW_INCOMPLETE: &str = "ViewIncomplete";
+/// `Enforced=False`: the catalog view is past its `viewExpiresAt`, or states
+/// none, so no run starts from it (FX-40).
+pub const REASON_VIEW_EXPIRED: &str = "ViewExpired";
 /// `Enforced=False`: a Job of this run's name exists and is not ours.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
 /// `Enforced=False`: the destination has no `spec.access.evidenceWrite` grant
@@ -264,6 +273,8 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_UNATTENDED,
     REASON_NOTHING_TO_DO,
     REASON_NOTHING_FITS_CEILING,
+    REASON_VIEW_INCOMPLETE,
+    REASON_VIEW_EXPIRED,
     REASON_JOB_NAME_CONFLICT,
     REASON_EVIDENCE_GRANT_UNUSABLE,
     REASON_DECLARED_EXPIRY_CONFLICTS,
@@ -1569,7 +1580,8 @@ impl Pass<'_> {
         let window = self.plan_window(&plan_sha256, plan_max_age);
 
         // ENFORCE, OR NOT.
-        let decision = self.enforcement_decision(&plan_sha256, &evaluation, &window);
+        let view_refusal = view.run_refusal(&self.policy.spec.catalog_ref.name, self.ctx.now);
+        let decision = self.enforcement_decision(&plan_sha256, &evaluation, &window, view_refusal);
         let mut outcome = Outcome {
             phase: RetentionPhase::Evaluated,
             ready: "True",
@@ -1929,6 +1941,7 @@ impl Pass<'_> {
                 .and_then(|s| s.cursor.as_ref())
                 .and_then(|c| c.complete),
             total: status.and_then(|s| s.counts).and_then(|c| c.total),
+            expires_at: status.and_then(|s| s.view_expires_at),
         }))
     }
 
@@ -2673,6 +2686,7 @@ impl Pass<'_> {
         plan_sha256: &str,
         evaluation: &plan::Evaluation,
         window: &PlanWindow,
+        view_refusal: Option<(&'static str, String)>,
     ) -> EnforcementDecision {
         if self.policy.spec.mode != RetentionMode::Enforce {
             return EnforcementDecision {
@@ -2692,6 +2706,17 @@ impl Pass<'_> {
                 message: "spec.mode is Enforce and spec.enforcement is absent".to_string(),
             };
         };
+        // NO RUN FROM A PARTIAL OR EXPIRED VIEW (FX-40). Points outside the
+        // view are never evaluated, so a set shared across its edge, or a
+        // point a stale view still lists, cannot be proven safe to delete.
+        if let Some((reason, message)) = view_refusal {
+            return EnforcementDecision {
+                start: false,
+                enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                reason,
+                message,
+            };
+        }
         // THREE CONSECUTIVE FAILURES STOP SCHEDULING UNTIL THE SPEC CHANGES.
         // Both halves live in `budget_before`: it returns 0 when
         // `metadata.generation != status.observedGeneration`, which is the only
@@ -3126,18 +3151,29 @@ impl Pass<'_> {
         // "an older controller did not say" (D3 §12) — and `viewIncomplete`
         // is `null`, which a merge patch reads as "remove", when the catalog
         // did not say whether its view holds every point.
+        //
+        // EACH LIST IS CUT AT THE CRD'S `maxItems` AND ITS COUNT WRITTEN BESIDE
+        // IT (FX-39). A list past the bound makes the API server refuse the
+        // whole status write (`422 Invalid`), conditions included, and since
+        // the evaluation is published before a run starts, the policy would
+        // stop enforcing with nothing on the object but its old status.
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        let cut = |list: &[Value]| list[..list.len().min(EVALUATION_LIST_BOUND)].to_vec();
+        let kept = &evaluation.kept[..evaluation.kept.len().min(EVALUATION_LIST_BOUND)];
         let mut last_evaluation = json!({
             "at": self.ctx.now,
             "pointsEvaluated": evaluation.points_evaluated,
-            "keptCount": i64::try_from(evaluation.kept.len()).unwrap_or(i64::MAX),
-            "candidateCount": i64::try_from(evaluation.candidates.len()).unwrap_or(i64::MAX),
+            "keptCount": count(evaluation.kept.len()),
+            "candidateCount": count(evaluation.candidates.len()),
+            "protectedCount": count(evaluation.protected.len()),
+            "skippedCount": count(evaluation.skipped.len()),
             "truncatedByCap": evaluation.truncated_by_cap,
             "maxDeletionsPerRun": bounds.max_deletions_per_run,
             "viewIncomplete": bounds.view_incomplete(),
-            "kept": evaluation.kept,
-            "candidates": candidates,
-            "protected": protected,
-            "skipped": skipped,
+            "kept": kept,
+            "candidates": cut(&candidates),
+            "protected": cut(&protected),
+            "skipped": cut(&skipped),
             "planSha256": plan_sha256,
             // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
             // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
@@ -3156,8 +3192,8 @@ impl Pass<'_> {
             "planExpiresAt": window.expires_at,
         });
         // A MEMBER THE STORED BLOCK DOES NOT CARRY NEVER MOVES THE INSTANT
-        // (FX-22, and FX-29's rule kept under version skew). The four members
-        // above are new. Over a CRD that predates them the API server PRUNES
+        // (FX-22, and FX-29's rule kept under version skew). The members
+        // `ADDITIVE_EVALUATION_FIELDS` lists are new. Over a CRD that predates them the API server PRUNES
         // them from every write, so the stored block never has them, "the
         // block changed" would be true on every pass, `at` would move on
         // every pass, and that write — a real one, the instant differs — is
@@ -3712,6 +3748,73 @@ struct CatalogView {
     walk_complete: Option<bool>,
     /// `RecoveryCatalog.status.counts.total`: every point the walk saw.
     total: Option<i64>,
+    /// `RecoveryCatalog.status.viewExpiresAt`.
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl CatalogView {
+    /// Why an `Enforce` run may not start from this view, or `None` when the
+    /// catalog said the view is current and holds every point (FX-40). A run
+    /// deletes, so "not said" refuses like "no".
+    fn run_refusal(&self, catalog: &str, now: DateTime<Utc>) -> Option<(&'static str, String)> {
+        match self.expires_at {
+            Some(at) if at > now => {}
+            expired => {
+                let when = expired.map_or_else(
+                    || "states no status.viewExpiresAt".to_string(),
+                    |at| format!("expired at {} (status.viewExpiresAt)", at.to_rfc3339()),
+                );
+                return Some((
+                    REASON_VIEW_EXPIRED,
+                    format!(
+                        "RecoveryCatalog {catalog}'s view {when}, so it no longer describes the \
+                         archive: no run starts and nothing is deleted. Let the catalog sync \
+                         (its Synced condition says why it has not)."
+                    ),
+                ));
+            }
+        }
+        let mut causes: Vec<&str> = Vec::new();
+        // NO REMEDY THE CATALOG CANNOT TAKE (review D3): `spec.sync` is
+        // immutable, and `viewLimit` cures only a window the limit cut.
+        if self.truncated == Some(true) {
+            causes.push(
+                "its view is a window (status.truncated). When spec.sync.viewLimit cut it, \
+                 re-create the RecoveryCatalog with a larger viewLimit (spec.sync is \
+                 immutable); an archive of more than 5000 points, the largest viewLimit, is \
+                 never enforced and reads ViewIncomplete. A larger viewLimit does not help a \
+                 view cut for page space, for an entry too large for one page or by merged \
+                 duplicate rows, nor a mode: Full catalog resuming a walk that does not finish \
+                 in one sync (re-create it with a larger spec.sync.maxObjectsPerRun, or use \
+                 mode: Index)",
+            );
+        }
+        if self.walk_complete == Some(false) {
+            causes.push(
+                "its walk stopped before the end (status.cursor.complete is false); the \
+                 catalog's Synced condition says why: its object budget \
+                 (spec.sync.maxObjectsPerRun), its clock, or a shard it could not read",
+            );
+        }
+        if causes.is_empty() && (self.truncated.is_none() || self.walk_complete.is_none()) {
+            causes.push(
+                "it did not say whether its walk finished and its view is whole; let the \
+                 catalog sync",
+            );
+        }
+        if causes.is_empty() {
+            return None;
+        }
+        Some((
+            REASON_VIEW_INCOMPLETE,
+            format!(
+                "RecoveryCatalog {catalog}'s view may not hold every point of the archive: {}. \
+                 A run deletes only what the whole archive proves safe, so no run starts from \
+                 this view and nothing is deleted.",
+                causes.join("; ")
+            ),
+        ))
+    }
 }
 
 /// What bounded one evaluation beside the rules — the facts that make its
@@ -3832,14 +3935,16 @@ impl EvaluationBounds {
     }
 }
 
-/// The `lastEvaluation` members FX-22 added. Each is additive: a status
+/// The `lastEvaluation` members FX-22 and FX-39 added. Each is additive: a status
 /// written before them does not carry them, and a CRD that predates them
 /// prunes them.
-pub const ADDITIVE_EVALUATION_FIELDS: [&str; 4] = [
+pub const ADDITIVE_EVALUATION_FIELDS: [&str; 6] = [
     "keptCount",
     "truncatedByCap",
     "maxDeletionsPerRun",
     "viewIncomplete",
+    "protectedCount",
+    "skippedCount",
 ];
 
 /// `stored` as the "did the findings change?" comparison should see it: with
@@ -3858,8 +3963,8 @@ pub const ADDITIVE_EVALUATION_FIELDS: [&str; 4] = [
 /// always comes with the catalog's `status.truncated` and `status.cursor`
 /// (the catalog writes them with its pages), so that transition does not
 /// arise from a view this controller evaluates; and the member cannot be left
-/// out of the list, because over an older CRD it is pruned like the other
-/// three.
+/// out of the list, because over an older CRD it is pruned like the
+/// others.
 #[must_use]
 pub fn stored_for_instant(stored: Option<&Value>, next: &Value) -> Option<Value> {
     let mut stored = stored?.clone();

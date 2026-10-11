@@ -766,5 +766,77 @@
     "python_exit": 1,
     "reason": "consumer_positions.groups[\"audit\"].active is false but its states \"Empty\" and \"PreparingRebalance\" say true: a group is active unless both its states are \"Empty\" or \"Dead\"",
     "arm": "consumer_positions.groups[\"audit\"].active is false but its states \"Empty\" and \"PreparingRebalance\" say true: a group is active unless both its states are \"Empty\" or \"Dead\""
+  },
+  {
+    "id": "receipt_1_8_with_source_watermarks",
+    "file": "receipt_1_8_with_source_watermarks.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_8_empty_capture",
+    "file": "receipt_1_8_empty_capture.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "source_watermarks_under_format_1_7_0",
+    "file": "source_watermarks_under_format_1_7_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source_watermarks is present but format_version \"1.7.0\" predates it: the field is defined from 1.8.0",
+    "arm": "source_watermarks is present but format_version \"1.7.0\" predates it: the field is defined from 1.8.0"
+  },
+  {
+    "id": "source_watermarks_missing_a_named_topic",
+    "file": "source_watermarks_missing_a_named_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source_watermarks covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "source_watermarks covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "source_watermarks_topic_with_no_partition",
+    "file": "source_watermarks_topic_with_no_partition.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source_watermarks[\"payments\"] records no partition: every named topic records each of its partitions, at least one",
+    "arm": "source_watermarks[\"payments\"] records no partition: every named topic records each of its partitions, at least one"
+  },
+  {
+    "id": "source_watermarks_low_above_high",
+    "file": "source_watermarks_low_above_high.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "source_watermarks[\"orders\"] partition 1 has low 38 above high 37: a partition's low watermark is never above its high",
+    "arm": "source_watermarks[\"orders\"] partition 1 has low 38 above high 37: a partition's low watermark is never above its high"
+  },
+  {
+    "id": "empty_capture_with_a_partition_that_held_records",
+    "file": "empty_capture_with_a_partition_that_held_records.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but source_watermarks[\"payments\"] partition 0 has low 12 and high 929: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition",
+    "arm": "covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but source_watermarks[\"payments\"] partition 0 has low 12 and high 929: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition"
+  },
+  {
+    "id": "empty_capture_counting_a_record",
+    "file": "empty_capture_counting_a_record.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but records[\"payments\"] is 3: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition",
+    "arm": "covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but records[\"payments\"] is 3: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition"
+  },
+  {
+    "id": "empty_window_without_source_watermarks",
+    "file": "empty_window_without_source_watermarks.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "covered.from_ms 1757415739000 is not before covered.to_ms 1757415739000: the covered window's end is EXCLUSIVE, so an empty range covers no record",
+    "arm": "covered.from_ms 1757415739000 is not before covered.to_ms 1757415739000: the covered window's end is EXCLUSIVE, so an empty range covers no record"
   }
 ]

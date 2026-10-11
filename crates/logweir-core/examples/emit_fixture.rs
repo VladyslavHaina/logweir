@@ -92,6 +92,7 @@ fn main() {
             approved_at: t("2026-09-02T17:40:00Z"),
             key_id: "a".repeat(64),
             self_attested: false,
+            console: None,
         },
         phases: vec![PhaseRecord {
             phase: 0,

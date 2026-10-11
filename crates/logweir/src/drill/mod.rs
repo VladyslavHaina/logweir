@@ -2844,6 +2844,7 @@ fn standing_approved_from(
             approved_at: doc.issued_at,
             key_id: verified.key_id.clone(),
             self_attested: verified.key_id == signing_key.key_id(),
+            console: None,
         },
     })
 }
@@ -3034,6 +3035,14 @@ fn execute_with_validated_approval(
     .to_string();
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
+    // PROD-16.2: a restore a second person approved in the console signs who
+    // approved and how (`approval.console`), which is format 1.9.0 — and 2.1.0
+    // once the selection step below has chosen major 2 for a partition
+    // subset. The step reads the major the earlier steps chose, so it is
+    // applied HERE, with the block, and again after each step that can change
+    // the major: no document this run signs carries the block under a version
+    // that does not define it (arm CA-1 would refuse to sign it).
+    raise_version_for_console_approval(&mut sc);
 
     // The archive read every later phase consumes. Not a phase of its own in
     // spec §9.3, and deliberately placed HERE: phases 0 and 1 are the two
@@ -3065,6 +3074,24 @@ fn execute_with_validated_approval(
     // if it moves after `time_basis::decide`.
     binding::check_restored_set(c.bound_set.as_ref(), &set, &facts)?;
     surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
+    // **PROD-02.1: AN EMPTY CAPTURE IS REFUSED BY NAME, HERE.** A set with no
+    // segment for any topic this restore names has nothing to restore (the
+    // manifest says so; the message names the empty capture as one reason
+    // and claims nothing a receipt has not said); it is
+    // refused exit 3 before phase 2 and before any other archive-based refusal,
+    // so no target topic is created and no engine starts — never phase 4's
+    // exit 1 over an "empty window".
+    let named: BTreeSet<&str> = admitted.topic_mapping.keys().map(String::as_str).collect();
+    if facts.earliest_covered_timestamp_ms(&named).is_none() {
+        return Err(DrillError::Guard(GuardRefusal(format!(
+            "the archive set `{}` records no segment for any of the topics this restore names \
+             ({}), so it holds no record to restore: an empty capture (a backup of a source \
+             that held none) or a set that never captured these topics. Refused before \
+             anything runs; no target topic was created",
+            set.backup_id,
+            named.iter().copied().collect::<Vec<&str>>().join(", ")
+        ))));
+    }
     // **FX-8: THE TIME BASIS, decided here and nowhere later.** The first point
     // at which both of its records are in hand — the archive manifest just
     // described (a topic's `message.timestamp.type` override) and the VERIFIED
@@ -3111,6 +3138,40 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-16.2: a partition subset approved in the console is 2.1.0.
+    raise_version_for_console_approval(&mut sc);
+    // **PROD-01.1a: TRANSACTION MARKERS, checked here**, before phase 2 and
+    // in every target mode: an archive whose restored partitions hold records
+    // shaped like transaction markers is refused exit 3,
+    // `TransactionMarkersInArchive`, with no target topic created and no
+    // engine started, unless the approved plan allows them. Under the
+    // override the check is skipped and the scorecard says so below; so does
+    // a run whose segments after the window could not all be read.
+    let marker_note = if c.spec.restore.allow_transaction_markers {
+        Some(logweir_core::transaction_markers::OVERRIDE_NOTE.to_string())
+    } else {
+        let window = logweir_core::replay_selection::ReplaySelection {
+            topics: selected.iter().cloned().collect(),
+            ..logweir_core::replay_selection::ReplaySelection::from_spec(&c.spec)
+                .map_err(|r| DrillError::Guard(GuardRefusal(r.to_string())))?
+        };
+        let scan = count_transaction_markers(&c.archive, &facts, &window)?;
+        if let Some(refusal) = logweir_core::transaction_markers::refusal(&scan.counts) {
+            return Err(DrillError::Guard(GuardRefusal(refusal)));
+        }
+        // Never silent: the runner's output names the segments, and the
+        // scorecard's note below says how many.
+        let unread = &scan.unread_after_window;
+        (!unread.is_empty()).then(|| {
+            let note = logweir_core::transaction_markers::unread_after_window_note(unread.len());
+            // One line whatever a manifest key holds (`exit::one_line`).
+            eprintln!(
+                "{}",
+                crate::exit::one_line(&format!("{note}: {}", unread.join(", ")))
+            );
+            note
+        })
+    };
 
     // 2
     let of_interest: Vec<String> = admitted.topic_mapping.values().cloned().collect();
@@ -3182,6 +3243,15 @@ fn execute_with_validated_approval(
         sc.source.selection.as_ref(),
     )
     .to_string();
+    // PROD-01.1a: the override, or the segments after the window the marker
+    // check could not read, in the note `logweir show` prints under the table
+    // (free text: no format change).
+    if let Some(note) = marker_note {
+        sc.sample.coverage_note = format!("{}; {note}", sc.sample.coverage_note);
+    }
+    // PROD-16.2: THE LAST VERSION STEP, after every step that can choose the
+    // major (`format_version_with_console_approval`).
+    raise_version_for_console_approval(&mut sc);
 
     // 5 — the engine's preflight runs INSIDE the phase-5 record, so the
     // record's own `duration_ms` is the number `compute_measured` subtracts
@@ -3336,6 +3406,22 @@ fn execute_with_validated_approval(
     // `validate-restore`, which force-sets `dry_run = true` and writes nothing,
     // so it needs no target topic; `restore` does.
     //
+    // **FX-44: a run that fails AFTER the restore started tears down what the
+    // creation step created**, by phase 9's rule, and names what it left.
+    // Defined here, before the creation step, and called only from the error
+    // returns of phases 6 to 8 that are not a signed `NotPass` (whose path
+    // runs phase 9): a stopped creation step itself still deletes nothing.
+    let remove_created = |created: &[String]| {
+        phase9_teardown::after_failure(
+            deleter,
+            &admitted.topic_mapping,
+            created,
+            &c.spec.target.teardown,
+            c.spec.target.mode,
+            run_id,
+            &mut std::io::stdout().lock(),
+        );
+    };
     // The rendered `restore.yaml` says `create_topics: false`, so this is what
     // creates them, with `TARGET_TOPIC_CONFIGS` on every one.
     phase0_admit::create_target_topics(
@@ -3346,6 +3432,11 @@ fn execute_with_validated_approval(
         c.spec.target.default_replication_factor,
         &mut topic_preflight,
     )?;
+    let created = topic_preflight.topics_created.clone();
+    let torn_down = |e: DrillError| -> DrillError {
+        remove_created(&created);
+        e
+    };
 
     // 6 — the topics phase 3 said would be created are carried in through
     // `plan`, which `build_plan` produced from the same mapping.
@@ -3400,7 +3491,8 @@ fn execute_with_validated_approval(
             // `None` for the same reason as the phase-5 branch, with one extra
             // fact: `RestoreNoOp` is the engine having exited 0 having produced
             // nothing, so any offset mapping it wrote would describe no records.
-            let signed = sign_and_publish(&mut sc, args, run_id, c, signer, None)?;
+            let signed =
+                sign_and_publish(&mut sc, args, run_id, c, signer, None).map_err(torn_down)?;
             // ...and then PHASE 9 STILL RUNS. This branch differs from the
             // phase-5 one in the fact that matters here: the restore actually
             // executed, so whatever it created on the operator's cluster is
@@ -3425,7 +3517,7 @@ fn execute_with_validated_approval(
             );
             return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
-        Err(e) => return Err(e),
+        Err(e) => return Err(torn_down(e)),
     };
     // Every config key Logweir rendered that the engine dropped, from both
     // readbacks. Phase 5's were recorded above; phase 6's arrive here.
@@ -3456,7 +3548,8 @@ fn execute_with_validated_approval(
             // it lacks a mapped partition with records in the window.
             &restored.engine_report,
         )
-    })?;
+    })
+    .map_err(torn_down)?;
     sc.integrity = verified.integrity.clone();
     sc.topic_parity = verified.topic_parity.clone();
     sc.sample.records_restored = verified.records_restored;
@@ -3508,7 +3601,8 @@ fn execute_with_validated_approval(
     // THE ONE PATH THAT HAS A REPORT: the restore ran to completion, so the
     // engine wrote its offset mapping to `plan.offset_report` and phase 8 puts
     // those exact bytes at `logweir/drills/<run_id>.offsets.json`.
-    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))?;
+    let signed = sign_and_publish(&mut sc, args, run_id, c, signer, Some(&plan.offset_report))
+        .map_err(torn_down)?;
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
@@ -3645,10 +3739,11 @@ fn teardown(
                 "{msg}"
             );
         }
+        // FX-44: and the line the controller copies to `status.teardown`.
+        phase9_teardown::print_left(&a.topics_failed);
         // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
-        // The attestation is what the controller fetches, verifies with
-        // `PAYLOAD_TYPE_TEARDOWN` and copies into `status.teardown`; a key
-        // line printed after a failed put would send it after an object that
+        // The attestation is the durable record of the teardown; a key line
+        // printed after a failed put would send a reader after an object that
         // is not there. So the answer is carried out of the closure rather
         // than logged and forgotten.
         let persisted = match phase9_teardown::persist_with_signer(&a, signer, &c.store) {
@@ -3919,6 +4014,99 @@ pub fn resolve_selection(
         ..selection
     };
     selection.resolve(&facts.topics).map(Some).map_err(refused)
+}
+
+/// **PROD-01.1a.** What the transaction-marker check found.
+struct MarkerScan {
+    /// Marker-shaped records per topic and partition.
+    counts: logweir_core::transaction_markers::MarkerCounts,
+    /// The segments after the window's end it could not read.
+    unread_after_window: Vec<String>,
+}
+
+/// **PROD-01.1a.** The records shaped like a transaction marker in the
+/// selected partitions' segments that the window overlaps (the engine's own
+/// rule, `ReplaySelection::segment_overlaps`) AND in every segment after the
+/// window's end: a marker there closes a transaction that can have records in
+/// the window. Segments whose last record is before the window's start are
+/// skipped (out-of-order timestamps can put a closing marker there:
+/// `docs/stability.md` lists it as not detected). Each is
+/// streamed through the bounded `kbak::scan_segment` (one stored segment and a
+/// few hundred KiB held at a time).
+///
+/// A segment the restore reads and the scan cannot decode refuses the run
+/// (`GuardRefused`); one the store does not hold is left to the restore, as
+/// before. A segment after the window that is absent or cannot be read never
+/// refuses (the restore does not read it, PROD-08.1); it is listed in
+/// `unread_after_window`, which the run reports.
+fn count_transaction_markers(
+    archive: &Store,
+    facts: &BackupSetFacts,
+    window: &logweir_core::replay_selection::ReplaySelection,
+) -> Result<MarkerScan, DrillError> {
+    use logweir_core::transaction_markers::{is_control_shaped, MarkerCounts, SHAPE_PREFIX};
+    use logweir_engine_oso::kbak::{scan_segment, ScanLimits};
+    use logweir_engine_oso::storage::{caps, StoreError};
+    let limits = ScanLimits {
+        max_decompressed: caps::SEGMENT,
+        deadline: None,
+    };
+    let start = window.window_start_ms.unwrap_or(i64::MIN);
+    let mut scan = MarkerScan {
+        counts: MarkerCounts::new(),
+        unread_after_window: Vec::new(),
+    };
+    for topic in &facts.topics {
+        for p in topic
+            .partitions
+            .iter()
+            .filter(|p| window.selects_partition(&topic.name, p.partition_id))
+        {
+            for seg in p.segments.iter().filter(|s| s.end_timestamp >= start) {
+                let after = seg.start_timestamp > window.window_end_ms;
+                let bytes = match archive.get_capped(&seg.key, caps::SEGMENT) {
+                    Ok((bytes, _)) => bytes,
+                    Err(_) if after => {
+                        scan.unread_after_window.push(seg.key.clone());
+                        continue;
+                    }
+                    Err(StoreError::NotFound(_)) => continue,
+                    Err(e) => return Err(logweir_core::engine::EngineError::from(e).into()),
+                };
+                let mut found = 0u64;
+                let read = scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
+                    if is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys) {
+                        found += 1;
+                    }
+                    true
+                });
+                if found > 0 {
+                    *scan
+                        .counts
+                        .entry(topic.name.clone())
+                        .or_default()
+                        .entry(p.partition_id)
+                        .or_default() += found;
+                }
+                match read {
+                    Ok(_) => {}
+                    Err(_) if after => scan.unread_after_window.push(seg.key.clone()),
+                    Err(e) => {
+                        return Err(DrillError::Guard(GuardRefusal(format!(
+                            "the transaction-marker check could not read archive segment `{}` \
+                             of topic `{}` partition {} ({e}), so it cannot say the restored \
+                             partitions hold no transaction marker. The run stopped before any \
+                             target topic was created. State \
+                             `restore.allow_transaction_markers: true` in the plan to restore \
+                             without the check.",
+                            seg.key, topic.name, p.partition_id
+                        ))))
+                    }
+                }
+            }
+        }
+    }
+    Ok(scan)
 }
 
 /// **PROD-11.1.** The signed `source.selection` block of a resolved
@@ -4234,6 +4422,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             approved_at: chrono::DateTime::UNIX_EPOCH,
             key_id: String::new(),
             self_attested: false,
+            console: None,
         },
         phases: Vec::new(),
         measured: Measured {
@@ -6582,6 +6771,20 @@ mod standing_approved_tests {
     }
 }
 
+/// **PROD-16.2.** Raises `sc.format_version` to the first version of its
+/// major that defines `approval.console`, when the document carries the
+/// block; a no-op for every other document, which keeps the version it had
+/// byte for byte. Monotonic, and it never changes the major, so it is safe to
+/// apply after each step that can
+/// (`logweir_core::scorecard::format_version_with_console_approval`).
+fn raise_version_for_console_approval(sc: &mut Scorecard) {
+    sc.format_version = logweir_core::scorecard::format_version_with_console_approval(
+        &sc.format_version,
+        sc.approval.console.as_ref(),
+    )
+    .to_string();
+}
+
 // =======================================================================
 // PROD-15.1 — the runner holds the signed approval subject to the plan
 // =======================================================================
@@ -6617,6 +6820,7 @@ mod original_name_subject_tests {
                 approved_at: chrono::Utc::now(),
                 key_id: "k".into(),
                 self_attested: false,
+                console: None,
             },
             validated_at: chrono::Utc::now(),
             approval_subject: subject,

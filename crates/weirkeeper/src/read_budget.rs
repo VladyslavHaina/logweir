@@ -21,7 +21,7 @@
 //!
 //! | read | reserves | why |
 //! |---|---|---|
-//! | a receipt or scorecard (`verify_evidence`, `observe_archive`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check. A document of tiny values parses into about 37× its size, measured by `tests/read_caps.rs`. |
+//! | a receipt or scorecard (`verify_evidence`, `observe_archive`, `observe_scorecard`, `read_signing_time`) | [`DOCUMENT_READ_COST_BYTES`] (40 MiB) | a scorecard: the 1 MiB cap, plus the `serde_json::Value` the controller parses before any digest check (a document of tiny values parses into about 37× its size, `tests/read_caps.rs`). A backup receipt (FX-33): its 5,131,072-byte cap, folded and never parsed into a tree, so the bytes and the signature's copy of them, about 10 MiB (`tests/topic_budget.rs`). |
 //! | one manifest in a retention report | [`MANIFEST_READ_COST_BYTES`] (64 MiB) | the cap's bytes are buffered. The fold over them keeps nothing per value. |
 //!
 //! With a 128 MiB budget, at most three documents, or two manifests, or one

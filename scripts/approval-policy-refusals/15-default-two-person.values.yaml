@@ -1,4 +1,4 @@
-# expect: not available in this release
+# expect: set per namespace
 approvalPolicy:
   default: two-person
   allowOrdinaryConfirmation: true

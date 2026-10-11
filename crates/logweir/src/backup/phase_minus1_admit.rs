@@ -121,6 +121,20 @@ pub fn local(args: &BackupRunArgs, spec: &BackupSpec, spec_text: &str) -> Result
         .into());
     }
 
+    // 3a. **FX-33.** At most `MAX_BACKUP_TOPICS` names. A backup signs
+    //     several blocks per topic in its receipt, and the catalog and the
+    //     controller read a receipt under one bound
+    //     (`logweir_core::topic_budget`); a selection over the count would
+    //     sign evidence neither could read, after the archive exists. Refused
+    //     here, exit 3, by name, with no client built.
+    if let Some(why) = logweir_core::topic_budget::refuse_topic_count(spec.source.topics.len()) {
+        return Err(GuardRefusal(format!(
+            "{why} (source.topics). NO backup was taken: this is refused before any client \
+             exists"
+        ))
+        .into());
+    }
+
     // 3b. **PROD-05.1.** A declared owner names one of the plan's topics, a
     //     kind the receipt defines and a usable reference — or the plan is
     //     refused here, exit 3, rather than recording an owner the receipt's

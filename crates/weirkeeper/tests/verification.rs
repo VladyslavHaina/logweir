@@ -765,6 +765,7 @@ fn observed_archive(
             // where they ARE observed.
             records: None,
             capture: None,
+            empty_capture: false,
         })
     })
 }

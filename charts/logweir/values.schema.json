@@ -457,7 +457,7 @@
         "default": {
           "type": "string",
           "enum": ["", "confirm", "strict", "two-person"],
-          "description": "PROD-16.1. What an UNBOUND namespace resolves to: empty is the fresh-install marker (confirm on a fresh install with a console, legacy-governed-v1 on an upgraded one); confirm is one-person confirmation in the console and needs allowOrdinaryConfirmation; strict is legacy-governed-v1 whatever the marker says. two-person is PROD-16.2 and refused by the template, by name. Rendered as defaultMode only when set, which an older binary refuses at start (fail closed)."
+          "description": "PROD-16.1. What an UNBOUND namespace resolves to: empty is the fresh-install marker (confirm on a fresh install with a console, legacy-governed-v1 on an upgraded one); confirm is one-person confirmation in the console and needs allowOrdinaryConfirmation; strict is legacy-governed-v1 whatever the marker says. two-person is not a default (PROD-16.2 sets it per namespace, through a policy) and is refused by the template, by name. Rendered as defaultMode only when set, which an older binary refuses at start (fail closed)."
         },
         "allowOrdinaryConfirmation": { "type": "boolean" },
         "policies": {
@@ -471,7 +471,12 @@
               "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
               "mode": { "type": "string", "enum": ["Governed", "Ordinary", "confirm", "strict", "two-person"] },
               "maxAgeSeconds": { "type": "integer", "minimum": 60, "maximum": 604800 },
-              "requireDistinctPrincipal": { "type": "boolean" }
+              "requireDistinctPrincipal": { "type": "boolean" },
+              "approverSignature": {
+                "type": "string",
+                "enum": ["Console"],
+                "description": "PROD-16.2. Who signs a Governed policy's approval: Console (a second person signs in to the shared console and clicks Approve; `mode: two-person` says the same) or absent (a personal GovernedApproval key). Inside the policy's snapshot digest. Refused unless api.console.mode is shared, on a confirm (Ordinary) policy, and beside mode: strict."
+              }
             }
           }
         },

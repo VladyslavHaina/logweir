@@ -78,11 +78,11 @@ jobs:
           - shard: 1
             tests: [record_semantics, record_semantics_oracle, topic_identity, pitr_boundary,
                     compat_contract, schema_dependency, created_topics, smoke, guards,
-                    check_image, config_coverage, new_topic_parity]
+                    check_image, config_coverage, new_topic_parity, topic_budget]
           - shard: 2
             tests: [replay_selection, auth_modes, mvp_demo, consumer_group_snapshot,
                     backup_argv, stack_params, credential_binding_store, fixture_retention,
-                    original_name, replication_factor_parity]
+                    original_name, replication_factor_parity, empty_capture]
           # The `--features e2e` rows under crates/ run here as well.
           - shard: 3
             crates: true

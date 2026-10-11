@@ -582,3 +582,20 @@ fn a_logweir_backup_never_asks_the_engine_for_a_consumer_group_snapshot() {
         "the backup document turns the engine's snapshot on:\n{doc}"
     );
 }
+
+/// **FX-27.** The engine's Prometheus server defaults on, unauthenticated, at
+/// `0.0.0.0:8080`; the backup document turns it off with a top-level
+/// `metrics:` block (column 0, so not nested under `backup:`), exactly once.
+#[test]
+fn the_backup_document_turns_the_engine_metrics_server_off() {
+    let doc = render_backup::render(&plan()).expect("the fixture renders");
+    assert!(
+        doc.contains("\nmetrics:\n  enabled: false\n"),
+        "expected a top-level `metrics:` block with `enabled: false`:\n{doc}"
+    );
+    assert_eq!(
+        doc.matches("metrics:").count(),
+        1,
+        "one metrics block:\n{doc}"
+    );
+}

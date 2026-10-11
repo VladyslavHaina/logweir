@@ -1103,6 +1103,7 @@ pub(crate) mod tests {
             consumer_positions: None,
             schema_dependency: None,
             generations: None,
+            source_watermarks: None,
         }
     }
 

@@ -1122,6 +1122,25 @@ th[aria-sort="descending"] .datagrid-sort::after {
   background: var(--cds-alias-object-container-background);
 }
 
+/* PROD-16.2: EVERY topic a second person approves, and the name it is
+ * restored under. The list scrolls inside the panel; a name wraps and is
+ * never clipped or ellipsized -- what is approved is what was shown. */
+.approval-scope-topics {
+  margin: 0 0 var(--cds-global-space-6);
+  padding: var(--cds-global-space-5) var(--cds-global-space-6) var(--cds-global-space-5)
+    var(--lw-list-indent);
+  max-height: var(--lw-subset-max-height);
+  overflow-y: auto;
+  border: var(--cds-alias-object-border-width-100) solid var(--cds-alias-object-border-color);
+  border-radius: var(--cds-alias-object-border-radius-100);
+  background: var(--cds-alias-object-container-background);
+}
+
+.approval-scope-topics li,
+.approval-scope dd {
+  overflow-wrap: anywhere;
+}
+
 .topic-subset label {
   display: flex;
   align-items: center;

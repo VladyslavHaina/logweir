@@ -51,8 +51,7 @@ use kube::ResourceExt;
 use logweir_core::check_contract::{
     CheckCode, CheckPlan, CheckPlanKind, CheckRelay, CheckRequest, CredentialMode, DestinationPlan,
     EvidenceFetchRequest, EvidenceObjectRequest, EvidenceObjectResult, FrameExpectations, Stream,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, MAX_EVIDENCE_PAYLOAD_BYTES,
-    MAX_EVIDENCE_SIDECAR_BYTES,
+    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, MAX_EVIDENCE_SIDECAR_BYTES,
 };
 use logweir_core::destination::DestinationRole;
 use serde_json::{json, Value};
@@ -106,13 +105,51 @@ pub fn retry_after(attempt: u32, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         .map(|secs| now + Duration::seconds(*secs))
 }
 
-/// The two objects one fetch relays.
+/// The two objects one fetch relays, and WHAT the first one is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     /// The signed document's key, verbatim as the runner printed it.
     pub payload_key: String,
     /// Its detached DSSE sidecar's key.
     pub sidecar_key: String,
+    /// **FX-33.** The document's media type, from the reconciler that asked:
+    /// a `Backup`'s fetch is for a backup receipt, a `Restore`'s for a drill
+    /// scorecard. It is the controller's own knowledge of what it is about to
+    /// hold, and [`Self::payload_cap`] is derived from it and from nothing
+    /// the pod says.
+    pub payload_type: &'static str,
+}
+
+impl Request {
+    /// **The most bytes of the signed document this controller will hold**,
+    /// from the document's KIND (`verification::controller_cap_for`): the
+    /// receipt cap for a backup receipt, which the controller folds and never
+    /// parses into a tree, and 1 MiB for a scorecard, which it parses whole.
+    ///
+    /// It is asked for in the plan, and [`read_relay`] measures the decoded
+    /// payload against it, whatever the relay declares.
+    #[must_use]
+    pub fn payload_cap(&self) -> u64 {
+        crate::verification::controller_cap_for(self.payload_type)
+    }
+}
+
+/// [`Relayed::Unread`]'s sentence for an object over the cap an evidence
+/// fetch relays it under — FX-31's, and FINAL: it begins with the key, so no
+/// transient prefix of `verification::not_attempted_class` matches, and the
+/// object is not fetched again.
+#[must_use]
+pub fn over_relay_cap_detail(key: &str, cap: u64, relayed: Option<u64>) -> String {
+    match relayed {
+        Some(len) => format!(
+            "{key} is larger than the {cap}-byte cap an evidence fetch relays ({len} bytes \
+             relayed); nothing was verified"
+        ),
+        None => format!(
+            "{key} is larger than the {cap}-byte cap an evidence fetch relays; nothing was \
+             verified"
+        ),
+    }
 }
 
 /// The plan document for one fetch — **pure**.
@@ -158,14 +195,17 @@ pub fn plan_documents(
                 credentials,
                 grant_bindings: Vec::new(),
             },
-            // EXACTLY TWO OBJECTS, AT THE CONTRACT'S CAPS, WITH THE ONE ROLE
-            // THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any other
-            // role on the runner's side too.
+            // EXACTLY TWO OBJECTS, EACH AT THE CAP OF WHAT IT IS, WITH THE ONE
+            // ROLE THE CONTRACT ALLOWS. `CheckPlan::validate` refuses any
+            // other role, and a cap over the contract's ceiling, on the
+            // runner's side too. The pod is ASKED for at most the document's
+            // own cap (FX-33: a receipt's, or a scorecard's); what it sends
+            // is bounded by `Request::payload_cap` where it is read.
             objects: vec![
                 EvidenceObjectRequest {
                     role: DestinationRole::EvidenceRead,
                     key: request.payload_key.clone(),
-                    max_bytes: MAX_EVIDENCE_PAYLOAD_BYTES,
+                    max_bytes: request.payload_cap(),
                     stream: Stream::EvidencePayload,
                 },
                 EvidenceObjectRequest {
@@ -371,10 +411,7 @@ fn answer<'a>(
         // digest is its prefix's, so verifying it would report a bad document
         // for what is only a big one.
         if entry.truncated {
-            return Answer::Unreadable(format!(
-                "{key} is larger than the {cap}-byte cap an evidence fetch relays; nothing was \
-                 verified"
-            ));
+            return Answer::Unreadable(over_relay_cap_detail(key, cap, None));
         }
         let Some(bytes) = relay.stream(stream) else {
             return Answer::Unreadable(format!(
@@ -398,10 +435,7 @@ fn answer<'a>(
         // length the relay declared for it.
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len > cap {
-            return Answer::Unreadable(format!(
-                "{key} is larger than the {cap}-byte cap an evidence fetch relays ({len} bytes \
-                 relayed); nothing was verified"
-            ));
+            return Answer::Unreadable(over_relay_cap_detail(key, cap, Some(len)));
         }
         if entry.bytes != Some(len) {
             return Answer::Unreadable(format!(
@@ -455,12 +489,15 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
             )
         }
     };
+    // FX-33: THE CAP OF THE DOCUMENT KIND THIS FETCH IS FOR, from the
+    // controller's own request — not the contract's ceiling, not the plan's
+    // `maxBytes`, not the length the relay declares.
     let payload = answer(
         relay,
         &results,
         &request.payload_key,
         Stream::EvidencePayload,
-        MAX_EVIDENCE_PAYLOAD_BYTES,
+        request.payload_cap(),
     );
     let sidecar = answer(
         relay,

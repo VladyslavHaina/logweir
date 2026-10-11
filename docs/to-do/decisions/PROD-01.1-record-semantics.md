@@ -639,13 +639,16 @@ backed by a row of §2 and may be used verbatim.
 
 ### 8.3 The restore review screen
 
-One sentence, shown when the plan names any topic (the console cannot yet tell which topics are
-transactional; §6's detection makes it conditional later):
+One sentence, shown when the plan names any topic. Amended 2026-10-10 by PROD-01.1a: the runner
+now refuses an archive holding transaction markers unless the approved plan allows them, so the
+sentence says that the markers and aborted records are restored as data only under that allowance,
+or for an open transaction the archive-side check cannot see (§6.2 signals 2 and 3, Deferred):
 
-> Restores copy the archive as written: aborted transactions and transaction markers are restored
-> as ordinary records, `LogAppendTime` timestamps come back as producer `CreateTime`, repeated
-> header keys keep one copy, and when timestamps are out of order a full or point-in-time restore
-> can miss records.
+> Restores copy the archive as written: an archive holding transaction markers is refused unless
+> the plan allows them, and under that allowance, or for an open transaction the check cannot see,
+> aborted transactions and transaction markers are restored as ordinary records, `LogAppendTime`
+> timestamps come back as producer `CreateTime`, repeated header keys keep one copy, and when
+> timestamps are out of order a full or point-in-time restore can miss records.
 
 ## 9. Proposed ledger rows
 

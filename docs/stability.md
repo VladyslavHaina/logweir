@@ -612,9 +612,10 @@ PROD-11.1 review's H1, measured on 1.21.0 and 1.22.0). An unknown key inside
 is optional there (absent: the window started at the archive's floor). The
 schema is [`schemas/logweir-drill-scorecard-2.0.0.json`](../schemas/logweir-drill-scorecard-2.0.0.json),
 which pins `format_version` to `2.x.y`; every 1.x schema up to 1.7.0 is frozen
-beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`, format 1's newest
-minor ([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151)),
-describes every other document this build writes. The media type keeps `version=1.0.0`, so an older
+beside it, and `schemas/logweir-drill-scorecard-1.8.0.json`
+([below](#scorecard-format-180-targetoriginal_name-a-restore-under-the-original-topic-names-prod-151))
+was format 1's newest minor until PROD-16.2 froze it; 1.9.0 is format 1's
+newest, generated, and 2.1.0 format 2's. The media type keeps `version=1.0.0`, so an older
 reader reaches its major refusal rather than a payload-type mismatch
 ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
 
@@ -778,8 +779,12 @@ each judged against the partition's marks and the archive's offsets
   at most 100 groups, and at most 80 KiB ENFORCED on its encoded bytes: a
   selection whose summary could exceed it as JSON writes it (escapes
   counted) is refused by name before anything runs — never on partitions, so
-  the catalog's 256 KiB read and the evidence fetch's 1 MiB hold; the
-  positions grow in their own document, which neither reads.
+  the receipt stays inside the one bound the catalog, the controller and the
+  evidence fetch read it under (5,131,072 bytes, the topic budget of
+  [kubernetes.md](kubernetes.md) §7b.5, whose base counts this block); the
+  positions grow in their own document, which none of them reads. (Since
+  1.8.0 the receipt does grow on partitions, by `source_watermarks`, within
+  a 32 KiB budget: see below.)
 - **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
   MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
   document without it changes verdict; the document's run only when a reader
@@ -807,6 +812,22 @@ each judged against the partition's marks and the archive's offsets
   already written stay valid. An older controller refuses a frozen run that
   carries `consumerGroups` (`PlanConfigMapConflict`).
 
+### Receipt format 1.8.0: `source_watermarks` and the empty capture (PROD-02.1)
+
+PROD-02.1 adds one optional block, `source_watermarks` (per named topic, each
+partition's `[low, high]` watermark read before the engine), and the EMPTY
+CAPTURE: the empty window `[t, t)` beside it, for a backup of a source whose
+records all expired
+([the receipt format](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180)).
+Arms 41–45 read only the block and arm 4 admits the empty window only beside
+it, so it is MINOR under OD-7: an older reader refuses an empty capture (the
+safer verdict) and reads an ordinary 1.8.0 receipt as the 1.7.0 one under it.
+Absent is coverage NOT RECORDED, never complete. The block grows with the
+partition count and the writer caps it at **32 KiB** (32,768 bytes, about
+430–650 partitions); over that it is not recorded, so it stays inside the
+receipt's base budget and never pushes a receipt over the one bound every
+reader caps it at (5,131,072 bytes, FX-33). `verify_scorecard.py` is 1.30.0.
+
 ### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
 
 The owner's decision OD-2 (2026-10-05) narrowed Never #1 (below) to a LIVE
@@ -828,8 +849,9 @@ into topics that do not exist, created by the run itself, exclusively
   fields with the subset meaning", `schemas/logweir-drill-scorecard-2.0.0.json`
   is byte for byte the file PROD-11.1b published and does not describe the
   block, and `schemas/logweir-drill-scorecard-1.8.0.json` (the frozen 1.7.0
-  file plus the block) is format 1's newest minor. Both are generated and
-  diffed by `just schema-check`. Arm ON-1 reads major 1 on purpose, where
+  file plus the block) was format 1's newest minor. Both are frozen since
+  PROD-16.2, which generates `-1.9.0.json` and `-2.1.0.json` in their place
+  (`just schema-check`). Arm ON-1 reads major 1 on purpose, where
   format 1's older optional blocks are also defined under major 2, and arm
   ON-14 refuses the block beside `source.selection.partitions` in either
   reader. A later 1.x minor that IS meant for subset restores too says so, and
@@ -968,6 +990,36 @@ into topics that do not exist, created by the run itself, exclusively
   unless the plan chose the owner path, and an owner looked for nowhere; a
   sampled verification; a partition subset. Nothing — teardown, a lost race, a
   stopped creation step — deletes a topic under its original name.
+
+### Scorecard 1.9.0 and 2.1.0, authorization document 2.2.0: two-person approval in the console (PROD-16.2)
+
+- **The policy snapshot** gains `approverSignature: Console` as its last key,
+  only when set; every existing policy's bytes and digest are unchanged. An
+  older controller, console or runner refuses the key (`deny_unknown_fields`).
+- **Authorization document v2 2.2.0** adds `approver {issuer, subject}` and
+  `approvedAt`, both or neither. 2.0.0 and 2.1.0 documents are written byte for
+  byte as before; the DSSE payload type is unchanged. This build refuses
+  either field under a version before 2.2.0; an older reader refuses them as
+  unknown fields (the safer verdict).
+- **Scorecard 1.9.0 (format 1) and 2.1.0 (format 2)** add the optional
+  `approval.console` ([the format](formats/drill-scorecard.md#approvalconsole-format-190-and-210)),
+  written only for a run a second person approved in the console; arms CA-1 to
+  CA-8 read the block or hold an existing field against it, and can only
+  refuse (OD-7 (a) and its third case). `target.original_name.approval_mode`
+  gains the member `consoleApproval` from 1.9.0; ON-5 is split by version as
+  PROD-01.3 split `target.auth.mode`, so a 1.8.0 document is judged in the same
+  words as before. `-1.8.0.json` and `-2.0.0.json` are frozen; `-1.9.0.json`
+  and `-2.1.0.json` are generated. A partition-subset restore approved in the
+  console is allowed (2.1.0). An older `logweir drill verify` accepts a 1.9.0
+  document and prints `approval:  <issuer>#<subject> (<ticket>)` (no key id);
+  `verify_scorecard.py` before 1.29.0 accepts it and prints no approval line;
+  a 1.28.0 reader refuses an original-name document naming `consoleApproval`
+  by its own ON-5; readers before 1.27.0 refuse a 2.1.0 document by its
+  major. No MAJOR.
+- **The approval-mode vocabulary is one set** (`logweir_core::scorecard`'s
+  constants); `docs/verify_scorecard.py` holds a copy that
+  `two_reader_parity.rs::the_approval_mode_vocabulary_is_the_same_set_in_both_readers`
+  holds to it member for member. `verify_scorecard.py` 1.29.0.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -1112,6 +1164,16 @@ reversible direction until the owning task rules.
     a field on the event; and
   - a clause on `drill run`'s summary line naming the count and the topics. A
     clean run's line is unchanged.
+
+  The warning names the missing grant when the broker refused the deletion for
+  authorization (``the restore principal lacks `Delete` on topic `…` ``), and the
+  runner's `teardown-failed=` line puts each leftover topic on
+  `Restore.status.teardown.failed`. **A run that fails after its creation
+  step completed**, from phase 6 onwards (exit 1, 3 or 4), tears down what that
+  step created by phase 9's rule (scratch
+  mode, `teardown: delete`, never an original name), logs what it removed, and
+  names what it could not with the same warning and line. It signs nothing and
+  writes no attestation, as before (FX-44).
 
   The signed teardown attestation
   (`logweir/drills/{run_id}.teardown.json`) has always been honest about this —
@@ -1362,7 +1424,7 @@ restore process dies mid-run, there is no checkpoint to resume from: the drill r
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
 
-### Transactional topics are restored with aborted records and markers as data
+### An archive holding transaction markers is refused unless the plan allows it
 
 The pinned engine captures with `READ_UNCOMMITTED` and archives transaction control records as
 ordinary records; the restore replays every archived record non-transactionally. A restored
@@ -1373,6 +1435,37 @@ transactional recovery. Measured by
 ([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)): seven
 markers and five aborted or open-transaction records came back as data, and the drill was signed
 `pass`.
+
+Since PROD-01.1a, before it creates anything on the target, a restore reads the selected
+partitions' segments that its window overlaps and every segment after the window's end (a marker
+there can close a transaction with records in the window; segments whose last record is before
+the window's start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
+`x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
+or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
+message names the topics, the partitions and the count. To restore such an archive as it is, state
+`restore.allow_transaction_markers: true` in the plan. The field is inside `plan_hash`, so the
+changed plan needs a new approval. Under the override the check is skipped, and the signed
+scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
+cannot state the override, so its slots over such an archive are refused and its
+`lastFailed.reason` names the refusal, nor does a standing authorization: a `Restore` under
+`spec.authorization` whose plan states the override is refused as outside the signed scope, because
+no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
+the run with `GuardRefused`. A segment after the window that the store does not hold or the check
+cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
+output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
+a transaction closed there is not seen. Cost: the check reads each restored segment once more
+before the engine reads it, plus, for a point-in-time restore, every segment after the point: a
+restore of an old window reads the archive's tail after it. On a large archive that is about one
+more read of the selected partitions.
+
+The record's shape is the only signal: the check does not read the source. A record of your own
+with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, and the override gets
+past it. These cases are not detected, and their records are still restored as data: a
+transaction open at backup time whose marker is not in the archive, a transaction opened after the
+backup began, a transaction whose marker is in a segment after the window that could not be read
+(the note above says so), a transaction whose marker is in a segment whose last record is before a
+stated window start (out-of-order timestamps put it there, and the engine skips that segment too),
+and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
 
 ### Recovery-point selection uses segment first and last timestamps
 
@@ -1601,7 +1694,7 @@ machine's measurements and are **not** budgets.
 | Surface | Bound | Beyond it |
 |---|---|---|
 | Topic discovery | `maxTopics` 20,000 by default, 50,000 installation ceiling (`hardMaxTopics`); chunks of 2,500 names / 768 KiB, at most 64 | the inventory is `truncated: true` with `MaxTopics` or `RelayLimit` ([kubernetes.md](kubernetes.md) §7c) |
-| A dynamic backup's selection | 5,000 resolved names or 256 KiB | `SelectionTooLarge`; name the topics or split the schedule (§10) |
+| The topics of one backup (FX-33) | **1,000 topics**, named or resolved, at a budget of **5,000 bytes a topic** in the receipt: a receipt of at most **5,131,072 bytes** and a catalog record of at most **6,131,072 bytes**. A dynamic selection is also at most 256 KiB of names. This was 5,000 resolved names, and unbounded for a named list | refused before the engine runs, by name (`BackupSelectionTooLarge`; a dynamic selection's `Backup` is `SelectionTooLarge`); nothing is left out to fit. Split the selection across schedules ([kubernetes.md](kubernetes.md) §7b.5) |
 | Catalog view (history from an archive) | the newest `spec.sync.viewLimit` points, 100–5,000, in at most 8 page `ConfigMap`s | counted and histogrammed over the whole archive, `truncated: true`; the rest is `logweir catalog list` against the archive (§7d) |
 | Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
 | API list page | 200 objects | follow `nextCursor` |
@@ -1906,6 +1999,19 @@ mandatory evidence keys out of the controller's bounded tail.
 **Read it by key name, never by position.** Same rule as `refusal-reason=` and
 `offset-report-key=`, for the same reason (plan erratum E4).
 
+### `teardown-failed=` names what a teardown left (FX-44)
+
+```
+teardown-failed=[{"topic":"drill-orders","error":"the restore principal lacks `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization failed)"}]
+```
+
+Printed once, by phase 9 or by the teardown of a run that failed after its creation step,
+whenever that teardown left a topic; never otherwise. Kafka-legal names only, at most 256 entries,
+each `error` at most 256 characters on one line. It is printed before the summary line, so it
+moves none of the keys below. The controller reads the last one in its tail and copies it,
+held to the Restore's mapped target names, to `Restore.status.teardown.failed`. An older
+controller ignores it.
+
 ### `teardown-key=` is printed exactly when phase 9 attested, and it comes BEFORE interface I8's keys
 
 ```
@@ -1994,7 +2100,7 @@ the code does not show that line (it shows "the runner gave no readable reason")
 
 | run | codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 **The two lines agree.** Both come from one refusal: the state on `refusal-reason=` is the detail's
@@ -2298,7 +2404,7 @@ semantics (a retired key keeps what it signed before `retired_at`; a key revoked
 verifies nothing).
 
 **Migration.** A `Restore` or rehearsal whose plan carries `source.point` gets the keyring from a
-controller at this version; one without `source.point` (every Backup-bound restore) renders
+controller at this version; one without `source.point` (a plan that names its backup set only) renders
 byte-for-byte the bundle it rendered before and is unaffected. Upgrade the controller and the
 runner image together: a runner at this version handed a point-bound plan by an older controller
 refuses it `PointUntrusted` ("no evidence-signing keyring"), and a runner older than this version

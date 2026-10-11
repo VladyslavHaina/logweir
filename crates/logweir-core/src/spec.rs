@@ -189,6 +189,14 @@ pub struct RestoreSpecBlock {
     /// subset, so each plan has one spelling. Empty for every plan that states
     /// none, which keeps its bytes.
     pub partitions: BTreeMap<String, Vec<i32>>,
+    /// **PROD-01.1a.** `true` restores an archive whose restored partitions
+    /// hold records shaped like transaction markers, which is otherwise
+    /// refused before phase 2 (`TransactionMarkersInArchive`,
+    /// `crate::transaction_markers`); the run then skips the check and its
+    /// scorecard's `sample.coverage_note` says so. Inside the plan bytes, so
+    /// inside `plan_hash`. `false` (absent) is not serialised, so a plan
+    /// rendered from this type keeps its bytes.
+    pub allow_transaction_markers: bool,
 }
 
 /// The open start of an ISO 8601 interval (ISO 8601-2, `"../<end>"`): the
@@ -209,6 +217,8 @@ struct RestoreSpecBlockWire {
     window_start: Option<serde_yaml::Value>,
     #[serde(default)]
     partitions: BTreeMap<String, Vec<i32>>,
+    #[serde(default)]
+    allow_transaction_markers: bool,
 }
 
 /// One RFC 3339 instant exactly as chrono's own `Deserialize` reads it (a
@@ -305,6 +315,7 @@ impl<'de> Deserialize<'de> for RestoreSpecBlock {
             time_basis: wire.time_basis,
             window_start,
             partitions: wire.partitions,
+            allow_transaction_markers: wire.allow_transaction_markers,
         })
     }
 }
@@ -326,6 +337,8 @@ struct RestoreSpecBlockOut<'a> {
     time_basis: Option<TimeBasis>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     partitions: &'a BTreeMap<String, Vec<i32>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    allow_transaction_markers: bool,
 }
 
 impl Serialize for RestoreSpecBlock {
@@ -361,6 +374,7 @@ impl Serialize for RestoreSpecBlock {
             point_in_time,
             time_basis: self.time_basis,
             partitions: &self.partitions,
+            allow_transaction_markers: self.allow_transaction_markers,
         }
         .serialize(s)
     }

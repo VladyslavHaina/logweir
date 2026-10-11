@@ -3053,6 +3053,48 @@ fn stop_tail(lists: &str, state: &str) -> String {
     format!("target-topics-appeared={lists}\nfailure-reason={state}\n")
 }
 
+/// **FX-44: what a run's teardown left is named on the Restore.** The
+/// runner's `teardown-failed=` line reaches `status.teardown.failed` on a run
+/// that failed (exit 1, which signs nothing) and on one that passed (exit 0),
+/// held to this Restore's mapped target names. Controls: a log without the
+/// line writes no `teardown` block, and a name the plan does not map is
+/// dropped. KILLS: the line not read; an unmapped name copied.
+#[tokio::test]
+async fn what_a_runs_teardown_left_is_named_on_the_restore() {
+    let why = "the restore principal lacks `Delete` on topic `drill-orders`: \
+               TopicAuthorizationFailed (Broker: Topic authorization failed)";
+    let line = format!(
+        "teardown-failed=[{{\"topic\":\"drill-orders\",\"error\":\"{why}\"}},\
+         {{\"topic\":\"payments-prod\",\"error\":\"x\"}}]\n"
+    );
+    let expected = serde_json::json!({"failed": [{"topic": "drill-orders", "error": why}]});
+    let (outcome, status, _) =
+        reconciled_with_log(1, &format!("{line}operational: engine: restore exited 1\n")).await;
+    assert_eq!(outcome.exit_code, Some(1));
+    assert_eq!(status["teardown"], expected, "{status}");
+    // The same line on a pass.
+    let (client, _, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&format!("{line}{}", i8_tail())),
+        "Complete",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    let status = patched_statuses(&seen).remove(0);
+    assert_eq!(status["teardown"], expected, "{status}");
+    // Control: no line, no block.
+    let (_, status, _) = reconciled_with_log(1, "operational: engine: restore exited 1\n").await;
+    assert!(status.get("teardown").is_none(), "{status}");
+}
+
 /// **PROD-15.1 review M4: a lost creation race is NAMED on the Restore.** An
 /// exit-1 run whose LAST line is `failure-reason=TargetTopicAppeared` says so
 /// on `status.exitReason` and the reconcile outcome, carries the runner's
@@ -5510,6 +5552,45 @@ fn the_controller_never_types_a_scorecard() {
         scorecard_observation(b"[1,2,3]"),
         None,
         "and neither is a JSON array"
+    );
+}
+
+/// **FX-33 — a scorecard is parsed only inside its own cap, at the line that
+/// parses it.** `scorecard_observation` builds a `serde_json::Value`, up to 37
+/// times the document, so it refuses bytes over 1 MiB itself, whoever handed
+/// them over: a document one byte over is NOT OBSERVED, and the same document
+/// one byte shorter is.
+///
+/// KILLS: the parse relying on its callers' caps (a 5 MiB scorecard handed
+/// over by a relay parsed into 185 MB).
+#[test]
+fn fx33_a_scorecard_over_its_cap_is_not_parsed_whoever_hands_it_over() {
+    use weirkeeper::controllers::restore::within_scorecard_cap;
+    let cap =
+        usize::try_from(logweir_core::check_contract::MAX_EVIDENCE_SCORECARD_BYTES).expect("fits");
+    let sized = |len: usize| -> Vec<u8> {
+        let mut doc = br#"{"outcome":"pass","pad":""#.to_vec();
+        let tail = br#""}"#;
+        doc.resize(len - tail.len(), b'x');
+        doc.extend_from_slice(tail);
+        assert_eq!(doc.len(), len);
+        doc
+    };
+    let at = sized(cap);
+    assert!(within_scorecard_cap(&at).is_some());
+    assert_eq!(
+        scorecard_observation(&at)
+            .and_then(|o| o.outcome)
+            .as_deref(),
+        Some("pass"),
+        "CONTROL: exactly at the cap is read"
+    );
+    let over = sized(cap + 1);
+    assert!(within_scorecard_cap(&over).is_none());
+    assert_eq!(
+        scorecard_observation(&over),
+        None,
+        "one byte over is not parsed, and is NOT OBSERVED"
     );
 }
 

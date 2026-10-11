@@ -1089,8 +1089,12 @@ fn inputs_v2_selection_block_is_canonical_and_sorted() {
 /// **THE TWO SIZE BOUNDS ARE ENFORCED, AND A TRUNCATED LISTING IS REFUSED** —
 /// D1 §7.2 R8.
 ///
-/// A run may freeze at most 5,000 names and at most 256 KiB of them, because
-/// the plan `ConfigMap` a run mounts is bounded at one MiB. And a listing the
+/// A run may freeze at most `MAX_RESOLVED_TOPICS` names — FX-33: the topic
+/// budget's maximum, 1,000, since a backup of more signs a receipt the
+/// recovery catalog cannot list and the controller cannot verify — and at
+/// most 256 KiB of them. A selection AT the maximum resolves; one name more
+/// is refused by name with both numbers, and nothing is truncated to fit.
+/// And a listing the
 /// runner had to CUT is refused outright: its names are a prefix of what the
 /// principal can see, and freezing a prefix while labelling the run "all user
 /// topics" is the silent claim this whole mode exists to avoid.
@@ -1111,6 +1115,32 @@ fn an_oversized_or_truncated_listing_is_selection_too_large() {
     )
     .expect_err("over the count bound");
     assert_eq!(state, TERMINAL_STATE_SELECTION_TOO_LARGE, "{message}");
+    // FX-33: the bound IS the topic budget's, and the refusal says so.
+    assert_eq!(
+        sel::MAX_RESOLVED_TOPICS,
+        logweir_core::topic_budget::MAX_BACKUP_TOPICS
+    );
+    assert!(
+        message.starts_with(logweir_core::topic_budget::SELECTION_TOO_LARGE)
+            && message.contains(&format!("resolved {} topics", sel::MAX_RESOLVED_TOPICS + 1))
+            && message.contains(&format!("{} topics", sel::MAX_RESOLVED_TOPICS))
+            && message.contains("no topic is left out")
+            && message.contains("split the cluster across schedules"),
+        "{message}"
+    );
+    // CONTROL: exactly the maximum resolves, whole.
+    let resolved = sel::resolved_selection(
+        &observed(
+            &many[..sel::MAX_RESOLVED_TOPICS],
+            &exclusions,
+            VisibilityState::Unknown,
+        ),
+        &exclusions,
+        IncompleteDiscovery::BackUpVisibleTopics,
+        NAME,
+    )
+    .expect("a selection at the maximum resolves");
+    assert_eq!(resolved.topics.len(), sel::MAX_RESOLVED_TOPICS);
 
     let entries = [entry("orders", 6)];
     let mut cut = observed(&entries, &exclusions, VisibilityState::Unknown);

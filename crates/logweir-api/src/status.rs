@@ -81,6 +81,9 @@ pub const REFUSAL_STATES: &[&str] = &[
     // already; listed so the vocabulary names every runner refusal state.
     "PointInTimeByProducerTime",
     "TargetTopicConfigRefused",
+    // PROD-01.1a: the runner's refusal of an archive holding transaction
+    // markers. Exit 3 as well; listed for the same reason.
+    "TransactionMarkersInArchive",
 ];
 
 /// A condition view with a bounded message.
@@ -959,7 +962,8 @@ pub struct TeardownFailureView {
     pub error: String,
 }
 
-/// What phase 9 removed, from the SIGNED teardown attestation.
+/// What a run's teardown could not remove, from `Restore.status.teardown`
+/// (the runner's `teardown-failed=` line, FX-44).
 #[derive(Clone, Debug, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TeardownView {

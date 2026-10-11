@@ -222,6 +222,16 @@ pub fn validate_run_policy(spec: &BackupSpec) -> Result<SelectionShape, Vec<Fiel
     {
         errs.push(field_error("spec.consumerGroups", why));
     }
+    // FX-33: AND SO DOES A NAMED ALLOWLIST OVER THE MAXIMUM ONE BACKUP MAY
+    // NAME (`logweir_core::topic_budget`). Its receipt could not be listed by
+    // the recovery catalog or verified by this controller, so Logweir does
+    // not write it: the runner refuses at phase −1, the freeze refuses before
+    // any Job exists (`backup_execution`), and this refuses the POLICY — a
+    // schedule is `Ready=False` by name instead of refusing every slot, and
+    // the product API answers 422.
+    if let Some(why) = logweir_core::topic_budget::refuse_topic_count(spec.topics.len()) {
+        errs.push(field_error("spec.topics", why));
+    }
 
     match (errs.is_empty(), shape) {
         (true, Some(shape)) => Ok(shape),

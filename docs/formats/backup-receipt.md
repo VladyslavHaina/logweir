@@ -3,10 +3,13 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.6.0.json`](../../schemas/logweir-backup-receipt-1.6.0.json)
+[`schemas/logweir-backup-receipt-1.8.0.json`](../../schemas/logweir-backup-receipt-1.8.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
 silently. A MINOR bump is a new schema file beside the old one: the
+[`1.7.0` schema](../../schemas/logweir-backup-receipt-1.7.0.json) (PROD-04.1),
+the [`1.6.0` schema](../../schemas/logweir-backup-receipt-1.6.0.json)
+(PROD-01.4a), the
 [`1.5.0` schema](../../schemas/logweir-backup-receipt-1.5.0.json) (PROD-03.0's
 `schema_dependency`), which describes every receipt written before
 PROD-01.4a, the
@@ -494,6 +497,59 @@ first consumers are PROD-02.1's lineage and the catalog and console views.
 
 ---
 
+## `source_watermarks` and the empty capture (format 1.8.0)
+
+**Why it exists (PROD-02.1).** A scheduled backup of a source whose records
+retention had all deleted failed exit 1 "operational": the engine exits 0 and
+writes a manifest with no segment, and nothing said the source was empty.
+`logweir backup run` now reads each named partition's low and high watermark
+(log start offset and high watermark, read uncommitted) once, immediately
+before the engine, and records them:
+
+```json
+"source_watermarks": { "orders": [[0, 4211], [37, 37]], "payments": [[929, 929]] }
+```
+
+Per named topic, one `[low, high]` pair per partition; the list's index is the
+partition id. A partition with `low == high` held no record at capture.
+
+**The block is budgeted (review F1).** It grows with the partition count — 36
+bytes per partition plus the two offsets' digits, as the receipt encodes it —
+so a writer records it only up to **32 KiB** (`SOURCE_WATERMARKS_BUDGET_BYTES`,
+32,768 bytes, measured as the block encodes in the receipt): about 430
+partitions at 20-digit offsets, about 650 at 9-digit ones. Over the budget the
+block is absent and the receipt reads "coverage not recorded"; an empty
+capture over it cannot be proved and stays exit 1, naming the budget. So the
+block fits the receipt's 131,072-byte base budget and never pushes a receipt
+over the bound every reader caps it at
+([kubernetes.md](../kubernetes.md) §7b.5). The receipt's growth with topics
+(about 3.4 KB each) is unchanged.
+
+- **Absent means coverage NOT RECORDED**, never complete: every receipt before
+  1.8.0, and a run whose watermark read did not answer for every partition.
+  Both readers print `source_watermarks: coverage not recorded, …` for it, and
+  `coverage recorded over <n> partition(s)` with the empty partitions named
+  for a receipt that carries it.
+- **An EMPTY CAPTURE** is a backup that captured no segment for any named
+  topic while every partition was `low == high`: exit 0, every `records` count
+  0, and `covered` the empty window `[t, t)` (`t` the engine's start), which
+  covers no record. It is not a recovery point: it gets no catalog point
+  (`logweir catalog sync` counts it `empty-capture`), no
+  `Backup.status.windowCovered`, its `Backup` completes with reason
+  `EmptyCapture` once the controller has verified the receipt, and a
+  `ProtectionPolicy` never counts it as a recovery point. A restore of
+  its set is refused by name, exit 3, before anything runs. Nothing captured
+  over a partition with `low < high`, or with the watermarks unread, is still
+  exit 1 and signs nothing.
+- **Versioning (OD-7).** Arms 41–45 read only the block, and arm 4 admits the
+  empty window only beside it, so every document without it is decided as
+  before. A reader older than 1.8.0 refuses an empty capture through arm 4 —
+  the safer verdict — and reads an ordinary 1.8.0 receipt as the 1.7.0
+  document under it. The catalog point does not copy the block (it copies
+  per-topic facts, not per-partition ones).
+
+---
+
 ## `consumer_positions` — consumer position evidence (format 1.7.0)
 
 **Why it exists (PROD-04.1).** A restore that brings a topic back still leaves
@@ -517,9 +573,12 @@ document.
 ### Two documents: the receipt's summary and the positions document
 
 **The receipt stays small however many partitions the groups hold** (PROD-04.1
-review H1). The catalog reads a receipt whole and refuses one over 256 KiB
-(`Unreadable`, so the console stops offering the point), and the evidence fetch
-relays at most 1 MiB; positions grow with groups × partitions. So the receipt
+review H1). The catalog, the controller and the evidence fetch read a receipt
+under one bound (5,131,072 bytes since FX-33, the topic budget of
+[kubernetes.md](../kubernetes.md) §7b.5; it was 256 KiB for the catalog and 1
+MiB for the other two) and a receipt over it is `Unreadable` in the catalog,
+so the console stops offering the point; positions grow with groups ×
+partitions. So the receipt
 carries only a per-group SUMMARY — outcome, type, states, members, `active` and
 the position COUNTS — the capture window, and the positions document's key,
 SHA-256 and length. Its size depends on the selection alone, and its cap,
@@ -750,7 +809,7 @@ survive the source cluster. With the source gone:
 
 ---
 
-## The forty arms, and the positions document's fourteen
+## The forty-five arms, and the positions document's fourteen
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -760,15 +819,15 @@ BOTH readers — compared byte-for-byte by
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
 arm 6–40, and
-`validate_invariants_has_exactly_forty_two_return_err_statements` over the
-total — forty arms, forty-two statements, because arm 5 is three since
+`validate_invariants_has_exactly_forty_seven_return_err_statements` over the
+total — forty-five arms, forty-seven statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-forty arms in the same order.
+forty-five arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -812,10 +871,11 @@ topic arm 38, then 39, then 40, each over `topic_id` before `topic_id_after`.
 
    > `records covers {"orders"} but the named topic set is {"orders", "payments"}`
 
-4. **`covered.from_ms < covered.to_ms`, strictly.** The end is EXCLUSIVE, so a
-   window that ends before it begins is meaningless and one that ends where it
-   begins is empty — and an archive that captured a record cannot cover an
-   empty range.
+4. **`covered.from_ms < covered.to_ms`, strictly** — or, from 1.8.0 and only
+   beside `source_watermarks`, equal: an empty capture, which arm 45 proves.
+   The end is EXCLUSIVE, so a window that ends before it begins is meaningless
+   and one that ends where it begins is empty — and an archive that captured a
+   record cannot cover an empty range.
 
    > `covered.from_ms 2 is not before covered.to_ms 1: the covered window's end is EXCLUSIVE, so an empty range covers no record`
 
@@ -1079,6 +1139,32 @@ receipt without it is decided exactly as before (OD-7 (a): MINOR).
 Two different recorded IDs are NOT refused: they are what the run observed
 (the topic was recreated while the engine ran), and both readers report it.
 
+Arms 41–45 (format 1.8.0, PROD-02.1) read `source_watermarks` and run only
+when it is present, after arms 1–40; topics in name order, partitions in
+index order.
+
+41. **`source_watermarks` is present only under a minor of at least 8.**
+
+    > `source_watermarks is present but format_version "1.7.0" predates it: the field is defined from 1.8.0`
+
+42. **It covers exactly `source.topics`.**
+
+    > `source_watermarks covers {"orders"} but the named topic set is {"orders", "payments"}`
+
+43. **Every topic records at least one partition.**
+
+    > `source_watermarks["payments"] records no partition: every named topic records each of its partitions, at least one`
+
+44. **A low watermark is never above its high.**
+
+    > `source_watermarks["orders"] partition 1 has low 38 above high 37: a partition's low watermark is never above its high`
+
+45. **An empty window (an empty capture) counts no record and every partition
+    was empty.** The first topic counting a record, else the first partition
+    whose low and high differ, is named.
+
+    > `covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but records["payments"] is 3: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -1123,12 +1209,13 @@ would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
 > **What each reader checks today, stated plainly rather than implied.** Both
-> readers run **all forty arms above** over a `--payload-type
+> readers run **all forty-five arms above** over a `--payload-type
 > backup-receipt` document; arms 1–5 arrived together in Task 5b, arms 6–11
 > together in FX-4, arms 12–21 together in PROD-05.1, arms 22–29 together in
-> PROD-03.0, arms 36–40 together in PROD-01.4a and arms 30–35 together in
-> PROD-04.1, so the two readers never disagreed in between.
-> `logweir drill verify` prints `checked:   the signature AND all forty
+> PROD-03.0, arms 36–40 together in PROD-01.4a, arms 30–35 together in
+> PROD-04.1 and arms 41–45 together in PROD-02.1, so the two readers never
+> disagreed in between.
+> `logweir drill verify` prints `checked:   the signature AND all forty-five
 > backup-receipt invariants …`; `docs/verify_scorecard.py` prints `verifier:
 > verify_scorecard.py <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both also print
 > the configuration capture coverage in the same words, one

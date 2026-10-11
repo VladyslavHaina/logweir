@@ -58,8 +58,8 @@ use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{reflector, watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
 use logweir_core::approval_policy::{
-    self as policy, ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizationRefusal,
-    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    self as policy, ApprovalPolicy, ApprovalPolicySet, AuthorizationRefusal, EffectivePolicy,
+    ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::trust::{KeyUsage, SigningRefusal};
@@ -504,6 +504,12 @@ impl From<AuthorizationRefusal> for ApprovalRefusal {
             AuthorizationRefusal::PolicyMismatch(_) => Self::ApprovalPolicyMismatch { detail },
             AuthorizationRefusal::WindowInvalid(_) => Self::AuthorizationWindowInvalid { detail },
             AuthorizationRefusal::Expired(_) => Self::AuthorizationExpired { detail },
+            // PROD-16.2: a two-person request nobody has approved is the same
+            // pending state a strict request without its countersignature is
+            // in, and an approver who is not a second person is the same
+            // refusal a self-signed countersignature earns.
+            AuthorizationRefusal::ApprovalRequired(_) => Self::GovernedApprovalRequired { detail },
+            AuthorizationRefusal::SelfApproval(_) => Self::SelfApprovalRefused { detail },
         }
     }
 }
@@ -1180,6 +1186,18 @@ fn verify_signature_under(
 ///    state — and then separation of duties: that key's `principal.id` must
 ///    not be the requester's `<issuer>#<subject>`.
 ///
+///    **PROD-16.2, a `Governed` policy whose `approverSignature` is
+///    `Console`:** there is no second KEY. The second PERSON is inside the
+///    bytes the console signed — `approver {issuer, subject}` and
+///    `approvedAt` — and step 4 has already held them to the rule every
+///    reader applies ([`policy::check_console_approval`]): present (absent is
+///    the pending state, as above), a second person of the requester's own
+///    issuer, never the local administrator or a service account, approved
+///    inside the request's window. The console's signature of step 2 is then
+///    the whole authorisation, under its `ConsoleConfirmation` usage; a
+///    `GovernedApproval` countersignature is neither asked for nor accepted
+///    in its place.
+///
 /// # What it never does
 ///
 /// Accept a `GovernedApproval` signature in place of the console's, or the
@@ -1225,13 +1243,32 @@ pub fn evaluate_authorization_v2(
     let requester = doc.requester.principal_id();
 
     // ---- 5. the governed approver, and separation of duties ----------------
-    let (matched_key_id, usage, approver) = match bound.mode {
-        ApprovalMode::Ordinary => (
+    //
+    // BY THE TABLE (PROD-16.2). `ApprovalPolicy::route` reads the policy's
+    // `(mode, approverSignature)` pair once; each row says whose signature
+    // authorises and whose name the verdict records, and the pair that is not
+    // a row is refused here, by name, whatever step 4 already said of it.
+    let route = bound.route()?;
+    let (matched_key_id, usage, approver) = match route {
+        policy::ApprovalRoute::RequesterConfirms => (
             confirmation_key_id.clone(),
-            KeyUsage::ConsoleConfirmation,
+            route.authorising_usage(),
             requester.clone(),
         ),
-        ApprovalMode::Governed => {
+        // THE CONSOLE SIGNS THE APPROVAL. Step 4 required the approver and
+        // judged it; what is left is to say whose approval the verdict
+        // records, taken from the document by the one function that takes it
+        // (`console_approval_of`) — which refuses, by name, a document with no
+        // approver or no `approvedAt`, so nothing here is ever made up. An
+        // admission path never aborts on an invariant it merely believes.
+        policy::ApprovalRoute::SecondPersonInConsole => (
+            confirmation_key_id.clone(),
+            route.authorising_usage(),
+            policy::console_approval_of(&doc, bound)?
+                .approver
+                .principal_id(),
+        ),
+        policy::ApprovalRoute::PersonalKey => {
             let countersigned = sidecar
                 .signatures
                 .iter()

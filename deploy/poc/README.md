@@ -87,7 +87,7 @@ install -d -m 0700 poc-secrets
 ## 1. Namespaces
 
 ```bash
-for ns in "$LOGWEIR_NAMESPACE" "$POC_NAMESPACE" "$DEX_NAMESPACE"; do
+for ns in "$LOGWEIR_NAMESPACE" "$POC_NAMESPACE" logweir-pair "$DEX_NAMESPACE"; do
   kubectl --context "$CTX" create namespace "$ns" --dry-run=client -o yaml \
     | kubectl --context "$CTX" apply -f -
 done
@@ -95,7 +95,8 @@ done
 
 `logweir-poc` must exist before Logweir installs: the chart copies the signing
 identity and the runner account into it, and the demo archive credential lands
-there (`kubernetes.connectionsNamespace`).
+there (`kubernetes.connectionsNamespace`). So must `logweir-pair`, the
+two-person namespace (step 9).
 
 ## 2. Ingress controller: Traefik
 
@@ -156,7 +157,7 @@ One client secret, shared by Dex and the console, and a password per user:
 
 ```bash
 openssl rand -hex 32 | tr -d '\n' > poc-secrets/client-secret   # no newline: both sides read it verbatim
-for u in viewer operator approver admin norole; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
+for u in viewer operator approver admin norole alice bob; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
 # -i reads the password on stdin: never on a command line another process can read.
 hash() { htpasswd -niBC 10 "" < "poc-secrets/$1.password" | tr -d ':\n'; }
 kubectl --context "$CTX" -n "$DEX_NAMESPACE" create secret generic dex-poc-secrets \
@@ -165,7 +166,9 @@ kubectl --context "$CTX" -n "$DEX_NAMESPACE" create secret generic dex-poc-secre
   --from-literal=DEX_HASH_OPERATOR="$(hash operator)" \
   --from-literal=DEX_HASH_APPROVER="$(hash approver)" \
   --from-literal=DEX_HASH_ADMIN="$(hash admin)" \
-  --from-literal=DEX_HASH_NOROLE="$(hash norole)"
+  --from-literal=DEX_HASH_NOROLE="$(hash norole)" \
+  --from-literal=DEX_HASH_ALICE="$(hash alice)" \
+  --from-literal=DEX_HASH_BOB="$(hash bob)"
 helm upgrade --install dex dex --repo "$DEX_REPO" --version "$DEX_CHART_VERSION" \
   --kube-context "$CTX" -n "$DEX_NAMESPACE" -f deploy/poc/dex.values.yaml --wait --timeout 10m
 ```
@@ -358,6 +361,9 @@ public keys on the `TrustPolicy` that governs `logweir-poc`:
 ```bash
 bash deploy/poc/trustpolicy.sh poc-secrets/confirmation.pub.pem > poc-secrets/trustpolicy.yaml
 kubectl --context "$CTX" apply -f poc-secrets/trustpolicy.yaml
+# The two-person namespace (step 9) gets its own policy with the same two keys:
+sed -e 's/^  name: logweir-poc$/  name: logweir-pair/' -e 's/^  namespaces: \[logweir-poc\]$/  namespaces: [logweir-pair]/' \
+  poc-secrets/trustpolicy.yaml | kubectl --context "$CTX" apply -f -
 ```
 
 **Check:** `kubectl --context "$CTX" get trustpolicy logweir-poc` reads `LOADED
@@ -396,6 +402,15 @@ password in `poc-secrets/<role>.password`, and land on
 **Check:** each user's session shows `logweir-poc` with exactly its role (and
 `norole`'s shows no namespace), and
 the audit line for the sign-in names `https://dex.localtest.me#<subject>`.
+
+**Two-person approval, in `logweir-pair`** (PROD-16.2; policy `poc-pair`,
+`mode: two-person`, requests valid 900 s). `alice` is operator and approver
+there, `bob` approver, `admin` administrator (not an approver). `alice` builds
+the namespace's connections, destination and catalog as step 10 does for
+`logweir-poc` (the PoC's own uses bucket `logweir-pair`, prefix `pair`), and
+requests a restore with a change ticket; `bob` opens it under *Approvals*, sees
+every topic, its target name, the target cluster and the source, and clicks
+*Approve this Restore*. Neither `alice` nor `admin` is offered the button.
 
 ## 10. First backup and restore, in the console
 
@@ -505,13 +520,21 @@ prints one line per object:
 
 ```bash
 helm template logweir poc-secrets/chart/logweir-chart -n "$LOGWEIR_NAMESPACE" \
+  --dry-run=server --kube-context "$CTX" \
   -f deploy/poc/logweir.values.yaml --set-json 'approvalPolicy.namespaces={}' \
   | kubectl --context "$CTX" apply --server-side --field-manager=helm --dry-run=server -f -
 ```
 
+Keep `--dry-run=server` on `helm template`. Without it the chart's `lookup`
+sees no cluster and renders the identity Secrets and ConfigMaps that
+`helm upgrade` creates only when they are absent. The dry run then reports
+false conflicts on them (manager `ureq`, four on the PoC).
+
 Do not save that render to a file: it carries the demo MinIO's root credential
 (*The demo archive*, step 7). On the PoC the dry run reported 61 objects
-`serverside-applied (server dry run)` and the one conflict above.
+`serverside-applied (server dry run)` and the one conflict above. At the next
+upgrade, with no command-written field left, it reported 66 objects and no
+conflict.
 
 - **Every conflict is a field you know a command wrote, and the chart's value
   is the one you want:** run step 2 again with `--force-conflicts` added. Helm

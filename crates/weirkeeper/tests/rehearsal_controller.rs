@@ -2460,6 +2460,36 @@ fn a_terminal_rehearsal_whose_verdict_is_owed_is_not_decided() {
     }
 }
 
+/// **FX-44: a failed rehearsal's leftover topic reaches the next slot's
+/// guard.** The `status.teardown.failed` block the restore reconciler writes
+/// from the runner's `teardown-failed=` line, on a child that FAILED (exit 1),
+/// is what `observe` mirrors as `pendingTopics`, the list that skips the next
+/// slot with `LeftoverTopics`. Control: no block, no pending topic.
+#[test]
+fn a_failed_childs_leftover_topic_is_pending() {
+    let now = at("2026-09-20T03:20:15Z");
+    let failed = json!({
+        "phase": "Failed", "exitCode": 1, "exitReason": "operational",
+        "teardown": {"failed": [{
+            "topic": "rehearsal-3f2a91c7-orders",
+            "error": "the restore principal lacks `Delete` on topic `rehearsal-3f2a91c7-orders`: x"
+        }]}
+    });
+    let seen = rs::observe(Some(&rehearsal_restore(failed)), now);
+    assert_eq!(
+        seen.pending_topics,
+        vec!["rehearsal-3f2a91c7-orders"],
+        "{seen:?}"
+    );
+    let seen = rs::observe(
+        Some(&rehearsal_restore(
+            json!({"phase": "Failed", "exitCode": 1, "exitReason": "operational"}),
+        )),
+        now,
+    );
+    assert!(seen.pending_topics.is_empty(), "{seen:?}");
+}
+
 /// **Then the verdict lands `Valid` with `outcome: pass`: a PASS.**
 ///
 /// MUTANTS: drop `badge.green` from `passed` (the `Invalid` row below then

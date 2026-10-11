@@ -229,13 +229,15 @@ pub enum RefusingRun {
 /// per place a refusal is built). Four of the codes are constants of the
 /// `logweir` crate, which this crate cannot name; `crates/logweir/tests/
 /// refusal_detail.rs` holds each literal here to its constant.
-pub const RESTORE_REASON_CODES: [&str; 13] = [
+pub const RESTORE_REASON_CODES: [&str; 14] = [
     crate::guard::TERMINAL_STATE_GUARD_REFUSED,
     crate::guard::TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     crate::guard::TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
     crate::guard::TERMINAL_STATE_POINT_IN_TIME_BY_PRODUCER_TIME,
     crate::guard::TERMINAL_STATE_PLAIN_WITHOUT_TLS,
     crate::guard::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    // PROD-01.1a.
+    crate::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
     crate::guard::STORAGE_REGION_INVALID,
     crate::execution_contract::AUTHORIZATION_INVALID,
     crate::execution_contract::AUTHORIZATION_EXPIRED,
@@ -868,7 +870,7 @@ mod tests {
         );
         assert_eq!(
             restore.union(&backup).count(),
-            17,
+            18,
             "the exit-3 sweep's count of distinct codes"
         );
         // PER KIND: a code of one is not a code of the other.

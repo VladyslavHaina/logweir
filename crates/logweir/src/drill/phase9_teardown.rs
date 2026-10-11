@@ -66,19 +66,21 @@ pub struct TeardownAttestation {
     pub deleted_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// What phase 9 deletes, and what it could not: the deleting half of [`run`],
+/// apart so a run that FAILED after its creation step (FX-44) tears down by
+/// the same rule. Returns `(deleted, failed)`.
+///
 /// Teardown goes through `logweir_kafka::reader::TopicDeleter`, NOT through
 /// rdkafka directly: `crates/logweir` declares no rdkafka dependency and adding
 /// one would break the layering rule that `logweir-kafka` is the only crate
 /// that dials a broker. The deleter takes exact names from
 /// `topic_mapping.values()` — never a pattern, never a prefix.
-pub fn run(
+pub fn remove(
     deleter: &dyn TopicDeleter,
     mapping: &BTreeMap<String, String>,
     policy: &str,
     mode: TargetMode,
-    run_id: &str,
-    scorecard_sha256: &str,
-) -> TeardownAttestation {
+) -> (Vec<String>, Vec<(String, String)>) {
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
     // **PHASE 9 TEARS DOWN IN `scratch` MODE AND NOWHERE ELSE** (Global
@@ -138,6 +140,89 @@ pub fn run(
             }
         }
     }
+    (deleted, failed)
+}
+
+/// **FX-44: the teardown of a run that FAILED after its creation step.**
+///
+/// Only the topics this run created (`created`, phase 0's `topics_created`)
+/// go to [`remove`], by phase 9's own rule: deleted in `scratch` mode under
+/// `teardown: delete`, never in `newTopic` mode, never under an original name.
+/// What it removed is logged; what it could not is a WARN naming each topic
+/// (and the grant, for an authorization refusal) and the `teardown-failed=`
+/// line; what the rule kept is a WARN naming it. Nothing is signed or written
+/// to the store: this path (exit 1, 3 or 4) signs nothing. The line goes to
+/// `out` (stdout in production). Returns `(deleted, failed)`.
+pub fn after_failure(
+    deleter: &dyn TopicDeleter,
+    mapping: &BTreeMap<String, String>,
+    created: &[String],
+    policy: &str,
+    mode: TargetMode,
+    run_id: &str,
+    out: &mut dyn std::io::Write,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let ours: BTreeMap<String, String> = mapping
+        .iter()
+        .filter(|(_, target)| created.contains(target))
+        .map(|(s, t)| (s.clone(), t.clone()))
+        .collect();
+    if ours.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let (deleted, failed) = remove(deleter, &ours, policy, mode);
+    if !deleted.is_empty() {
+        tracing::info!(
+            run_id = %run_id,
+            topics = %deleted.join(","),
+            "the restore failed after it created its target topics; teardown removed {} \
+             scratch {}: {}",
+            deleted.len(),
+            if deleted.len() == 1 { "topic" } else { "topics" },
+            deleted.join(", ")
+        );
+    }
+    if let Some(msg) = left_warning(&failed) {
+        let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+        tracing::warn!(
+            run_id = %run_id,
+            topics = %names.join(","),
+            count = failed.len(),
+            "{msg}"
+        );
+    }
+    let _ = print_left_to(out, &failed);
+    let kept: Vec<&str> = ours
+        .values()
+        .filter(|t| !deleted.contains(t) && !failed.iter().any(|(n, _)| n == *t))
+        .map(String::as_str)
+        .collect();
+    if !kept.is_empty() {
+        tracing::warn!(
+            run_id = %run_id,
+            topics = %kept.join(","),
+            "the restore failed after it created {}; left in place, because {}",
+            kept.join(", "),
+            if mode == TargetMode::NewTopic {
+                "a newTopic restore never deletes the topics it created"
+            } else {
+                "target.teardown is keep"
+            }
+        );
+    }
+    (deleted, failed)
+}
+
+/// Phase 9: [`remove`], attested.
+pub fn run(
+    deleter: &dyn TopicDeleter,
+    mapping: &BTreeMap<String, String>,
+    policy: &str,
+    mode: TargetMode,
+    run_id: &str,
+    scorecard_sha256: &str,
+) -> TeardownAttestation {
+    let (deleted, failed) = remove(deleter, mapping, policy, mode);
     TeardownAttestation {
         run_id: run_id.into(),
         target_mode: mode,
@@ -226,16 +311,88 @@ pub fn failed_topic_names(att: &TeardownAttestation) -> Vec<String> {
 /// on a cluster whose topic list is not theirs to guess at. The count is
 /// already the metric's job.
 pub fn teardown_warning(att: &TeardownAttestation) -> Option<String> {
-    let names = failed_topic_names(att);
-    if names.is_empty() {
+    left_warning(&att.topics_failed)
+}
+
+/// [`teardown_warning`] over `(topic, broker error)` pairs, for phase 9 and
+/// for the teardown of a run that failed (FX-44). When the broker refused a
+/// topic for authorization, the warning names the grant (FX-44).
+pub fn left_warning(failed: &[(String, String)]) -> Option<String> {
+    if failed.is_empty() {
         return None;
     }
-    Some(format!(
+    let names: Vec<&str> = failed.iter().map(|(n, _)| n.as_str()).collect();
+    let mut msg = format!(
         "teardown left {} scratch {} behind on the target cluster: {}",
         names.len(),
         if names.len() == 1 { "topic" } else { "topics" },
         names.join(", ")
-    ))
+    );
+    let refused: Vec<&str> = failed
+        .iter()
+        .filter(|(_, e)| lacks_delete(e))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if !refused.is_empty() {
+        msg.push_str(&format!("; {}", lacks_delete_on(&refused)));
+    }
+    Some(msg)
+}
+
+/// **FX-44.** Whether the broker's answer for one topic was an authorization
+/// refusal: the restore principal lacks `Delete` on it.
+#[must_use]
+pub fn lacks_delete(error: &str) -> bool {
+    logweir_kafka::rdkafka_reader::is_topic_authorization_failed(error)
+}
+
+fn lacks_delete_on(topics: &[&str]) -> String {
+    format!(
+        "the restore principal lacks `Delete` on {} {}",
+        if topics.len() == 1 { "topic" } else { "topics" },
+        topics
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// The `(topic, why)` pairs the `teardown-failed=` line carries: the broker's
+/// answer, led by the missing grant when it was an authorization refusal.
+#[must_use]
+pub fn left_reasons(failed: &[(String, String)]) -> Vec<(String, String)> {
+    failed
+        .iter()
+        .map(|(topic, error)| {
+            let why = if lacks_delete(error) {
+                format!("{}: {error}", lacks_delete_on(&[topic]))
+            } else {
+                error.clone()
+            };
+            (topic.clone(), why)
+        })
+        .collect()
+}
+
+/// Print the `teardown-failed=` line for `failed`, or nothing when nothing
+/// was left. The controller copies it to `Restore.status.teardown.failed`.
+pub fn print_left(failed: &[(String, String)]) {
+    let _ = print_left_to(&mut std::io::stdout().lock(), failed);
+}
+
+/// [`print_left`] through a writer seam, so the line is testable.
+///
+/// # Errors
+/// The writer's.
+pub fn print_left_to(
+    out: &mut dyn std::io::Write,
+    failed: &[(String, String)],
+) -> std::io::Result<()> {
+    match logweir_core::execution_contract::teardown_failed_line(&left_reasons(failed)) {
+        Some(line) => writeln!(out, "{line}"),
+        None => Ok(()),
+    }
 }
 
 /// The notes phase 9 writes onto its own `PhaseRecord`, one per failed topic.

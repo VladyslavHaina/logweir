@@ -2841,6 +2841,48 @@ test("legacy_mode_reads_the_same_counts_off_the_custom_resource", () => {
   assert.notEqual(evaluationAccounting(byName["keep-10"].status.lastEvaluation), null);
 });
 
+// FX-39: the controller cuts each status list at 500 and writes the count
+// beside it. Legacy mode reads `skippedCount`, and holds `kept` to its first
+// 500 ids.
+test("legacy_mode_reads_the_counts_past_the_status_lists_bound", () => {
+  const items = fixture("retention-held-back.json").items;
+  const cut = JSON.parse(JSON.stringify(items.find((i) => i.metadata.name === "keep-10")));
+  const ev = cut.status.lastEvaluation;
+  Object.assign(ev, {
+    pointsEvaluated: 720 + 50 + 311 + 600,
+    keptCount: 720,
+    skippedCount: 600,
+    kept: Array.from({ length: 500 }, (_, i) => "k" + i),
+    skipped: Array.from({ length: 500 }, (_, i) => ({ pointId: "s" + i, reason: "Unreadable" })),
+  });
+  assert.deepEqual({ ...evaluationAccounting(ev) },
+    { pointsEvaluated: 1681, kept: 720, candidates: 50, heldBack: 311, ceiling: 50 });
+  assert.equal(fact(decode(renderEnforcement({}, cut)), "kept"), "720");
+  // CONTROLS: a count that does not close, and a list that is not its first 500.
+  assert.equal(evaluationAccounting({ ...ev, skippedCount: 599 }), null);
+  assert.equal(evaluationAccounting({ ...ev, kept: ev.kept.slice(1) }), null);
+});
+
+// FX-39 review S1: a `skipped` list that is not as long as `skippedCount` is
+// two writers' block (an older controller rewrote the list beside a stale
+// count), however the stale counts add up.
+test("legacy_mode_refuses_a_skipped_list_beside_a_stale_skipped_count", () => {
+  const items = fixture("retention-held-back.json").items;
+  const policy = JSON.parse(JSON.stringify(items.find((i) => i.metadata.name === "keep-10")));
+  const ev = policy.status.lastEvaluation;
+  Object.assign(ev, {
+    pointsEvaluated: 61, keptCount: 10, candidateCount: 50, truncatedByCap: 1, skippedCount: 0,
+    kept: ev.kept.slice(0, 10),
+    skipped: [{ pointId: "p061", reason: "Unreadable" }],
+  });
+  assert.equal(evaluationAccounting(ev), null);
+  assert.equal(fact(decode(renderEnforcement({}, policy)), "held back by the per-run ceiling"),
+    "not recorded");
+  // CONTROL: the counts this controller writes for the same archive.
+  assert.deepEqual({ ...evaluationAccounting({ ...ev, truncatedByCap: 0, skippedCount: 1 }) },
+    { pointsEvaluated: 61, kept: 10, candidates: 50, heldBack: 0, ceiling: 50 });
+});
+
 // FX-22 review M1: console mode READS the API's word. It does not infer "not
 // recorded" from an absent count, and it does not let a count stand against
 // the API's `NotRecorded`.

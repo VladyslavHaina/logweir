@@ -70,6 +70,30 @@ them; a report that one of them is true is not a vulnerability report.
   always accepted. Namespaces that cannot accept that are bound `strict`
   (a personal-key approval), or the installation sets
   `approvalPolicy.default: strict`.
+- **Two-person approval in the console is two identities of one identity
+  provider, attested and signed by one console** (PROD-16.2). Under
+  `two-person` (internal `Governed` with `approverSignature: Console`) a
+  second signed-in person clicks Approve and no personal key exists. What that
+  establishes is that the console attested two different `<issuer>#<subject>`
+  pairs of the same issuer, the second holding the Approver role, and signed
+  both with its `ConsoleConfirmation` key. So **whoever controls the console
+  pod, its `logweir-console-confirmation` key Secret, or the identity provider
+  — or can obtain two accounts there, or can edit the role-binding table or
+  the approval-policy document — can produce both the request and the
+  approval alone.** A stolen console key signs a complete two-person
+  authorization for any restore in any two-person (or `confirm`) namespace
+  that trusts it, naming any two identities it likes; it cannot authorise
+  anything in a `strict` namespace, whose second signature comes from a
+  personal `GovernedApproval` key the console never holds. Revoking the
+  console key for `KeyCompromise` withdraws every record it signed
+  (`docs/kubernetes.md` §8). The comparison of the two people is made on the
+  issuer and the subject only, after folding case, and an identity that cannot
+  be compared is refused rather than guessed at; it does not detect one human
+  with two accounts. The mode guards against one person acting alone or by
+  mistake through the console. Namespaces where the console or the identity
+  provider must not be enough are bound `strict`. The setting is refused
+  outside the shared console, and the in-cluster administrator console
+  neither requests nor approves under it.
 - **The in-cluster administrator console confirms as one shared identity.**
   In `localAdmin` mode the confirming principal is
   `urn:logweir:local-admin#admin`: whoever can reach that console — the

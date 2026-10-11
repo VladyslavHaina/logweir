@@ -40,3 +40,6 @@ restore:
   reset_consumer_offsets: false
   auto_consumer_groups: false
   offset_report: "/var/lib/logweir/01J9X/offsets.json"
+
+metrics:
+  enabled: false
