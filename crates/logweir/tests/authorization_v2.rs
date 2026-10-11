@@ -1,4 +1,4 @@
-//! PLAT-19.2 at the runner: an authorization document v2 is re-verified from
+//! At the runner, an authorization document v2 is re-verified from
 //! the mounted bundle before any data-plane client exists — the console's
 //! signature always, a DISTINCT governed approver's under `Governed`, and the
 //! document's binding to this Restore, this plan and the frozen policy
@@ -315,7 +315,7 @@ fn the_snapshot_must_be_the_policy_the_document_names() {
     );
     assert!(is_guard(&result), "{}", message(&result));
     // Refused BY THE POLICY CHECK, not incidentally by the Governed arm's
-    // "approver key == console key" rule (review M1).
+    // "approver key == console key" rule.
     assert!(
         message(&result).contains(POLICY_MISMATCH),
         "{}",
@@ -337,7 +337,7 @@ fn the_snapshot_must_be_the_policy_the_document_names() {
     assert!(is_guard(&result), "{}", message(&result));
 }
 
-/// The runner's own policy-digest check, and nothing else (review M1).
+/// The runner's own policy-digest check, and nothing else.
 const POLICY_MISMATCH: &str = "a policy change requires a new confirmation";
 
 /// An EDITED policy with the same name and the same mode -- `maxAgeSeconds`
@@ -446,9 +446,7 @@ fn the_v1_verifier_refuses_a_v2_document() {
     assert!(matches!(result, Err(DrillError::Guard(_))));
 }
 
-// ---------------------------------------------------------------------------
-// The real binary
-// ---------------------------------------------------------------------------
+// The real binary.
 
 struct Mounted {
     _dir: tempfile::TempDir,
@@ -668,9 +666,7 @@ fn the_multi_signature_sidecar_round_trips() {
     assert_eq!(parsed.payload_type, PAYLOAD_TYPE_RESTORE_AUTHORIZATION);
 }
 
-// ---------------------------------------------------------------------------
-// `logweir drill countersign` — the governed approver's half
-// ---------------------------------------------------------------------------
+// `logweir drill countersign` — the governed approver's half.
 
 fn countersign(
     dir: &std::path::Path,
@@ -774,7 +770,7 @@ fn countersign_refuses_what_it_cannot_make_valid() {
     assert!(out.contains("no console confirmation"), "{out}");
 }
 
-/// **FX-9: `countersign` judges the CALLER's `now` and reads no clock.**
+/// **`countersign` judges the CALLER's `now` and reads no clock.**
 ///
 /// `run_countersign` hands it the wall clock, which the two binary rows above
 /// pin: a request five minutes from expiry is countersigned, and one that
@@ -862,7 +858,7 @@ fn countersign_judges_the_callers_now_and_reads_no_clock() {
     result.expect("one minute before expiresAt the request is countersigned");
 }
 
-/// PROD-16.1: a fresh install's one-click confirmation reaches the runner as
+/// A fresh install's one-click confirmation reaches the runner as
 /// an ordinary bundle under `default-confirm-v1`, attested to the local
 /// administrator, and verifies exactly as an explicit Ordinary binding's — no
 /// approver key file anywhere. NEGATIVE CONTROL: the same document beside the
@@ -907,9 +903,7 @@ fn policy_of(mode: ApprovalMode) -> logweir_core::approval_policy::ApprovalPolic
     policy(mode)
 }
 
-// ---------------------------------------------------------------------------
-// PROD-15.1: the approval subject and the typed names are document format 2.1.0
-// ---------------------------------------------------------------------------
+// The approval subject and the typed names are document format 2.1.0.
 
 /// A plan restored under the ORIGINAL topic names, in the shape the runner
 /// accepts: `newTopic`, the empty prefix, the block, complete verification.
@@ -1101,13 +1095,11 @@ fn an_older_runner_refuses_every_2_1_0_document() {
     assert_ne!(code, 0, "no broker is running");
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.2: two-person approval in the console (`approverSignature: Console`)
-// ---------------------------------------------------------------------------
+// Two-person approval in the console (`approverSignature: Console`).
 
 const IDP: &str = "https://idp.example";
 
-/// The installation document of the PROD-16.2 rows: `team-a` is bound to a
+/// The installation document of the two-person rows: `team-a` is bound to a
 /// two-person policy, and `prod` to the SAME policy with a personal key.
 const PAIR_POLICIES: &str = "policies:\n  - name: prod-pair\n    mode: two-person\n    maxAgeSeconds: 3600\n  - name: prod-strict\n    mode: strict\n    maxAgeSeconds: 3600\nnamespaces:\n  team-a: prod-pair\n  prod: prod-strict\n";
 
@@ -1482,7 +1474,7 @@ fn the_runner_refuses_the_approver_fields_under_an_older_version() {
     assert!(verify_console(PLAN, &pair_approved(PLAN), &snapshot, &k).is_ok());
 }
 
-/// **THE COMBINATION WITH PROD-15.1.** An original-name restore approved by a
+/// **WITH AN ORIGINAL-NAME RESTORE.** An original-name restore approved by a
 /// second person: the bundle carries `approvalSubject: originalName` and the
 /// approver, at 2.2.0; the runner reads the subject, reads no typed names
 /// (they are a one-person confirmation's), and reports the approval mode a
@@ -1689,9 +1681,7 @@ fn an_older_runner_refuses_a_console_approved_bundle() {
     assert_ne!(code, 0, "no broker is running");
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.2: the fixture the controller's rows read
-// ---------------------------------------------------------------------------
+// The fixture the controller's rows read.
 
 /// Where the controller's console-approval fixture lives. `weirkeeper` cannot
 /// sign (`scripts/check-one-signer.sh`), so its rows read documents and
@@ -2104,9 +2094,7 @@ fn the_checked_in_console_approval_fixture_is_judged_the_same_by_the_runner() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.2, the coordinator's additions 3, 4 and 5 at the runner
-// ---------------------------------------------------------------------------
+// The full table, fabricated time and refusal text at the runner.
 
 /// **THE RUNNER DECIDES FROM THE FULL TABLE, NOT FROM ONE GUARD.** The
 /// snapshot's `(mode, approverSignature)` pair picks the row
@@ -2272,7 +2260,7 @@ fn the_runner_decides_from_the_table_and_refuses_every_pair_off_it() {
     }
 }
 
-/// **NO FABRICATED TIME (the coordinator's addition 3).** Under a console
+/// **NO FABRICATED TIME.** Under a console
 /// policy the approval's instant is the document's `approvedAt` or the run is
 /// refused, exit 3, by name: the runner never records the request's time, or
 /// any other, in its place.
@@ -2283,8 +2271,8 @@ fn the_runner_decides_from_the_table_and_refuses_every_pair_off_it() {
 /// * THE CONTROL: both, and the evidence carries exactly that instant — which
 ///   is NOT the request's `issuedAt`.
 ///
-/// And the personal-key and one-person rows keep what main records: the
-/// instant the console signed (`issuedAt`), as before.
+/// And the personal-key and one-person rows record the instant the console
+/// signed (`issuedAt`).
 #[test]
 fn a_console_approval_without_its_instant_is_refused_by_name_and_no_time_is_made_up() {
     let k = keys();
@@ -2377,7 +2365,7 @@ fn a_console_approval_without_its_instant_is_refused_by_name_and_no_time_is_made
     assert!(governed.approval.console.is_none());
 }
 
-/// **REFUSAL TEXT (the coordinator's addition 5).** A requester and an
+/// **REFUSAL TEXT.** A requester and an
 /// approver are text somebody else chose. Whatever a signed document carries
 /// in them, the runner's refusal is ONE line of printable ASCII of bounded
 /// length: a line break cannot start a second line that reads as another

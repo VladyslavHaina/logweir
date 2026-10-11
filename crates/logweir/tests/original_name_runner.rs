@@ -1,11 +1,11 @@
-//! **PROD-15.1 review M3 and L5: the RUNNER's own hold of an original-name
-//! restore's approval, through its call sites, over the orchestrator
-//! fixture.** CI-run (no broker, no bucket, no engine binary).
+//! **The RUNNER's own hold of an original-name restore's approval, through
+//! its call sites, over the orchestrator fixture.** CI-run (no broker, no
+//! bucket, no engine binary).
 //!
 //! The function `check_original_name_subject` has its own unit rows; these
-//! rows exist because removing its CALL SITES survived every CI suite in the
-//! review, and live an ordinary approval then wrote under the original name
-//! before signing refused (exit 4). Each row below fails when one call site
+//! hold its CALL SITES, without which an ordinary approval writes under the
+//! original name before signing refuses (exit 4). Each row below fails when
+//! one call site is gone:
 //! is gone:
 //!
 //! - after phase 1, on the path-based `execute_with`
@@ -14,8 +14,7 @@
 //!   ([`a_prevalidated_ordinary_approval_is_refused_before_phase_0`]);
 //! - at startup, before any runner input is read: `original_name_cli.rs`.
 //!
-//! The pass row is also the one that proves the signed block is WRITTEN
-//! (review L5, R21).
+//! The pass row is also the one that proves the signed block is WRITTEN.
 
 mod fixtures;
 
@@ -62,7 +61,7 @@ fn approved(subject: ApprovalSubject, mode: &'static str) -> phase1_approval::Ap
 
 /// The plan the original-name fixture restores, approved with the separate
 /// subject: it runs to a pass, creates `orders` under its own name, and SIGNS
-/// `target.original_name` (version at least 1.8.0). KILLS (review L5, R21):
+/// `target.original_name` (version at least 1.8.0). KILLS:
 /// never writing the block; writing it without the subject or the condition.
 #[test]
 fn an_original_name_restore_runs_and_signs_its_block() {
@@ -116,10 +115,10 @@ fn an_original_name_restore_runs_and_signs_its_block() {
     signed_document_is_accepted(&f);
 }
 
-/// **A producer nobody stopped: complete verification NAMES its record**
-/// (the orchestrator's ruling of 2026-10-09 — an original-name restore
-/// requires complete verification, because a sampled check can pass a
-/// foreign record inside a loose count bound). The same restore, with one
+/// **A producer nobody stopped: complete verification NAMES its record.** An
+/// original-name restore requires complete verification, because a sampled
+/// check can pass a foreign record inside a loose count bound. The same
+/// restore, with one
 /// foreign record interleaved on the target at offset 300 — past the
 /// 25-record canary a sampled check reads: the run signs `fail-integrity`,
 /// the complete block counts 500 expected, 501 restored, 500 matching and ONE
@@ -174,7 +173,7 @@ fn complete_verification_names_a_foreign_record_interleaved_in_the_restored_name
     sc.validate_invariants().expect("the readers accept it");
 }
 
-/// **Review 2, L11 (probe C1): an original name beside
+/// **An original name beside
 /// `sample.complete_max_records`.** The bound is allowed, and a run it stops
 /// is NEVER a pass: the same restore with a bound of one decoded record signs
 /// `fail-integrity`, `integrity.result: partial`, `covered: false` with the
@@ -263,7 +262,7 @@ fn an_original_name_restore_stopped_by_its_record_bound_is_never_a_pass() {
     assert!(why.starts_with(on13), "{why}");
 }
 
-/// Review M3, the call site AFTER PHASE 1: an ordinary v1 approval for an
+/// The call site AFTER PHASE 1: an ordinary v1 approval for an
 /// original-name plan is refused by name once phase 1 has verified it, and
 /// NOTHING is created. KILLS: removing that call site (the run would create
 /// `orders`, restore into it, and stop only at signing, exit 4).
@@ -281,7 +280,7 @@ fn an_ordinary_v1_approval_never_reaches_the_creation_step() {
     );
 }
 
-/// Review M3, the call site BEFORE PHASE 0 on a pre-validated approval: the
+/// The call site BEFORE PHASE 0 on a pre-validated approval: the
 /// plan here would ALSO be refused at phase 0 (its owner statement is removed,
 /// `OriginalNameOwnerNotChecked`), so the refusal this row reads proves which
 /// check ran first. KILLS: removing that call site (phase 0's refusal would

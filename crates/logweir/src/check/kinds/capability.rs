@@ -1,4 +1,4 @@
-//! **PROD-01.2's capability rows** — does this endpoint HAVE what the
+//! **The capability rows** — does this endpoint HAVE what the
 //! operation needs, said from the endpoint's own answers before the operation
 //! starts.
 //!
@@ -32,8 +32,8 @@
 //! `unknown` with the reason. No arm turns "I could not tell" into a verdict
 //! in either direction.
 //!
-//! **And an answer is about the CLUSTER only when every broker gave one**
-//! (review, M3). The engine may be sent to any broker, so a row that read two
+//! **And an answer is about the CLUSTER only when every broker gave one.**
+//! The engine may be sent to any broker, so a row that read two
 //! brokers of three has not read the cluster: it is `unknown`, and its
 //! message names how many of how many answered and which did not
 //! (`logweir_kafka::api_versions::full_view`). When the brokers' answers
@@ -243,9 +243,9 @@ pub fn topic_configs_readable(
 ) -> CheckOutcome {
     let id = CheckId::ConnectionTopicConfigsReadable;
     if topics.is_empty() {
-        // NOTHING WAS READ, so this is not an answer (review L12: it said
-        // `ready`). A Backup Preflight always names a topic; a hand-built
-        // plan that lists this row and names none is told so.
+        // NOTHING WAS READ, so this is not an answer. A Backup Preflight always
+        // names a topic; a hand-built plan that lists this row and names none
+        // is told so.
         return catalogue::outcome(
             id,
             CheckState::Unknown,
@@ -271,7 +271,7 @@ pub fn topic_configs_readable(
         }
         match probe.topic_configs(name) {
             // `Ok` always holds entries: a refused read is never an empty map
-            // (FX-4, T13; `InventoryProbe::topic_configs`).
+            // (`InventoryProbe::topic_configs`).
             Ok(_) => {}
             Err(f)
                 if matches!(

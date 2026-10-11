@@ -1,4 +1,4 @@
-//! `logweir check run` — D2 §4.2's ONE check runner (D-SEAMS **S1**).
+//! `logweir check run` — D2 §4.2's ONE check runner.
 //!
 //! One subcommand serves discovery, operation readiness, restore preflight,
 //! destination access and evidence fetch, because a second runner would be a
@@ -287,9 +287,6 @@ pub fn runner_bounds(plan: &CheckPlan) -> Result<(), Refusal> {
 
 /// Print the refusal line — stdout, and the only line this process prints
 /// there.
-///
-/// # Errors
-/// The writer's.
 pub fn print_refusal_to<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(
         w,
@@ -308,102 +305,48 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 
 /// [`logweir_core::check_contract::redact`] for a value that is a KEY PATH.
 ///
-/// # Why a key path needs a different application of the same rules
-///
 /// `redact`'s last rule removes base64-or-hex runs of 40 characters or more,
-/// and `/`, `-`, `=` and the digits are all in the base64 alphabet — so an
-/// ordinary archive key,
-/// `kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin`,
-/// is ONE 70-character run and comes back as `[redacted]`. Applying it whole
-/// therefore protects nothing and deletes the only fact the line carried: a
-/// `<job>-details` `ConfigMap` reporting "3 missing segments: [redacted],
-/// [redacted], [redacted]" is one nobody can act on. That is reviewer finding
-/// **F7** arriving inside the fix for **F2**.
+/// and `/`, `-`, `=` and the digits are in the base64 alphabet, so an ordinary
+/// archive key
+/// (`kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin`)
+/// is one 70-character run and would come back as `[redacted]`.
 ///
-/// # And why it is NOT simply "split and redact"
-///
-/// The first version split on `/` and ran the whole rule set over each piece,
-/// which broke the URL-userinfo rule: `https://root:hunter2@host` splits into
-/// `https:`, `` and `root:hunter2@host`, and that rule is anchored on `://`,
-/// so the password survived. A test caught it; the shape of the mistake —
-/// weakening a rule while claiming not to — is the one this finding is about.
-///
-/// So the two halves are applied differently, deliberately:
+/// So the two halves are applied differently:
 ///
 /// * **every SHAPE rule over the WHOLE string**, exactly as `redact` applies
 ///   it: PEM blocks, S3 XML bodies, URL userinfo, `secret…=value` forms and
-///   `AKIA`/`ASIA` key ids. None of them is weakened at all.
+///   `AKIA`/`ASIA` key ids. None is weakened (splitting on `/` first would
+///   break the userinfo rule, which is anchored on `://`).
 /// * **the long-run rule with the object-key allowance**
 ///   ([`redact_long_runs_in_keys`][logweir_core::check_contract::redact_long_runs_in_keys]),
-///   which is the only one that cannot tell an archive key from a secret.
+///   over the whole string, run by run, with one extra way for a run to be
+///   public:
+///   [`is_object_key_shaped`][logweir_core::check_contract::is_object_key_shaped]
+///   (`/`-separated components, none long enough to be a credential, at most
+///   one not a public form, such as a set id `20260915T030000Z` or a topic
+///   `payments-EU`). A credential fails both clauses: unsliced it is over the
+///   length cap, and sliced it is two or three non-public components.
 ///
-/// **And the per-segment pass is not reached for a value that is not a key.**
-/// That trade used to be stated and taken: "a base64 secret that happens to
-/// contain `/` — base64's 64th character — is split into pieces shorter than 40
-/// and the long-run rule no longer sees it", excused on the grounds that the
-/// values here are object keys and topic names. The canonical AWS secret access
-/// key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` is 40 characters split by its
-/// own slashes into 13, 7 and 18, so it came through this function untouched
-/// while `redact` replaced it — a hole in a redactor, excused by an assumption
-/// about the caller that nothing checked (review round 1, the `redact_path`
-/// half of finding **F1**; roughly 45% of real keys carry at least one `/`).
+/// Asked per RUN, never per value: `details_stream` applies this to a whole
+/// JSON line, whose first `/`-piece is not a key. A run holding a component of
+/// 40 characters or more is redacted whole, the conservative answer.
 ///
-/// There is no `/` split any more. The long-run rule is applied to the WHOLE
-/// string, run by run, exactly as [`redact`] applies it, with one extra way for
-/// a run to be public:
-/// [`is_object_key_shaped`][logweir_core::check_contract::is_object_key_shaped]
-/// — `/`-separated components, none long enough to be a credential on its own,
-/// and at most ONE that is not a public form. That one is the adopter-chosen
-/// component: a backup set id like `20260915T030000Z`, which carries upper case
-/// and is neither a UUID nor a digest, or a topic name like `payments-EU`. A
-/// credential fails both clauses — unsliced it is 40 characters and over the
-/// length cap, and sliced it is two or three non-public components.
+/// # It does NOT cap, unlike [`redact`]
 ///
-/// Asking per RUN rather than per value is not a detail: `details_stream`
-/// applies this to a whole JSON line, whose first `/`-piece is
-/// `{"check":"archive.segments","missingSegment":"kafka-backups`. A
-/// value-level test would call that not-a-key and redact the key inside it.
-///
-/// The result is that this function is never MORE permissive than the
-/// chokepoint about what is material. It is more permissive about exactly two
-/// things, both deliberate: the cap (below), and the one non-public component
-/// that makes an unanchored archive key readable.
-///
-/// What it gives up against the old `/`-splitting form: a run holding a
-/// component of 40 characters or more is now redacted whole rather than
-/// segment by segment. Such a component is the shape the threshold exists for,
-/// so losing the run around it is the conservative answer.
-///
-/// # It does NOT cap, and that is the difference from [`redact`]
-///
-/// [`redact`] ends with a 512-CHARACTER truncation, which is right for a
-/// `message` (a sentence, bounded by `MESSAGE_MAX_CHARS`) and wrong for a
-/// value. `details_stream` applies this per LINE, and a line is JSON: cutting
-/// one at 512 characters emits an unparseable line into the `details` stream,
-/// which D2 §6.7 documents as JSON lines and the controller stores as such.
-/// Reviewer probe **R7** found it with an 888-character S3 key of short
-/// `/`-separated segments — no run reaches 40 characters, so nothing is
-/// redacted, and the line came back cut mid-key.
-///
-/// So the two bounds are applied where they belong and nowhere else:
-///
-/// * a MESSAGE is capped by `CheckOutcome::with_message` / `with_remedy`,
-///   which already call [`redact`];
-/// * a detail SAMPLE is capped as a VALUE by
-///   [`crate::check::kinds::readiness::detail`], which truncates the string
-///   and lets `serde_json` re-serialise it — so the JSON stays JSON;
-/// * the `details` STREAM is capped in bytes by
-///   `kinds::restore::details_stream`, which drops WHOLE lines and says it
-///   did.
+/// `details_stream` applies this per JSON line, and a 512-character cut would
+/// emit an unparseable line. The bounds live where they belong: a MESSAGE is
+/// capped by `CheckOutcome::with_message` / `with_remedy`; a detail SAMPLE as
+/// a value by [`crate::check::kinds::readiness::detail`]; the `details`
+/// STREAM in bytes by `kinds::restore::details_stream`, which drops whole
+/// lines and says so.
 ///
 /// [`redact`]: logweir_core::check_contract::redact
 ///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
 /// `the_long_run_rule_is_the_only_one_applied_per_segment` fails on first. The
-/// name still has to match exactly one rule: if it matched none, `shape` would
-/// carry the STRICT long-run rule and the object-key allowance would be applied
-/// to an already-redacted string, restoring F7.
+/// name has to match exactly one rule, or the object-key allowance would run
+/// over an already-redacted string.
 #[must_use]
 pub fn redact_path(value: &str) -> String {
     use logweir_core::check_contract::{apply_rules, redaction_rules};

@@ -1,5 +1,5 @@
-//! Task 21a — the phase orchestrator, the `DrillError` -> exit-code contract
-//! and the Prometheus textfile metrics.
+//! The phase orchestrator, the `DrillError` -> exit-code contract and the
+//! Prometheus textfile metrics.
 mod fixtures;
 mod support;
 
@@ -72,15 +72,11 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
         "logweir_drill_integrity_level",
         "logweir_drill_integrity_result",
         "logweir_evidence_lock_verified",
-        // Task 22. Added by a later fix than the original eight and panelled in
-        // `dashboards/logweir.json`, so it belongs in this list too.
         "logweir_drill_exit_code",
-        // Task 4 fix round 1 (T0-3, display surface 2). Nothing here carried a
-        // redaction signal, so a dashboard showed a clean drill over a document
-        // that says a field was removed.
+        // A redaction signal: a dashboard must not show a clean drill over a
+        // document that says a field was removed.
         "logweir_drill_redactions",
-        // Task 11 (T0-7 rung 2). The metric `docs/kubernetes.md` rendered
-        // inside a "Verified live" transcript and no code emitted.
+        // The last-run timestamp, the series that says a drill ran at all.
         "logweir_drill_last_run_timestamp_seconds",
     ] {
         assert!(
@@ -94,9 +90,8 @@ fn the_textfile_metrics_carry_every_name_the_dashboard_reads() {
     );
 }
 
-/// Task 4 fix round 1 (T0-3, display surface 2). The Prometheus textfile
-/// carried no redaction signal at all, so a dashboard rendered a clean drill
-/// over a document announcing that a field had been removed.
+/// The textfile carries a redaction signal, so a dashboard never renders a
+/// clean drill over a document announcing that a field was removed.
 ///
 /// The series is emitted UNCONDITIONALLY, `0` included. That is the property
 /// this test pins hardest: a gauge that appears only when it is non-zero
@@ -149,14 +144,13 @@ fn the_textfile_metrics_report_redactions_even_when_there_are_none() {
     );
 }
 
-/// Task 22. The hand-maintained list above is a promise that someone remembers
+/// The hand-maintained list above is a promise that someone remembers
 /// to update it. This reads `dashboards/logweir.json` ITSELF, pulls every
 /// `logweir_*` metric name out of its PromQL expressions, and requires each one
 /// to appear in the textfile the CLI actually writes.
 ///
-/// It is the mechanical half of the brief's rule "the dashboard must not outrun
-/// the writer": adding a panel over a metric nothing emits turns this red
-/// without anyone having to notice.
+/// The dashboard must not outrun the writer: adding a panel over a metric
+/// nothing emits turns this red without anyone having to notice.
 #[test]
 fn every_metric_name_the_dashboard_queries_is_one_the_cli_writes() {
     let dashboard = std::fs::read_to_string(
@@ -223,10 +217,9 @@ fn execute_scores_before_it_signs() {
     assert_eq!(sc.last_phase_completed, 9);
 }
 
-// ---------------------------------------------------------------------------
-// Beyond the brief's four. Every test below exists to kill a specific mutant:
-// a phase whose CALL SITE is deleted, a routing decision flipped, a value
-// carried from the wrong place, or an obligation silently dropped.
+// Every test below kills a specific mutant: a phase whose CALL SITE is
+// deleted, a routing decision flipped, a value carried from the wrong place,
+// or an obligation silently dropped.
 
 use fixtures::Drill;
 use logweir::drill::execute_with;
@@ -447,10 +440,8 @@ fn a_blocked_preflight_exits_2_with_a_signed_scorecard_and_never_reaches_phase_6
     .expect("the uploaded preflight-failed scorecard must verify");
 }
 
-/// Carried obligation from Task 17. `PhaseRecord.notes` exists so a
-/// `preflight-failed` scorecard states WHICH ground blocked the restore. This
-/// task is its sole writer; without the copy the field is a sink nothing
-/// reaches and the adjudication's reasoning is discarded.
+/// `PhaseRecord.notes` exists so a `preflight-failed` scorecard states WHICH
+/// ground blocked the restore; the orchestrator is its sole writer.
 #[test]
 fn a_blocked_preflight_writes_every_finding_into_the_phase_5_notes() {
     let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
@@ -490,7 +481,7 @@ fn a_blocked_preflight_writes_every_finding_into_the_phase_5_notes() {
     );
 }
 
-/// task-21a-addendum.md ruling A8. A restore that ran, exited 0, and left every
+/// Ruling A8. A restore that ran, exited 0, and left every
 /// selected partition at end offset 0 is a positively established fact ABOUT
 /// THE ARCHIVE. Routing it to exit 1 would throw away the most valuable
 /// negative finding phase 6 can produce, and would leave no artifact.
@@ -584,18 +575,11 @@ fn every_phase_from_0_through_9_has_a_call_site_and_they_run_in_ascending_order(
     assert_eq!(signed.last_phase_completed, 7);
 }
 
-/// THE CONSOLE AND THE ARTIFACT MUST AGREE. Nobody owned this question, and
-/// they did not: `drill run` printed `last phase completed 9` for a run whose
-/// signed scorecard says `7`. Both numbers were individually correct — phase 9
-/// really did complete, and it really did happen after the bytes were frozen —
-/// and an auditor comparing the two had no way to know that. Reading
-/// `docs/formats/drill-scorecard.md` would have told them teardown never ran.
-///
-/// The assertion is against the SIGNED BYTES read back out of the store, never
-/// against the in-memory document the line is derived from, so a mutant that
-/// changes either side is caught. Deleting the fix — printing
-/// `sc.last_phase_completed` again — makes this fail at assertion time with
-/// `9` against `7`.
+/// THE CONSOLE AND THE ARTIFACT MUST AGREE: `drill run` must not print `last
+/// phase completed 9` for a run whose signed scorecard says `7`. Phase 9
+/// completes after the bytes are frozen, and an auditor comparing the two
+/// must see the same number. Asserted against the SIGNED BYTES read back out
+/// of the store, so a mutant on either side is caught.
 #[test]
 fn the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
@@ -632,15 +616,10 @@ fn the_stdout_line_quotes_the_signed_artifact_never_the_in_memory_copy() {
 /// `engine.matrix_verdict` DESCRIBES THE DRILL, and a failed drill must not
 /// sign `"pass"`.
 ///
-/// `docs/support-matrix.md` defines `pass` as "the full drill ran and passed".
-/// Phase 5 raised the field the moment the `header_preflight` lever was
-/// honoured and nothing lowered it again, so all four non-passing shapes below
-/// signed `matrix_verdict: "pass"` with a null reason — verified on the real
-/// artifacts read back out of the store here. A signed field saying "pass"
-/// inside a failed drill is indefensible whatever it was meant to mean.
-///
-/// Read from the SIGNED BYTES, not from the returned document: the claim is
-/// about what an auditor finds in the artifact.
+/// `docs/support-matrix.md` defines `pass` as "the full drill ran and passed",
+/// so all four non-passing shapes below must not sign `matrix_verdict:
+/// "pass"`. Read from the SIGNED BYTES: the claim is about what an auditor
+/// finds in the artifact.
 #[test]
 fn a_drill_that_did_not_pass_never_signs_a_matrix_pass() {
     for shape in [
@@ -738,8 +717,8 @@ fn the_out_artifact_is_the_exact_byte_string_phase_8_signed_and_still_verifies()
         &sidecar,
     )
     .expect("the --out artifact must verify against its own sidecar");
-    // The in-memory document HAS grown phase 9 by now; re-serialising it would
-    // have produced different bytes, which is the defect A5 names.
+    // The in-memory document HAS grown phase 9 by now; re-serialising it
+    // would produce different bytes.
     assert_eq!(sc.last_phase_completed, 9);
     assert_ne!(
         logweir_core::det_json::to_deterministic_json(&sc).unwrap(),
@@ -749,10 +728,9 @@ fn the_out_artifact_is_the_exact_byte_string_phase_8_signed_and_still_verifies()
     );
 }
 
-/// Carried obligation from Task 20. Phase 8 signs before it puts, so the four
-/// storage facts are unknowable at signing time and the scorecard neutralises
-/// them. Until this receipt existed, Logweir published NO verifiable evidence
-/// that its own upload was create-only.
+/// Phase 8 signs before it puts, so the four storage facts are unknowable at
+/// signing time and the scorecard neutralises them; this receipt is the
+/// verifiable evidence that the upload was create-only.
 #[test]
 fn a_second_signed_receipt_publishes_the_post_put_readback() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
@@ -810,11 +788,10 @@ fn a_second_signed_receipt_publishes_the_post_put_readback() {
     );
 }
 
-/// Carried obligation from Task 17, second half: nothing pinned the
-/// skip-when-empty byte-stability that keeps the already-signed fixtures
-/// valid. `notes` was added to `PhaseRecord` after those fixtures were minted,
+/// The skip-when-empty byte-stability that keeps the already-signed fixtures
+/// valid: `notes` was added to `PhaseRecord` after those fixtures were minted,
 /// so an omitted-when-empty field is the only thing keeping their signatures
-/// good — and this asserts the CRYPTOGRAPHY, not merely that they parse.
+/// good. This asserts the CRYPTOGRAPHY, not merely that they parse.
 #[test]
 fn an_empty_notes_field_stays_absent_so_the_checked_in_signed_fixtures_still_verify() {
     for stem in ["scorecard", "scorecard-self-attested"] {
@@ -883,8 +860,8 @@ fn the_backup_set_ref_is_bound_into_every_selection_before_the_engine_fingerprin
 }
 
 /// `sample.records_expected` is the CANARY SIZE, not the manifest's window
-/// total. Task 16 parked the distinction for this task; substituting one for
-/// the other would make the signed document overstate what was verified.
+/// total: substituting one for the other would make the signed document
+/// overstate what was verified.
 #[test]
 fn the_sample_block_publishes_the_canary_size_not_the_manifest_window_total() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
@@ -999,15 +976,10 @@ fn each_phases_result_reaches_the_signed_document() {
     assert_eq!(sc.source.backup_id, "backup-2026-08-30T02:00:00Z");
     assert!(!sc.source.manifest_sha256.is_empty());
     assert!(!sc.source.captured_by_logweir, "phase -1 is Task 24's");
-    // 3 — the diff.
-    //
-    // NO collision, and that is now a property rather than an accident: phase
-    // 0 REFUSES a plan whose mapped target topics already exist (spec §6.1,
-    // `phase0_admit::run`), so a drill that reaches phase 3 at all found the
-    // scratch namespace empty. The fixture target lists the marker only for
-    // exactly that reason. `phase3_diff`'s collision path keeps its own
-    // coverage in `tests/phases_2_4.rs`, which drives the phase directly, and
-    // the refusal has its own row in
+    // 3 — the diff. NO collision, as a property: phase 0 REFUSES a plan whose
+    // mapped target topics already exist (spec §6.1), so a drill that reaches
+    // phase 3 found the scratch namespace empty. `phase3_diff`'s collision
+    // path is covered in `tests/phases_2_4.rs`, and the refusal in
     // `tests/topic_preflight.rs::a_mapped_target_topic_that_already_exists_is_a_guard_refusal_naming_it`.
     assert!(
         sc.target_diff.collisions.is_empty(),
@@ -1024,7 +996,7 @@ fn each_phases_result_reaches_the_signed_document() {
         "the diff must report what it actually READ off the target"
     );
     assert_eq!(sc.target_diff.level, "full");
-    // FX-4: phase 3 ran and found no collision, so its 1.1.0 `not_assessed`
+    // Phase 3 ran and found no collision, so its 1.1.0 `not_assessed`
     // reaches the signed document as the claim `[]`, never absent ("not
     // recorded"), and the collision strings carry no qualifier of their own.
     assert_eq!(
@@ -1054,10 +1026,10 @@ fn each_phases_result_reaches_the_signed_document() {
          against the target topic: {:?}",
         sc.topic_parity.intentionally_deviated
     );
-    // FX-4: the fixture's plan binds no recovery point, so there is no signed
-    // record of what was captured. No key diverged, and phase 7 says so in
-    // `not_assessed` AND leaves its fail-safe marker in `unexpected_divergence`,
-    // so a reader older than `not_assessed` cannot read parity here (M5).
+    // The fixture's plan binds no recovery point, so there is no signed record
+    // of what was captured: phase 7 says so in `not_assessed` AND leaves its
+    // fail-safe marker in `unexpected_divergence`, so a reader older than
+    // `not_assessed` cannot read parity here.
     assert_eq!(
         sc.topic_parity.unexpected_divergence,
         vec!["drill-orders: configuration not assessed (unknown)".to_string()]
@@ -1066,16 +1038,15 @@ fn each_phases_result_reaches_the_signed_document() {
         sc.topic_parity.not_assessed,
         Some(vec!["drill-orders: configuration (unknown)".to_string()])
     );
-    // FX-3: a SCRATCH drill's deviations are intended (above), and phase 7
+    // A SCRATCH drill's deviations are intended (above), and phase 7
     // makes the 1.2.0 claim that nothing was left unreconstructed.
     assert_eq!(sc.topic_parity.not_reconstructed, Some(vec![]));
-    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
-    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
     assert_eq!(
         sc.format_version,
         logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
     );
-    // FX-8: the fixture's plan states no point in time and its sample window
+    // The fixture's plan states no point in time and its sample window
     // ends on the archive's newest timestamp, so nothing was selected by time:
     // the block is WRITTEN (1.3.0's claim) and both lists are empty.
     assert_eq!(
@@ -1088,7 +1059,7 @@ fn each_phases_result_reaches_the_signed_document() {
     assert_eq!(sc.triggered_by.as_deref(), Some("fixture"));
 }
 
-/// **FX-3, end to end through the phase sequence.** The same fixture drill as
+/// **The mode, end to end through the phase sequence.** The same fixture drill as
 /// `each_phases_result_reaches_the_signed_document`, as a `newTopic` restore:
 /// the spec's mode reaches phase 7 and decides the label in the SIGNED
 /// document. The deviation the scratch run signs as intended (the source's
@@ -1114,8 +1085,7 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.target.mode, logweir_core::spec::TargetMode::NewTopic);
-    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
-    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
     assert_eq!(
         sc.format_version,
         logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
@@ -1143,8 +1113,7 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
     }
 }
 
-/// **FX-3 review F2 (and FX-4's twin): a scorecard signed BEFORE phase 7
-/// records neither parity claim.** `topic_parity.not_reconstructed` and
+/// **A scorecard signed BEFORE phase 7 records neither parity claim.**
 /// `topic_parity.not_assessed` are written by phase 7 alone; `[]` in either is
 /// the claim "compared, and nothing left unreconstructed / unassessed". A run
 /// that stops at phase 5 (a blocked preflight) or phase 6 (a restore that
@@ -1152,8 +1121,8 @@ fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
 /// comparison that never ran.
 ///
 /// Negative control: `new_scorecard` drafting `not_reconstructed:
-/// Some(Vec::new())` (the review's surviving mutant R6), or `not_assessed:
-/// Some(Vec::new())`, signs the key and this test fails.
+/// Some(Vec::new())` or `not_assessed: Some(Vec::new())` signs the key and
+/// this test fails.
 #[test]
 fn a_scorecard_signed_before_phase_7_records_neither_parity_claim() {
     for drill in [Drill::BlocksAtPreflight, Drill::RestoresNothing] {
@@ -1252,8 +1221,8 @@ fn the_metrics_file_distinguishes_a_pass_from_a_signed_non_pass() {
 /// Every name below has to be present as a SAMPLE, not merely inside the
 /// `# HELP` / `# TYPE` comment lines that mention them. A metric whose value
 /// line is deleted still leaves its name in the comments, so a bare
-/// `contains(name)` check — which is what the brief's own test performs —
-/// cannot tell the two apart, and a dashboard reading it would show no data.
+/// `contains(name)` cannot tell the two apart, and a dashboard reading it
+/// would show no data.
 #[test]
 fn every_metric_name_is_emitted_as_a_sample_not_only_as_a_help_comment() {
     let dir = tempfile::tempdir().unwrap();
@@ -1274,8 +1243,7 @@ fn every_metric_name_is_emitted_as_a_sample_not_only_as_a_help_comment() {
         "logweir_drill_integrity_result",
         "logweir_evidence_lock_verified",
         "logweir_drill_exit_code",
-        // Task 11 (T0-7 rung 2). This entry is what kills the "emit the
-        // HELP/TYPE block and no sample line" mutant.
+        // This entry kills the HELP/TYPE-block-without-a-sample mutant.
         "logweir_drill_last_run_timestamp_seconds",
     ] {
         assert!(
@@ -1352,14 +1320,11 @@ fn a_key_the_engine_dropped_during_the_restore_reaches_the_signed_levers() {
 /// THE MAINLINE EXIT-2 PATH — a drill that ran every phase, was measured, was
 /// SCORED, and did not pass.
 ///
-/// This is the review's finding R3. Both exit-2 routes that were covered
-/// before — a blocked preflight and a no-op restore — `return Err(NotPass)`
-/// early from inside phases 5 and 6 and never reach `execute_with`'s final
-/// `if sc.outcome != Outcome::Pass` gate. So that gate could be replaced with
-/// `if false` and the entire workspace stayed green: a restore that missed its
-/// RTO by 25 minutes would be signed as `fail-objective` in the bucket and
-/// reported to the CronJob as **exit 0, passed**. That is the most valuable
-/// result this product produces, announced as its opposite.
+/// Both other exit-2 routes (a blocked preflight and a no-op restore) return
+/// `Err(NotPass)` from inside phases 5 and 6 and never reach `execute_with`'s
+/// final `if sc.outcome != Outcome::Pass` gate. Without this row that gate
+/// could be `if false` with the workspace green, and a restore that missed
+/// its RTO would be signed `fail-objective` and reported as exit 0.
 ///
 /// Both scoring routes are covered: `decide` reaches `FailObjective` through
 /// the objectives and `FailIntegrity` through phase 7's verdict, and they are
@@ -1423,7 +1388,7 @@ fn a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase() {
     assert_eq!(sc.outcome, Outcome::Pass);
 }
 
-/// FIX 2. The `RestoreNoOp` interception runs a restore that ACTUALLY
+/// The `RestoreNoOp` interception runs a restore that ACTUALLY
 /// EXECUTED, so anything it created on the operator's cluster is still there.
 /// Returning straight to exit 2 would leave scratch topics behind on the one
 /// failure path where a drill wrote to their broker.
@@ -1485,9 +1450,8 @@ fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_d
     );
 }
 
-/// FIX 3. `PutReceipt.scorecard_key` must be the key `phase8_score::run`
-/// actually put at, carried out on `Signed`, never a second reconstruction —
-/// the same defect shape as Task 20's `retrieved_from` naming a prefix.
+/// `PutReceipt.scorecard_key` must be the key `phase8_score::run` actually
+/// put at, carried out on `Signed`, never a second reconstruction.
 #[test]
 fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
@@ -1526,18 +1490,12 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     );
 }
 
-/// REGRESSION (Task 21c, found the first time the orchestrator was pointed at a
-/// real engine). `build_plan` puts the restore checkpoint at
-/// `temp_dir()/logweir-<run_id>/checkpoint.json`, and `drill::context` creates a
-/// DIFFERENT directory (`logweir-<pid>`, for the rendered restore.yaml).
-/// Nothing created the checkpoint's parent, and the engine does not create it
-/// either, so `kafka-backup restore` exited 1 with a bare
-/// `IO error: No such file or directory (os error 2)` on every run against the
-/// real binary — on any host, CI included. Every existing test passed, because
-/// every engine in this suite is a double that never opens the path.
-///
-/// This asserts the directory the plan names actually exists once the drill has
-/// run, which is the only thing the real engine needs from it.
+/// `build_plan` puts the restore checkpoint at
+/// `temp_dir()/logweir-<run_id>/checkpoint.json`, and the engine does not
+/// create the parent, so without it `kafka-backup restore` exits 1 with
+/// `IO error: No such file or directory (os error 2)` on every real run while
+/// every double passes. This asserts the directory the plan names exists once
+/// the drill has run.
 #[test]
 fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
@@ -1554,11 +1512,9 @@ fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// FIX 3 (Task 21c fix round 2). `logweir_core::scorecard::SampleInfo.anchor`
-/// is a `String`, not `Anchor`: Global Constraint 12 freezes `format_version` at
-/// 1.0.0 and retyping a published field is not an optional addition. Only
-/// `Anchor::as_str()` writes it today, so it cannot drift in practice — but
-/// "cannot drift in practice" is an argument, not a check. This is the check.
+/// `logweir_core::scorecard::SampleInfo.anchor` is a `String`, not `Anchor`:
+/// retyping a published field is not an optional addition. Only
+/// `Anchor::as_str()` writes it, and this checks that it cannot drift.
 ///
 /// It reads the SIGNED bytes, not the in-memory struct, because the signed
 /// document is the thing an auditor validates against the published schema.
@@ -1588,18 +1544,14 @@ fn the_signed_scorecards_sample_anchor_is_always_one_of_the_closed_set() {
     );
 }
 
-// ===========================================================================
-// D3 §2.4 — the teardown attestation key, on the scorecard's phase-9 record
-// ===========================================================================
+// D3 §2.4: the teardown attestation key, on the scorecard's phase-9 record.
 
 /// The `teardown-key=` line is driven by a phase-9 NOTE, and the note is the
 /// only place a completed run remembers that the attestation was put.
 ///
 /// It lives on `PhaseRecord.notes` for `failed_count`'s three reasons plus one
 /// that matters here: the note is pushed AFTER phase 8 froze and signed the
-/// scorecard bytes, so it can be read on the exit-2 path too — which is the
-/// path that matters for D3 §4.4, where a rehearsal that did not pass is
-/// exactly the run whose leftover topics block the next slot.
+/// scorecard bytes, so it can be read on the exit-2 path too.
 #[test]
 fn the_teardown_key_is_read_off_the_phase_nine_record_and_only_when_it_is_there() {
     use logweir::drill::phase9_teardown::{attested_key, attested_note, teardown_key};
@@ -1665,7 +1617,7 @@ fn the_attested_note_does_not_disturb_the_teardown_failure_notes() {
     assert!(attested_key(&sc).is_some());
 }
 
-/// **FX-4, end to end through the phase sequence.** The coverage a VERIFIED
+/// **Coverage, end to end through the phase sequence.** The coverage a VERIFIED
 /// point binding established reaches phase 7 through `Ctx` and becomes the
 /// signed document's `topic_parity.not_assessed`: `captured` for the one
 /// mapped topic yields `Some([])` — every topic assessed — and the SAME run
@@ -1702,14 +1654,12 @@ fn a_captured_source_configuration_reaches_the_signed_document_as_assessed() {
     assert_eq!(sc.topic_parity.not_assessed, Some(vec![]));
 }
 
-// ------------------------------------------------------------------ FX-8
-//
 // The time basis, end to end through the phase sequence: the refusal of a
 // selection by producer time over a `LogAppendTime` source, before any target
 // topic exists, and the label the opt-in signs.
 
 /// A receipt coverage recording `orders`' EFFECTIVE `message.timestamp.type`
-/// as `value` from `source` — what FX-4's backup records and a verified point
+/// as `value` from `source`, what the backup records and a verified point
 /// binding hands the drill. The broker-default arm's only record.
 fn coverage_recording(
     value: &str,
@@ -1749,7 +1699,7 @@ fn refusal(err: DrillError) -> (String, ExitCode, String) {
     (message, ExitCode::from(err), line)
 }
 
-/// **FX-8, the topic-override arm — and WHERE it refuses.** The archive
+/// **The topic-override arm, and WHERE it refuses.** The archive
 /// manifest records `orders` as `LogAppendTime` and the plan states a point in
 /// time with no `restore.time_basis`: exit 3, `refusal-reason=
 /// PointInTimeByProducerTime`, naming the topic and the record — and NO target
@@ -1796,7 +1746,7 @@ fn the_time_basis_refusal_creates_no_target_topic() {
     );
 }
 
-/// **PROD-02.1, review P-e.** A restore of an empty capture's set — its
+/// A restore of an empty capture's set — its
 /// manifest names the topic and no segment — is refused by name, exit 3,
 /// as soon as the manifest is read: no target topic, no phase 4, nothing
 /// signed. (The control is every passing shape: `Passes` restores the same
@@ -1821,7 +1771,7 @@ fn a_restore_of_an_empty_capture_is_refused_by_name_before_anything_runs() {
     execute_with(&f.args, &f.run_id, &f.ctx).expect("the control restores");
 }
 
-/// **FX-8, the opt-in.** The same archive and point with `restore.time_basis:
+/// **The opt-in.** The same archive and point with `restore.time_basis:
 /// producerTime` in the approved plan: the run passes as `Passes` does, the
 /// target topic IS created, and the signed scorecard — format 1.3.0 — lists
 /// `orders` under `source.time_basis.producer_time` with the plan's value.
@@ -1836,8 +1786,7 @@ fn the_producer_time_opt_in_runs_and_the_signed_scorecard_says_so() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
-    // FX-23: every SAMPLED document is 1.6.0, so the version marks a build
-    // with FX-23's checks; a complete one stays 1.4.0 (below).
+    // Every SAMPLED document is 1.6.0; a complete one stays 1.4.0 (below).
     assert_eq!(
         sc.format_version,
         logweir_core::scorecard::FORMAT_VERSION_WITH_UNSAMPLED_TOPICS
@@ -1853,7 +1802,7 @@ fn the_producer_time_opt_in_runs_and_the_signed_scorecard_says_so() {
     assert!(sc.validate_invariants().is_ok());
 }
 
-/// **FX-8: the opt-in is inside the approved bytes.** An approval minted over
+/// **The opt-in is inside the approved bytes.** An approval minted over
 /// the plan WITHOUT `restore.time_basis` does not authorise the same plan WITH
 /// it: phase 1 refuses before the archive is opened, and nothing is created.
 ///
@@ -1880,7 +1829,7 @@ fn an_approval_without_the_opt_in_does_not_authorise_it() {
     assert_eq!(refusal(err).2, "refusal-reason=PointInTimeByProducerTime");
 }
 
-/// **FX-8, the broker-default arm.** No manifest override; the VERIFIED
+/// **The broker-default arm.** No manifest override; the VERIFIED
 /// receipt's coverage recorded `orders`' effective type `LogAppendTime` from
 /// the broker's dynamic default. Refused the same way, naming that record,
 /// with nothing created.
@@ -1906,9 +1855,9 @@ fn a_broker_default_log_append_time_is_refused_from_the_receipts_record() {
     assert!(fixtures::created_topics(&f).is_empty());
 }
 
-/// **FX-8, the unknown case and the `CreateTime` control**, over the same
-/// point-in-time plan. Nothing records the type (an unbound plan, or a receipt
-/// before FX-4): the run PASSES and signs `not_recorded: [orders]` — never
+/// **The unknown case and the `CreateTime` control**, over the same
+/// point-in-time plan. Nothing records the type (an unbound plan, or an older
+/// receipt): the run PASSES and signs `not_recorded: [orders]` — never
 /// `CreateTime` by silence. The receipt recorded `CreateTime`: the run passes
 /// and lists `orders` nowhere.
 ///
@@ -1941,8 +1890,6 @@ fn an_unrecorded_type_is_labelled_and_a_create_time_topic_is_not_refused() {
     );
 }
 
-// ------------------------------------------------------------------ FX-16
-//
 // The restored set is the bound point's, or nothing is created: a plan that
 // binds point A must not restore set B and then take A's recorded word —
 // configuration coverage, timestamp types, the manifest pin — for B's records.
@@ -2002,15 +1949,15 @@ fn refused_set_mismatch(f: &fixtures::OrchestratorFixture, err: DrillError, need
     );
 }
 
-/// **FX-16 — a plan binding point A while restoring set B is refused before
+/// **A plan binding point A while restoring set B is refused before
 /// any target exists.** The fixture engine restores its one set; the verified
 /// binding (as `Ctx::bound_set`) names that set's key, so it is the set
 /// selected, and describes it with ONE difference per run: another set id
 /// (what `latestCompleted` resolving to a newer set looks like), another
 /// manifest digest (other bytes at that key), another version (the manifest
 /// written again between the binding and `describe`). Each is exit 3 with
-/// nothing created. Another manifest KEY never reaches this check since the
-/// fix round: the set is selected by the point's key (the row below).
+/// nothing created. Another manifest KEY never reaches this check: the set
+/// is selected by the point's key (the row below).
 ///
 /// KILLS: removing the check (all three runs pass and create the topic);
 /// moving it after the target-creation step (`created_topics` is not empty);
@@ -2048,7 +1995,7 @@ fn a_restored_set_that_is_not_the_bound_points_creates_no_target_topic() {
     }
 }
 
-/// **FX-16 fix round (review M-1): a bound plan's set is selected by the
+/// **A bound plan's set is selected by the
 /// point's key.** A point whose manifest key the archive's listing does not
 /// show (the binding read it there moments earlier) is exit 1, the archive
 /// answering inconsistently — never a substitution of another set by id. No
@@ -2159,12 +2106,11 @@ impl logweir_core::engine::DataEngine for ListsACopyFirst {
     }
 }
 
-/// **FX-16 fix round (review L-1): a same-id copy that sorts first does not
+/// **A same-id copy that sorts first does not
 /// refuse a truthful plan.** The listing shows a copy of the point's set
 /// (`0copy/…`) before the set itself; the plan is bound to the set itself.
 /// The run selects and describes the set at the point's key, ONLY that key,
-/// and passes as `Passes` does. Before the fix round the copy was selected by
-/// id and the run refused `PointBindingSetMismatch` on its key.
+/// and passes as `Passes` does.
 ///
 /// KILLS: selecting a bound plan's set by id (first) again.
 #[test]
@@ -2198,7 +2144,7 @@ fn a_same_id_copy_listed_first_does_not_refuse_a_truthful_plan() {
     assert_eq!(sc.outcome, Outcome::Pass);
 }
 
-/// **FX-16, the control.** The same run with the binding describing exactly
+/// **The control.** The same run with the binding describing exactly
 /// the set the engine restores passes as `Passes` does, and creates its one
 /// target topic — so the row above is not a build that refuses every bound
 /// run.
@@ -2213,14 +2159,14 @@ fn a_restored_set_that_is_the_bound_points_runs() {
     assert_eq!(sc.outcome, Outcome::Pass);
 }
 
-/// **FX-16 and FX-8: the receipt's word never reaches another set.** The
+/// **The receipt's word never reaches another set.** The
 /// bound receipt records `orders` as `LogAppendTime` from the broker default
-/// (FX-8's broker-default arm, decided from the RECEIPT alone). Bound to a
+/// (the broker-default arm, decided from the RECEIPT alone). Bound to a
 /// receipt of ANOTHER set, the run is refused `PointBindingSetMismatch`, not
 /// `PointInTimeByProducerTime`: the set check comes first, so the time basis
 /// is never decided from a record about other records. The control — the
 /// same receipt describing the restored set — reaches the time basis and is
-/// refused there, as FX-8's row is.
+/// refused there, as the broker-default row is.
 ///
 /// KILLS: moving the set check after `time_basis::decide` (the first run is
 /// refused `PointInTimeByProducerTime`).
@@ -2248,9 +2194,9 @@ fn a_restored_set_mismatch_is_refused_before_the_time_basis_reads_the_receipt() 
     assert!(fixtures::created_topics(&f).is_empty());
 }
 
-// ------------------------------------------------------------------ PROD-08.1
+// Complete coverage.
 
-/// **PROD-08.1, the wiring.** A plan stating `sample.coverage: complete`
+/// **The wiring.** A plan stating `sample.coverage: complete`
 /// reaches phase 7's complete lane and the SIGNED document says so: coverage
 /// complete, header order verified, the block covered and exact over all 500
 /// records — the whole window, not the 25-record canary — `sample` holding
@@ -2269,8 +2215,8 @@ fn a_complete_coverage_plan_signs_a_covered_exact_complete_block() {
     let sc: logweir_core::scorecard::Scorecard =
         serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
     assert_eq!(sc.outcome, Outcome::Pass);
-    // FX-23: a complete verification keeps the version it always had; only a
-    // sampled one is 1.6.0.
+    // A complete verification keeps its version; only a sampled one is
+    // 1.6.0.
     assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
     let v = sc
         .integrity
@@ -2314,7 +2260,7 @@ fn a_complete_coverage_plan_signs_a_covered_exact_complete_block() {
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
 
-/// **PROD-08.1.** The same plan, with one restored record past the canary
+/// The same plan, with one restored record past the canary
 /// changed on the target: the complete lane finds it, the drill scores
 /// `fail-integrity` (exit 2 with a signed document), and the signed block
 /// counts exactly one different record. A sampled drill over the same target
@@ -2348,8 +2294,8 @@ fn a_complete_coverage_plan_finds_a_changed_record_past_the_canary() {
     assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
 }
 
-/// **PROD-11.1b: a partition subset is restored, judged over its selection
-/// and SIGNED as format 2.0.0** (the owner's OD-9 (a)). The approved plan
+/// **A partition subset is restored, judged over its selection
+/// and SIGNED as format 2.0.0** (OD-9 (a)). The approved plan
 /// states `restore.partitions: {orders: [0]}` from the archive's floor
 /// (`point_in_time: "../<end>"`), one the archive satisfies. The run passes;
 /// its scorecard is format 2.0.0 with `source.selection` naming the subset,
@@ -2412,7 +2358,7 @@ fn a_partition_subset_is_restored_and_signed_as_format_2_0_0() {
     assert!(sc.format_version.starts_with("1."), "{}", sc.format_version);
 }
 
-/// **PROD-11.1: a stated window start is restored, judged over its window and
+/// **A stated window start is restored, judged over its window and
 /// SIGNED.** The approved plan states `restore.point_in_time:
 /// "<start>/<end>"` with the start at the archive's floor (so the restore is
 /// the archive's). The run passes, its scorecard is format 1.7.0 with
@@ -2465,7 +2411,7 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
         "{}",
         sc.sample.coverage_note
     );
-    // Review N1: the sampled lane's signed note never says no record before
+    // The sampled lane's signed note never says no record before
     // the start was restored — it cannot show that.
     assert!(
         sc.sample.coverage_note.contains(
@@ -2494,9 +2440,9 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
     assert!(!sc.sample.coverage_note.contains("replay selection"));
 }
 
-// ----------------------------------------------------------------- PROD-08.1a
+// Complete coverage past its bound.
 
-/// **PROD-08.1a: a `covered: false` complete run never reads as a pass in a
+/// **A `covered: false` complete run never reads as a pass in a
 /// metrics label.** The plan asks for complete coverage
 /// with `complete_max_records: 1`, so the one partition is past the bound and
 /// is not compared: the signed scorecard says `covered: false` with its
@@ -2507,9 +2453,6 @@ fn a_stated_window_start_is_restored_and_signed_with_its_window() {
 /// `logweir_drill_integrity_complete_covered 0`. The covered run
 /// (`VerifiesCompletely`) is the control: `covered: true`, `pass`, and the
 /// gauge at 1.
-///
-/// (The notification-body half of this row went with the drill's
-/// notification post.)
 ///
 /// KILLS: the metrics writer dropping either series or writing `covered` as 1; phase 8 scoring a
 /// `partial` result as `pass` (the outcome assertions).
@@ -2571,8 +2514,7 @@ fn a_complete_run_that_did_not_cover_is_never_a_pass_in_the_metrics() {
 }
 
 /// **A sampled run never claims complete** in the metrics: they carry
-/// `coverage="sampled"` and no complete gauge. (The notification-body half
-/// went with the drill's notification post.)
+/// `coverage="sampled"` and no complete gauge.
 ///
 /// KILLS: the coverage read from anything but the signed block; the complete
 /// gauge written for a sampled run.
@@ -2590,9 +2532,9 @@ fn a_sampled_run_never_claims_complete_in_the_metrics() {
     );
 }
 
-// ----------------------------------------------------------------- PROD-01.1a
+// Transaction markers.
 
-/// **PROD-01.1a, R1 in the doubles, both target modes.** The archive's
+/// **Both target modes.** The archive's
 /// segment holds a commit and an abort marker beside a data record and the
 /// plan does not allow them: exit 3, `refusal-reason=
 /// TransactionMarkersInArchive`, naming the topic, the partition and the count
@@ -2640,7 +2582,7 @@ fn an_archive_holding_transaction_markers_is_refused_in_both_target_modes() {
     }
 }
 
-/// **PROD-01.1a, R2 in the doubles.** The same archive with
+/// **The override.** The same archive with
 /// `restore.allow_transaction_markers: true` in the approved plan: the run
 /// passes, and its signed scorecard's `sample.coverage_note` says the override
 /// was used. The control is the row above (the same archive, refused).
@@ -2676,7 +2618,7 @@ fn the_override_restores_the_archive_and_the_scorecard_says_so() {
     );
 }
 
-/// **PROD-01.1a: the override is inside the approved bytes.** An approval
+/// **The override is inside the approved bytes.** An approval
 /// minted over the plan WITHOUT `restore.allow_transaction_markers` does not
 /// authorise the same plan WITH it: phase 1 refuses before the archive is
 /// read, and nothing is created.
@@ -2696,7 +2638,7 @@ fn an_approval_without_the_override_does_not_authorise_it() {
     assert!(fixtures::created_topics(&with).is_empty());
 }
 
-/// **PROD-01.1a: a segment the check cannot read refuses the run.** It cannot
+/// **A segment the check cannot read refuses the run.** It cannot
 /// say the partition holds no marker, so it never reads as clean.
 #[test]
 fn a_segment_the_marker_check_cannot_read_refuses_the_run() {
@@ -2713,7 +2655,7 @@ fn a_segment_the_marker_check_cannot_read_refuses_the_run() {
     assert!(fixtures::created_topics(&f).is_empty());
 }
 
-/// **PROD-01.1a, the coordinator's row 1.** The archive's abort marker is in a
+/// The archive's abort marker is in a
 /// segment AFTER the window's end, which the restore does not read; the
 /// window's segment holds the transaction's record. Refused all the same, by
 /// name, with nothing created. Control 1 is `HoldsTransactionMarkers` above
@@ -2731,7 +2673,7 @@ fn a_marker_after_the_window_still_refuses_the_restore() {
     assert!(fixtures::created_topics(&f).is_empty());
 }
 
-/// **PROD-01.1a, PROD-08.1's rule kept.** Two segments after the window's
+/// **Never silent.** Two segments after the window's
 /// end, one the store does not hold and one that is not a KBAK segment: the
 /// restore never reads them, so the run is NOT refused, and it is never
 /// silent: the signed scorecard's `sample.coverage_note` says the check could
@@ -2763,7 +2705,7 @@ fn segments_after_the_window_the_check_cannot_read_are_noted_not_refused() {
     );
 }
 
-/// **PROD-01.1a (review R-f).** A segment whose last record is before the
+/// A segment whose last record is before the
 /// plan's stated window start is read by neither the engine nor the marker
 /// check, so its abort marker does not refuse the run. The control is
 /// `a_marker_after_the_window_still_refuses_the_restore` (the same marker

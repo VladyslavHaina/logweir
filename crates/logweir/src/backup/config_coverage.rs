@@ -1,7 +1,7 @@
-//! **FX-4: per-topic topic-configuration capture coverage**, recorded in the
-//! backup receipt (format 1.1.0) and projected into the catalog point.
+//! Per-topic topic-configuration capture coverage, recorded in the backup
+//! receipt (format 1.1.0) and projected into the catalog point.
 //!
-//! # The defect this closes
+//! # Why the engine's capture cannot be trusted alone
 //!
 //! The engine captures topic configuration NON-FATALLY:
 //! `crates/logweir-engine-oso/src/render_backup.rs::render` writes no
@@ -13,9 +13,8 @@
 //! DescribeConfigs returns `Err` on the first resource that carries an error
 //! code (`kafka/admin.rs:476-487`), so one denied topic leaves EVERY topic's
 //! `configurations` empty. And the manifest spells "captured, no overrides"
-//! and "not captured" identically, as `configurations: {}`. A later parity
-//! check therefore compared a restored topic against an empty record and
-//! reported no divergence.
+//! and "not captured" identically, as `configurations: {}`, so an empty
+//! record cannot be read as "no overrides".
 //!
 //! # Where coverage comes from, and why not from the engine
 //!
@@ -23,7 +22,7 @@
 //! naming at most the FIRST failing resource, from a subprocess whose output is
 //! not a contract — and it keeps explicit overrides only (`config_source == 1`,
 //! `kafka/admin.rs:90-92`), so it can never say what a topic's EFFECTIVE
-//! `message.timestamp.type` was when it came from the broker (FX-8's
+//! `message.timestamp.type` was when it came from the broker (the time basis's
 //! broker-default arm). So `logweir backup run` reads each topic's
 //! configuration ITSELF, through the same principal the engine uses,
 //! IMMEDIATELY before the engine starts ([`observe`]), and after the engine
@@ -32,7 +31,7 @@
 //! hold ([`classify`]). Coverage is the outcome of that comparison, not of
 //! either read alone.
 //!
-//! # rdkafka 0.36.2 hides a refused read (T13), and this module does not
+//! # rdkafka 0.36.2 hides a refused read, and this module does not
 //!
 //! `logweir_kafka::reader::ClusterReader::describe_topic_configs` never
 //! returns an empty `Ok` for a refused topic: an empty DescribeConfigs answer is
@@ -44,7 +43,7 @@
 //! # Nothing here fails the backup
 //!
 //! Coverage is a RECORDED FACT, not a refusal: a denied read is written down
-//! as `captureDenied`, and the backup proceeds exactly as it did before. Every
+//! as `captureDenied`, and the backup proceeds. Every
 //! per-topic outcome — including "this reader cannot answer at all" — is a
 //! value, so [`observe`] has no error path.
 
@@ -57,7 +56,7 @@ use logweir_kafka::reader::{
 };
 use std::collections::BTreeMap;
 
-/// The one configuration key whose EFFECTIVE value the receipt records (FX-8).
+/// The one configuration key whose EFFECTIVE value the receipt records.
 pub const TIMESTAMP_TYPE_KEY: &str = "message.timestamp.type";
 
 /// What Logweir's own DescribeConfigs read established about ONE topic,
@@ -72,14 +71,14 @@ pub enum Observation {
         /// The effective `message.timestamp.type` and its source, when the
         /// broker reported one of the two values the receipt defines.
         timestamp_type: Option<EffectiveConfigValue>,
-        /// **PROD-05.1.** The entries the configuration MODEL records, by key
+        /// The entries the configuration MODEL records, by key
         /// — `logweir_core::topic_configuration::entry_of` over every entry
         /// of the answer: each override and each semantic key's effective
         /// value, classified, and a sensitive entry by key only. Computed
         /// here, at the read, so a sensitive value never outlives it.
         model: BTreeMap<String, ConfigEntry>,
     },
-    /// The broker's authorizer refused the read — directly, or by T13's rule
+    /// The broker's authorizer refused the read — directly, or by the rule
     /// for an empty answer on a visible topic. The detail is the reader's.
     Denied(String),
     /// Any other failure: no broker answered, the topic is unknown, a reader
@@ -224,7 +223,7 @@ pub fn classify(
 /// `original_partition_count` and `source_replication_factor`.
 pub type Layout = (Option<i32>, Option<i16>);
 
-/// **PROD-05.1: the receipt's `topic_configuration`**, one entry per observed
+/// **The receipt's `topic_configuration`**, one entry per observed
 /// topic — which [`observe`] makes exactly the named set, so arm 14 holds by
 /// construction.
 ///
@@ -241,10 +240,9 @@ pub type Layout = (Option<i32>, Option<i16>);
 ///   manifest first, because engine 0.23.3 records the factor reliably only
 ///   for the FIRST topic it saves: its `merge_manifests` carries
 ///   `original_partition_count` from each later save and drops
-///   `source_replication_factor` (engine 0.23.3 `backup/engine.rs:1683-1705`;
-///   measured on compose, PROD-05.1 report). Logweir's build from
-///   `0.23.3+logweir.2` records every topic's (patch 0002, FX-21), but OSO's
-///   release, the one-release rollback, still does not.
+///   `source_replication_factor` (engine 0.23.3 `backup/engine.rs:1683-1705`).
+///   Logweir's build from `0.23.3+logweir.2` records every topic's (patch
+///   0002), but OSO's release, the one-release rollback, does not.
 /// - A count that is absent, or `0` or less, is NOT RECORDED rather than
 ///   written as a value arm 19 refuses — a run must not refuse its own receipt
 ///   after the archive exists.
@@ -394,11 +392,10 @@ mod tests {
             .collect()
     }
 
-    /// **The FX-4 defect, and the mutant the brief names first: "coverage
-    /// forced to `captured` on a denied read".** A refused read is
-    /// `captureDenied` whatever the manifest says — including an EMPTY
-    /// manifest record, which is exactly what the engine writes for a denied
-    /// topic and exactly what used to compare as "no overrides".
+    /// **A refused read is `captureDenied` whatever the manifest says**,
+    /// including an EMPTY manifest record, which is exactly what the engine
+    /// writes for a denied topic. KILLS: coverage forced to `captured` on a
+    /// denied read.
     #[test]
     fn a_denied_read_is_capture_denied_even_beside_an_empty_manifest_record() {
         let observed = observe(
@@ -421,14 +418,13 @@ mod tests {
         );
     }
 
-    /// **The no-misfire direction (FX-4 review M4, mutant K1): the common
-    /// case.** A topic with NO override answers only broker and default
-    /// entries; the engine keeps none of them, so its manifest record is
-    /// empty and EQUAL to what Logweir read — `captured`, with the effective
-    /// timestamp type from the broker's default. It stays `captured` beside a
-    /// denied neighbour, whose refusal emptied every record in the run: the
-    /// empty record is still the accurate one for this topic (measured live
-    /// by the review, `plain` beside `denied`).
+    /// **The no-misfire direction, the common case.** A topic with NO override
+    /// answers only broker and default entries; the engine keeps none of them,
+    /// so its manifest record is empty and EQUAL to what Logweir read —
+    /// `captured`, with the effective timestamp type from the broker's default.
+    /// It stays `captured` beside a denied neighbour, whose refusal emptied
+    /// every record in the run: the empty record is still the accurate one for
+    /// this topic (measured live, `plain` beside `denied`).
     #[test]
     fn a_read_with_no_override_beside_an_empty_manifest_record_is_captured() {
         let observed = observe(
@@ -704,7 +700,7 @@ mod tests {
         }
     }
 
-    /// **PROD-05.1, the projection.** A compacted, min-in-sync-2 topic with
+    /// **The projection.** A compacted, min-in-sync-2 topic with
     /// an inherited retention, a removed-in-4.0 override, a provider-only
     /// override and a secret; a delete-policy topic denied; a third whose
     /// read failed. Every class lands where the table puts it, a secret is
@@ -901,7 +897,7 @@ mod tests {
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }
 
-    /// **The factor's source** (PROD-05.1, measured): Logweir's own metadata
+    /// **The factor's source** (measured): Logweir's own metadata
     /// read wins over the manifest, which the pinned engine fills for the
     /// first topic it saves only; the manifest's stands where the read named
     /// none; a zero from either is NOT RECORDED.

@@ -175,32 +175,24 @@ fn no_teardown_key_is_printed_when_the_attestation_was_not_persisted() {
     );
 }
 
-/// **F5: the new lines must fit in the controller's key-scan window.**
+/// **The new lines must fit in the controller's key-scan window.**
 ///
 /// `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES = 16` is how many
 /// trailing pod-log lines the controller reads when it scans for evidence keys
-/// BY NAME. That constant lives in `weirkeeper` (D3 W2/W13's file) and is not
-/// edited here; it is MIRRORED below so that a runner-side change which
-/// overruns it fails loudly in the file that caused it, instead of silently
-/// pushing `topic-preflight=` — erratum E10(c)'s only producer for
-/// `Restore.status.topicPreflight` — out of the window.
-///
-/// Measured for a passing restore at the time `teardown-key=` landed: summary,
-/// `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
-/// `offset-report-key=` — six, plus the `drill finished` tracing line that
-/// production emits and this in-process seam does not, for **seven**. At the
-/// original window of eight that was seven of eight, with one slot left; W2
-/// raised it to sixteen for that reason (review finding F5), and the
-/// controller side states the same seven as `BUDGETED_TRAILING_LINES` and
-/// asserts the margin. **Both numbers below are mirrors: change one and the
-/// other's test tells you.**
+/// BY NAME. It is MIRRORED below so that a runner-side change which overruns
+/// it fails in the file that caused it, instead of silently pushing
+/// `topic-preflight=` (erratum E10(c)'s only producer for
+/// `Restore.status.topicPreflight`) out of the window. A passing restore
+/// prints seven trailing lines, and the controller side states the same seven
+/// as `BUDGETED_TRAILING_LINES`. **Both numbers below are mirrors: change one
+/// and the other's test tells you.**
 #[test]
 fn the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window() {
     /// MIRRORED from `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`.
     /// A `weirkeeper` dependency here would invert the crate layering, so the
-    /// number is copied and this comment is the join. Raised 8 → 16 by D3 W2,
-    /// whose `the_key_scan_window_has_room_for_the_runners_trailing_block`
-    /// holds the other half of the budget.
+    /// number is copied and this comment is the join;
+    /// `the_key_scan_window_has_room_for_the_runners_trailing_block` holds the
+    /// other half of the budget.
     const KEY_SCAN_TAIL_LINES: usize = 16;
     /// The `drill finished` line `tracing` emits in production. `run_with`
     /// installs no subscriber (its own doc comment says why), so the child
@@ -228,7 +220,7 @@ fn the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window()
     );
     // And every key a controller reads IS inside the window, counted from the
     // end exactly as the controller counts.
-    // SATURATING, because the window is now wider than this child's whole
+    // SATURATING, because the window is wider than this child's whole
     // stdout. The controller's own `tail_lines` saturates for the same reason
     // (`backup.rs`: `all.len().saturating_sub(KEY_SCAN_TAIL_LINES)`), so this
     // mirrors the real scan rather than panicking on a short log.
@@ -270,17 +262,15 @@ fn the_channel_is_a_filter_and_the_only_producer_goes_through_it() {
     }
 }
 
-/// **F6: `teardown-key=` is gated on the exit code, so interface I9's
+/// **`teardown-key=` is gated on the exit code, so interface I9's
 /// "`refusal-reason=` is the process's FINAL stdout line for exit 3" holds
 /// structurally.**
 ///
-/// This is a SOURCE lint and not a runtime row, and the reason is worth
-/// stating: the state it guards is unreachable. A run refused by a guard has
-/// no phase-9-attested scorecard, so no runtime mutant can make the ungated
-/// version print anything — I planted `if true {` in place of the gate and the
-/// whole suite stayed green. An invariant that holds only because the state
-/// never occurs is one a future change breaks silently, so the guard is the
-/// gate's presence rather than its effect.
+/// A SOURCE lint, because the state it guards is unreachable at runtime: a
+/// run refused by a guard has no phase-9-attested scorecard, so no runtime
+/// mutant makes an ungated version print anything. An invariant that holds
+/// only because the state never occurs is one a future change breaks
+/// silently, so the guard is the gate's presence.
 ///
 /// `crates/logweir/tests/execution_contract_v2.rs::
 /// a_guard_refusal_ends_stdout_with_the_refusal_reason_line` observes the
@@ -445,9 +435,7 @@ fn the_backup_path_announces_its_five_named_steps() {
     );
 }
 
-// ===========================================================================
 // The children. `#[ignore]`d so they run only under the re-exec above.
-// ===========================================================================
 
 #[test]
 #[ignore = "child row: re-exec'd by the rows above so their assertions see fd 1"]

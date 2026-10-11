@@ -44,9 +44,7 @@ const SCRATCH_PREFIX: &str = "drill-";
 ///
 /// Its epoch-millisecond value is **1_788_789_900_000**, computed with
 /// `python3 -c 'import datetime as d; print(int(d.datetime(2026,9,7,14,5,0,
-/// tzinfo=d.timezone.utc).timestamp()*1000))'` — plan erratum E6 is the brief
-/// that quoted `1_788_098_700_000` for this instant, which is
-/// `2026-08-30T14:05:00Z`, eight days earlier.
+/// tzinfo=d.timezone.utc).timestamp()*1000))'`.
 const POINT_IN_TIME: &str = "2026-09-07T14:05:00Z";
 const POINT_IN_TIME_MS: i64 = 1_788_789_900_000;
 
@@ -176,9 +174,7 @@ fn message_of<T: std::fmt::Debug>(r: Result<T, DrillError>) -> String {
     }
 }
 
-// ===========================================================================
-// THE MODE BRANCH (interface I33)
-// ===========================================================================
+// THE MODE BRANCH (interface I33).
 
 /// **The `newTopic` arm.** A cluster with no marker topic, absent from the
 /// allowlist, and equal to the source cluster id — all three of `scratch`'s
@@ -277,7 +273,7 @@ fn a_scratch_restore_still_requires_them() {
         m.contains("its existence is the v0.1 segregation proof"),
         "got: {m}"
     );
-    // PROD-01.2: a marker missing from the listing is absent OR not
+    // A marker missing from the listing is absent OR not
     // describable, and the refusal says both (measured on the `acl` profile:
     // a principal without Describe on an existing marker gets this arm).
     assert!(
@@ -293,8 +289,7 @@ fn a_scratch_restore_still_requires_them() {
 /// **Spec §6.1's existence rule, in BOTH modes**, on the exact sentence, with
 /// the cluster id and every offending topic named.
 ///
-/// The mutant this exists for: delete the refusal (or restore Task 8's
-/// pre-fix "reuse the topic" behaviour). Either returns `ExitCode::Ok` where
+/// Deleting the refusal, or reusing the topic, returns `ExitCode::Ok` where
 /// this asserts `GuardRefused`.
 #[test]
 fn a_restore_refuses_a_target_topic_that_already_exists() {
@@ -359,25 +354,19 @@ fn a_restore_refuses_a_target_topic_that_already_exists() {
     assert!(m.contains("mode scratch"), "got: {m}");
 }
 
-// ===========================================================================
-// THE NAMING (interface I33)
-// ===========================================================================
+// THE NAMING (interface I33).
 
-/// **A mapped target name that Kafka would refuse is refused at PHASE 0**
-/// (fix round 1, review F2), not at phase 5 by the broker.
+/// **A mapped target name that Kafka would refuse is refused at PHASE 0**,
+/// not at phase 5 by the broker.
 ///
 /// Three shapes, each through an explicit `topic_naming.prefix` because that
 /// is the adopter-written half — `examples/restore.yaml` suggests writing one
 /// by hand — and the exposure is the same for `target.topic_mapping_prefix`
 /// in `scratch` mode, which has always had it.
 ///
-/// Every row asserts the EXIT CODE, because the whole point of the finding is
-/// that these used to arrive as `EngineError::Operational` (exit 1, no
-/// artifact, no `refusal-reason=` line) from `create_target_topics` AFTER
-/// phase 5 had written into the workdir.
-///
-/// The mutant this exists for: delete the arm. All four assertions below then
-/// report `ExitCode::Ok` where they assert `GuardRefused`.
+/// Every row asserts the EXIT CODE: such a name must not arrive as
+/// `EngineError::Operational` (exit 1, no artifact, no `refusal-reason=` line)
+/// from `create_target_topics` AFTER phase 5 has written into the workdir.
 #[test]
 fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
     // (a) 250 characters. `orders` is six, so a 244-character prefix puts the
@@ -475,8 +464,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
 /// actually derives from it.
 #[test]
 fn the_default_new_topic_prefix_carries_the_point_in_time() {
-    // The instant, and its epoch-millisecond value, computed with python3
-    // before it was written here (plan erratum E6's rule):
+    // The instant, and its epoch-millisecond value, computed with python3:
     //   python3 -c 'import datetime as d; print(int(d.datetime(2026,9,7,14,5,0,
     //     tzinfo=d.timezone.utc).timestamp()*1000))'  ->  1788789900000
     let t = ts(POINT_IN_TIME);
@@ -527,9 +515,7 @@ fn the_default_new_topic_prefix_carries_the_point_in_time() {
     assert_eq!(target_topic_prefix(&spec), SCRATCH_PREFIX);
 }
 
-// ===========================================================================
-// PHASE 9 (Global Constraint 19)
-// ===========================================================================
+// PHASE 9 (Global Constraint 19).
 
 /// **Phase 9 tears nothing down outside `mode: scratch`**, and DOES tear down
 /// inside it — the second half is the control, without which a mutant that
@@ -606,9 +592,7 @@ fn a_new_topic_restore_tears_nothing_down() {
     assert!(att.topics_deleted.is_empty());
 }
 
-// ===========================================================================
-// THE OFFSET SIDE (Global Constraint 20, spec §6.1 N6/N9)
-// ===========================================================================
+// THE OFFSET SIDE (Global Constraint 20, spec §6.1 N6/N9).
 
 /// **The four offset-side keys are in the GOLDEN and in the RENDERER**, each as
 /// its own assertion.
@@ -650,9 +634,8 @@ fn the_rendered_restore_pins_the_four_offset_side_keys() {
         "the report's path is rendered from the plan, so plan_hash covers it:\n{golden}"
     );
     // All four are under `restore:` at the same indent as the keys around
-    // them. Indentation is part of the contract — plan erratum E3 is the SASL
-    // block that landed one indent too shallow and ran UNAUTHENTICATED behind
-    // four "Ignoring unknown config key" lines.
+    // them. Indentation is part of the contract: a block one indent too
+    // shallow is ignored by the engine with an "unknown config key" line.
     for key in [
         "consumer_group_strategy",
         "reset_consumer_offsets",
@@ -683,13 +666,9 @@ fn the_rendered_restore_pins_the_four_offset_side_keys() {
         );
     }
 
-    // AND THE RENDERER ITSELF, freshly, in this process. The golden read above
-    // is the artefact a reviewer looks at; this half is what makes the mutant
-    // "delete a line from `render_restore::render` AND from the golden in one
-    // edit" fail here rather than balance. Without it that pair of edits leaves
-    // insta green (the golden matches the render again) and this test green
-    // (the golden it reads no longer has the line) — the coordinated deletion
-    // the corpus arithmetic exists to catch, in the render layer.
+    // AND THE RENDERER ITSELF, freshly, in this process: deleting a line from
+    // `render_restore::render` AND from the golden in one edit leaves insta
+    // green and the golden read above green, and fails here.
     let doc = logweir_engine_oso::render_restore::render(&fixtures::plan())
         .expect("the fixture plan holds no glob metacharacter");
     for want in [
@@ -834,28 +813,17 @@ fn a_whole_run_uploads_the_offset_report_and_names_its_prefix() {
     assert_eq!(outcome.scorecard.target.topic_mapping_prefix, "drill-");
 }
 
-// ===========================================================================
-// I8 — THE THREE STDOUT LINES
-// ===========================================================================
+// I8 — THE THREE STDOUT LINES.
 
 /// **I8.** The final three stdout lines of a successful restore are
 /// `scorecard-key=<k>`, `sidecar-key=<k>`, `offset-report-key=<k>`, in that
 /// order, with nothing after them.
 ///
-/// # Why this row re-execs the test binary
-///
-/// Exactly interface I7's reason in `crates/logweir/tests/backup_run.rs`: the
-/// claim is about a PROCESS's stdout, `println!` cannot be captured in process
-/// without an fd redirect (a new dependency, which Global Constraint 38
-/// forbids), and `run_with`'s doubles cannot be handed to the `logweir` binary,
-/// which would additionally need a broker, a bucket and the engine. So the
-/// parent runs this binary's `#[ignore]`d child row, which performs the same
-/// in-process `run_with` against the same doubles and calls
-/// `std::process::exit` so libtest's own summary never reaches stdout after the
-/// three lines under test.
-///
-/// The child asserts nothing about ordering; the parent asserts everything,
-/// over bytes the child actually wrote to fd 1.
+/// The row re-execs the test binary for interface I7's reason in
+/// `crates/logweir/tests/backup_run.rs`: the claim is about a PROCESS's
+/// stdout, which cannot be captured in process without a new dependency, so
+/// the parent runs this binary's `#[ignore]`d child row and asserts
+/// everything over the bytes the child wrote to fd 1.
 ///
 /// The mutant this exists for: reorder the three `println!`s. The
 /// `starts_with` rows below then fail at assertion time.
@@ -946,9 +914,7 @@ fn the_i8_child_runs_one_restore_and_exits() {
     std::process::exit(code as u8 as i32);
 }
 
-// ===========================================================================
-// I8 AS AMENDED — A FAILED DRILL PUBLISHES ITS SIGNED EVIDENCE KEYS TOO
-// ===========================================================================
+// I8 AS AMENDED — A FAILED DRILL PUBLISHES ITS SIGNED EVIDENCE KEYS TOO.
 
 /// Re-exec one `#[ignore]`d child of this binary and return its exit code and
 /// stdout — the same mechanism as
@@ -964,8 +930,8 @@ fn failed_child(name: &str) -> (Option<i32>, String) {
     )
 }
 
-/// **FAILED-DRILL-EVIDENCE-UNPUBLISHED, the runner half.** Every exit-2 path
-/// signs and puts a scorecard, and each now names it on stdout exactly as a
+/// **The runner half.** Every exit-2 path signs and puts a scorecard, and each
+/// names it on stdout exactly as a
 /// pass does: `scorecard-key=`, `sidecar-key=` and — only when the engine
 /// wrote an offset report — `offset-report-key=`, as the FINAL lines, all one
 /// run's stem.
@@ -976,8 +942,8 @@ fn failed_child(name: &str) -> (Option<i32>, String) {
 /// phase 5's `preflight-failed` jump and phase 6's no-op interception (both
 /// without one, because no restore completed).
 ///
-/// MUTANTS this kills: `exiting` printing keys on `ExitCode::Ok` only (the
-/// pre-amendment rule — every arm fails at "no key line"); any one of the three
+/// MUTANTS this kills: `exiting` printing keys on `ExitCode::Ok` only (every
+/// arm fails at "no key line"); any one of the three
 /// sites passing `None` instead of `Some(EvidenceKeys::of(&signed))` (that
 /// arm fails); `report_with` mapping `NotPass` to `None` (every arm fails);
 /// an `offset-report-key=` printed for a run that had no report (the two
@@ -1139,9 +1105,7 @@ fn a_failed_drills_keys_name_the_objects_it_put() {
     }
 }
 
-// ===========================================================================
-// I20 — ONE GRAMMAR, TWO NAMES
-// ===========================================================================
+// I20 — ONE GRAMMAR, TWO NAMES.
 
 /// **I20.** `RestoreSpec` is the canonical name and `DrillSpec` is the same
 /// type, so every checked-in reference keeps compiling and neither name has
@@ -1215,7 +1179,7 @@ fn the_shipped_restore_example_deserialises_as_a_restore_spec() {
 
 /// The shipped example names the HOST-side MinIO endpoint in both storage
 /// blocks. `logweir` and the engine run on the host, so the compose SERVICE
-/// name does not resolve there (critique A F23).
+/// name does not resolve there.
 #[test]
 fn the_shipped_restore_example_is_host_side() {
     let text = include_str!("../../../examples/restore.yaml");
@@ -1247,9 +1211,9 @@ fn the_shipped_restore_example_is_host_side() {
 /// same exit code under either name; and the alias prints EXACTLY ONE line on
 /// stderr while the name prints none.
 ///
-/// No binary is run against a broker (critique A F1, Global Constraint 22); the
+/// No binary is run against a broker (Global Constraint 22); the
 /// byte-identity of two full runs against the real stack is `just mvp-demo`'s,
-/// in Task 12, under `#![cfg(feature = "e2e")]`.
+/// under `#![cfg(feature = "e2e")]`.
 #[test]
 fn cli_drill_run_is_an_alias_for_restore_run() {
     use clap::Parser;

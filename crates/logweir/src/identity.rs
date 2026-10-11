@@ -5,7 +5,7 @@
 //! and patch the retained identity objects. The long-lived controller and UI
 //! receive neither this code nor Secret-read permission.
 //!
-//! # PROD-16.1: three more things, all create-once
+//! # More things, all create-once
 //!
 //! * **The console's ConsoleConfirmation key** ([`ConsoleKeyArgs`]): the same
 //!   lifecycle as the installation identity — a retained Secret filled exactly
@@ -17,8 +17,8 @@
 //!   the run that GENERATES the installation identity — a fresh install; an
 //!   upgraded install's identity already existed, and an adopted one may
 //!   have — and ONLY for a console whose key this same install GENERATED
-//!   (the fix round of 2026-10-08: no console, or an adopted console key,
-//!   creates nothing), one cluster-scoped `default: true` policy trusting
+//!   (no console, or an adopted console key, creates nothing), one
+//!   cluster-scoped `default: true` policy trusting
 //!   exactly the installation signer (`EvidenceSigning`) and that console
 //!   key (`ConsoleConfirmation`), so a first restore reaches a verified
 //!   result with no key handled by a person. Never when the cluster's trust
@@ -37,9 +37,8 @@
 //!   identity ConfigMap naming the policy by name and UID and both key ids.
 //!   The console and the controller honour it only beside that exact,
 //!   hook-made trust entry (`logweir_core::approval_policy::verify_marker`),
-//!   so an annotation patched into an older install changes nothing — the
-//!   PROD-16.1 security review's requirement that no single object edit can
-//!   do what two gates did before.
+//!   so an annotation patched into an older install changes nothing: no
+//!   single object edit can do what two gates do.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -64,7 +63,7 @@ const SERVICE_ACCOUNT_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount
 /// `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT_HTTPS` naming the API
 /// server. The chart never sets it; it exists so the same binary can run the
 /// same steps from a workstation under a narrowly bound account's token
-/// (PROD-16.1's host proof, a break-glass re-run). It grants nothing: the
+/// (a break-glass re-run). It grants nothing: the
 /// token's own RBAC is the whole authority.
 const SERVICE_ACCOUNT_DIR_ENV: &str = "LOGWEIR_SERVICE_ACCOUNT_DIR";
 const IDENTITY_STATE_ANNOTATION: &str = "logweir.dev/identity-state";
@@ -75,7 +74,7 @@ const PUBLIC_ALGORITHM: &str = "algorithm";
 const TRUST_REFERENCE: &str = "trust-reference";
 const DEFAULT_TRUST_REFERENCE: &str = "logweir.dev/v1alpha1/TrustRoster/default#spec.signingKeys";
 
-/// PROD-16.1: on the public identity ConfigMap, what the fresh install's
+/// On the public identity ConfigMap, what the fresh install's
 /// trust step did — a record for the operator. Nothing reads it to decide
 /// anything: the step runs only in the identity-generating run.
 const INSTALLATION_TRUST_ANNOTATION: &str = "logweir.dev/installation-trust";
@@ -120,15 +119,15 @@ pub struct BootstrapArgs {
     pub secret_key: String,
     pub public_configmap_name: String,
     pub external_secret: Option<(String, String)>,
-    /// PROD-16.1: mark a GENERATED identity as a fresh install whose unbound
+    /// Mark a GENERATED identity as a fresh install whose unbound
     /// namespaces start in `confirm`.
     pub mark_fresh_install_confirm: bool,
-    /// PROD-16.1: the managed console confirmation key, when the chart
+    /// The managed console confirmation key, when the chart
     /// manages one.
     pub console: Option<ConsoleKeyArgs>,
-    /// PROD-16.1: the installation `TrustPolicy`, when the chart asks for one.
+    /// The installation `TrustPolicy`, when the chart asks for one.
     pub installation_trust: Option<InstallationTrustArgs>,
-    /// PROD-16.1 security review: the install-only ClusterRoleBinding that
+    /// The install-only ClusterRoleBinding that
     /// grants the trust step, deleted at the end of every run.
     pub revoke_trust_binding: Option<String>,
 }
@@ -149,8 +148,8 @@ pub struct InstallationTrustArgs {
 }
 
 /// What `logweir identity …` runs: the parsed subcommand's arguments, mapped
-/// ONCE, here — `main` runs it, and FX-15's row parses the chart's own
-/// rendered hook argv through it.
+/// ONCE, here — `main` runs it, and a row parses the chart's own rendered
+/// hook argv through it.
 #[derive(Debug)]
 pub enum Invocation {
     /// `identity bootstrap`.
@@ -278,7 +277,7 @@ struct PublicRecord {
     data_keys: BTreeSet<String>,
     has_any_data: bool,
     has_annotations: bool,
-    /// PROD-16.1: every annotation.
+    /// Every annotation.
     annotations: BTreeMap<String, String>,
 }
 
@@ -289,8 +288,8 @@ impl PublicRecord {
 }
 
 /// Where a public record keeps its PEM and its reference. The installation
-/// identity's layout is the one PLAT-02.1 shipped, byte for byte; the console
-/// key's (PROD-16.1) differs only in the two key names and the fixed value.
+/// identity's layout is unchanged since its first release, byte for byte; the
+/// console key's differs only in the two key names and the fixed value.
 #[derive(Debug, Clone, Copy)]
 struct PublicLayout {
     pem_key: &'static str,
@@ -363,7 +362,7 @@ trait IdentityStore {
         material: &PublicMaterial,
         markers: &[Marker<'_>],
     ) -> Result<InitializeResult, String>;
-    /// PROD-16.1: annotations on the public identity ConfigMap, in one
+    /// Annotations on the public identity ConfigMap, in one
     /// patch, under a `resourceVersion` precondition.
     fn annotate_public(
         &mut self,
@@ -371,9 +370,9 @@ trait IdentityStore {
         has_annotations: bool,
         markers: &[Marker<'_>],
     ) -> Result<InitializeResult, String>;
-    /// PROD-16.1: the console key's retained Secret.
+    /// The console key's retained Secret.
     fn console_private(&mut self, console: &ConsoleKeyArgs) -> Result<PrivateRecord, String>;
-    /// PROD-16.1: the console key's public ConfigMap.
+    /// The console key's public ConfigMap.
     fn console_public(&mut self, console: &ConsoleKeyArgs) -> Result<PublicRecord, String>;
     fn initialize_console_private(
         &mut self,
@@ -389,13 +388,13 @@ trait IdentityStore {
         has_annotations: bool,
         material: &PublicMaterial,
     ) -> Result<InitializeResult, String>;
-    /// PROD-16.1: every `TrustPolicy` in the cluster (a read).
+    /// Every `TrustPolicy` in the cluster (a read).
     fn trust_policies(&mut self) -> Result<Vec<Value>, String>;
-    /// PROD-16.1: whether `TrustRoster/default` exists (a read).
+    /// Whether `TrustRoster/default` exists (a read).
     fn trust_roster_exists(&mut self) -> Result<bool, String>;
-    /// PROD-16.1: create the installation `TrustPolicy`.
+    /// Create the installation `TrustPolicy`.
     fn create_trust_policy(&mut self, policy: &Value) -> Result<CreateResult, String>;
-    /// PROD-16.1 security review: delete one ClusterRoleBinding by name.
+    /// Delete one ClusterRoleBinding by name.
     fn delete_cluster_role_binding(&mut self, name: &str) -> Result<Revocation, String>;
 }
 
@@ -516,8 +515,8 @@ fn trust_notice(trust: &str, report: &Report) -> Option<String> {
     )
 }
 
-/// NO STANDING GRANT, ON EVERY EXIT PATH THIS BINARY CONTROLS (the PROD-16.1
-/// fix round of 2026-10-08, review H1). Helm 3.12–3.18 keeps the install's
+/// NO STANDING GRANT, ON EVERY EXIT PATH THIS BINARY CONTROLS. Helm
+/// 3.12–3.18 keeps the install's
 /// `<release>-identity-trust` grant when this Job fails, so the hook revokes
 /// it itself whatever happened: after the steps (`bootstrap_and_revoke`),
 /// after a failed step, after a store that could not be opened, after a
@@ -629,7 +628,7 @@ fn revocation_target(argv: &[String]) -> Option<String> {
 }
 
 /// The whole hook over one store, as the test rows drive it: the
-/// installation identity, then (PROD-16.1) the console key, then — ONLY when
+/// installation identity, then the console key, then — ONLY when
 /// this run generated the identity — the fresh install's trust and marker,
 /// then the revocation.
 #[cfg(test)]
@@ -651,8 +650,8 @@ fn bootstrap_all(
 }
 
 /// The steps, then the revocation through the same store whatever the steps
-/// did (PROD-16.1 security review: NO STANDING GRANT; Helm's hook cleanup
-/// deletes it too, on Helm ≥ 3.19 even when this Job fails).
+/// did: no standing grant (Helm ≥ 3.19's hook cleanup deletes it too, even
+/// when this Job fails).
 fn bootstrap_and_revoke(
     store: &mut impl IdentityStore,
     args: &BootstrapArgs,
@@ -982,16 +981,14 @@ fn validate_public(
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.1: the console's ConsoleConfirmation key
-// ---------------------------------------------------------------------------
+// The console's ConsoleConfirmation key.
 
 /// Generate, adopt or validate the console key — the installation identity's
 /// lifecycle, applied to a second Secret.
 ///
 /// * A Secret that already holds a key at the configured data key is that key
 ///   — ADOPTED when nothing marked it established (a hand-made Secret, as
-///   every PLAT-19.2 install created), EXISTING when this hook did. Never
+///   older installs created), EXISTING when this hook did. Never
 ///   replaced.
 /// * A Secret with other data, or a published public half without a private
 ///   key, is refused: the first could be someone else's object, and the
@@ -1123,9 +1120,7 @@ fn ensure_console_public(
     }
 }
 
-// ---------------------------------------------------------------------------
-// PROD-16.1: the installation TrustPolicy
-// ---------------------------------------------------------------------------
+// The installation TrustPolicy.
 
 /// The fresh install's `TrustPolicy` and marker — called ONLY in the run that
 /// generated the installation identity.
@@ -1154,7 +1149,7 @@ fn fresh_install_trust(
     let Some(trust) = &args.installation_trust else {
         return Ok(None);
     };
-    // THE FIX ROUND OF 2026-10-08 (review M2 and L1): the automatic trust
+    // The automatic trust
     // exists for the console's one-click confirmation and for nothing else.
     // No console key, no confirm marker requested, or a console key this
     // install did NOT generate (a hand-made Secret of that name, adopted; a
@@ -1245,11 +1240,11 @@ fn fresh_install_trust(
     Ok(Some(recorded))
 }
 
-/// BELT AND BRACES (PROD-16.1 security review): the one TrustPolicy this hook
+/// BELT AND BRACES: the one TrustPolicy this hook
 /// may create declares EXACTLY the installation signer with `EvidenceSigning`
 /// and the console key with `ConsoleConfirmation` — never another key, never
-/// another usage, never a namespace list, never the signer alone (the fix
-/// round: no automatic trust without the console) — carries the hook's
+/// another usage, never a namespace list, never the signer alone (no
+/// automatic trust without the console) — carries the hook's
 /// provenance and confirm annotations, and is the default policy. Checked on
 /// the bytes about to be POSTed.
 fn guard_installation_policy(
@@ -1321,9 +1316,9 @@ enum TrustOutcome {
 /// One attempt: read what trust the cluster has, then create the policy or
 /// say why not. ANY existing TrustPolicy — a default one, a namespaced one,
 /// one of this name — or `TrustRoster/default` means the cluster's trust is
-/// administered, and the hook adds nothing beside it (the fix round, review
-/// L2: a default policy created next to namespaced ones would turn every
-/// other unbound namespace into confirm).
+/// administered, and the hook adds nothing beside it (a default policy
+/// created next to namespaced ones would turn every other unbound namespace
+/// into confirm).
 fn create_installation_trust(
     store: &mut impl IdentityStore,
     name: &str,
@@ -1984,8 +1979,8 @@ fn annotation_ops(has_annotations: bool, annotations: &[Marker<'_>]) -> Vec<Valu
     }
 }
 
-/// `identity-state: established` first (its position is pinned by a test of
-/// the PLAT-02.1 shape), then any PROD-16.1 markers.
+/// `identity-state: established` first (its position is pinned by a test),
+/// then any markers.
 fn established_with<'a>(markers: &[Marker<'a>]) -> Vec<Marker<'a>> {
     std::iter::once((IDENTITY_STATE_ANNOTATION, ESTABLISHED))
         .chain(markers.iter().copied())
@@ -2206,14 +2201,13 @@ mod tests {
         private: PrivateRecord,
         public: PublicRecord,
         external: Result<String, String>,
-        /// FX-15: when set, `external` is served only under this Secret name
+        /// When set, `external` is served only under this Secret name
         /// and data key, as the API server would.
         external_at: Option<(String, String)>,
         private_patch_error: Option<String>,
         concurrent_private: Option<String>,
         empty_private_contention: bool,
         public_conflict: bool,
-        // PROD-16.1
         console_private: PrivateRecord,
         console_public: PublicRecord,
         policies: Vec<Value>,
@@ -2228,7 +2222,7 @@ mod tests {
         grant: Option<bool>,
         /// The order of the calls that matter: create, then revoke.
         calls: Vec<&'static str>,
-        /// The fix round: a step that panics, and a delete that errors.
+        /// A step that panics, and a delete that errors.
         panic_in_console: bool,
         revoke_error: bool,
     }
@@ -2502,7 +2496,7 @@ mod tests {
         }
     }
 
-    /// The chart's PROD-16.1 arguments: the marker, the managed console key
+    /// The chart's arguments: the marker, the managed console key
     /// and the installation TrustPolicy.
     fn chart_args() -> BootstrapArgs {
         BootstrapArgs {
@@ -3006,9 +3000,7 @@ mod tests {
         assert_eq!(result, InitializeResult::Contended(422));
     }
 
-    // ------------------------------------------------------------------
-    // PROD-16.1: the console key, and the fresh install's trust and marker
-    // ------------------------------------------------------------------
+    // The console key, and the fresh install's trust and marker.
 
     use logweir_core::approval_policy::{
         verify_marker, InstallationMarker, MarkerRefusal, TrustKeyFacts, TrustPolicyFacts,
@@ -3151,7 +3143,7 @@ mod tests {
         );
     }
 
-    /// THE FIX ROUND OF 2026-10-08 (review M2): an install that never uses
+    /// An install that never uses
     /// confirm gets nothing new. Without the console key, or without the
     /// confirm marker requested, the hook creates NO TrustPolicy — not even a
     /// signer-only one — and marks nothing; the grant is still revoked.
@@ -3205,7 +3197,7 @@ mod tests {
         }
     }
 
-    /// THE FIX ROUND (review L1): a console key this install did NOT
+    /// A console key this install did NOT
     /// generate — a hand-made Secret of the managed name planted before the
     /// first install — is adopted and published, and trusted NOWHERE
     /// automatically: no policy, no marker.
@@ -3227,10 +3219,10 @@ mod tests {
         assert_eq!(read_marker(&store), Ok(InstallationMarker::Unmarked));
     }
 
-    /// THE UPGRADE NEVER WEAKENS APPROVAL (the PROD-16.1 security review).
-    /// An install whose identity already existed — established by an earlier
-    /// chart, hand-provisioned before the managed identity (rehearsal R1), or
-    /// adopted — gets no TrustPolicy, its console key is trusted nowhere, and
+    /// THE UPGRADE NEVER WEAKENS APPROVAL. An install whose identity already
+    /// existed — established by an earlier chart, hand-provisioned before the
+    /// managed identity, or adopted — gets no TrustPolicy, its console key is
+    /// trusted nowhere, and
     /// nothing is marked. Then the ATTACK: a marker patched into the
     /// ConfigMap, bare or as a forged claim, is ignored.
     #[test]
@@ -3337,8 +3329,8 @@ mod tests {
             "metadata": {"name": "logweir-installation", "uid": "u3"},
             "spec": {"default": true, "keys": []}
         }));
-        // THE FIX ROUND (review L2): namespaced trust only — the PoC's shape —
-        // is administered trust too; a default policy beside it would turn
+        // Namespaced trust only is administered trust too; a default policy
+        // beside it would turn
         // every other unbound namespace into confirm.
         let mut namespaced = MemoryStore::fresh();
         namespaced.policies.push(json!({
@@ -3424,7 +3416,7 @@ mod tests {
 
     #[test]
     fn a_hand_made_console_key_is_adopted_and_published() {
-        // Every PLAT-19.2 install created `logweir-console-confirmation` by
+        // Older installs created `logweir-console-confirmation` by
         // hand (`openssl genpkey -algorithm ed25519`). It is that key.
         let hand = SigningKey::generate_ed25519();
         let mut store = MemoryStore::fresh();
@@ -3543,9 +3535,7 @@ mod tests {
         assert!(error.contains("HTTP 403"), "{error}");
     }
 
-    // ------------------------------------------------------------------
-    // PROD-16.1 security review: no standing trust grant
-    // ------------------------------------------------------------------
+    // No standing trust grant.
 
     #[test]
     fn the_fresh_install_revokes_its_trust_grant_right_after_creating_the_policy() {
@@ -3633,8 +3623,8 @@ mod tests {
             Ok(())
         );
         // NEGATIVE CONTROLS: another key, another usage, a namespace list,
-        // not the default, the signer alone (the fix round: no automatic
-        // trust without the console), no provenance, no confirm annotation.
+        // not the default, the signer alone (no automatic trust without the
+        // console), no provenance, no confirm annotation.
         let other = public_material(&SigningKey::generate_p256()).unwrap();
         let mut extra = exact.clone();
         extra["spec"]["keys"]
@@ -3712,10 +3702,7 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // PROD-16.1 fix round (2026-10-08, review H1): the revocation on every
-    // exit path this binary controls
-    // ------------------------------------------------------------------
+    // The revocation on every exit path this binary controls.
 
     /// What the fallback revocation was asked to delete, by name.
     fn fallback(
@@ -3879,7 +3866,7 @@ mod tests {
     }
 
     /// The automatic trust is reachable only with the console key and the
-    /// confirm marker (review M2): clap refuses the trust flag alone, so a
+    /// confirm marker: clap refuses the trust flag alone, so a
     /// chart that renders it without a console fails loudly, before any
     /// step.
     #[test]
@@ -3914,7 +3901,7 @@ mod tests {
         assert!(parse(&all));
     }
 
-    /// The second-pass review's wording LOW: a skipped trust step's notice
+    /// A skipped trust step's notice
     /// names BOTH halves of the opt-in (the keys on the policy AND the
     /// approval-policy default), because the keys alone leave an unbound
     /// namespace strict.
@@ -3988,7 +3975,7 @@ mod tests {
         }
     }
 
-    /// **FX-15: `identity.externalSecret.*` and `identity.publicConfigMapName`
+    /// **`identity.externalSecret.*` and `identity.publicConfigMapName`
     /// reach the hook's reads at NON-default values** — from the chart's own
     /// render (`examples/identity-external.values.yaml`), through clap and the
     /// one argument mapping `main` uses, to what the hook does: it ADOPTS the

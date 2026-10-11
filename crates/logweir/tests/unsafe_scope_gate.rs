@@ -1,5 +1,5 @@
 //! **The `unsafe` perimeter gate, and the negative controls that keep it a
-//! gate** (PROD-04.0b; OD-6 (a2); `decisions/PROD-04.0-admin-path.md` §7.4).
+//! gate** (OD-6 (a2); `decisions/PROD-04.0-admin-path.md` §7.4).
 //!
 //! `scripts/check-unsafe-scope.sh` is the gate: exactly one crate,
 //! `crates/logweir-rdkafka-ffi`, may contain `unsafe`, only in its `src/`,
@@ -15,7 +15,7 @@
 //! |---|---|---|
 //! | `the_gate_is_green_on_this_tree` | nothing | exit 0, "the perimeter holds" |
 //! | `a_root_without_forbid_is_named` | a lib root and an example root without the attribute; a root with it commented out | each file, "without #![forbid(unsafe_code)]" |
-//! | `code_shaped_unsafe_outside_the_perimeter_is_named` | eighteen files outside the perimeter's `src/`, one construct each (the review's six and M2's four included), one under a nested `upstream/`, one inside the perimeter's own `tests/` | each `file:line` |
+//! | `code_shaped_unsafe_outside_the_perimeter_is_named` | eighteen files outside the perimeter's `src/`, one construct each, one under a nested `upstream/`, one inside the perimeter's own `tests/` | each `file:line` |
 //! | `rustc_forbids_unsafe_in_every_target_through_the_workspace_lints` | the workspace table relaxed; a member without `[lints] workspace = true`; the perimeter taking it | each named |
 //! | `prose_strings_and_chars_are_not_code` | the word in comments, strings, raw strings, byte strings; char literals and lifetimes beside it | exit 0 |
 //! | `the_perimeter_is_exactly_one_crate_reached_only_through_logweir_kafka` | a second crate without `forbid` or the lints opt-in; a crate depending on the perimeter; the perimeter depending on another crate | each named |
@@ -194,9 +194,7 @@ fn a_root_without_forbid_is_named() {
 fn code_shaped_unsafe_outside_the_perimeter_is_named() {
     let ov = Overlay::new("shapes");
     // One file per construct, each in an integration-test target (a crate of
-    // its own, which no root attribute reaches). The six marked "review" are
-    // the constructs PROD-04.0b's review found passing the first gate (M1),
-    // and `export_name`, `link_section`, `warn` and `expect` are M2's.
+    // its own, which no root attribute reaches).
     let probes = [
         ("block", "pub fn f(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n"),
         ("function", "pub unsafe fn g() {}\n"),
@@ -210,22 +208,22 @@ fn code_shaped_unsafe_outside_the_perimeter_is_named() {
         ("warn", "#![warn(unsafe_code)]\npub fn w() {}\n"),
         ("expect", "#[expect(unsafe_code)]\npub fn x() {}\n"),
         ("attribute", "#[unsafe(no_mangle)]\npub fn m() {}\n"),
-        // review S1: a macro whose expansion is the `unsafe` block
+        // A macro whose expansion is the `unsafe` block
         ("macro", "macro_rules! s { ($($t:tt)*) => { unsafe $($t)* }; }\npub fn r(p: *const u8) -> u8 { s!({ *p }) }\n"),
-        // review S2: the attribute behind `cfg_attr`
+        // The attribute behind `cfg_attr`
         ("cfgattr", "#[cfg_attr(all(), no_mangle)]\npub extern \"C\" fn c() {}\n"),
-        // review S3: text the scan never reads
+        // Text the scan never reads
         ("include", "include!(\"sneak.in\");\n"),
-        // review S5: module-level assembly needs no `unsafe` token
+        // Module-level assembly needs no `unsafe` token
         ("globalasm", "std::arch::global_asm!(\"nop\");\n"),
-        // review S6: the perimeter's exempt source compiled into another crate
+        // The perimeter's exempt source compiled into another crate
         ("pathin", "#[path = \"../../logweir-rdkafka-ffi/src/zz_not_a_module.rs\"]\nmod m;\n"),
         ("pathout", "#[path = \"/etc/zz_outside.rs\"]\nmod o;\n"),
     ];
     for (name, body) in probes {
         ov.write(&format!("crates/logweir-store/tests/zz_{name}.rs"), body);
     }
-    // review S4: a directory named like a root-level prune target, deeper down.
+    // A directory named like a root-level prune target, deeper down.
     ov.write(
         "crates/logweir-store/tests/upstream/mod.rs",
         "pub fn u(p: *const u8) -> u8 { unsafe { *p } }\n",
@@ -263,7 +261,7 @@ fn code_shaped_unsafe_outside_the_perimeter_is_named() {
     );
 }
 
-/// **Rustc is the first layer** (PROD-04.0b's fix round, review M1): the
+/// **Rustc is the first layer**: the
 /// root's `[workspace.lints.rust] unsafe_code = "forbid"`, taken by every
 /// member but the perimeter, makes rustc refuse `unsafe` in every target. The
 /// gate requires the table and each opt-in, and refuses the perimeter taking it.
@@ -418,13 +416,11 @@ fn just_lint_runs_the_unsafe_scope_gate() {
     );
 }
 
-/// **AP-04.1-4's gate (T1).** rust-rdkafka 0.36.2's `GroupInfo::members` is
-/// undefined behaviour on a group without members; the workspace `clippy.toml`
-/// lists it under `disallowed-methods`, so `cargo clippy -D warnings` refuses
-/// any call. This fails when the entry is missing while `Cargo.lock` carries
-/// rdkafka below 0.37 (where the defect is fixed). The mutant that deletes the
-/// entry makes it red; a call to the method makes clippy red (recorded in
-/// the PROD-04.0b report).
+/// rust-rdkafka 0.36.2's `GroupInfo::members` is undefined behaviour on a
+/// group without members; the workspace `clippy.toml` lists it under
+/// `disallowed-methods`, so `cargo clippy -D warnings` refuses any call. This
+/// fails when the entry is missing while `Cargo.lock` carries rdkafka below
+/// 0.37 (where the defect is fixed).
 #[test]
 fn the_unsound_group_member_accessor_is_fenced_while_rdkafka_is_below_0_37() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).expect("Cargo.lock");

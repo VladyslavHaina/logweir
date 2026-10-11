@@ -1,14 +1,11 @@
-//! **PROD-03.0: schema dependency detection holds a bounded amount of memory,
+//! **Schema dependency detection holds a bounded amount of memory,
 //! whatever the segment.**
 //!
 //! Detection runs inside a backup that has already succeeded, so a segment
 //! that made it hold its records — or a decompression bomb — could OOM-kill a
-//! runner whose archive exists (the class of FX-23's M1). The first version
-//! decoded every record of a sampled segment into owned keys and values. The
-//! security review made it stream, keeping six bytes of each key and value. The
-//! Tier A review then measured two shapes that still cost 135–263 MB (M1),
-//! fixed in the fix round:
-//! - a zstd frame declaring a 2^27 window: the decoder allocated and touched it;
+//! runner whose archive exists. Detection streams, keeping six bytes of each
+//! key and value, and two shapes are bounded explicitly:
+//! - a zstd frame declaring a 2^27 window: the decoder would allocate it;
 //! - an lz4 body decompressed whole.
 //!
 //! ONE test, measured in CHILD processes, the way
@@ -28,8 +25,8 @@
 //! | `baseline` | one small record | (the reference) |
 //! | `large` | 3 000 records of 64 KiB zero-padded values, zstd, ~190 MiB decompressed | add at most `BOUND`, judged `schemaDependent (sampled)` |
 //! | `bomb` | one value of 1 GiB of zeros, zstd level 3, ~40 KiB stored | add at most `BOUND`, `segmentTooLargeForDetection` at the 256 MiB output cap |
-//! | `window` | the same bomb in a frame declaring a 2^27 window (review M1) | add at most `BOUND`, `segmentTooLargeForDetection` before decoding |
-//! | `lz4` | one ~250 MiB value as an lz4 block, ~1 MiB stored (review M1) | add at most `BOUND`, judged (streamed, never held) |
+//! | `window` | the same bomb in a frame declaring a 2^27 window | add at most `BOUND`, `segmentTooLargeForDetection` before decoding |
+//! | `lz4` | one ~250 MiB value as an lz4 block, ~1 MiB stored | add at most `BOUND`, judged (streamed, never held) |
 //! | `stored` | one ~16 MiB incompressible value, uncompressed, just under the 16 MiB stored cap | add at most `BOUND`: the stored bytes are held, nothing more |
 //! | `control` | the `large` segment through `kbak::decode_segment`, which materialises its records | add many times `BOUND` (the meter sees a reader that holds records) |
 //!

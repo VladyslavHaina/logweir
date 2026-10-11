@@ -4,25 +4,19 @@ use logweir::drill::InvokedAs;
 use logweir::{cli, exit, schema, show, verify};
 
 fn main() -> std::process::ExitCode {
-    // `cli::Cli::parse()` (via clap's `Parser::parse`) calls `Error::exit()`
-    // on any usage error, which hardcodes exit code 2. Global Constraint 11
-    // reserves 2 for "a drill result that is not a pass — a scorecard IS
-    // written and signed", and this is a published interface a CronJob and a
-    // CI job branch on. A typo'd flag or a chart bump that drops a flag must
-    // never be reported as "the drill ran and did not pass": no drill ran
-    // and no scorecard exists. So usage errors are handled explicitly here
-    // and mapped to `ExitCode::Operational` (1) instead, while `--help` and
-    // `--version` (which clap also routes through `Err`, printing to stdout)
-    // keep exiting 0.
+    // clap's `Parser::parse` exits 2 on a usage error, and Global Constraint
+    // 11 reserves 2 for "a drill ran and did not pass; a signed scorecard
+    // exists". A typo'd flag runs no drill, so usage errors map to
+    // `ExitCode::Operational` (1) here, while `--help` and `--version` (also an
+    // `Err` from clap) keep exiting 0.
     let args = match cli::Cli::try_parse() {
         Ok(a) => a,
         Err(e) => {
             let _ = e.print();
             return if e.use_stderr() {
-                // PROD-16.1 fix round (review H1): an `identity bootstrap`
-                // that clap refused ran none of its steps, so nothing else
-                // would delete the install's trust grant; the arguments
-                // still name it.
+                // An `identity bootstrap` that clap refused ran none of its
+                // steps, so nothing else would delete the install's trust
+                // grant; the arguments still name it.
                 let argv: Vec<String> = std::env::args_os()
                     .map(|a| a.to_string_lossy().into_owned())
                     .collect();
@@ -41,11 +35,6 @@ fn main() -> std::process::ExitCode {
             }
         },
         cli::Command::Schema { which } => schema::run(&which),
-        // PLAT-15.1 / decision D3 §5. Dispatched here for the structural
-        // reason the comment at the end of this match records: the arm list is
-        // exhaustive with no catch-all, so a `catalog` subcommand added to
-        // `cli.rs` and not wired here is a COMPILE error rather than a runtime
-        // stub.
         cli::Command::Catalog(cli::CatalogCmd::Sync {
             location,
             signing_key,
@@ -70,14 +59,9 @@ fn main() -> std::process::ExitCode {
             max,
             days,
         }),
-        // PLAT-19.1 / decision D3 §7.1 and §7.5. Dispatched here for the
-        // structural reason the comment at the end of this match records: the
-        // arm list is exhaustive with no catch-all, so a `trust` subcommand
-        // added to `cli.rs` and not wired here is a COMPILE error rather than
-        // a runtime stub. `stdin` is a flag rather than a value, and clap's
-        // `required_unless_present`/`conflicts_with` pair makes exactly one of
-        // it and `--from` present — so `from` deciding the input here cannot
-        // silently ignore a `--stdin` the operator also passed.
+        // clap's `required_unless_present`/`conflicts_with` pair makes exactly
+        // one of `--stdin` and `--from` present, so `from` deciding the input
+        // cannot silently ignore a `--stdin` the operator also passed.
         cli::Command::Trust(cli::TrustCmd::Export {
             policy,
             stdin: _,
@@ -98,11 +82,6 @@ fn main() -> std::process::ExitCode {
             namespaces: namespace,
             input: from.map_or(logweir::trust::Input::Stdin, logweir::trust::Input::File),
         }),
-        // Decision D2 §4.2 / D-SEAMS S1. Dispatched here for the structural
-        // reason the comment at the end of this match records: the arm list is
-        // exhaustive with no catch-all, so a `check` subcommand added to
-        // `cli.rs` and not wired here is a COMPILE error rather than a runtime
-        // stub.
         cli::Command::Check(cli::CheckCmd::Run {
             plan,
             check_contract_version,
@@ -124,7 +103,7 @@ fn main() -> std::process::ExitCode {
             consumer_groups,
             line_token,
         }) => {
-            // FX-34: the Job's line token, held for the one line that carries
+            // The Job's line token, held for the one line that carries
             // it. Set here, once, before anything runs.
             logweir::exit::set_line_token(line_token);
             logweir::backup::run(&logweir::backup::BackupRunArgs {
@@ -141,13 +120,6 @@ fn main() -> std::process::ExitCode {
                 consumer_groups,
             })
         }
-        // Task 15c, interface I14. Dispatched here for the structural reason
-        // the comment at the end of this match records: the arm list is
-        // exhaustive with no catch-all, so a subcommand added to `cli.rs` and
-        // not wired here is a COMPILE error rather than a runtime stub. That is
-        // also why `crates/logweir/src/main.rs` is edited by this task although
-        // the brief's Files block names only `cli.rs` — the two cannot move
-        // apart.
         cli::Command::ClusterProbe {
             bootstrap,
             auth_mode,
@@ -221,7 +193,7 @@ fn main() -> std::process::ExitCode {
         // is printed on stderr. There is deliberately no second code path for
         // the alias — an alias that could behave differently is not an alias.
         cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
-            // FX-34: see the `backup run` arm.
+            // See the `backup run` arm.
             logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::Restore)
         }
@@ -229,18 +201,11 @@ fn main() -> std::process::ExitCode {
             logweir::exit::set_line_token(a.line_token.clone());
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
         }
-        // Task 22 (carried obligation 1). `show::run` has been implemented and
-        // golden-tested since `d403abc`, but this match ended in a `_ =>` arm
-        // that printed "not yet implemented in this task" — so the ONLY way to
-        // reach the renderer was to link the library from a test. The shipped
-        // binary silently had no `drill show`.
-        //
-        // There is deliberately NO catch-all arm now. With every variant named,
-        // adding a subcommand to `cli.rs` without dispatching it is a compile
-        // error (`non-exhaustive patterns`), not a runtime stub that a reader
-        // discovers from a message. That is the structural half of the fix; the
-        // wiring is the other half, and `crates/logweir/tests/cli_show.rs`
-        // asserts the compiled binary, not the library, renders a table.
+        // NO catch-all arm: with every variant named, a subcommand added to
+        // `cli.rs` and not dispatched here is a compile error
+        // (`non-exhaustive patterns`), not a runtime stub.
+        // `crates/logweir/tests/cli_show.rs` asserts the compiled binary
+        // renders a table.
         cli::Command::Drill(cli::DrillCmd::Show { scorecard, format }) => {
             show::run(&scorecard, &format)
         }

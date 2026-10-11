@@ -1,19 +1,16 @@
 //! **The engine pin is ONE build, and everything that names it agrees.**
 //!
-//! PROD-00.3f moved OSO's release from `kafka-backup` 0.21.0 to 0.23.3
-//! (`docs/to-do/decisions/PROD-00-engine-route.md` section 12). PROD-00.2
-//! (OD-3) made what ships LOGWEIR'S BUILD of that release's vendored source,
-//! `0.23.3+logweir.1` (FX-21's patch 0002 made it `0.23.3+logweir.2`, and
-//! PROD-00.3g's patch 0003 `0.23.3+logweir.3`), and kept
-//! OSO's own binary as the one-release rollback.
+//! What ships is LOGWEIR'S BUILD of OSO's 0.23.3 vendored source
+//! (`0.23.3+logweir.3`, patches 0002 and 0003), and OSO's own binary is kept
+//! as the one-release rollback.
 //! So there are two values, and each place names the one it should:
 //!
 //! | place | names | what goes wrong when it lags |
 //! |---|---|---|
 //! | `logweir::doctor::ENGINE_PIN` | the build | `doctor` refuses the shipped engine, or accepts another build |
 //! | `third_party/kafka-backup-build.env` `ENGINE_VERSION` | the build | the image stamps a version `doctor` refuses |
-//! | `crates/weirkeeper/src/job.rs` | nothing, since PROD-00.2's review | the controller becomes a source of the engine identity again, and a runner image it was not built with signs the wrong engine (review L3) |
-//! | PROD-01.1's `CONTRACT_ENGINE` (`record_semantics.rs`) | the build | every contract row on the shipped engine records its outcome, asserts NOTHING, and stays green (A-3f-1) |
+//! | `crates/weirkeeper/src/job.rs` | nothing | the controller becomes a source of the engine identity, and a runner image it was not built with signs the wrong engine |
+//! | `CONTRACT_ENGINE` (`record_semantics.rs`) | the build | every contract row on the shipped engine records its outcome, asserts NOTHING, and stays green |
 //! | `e2e/fixtures/fake-engine-ok.sh` | the build | `doctor`'s own tests stop exercising the accepting path |
 //! | `examples/cronjob-drill.yaml` and `docs/quickstart.md`'s `export` lines | the build | an adopter's standalone run signs an engine its image does not carry |
 //! | `logweir::doctor::ENGINE_UPSTREAM_RELEASE` | the release | `doctor` names the rollback wrongly |
@@ -37,14 +34,10 @@
 //! **WHY IT LIVES IN `logweir`'s TESTS AND NEVER IN THE `e2e` PACKAGE.**
 //! `third_party/kafka-backup-binary.digest` is the pin only in a checked-out
 //! tree. Each `engine-matrix` row overwrites it, and `.engine/`, with ITS
-//! engine (`.github/workflows/engine-matrix.yml`, "Extract this engine and
-//! point the stack at it") and then runs `cargo test -p e2e --features e2e`.
-//! This file first lived at `e2e/tests/engine_pin.rs`, and run 37728540932
-//! recorded the floor row (v0.21.0) and the operator-default row (v0.22.0)
-//! as `fail(e2e suite)`: the guard failed on the row's digest and cargo
-//! stopped before a single drill suite ran (review H1). CI's workspace job
-//! runs this crate's tests on the committed tree; the matrix never runs them.
-//! `crates/logweir/tests/engine_matrix.rs`'s
+//! engine and then runs `cargo test -p e2e --features e2e`, so a pin guard
+//! there fails on every row that is not the pin and cargo stops before the
+//! drill suites. CI's workspace job runs this crate's tests on the committed
+//! tree; the matrix never runs them. `crates/logweir/tests/engine_matrix.rs`'s
 //! `no_e2e_test_compares_the_engine_with_a_committed_pin` keeps every pin
 //! statement out of `e2e/tests/`.
 
@@ -52,14 +45,14 @@ use std::path::{Path, PathBuf};
 
 use logweir::doctor::{ENGINE_PIN, ENGINE_UPSTREAM_RELEASE};
 
-/// The pin before PROD-00.2 was OSO's own release, and the release before
-/// PROD-00.3f was 0.21.0: every planted negative control lags to one of them.
+/// OSO's own release (an earlier pin) and 0.21.0 (an earlier release): every
+/// planted negative control lags to one of them.
 const OLD_PIN: &str = "0.23.3";
 const OLD_RELEASE: &str = "0.21.0";
 const OLD_OSO_DIGEST: &str =
     "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317";
-/// OSO's 0.23.3 image digest: the identity the controller stamped before
-/// PROD-00.2, and the most plausible stale value for Logweir's build digest.
+/// OSO's 0.23.3 image digest: the most plausible stale value for Logweir's
+/// build digest.
 const OSO_0_23_3_DIGEST: &str =
     "sha256:cc7d5a8aefa422dadc602d6349624c4563b38478ee6893de5240b98f16a732db";
 
@@ -159,7 +152,7 @@ fn check_tarball_checksum(sha_file: &str, tarball: &str, bytes: &[u8]) -> Result
     }
 }
 
-/// `crates/weirkeeper/src/job.rs` states NO engine identity (review L3): no
+/// `crates/weirkeeper/src/job.rs` states NO engine identity: no
 /// version or digest constant, no literal of the build's version or digest.
 /// The runner image declares its engine and the runner holds that declaration
 /// to the binary; a controller constant would only ever be a second, wrong
@@ -198,7 +191,7 @@ fn check_dockerfile(src: &str, oso_digest: &str) -> Result<(), String> {
     if !src.contains("COPY third_party/kafka-backup-build.env") {
         return Err("the Dockerfile's engine stage does not build from the build env".into());
     }
-    // Review L5: every external base is pinned by digest; a `FROM` of one of
+    // Every external base is pinned by digest; a `FROM` of one of
     // this file's own stages is the only unpinned form.
     let stages: Vec<&str> = lines
         .iter()
@@ -219,7 +212,7 @@ fn check_dockerfile(src: &str, oso_digest: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// PROD-01.1's `CONTRACT_ENGINE` (A-3f-1).
+/// The record-semantics suite's `CONTRACT_ENGINE`.
 fn check_contract_engine(src: &str, pin: &str) -> Result<(), String> {
     let v = quoted_after(src, "const CONTRACT_ENGINE: &str = ")
         .ok_or("record_semantics.rs declares no CONTRACT_ENGINE literal")?;
@@ -282,7 +275,7 @@ fn check_documented_identity(src: &str, pin: &str, digest: &str) -> Result<(), S
     }
 }
 
-/// EVERY BUILD OF THE ENGINE THAT HAS LANDED, in order (review M1). The ledger
+/// EVERY BUILD OF THE ENGINE THAT HAS LANDED, in order. The ledger
 /// `third_party/kafka-backup-builds.txt` must begin with exactly these lines:
 /// a recorded build is never rewritten. `scripts/engine-source.sh` refuses a
 /// repeated version, a repeated digest, an `n` that does not rise and a last
@@ -294,12 +287,12 @@ const SHIPPED_BUILDS: &[(&str, &str)] = &[
         "0.23.3+logweir.1",
         "sha256:6385b2d3aecb9d107010b14362bb60db756e6774b2181cd2273d7c6f92ed9af3",
     ),
-    // FX-21: patch 0002, the manifest records every topic's replication factor.
+    // Patch 0002: the manifest records every topic's replication factor.
     (
         "0.23.3+logweir.2",
         "sha256:2bca49d72b92fc9d96d69ff2a8b64faef2c837bfbff8ba92326723f549197db8",
     ),
-    // PROD-00.3g: patch 0003, the restore checkpoint honours its interval and
+    // Patch 0003: the restore checkpoint honours its interval and
     // its hash leaves out the run's own paths.
     (
         "0.23.3+logweir.3",
@@ -376,7 +369,7 @@ fn the_ledger_keeps_every_shipped_build() {
     );
 }
 
-/// REVIEW M1's negative controls: the shipped line rewritten in place under
+/// The ledger's negative controls: the shipped line rewritten in place under
 /// the same version (the change `engine-source.sh` cannot see), and the line
 /// dropped, are both refused, naming the bump.
 #[test]
@@ -455,9 +448,8 @@ fn the_documented_standalone_identity_names_the_pin() {
 }
 
 /// THE NEGATIVE CONTROLS: each check above, over a copy of the real file that
-/// lags — to OSO's release (the pin before PROD-00.2), or to the release
-/// before PROD-00.3f — refuses. A-3f-1's own control is the first one: the
-/// old `CONTRACT_ENGINE` on the new pin fails.
+/// lags (to OSO's release, or to an earlier release), refuses. The first is
+/// the old `CONTRACT_ENGINE` on the new pin.
 #[test]
 fn every_check_refuses_a_copy_that_lags() {
     let digest = build_digest();
@@ -481,7 +473,7 @@ fn every_check_refuses_a_copy_that_lags() {
         (
             env.replace(
                 &format!("ENGINE_VERSION={ENGINE_PIN}"),
-                // The build before the pin (PROD-00.3g moved it to `+logweir.3`).
+                // The build before the pin.
                 "ENGINE_VERSION=0.23.3+logweir.2",
             ),
             "another build",

@@ -13,20 +13,14 @@ use crate::catalog::record::CatalogPoint;
 /// Pretty-printed JSON Schema for [`CatalogPoint`], `$id` pinned to the
 /// published URL so a downloaded record names the schema that validates it.
 ///
-/// **The newest MINOR** (FX-7 fix round, review M-2): the `$id` and the file
-/// name come from ONE constant,
+/// **The newest MINOR**: the `$id` and the file name come from ONE constant,
 /// [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`](crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS)
-/// (`1.7.0`, PROD-04.1's `consumer_positions`). The older files are FROZEN
-/// beside it: PROD-01.4a's `-1.6.0.json` (`topics[].identity`) for every
-/// record written before PROD-04.1 and every later one without consumer
-/// positions, `schemas/logweir-catalog-point-1.0.0.json` for the records
-/// written before FX-4, FX-4's `-1.1.0.json` (`topics[].config_coverage`) for
-/// the records written without a pin before PROD-05.1, FX-7's `-1.2.0.json`
-/// (`archive.manifest_version_id`) for the pinned ones, PROD-05.1's
-/// `-1.3.0.json` (`topics[].configuration`), PROD-01.3's `-1.4.0.json`
-/// (three more `source.auth_mode` values) and PROD-03.0's `-1.5.0.json`
-/// (`topics[].schema_dependency`) for every record written before
-/// PROD-01.4a.
+/// (`1.7.0`, `consumer_positions`). The older files are FROZEN beside it, one
+/// per minor: `1.0.0`, `1.1.0` (`topics[].config_coverage`), `1.2.0`
+/// (`archive.manifest_version_id`), `1.3.0` (`topics[].configuration`),
+/// `1.4.0` (three more `source.auth_mode` values), `1.5.0`
+/// (`topics[].schema_dependency`) and `1.6.0` (`topics[].identity`); a record
+/// validates against the file of its own `format_version`.
 ///
 /// The `format_version` pattern (`^1\.[0-9]+\.[0-9]+$`) is on the type, not
 /// added here: a schema-only validator — the one route that does not go

@@ -35,7 +35,7 @@
 //! with no socket at all. [`probe`] is the seam a `ClusterReader` double
 //! drives: one `cluster_id()` call and nothing else. [`run`] is the ONLY
 //! function here that constructs a client, which is why this file is on
-//! `tests/no_network_in_unit_tests.rs`'s allow-list (STANDING RULE 18): the
+//! `tests/no_network_in_unit_tests.rs`'s allow-list: the
 //! probe dials BY DESIGN — it is the whole subcommand.
 //!
 //! # Nothing but the two lines reaches stdout
@@ -43,7 +43,7 @@
 //! The diagnostic goes to **stderr**, and so does this subcommand's tracing
 //! subscriber ([`install_diagnostics`]), because the two stdout lines are the
 //! whole machine contract. A pod log merges the two streams in nondeterministic
-//! order (plan erratum **E4**), so a controller reads the two lines BY KEY NAME
+//! order, so a controller reads the two lines BY KEY NAME
 //! from a bounded tail and never by position — and the two contract lines are
 //! the last thing this process writes.
 
@@ -72,13 +72,13 @@ pub const AUTH_MODE_PLAINTEXT: &str = "plaintext";
 /// read straight onto this argv.
 pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
 
-/// `--auth-mode scramSha256` (PROD-01.3).
+/// `--auth-mode scramSha256`.
 pub const AUTH_MODE_SCRAM_SHA_256: &str = logweir_core::connection::AUTH_MODE_SCRAM_SHA_256;
 
-/// `--auth-mode plain` (PROD-01.3) — SASL/PLAIN, and only with `--tls`.
+/// `--auth-mode plain` — SASL/PLAIN, and only with `--tls`.
 pub const AUTH_MODE_PLAIN: &str = logweir_core::connection::AUTH_MODE_PLAIN;
 
-/// `--auth-mode mtls` (PROD-01.3) — a TLS client certificate, with `--tls`.
+/// `--auth-mode mtls` — a TLS client certificate, with `--tls`.
 /// The certificate and key reach the probe as projected files named by
 /// `LOGWEIR_SOURCE_TLS_CERT_FILE` / `LOGWEIR_SOURCE_TLS_KEY_FILE`, never as
 /// flags.
@@ -93,7 +93,7 @@ pub const AUTH_MODE_MTLS: &str = logweir_core::connection::AUTH_MODE_MTLS;
 /// anyone with pod read can see it.
 pub const SOURCE_PASSWORD_ENV: &str = "LOGWEIR_SOURCE_PASSWORD";
 
-/// The environment variable naming a projected private CA file (PLAT-07.1).
+/// The environment variable naming a projected private CA file.
 ///
 /// A probe reads ONE cluster, so — exactly as for the password — it reads the
 /// source side's variable whatever the object's `spec.role` says. The path
@@ -102,16 +102,12 @@ pub const SOURCE_TLS_CA_FILE_ENV: &str = crate::tls_ca::SOURCE_TLS_CA_FILE_VAR;
 
 /// How long the dial is given before it is reported as unreachable.
 ///
-/// **TEN SECONDS, AND THE BOUND IS THIS MODULE'S OWN.** The brief names no
-/// timeout, so this is the dispatch's default, recorded here rather than left
-/// implicit. It is deliberately SHORTER than the 20-second metadata budget
-/// `logweir-kafka`'s rdkafka reader gives `fetch_cluster_id`: that call returns
-/// NULL only after its whole allotted timespan, and a SASL handshake that the
-/// broker rejects makes librdkafka RETRY rather than return, so without a bound
-/// of its own a wrong password would present as a 20-second stall and a wrong
-/// port as another one. A probe that hangs is worse than a probe that says
-/// `false`: interface **I14** has an answer for unreachable and no answer for
-/// "still thinking".
+/// Ten seconds, shorter than the 20-second metadata budget `logweir-kafka`'s
+/// rdkafka reader gives `fetch_cluster_id`: that call returns only after its
+/// whole timespan, and a rejected SASL handshake makes librdkafka retry rather
+/// than return, so a wrong password or a wrong port would otherwise present as
+/// a 20-second stall. Interface **I14** has an answer for unreachable and none
+/// for "still thinking".
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The parsed `cluster-probe` command line.
@@ -164,7 +160,7 @@ pub struct ProbeOutcome {
 /// # The order is asserted, not incidental
 ///
 /// `cluster-id=` FIRST, `reachable=` SECOND. A controller reads both by key
-/// name (erratum **E4**), so the order is not what makes the parse work — it is
+/// name, so the order is not what makes the parse work — it is
 /// what makes the CONTRACT one thing rather than two spellings of it, and
 /// `cluster_probe_prints_the_cluster_id_and_exits_zero` compares the whole
 /// string rather than two `contains` calls for exactly that reason.
@@ -191,8 +187,8 @@ pub fn outcome(observed: &Result<String, KafkaError>) -> ProbeOutcome {
     }
 }
 
-/// The outcome of a probe whose credential binding was refused (PROD-01.3
-/// security follow-up): interface **I14**'s unreachable lines on stdout,
+/// The outcome of a probe whose credential binding was refused: interface
+/// **I14**'s unreachable lines on stdout,
 /// unchanged, and on stderr the diagnostic followed by
 /// `refusal-reason=CredentialBindingMismatch` — the line the `KafkaCluster`
 /// controller reads off the pod log into the `Reachable` condition's reason.
@@ -259,7 +255,7 @@ pub fn write_outcome<O: Write, E: Write>(
 ) -> std::io::Result<()> {
     if let Some(d) = o.diagnostic.as_deref() {
         // THE DIAGNOSTIC FIRST, so the two contract lines are the LAST thing
-        // this process writes. A pod log merges the streams (erratum E4) and a
+        // this process writes. A pod log merges the streams and a
         // controller scans a bounded tail; putting the diagnostic ahead of the
         // contract keeps both lines inside that tail however long the
         // diagnostic is.
@@ -294,15 +290,13 @@ pub fn bootstrap_servers(csv: &str) -> Vec<String> {
 /// adopter writes, and the mapping onto the client's own enum stays where every
 /// other call site finds it. A `probe.rs` that built `AuthConfig::ScramSha512
 /// { … }` itself would be a second construction site with a second chance to
-/// pin the plaintext arm — which is the defect interface I1 exists to prevent,
-/// and which `probe_builds_its_auth_through_the_one_construction_site` asserts
-/// over this file's source.
+/// pin the plaintext arm, which is the defect interface I1 exists to prevent.
 ///
 /// # Errors
 ///
 /// A mode this build does not know (anything but the constants above), a SASL
 /// mode (`scramSha512`, `scramSha256`, `plain`) with no `--username`, or
-/// `plain`/`mtls` without `--tls` (PROD-01.3). Both are reported as an unreachable
+/// `plain`/`mtls` without `--tls`. Both are reported as an unreachable
 /// probe by [`run`] rather than as a usage error, so the two contract lines
 /// exist for every command line clap accepted.
 pub fn auth_spec(
@@ -319,11 +313,10 @@ pub fn auth_spec(
         ))),
     };
     let spec = match mode {
-        // TLS WITHOUT SASL IS REFUSED, NOT DOWNGRADED (PLAT-07.1). This arm used
-        // to ignore `--tls` and dial PLAINTEXT, so an object that said TLS was
-        // probed in the clear. `AuthSpec::Plaintext` has no TLS field for a
-        // restore plan to carry either, so the controller refuses the same
-        // shape before any Job exists; this is the runner's half.
+        // TLS without SASL is refused, not downgraded: `AuthSpec::Plaintext`
+        // has no TLS field, so dialling it would probe an object that says TLS
+        // in the clear. The controller refuses the same shape before any Job
+        // exists; this is the runner's half.
         AUTH_MODE_PLAINTEXT if tls => {
             return Err(KafkaError::Client(format!(
                 "--auth-mode {AUTH_MODE_PLAINTEXT} with --tls (TLS without SASL) is not \
@@ -353,7 +346,7 @@ pub fn auth_spec(
             )))
         }
     };
-    // PROD-01.3: `plain` (PlainWithoutTls) and `mtls` without `--tls` are
+    // `plain` (PlainWithoutTls) and `mtls` without `--tls` are
     // refused here, before any client exists — the probe's half of the rule
     // the controller and the CRD state.
     if let Some(refusal) = spec.transport_refusal() {
@@ -441,7 +434,7 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         Ok(s) => s,
         Err(e) => return outcome(&Err(e)),
     };
-    // PROD-01.3 security follow-up: a credential whose binding does not name
+    // A credential whose binding does not name
     // this `KafkaCluster` is refused before the password or key is read and
     // before any client exists. The probe's two stdout lines stay its
     // contract (`reachable=false`); the named reason travels on STDERR as
@@ -460,13 +453,13 @@ fn dial(args: &ProbeArgs) -> ProbeOutcome {
         .ok()
         .filter(|p| !p.is_empty());
     // The projected CA, if the connection names one, for librdkafka's
-    // `ssl.ca.location` (PLAT-07.1). `with_tls_ca_file` refuses a CA for a
+    // `ssl.ca.location`. `with_tls_ca_file` refuses a CA for a
     // transport that is not TLS, so a CA can never sit beside a clear dial.
     let ca_file = match crate::tls_ca::projected_ca_file(SOURCE_TLS_CA_FILE_ENV) {
         Ok(c) => c,
         Err(e) => return outcome(&Err(KafkaError::Client(e))),
     };
-    // PROD-01.3: the `mtls` pair, from the source side's two variables.
+    // The `mtls` pair, from the source side's two variables.
     let client_certificate =
         match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Source) {
             Ok(files) => files,

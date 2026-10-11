@@ -1,4 +1,4 @@
-//! **PROD-04.1: the receipt's `consumer_positions` block and the positions
+//! **The receipt's `consumer_positions` block and the positions
 //! document it binds**, built from what the run observed of the selected
 //! consumer groups before the engine, the partitions' marks after it, and the
 //! offsets the archive's manifest records.
@@ -14,13 +14,13 @@
 //! - **One outcome per selected id**, in the receipt's id order. An id the
 //!   observation does not answer for — the reader could not read groups at
 //!   all — is `failed: CaptureUnavailable`, never absent.
-//! - **A group described `Dead` with no member** — the stand-in for "no such
-//!   group" (PROD-04.0 T2) — was deleted, or its offsets expired, while it was
-//!   read: `failed: GroupVanishedDuringCapture`, never captured with every
-//!   partition "never committed" (PROD-04.1 review M2).
+//! - **A group described `Dead` with no member**, the stand-in for "no such
+//!   group", was deleted, or its offsets expired, while it was read:
+//!   `failed: GroupVanishedDuringCapture`, never captured with every
+//!   partition "never committed".
 //! - **A group is captured only over topics whose partitions were read**: a
 //!   named topic no read gave a partition for fails every group that would
-//!   have been captured, `PartitionsNotRead` (review L4).
+//!   have been captured, `PartitionsNotRead`.
 //! - **A captured group accounts for every partition of every named topic**,
 //!   SPARSELY: an entry for each committed position, each failed read and each
 //!   partition the capture did not observe (`notObserved`:
@@ -108,7 +108,7 @@ pub struct Built {
 }
 
 /// Whether the capture asked any group for its positions: the marks are only
-/// worth reading for a group that was described (PROD-04.1 review L8).
+/// worth reading for a group that was described.
 #[must_use]
 pub fn positions_were_asked(observation: &GroupsObservation) -> bool {
     observation
@@ -202,7 +202,7 @@ fn failed(reason: &str) -> (GroupSnapshot, Option<GroupPositions>) {
     (not_captured("failed", reason), None)
 }
 
-/// PROD-04.0b's classification failures, by name.
+/// The group-classification failures, by name.
 fn classification_failure(f: &GroupFailure) -> &'static str {
     match f {
         GroupFailure::NotVisibleToPrincipal => "NotVisibleToPrincipal",
@@ -298,7 +298,7 @@ fn position_entries(
                         e.coverage = Some(word.into());
                     }
                 },
-                // NEVER offset 0 (PROD-04.0 T7): counted, never listed.
+                // NEVER offset 0: counted, never listed.
                 Some(PartitionPosition::NoCommittedPosition) => {
                     no_committed_position = no_committed_position.saturating_add(1);
                     continue;
@@ -354,7 +354,7 @@ fn group_outcome(
     };
     let state = description.state.wire_name();
     let members = u32::try_from(description.members.len()).unwrap_or(u32::MAX);
-    // M2: `Dead` with no member is "no such group" — it vanished while it was
+    // `Dead` with no member is "no such group" — it vanished while it was
     // read, and its fetch can only answer "never committed" everywhere.
     if model::vanished(state, members) {
         return failed(model::GROUP_VANISHED);
@@ -364,13 +364,13 @@ fn group_outcome(
         Some(Err(e)) => return failed(positions_failure(e)),
         Some(Ok(p)) => p,
     };
-    // L4: a topic no read gave a partition for. Its positions are unknown.
+    // A topic no read gave a partition for. Its positions are unknown.
     if topics.values().any(|t| t.partitions.is_empty()) {
         return failed(model::PARTITIONS_NOT_READ);
     }
     let positions = position_entries(topics, observation, answered);
     // A KEPT position — captured or excluded — on a topic that changed during
-    // the capture (review A3: an excluded one counts too).
+    // the capture (an excluded one counts too).
     if positions.positions.iter().any(|e| {
         e.position.is_some()
             && topics
@@ -720,7 +720,7 @@ mod tests {
         );
     }
 
-    /// TI-04.1-2: a commit above the end is excluded `PositionBeyondEnd`, the
+    /// A commit above the end is excluded `PositionBeyondEnd`, the
     /// end itself is captured. Kills: `>` -> `>=`, and dropping the check.
     #[test]
     fn a_position_beyond_the_end_is_excluded_and_the_end_itself_is_captured() {
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(p[0].reason.as_deref(), Some("TopicNotObserved"));
     }
 
-    /// TI-04.1-3: marks that regress after the engine fail the groups that
+    /// Marks that regress after the engine fail the groups that
     /// hold a kept position on the topic; stable marks capture them. Kills:
     /// ignoring `changed_during_capture`; failing a group with no position.
     #[test]
@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(group(&b, "holds").outcome, "captured");
     }
 
-    /// The review's A3: a KEPT position that is excluded (beyond the end) on a
+    /// A KEPT position that is excluded (beyond the end) on a
     /// changed topic fails the group too — or arm CP-9 would refuse the
     /// runner's own receipt and the backup would lose its evidence. Kills:
     /// counting only `captured` positions.
@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(g.no_committed_position, 0);
     }
 
-    /// The review's A1: a partition whose read was REFUSED or answered
+    /// A partition whose read was REFUSED or answered
     /// something that is not a position is `failed` with that reason — never
     /// "never committed". Kills: mapping `PartitionPosition::Failed` to the
     /// no-commit count.
@@ -1077,7 +1077,7 @@ mod tests {
         assert_eq!((c.failed, c.never_committed), (2, 1));
     }
 
-    /// The review's M2: a group listed live and described `Dead` with no
+    /// A group listed live and described `Dead` with no
     /// member was deleted (or expired) while it was read — `failed:
     /// GroupVanishedDuringCapture`, never captured with every partition
     /// "never committed". The control: described `Empty` with no member, it is
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(positions(&b, "still").no_committed_position, 3);
     }
 
-    /// The review's L4: a named topic no read gave a partition for (the
+    /// A named topic no read gave a partition for (the
     /// capture's and the later metadata read both failed, nothing archived)
     /// fails every group that would have been captured `PartitionsNotRead`
     /// — never captured with no entry for it. The control: the same topic
@@ -1157,7 +1157,7 @@ mod tests {
         );
     }
 
-    /// **Review N1, through the builder.** The largest selection of
+    /// **Through the builder.** The largest selection of
     /// escape-heavy ids the cap admits (84 ids of 255 `"`), every group
     /// captured, builds a block whose ENCODED bytes are within
     /// `MAX_BLOCK_BYTES` and within the worst case `refuse_selection` measured;

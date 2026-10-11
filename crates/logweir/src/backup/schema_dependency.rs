@@ -1,4 +1,4 @@
-//! **PROD-03.0 — schema dependency, judged at backup from the segments the run
+//! **Schema dependency, judged at backup from the segments the run
 //! just wrote.**
 //!
 //! After the engine exits and the manifest is read back, this reads a BOUNDED
@@ -24,12 +24,11 @@
 //! judged records are every record the manifest counts for the topic,
 //! `sampled` otherwise.
 //!
-//! # Bounded — the security review of the first version (orchestrator note)
+//! # Bounded
 //!
-//! The first version fetched each sampled segment whole and decoded EVERY
-//! record into owned keys and values, with no bound on decompression — one
-//! large segment or a decompression bomb could OOM-kill a runner whose backup
-//! had already succeeded (the class of FX-23's M1). Now:
+//! A sampled segment is never fetched whole and decoded in full, which one
+//! large segment or a decompression bomb could turn into an OOM kill after the
+//! backup succeeded:
 //!
 //! - **no record is materialised**: the scan keeps each key's and value's
 //!   first `MIN_FRAMED_LEN` bytes — all the framing test reads — and skips the
@@ -42,8 +41,8 @@
 //!   stops the scan; a zstd frame declaring a window above 8 MiB is refused
 //!   before it is decoded; lz4 is decoded as a stream — all
 //!   `segmentTooLargeForDetection`. What one segment's judgement holds is the
-//!   stored bytes plus at most the zstd window and a few hundred KiB (the
-//!   review's fix round, M1; measured in `tests/schema_dependency_memory.rs`);
+//!   stored bytes plus at most the zstd window and a few hundred KiB
+//!   (measured in `tests/schema_dependency_memory.rs`);
 //! - **the time is a hard stop**: [`DetectionLimits::time_budget`] runs from
 //!   the start of detection; every store read gets only what is left of it
 //!   (`Store::get_bounded`'s `within`), every scan stops reading when it runs
@@ -54,8 +53,7 @@
 //!
 //! Every manifest entry with the topic's name is judged together — their
 //! partitions merged — exactly as `phase_run::run` counts its records, so the
-//! judgement and the receipt's `records` describe the same records (the
-//! review's L1).
+//! judgement and the receipt's `records` describe the same records.
 //!
 //! # Never fatal
 //!
@@ -222,7 +220,7 @@ pub fn detect_on_clock(
     elapsed: &dyn Fn() -> Duration,
 ) -> BTreeMap<String, TopicSchemaDependency> {
     // ONE budget for the whole backup, measured from here: never restarted
-    // per topic (the review's mutant RR1).
+    // per topic.
     let budget = Budget {
         elapsed,
         limit: limits.time_budget,
@@ -230,7 +228,7 @@ pub fn detect_on_clock(
     topics
         .iter()
         .map(|name| {
-            // Every manifest entry with the name, merged (L1).
+            // Every manifest entry with the name, merged.
             let partitions: Vec<&PartitionFacts> = archive
                 .topics
                 .iter()

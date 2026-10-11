@@ -14,54 +14,52 @@ use serde::{Deserialize, Serialize};
 /// carries `archive.manifest_version_id` is
 /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] instead.
 ///
-/// `1.1.0` since FX-4, which added the optional `topics[].config_coverage`. A
+/// `1.1.0` added the optional `topics[].config_coverage`. A
 /// minor bump adds optional fields only (reading rule 2), so a 1.0.0 reader
 /// reads a 1.1.0 record and ignores the field; the 1.0.0 schema is frozen
 /// beside the 1.1.0 one.
 pub const FORMAT_VERSION: &str = "1.1.0";
 
-/// The format of the day-sharded INDEX entry, which FX-4 did not change: its
+/// The format of the day-sharded INDEX entry, which 1.1.0 did not change: its
 /// fields are copies of the record's and none of them is the new one.
 pub const LOG_ENTRY_FORMAT_VERSION: &str = "1.0.0";
 
-/// **FX-7.** The format of a record that carries `archive.manifest_version_id`
-/// — a MINOR bump over [`FORMAT_VERSION`] (FX-4's 1.1.0, which merged first;
-/// reading rule 2: a 1.1.0 or 1.0.0 reader ignores the field and reads the
-/// rest). Written only when the pin is present, so a record for a point on an
-/// unversioned bucket is exactly the [`FORMAT_VERSION`] document.
+/// The format of a record that carries `archive.manifest_version_id`, a MINOR
+/// bump over [`FORMAT_VERSION`] (1.1.0; reading rule 2: a 1.1.0 or 1.0.0
+/// reader ignores the field and reads the rest). Written only when the pin is
+/// present, so a record for a point on an unversioned bucket is exactly the
+/// [`FORMAT_VERSION`] document.
 pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
-/// **PROD-05.1.** The format of a record whose topics carry the receipt's
+/// The format of a record whose topics carry the receipt's
 /// `topic_configuration` (`topics[].configuration`, and `topics[].partitions`
-/// from it) — the MINOR after FX-7's 1.2.0. Written exactly when the receipt
-/// carries the block and nothing newer decides (every receipt PROD-05.1's
-/// builds signed, before PROD-03.0's 1.5.0); a record backfilled from an
-/// older receipt keeps the format it would have had (reading rule 2: an older
-/// reader ignores the fields).
+/// from it), the MINOR after 1.2.0. Written exactly when the receipt carries
+/// the block and nothing newer decides; a record backfilled from an older
+/// receipt keeps the format it would have had (reading rule 2: an older reader
+/// ignores the fields).
 pub const FORMAT_VERSION_WITH_TOPIC_CONFIGURATION: &str = "1.3.0";
 
-/// **PROD-01.3.** The format of a record whose `source.auth_mode` is one of the
-/// modes PROD-01.3 added (`scramSha256`, `plain`, `mtls`) — copied from a
-/// receipt that is itself 1.4.0 (`logweir_core::backup_receipt::
-/// FORMAT_VERSION_WITH_AUTH_MODES`). A MINOR bump over
-/// [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`]: the field's set of values
-/// grows and nothing else changes, and a 1.4.0 record carries PROD-05.1's
-/// topic configuration and may pin a manifest version (1.4.0 includes every
-/// earlier minor). Written only for those modes, so every other record is the
-/// document it was.
+/// The format of a record whose `source.auth_mode` is one of the modes 1.4.0
+/// added (`scramSha256`, `plain`, `mtls`), copied from a receipt that is
+/// itself 1.4.0 (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_AUTH_MODES`).
+/// A MINOR bump over [`FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`]: the field's
+/// set of values grows and nothing else changes, and a 1.4.0 record carries
+/// the topic configuration and may pin a manifest version (1.4.0 includes
+/// every earlier minor). Written only for those modes, so every other record
+/// is the document it was.
 pub const FORMAT_VERSION_WITH_AUTH_MODES: &str = "1.4.0";
 
-/// **PROD-03.0.** The format of a record whose topics carry the receipt's
-/// `schema_dependency` (`topics[].schema_dependency`) — copied from a receipt
-/// that is itself 1.5.0 (`logweir_core::backup_receipt::
-/// FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`), which every receipt PROD-03.0's
-/// builds signed is. A MINOR bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: one
-/// optional field, and 1.5.0 defines every earlier minor's fields and values
-/// (reading rule 2: an older reader ignores the field). A record backfilled
-/// from an older receipt keeps the format it would have had.
+/// The format of a record whose topics carry the receipt's
+/// `schema_dependency` (`topics[].schema_dependency`), copied from a receipt
+/// that is itself 1.5.0
+/// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY`). A
+/// MINOR bump over [`FORMAT_VERSION_WITH_AUTH_MODES`]: one optional field, and
+/// 1.5.0 defines every earlier minor's fields and values (reading rule 2: an
+/// older reader ignores the field). A record backfilled from an older receipt
+/// keeps the format it would have had.
 pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 
-/// **PROD-01.4a.** The format of a record whose topics carry the receipt's
+/// The format of a record whose topics carry the receipt's
 /// `generations` entry (`topics[].identity`: the topic ID before and after the
 /// engine) — copied from a receipt that is itself 1.6.0
 /// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS`). A MINOR
@@ -72,7 +70,7 @@ pub const FORMAT_VERSION_WITH_SCHEMA_DEPENDENCY: &str = "1.5.0";
 /// receipt keeps the format it would have had.
 pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
 
-/// **PROD-04.1.** The format of a record that carries `consumer_positions` —
+/// The format of a record that carries `consumer_positions` —
 /// copied from a receipt that is itself 1.7.0
 /// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`).
 /// A MINOR bump over [`FORMAT_VERSION_WITH_GENERATIONS`]: one optional field,
@@ -124,7 +122,7 @@ pub const RECEIPT_SUFFIX: &str = ".receipt.json";
 /// What that leaves is printable ASCII, less the separator and the bytes the
 /// path type rewrites, **and the space** (`0x20`): the store keeps a space as
 /// it is, a backup set id is free text, and a set named `nightly 7` is a set
-/// the runner restores (FX-14 review M1). No other whitespace is plain: a
+/// the runner restores. No other whitespace is plain: a
 /// tab, a line break and every other control character are rewritten, and a
 /// no-break space is not ASCII.
 ///
@@ -145,7 +143,7 @@ pub fn is_plain_key_segment(segment: &str) -> bool {
             .all(|b| (b == b' ' || b.is_ascii_graphic()) && !NOT_KEPT.contains(&b))
 }
 
-/// **FX-14 — the confinement of a receipt key a PLAN names.** The run id of
+/// **The confinement of a receipt key a PLAN names.** The run id of
 /// `receipt_key` when it is, character for character, the key
 /// `logweir backup run` writes set `backup_id`'s receipt at —
 /// `logweir/backups/<backup_id>/<run_id>.receipt.json`, each id one plain
@@ -188,7 +186,7 @@ pub fn receipt_run_id<'a>(receipt_key: &'a str, backup_id: &str) -> Option<&'a s
 ///
 /// # Why the receipt and not the manifest
 ///
-/// Tracker defect **RECEIPT-DUP**: a Backup Job re-created from its frozen
+/// A Backup Job re-created from its frozen
 /// inputs writes a SECOND run-id receipt under the same execution id while
 /// overwriting the manifest at the same key. Run identity is idempotent;
 /// signed evidence is not. An identity derived from the manifest would
@@ -644,13 +642,10 @@ pub const SIGNING_ALGORITHMS: [&str; 2] = ["ecdsa-p256-sha256", "ed25519"];
 /// The JSON Schema for [`RecordSigning::algorithm`]: a string with an explicit
 /// `enum`, generated from [`SIGNING_ALGORITHMS`].
 ///
-/// **Review finding F2.** Without it the checked-in schema carried only a free
-/// `"type": "string"` and a doc comment naming `p256` — the very spelling this
-/// record rejects — so a consumer generating its type from the one artifact
-/// that exists to publish the vocabulary would have matched on a value no
-/// record ever carries, and nothing mechanical would have noticed. An `enum`
-/// rather than a `pattern` because the set really is closed and a reader
-/// should be able to READ it out of the schema, not infer it from a regex.
+/// Without it the schema would carry only a free `"type": "string"`, and a
+/// consumer generating its type from the schema would accept values no record
+/// carries. An `enum` rather than a `pattern` because the set really is closed
+/// and a reader should be able to READ it out of the schema.
 fn algorithm_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
     schemars::schema::SchemaObject {
         instance_type: Some(schemars::schema::InstanceType::String.into()),
@@ -827,7 +822,7 @@ mod tests {
         }
     }
 
-    /// **FX-14.** Only the writer's key for THIS set confines: every other
+    /// Only the writer's key for THIS set confines: every other
     /// spelling — another set, another prefix or tenant, a nested or relative
     /// path, another object of the same run, an id that is not one plain
     /// segment — is `None`, so a reader refuses it before any read.
@@ -896,7 +891,7 @@ mod tests {
         );
     }
 
-    /// **FX-14 review M1.** A space is plain, so a set id and a run id may
+    /// A space is plain, so a set id and a run id may
     /// hold one, and the confinement is still of BYTES: for the set
     /// `nightly 7` the one key that confines is the writer's, and nothing
     /// that only looks like it does — the id with a space before or after it,
@@ -995,7 +990,7 @@ mod tests {
         (b'~', "a%7Eb"),
     ];
 
-    /// **FX-14 review M1 — the rule, held to the store's own path type for
+    /// **The rule, held to the store's own path type for
     /// every ASCII byte.** [`is_plain_key_segment`] accepts a segment exactly
     /// when `object_store::path::Path::from` keeps it as one segment,
     /// unchanged: for each of the 128 ASCII bytes, alone, first, inside and

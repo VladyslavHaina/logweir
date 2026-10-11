@@ -4,9 +4,6 @@ use logweir::drill::phase7_verify::{classify_parity, compare, ParityClasses};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::spec::Anchor;
 
-// ---------------------------------------------------------------------------
-// task-19-brief.md Step 1, verbatim. Six tests.
-
 #[test]
 fn identical_records_reconcile_at_pass_rate_one() {
     let (arch, cons) = fixtures::matching_pair(50);
@@ -41,11 +38,7 @@ fn an_archive_offset_absent_from_the_target_is_a_mismatch() {
 /// **SHAPE ONLY — this is not coverage of compacted topics.** It asserts over
 /// a hand-built `VerifyOutcome`, because `phase7_verify::run` has no reachable
 /// path from a compacted target to `Partial` (module doc; and
-/// `IntegrityResult::Partial`'s own doc comment). Task 21c tried to drive this
-/// row end to end against a live cluster and could not, which is why
-/// `e2e/tests/full_drill.rs` carries
-/// `a_drill_with_nothing_to_restore_is_refused_and_never_reports_a_pass`
-/// instead of the compacted-topic row its brief asked for.
+/// `IntegrityResult::Partial`'s own doc comment).
 #[test]
 fn a_compacted_topic_is_partial_with_a_reason() {
     let o = fixtures::verify_outcome_for_compacted_topic();
@@ -72,8 +65,8 @@ fn an_unsupported_kbak_segment_degrades_to_consume_only_never_to_a_silent_pass()
 /// count; a scratch cluster has infinite retention and cleanup.policy=delete.
 /// Those deviations are INTENDED and are reported as such, never as failures.
 ///
-/// FX-3: this is the SCRATCH row, unchanged in what it asserts — the mode is
-/// now an argument, and a scratch drill leaves nothing `not_reconstructed`.
+/// This is the SCRATCH row: a scratch drill leaves nothing
+/// `not_reconstructed`.
 #[test]
 fn scratch_deviations_are_intentional_and_anything_else_is_not() {
     let ParityClasses {
@@ -119,19 +112,12 @@ fn scratch_deviations_are_intentional_and_anything_else_is_not() {
     assert_eq!(unexpected, vec!["max.message.bytes".to_string()]);
 }
 
-// ---------------------------------------------------------------------------
-// Task 19 fix round 1: direct `compare`/`classify_parity` tests closing
-// surviving mutants r4, r6, r8 from task-19-review.md.
+// Direct `compare`/`classify_parity` tests.
 
-/// r4: `compare` must match by the `x-original-offset` HEADER, not the
-/// consumed record's own target-side offset — that is the whole point of
-/// the header (a restored topic's offsets need not start where the
-/// source's did; see `compare`'s own doc comment, "never by position").
-/// Every prior test's fixture happened to set the header equal to the
-/// target offset, so a mutant deleting the header lookup entirely survived.
-/// Here the two are DELIBERATELY different: the record's own offset is 99
-/// (wherever it actually landed on the target), but its header names its
-/// TRUE original archive offset, 5.
+/// `compare` must match by the `x-original-offset` HEADER, not the consumed
+/// record's own target-side offset: a restored topic's offsets need not start
+/// where the source's did. Here the two DIFFER: the record's own offset is 99,
+/// but its header names its TRUE original archive offset, 5.
 #[test]
 fn compare_matches_by_the_original_offset_header_not_the_targets_own_offset() {
     // The `x-original-offset` header is part of the record's OWN content —
@@ -140,13 +126,10 @@ fn compare_matches_by_the_original_offset_header_not_the_targets_own_offset() {
     // header set (see `fixtures::matching_pair`) — so it is included on
     // BOTH the archive fingerprint and the consumed record here, exactly as
     // it would be in a real restored record.
-    // Task 10, guard **G-HDR**: the header value is the engine's 8-byte
-    // little-endian i64 `\x05\x00\x00\x00\x00\x00\x00\x00`, NEVER the ASCII
-    // `b"5"` this fixture used to fabricate. `b"5"` is one byte, so
-    // `decode_original_offset` answers `None` for it and `compare` falls back
-    // to the target's own offset — which here is 99, so under the old ASCII
-    // fixture the mutant this test exists to kill (deleting the header lookup)
-    // was killed by accident and the DECODE was never exercised at all.
+    // The header value is the engine's 8-byte little-endian i64
+    // `\x05\x00\x00\x00\x00\x00\x00\x00` (guard **G-HDR**), never ASCII `b"5"`,
+    // which `decode_original_offset` answers `None` for, falling back to the
+    // target's own offset and never exercising the decode.
     let headers = vec![(
         "x-original-offset".to_string(),
         Some(fixtures::le_offset(5)),
@@ -177,13 +160,9 @@ fn compare_matches_by_the_original_offset_header_not_the_targets_own_offset() {
     assert!(mismatches.is_empty());
 }
 
-/// r6: a source config key ABSENT from the target's config map entirely
-/// (not merely present-with-a-different-value) must still be reported as a
-/// divergence — `target_cfg.get(k).map(|t| t != v).unwrap_or(true)`'s
-/// `unwrap_or(true)` is the "absent ≠ agreement" rule. No prior test
-/// presented a source key the target's map lacked outright, so a mutant
-/// flipping that default to `false` (treating "I don't know" as "matches")
-/// survived.
+/// A source config key ABSENT from the target's config map entirely (not
+/// merely present-with-a-different-value) is still a divergence:
+/// `unwrap_or(true)` is the "absent ≠ agreement" rule.
 #[test]
 fn a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed() {
     let ParityClasses {
@@ -203,12 +182,8 @@ fn a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed() 
     assert_eq!(unexpected, vec!["max.message.bytes".to_string()]);
 }
 
-/// r8: the POSITIVE case for partition-count divergence. The brief's own
-/// `scratch_deviations_are_intentional_and_anything_else_is_not` only ever
-/// asserts the NEGATIVE (`!intended.contains("partition_count")` when the
-/// counts are equal), so a mutant deleting the
-/// `if src_partitions != tgt_partitions { intended.push("partition_count") }`
-/// line survived undetected. Spec §9.3 phase 7(d) requires this reported.
+/// The POSITIVE case for partition-count divergence: spec §9.3 phase 7(d)
+/// requires `partition_count` reported when the counts differ.
 #[test]
 fn a_partition_count_divergence_is_reported_as_intended() {
     let ParityClasses {
@@ -228,16 +203,9 @@ fn a_partition_count_divergence_is_reported_as_intended() {
     assert!(unexpected.is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// Additions beyond the brief's six tests. None of the six above are touched.
-//
-// The brief's Step 1 tests exercise `compare`/`classify_parity` directly and
-// the two fixture constructors — none of them ever call `phase7_verify::run`
-// itself, so none of them would fail if `run`'s OWN wiring (the topic-rename
-// mapping, the empty-selection/empty-mapping guards) were broken or deleted
-// outright. That is
-// exactly the "call site not pinned" failure mode Tasks 17/18's reviews found
-// real defects through — these tests pin `run`'s call sites specifically.
+// Tests that pin `run`'s own call sites: the topic-rename mapping and the
+// empty-selection/empty-mapping guards, which the direct tests above cannot
+// see.
 use logweir::drill::phase7_verify::run;
 use logweir::drill::DrillError;
 use logweir_core::engine::{
@@ -252,14 +220,10 @@ use support::doubles::{Engine, Reader, TopicData};
 /// `SampleSelection` here asks for.
 ///
 /// It MUST be the same pair of instants as `plan_orders_to_drill_orders`'s
-/// `time_window` (Task 10): guard **G-WIN**'s second half bounds the restored
-/// count by the segments the manifest places inside the PLAN's window, so a
-/// fixture whose segments sit outside that window proves a bound of `[0, 0]`
-/// and refuses the 50 records its own target holds. Until Task 10 these two
-/// were `(0, 1_000_000)` — 1970-01-01T00:00:00Z to 1970-01-01T00:16:40Z — and
-/// 2026-08-29/30 respectively, an inconsistency nothing in phase 7 could see.
-/// `2026-08-29T00:00:00Z` and `2026-08-30T02:00:00Z`, computed with
-/// `python3 -c 'import datetime as d; ...'` (plan errata E6/E7).
+/// `time_window`: guard **G-WIN**'s second half bounds the restored count by
+/// the segments the manifest places inside the PLAN's window, so a fixture
+/// whose segments sit outside that window proves a bound of `[0, 0]`.
+/// `2026-08-29T00:00:00Z` and `2026-08-30T02:00:00Z`.
 const WINDOW: (i64, i64) = (1_787_961_600_000, 1_788_055_200_000);
 /// The exact timestamp base `fixtures::matching_pair` bakes into every
 /// record it builds (offset `i` gets `BASE_TS + i`) — duplicated here (not
@@ -347,28 +311,14 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
 /// restored-count bound deliberately non-binding, `[0, Σ record_count]`
 /// instead of `[Σ, Σ]`, for the whole drill and for every partition.
 ///
-/// Task 10. Every test that reaches for this one is about a SHORT or EMPTY
-/// read-back — an archive that offered one fingerprint where the manifest
-/// claims twenty-five, a sampled partition that gave back nothing — and each
-/// of them models that by giving the target a high watermark as short as the
-/// read-back. Against a wholly-inside segment the count bound then fires too,
-/// and the verdict becomes `Fail` for a second, independent reason: the test
-/// would still be green, and would no longer kill the per-selection mutant it
-/// exists to kill, because the property it pins would no longer be the cause
-/// of what it asserts.
-///
-/// A `point_in_time` landing inside a segment is the NORMAL case for a
-/// point-in-time restore, and it is exactly when the manifest cannot say how
-/// many records precede it. FX-23 made one more thing provable: a segment whose
-/// FIRST or LAST record's timestamp lies inside the window proves that record
-/// is restored, so moving only the point in time now leaves its partition's
-/// lower bound at 1, and an EMPTY target partition fails the per-partition
-/// bound (`logweir_core::engine::partition_count_bound`) — correctly, and for
-/// a reason that is not the one these tests pin. So the floor moves too: a
-/// segment that covers the window from both sides proves no record inside it,
-/// any count from zero to the whole segment is inside its bound, and the count
-/// check is silent here BY CONSTRUCTION, leaving the selection lane the single
-/// decider it is meant to be. The selections' own `window` is untouched.
+/// Every test that reaches for this one is about a SHORT or EMPTY read-back,
+/// modelled by a target high watermark as short as the read-back. Against a
+/// wholly-inside segment the count bound would fire too, a second,
+/// independent cause of `Fail`, and the test would no longer pin its own
+/// property. A segment whose first or last record lies inside the window
+/// proves that record restored, so the floor moves too: a segment that covers
+/// the window from both sides proves no record inside it, and the count check
+/// is silent here BY CONSTRUCTION. The selections' own `window` is untouched.
 fn with_window_inside_the_segment(mut plan: RestorePlan) -> RestorePlan {
     plan.time_window.0 += chrono::Duration::milliseconds(1);
     plan.time_window.1 -= chrono::Duration::milliseconds(1);
@@ -436,7 +386,7 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
     assert_eq!(out.newest_restored_ts_ms, MATCHING_PAIR_BASE_TS + 49);
     // No key diverged; the one entry is the fail-safe marker of a run whose
     // coverage is UNKNOWN (no bound receipt), which an older reader must never
-    // read as parity (FX-4 review M5).
+    // read as parity.
     assert_eq!(
         out.topic_parity.unexpected_divergence,
         vec!["drill-orders: configuration not assessed (unknown)".to_string()]
@@ -461,13 +411,10 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
     );
 }
 
-/// REGRESSION (Task 21c, found against MinIO). A real 0.21.0 manifest stores
-/// each segment's digest as BARE HEX (`"sha256": "27f6c448…"`), while
-/// `logweir_core::ids::sha256_prefixed` produces Logweir's own `sha256:<hex>`
-/// form. `segment_evidence` compared the two directly, so every segment of
-/// every real archive reported "sha256 mismatch against the manifest" and the
-/// segment lane could never return `Verified` outside these tests — which
-/// construct `SegmentFacts` by hand and happen to write the prefixed form.
+/// A real 0.21.0 manifest stores each segment's digest as BARE HEX
+/// (`"sha256": "27f6c448…"`), while `logweir_core::ids::sha256_prefixed`
+/// produces `sha256:<hex>`; the segment lane must accept the engine's
+/// spelling or it can never return `Verified` against a real archive.
 ///
 /// This is the same scenario as
 /// `a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only`
@@ -633,18 +580,12 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
 /// null. Also proves `verdict_for_selection` still consumes (and still
 /// applies the mapping) on the consume-only branch.
 ///
-/// Task 19 fix round 3: `partial_reason` is now asserted by CONTAINMENT, not
-/// equality. Round 2 emitted the engine's bare reason ("kbak level below the
-/// gate") as the whole string; round 3 prefixes every reason with the
-/// selection it belongs to, because a whole-backup-set reason is exactly what
-/// let one selection's downgrade speak for every other one (the fifth
-/// reproduction). The engine's own words are still carried through verbatim —
-/// that part of the premise is unchanged and is still asserted.
-///
-/// The result assertion is NEW and is the fourth door's headline: this drill
-/// reaches `Pass` only because the target actually gave back at least the 50
-/// records the manifest claims for this selection. Consume-only is a weaker
-/// CLAIM (`level` says so, and `pass_rate` stays null), never a weaker CHECK.
+/// `partial_reason` is asserted by CONTAINMENT: every reason is prefixed with
+/// the selection it belongs to, so one selection's downgrade cannot speak for
+/// another, and the engine's own words are carried through verbatim. The
+/// drill reaches `Pass` only because the target gave back at least the 50
+/// records the manifest claims: consume-only is a weaker CLAIM (`level` says
+/// so, and `pass_rate` stays null), never a weaker CHECK.
 #[test]
 fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
     let (store, sha) = store_with_matching_segment();
@@ -890,16 +831,10 @@ fn multi_topic_engine(
 }
 
 /// Like `fixtures::matching_pair`, but the key/value bytes are distinguished
-/// by `tag` — Task 19 fix round 1 (review finding F1). `fixtures::matching_pair`
-/// always builds byte-IDENTICAL records (`k{i}`/`v{i}`) regardless of which
-/// topic it is called for — the record's fingerprint does not fold in a
-/// topic name at all. Reusing it for TWO topics in the same test made the
-/// original pooled-`compare()` bug (offsets colliding across topics)
-/// invisible: a record from one topic "matched" the other topic's archive
-/// fingerprint just fine, because the bytes were identical either way.
-/// Distinct content per topic makes a cross-topic collision observable — a
-/// record built with `tag = "payments"` can never fingerprint-match an
-/// archive entry built with `tag = "orders"`.
+/// by `tag`: `matching_pair` builds byte-IDENTICAL records for every topic,
+/// so a cross-topic collision is invisible with it. A record built with
+/// `tag = "payments"` can never fingerprint-match an archive entry built with
+/// `tag = "orders"`.
 fn distinct_matching_pair(tag: &str, n: usize) -> (Vec<RecordFingerprint>, Vec<ConsumedRecord>) {
     let mut arch = Vec::with_capacity(n);
     let mut cons = Vec::with_capacity(n);
@@ -1008,10 +943,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
         ],
     };
 
-    // Task 19 fix round 1 (review finding F1): DISTINCT content per topic,
-    // not `fixtures::matching_pair` reused for both — see
-    // `distinct_matching_pair`'s own doc comment for why identical content
-    // made the original pooled-`compare()` bug invisible.
+    // DISTINCT content per topic (see `distinct_matching_pair`).
     let (archive_o, cons_o) = distinct_matching_pair("orders", 25);
     let (archive_p, cons_p) = distinct_matching_pair("payments", 25);
 
@@ -1095,41 +1027,18 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
     assert!(deviated.iter().any(|s| s.starts_with("drill-payments:")));
 }
 
-/// THE critical fix for review finding F1, proven directly against the exact
-/// shape the reviewer demonstrated: two mapped topics, one of them restored
-/// to ZERO records. Before the fix, `compare()` was called ONCE over both
-/// topics' fingerprints and both topics' consumed records pooled into one
-/// flat pair — since `ConsumedRecord` carries no topic field and every
-/// partition starts at offset 0, `payments`'s healthy records satisfied
-/// `orders`'s archive lookups by coincidence of matching offsets, and the
-/// drill signed `integrity: pass` for a topic that was never restored at
-/// all. Reconciling per selection (this fix) makes that impossible: `orders`
-/// has nothing to match against on the target, so every one of its archive
-/// fingerprints is "present in the archive, absent from the target" — a
-/// real, counted mismatch — regardless of what `payments` looks like.
-/// Task 19 fix round 2 (review finding FIX 2b): this test previously used
-/// `distinct_matching_pair` for both topics, which the reviewer showed makes
-/// it pass IDENTICALLY whether `compare()` is called per-selection (fixed)
-/// or once over everything pooled (the original bug reintroduced) — with
-/// distinct content, pooling can only ever turn a would-be match into a
-/// "fingerprint mismatch", never into a false MATCH, so the asserted numbers
-/// (50/25/25/0.5) come out the same under both implementations and the test
-/// could not actually distinguish them.
+/// Two mapped topics, one of them restored to ZERO records. `ConsumedRecord`
+/// carries no topic field and every partition starts at offset 0, so a
+/// `compare()` over both topics' records pooled would let `payments`'s healthy
+/// records satisfy `orders`'s archive lookups and sign `integrity: pass` for a
+/// topic never restored. Reconciling per selection, every `orders` archive
+/// fingerprint is "present in the archive, absent from the target".
 ///
-/// Fixed by using COLLIDING content instead — `fixtures::matching_pair`
-/// called for BOTH topics, which builds byte-IDENTICAL records (`k{i}`/`v{i}`,
-/// no topic name folded into the fingerprint) — exactly the shape the
-/// reviewer's original demonstration used. Under the FIXED (per-selection)
-/// implementation this still correctly reports `Fail` (orders' own archive
-/// has nothing to match against on the target). Under the ORIGINAL pooled
-/// bug, `payments`'s real consumed records would satisfy `orders`'s archive
-/// lookups too (same content, same offsets), and the drill would report a
-/// full `Pass` — 50 matched — for a topic that restored ZERO records. This
-/// is what "the test that would fail if this regressed" now means literally:
-/// re-pooling `compare()`'s inputs (reverting to one flat call instead of
-/// one call per selection) turns this test's expected `Fail`/`0.5` into
-/// `Pass`/`1.0`, and IS verified to do so as part of this round's mutation
-/// pass (see the report's mutant table, mutant p1).
+/// The content COLLIDES on purpose (`fixtures::matching_pair` for both
+/// topics): with distinct content, pooling can only turn a match into a
+/// mismatch, so the numbers would come out the same under both
+/// implementations. Re-pooling turns this test's `Fail`/`0.5` into
+/// `Pass`/`1.0`.
 #[test]
 fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_healthy_topic() {
     let bytes_orders = b"segment payload for verify phase test - orders (unrestored)";
@@ -1198,13 +1107,8 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     };
 
     // COLLIDING content, deliberately: `fixtures::matching_pair` builds the
-    // SAME `k{i}`/`v{i}` bytes regardless of which topic calls it, so
-    // `archive_o` and `archive_p` carry byte-IDENTICAL fingerprints at each
-    // offset. That is exactly what makes this test discriminate a
-    // pooled-vs-per-selection implementation (see the doc comment above) —
-    // `distinct_matching_pair` (used by `run_aggregates_...`, whose own
-    // purpose is aggregation-completeness, not collision-sensitivity) would
-    // not.
+    // SAME `k{i}`/`v{i}` bytes for every topic, which is what makes this test
+    // tell a pooled implementation from a per-selection one.
     let (archive_o, _cons_o_unused) = fixtures::matching_pair(25);
     let (archive_p, cons_p) = fixtures::matching_pair(25);
 
@@ -1291,18 +1195,11 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     assert_eq!(out.records_restored, 25);
 }
 
-/// Task 19 fix round 2, FIX 2 (the SAME critical finding surviving fix
-/// round 1 through a narrower door): fix round 1's guard fired only on the
-/// AGGREGATE `sampled == 0`. Here `orders`'s own `engine.fingerprints`
-/// returns `Ok(vec![])` — no error, no `Unsupported` — for a topic restored
-/// to zero, POOLED with a healthy `payments` selection whose archive and
-/// consumed records genuinely match. Under fix round 1's aggregate-only
-/// guard this reported `Pass, byte-fingerprint, 25/25, pass_rate 1.0,
-/// partial_reason None` — `orders` was never compared against anything, but
-/// its silence was invisible inside `payments`'s healthy total. The
-/// per-selection guard closes this: ANY selection with zero of its OWN
-/// archive fingerprints disqualifies the result from `Pass`, regardless of
-/// what a sibling selection contributed.
+/// `orders`'s `engine.fingerprints` returns `Ok(vec![])` (no error, no
+/// `Unsupported`) for a topic restored to zero, beside a healthy `payments`
+/// selection. A guard on the AGGREGATE `sampled == 0` would report `Pass`;
+/// ANY selection with zero of its OWN archive fingerprints disqualifies the
+/// result from `Pass`, whatever a sibling contributed.
 #[test]
 fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passing_aggregate() {
     let (store, sha) = store_with_matching_segment();
@@ -1387,7 +1284,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     ];
     let mut mapping = fixtures::mapping("orders", "drill-orders");
     mapping.insert("payments".to_string(), "drill-payments".to_string());
-    // Task 10: the count bound is deliberately non-binding here — see
+    // The count bound is deliberately non-binding here — see
     // `with_window_inside_the_segment`.
     let mut plan = with_window_inside_the_segment(plan_orders_to_drill_orders());
     plan.topic_mapping = mapping.clone();
@@ -1423,7 +1320,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     );
 }
 
-/// Review finding F2/F3: a byte-fingerprint comparison that samples ZERO
+/// A byte-fingerprint comparison that samples ZERO
 /// records — `engine.fingerprints` returns `Ok(vec![])`, not
 /// `Err(Unsupported(..))` — must never read as `Pass`. This is now the
 /// production path for `IntegrityResult::Partial` (see the module doc
@@ -1460,7 +1357,7 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         // nothing to compare.
         .fingerprinting(vec![]);
     let mapping = fixtures::mapping("orders", "drill-orders");
-    // Task 10: the count bound is deliberately non-binding here — see
+    // The count bound is deliberately non-binding here — see
     // `with_window_inside_the_segment`.
     let plan = with_window_inside_the_segment(plan_orders_to_drill_orders());
 
@@ -1483,11 +1380,9 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         IntegrityResult::Partial,
         "zero sampled records must never report Pass, and is a different case from ConsumeOnly"
     );
-    // Task 19 fix round 3: the reason is asserted by CONTENT, not merely
-    // `is_some()`. "Compared nothing" and "compared less than claimed" are
-    // different findings that an auditor must be able to tell apart in the
-    // signed document, and a bare `is_some()` let a mutant collapsing the
-    // zero case into the short-sample wording survive with nothing red.
+    // The reason is asserted by CONTENT, not `is_some()`: "compared nothing"
+    // and "compared less than claimed" are different findings an auditor must
+    // tell apart in the signed document.
     assert!(
         out.integrity
             .partial_reason
@@ -1505,12 +1400,10 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
 /// `a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_successful_sample`,
 /// which exercises the byte-fingerprint lane only.
 ///
-/// Found by mutation: dropping `records_restored >= claimed` from the
-/// consume-only lane's positive predicate left every test in this suite
-/// green, because nothing drove a consume-only selection to a read-back that
-/// was non-empty but SHORT. That is "compared less than claimed" reaching
-/// `Pass` on a lane — the fourth door's exact shape, one guard over. The
-/// manifest claims 50 records for this selection and the target hands back 5.
+/// Dropping `records_restored >= claimed` from the consume-only lane's
+/// positive predicate would let "compared less than claimed" reach `Pass`:
+/// the manifest claims 50 records for this selection and the target hands
+/// back 5.
 #[test]
 fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_successful_sample() {
     let (store, sha) = store_with_matching_segment();
@@ -1540,7 +1433,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         &facts,
         &sel_orders(), // count 50
         &fixtures::mapping("orders", "drill-orders"),
-        // Task 10: the count bound is deliberately non-binding here — see
+        // The count bound is deliberately non-binding here — see
         // `with_window_inside_the_segment`.
         &with_window_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
@@ -1563,10 +1456,8 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         .partial_reason
         .expect("partial must carry a reason");
     assert!(reason.contains("orders/0"), "{reason:?}");
-    // Task 10b: "supports at least 50", not "claims 50". The segment here is
-    // WHOLLY inside the sampled window, so the number itself is unchanged —
-    // what changed is that the figure is now stated as the lower bound it has
-    // always been, and a straddling segment would no longer contribute to it.
+    // "supports at least 50", not "claims 50": the figure is a lower bound,
+    // and a straddling segment would not contribute to it.
     assert!(
         reason.contains("gave back 5 records") && reason.contains("supports at least 50"),
         "the reason must name BOTH the shortfall and the claim, so an auditor can size it: \
@@ -1579,7 +1470,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
     );
 }
 
-/// Review finding r13 (surviving mutant): the per-partition consume cap.
+/// The per-partition consume cap.
 /// `SpyReader` records every `max` argument `consume_range` actually
 /// received; the target genuinely holds 40 records but `sel_orders()` caps
 /// `count` at 50 (its own fixture value) — this test instead builds a
@@ -1603,7 +1494,7 @@ impl ClusterReader for SpyReader {
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
         self.inner.topic_configs(topic)
     }
-    /// Task 8 (guard **G-TS**): forwarded like every other read, so the spy
+    /// Guard **G-TS**: forwarded like every other read, so the spy
     /// keeps observing exactly what the inner reader answers.
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
         self.inner.broker_configs()
@@ -1686,13 +1577,10 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
     assert_eq!(out.integrity.records_sampled_matching, 7);
 }
 
-/// Review finding r15: addendum A1 explicitly redefined `records_restored` as
-/// "the count of records actually consumed, not `matched + mismatched`" —
-/// every prior fixture made the two figures equal, so the distinction was
-/// unpinned. Here the target holds MORE records than the archive sampled
-/// (8 consumed vs. 5 archived), so `records_restored` (8) must differ from
-/// `records_sampled_matching + mismatches` (5): a mutant reverting to the
-/// old `matched + mismatched` definition changes the observed value.
+/// `records_restored` is "the count of records actually consumed, not
+/// `matched + mismatched`" (addendum A1). Here the target holds MORE records
+/// than the archive sampled (8 consumed vs. 5 archived), so the two figures
+/// differ.
 #[test]
 fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
     let (store, sha) = store_with_matching_segment();
@@ -1749,18 +1637,10 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
     );
 }
 
-/// Task 19 fix round 2: "no shipped test drives two partitions of one topic
-/// through `run()`" (review). Every prior multi-selection test used two
-/// DIFFERENT topics; this one uses ONE topic ("orders") across TWO
-/// partitions, each independently and correctly restored but with DISTINCT
-/// per-partition content — the shape the reviewer's very first F1
-/// demonstration also used ("Same defect within one topic. Two partitions of
-/// orders, each restored perfectly, distinct content"). If `compare()` were
-/// ever pooled across selections again, partition 1's consumed records would
-/// displace partition 0's in one shared `by_offset` map (both partitions
-/// start at offset 0), and partition 0's archive entries would be checked
-/// against partition 1's — different — content, fabricating mismatches on a
-/// perfectly healthy restore.
+/// ONE topic ("orders") across TWO partitions, each correctly restored with
+/// DISTINCT content. Pooled across selections, partition 1's records would
+/// displace partition 0's in one shared `by_offset` map (both start at offset
+/// 0), fabricating mismatches on a healthy restore.
 fn per_partition_engine(
     facts: BackupSetFacts,
     by_partition: BTreeMap<i32, Vec<RecordFingerprint>>,
@@ -1943,20 +1823,9 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
     assert_eq!(out.pass_rate(), Some(1.0));
 }
 
-// ===========================================================================
-// Task 19 fix round 3 — THE FIVE REPRODUCTIONS.
-//
-// Five independent reviewers each produced an EXECUTED reproduction of the
-// same critical defect: phase 7 signing `Pass` over a restore it had not
-// actually checked. Rounds 1 and 2 each closed the lane their own defect was
-// found in and left another open. These five tests are the regression suite
-// for that defect, one named test per reproduction, each driven through the
-// FULL `run` (never through a helper in isolation) because every one of the
-// four shipped doors was in `run`'s own wiring rather than in a leaf.
-//
-// Each test states the OLD (broken) observation in its doc comment and
-// asserts the new one, so a future reader can tell at a glance what the test
-// is defending and what it looked like when it was wrong.
+// THE FIVE REPRODUCTIONS: phase 7 signing `Pass` over a restore it had not
+// checked, one named test per shape, each driven through the FULL `run`
+// because every one was in `run`'s own wiring rather than in a leaf.
 
 /// A `DataEngine` answering per SELECTION (`"topic/partition"`), able to hand
 /// back either real fingerprints or `EngineError::Unsupported` — the mixed
@@ -2076,24 +1945,12 @@ fn two_topic_plan() -> RestorePlan {
     plan
 }
 
-// ---------------------------------------------------------------------------
-// REPRODUCTION 1 — one of two topics restored to ZERO records, on a legacy
-// archive.
-//
-// OLD OBSERVATION (the fourth door, shipped):
-//     level=ConsumeOnly result=Pass sampled=0 records_restored=25
-//
-// Both zero-record guards lived inside the `ByteFingerprint` arm, so the
-// `ConsumeOnly` lane had no zero-record guard of ANY kind: `result` was
-// initialised to `Pass` and nothing in that lane could move it. The trigger —
-// a pre-0.21 archive or a KBAK level-1 segment — is a NORMAL production
-// condition the code treated as a routine downgrade, so this signed a
-// successful restore drill over a topic that restored nothing at all.
-//
-// NOW: the obligation is not written in the lane. `verdict_for_selection`'s
-// consume-only arm must construct `Evidence` exactly as the byte-fingerprint
-// arm does, and "the target partition gave back zero records" is
-// `Unverified`, which `roll_up` refuses to fold into a `Pass`.
+// REPRODUCTION 1: one of two topics restored to ZERO records, on a legacy
+// archive (a pre-0.21 archive or a KBAK level-1 segment, a NORMAL production
+// condition). `verdict_for_selection`'s consume-only arm constructs
+// `Evidence` exactly as the byte-fingerprint arm does, and "the target
+// partition gave back zero records" is `Unverified`, which `roll_up` refuses
+// to fold into a `Pass`.
 
 /// Reproduction 1. A legacy archive downgrades BOTH selections to
 /// consume-only; `payments` restored healthily, `orders` restored to zero.
@@ -2136,7 +1993,7 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         &facts,
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
-        // Task 10: the count bound is deliberately non-binding here — see
+        // The count bound is deliberately non-binding here — see
         // `with_window_inside_the_segment`.
         &with_window_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
@@ -2152,9 +2009,8 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
     );
     assert_eq!(out.integrity.result, IntegrityResult::Partial);
     assert_eq!(out.integrity.level, IntegrityLevel::ConsumeOnly);
-    // The old observation's exact numbers, now attached to a verdict that is
-    // not a pass: `sampled = 0` because the consume-only lane reconciles
-    // nothing, and `records_restored = 25` from the healthy sibling alone.
+    // `sampled = 0` because the consume-only lane reconciles nothing, and
+    // `records_restored = 25` from the healthy sibling alone: not a pass.
     assert_eq!(out.integrity.records_sampled, 0);
     assert_eq!(out.records_restored, 25);
     assert_eq!(out.pass_rate(), None);
@@ -2172,22 +2028,10 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
     );
 }
 
-// ---------------------------------------------------------------------------
-// REPRODUCTION 2 — `orders` restored 100% CORRUPT and `payments` not restored
-// at all.
-//
-// OLD OBSERVATION: Pass, records_restored=50.
-//
-// `compare()` pooled every selection's records into one offset-keyed map.
-// `ConsumedRecord` carries no topic field and every Kafka partition starts at
-// offset 0, so one topic's records satisfied ANOTHER topic's archive lookups
-// by coincidence of matching offsets. Two independently broken topics
-// reconciled against each other into a clean pass.
-//
-// NOW: `compare()` is called from `verdict_for_selection`, which is handed ONE
-// selection, so it cannot see two selections' data at once even by accident.
-// Both defects are detected, separately, and both are `Failed` — "examined,
-// and found wrong", which outranks every other verdict.
+// REPRODUCTION 2: `orders` restored 100% CORRUPT and `payments` not restored
+// at all. `compare()` is called from `verdict_for_selection`, which is handed
+// ONE selection, so two selections' records can never reconcile against each
+// other; both defects are detected, separately, and both are `Failed`.
 
 /// Reproduction 2. Corruption and absence are each detected on their own
 /// merits and neither can be papered over by the other.
@@ -2195,13 +2039,9 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
 fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_against_it() {
     let (facts, store) = two_topic_facts_and_store(25);
 
-    // `fixtures::matching_pair` builds byte-IDENTICAL `k{i}`/`v{i}` records
-    // regardless of the topic it is called for (the fingerprint folds in no
-    // topic name), and both partitions start at offset 0 — deliberately, so
-    // that a pooled `compare()` COULD satisfy one topic's archive from the
-    // other's records. That is what makes this test discriminate the pooled
-    // implementation from the per-selection one, exactly as
-    // `a_topic_restored_to_zero_records_...` documents for its own case.
+    // `fixtures::matching_pair` builds byte-IDENTICAL records for every topic
+    // and both partitions start at offset 0, so a pooled `compare()` COULD
+    // satisfy one topic's archive from the other's records.
     let (archive_orders, mut cons_orders) = fixtures::matching_pair(25);
     let (archive_payments, _cons_payments_never_restored) = fixtures::matching_pair(25);
     // 100% corrupt: every restored value differs from what the archive
@@ -2263,17 +2103,8 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
     assert_eq!(out.records_restored, 25);
 }
 
-// ---------------------------------------------------------------------------
-// REPRODUCTION 3 — ZERO records consumed from a sampled partition.
-//
-// OLD OBSERVATION: Pass, records_restored=0.
-//
-// The purest form of the fourth door: the drill consumed nothing whatsoever
-// from the partition it sampled, and still signed a pass. `result` began at
-// `Pass` on the consume-only lane and nothing wrote to it.
-//
-// NOW: `Pass` is COMPUTED from positive evidence, never initialised. There is
-// no `result` variable in `run` to forget to move.
+// REPRODUCTION 3: ZERO records consumed from a sampled partition. `Pass` is
+// COMPUTED from positive evidence, never initialised.
 
 /// Reproduction 3. The sampled partition gives back nothing, while a
 /// DIFFERENT partition of the same target topic holds data — so the drill has
@@ -2283,7 +2114,7 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
 fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
     let (store, sha) = store_with_matching_segment();
     let mut facts = facts_with_segment(&sha);
-    // FX-23: the manifest lists partition 1 too (the same segment shape), so
+    // The manifest lists partition 1 too (the same segment shape), so
     // the records the target holds there are records the archive accounts
     // for; a target partition the manifest has no partition for is now a
     // count-bound failure of its own, which is not what this test pins.
@@ -2316,7 +2147,7 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         &facts,
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
-        // Task 10: the count bound is deliberately non-binding here — see
+        // The count bound is deliberately non-binding here — see
         // `with_window_inside_the_segment`.
         &with_window_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
@@ -2343,22 +2174,11 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
     assert_eq!(out.newest_restored_ts_ms, MATCHING_PAIR_BASE_TS + 4);
 }
 
-// ---------------------------------------------------------------------------
-// REPRODUCTION 4 — a SHORT archive fingerprint list over a 96%-lossy
-// partition.
-//
-// OLD OBSERVATION:
-//     level=ByteFingerprint result=Pass sampled=26 matching=26 pass_rate=Some(1.0)
-//
-// The archive returned 1 fingerprint where the manifest claims 25. Every
-// guard asked "did we compare zero?", none asked "did we compare LESS than we
-// claim to have?" — so 24 unexamined records read as a smaller successful
-// sample, and `Some(1.0)` was signed over a partition that had lost 96% of
-// its data.
-//
-// NOW: short IS unverified. What came back is held against
-// `min(sel.count, Σ record_count)` — both already-signed figures — and
-// `pass_rate_measured` is a ratio over the WHOLE sample or it is null.
+// REPRODUCTION 4: a SHORT archive fingerprint list over a 96%-lossy
+// partition (1 fingerprint where the manifest claims 25). Short IS
+// unverified: what came back is held against `min(sel.count, Σ
+// record_count)`, both already-signed figures, and `pass_rate_measured` is a
+// ratio over the WHOLE sample or it is null.
 
 /// Reproduction 4. A short sample is coverage the drill did not obtain, not a
 /// smaller successful sample; and no `Some(1.0)` may sit beside it.
@@ -2398,7 +2218,7 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         &facts,
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
-        // Task 10: the count bound is deliberately non-binding here — see
+        // The count bound is deliberately non-binding here — see
         // `with_window_inside_the_segment`.
         &with_window_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
@@ -2429,7 +2249,7 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         .partial_reason
         .expect("partial must carry a reason");
     assert!(reason.contains("orders/0"), "{reason:?}");
-    // Task 10b: the byte-fingerprint lane's own wording, pinned as a phrase
+    // The byte-fingerprint lane's own wording, pinned as a phrase
     // rather than as a bare "25" — a lone digit is satisfied by any number in
     // any sentence, and the message this arm is about is the one an auditor
     // reads out of the SIGNED `partial_reason`.
@@ -2443,22 +2263,11 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
     );
 }
 
-// ---------------------------------------------------------------------------
-// REPRODUCTION 5 — one selection's `Unsupported` archive silently ERASED the
-// byte-level claim for every other selection.
-//
-// OLD OBSERVATION: `probe_archive_mode` returned a single `ConsumeOnly` for
-// the whole backup set on the FIRST `Unsupported`, discarding every
-// fingerprint set it had already collected. One legacy partition therefore
-// (a) threw away a sibling's genuinely-established byte-level reconciliation,
-// and (b) moved the entire run onto the lane that had no zero-record guard —
-// which is how reproduction 1 became reachable in the first place.
-//
-// NOW: the mode is PER SELECTION. A legacy segment downgrades only its own
-// partition; `level` still reports the WEAKEST claim any selection could
-// support (a drill containing a legacy segment cannot honestly tell an
-// auditor "byte-fingerprint" for the restore as a whole), but the counters
-// and `partial_reason` preserve what was genuinely established.
+// REPRODUCTION 5: one selection's `Unsupported` archive must not erase the
+// byte-level claim for every other selection. The mode is PER SELECTION: a
+// legacy segment downgrades only its own partition; `level` still reports
+// the WEAKEST claim any selection could support, but the counters and
+// `partial_reason` preserve what was established.
 
 /// Reproduction 5. A downgrade names itself and costs the drill its
 /// whole-run LEVEL; it does not cost a sibling selection its CHECK.
@@ -2541,13 +2350,9 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
     );
 }
 
-// ---------------------------------------------------------------------------
-// Round 3's two deliberate severity changes, pinned at `run`'s own call site.
-// Both were `DrillError::Operational` (exit 1, NO signed artifact) before this
-// round and are drill results (exit 2, signed scorecard) now — see
-// `verdict_for_selection`'s "Severity" doc paragraph. A test that only
-// asserted "not a Pass" would keep passing if either reverted to an `Err`, so
-// each asserts `Ok` explicitly.
+// Two outcomes that are drill results (exit 2, signed scorecard), not
+// `DrillError::Operational`; see `verdict_for_selection`'s "Severity" doc
+// paragraph. Each asserts `Ok` explicitly.
 
 /// A `(topic, partition, window)` the plan names but no archive segment
 /// matches. The archive holding no segment in this window is a positively
@@ -2600,10 +2405,7 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
 }
 
 /// A segment written before 0.21 carries an EMPTY sha256 and cannot be
-/// checked. Round 2 skipped it with a logged note and let the run report
-/// `Pass` anyway — the module doc claimed such segments were "never counted
-/// as a pass", and nothing in the code made that true. A skip is coverage the
-/// drill did not obtain.
+/// checked: a skip is coverage the drill did not obtain, never a pass.
 #[test]
 fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
     let (store, _sha) = store_with_matching_segment();
@@ -2648,22 +2450,12 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         .contains("before 0.21"));
 }
 
-/// Task 19 fix round 3, third pass — the REACHABLE half of the coordinator's
-/// surviving mutant M3, driven through the full `run`.
-///
 /// `verdict_for_selection` calls `segment_evidence` BEFORE it matches on the
-/// archive mode, so the segment sha256 check runs on every lane — including
-/// consume-only. A pre-0.21 / KBAK-level-1 archive whose segment bytes do not
-/// match its own manifest is therefore a real production path on which a
-/// DOWNGRADED selection is `Evidence::Failed`.
-///
-/// The records here reconcile perfectly and the target returns everything the
-/// manifest claims, so the record lane is `Verified` and the `Fail` is
-/// attributable to the segment lane alone. Under M3 — which filtered
-/// downgraded selections out of `roll_up`'s `any(failed)` — this reported
-/// `Partial` ("the drill could not fully check this") for an archive the
-/// drill HAD checked and found corrupt. Partial and Fail are not
-/// interchangeable in a signed document.
+/// archive mode, so the segment sha256 check runs on every lane, consume-only
+/// included: a downgraded selection whose segment bytes do not match its own
+/// manifest is `Evidence::Failed`. The records reconcile perfectly here, so
+/// the `Fail` is the segment lane's alone, and it must not read `Partial`:
+/// Partial and Fail are not interchangeable in a signed document.
 #[test]
 fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_partial() {
     let (store, _real_sha) = store_with_matching_segment();
@@ -2727,21 +2519,11 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
     );
 }
 
-// ---------------------------------------------------------------------------
-// THE PHASE-7 → PHASE-8 SEAM.
-//
-// Every test above this line stops at `phase7_verify::run`'s answer. The final
-// whole-branch review found the build's recurring defect surviving one layer
-// downstream of it: `roll_up` withholds `pass_rate_measured` when part of the
-// sample was never reconciled, and phase 8 recomputed the same ratio from the
-// two counters with that condition dropped — so a signed document carried
-// `integrity.result: "partial"` beside `integrity.pass_rate_measured: 1.0` and
-// `objectives.met: true`.
-//
-// Both halves were individually correct and individually reviewed. Nothing
-// crossed the seam, which is why 405 green tests did not see it. These two
-// tests cross it, and the second one crosses it all the way into the SIGNED
-// BYTES — the only surface an auditor actually reads.
+// THE PHASE-7 → PHASE-8 SEAM. `roll_up` withholds `pass_rate_measured` when
+// part of the sample was never reconciled, so phase 8 must not recompute the
+// ratio from the two counters: a signed `integrity.result: "partial"` beside
+// `pass_rate_measured: 1.0` and `objectives.met: true` is the defect. The
+// second test crosses the seam into the SIGNED BYTES.
 
 /// A REAL phase-7 verdict for the shape that produces it: one selection
 /// reconciles record-for-record, a second returns zero archive fingerprints.
@@ -2817,9 +2599,7 @@ fn phase_8_never_republishes_a_pass_rate_phase_7_withheld() {
 }
 
 /// The same property asserted against the SIGNED BYTES, because that is the
-/// artifact the claim is made in. A unit assertion on `decide`'s return value
-/// would not have caught the original defect: the republication happened at
-/// the orchestrator's assignment, one line after `decide` returned.
+/// artifact the claim is made in.
 #[test]
 fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
     let integ = a_partial_verdict_over_a_partly_reconciled_sample();
@@ -2833,8 +2613,8 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
     sc.integrity = integ;
     sc.outcome = outcome;
     sc.objectives = objectives;
-    // Phase 7's integrity carries `integrity.verification` since PROD-08.1,
-    // a 1.4.0 field (arm IV-1), so the document is the writer's version.
+    // Phase 7's integrity carries `integrity.verification`, a 1.4.0 field
+    // (arm IV-1), so the document is the writer's version.
     sc.format_version = logweir_core::FORMAT_VERSION.into();
 
     let store = fixtures::recording_store();
@@ -2867,14 +2647,11 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-4: configuration parity is ASSESSED only where the capture was, and a
-// refused TARGET read (T13, consumer 5) is recorded, not compared as empty.
-// ---------------------------------------------------------------------------
+// Configuration parity is ASSESSED only where the capture was, and a refused
+// TARGET read is recorded, not compared as empty.
 
 /// The healthy baseline's reader, wrapped so the TARGET's DescribeConfigs is
-/// REFUSED — what `RdKafkaReader::topic_configs` now returns instead of the
-/// empty map rdkafka 0.36.2 used to hand back.
+/// REFUSED, as `RdKafkaReader::topic_configs` reports it.
 fn refusing_target_configs(reader: Reader) -> Reader {
     reader.on_topic_configs(|topic| {
         Err(logweir_kafka::reader::empty_topic_config_answer(
@@ -2940,7 +2717,7 @@ fn receipt_coverage(coverage: &str) -> logweir_core::backup_receipt::SourceConfi
     logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
 }
 
-/// **FX-4: the parity arm that ignores coverage.** Every coverage that is not
+/// **The parity arm that ignores coverage.** Every coverage that is not
 /// `captured` — no receipt (`unknown`), a denied capture, a manifest that
 /// disagreed — names the topic in `not_assessed`; `captured` is the only state
 /// that yields `Some([])`, the "every topic assessed" claim. The archive's own
@@ -2997,16 +2774,14 @@ fn configuration_parity_is_not_assessed_unless_the_source_capture_was() {
     }
 }
 
-/// **FX-4 review M5: what a reader older than `not_assessed` sees.** For
-/// every coverage state, a topic that phase 7 did not assess leaves a
-/// non-empty `unexpected_divergence` — the array `verify_scorecard.py` 1.14.0,
-/// a pre-FX-4 `drill show` and the pre-FX-4 guide all read — so no reader that
-/// ignores `not_assessed` can take its silence for parity. Only `captured` with
-/// a readable target and agreeing keys may leave the array empty.
+/// **What a reader older than `not_assessed` sees.** For every coverage
+/// state, a topic phase 7 did not assess leaves a non-empty
+/// `unexpected_divergence`, the array older readers read, so no reader that
+/// ignores `not_assessed` can take its silence for parity. Only `captured`
+/// with a readable target and agreeing keys may leave the array empty.
 ///
 /// Negative control: drop the marker from `classify_parity_all` and every
-/// not-assessed row fails, the `targetReadDenied` one included (the case the
-/// writer before FX-4 made noisy and FX-4 had made silent).
+/// not-assessed row fails, the `targetReadDenied` one included.
 #[test]
 fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
     let quiet = |out: &logweir::drill::phase7_verify::VerifyOutcome, why: &str| {
@@ -3057,13 +2832,13 @@ fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
     quiet(&out, "targetReadDenied");
 }
 
-/// **OD-7, as the owner ruled it on 2026-10-05.** `docs/stability.md` states
-/// both rulings beside the MINOR/MAJOR rule, and the entry the follow-up
-/// ruling covers is EXACTLY the shape phase 7 writes: the ruling names that
-/// string, so a different marker would be an unruled change to an existing
-/// field's content again. No doc still calls the classification pending.
+/// **OD-7, as the owner ruled it.** `docs/stability.md` states both rulings
+/// beside the MINOR/MAJOR rule, and the entry the follow-up ruling covers is
+/// EXACTLY the shape phase 7 writes: the ruling names that string, so a
+/// different marker would be an unruled change to an existing field's
+/// content. No doc still calls the classification pending.
 ///
-/// Negative controls: the 2026-09-29 "OD-7, still pending" text restored in
+/// Negative controls: the old "OD-7, still pending" text restored in
 /// `docs/stability.md`, a rule that loses either ruling, or a
 /// `not_assessed_marker` of another shape, fails this test.
 #[test]
@@ -3123,9 +2898,8 @@ fn the_stability_rule_carries_the_owners_od_7_rulings_for_the_entry_phase_7_writ
     }
 }
 
-/// **FX-4 / T13, consumer 5.** A REFUSED read of the TARGET's configuration
-/// used to be an empty map, so every source key compared as different. It is
-/// now named `targetReadDenied` and the topic's keys are not compared at all;
+/// **A REFUSED read of the TARGET's configuration is named
+/// `targetReadDenied`**, and the topic's keys are not compared at all;
 /// partition count and replication factor still are.
 ///
 /// Negative control: `reader.topic_configs(tgt).unwrap_or_default()` in phase
@@ -3152,7 +2926,7 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
             "drill-orders: configuration (targetReadDenied)".to_string()
         ])
     );
-    // No KEY was compared; the one entry is the fail-safe marker (review M5).
+    // No KEY was compared; the one entry is the fail-safe marker.
     assert_eq!(
         out.topic_parity.unexpected_divergence,
         vec!["drill-orders: configuration not assessed (targetReadDenied)".to_string()]
@@ -3174,13 +2948,11 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
     );
 }
 
-// ---------------------------------------------------------------------------
-// FX-3: the MODE decides the label. A scratch drill's deviations on the four
-// kinds the restore's topic creation decides are INTENDED (unchanged); a
-// `newTopic` restore's are NOT RECONSTRUCTED and also UNEXPECTED, never
-// intended, so a reader older than format 1.2.0 sees a divergence, not a label
-// that calls lost compaction or replication factor 1 "intended".
-// ---------------------------------------------------------------------------
+// The MODE decides the label. A scratch drill's deviations on the four kinds
+// the restore's topic creation decides are INTENDED; a `newTopic` restore's
+// are NOT RECONSTRUCTED and also UNEXPECTED, never intended, so a reader
+// older than format 1.2.0 sees a divergence, not a label that calls lost
+// compaction or replication factor 1 "intended".
 
 use logweir_core::spec::TargetMode;
 
@@ -3273,8 +3045,8 @@ fn a_lower_replication_factor_is_intended_in_a_scratch_drill_and_not_reconstruct
 }
 
 /// The controls for the four rows above: any OTHER differing key is
-/// unexpected in both modes and never "not reconstructed" (FX-3 reclassifies
-/// the four kinds only), and a topic that matches the source on every count
+/// unexpected in both modes and never "not reconstructed" (only the four kinds
+/// are reclassified), and a topic that matches the source on every count
 /// and key has nothing in any list, in either mode.
 #[test]
 fn other_keys_stay_unexpected_and_a_matching_topic_has_nothing_in_either_mode() {
@@ -3299,11 +3071,10 @@ fn other_keys_stay_unexpected_and_a_matching_topic_has_nothing_in_either_mode() 
     }
 }
 
-/// THE DEFECT, through the whole of phase 7: a compacted source with a
-/// seven-day retention at replication factor 3, restored into a NEW topic at
-/// the plan's replication factor 1. Before FX-3 this run's `topic_parity`
-/// was byte for byte the scratch drill's — `intentionally_deviated: [cleanup.
-/// policy, replication_factor, retention.ms]` — and phase 8 signed it.
+/// A compacted source with a seven-day retention at replication factor 3,
+/// restored into a NEW topic at the plan's replication factor 1: its
+/// deviations are not reconstructed, never the scratch drill's
+/// `intentionally_deviated`.
 ///
 /// The verified receipt says the capture was `captured`, so no `not_assessed`
 /// marker shares the list and every entry below is a deviation.
@@ -3408,10 +3179,10 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
     assert!(out.topic_parity.unexpected_divergence.is_empty());
     assert_eq!(out.topic_parity.not_reconstructed, Some(vec![]));
 
-    // FX-3 review F1: THE MODE LOST ON ITS WAY TO PHASE 7. These scratch
-    // labels, signed in a document whose `target.mode` is newTopic, are what
-    // the defect's return would produce; phase 8's `validate_invariants`
-    // refuses to sign them (NR-4), and both readers refuse them.
+    // THE MODE LOST ON ITS WAY TO PHASE 7: scratch labels signed in a
+    // document whose `target.mode` is newTopic. Phase 8's
+    // `validate_invariants` refuses to sign them (NR-4), and both readers
+    // refuse them.
     let mut sc = fixtures::scorecard_pass();
     sc.format_version = logweir_core::FORMAT_VERSION.to_string();
     sc.target.mode = TargetMode::NewTopic;
@@ -3428,10 +3199,10 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
     );
 }
 
-/// A refused TARGET configuration read (FX-4's `targetReadDenied`) compares no
+/// A refused TARGET configuration read (`targetReadDenied`) compares no
 /// keys, but replication factor comes from metadata and is classified either
 /// way — so even then a `newTopic` restore names it not reconstructed, beside
-/// FX-4's fail-safe marker.
+/// the fail-safe marker.
 #[test]
 fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication_factor() {
     let (store, facts, reader, engine) = healthy_parts();
@@ -3461,9 +3232,8 @@ fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication
     assert!(out.topic_parity.intentionally_deviated.is_empty());
 }
 
-/// The bullet `docs/stability.md`'s FX-3 section carried from 2026-10-05 until
-/// the owner ruled, verbatim (whitespace-flattened). It is kept here only so
-/// [`fx3_stale_wording`] is proven to catch it.
+/// The bullet `docs/stability.md`'s FX-3 section once carried, verbatim
+/// (whitespace-flattened), kept so [`fx3_stale_wording`] is proven to catch it.
 const FX3_PENDING_BULLET_OF_2026_10_05: &str = "- **PENDING THE OWNER'S RULING: the content \
      of the two existing lists.** In a `newTopic` document, entries of the existing shape \
      `\"<target topic>: <key>\"` leave `intentionally_deviated` and are written into \
@@ -3495,23 +3265,18 @@ fn fx3_stale_wording(flat_lowercase: &str) -> Vec<&'static str> {
 }
 
 /// **FX-3's classification is RULED, and no document calls it pending.** The
-/// new field and arms NR-1..NR-5 are MINOR under OD-7 (a). Moving a
-/// `newTopic` restore's deviations out of `intentionally_deviated` and into
-/// the existing `unexpected_divergence` is new content in two existing
-/// fields; the owner ruled it MINOR on 2026-10-07 as OD-7's third, general
-/// case (it can only move a reader's verdict to the safer side).
-/// `docs/stability.md`'s rule states that case and names FX-3's move (the
-/// text integration batch 3 landed), the FX-3 section (in
-/// `docs/formats/drill-scorecard.md` since PROD-17.1 B12) states the ruling,
-/// and no document or FX-3 source comment still says the classification
-/// awaits it.
+/// new field and arms NR-1..NR-5 are MINOR under OD-7 (a); moving a
+/// `newTopic` restore's deviations into the existing `unexpected_divergence`
+/// is OD-7's third, general case (it can only move a reader's verdict to the
+/// safer side). `docs/stability.md`'s rule states that case,
+/// `docs/formats/drill-scorecard.md`'s FX-3 section states the ruling, and no
+/// listed document or source still says the classification awaits it.
 ///
 /// Negative controls: [`FX3_PENDING_BULLET_OF_2026_10_05`] must trip
-/// [`fx3_stale_wording`] (asserted first, so the check cannot go blind), and
-/// restoring that bullet in `docs/stability.md`, a rule without the third
-/// case's FX-3 sentence, a "pending" sentence in any listed file, a section
-/// that drops NR-4 and NR-5's classification, or one that says again that no
-/// reader has a `topic_parity` arm (review F3), fails here.
+/// [`fx3_stale_wording`] (asserted first, so the check cannot go blind); a
+/// rule without the third case's FX-3 sentence, a "pending" sentence in any
+/// listed file, or a section that drops NR-4 and NR-5's classification or says
+/// no reader has a `topic_parity` arm, fails here.
 #[test]
 fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pending() {
     assert_eq!(
@@ -3547,8 +3312,7 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
             "docs/stability.md's MINOR/MAJOR rule no longer says: {ruled}"
         );
     }
-    // The per-version sections moved to each format's own page in PROD-17.1
-    // (B12): FX-3's classification lives with the field it classifies.
+    // FX-3's classification lives with the field it classifies.
     let scorecard = flat("docs/formats/drill-scorecard.md");
     let section = scorecard
         .split("### `topic_parity` in a `newTopic` restore: not reconstructed (1.2.0)")
@@ -3570,7 +3334,7 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
             "docs/formats/drill-scorecard.md's FX-3 section no longer says: {said}"
         );
     }
-    // FX-3 review F3: this build's readers DO have `topic_parity` arms.
+    // This build's readers DO have `topic_parity` arms.
     assert!(
         !section.contains("because no reader has a `topic_parity` arm"),
         "docs/formats/drill-scorecard.md's FX-3 section says no reader has a topic_parity arm; \
@@ -3598,13 +3362,9 @@ fn fx3s_change_to_the_two_existing_lists_is_ruled_minor_and_no_doc_calls_it_pend
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-21: a source replication factor (or partition count) the archive does not
-// record is NOT ASSESSED, never read as matching. Engine 0.23.3 records the
-// factor in the manifest for the FIRST topic it saves only, and phase 7 used
-// the TARGET's own value in its place, so every other topic's factor
-// difference was signed as no divergence.
-// ---------------------------------------------------------------------------
+// A source replication factor (or partition count) the archive does not
+// record is NOT ASSESSED, never read as matching: engine 0.23.3 records the
+// factor in the manifest for the FIRST topic it saves only.
 
 /// A verified receipt's coverage, `captured` for `orders`, whose 1.3.0
 /// `topic_configuration` records `orders`' replication factor as `factor`
@@ -3667,18 +3427,16 @@ fn parity_with(
     .topic_parity
 }
 
-/// **FX-21, the defect.** The manifest records no replication factor for the
-/// topic and the bound receipt none either (a 1.1.0 receipt, or no binding):
-/// the factor is named in `not_assessed` and its fail-safe twin in
+/// **The factor not recorded.** The manifest records no replication factor
+/// for the topic and the bound receipt none either (a 1.1.0 receipt, or no
+/// binding): the factor is named in `not_assessed` and its fail-safe twin in
 /// `unexpected_divergence`, in both modes, and it is in neither the intended
-/// nor the not-reconstructed list — so no list reads it as matching or as a
-/// measured deviation. The plan's factor here is 1, the target's own value the
-/// writer before FX-21 substituted for the missing one, which signed the topic
-/// as "no replication-factor divergence".
+/// nor the not-reconstructed list. The plan's factor here is 1, the target's
+/// own value, which must not stand in for the missing one.
 ///
-/// Negative control: `t.source_replication_factor.unwrap_or(tgt_rf)` restored
-/// in `classify_parity_all` (the writer before FX-21) names nothing in
-/// `not_assessed` and fails every row below.
+/// Negative control: `t.source_replication_factor.unwrap_or(tgt_rf)` in
+/// `classify_parity_all` names nothing in `not_assessed` and fails every row
+/// below.
 #[test]
 fn a_replication_factor_the_archive_does_not_record_is_not_assessed_never_matched() {
     let entry = "drill-orders: replication_factor (notRecorded)".to_string();
@@ -3714,13 +3472,13 @@ fn a_replication_factor_the_archive_does_not_record_is_not_assessed_never_matche
     assert_eq!(p.not_assessed, Some(vec![entry]));
 }
 
-/// **FX-21, the receipt's factor.** Where the manifest records none, the bound
+/// **The receipt's factor.** Where the manifest records none, the bound
 /// receipt's `topic_configuration` factor (1.3.0, Logweir's own metadata read)
 /// is the source's, and is compared: 3 against the plan's 1 is a deviation,
 /// intended in a scratch drill and not reconstructed in a `newTopic` restore,
 /// and nothing is not assessed. The MANIFEST's factor comes first, so a
-/// document whose manifest records one is decided exactly as before FX-21:
-/// manifest 1 and receipt 3 is no deviation.
+/// document whose manifest records one is decided by the manifest: manifest 1
+/// and receipt 3 is no deviation.
 ///
 /// Negative controls: a phase 7 that ignores the receipt fails the first row
 /// (it names the factor not assessed); one that prefers the receipt fails the
@@ -3764,9 +3522,8 @@ fn the_bound_receipts_factor_stands_where_the_manifest_records_none() {
     );
 }
 
-/// **FX-21, the same class for the partition count.** A manifest that records
-/// no `original_partition_count` (an archive before engine 0.17) used to
-/// compare the TARGET's count against itself. It is now named in
+/// **The same class for the partition count.** A manifest that records no
+/// `original_partition_count` (an archive before engine 0.17) is named in
 /// `not_assessed` with its twin, exactly like the factor. The control: the
 /// recorded count (1, the target's 1) is a match and adds nothing.
 #[test]
@@ -3799,7 +3556,7 @@ fn a_partition_count_the_archive_does_not_record_is_not_assessed_never_matched()
         .any(|e| e.contains("partition_count")));
 }
 
-/// **FX-21 through phase 8's checks.** The `newTopic` document phase 7 writes
+/// **Through phase 8's checks.** The `newTopic` document phase 7 writes
 /// for a topic whose factor is not recorded passes `validate_invariants` in
 /// full (NR-2 to NR-5 included: the twin names no setting the restore
 /// decides), so phase 8 signs it, and its `not_assessed` names the factor.

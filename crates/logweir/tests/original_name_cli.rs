@@ -1,5 +1,5 @@
-//! **PROD-15.1 review M3, M2 and L2: the runner BINARY's own refusals of a
-//! restore under the original topic names, before anything is read or
+//! **The runner BINARY's own refusals of a restore under the original topic
+//! names, before anything is read or
 //! dialled.** CI-run: every refusal here happens at startup, so the target
 //! (`127.0.0.1:1`, nothing listens) is never contacted and no bucket is
 //! opened (the plan's stores are filesystem paths nothing creates).
@@ -119,7 +119,7 @@ fn last_stdout_line(o: &Output) -> String {
         .to_string()
 }
 
-/// Review M3, the STARTUP call site: an ordinary approval for an
+/// The STARTUP call site: an ordinary approval for an
 /// original-name plan is exit 3 `ApprovalSubjectMismatch`, before the runner
 /// reads its `KafkaTopic` resources (a path that does not exist) or dials
 /// anything. KILLS: removing the startup check (the unreadable file would
@@ -181,7 +181,7 @@ fn a_sampled_original_name_plan_is_refused_by_name_before_anything_is_dialled() 
 }
 
 /// `ORIGINAL_PLAN` narrowed to one partition of `orders`, in the one spelling
-/// PROD-11.1b's grammar accepts for a subset (the interval form).
+/// the grammar accepts for a subset (the interval form).
 fn subset_plan() -> String {
     format!(
         "{ORIGINAL_PLAN}restore:\n  point_in_time: \"../2026-08-30T01:00:00Z\"\n  partitions:\n    orders: [0]\n"
@@ -255,9 +255,9 @@ fn an_original_name_approval_is_refused_for_an_ordinary_plan() {
     assert!(text.contains("ApprovalSubjectMismatch"), "{text}");
 }
 
-/// Review M2 and L2 through the binary: the owner condition fails CLOSED on
+/// Through the binary: the owner condition fails CLOSED on
 /// what `--kafka-topic-resources` holds — a `KafkaTopic` that manages
-/// `orders` under a reference too long to record (the review's probe P1: a
+/// `orders` under a reference too long to record (a
 /// 63-character namespace and a 200-character name), a `KafkaTopic` with no
 /// readable name, and a file holding no `KafkaTopic` at all — each exit 3
 /// `OriginalNameOwnerUnreadable`, before anything is dialled. The explicit
@@ -307,8 +307,8 @@ fn the_owner_condition_fails_closed_on_the_resources_file() {
     assert!(!text.contains("ApprovalSubjectMismatch"), "{text}");
 }
 
-/// **PROD-15.1 review 2, M1 (the reviewer's probe C2, through the real
-/// binary): a plan string with line breaks never STARTS A LINE of the
+/// **Through the real binary, a plan string with line breaks never STARTS A
+/// LINE of the
 /// runner's own output.** The plan's `evidence.path` carries the two key
 /// lines a controller reads, `target-topics-appeared=` and
 /// `failure-reason=CreatedTopicsLeft`; the run fails on that store (exit 1)
@@ -372,7 +372,7 @@ fn a_plan_string_with_line_breaks_never_starts_a_line_of_the_runners_output() {
     }
 }
 
-/// Review M3 (R09): `drill approve` refuses to sign an ordinary approval for
+/// `drill approve` refuses to sign an ordinary approval for
 /// an original-name plan, and writes nothing; with the flag it signs the
 /// subject. KILLS: minting the ordinary subject for such a plan.
 #[test]

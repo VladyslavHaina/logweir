@@ -63,7 +63,7 @@ fn drill_verify_refuses_a_higher_major_format_version_even_when_well_signed() {
     );
 }
 
-// ---------------------------------------------------------------- Task 5
+// ---------------------------------------------------------------- the backup receipt schema
 // Global Constraint 13, as REVISED: `logweir schema` accepts `scorecard` AND
 // `backup-receipt` in tag 1, and `switchover-record` exits 1 naming tag 2.
 //
@@ -88,13 +88,8 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
         "`logweir schema backup-receipt` must exit 0 (GC13 as revised), stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // The CURRENT file, named by the writer's constant: the newest MINOR's
-    // (FX-7 fix round, review M-2; 1.3.0 since PROD-05.1, 1.4.0 since
-    // PROD-01.3's auth modes, 1.5.0 since PROD-03.0's schema dependency, 1.6.0
-    // since PROD-01.4a's topic IDs, 1.7.0 since PROD-04.1's consumer
-    // positions, 1.8.0 since PROD-02.1's source watermarks). The 1.0.0, FX-4's 1.1.0, FX-7's 1.2.0, PROD-05.1's 1.3.0,
-    // PROD-01.3's 1.4.0, PROD-03.0's 1.5.0 and PROD-01.4a's 1.6.0 files are
-    // frozen beside it
+    // The CURRENT file, named by the writer's constant: the newest MINOR's. The
+    // 1.0.0 to 1.6.0 files are frozen beside it
     // (`crates/logweir-core/tests/schema_drift.rs::the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema`,
     // `…::the_frozen_1_1_0_receipt_schema_is_still_fx4s`,
     // `…::the_frozen_1_2_0_receipt_schema_is_still_fx7s`).
@@ -113,11 +108,10 @@ fn schema_backup_receipt_is_byte_identical_to_the_checked_in_file() {
 
 /// `logweir schema switchover-record` exits 1 and names **tag 2**.
 ///
-/// Critique A F31: it used to fall through the catch-all, whose message named
-/// no tag. "unknown schema `switchover-record`" reads as "there is no such
-/// thing" to an operator who has read tag 2's design and typed the obvious
-/// command; every other deferred schema in that function names the thing that
-/// introduces it.
+/// Without its own arm it would fall through the catch-all, whose "unknown
+/// schema `switchover-record`" reads as "there is no such thing" to an
+/// operator who has read tag 2's design; every other deferred schema names
+/// the thing that introduces it.
 #[test]
 fn schema_rejects_switchover_record_in_tag_1() {
     let out = bin()

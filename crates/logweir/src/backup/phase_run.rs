@@ -8,8 +8,7 @@
 //! bytes' digest, the per-topic record counts and the covered window — which
 //! is what turns "the engine exited 0" into "these records are in this
 //! archive". A backup of empty topics also exits 0, and a run that reports
-//! success without reading anything back is this project's recurring defect
-//! (`scripts/e2e-seed.sh`'s own header says so about its own steps).
+//! success without reading anything back has measured nothing.
 //!
 //! Global Constraint 6 is untouched: the archive handle is
 //! `Store::read_only_from_url`'s, which physically cannot put.
@@ -23,13 +22,13 @@ use logweir_engine_oso::storage::Store;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// **RECEIPT-DUP.** The token a run names when its execution was already
+/// The token a run names when its execution was already
 /// claimed by an earlier run — see [`claim_execution`]. Exit 1: a retry under a
 /// NEW execution id is the remedy, and D1 §4.6's retry policy takes it.
 pub const EXECUTION_ALREADY_CLAIMED: &str =
     logweir_core::guard::TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED;
 
-/// **RECEIPT-DUP.** The token a run names when the evidence store could not
+/// The token a run names when the evidence store could not
 /// prove the execution claim is exclusive — it refused the create-only put,
 /// answered it without enforcing it, or accepted a second create of the same
 /// key. Exit 4 (GC11: "lock-proof failed, nothing uploaded"): nothing about
@@ -47,7 +46,7 @@ pub fn claim_key(backup_id: &str) -> String {
     format!("logweir/backups/{backup_id}/execution.claim.json")
 }
 
-/// **RECEIPT-DUP — one engine run per execution.** Claim `backup_id` with a
+/// **One engine run per execution.** Claim `backup_id` with a
 /// create-only put, immediately BEFORE the engine starts, and PROVE the claim
 /// is exclusive; return the claim's key.
 ///
@@ -59,15 +58,15 @@ pub fn claim_key(backup_id: &str) -> String {
 /// advanced in between, that earlier signed receipt stops describing what the
 /// archive holds (every archive-reading verifier reports it). Logweir cannot
 /// make the engine's write conditional. What it can do is make sure no second
-/// engine run of the same execution ever starts: a PLAT-06.1 case-e Job
-/// re-created from its frozen inputs carries the same `backup_id`, finds the
+/// engine run of the same execution ever starts: a Job re-created from its
+/// frozen inputs carries the same `backup_id`, finds the
 /// claim, and stops here, before the engine, the manifest read-back and any
 /// signature.
 ///
 /// The claim lives under the evidence root because that is the one place this
 /// runner may write (GC6), and a create-only put there needs no permission the
-/// runner does not already hold (`s3:PutObject` on `logweir/*`, U6's
-/// `evidenceWrite`). It is NOT read: the runner holds no `s3:GetObject` or
+/// runner does not already hold (`s3:PutObject` under `logweir/`, the
+/// `evidenceWrite` grant). It is NOT read: the runner holds no `s3:GetObject` or
 /// `s3:ListBucket` under `logweir/` and this adds none — existence is learned
 /// from the conditional put's own answer.
 ///
@@ -154,82 +153,60 @@ pub fn claim_execution(
     }
 }
 
-/// **FX-7 — one engine run per backup SET, whoever made the first one.**
-/// Refuse the engine when the archive already holds what the engine writes
-/// for this execution and a signed receipt attests: its manifest,
+/// **One engine run per backup SET, whoever made the first one.** Refuse the
+/// engine when the archive already holds what the engine writes for this
+/// execution and a signed receipt attests: its manifest,
 /// `<prefix>/<backup_id>/manifest.json`, or any segment under
 /// `<prefix>/<backup_id>/topics/`.
 ///
 /// # Why the claim alone is not enough
 ///
-/// [`claim_execution`] stops a second run of an execution whose first run
-/// took a claim. A set written by a build WITHOUT the claim (a runner from
-/// before RECEIPT-DUP) carries none, so a later run of the same `backup_id`
-/// — a Backup Job lost and re-created across the upgrade, or a standalone
-/// `backup run` re-using a fixed `backup_id` — wins a fresh claim and starts
-/// the engine over the older run's archive. Measured on engine 0.21.0
-/// (FX-7, `docs/formats/backup-receipt.md`): the engine writes each segment
-/// at `<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>…`, so
-/// the second run REWRITES the first run's segment objects in place, and its
-/// get-merge-put keeps the first run's manifest entry for every key it
-/// already had ("existing wins"). The manifest bytes can therefore come out
-/// IDENTICAL while the segment under them now holds different records: the
-/// first signed receipt's manifest digest still matches and its data does
-/// not. No manifest check can see that afterwards, so the only fix is that
-/// the second engine run never starts.
+/// A set written by an older build carries no claim, so a later run of the
+/// same `backup_id` (a Job re-created across the upgrade, or a standalone
+/// `backup run` re-using a fixed id) wins a fresh claim. Measured on engine
+/// 0.21.0 (`docs/formats/backup-receipt.md`): the engine writes each segment at
+/// `<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>…`, so a
+/// second run rewrites the first run's segments in place, and its
+/// get-merge-put keeps the first run's manifest entries ("existing wins"). The
+/// manifest bytes can come out IDENTICAL while the segments hold different
+/// records, so the second engine run must never start.
 ///
-/// # Why the segments and not only the manifest — and why not "any object"
+/// # Why the segments, and not any object
 ///
-/// The engine writes segments before its final manifest, so an older run
-/// that is still running, or that died after its first segment, leaves a
-/// set with segments and no manifest; starting the engine there writes into
-/// the same keys again. So both are looked for.
-///
-/// Anything ELSE under the set's directory is not the engine's output in the
-/// configuration Logweir renders: `offsets.db` is written only by continuous
-/// or configured offset storage, and `consumer-groups-snapshot.json` only
-/// when the snapshot is enabled — neither of which `render_backup` does. A
-/// run beside such an object (an upstream archive's snapshot, say, which
-/// FX-1's rows plant on purpose) writes none of its keys and invalidates
-/// nothing, so it is not refused.
+/// The engine writes segments before its final manifest, so a run that is
+/// still running or died after its first segment leaves segments and no
+/// manifest; both are looked for. Anything else under the set (`offsets.db`,
+/// `consumer-groups-snapshot.json`) is not written in the configuration
+/// `render_backup` produces, so a run beside it invalidates nothing and is
+/// not refused.
 ///
 /// # Where it runs, and what it costs
 ///
-/// AFTER the claim and as the last refusal before the engine, so between two
-/// runs of this build the claim still answers first (the same refusal, with
-/// its own message), and the window between these reads and the engine's
-/// first write is as short as it can be: only FX-4's topic-configuration
-/// read, which writes nothing and is never fatal, runs between them. Two reads through the read-only archive
-/// handle — a one-key LIST of `topics/` and a GET of the manifest — under
-/// the prefix `run` already lists and reads after the engine, so no
-/// permission is added. For a new execution both answer "nothing".
+/// After the claim and as the last refusal before the engine: between two runs
+/// of this build the claim answers first, and only the topic-configuration
+/// read (which writes nothing and is never fatal) runs between these reads and
+/// the engine's first write. Two reads through the read-only archive handle (a
+/// one-key LIST of `topics/` and a GET of the manifest), under the prefix
+/// `run` already reads, so no permission is added. An existing set is exit 1
+/// [`EXECUTION_ALREADY_CLAIMED`]: the same fact as an existing claim, with the
+/// same remedy (a new execution id).
 ///
-/// An existing set is exit 1 [`EXECUTION_ALREADY_CLAIMED`] — the same state
-/// as a claim that already exists, because it is the same fact (an earlier
-/// run of this `backup_id` reached the engine) with a different witness, and
-/// the same remedy (a new execution id; D1 §4.6's retry is one).
+/// # A read that FAILS proves nothing, and which failure decides the code
 ///
-/// # A read that FAILS proves nothing about the set — and WHICH failure it was decides the code
-///
-/// Either way no engine run is started and nothing is signed. What differs is
-/// whether waiting can change the answer (FX-7 fix round, review L-3):
+/// No engine run starts and nothing is signed either way:
 ///
 /// * **a transport failure, a timeout, or a 5xx/429 the object-store client
-///   already retried for its three minutes** — exit 1 `Operational`. It says
-///   nothing about the set or the configuration, the controller's retry policy
-///   (`weirkeeper::cadence::is_retryable`: exit 1 is "the run failed and wrote
-///   nothing; a broker or a network can be back") retries it when the schedule
-///   has `spec.retry`, and a retry is SAFE: it is a new execution id
+///   already retried** is exit 1 `Operational`, which the controller's retry
+///   policy (`weirkeeper::cadence::is_retryable`) retries when the schedule
+///   has `spec.retry`. A retry is SAFE: it is a new execution id
 ///   `<uid>-<slot>-r<k>`, a different set, with its own claim;
-/// * **anything else** — a 401/403 (the grant is missing), a wrong bucket,
-///   region or CA, or a failure this build cannot classify — exit 4
-///   [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused: a
-///   decision no retry changes, which `is_retryable` does not retry.
+/// * **anything else** (a 401/403, a wrong bucket, region or CA, a failure this
+///   build cannot classify) is exit 4 [`EXECUTION_CLAIM_UNPROVEN`], a decision
+///   no retry changes.
 ///
-/// Either message says the execution's claim is taken, so a MANUAL retry needs a
-/// new execution id too. `archive` is the [`ObjectAccess`] seam the check runner
-/// reads through — `Store` implements it — so a row can make either read fail
-/// with a chosen answer.
+/// Either message says the claim is taken, so a MANUAL retry needs a new
+/// execution id too. `archive` is the [`ObjectAccess`] seam the check runner
+/// reads through (`Store` implements it), so a row can make either read fail.
 ///
 /// [`ObjectAccess`]: crate::check::store::ObjectAccess
 pub fn refuse_an_existing_set(
@@ -278,7 +255,7 @@ pub fn refuse_an_existing_set(
         Some(segment) => Some(segment),
         None => {
             let manifest = format!("{directory}manifest.json");
-            // FX-31: an EXISTENCE test, so no byte of the manifest is read:
+            // An EXISTENCE test, so no byte of the manifest is read:
             // `caps::PROBE` refuses any body unread, and that refusal is the
             // store answering "it is there". A GET and not a HEAD, so a denial
             // keeps the error text `unproven` classifies.
@@ -302,13 +279,13 @@ pub fn refuse_an_existing_set(
     }
 }
 
-/// **FX-7 fix round (review L-3).** Whether a failed read of the archive in
+/// Whether a failed read of the archive in
 /// [`refuse_an_existing_set`] is one a retry under a new execution id can
 /// change: a transport failure (`EndpointUnreachable`), a `Timeout`, or a 5xx
 /// or 429 the object-store client has already retried — which the classifier
 /// leaves unclassified, so the status the store ANSWERED with decides
 /// (`answered_status`: read off `object_store`'s status line, never searched
-/// for in a text that also carries the archive's key; PROD-01.2 review, M1).
+/// for in a text that also carries the archive's key).
 /// A closed match with no wildcard: a class added to the vocabulary must be
 /// placed here on purpose, and "could not classify" stays a decision.
 fn a_retry_can_change(e: &logweir_engine_oso::storage::StoreError) -> bool {
@@ -347,14 +324,14 @@ pub struct Ran {
     /// `logweir_core::ids::sha256_prefixed` (`ids.rs:11-13`) — never over a
     /// re-serialisation of anything.
     pub manifest_sha256: String,
-    /// **FX-7.** The version id the store answered the SAME read with — the
+    /// The version id the store answered the SAME read with — the
     /// version those exact bytes are — or `None` on a bucket that keeps no
     /// versions (`logweir_core::backup_receipt::pinnable_version_id`).
     pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     /// The covered window, epoch milliseconds, or `None` when the set holds
-    /// no segment for any named topic (PROD-02.1: an empty capture, when the
-    /// source's watermarks say so — [`empty_capture_window`]).
+    /// no segment for any named topic (an empty capture, when the source's
+    /// watermarks say so — [`empty_capture_window`]).
     ///
     /// The start is INCLUSIVE: the oldest `start_timestamp` any segment of
     /// this backup set declares. The end is **EXCLUSIVE** — interface
@@ -364,24 +341,24 @@ pub struct Ran {
     /// millisecond, converted HERE, once, where the window is measured — see
     /// the argument in `run` below.
     pub covered: Option<(i64, i64)>,
-    /// **FX-4.** The manifest's `configurations` for each NAMED topic the
+    /// The manifest's `configurations` for each NAMED topic the
     /// manifest mentions — read back through the same `describe` as the
     /// counts, so the coverage comparison is against the bytes this run read.
     /// A named topic the manifest does not mention is ABSENT here, which
     /// `config_coverage::classify` reads as `manifestDiffers`, never as "no
     /// overrides".
     pub manifest_configurations: BTreeMap<String, BTreeMap<String, String>>,
-    /// **PROD-05.1.** The manifest's `original_partition_count` and
+    /// The manifest's `original_partition_count` and
     /// `source_replication_factor` for each NAMED topic it mentions — the
     /// counts `topic_configuration` records, from the same read-back.
     pub manifest_layouts: BTreeMap<String, crate::backup::config_coverage::Layout>,
-    /// **PROD-03.0.** Per NAMED topic, the schema dependency judged from a
+    /// Per NAMED topic, the schema dependency judged from a
     /// bounded sample of the segments the manifest just read back lists —
     /// `crate::backup::schema_dependency::detect`, through the same read-only
     /// archive handle. Never fatal: a segment it cannot judge makes its topic
     /// `notAssessed`.
     pub schema_dependency: BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>,
-    /// **PROD-04.1.** Per NAMED topic, per partition with at least one
+    /// Per NAMED topic, per partition with at least one
     /// segment, the lowest and highest offsets the manifest records
     /// (inclusive): what a consumer position is judged against. A partition
     /// with no segment is ABSENT: nothing archived, never `[0, 0]`.
@@ -438,7 +415,7 @@ pub fn run(
     // engine's OWN store handle, so a receipt quoting only the engine's
     // number would be attesting bytes this process never saw.
     //
-    // **And the version id that same read was answered with (FX-7).** It is
+    // **And the version id that same read was answered with.** It is
     // the version of exactly these bytes — one response carries both — so a
     // receipt that pins it names the object version its digest is over. The
     // engine rewrites `<backup_id>/manifest.json` with its own unconditional
@@ -519,38 +496,24 @@ pub fn run(
             }
         }
     }
-    // A set with no segment FOR ANY NAMED TOPIC bounds no window. An empty
-    // min/max would be published as a real window, and a covered range of
-    // `[0, 0]` reads as "this archive covers the epoch", so it is `None` here
-    // and the caller decides (PROD-02.1, [`empty_capture_window`]): an empty
-    // capture when the source's watermarks say it held no record, the old
-    // exit 1 otherwise.
+    // A set with no segment FOR ANY NAMED TOPIC bounds no window: `[0, 0]`
+    // would read as "this archive covers the epoch", so it is `None` and the
+    // caller decides ([`empty_capture_window`]): an empty capture when the
+    // source's watermarks say it held no record, exit 1 otherwise.
     //
-    // **THE WINDOW IS HALF-OPEN, AND THIS IS WHERE IT BECOMES SO** (I22, and
-    // Task 5's review finding F3).
-    //
-    // `segment.end_timestamp` is the timestamp of a record the archive HOLDS,
-    // so the range it bounds is inclusive at both ends. The receipt and
-    // `Backup.status.windowCovered` both carry an EXCLUSIVE `to_ms` —
-    // `config/crd/backups.yaml` documented it that way before this task, and
-    // `BackupReceipt::validate_invariants`'s arm 4 now requires
-    // `from_ms < to_ms` strictly. A backup of a topic whose records share one
-    // millisecond therefore has to become `[t, t+1)`: a one-millisecond window
-    // containing exactly those records, rather than the empty `[t, t]` that
-    // arm 4 refuses and that would make a legitimate single-record backup
-    // unrepresentable.
-    //
-    // ONE conversion, in the ONE place that measures the window — the defect
-    // `ReceiptCovered`'s own doc comment warns about is two representations of
-    // one range with a conversion nobody owns. `saturating_add` and not `+ 1`:
-    // an `end_timestamp` of `i64::MAX` is a manifest this build cannot read as
-    // a timestamp, and saturating there keeps the arithmetic total rather than
-    // panicking in a release build's wrapping.
+    // The window is half-open, and this is where it becomes so (I22).
+    // `segment.end_timestamp` is a record the archive HOLDS, so the range is
+    // inclusive; the receipt and `Backup.status.windowCovered` carry an
+    // EXCLUSIVE `to_ms`, and `BackupReceipt::validate_invariants`'s arm 4
+    // requires `from_ms < to_ms`. A topic whose records share one millisecond
+    // becomes `[t, t+1)`, never the empty `[t, t]`. One conversion, in the one
+    // place that measures the window; `saturating_add`, because an
+    // `end_timestamp` of `i64::MAX` must neither panic nor wrap.
     let covered = oldest
         .zip(newest)
         .map(|(from_ms, newest_inclusive)| (from_ms, newest_inclusive.saturating_add(1)));
 
-    // **PROD-03.0.** The named topics' schema dependency, from the archived
+    // The named topics' schema dependency, from the archived
     // BYTES this run wrote: a bounded sample of each topic's segments, read
     // back through the read-only archive handle and decoded with Logweir's own
     // `.kbak` decoder. No registry is contacted. Never fatal.
@@ -570,11 +533,11 @@ pub fn run(
     })
 }
 
-/// **PROD-02.1.** The receipt's `source_watermarks` from ONE marks read taken
+/// The receipt's `source_watermarks` from ONE marks read taken
 /// before the engine (`ClusterReader::partition_marks`), or why there is
 /// none. Every named topic must answer with partitions `0..n` (n ≥ 1), each
 /// with its marks, and the block must fit
-/// `SOURCE_WATERMARKS_BUDGET_BYTES` (review F1); anything else — a failed
+/// `SOURCE_WATERMARKS_BUDGET_BYTES`; anything else — a failed
 /// metadata or marks read, a gap in the ids, a block over the budget — leaves
 /// the block absent, which a reader takes as coverage NOT RECORDED.
 pub fn source_watermarks(
@@ -612,10 +575,10 @@ pub fn source_watermarks(
         }
         block.insert(topic.clone(), pairs);
     }
-    // PROD-02.1 (review F1): the block grows with the partition count, and a
-    // receipt over the bound every reader caps it at (FX-33's
-    // `topic_budget::MAX_RECEIPT_BYTES`) reads Unreadable. Over its
-    // budget it is NOT recorded — and an empty capture then stays exit 1.
+    // The block grows with the partition count, and a receipt over the bound
+    // every reader caps it at (`topic_budget::MAX_RECEIPT_BYTES`) reads
+    // Unreadable. Over its budget it is NOT recorded, and an empty capture
+    // then stays exit 1.
     let budget = logweir_core::backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES;
     let encoded = logweir_core::backup_receipt::source_watermarks_encoded_len(&block)
         .map_err(|e| format!("the source_watermarks block could not be encoded: {e}"))?;
@@ -629,11 +592,11 @@ pub fn source_watermarks(
     Ok(block)
 }
 
-/// **PROD-02.1 — the EMPTY CAPTURE.** The covered window a run signs when its
+/// **The EMPTY CAPTURE.** The covered window a run signs when its
 /// backup set holds no segment for any named topic: the empty `[t, t)`, `t`
 /// the engine's start, which covers no record — when the source's
 /// watermarks, read before the engine, say every selected partition held no
-/// record (`low == high`). Otherwise the run is refused exit 1 as before,
+/// record (`low == high`). Otherwise the run is refused exit 1,
 /// naming why: the source held records the engine did not capture, or its
 /// watermarks could not be read, so its emptiness is not known.
 pub fn empty_capture_window(
@@ -666,12 +629,10 @@ pub fn empty_capture_window(
     )))
 }
 
-// ---------------------------------------------------------------------------
-// The receipt: built, validated, signed, put — and written locally on request.
-// ---------------------------------------------------------------------------
+// The receipt: built, validated, signed, put, and written locally on request.
 
 /// Where the receipt landed. Both keys are printed as `backup run`'s final two
-/// stdout lines (**I7**) and both are read by Task 17's reconciler.
+/// stdout lines (**I7**) and both are read by the Backup reconciler.
 #[derive(Debug, Clone)]
 pub struct Persisted {
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json`
@@ -679,7 +640,7 @@ pub struct Persisted {
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`
     pub sidecar_key: String,
     /// `logweir/backups/<backup_id>/<run_id>.consumer-positions.json`, when
-    /// the run selected consumer groups (PROD-04.1): the positions document
+    /// the run selected consumer groups: the positions document
     /// the receipt binds by digest, put BEFORE the receipt so a receipt never
     /// names a document that is not there.
     pub positions_key: Option<String>,
@@ -688,7 +649,7 @@ pub struct Persisted {
     /// verified the receipt's signature.
     pub receipt_sha256: String,
     /// `logweir/catalog/v1/points/<pointId>/record.json`, when the catalog
-    /// point record was written (PLAT-15.1, D3 §5.2).
+    /// point record was written (D3 §5.2).
     ///
     /// `None` when the catalog write FAILED — which is a warning and nothing
     /// more. See `persist_receipt`'s step 6: the archive and its signed
@@ -723,19 +684,18 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is `FORMAT_VERSION_WITH_GENERATIONS` (`1.6.0`,
-/// PROD-01.4a) of THIS document type (independent of the scorecard's), because
-/// this build writes `generations` and PROD-03.0's `schema_dependency` (1.5.0)
-/// on every receipt, beside `topic_configuration`, pinned or not and for every
-/// auth mode (1.6.0 defines PROD-01.3's modes too) — by
-/// `logweir_core::backup_receipt::format_version_for`, the one place that
-/// decides it. `source.auth` is `BackupOutcome::source_auth` rendered as the
-/// two strings `ReceiptAuth` holds — **never a password, and no field that
-/// could hold one**.
+/// `format_version` is decided by
+/// `logweir_core::backup_receipt::format_version_for`, the one place, for
+/// THIS document type (independent of the scorecard's): at least 1.6.0
+/// (`FORMAT_VERSION_WITH_GENERATIONS`, which defines every auth mode),
+/// because this build writes `generations` and `schema_dependency` on every
+/// receipt. `source.auth` is `BackupOutcome::source_auth` rendered as the two
+/// strings `ReceiptAuth` holds — **never a password, and no field that could
+/// hold one**.
 ///
-/// `config_coverage` is ALWAYS written (FX-4): a receipt this build signs
-/// never leaves a topic's configuration coverage to be read as unknown by
-/// omission when it was measured.
+/// `config_coverage` is ALWAYS written: a receipt this build signs never
+/// leaves a topic's configuration coverage to be read as unknown by omission
+/// when it was measured.
 pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     let archive = ReceiptArchive {
         manifest_key: outcome.manifest_key.clone(),
@@ -745,12 +705,11 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     };
     let auth = receipt_auth(&outcome.source_auth);
     BackupReceipt {
-        // PROD-03.0: every receipt this build signs carries
-        // `schema_dependency` (1.5.0), and since PROD-01.4a `generations` too,
-        // so every one is at least 1.6.0 — which defines PROD-01.3's auth modes and
-        // PROD-05.1's block as well.
-        // PROD-04.1: the version that defines `consumer_positions` (1.7.0)
-        // when the run selected consumer groups.
+        // Every receipt this build signs carries `schema_dependency` (1.5.0)
+        // and `generations` (1.6.0), so every one is at least 1.6.0, which
+        // defines every auth mode and the `topic_configuration` block too;
+        // 1.7.0, which defines `consumer_positions`, when the run selected
+        // consumer groups.
         format_version: logweir_core::backup_receipt::format_version_for(
             &archive,
             true,
@@ -790,35 +749,32 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             to_ms: outcome.covered_to_ms,
         },
         config_coverage: Some(outcome.config_coverage.clone()),
-        // PROD-05.1: ALWAYS written beside `config_coverage`, so every receipt
-        // this build signs carries its topics' configuration model (and is
-        // 1.6.0, for PROD-03.0's and PROD-01.4a's blocks below) — a receipt
-        // never leaves it to be read as NOT RECORDED by omission when it was
-        // observed.
+        // ALWAYS written beside `config_coverage`, so a receipt never leaves
+        // its topics' configuration model to be read as NOT RECORDED by
+        // omission when it was observed.
         topic_configuration: Some(outcome.topic_configuration.clone()),
-        // PROD-05.1: where the run looked for owners — written beside the
+        // Where the run looked for owners — written beside the
         // model, so a topic without an owner reads "not checked" when it is
         // empty and never "applied through the admin API".
         owner_detection: Some(outcome.owner_detection.clone()),
-        // PROD-03.0: ALWAYS written, so every receipt this build signs is
-        // 1.5.0 and says, per named topic, whether its records need a schema
-        // registry — never left to be read as NOT ASSESSED by omission when it
-        // was judged.
+        // ALWAYS written, so every receipt says, per named topic, whether its
+        // records need a schema registry, never left to be read as NOT
+        // ASSESSED by omission when it was judged.
         schema_dependency: Some(outcome.schema_dependency.clone()),
-        // PROD-01.4a: ALWAYS written, one entry per named topic, so a receipt
+        // ALWAYS written, one entry per named topic, so a receipt
         // never leaves a topic's ID to be read as unknown by omission when it
         // was read — and a null ID always says why.
         generations: Some(outcome.generations.clone()),
-        // PROD-04.1: present exactly when the run selected consumer groups.
+        // Present exactly when the run selected consumer groups.
         consumer_positions: outcome.consumer_positions.clone(),
-        // PROD-02.1: present exactly when the marks read before the engine
+        // Present exactly when the marks read before the engine
         // answered for every named partition (1.8.0); absent is coverage NOT
         // RECORDED.
         source_watermarks: outcome.source_watermarks.clone(),
     }
 }
 
-/// **PROD-03.0 (the review's L1).** The schema dependency block is advisory:
+/// The schema dependency block is advisory:
 /// it must never be the reason a backup goes unsigned. When the receipt's own
 /// arms refuse the block — a manifest this build did not foresee, a detector
 /// defect — every topic's entry becomes `notAssessed (segmentUnreadable)`,
@@ -859,36 +815,16 @@ pub fn signable_schema_dependency(mut receipt: BackupReceipt) -> BackupReceipt {
 /// `AuthRender` -> `ReceiptAuth`. The wire spellings, and the ONE place they
 /// are chosen for this document.
 ///
-/// **`scramSha512`, and there is ONE spelling in this product** (controller
-/// ruling, Task 5b fix round 1; Task 6's review Ruling 3). Task 5 chose
-/// `scram-sha-512` here on the argument that the RFC's own name is what a
-/// Kafka operator recognises, and that argument does not survive contact with
-/// the rest of the tree: `scramSha512` is `AuthSpec`'s `#[serde(tag =
-/// "mode")]` value, so it is the string an adopter writes in a
-/// `KafkaCluster`/`BackupSpec`; it is `KafkaCluster.spec.auth.mode`'s CRD enum
-/// byte for byte (`crates/weirkeeper/tests/crd_shape.rs::
-/// the_crd_auth_mode_enum_and_auth_spec_agree`); it is what
-/// `Backup.status.auth.mode`'s own CRD description already promised while this
-/// function wrote something else, and Task 17 copies THIS field into THAT one;
-/// and it is the only value `AuthSpec::mode_str()` — the sole accessor any
-/// receipt-writing code can fill the field from — can return. Two spellings
-/// meant the same product signed two evidence documents describing one
-/// mechanism by different names, with a landed test
-/// (`crates/logweir/tests/auth_binding.rs::
-/// the_scorecard_auth_block_and_auth_spec_agree`) asserting that
-/// `"scram-sha-512"` does not parse at all.
-///
-/// The set is CLOSED at both readers since this round: `BackupReceipt::
-/// validate_invariants`'s arm 5 and `docs/verify_scorecard.py::
-/// check_backup_receipt_invariants`'s mirror refuse any third value, so this
-/// literal cannot drift back without `logweir backup run` refusing its own
-/// receipt before it signs it.
-///
-/// **PROD-01.3** adds three values, and they are still chosen here and nowhere
-/// else: `AuthRender::mode_str` is `AuthSpec::mode_str`'s twin, so the receipt
-/// carries `scramSha256`, `plain` or `mtls` byte for byte as the spec, the CRD
-/// and the scorecard spell them, and `format_version_for` writes such a
-/// receipt as 1.3.0 — the version whose arm 5 defines them.
+/// One spelling per mode in the whole product: `AuthRender::mode_str` is
+/// `AuthSpec::mode_str`'s twin, so the receipt carries `scramSha512`,
+/// `scramSha256`, `plain`, `mtls` or `plaintext` byte for byte as the spec,
+/// the `KafkaCluster` CRD
+/// (`crates/weirkeeper/tests/crd_shape.rs::the_crd_auth_mode_enum_and_auth_spec_agree`),
+/// `Backup.status.auth.mode` and the scorecard spell them. The set is closed
+/// at both readers: `BackupReceipt::validate_invariants`'s arm 5 and
+/// `docs/verify_scorecard.py::check_backup_receipt_invariants` refuse any
+/// other value, so `logweir backup run` would refuse its own receipt before
+/// signing it.
 fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
     ReceiptAuth {
         mode: render.mode_str().to_string(),
@@ -911,7 +847,7 @@ fn receipt_auth(render: &logweir_core::engine::AuthRender) -> ReceiptAuth {
 ///    and a reader refusing a document Logweir itself wrote is the worst
 ///    possible way to discover an arithmetic bug. This is also what makes
 ///    `docs/formats/backup-receipt.md`'s claim that `logweir backup run`
-///    refuses a violating receipt true by EXECUTION (Task 5's review, F4)
+///    refuses a violating receipt true by EXECUTION
 ///    rather than by assertion.
 /// 2. **Serialise** deterministically — the exact bytes that will be signed,
 ///    stored and (with `--receipt-out`) written to disk. Never a
@@ -943,7 +879,7 @@ pub(crate) fn persist_receipt(
              logweir, not in the spec — please report it with this line."
         ))
     })?;
-    // 1b. PROD-04.1: the positions document the receipt binds holds against
+    // 1b. The positions document the receipt binds holds against
     //     it, through the same arms a reader runs (CP-1 to CP-14) — over the
     //     exact bytes that will be put.
     let positions = match (
@@ -1000,7 +936,7 @@ pub(crate) fn persist_receipt(
     let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
     keys.receipt_sha256 = receipt_sha256;
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_UPLOAD);
-    // PROD-04.1: the positions document FIRST, at the key the receipt names:
+    // The positions document FIRST, at the key the receipt names:
     // a receipt is never put that names a document that is not there.
     if let (Some(cp), Some(doc)) = (&receipt.consumer_positions, positions) {
         store
@@ -1015,7 +951,7 @@ pub(crate) fn persist_receipt(
         .put_create_only(&keys.sidecar_key, &sidecar_bytes)
         .map_err(|e| sig(e.to_string()))?;
 
-    // 6. **THE CATALOG POINT** (PLAT-15.1, D3 §5.2) — the fifth, sixth and
+    // 6. **THE CATALOG POINT** (D3 §5.2) — the fifth, sixth and
     //    seventh create-only puts, and the only ones in this function whose
     //    failure is a WARNING.
     //
@@ -1035,7 +971,7 @@ pub(crate) fn persist_receipt(
     //    which is why the backfill exists at all (D3 §5.2, "the scanner
     //    backfills").
     //
-    //    **PROD-02.1: an EMPTY CAPTURE is not a recovery point**, so it gets
+    //    **An EMPTY CAPTURE is not a recovery point**, so it gets
     //    no catalog point: nothing in it can be restored, and a point would
     //    take a retention `keepLast` rank from a real one.
     if receipt.is_empty_capture() {
@@ -1077,7 +1013,7 @@ pub(crate) fn persist_receipt(
                 keys.sidecar_key
             ))
         })?;
-        // PROD-04.1: the positions document beside them, as
+        // The positions document beside them, as
         // `<receipt-out stem>.consumer-positions.json`.
         if let Some(doc) = positions {
             let doc_path = positions_out(path);
@@ -1103,7 +1039,7 @@ pub fn positions_out(receipt_out: &Path) -> std::path::PathBuf {
     receipt_out.with_extension("consumer-positions.json")
 }
 
-/// **PLAT-15.1, D3 §5.2** — the catalog point record for this run, written as
+/// **D3 §5.2** — the catalog point record for this run, written as
 /// three create-only puts under `logweir/catalog/v1/`.
 ///
 /// Returns the record's key when it was written, and `None` on ANY failure —

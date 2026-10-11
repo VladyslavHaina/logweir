@@ -1,4 +1,4 @@
-//! Binary-level PLAT-02.2 acceptance: invalid signing material is rejected by
+//! Binary-level acceptance: invalid signing material is rejected by
 //! the production wrappers before they construct clients or create execution
 //! outputs. Redacted terminal diagnostics, including metrics, remain allowed.
 

@@ -1,19 +1,14 @@
 //! The manifest-lint gate: every shipped Kubernetes manifest, parsed.
 //!
-//! # The selection rule, fixed here and inherited by Tasks 22 and 23
+//! # The selection rule
 //!
 //! Every file under `config/**` and `examples/**` is
 //! parsed with [`serde_yaml::Deserializer::from_str`] as a MULTI-DOCUMENT
 //! stream, and a document is treated as a Kubernetes manifest when it carries
 //! **both `apiVersion` and `kind`** — never by filename and never by extension.
 //!
-//! That is not fastidiousness. `examples/` holds `allowed-clusters.json` and
-//! `approval.json` (JSON, which is YAML, and neither is a manifest),
-//! `drill.yaml` (a drill SPEC, no `apiVersion`), and `backup.yaml` /
-//! `restore.yaml` (Logweir specs, likewise). A `*.yaml` glob that asserted "every
-//! file names an image digest" would fail on three of those and would have to
-//! grow a filename special case per exception — at which point the gate is a
-//! list of names rather than a property.
+//! `examples/` holds JSON files and Logweir specs with no `apiVersion`, so a
+//! `*.yaml` glob would need a filename special case per exception.
 //! [`manifest_lint_selects_by_parsed_api_version_and_kind`] asserts the
 //! exceptions are skipped BY THE PARSE.
 //!
@@ -32,9 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-// ---------------------------------------------------------------------------
-// Locating the tree
-// ---------------------------------------------------------------------------
+// Locating the tree.
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
@@ -62,9 +55,7 @@ fn files_under(rel: &str) -> Vec<PathBuf> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// The selection rule
-// ---------------------------------------------------------------------------
+// The selection rule.
 
 /// One parsed document that carries both `apiVersion` and `kind`.
 #[derive(Debug, Clone)]
@@ -228,8 +219,8 @@ const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topic
 /// what an operator may bring into existence is protection and a catalog.
 const TWO_D3_OPERATOR_KINDS: [&str; 2] = ["protectionpolicies", "recoverycatalogs"];
 
-/// The chart's default render: the install, since the `config/` tree went
-/// (PROD-17.1 C6). Every ClusterRole below is read from it.
+/// The chart's default render, the install. Every ClusterRole below is read
+/// from it.
 const DEFAULT_RENDER: &str = "charts/logweir/rendered/default.yaml";
 
 fn v(items: &[&str]) -> Vec<String> {
@@ -238,20 +229,16 @@ fn v(items: &[&str]) -> Vec<String> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// The `weirkeeper` ClusterRole — interface I28
-// ---------------------------------------------------------------------------
+// The `weirkeeper` ClusterRole (interface I28).
 
 /// `pods/log` is named in exactly one rule, with `get` and nothing else, and no
 /// rule anywhere names `pods/exec` or `pods/attach`.
 ///
-/// Critique B **H8**, spec §9 amendment 4a, claim **C96**. `pods/log` is a
-/// SUBRESOURCE: `get` on `pods` does not grant it, and without an explicit rule
-/// the API server answers 403 for every
-/// `GET /api/v1/namespaces/<ns>/pods/<p>/log`. The consequence is not a crash —
-/// it is every `status.evidence.*` key on `Backup` and `Restore` staying
-/// unpopulated, Task 24's verification having nothing to fetch, and a 403 that
-/// looks like a transient API error.
+/// `pods/log` is a SUBRESOURCE: `get` on `pods` does not grant it, and without
+/// an explicit rule the API server answers 403 for every
+/// `GET /api/v1/namespaces/<ns>/pods/<p>/log`, so every `status.evidence.*`
+/// key on `Backup` and `Restore` stays unpopulated behind what looks like a
+/// transient API error.
 #[test]
 fn weirkeeper_can_read_pod_logs_and_nothing_more() {
     let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
@@ -304,8 +291,8 @@ fn weirkeeper_can_read_pod_logs_and_nothing_more() {
 /// from references this controller writes into a PodSpec — writing a reference
 /// is not reading a value.
 ///
-/// THIS BOUNDS READS AND NOT CAPABILITY (Global Constraint 27, O1/O0 default
-/// (a)): Job create in a namespace holding the signing key is equivalent to
+/// THIS BOUNDS READS AND NOT CAPABILITY (Global Constraint 27): Job create in
+/// a namespace holding the signing key is equivalent to
 /// holding the key, because this controller can create a pod that mounts it.
 /// The narrow statement is the one asserted here.
 #[test]
@@ -321,24 +308,9 @@ fn weirkeeper_has_no_verb_on_secrets() {
     }
 }
 
-/// Every verb granted in `charts/logweir/templates/clusterrole.yaml` is named by at least one
-/// `Api::` call under `crates/weirkeeper/src/`, and `delete` is granted nowhere.
-///
-/// Critique B **M18**. A verb nobody calls is a capability nobody audits. The
-/// table below maps each RBAC verb to the call that needs it; a verb with no
-/// table row fails loudly rather than silently passing, so a future `*` or
-/// `deletecollection` cannot slip in.
 /// The `Api<T>` methods actually called under `crates/weirkeeper/src/`, per
-/// Rust type — DERIVED from the source, never listed.
-///
-/// # Why a derived map and not a table of needles
-///
-/// The verb-granular predecessor asked "does the string `.get(&` appear
-/// ANYWHERE under `crates/weirkeeper/src/`", which is true as soon as any one
-/// resource is `get`-ed. Task 21's review (LOW-1) found what that cannot see:
-/// `get` and `watch` were granted on `pods` while every `Api<Pod>` call in the
-/// tree is `.list(&ListParams…)` or `.logs(…)`. A caller table has to bind the
-/// verb to the RESOURCE, and the only honest way to bind them is to read which
+/// Rust type — DERIVED from the source, never listed: a caller table has to
+/// bind the verb to the RESOURCE, and the only honest way is to read which
 /// method is called on which typed handle.
 ///
 /// # How the binding is read
@@ -366,7 +338,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         let src = std::fs::read_to_string(&f).expect("a readable .rs");
         let bytes: Vec<char> = src.chars().collect();
 
-        // D0 STAGE 5 (PLAT-17.2): `weirkeeper::scope::list_everywhere::<T>(…)`
+        // `weirkeeper::scope::list_everywhere::<T>(…)`
         // is a `list` on `T` in every watched namespace. It builds its handle
         // inside the helper, generic over the kind, so the typed-binding scan
         // below cannot see it; the turbofish at the call site is what names
@@ -455,7 +427,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                     }
                 }
                 let head = region[..hit].trim_end();
-                // `watcher(ident` IS THE SAME LIST-THEN-WATCH (FX-29): the
+                // `watcher(ident` IS THE SAME LIST-THEN-WATCH: the
                 // `BackupSchedule` reconciler builds its trigger stream from
                 // `kube::runtime::watcher(api, …)` and hands it to
                 // `Controller::for_stream`, so its kind's `list`/`watch`
@@ -465,13 +437,10 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                 }
                 // A HANDLE PASSED TO THE SHARED `/status` WRITER IS A
                 // `patch_status` CALLER. `conditions::patch_status_preconditioned`
-                // is the one implementation of D-SEAMS S7's compare-and-set
-                // (defect STATUS-PATCH-NO-RV), so four reconcilers now hand it
-                // their `Api<T>` instead of calling `patch_status` themselves.
-                // Without this the scan sees no caller for `patch` on their
-                // `/status` subresources and the grant looks orphaned — which
-                // is this test failing on a refactor rather than on a
-                // capability, the one outcome it must not have.
+                // is the one implementation of D-SEAMS S7's compare-and-set, and
+                // reconcilers hand it their `Api<T>` instead of calling
+                // `patch_status` themselves; without this the grant looks
+                // orphaned and the test fails on a refactor, not a capability.
                 let passed = head.trim_end_matches('&').trim_end();
                 if passed.ends_with("patch_status_preconditioned(") {
                     out.entry(ty.clone())
@@ -486,7 +455,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
 
 /// Whether the text before a typed handle is a call that LISTs and then
 /// WATCHes it: `Controller::new(`, `.owns(`, `.watches(`, or `watcher(` as a
-/// whole word (FX-29). Only a whole word (review L-6): `start_watcher(api`
+/// whole word: `start_watcher(api`
 /// is some other function, and counting it would hide an orphaned grant.
 fn is_watch_call(head: &str) -> bool {
     let watcher = head
@@ -525,11 +494,8 @@ fn a_watch_call_is_matched_as_a_whole_call() {
 /// Every granted **(resource, verb)** pair has a caller on that resource's own
 /// typed handle.
 ///
-/// Sharpened in Task 22 from a verb-granular test (Task 21 review, LOW-1): the
-/// old form asked only whether a verb's call shape appeared anywhere in the
-/// crate, so `get` and `watch` on `pods` — which nothing calls — passed. The
-/// mutant that proves the difference is re-adding either verb to the `pods`
-/// rule: the verb-granular test stayed green, this one fails naming the pair.
+/// The binding is per resource: `get` and `watch` granted on `pods`, which
+/// nothing calls, fail here naming the pair.
 #[test]
 fn every_granted_verb_has_a_caller() {
     const WATCH: &str = "<controller-watch>";
@@ -554,18 +520,16 @@ fn every_granted_verb_has_a_caller() {
             "backupschedules" => "BackupSchedule",
             "kafkaclusters" => "KafkaCluster",
             "recoverycatalogs" => "RecoveryCatalog",
-            // D2 W9 (PLAT-03.1/03.2): the `Preflight` reconciler, and the
+            // The `Preflight` reconciler, and the
             // cluster Events its waiting classification reads by
             // `involvedObject.uid`.
             "preflights" => "Preflight",
             "events" => "Event",
             "restores" => "Restore",
             "trustrosters" => "TrustRoster",
-            // PLAT-19.1, the other direction of the same mapping.
+            // The other direction of the same mapping.
             "trustpolicies" => "TrustPolicy",
-            // PLAT-16.1 / PLAT-16.2 (D3 W9).
             "retentionpolicies" => "RetentionPolicy",
-            // PLAT-14.2 (D3 W6).
             "protectionpolicies" => "ProtectionPolicy",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
@@ -602,15 +566,12 @@ fn every_granted_verb_has_a_caller() {
 
     /// The ONE (resource, verb) pair granted without a caller, with the reason.
     ///
-    /// Found BY this sharpening, and recorded rather than narrowed. Spec §9's
-    /// shape grants `get`/`list`/`watch` uniformly over the six kinds; five of
-    /// the six have a `get`-shaped caller and `backupschedules` does not,
-    /// because its reconciler only ever receives the object from the
-    /// `Controller`'s own watcher and then patches its status. Splitting the
-    /// rule would leave one of six kinds silently un-`get`-able to anyone
-    /// reading the install file, which is a worse surprise than a grant that
-    /// is written down; the security delta is nil, since `list` already
-    /// returns every one of these objects in full.
+    /// Spec §9's shape grants `get`/`list`/`watch` uniformly over the six
+    /// kinds; `backupschedules` has no `get`-shaped caller, because its
+    /// reconciler only receives the object from the `Controller`'s watcher.
+    /// Splitting the rule would leave one kind silently un-`get`-able to anyone
+    /// reading the install file; the security delta is nil, since `list`
+    /// already returns every one of these objects in full.
     ///
     /// EXACTLY ONE ENTRY, asserted below: a second one must show up in a diff.
     const GRANTED_FOR_UNIFORMITY: [(&str, &str); 1] = [("backupschedules", "get")];
@@ -618,51 +579,29 @@ fn every_granted_verb_has_a_caller() {
     let rules = rules_of(DEFAULT_RENDER, "weirkeeper");
     assert!(!rules.is_empty(), "role.yaml granted no verb at all");
 
-    // ----------------------------------------------------------------------
-    // THE NAMED ONE: `delete`, ON EXACTLY TWO RESOURCES, WITH ITS CALLER
-    // ----------------------------------------------------------------------
+    // THE NAMED ONE: `delete`, ON EXACTLY TWO RESOURCES, WITH ITS CALLER.
     //
-    // WHAT THIS ASSERTION USED TO SAY, AND WHY IT CHANGED. Until D2 W11 it was
-    // two claims: `delete` appears in NO rule on ANY resource, and
-    // `Api::delete`/`delete_opt` is called NOWHERE under
-    // `crates/weirkeeper/src/`. Both were true and both were load-bearing —
-    // "Job CRUD"'s D is done by the API server's TTL controller and by
-    // ownerReference garbage collection, so the controller needed no delete at
-    // all.
-    //
-    // D2 §4.3's `gc.rs` and §5.8's retention are the one case that does not
-    // fit. A `TopicDiscovery` is ONE observation with an immutable spec and a
-    // `Preflight` is ONE verdict about ONE plan; neither is an execution input
-    // (D-SEAMS S2), and a namespace that refreshes an inventory every minute
-    // fills etcd with objects a fresh check has already replaced. Nothing else
-    // can collect them: they are not owned by anything, so no cascade reaches
-    // them, and a TTL on a custom resource does not exist.
-    //
-    // SO THE CLAIM IS NARROWED RATHER THAN DROPPED, and the narrowing is what
-    // this test now enforces, in three parts:
+    // A `TopicDiscovery` is ONE observation and a `Preflight` ONE verdict;
+    // neither is an execution input, nothing owns them, and a custom resource
+    // has no TTL, so the controller collects them itself (D2 §4.3 `gc.rs`,
+    // §5.8). Everything else is collected by the TTL controller and
+    // ownerReference garbage collection. Three parts:
     //
     //   (a) the ONLY resources carrying `delete` are `topicdiscoveries` and
-    //       `preflights` — a rule that grew the verb on `backups`, `jobs`,
-    //       `configmaps` or anything else fails here, naming it;
+    //       `preflights`;
     //   (b) the ONLY types whose handles are deleted through are
     //       `TopicDiscovery` and `Preflight`;
-    //   (c) `delete_opt` — the "delete if it is there" shape, which cannot
-    //       carry the `DeleteParams` a UID precondition lives in — is called
-    //       NOWHERE.
+    //   (c) `delete_opt`, which cannot carry the `DeleteParams` a UID
+    //       precondition lives in, is called NOWHERE.
     //
-    // The UID precondition itself, the per-pass cap and the terminal-only rule
-    // are asserted where they can be observed, against the route-table double:
+    // The UID precondition, the per-pass cap and the terminal-only rule are
+    // asserted against the route-table double:
     // `topic_discovery_controller::the_collector_deletes_only_expired_terminal_discoveries_and_names_their_uid`
     // and `preflight_controller::the_collector_deletes_only_expired_terminal_preflights_and_names_their_uid`.
     //
-    // AND GLOBAL CONSTRAINT 6 IS UNTOUCHED. That constraint is about OBJECT
-    // STORAGE — "Logweir writes only under its own `logweir/` prefix,
-    // `PutMode::Create` everywhere", and no component holding any delete
-    // capability against a bucket. These are Kubernetes objects.
-    // `scripts/check-no-archive-write.sh` anchors its control-plane delete
-    // token to store-shaped receivers, so `discoveries.delete(` and
-    // `preflights.delete(` are outside it by construction and the gate is
-    // green on the same run as this test.
+    // Global Constraint 6 is about OBJECT STORAGE, not Kubernetes objects;
+    // `scripts/check-no-archive-write.sh` anchors its delete token to
+    // store-shaped receivers.
     const DELETABLE: [&str; 2] = ["preflights", "topicdiscoveries"];
     let mut delete_rules = 0usize;
     for (groups, resources, verbs) in &rules {
@@ -769,35 +708,14 @@ fn every_granted_verb_has_a_caller() {
 }
 
 /// Every delete the control plane can issue is the check collector's, and it
-/// carries a UID precondition — review finding **F2**, fix round 1.
+/// carries a UID precondition.
 ///
-/// # What was wrong with the narrowing this replaces
-///
-/// [`every_granted_verb_has_a_caller`] narrows `delete` by TYPE: the only
-/// handles deleted through may be `TopicDiscovery` and `Preflight`. A
-/// per-controller source scan in
-/// `topic_discovery_controller::the_reconciler_names_no_grant_this_role_does_not_hold`
-/// additionally pinned, for **that file only**, that there is exactly one
-/// `.delete(`, that it is inside `collect_expired`, and that it carries
-/// `preconditions` and a `uid`.
-///
-/// **`controllers/preflight.rs` had no counterpart**, and the reviewer proved
-/// it: a second `Api<Preflight>::delete` planted above `collect_expired`, with
-/// **no** `DeleteParams` at all, survived `manifest_lint` (29/29),
-/// `preflight_controller` (82/82), `topic_discovery_controller` (54/54) and
-/// `linkage` (17/17). A delete by NAME removes whatever holds that name — a
-/// same-named `Preflight` created between the LIST and the DELETE is somebody
-/// else's verdict — while `charts/logweir/templates/clusterrole.yaml`'s header, the doc comment
-/// above, and the worker's own report all claimed "the two call sites are…".
-///
-/// # Why this one is in `manifest_lint` and not in a controller suite
-///
-/// Because the claim is about the CRATE, not about a file. A per-file test
-/// only ever covers the files somebody remembered to write one for, which is
-/// exactly how the gap arose. This walks **every** `.rs` under
-/// `crates/weirkeeper/src` — including the two files
-/// `no_execution_path_reads_preflight_or_discovery` excludes from its own scan
-/// — and holds all three delete spellings to one shape:
+/// A delete by NAME removes whatever holds that name: a same-named
+/// `Preflight` created between the LIST and the DELETE is somebody else's
+/// verdict. The claim is about the CRATE, not a file, so this walks **every**
+/// `.rs` under `crates/weirkeeper/src` (including the two files
+/// `no_execution_path_reads_preflight_or_discovery` excludes) and holds all
+/// three delete spellings to one shape:
 ///
 /// 1. `delete_opt` appears **nowhere**. It takes no `DeleteParams`, so a
 ///    delete written that way cannot carry a precondition at all.
@@ -805,14 +723,9 @@ fn every_granted_verb_has_a_caller() {
 ///    `collect_expired`, in one of the two check controllers;
 /// 3. every such function carries `preconditions` and `uid:`.
 ///
-/// A mirror test in `preflight_controller.rs` states the same thing beside the
-/// code it is about; this is the one that cannot be forgotten for a new file.
-///
-/// # What it cannot catch
-///
-/// A delete issued through an untyped handle (`Api<DynamicObject>`,
-/// `client.request(…)`) or a raw HTTP verb. None exists — `weirkeeper` declares
-/// no `reqwest`/`hyper` edge (Global Constraint 38) — and
+/// It cannot catch a delete through an untyped handle (`Api<DynamicObject>`,
+/// `client.request(…)`) or a raw HTTP verb. None exists — `weirkeeper`
+/// declares no `reqwest`/`hyper` edge (Global Constraint 38) — and
 /// [`every_call_site_has_a_grant`] is what sees a typed one.
 #[test]
 fn every_delete_in_the_control_plane_is_the_check_collectors() {
@@ -944,19 +857,11 @@ fn every_delete_in_the_control_plane_is_the_check_collectors() {
 /// The OTHER direction: every **call site's** (resource, verb) is granted by
 /// the role every install actually ships.
 ///
-/// # Why this exists (W0)
-///
-/// [`every_granted_verb_has_a_caller`] above walks grants and looks for
-/// callers. It is silent about the inverse — a call whose verb is granted
-/// NOWHERE — and that silence shipped a P0: the `BackupSchedule` reconciler
-/// reserved a `Forbid` slot with `Api::replace_status`, which kube issues as
-/// `PUT` and the API server authorises as the verb `update` on
-/// `backupschedules/status`. The role grants `patch` on the status
-/// subresources and, deliberately, `update` on nothing. With the default
-/// `concurrencyPolicy: Forbid` that is a 403 on every due slot of every
-/// schedule: no scheduled Backup is ever created on a shipped install, while
-/// every unit test — which answers whatever route it is asked for — stays
-/// green. This test is the one that fails on it, naming the method, the
+/// [`every_granted_verb_has_a_caller`] above is silent about a call whose verb
+/// is granted NOWHERE. `Api::replace_status` is a `PUT`, authorised as
+/// `update` on `<resource>/status`, which the role grants on nothing: such a
+/// call 403s on a shipped install while every unit test, answering whatever
+/// route it is asked for, stays green. This test names the method, the
 /// resource and the verb.
 ///
 /// # What makes it more than a text match
@@ -1002,20 +907,19 @@ fn every_call_site_has_a_grant() {
         match ty {
             "Approval" => ("logweir.dev", "approvals"),
             "Backup" => ("logweir.dev", "backups"),
-            // D2 W7 (PLAT-08.1): the seventh kind. Its two rules are in
+            // The seventh kind. Its two rules are in
             // `charts/logweir/templates/clusterrole.yaml` beside the six-kind list rather than
             // inside it, so the `logweir-viewer` role is untouched.
             "BackupDestination" => ("logweir.dev", "backupdestinations"),
-            // D2 W8 (PLAT-09.1): the eighth kind. `controllers/topic_discovery.rs`
+            // The eighth kind. `controllers/topic_discovery.rs`
             // reaches it for exactly two things — the `Controller::new` watch and
             // `patch_status` — and `charts/logweir/templates/clusterrole.yaml` grants exactly those.
             "TopicDiscovery" => ("logweir.dev", "topicdiscoveries"),
             "BackupSchedule" => ("logweir.dev", "backupschedules"),
-            // D3 W8 (PLAT-15.1): the eighth kind. Its two rules are in
-            // `charts/logweir/templates/clusterrole.yaml` beside the six-kind list, with a NOTE FOR
-            // W13 that folds them into D3's own RBAC pass.
+            // Its two rules are in `charts/logweir/templates/clusterrole.yaml`
+            // beside the six-kind list.
             "RecoveryCatalog" => ("logweir.dev", "recoverycatalogs"),
-            // D2 W9. `Preflight` is the tenth kind; `Event` is the first core
+            // `Preflight` is the tenth kind; `Event` is the first core
             // resource this crate reads that is not a pod, a Job or a
             // ConfigMap, and it exists so a check pod that never started can
             // say WHY.
@@ -1024,17 +928,15 @@ fn every_call_site_has_a_grant() {
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
             "TrustRoster" => ("logweir.dev", "trustrosters"),
-            // PLAT-19.1. Added with the `TrustPolicy` reconciler, which is
-            // what makes this mapping necessary: the panic below is a HARD
-            // failure on an unmapped type, so a new `Api<T>` cannot reach a
-            // release with its grant unchecked.
+            // The panic below is a HARD failure on an unmapped type, so a new
+            // `Api<T>` cannot reach a release with its grant unchecked.
             "TrustPolicy" => ("logweir.dev", "trustpolicies"),
-            // PLAT-14.2 (D3 W6): `controllers/protection_policy.rs` reaches
+            // `controllers/protection_policy.rs` reaches
             // its own kind for the `Controller::new` watch and `patch_status`,
             // and ONE named `RecoveryCatalog` for `get_opt`. Nothing else is
             // granted and nothing else is called.
             "ProtectionPolicy" => ("logweir.dev", "protectionpolicies"),
-            // PLAT-16.1 / PLAT-16.2 (D3 W9): `controllers/retention_policy.rs`
+            // `controllers/retention_policy.rs`
             // reaches its own kind for the `Controller::new` watch, the
             // namespace-wide conflict `list` and `patch_status`; ONE named
             // `RecoveryCatalog` and its page `ConfigMap`s for `get_opt`; every
@@ -1069,7 +971,7 @@ fn every_call_site_has_a_grant() {
             "get_status" => vec![(status, "get")],
             "patch_status" => vec![(status, "patch")],
             "replace_status" => vec![(status, "update")],
-            // FX-34: `log_stream` is `logs` read as a stream, so the caller can
+            // `log_stream` is `logs` read as a stream, so the caller can
             // stop at its own byte bound. It is the same request (`GET
             // …/pods/<name>/log`) and the API server authorises it against the
             // same pair, which the role already grants for `logs`: no grant is
@@ -1161,48 +1063,37 @@ fn every_call_site_has_a_grant() {
 /// set of each role: an extra rule is as much a defect as a wrong verb, and a
 /// per-rule assertion cannot see one.
 ///
-/// SIX SINCE D3 W13, AND THE NAME SAYS SO. Two of them are administrator roles
-/// that exist to NOT be held by whoever holds `logweir-operator`:
+/// Two of them are administrator roles that exist to NOT be held by whoever
+/// holds `logweir-operator`:
 ///
-/// * `logweir-trust-admin` (D2 W11) writes `TrustPolicy`, which decides whose
-///   keys may sign an approval. An operator who held it could add their own key
-///   and then approve their own restore.
-/// * `logweir-retention-admin` (D3 W13) writes `RetentionPolicy`, whose
-///   `spec.mode` is what moves an installation from reporting to DELETING. D3
-///   §12 calls `Enforce` "a separate, later, administrator decision with its own
+/// * `logweir-trust-admin` writes `TrustPolicy`, which decides whose keys may
+///   sign an approval. An operator who held it could add their own key and
+///   then approve their own restore.
+/// * `logweir-retention-admin` writes `RetentionPolicy`, whose `spec.mode` is
+///   what moves an installation from reporting to DELETING. D3 §12 calls
+///   `Enforce` "a separate, later, administrator decision with its own
 ///   credential", and RBAC is the only layer that can say whose decision.
 ///
-/// The function has been renamed twice for the same reason — it was left at
-/// `…four…` while asserting five (fix round 1, review finding F3) — and the
-/// count is in the name because the count is an assertion.
+/// The count is in the name because the count is an assertion.
 #[test]
 fn the_six_cluster_roles_are_exactly_as_specified() {
     // --- `weirkeeper` (interface I28) -------------------------------------
     //
-    // Three places where this differs from the letter of the task brief, each
-    // for the same reason — the role grants what the reconcilers CALL:
+    // The role grants what the reconcilers CALL:
     //
-    //  * `patch` and not `update` on the status subresources. Every status
-    //    write in the crate is `Api::patch_status` with `Patch::Merge`; no
-    //    `Api::replace` exists. Spec §9's "`update` on their `/status` only"
-    //    is carrying the word ONLY (the subresource, not the object); a literal
-    //    `update` verb would be a grant with no caller.
-    //  * `patch` IS granted on `jobs`, which the brief's rule list omits:
-    //    `ttlSecondsAfterFinished` is patched on after the status write by
-    //    three reconcilers, and without it finished Jobs never expire.
-    //  * `configmaps` gets `create` and `get` only (plan erratum E5a and Task
-    //    17's request fragment), not `create/get/list/watch`: nothing watches
-    //    ConfigMaps.
-    //
-    // And one rule no source for this task listed at all: `create` on
-    // `backups`, which is how a `BackupSchedule` produces a run.
+    //  * `patch` and not `update` on the status subresources: every status
+    //    write is `Api::patch_status` with `Patch::Merge`.
+    //  * `patch` on `jobs`: `ttlSecondsAfterFinished` is patched on after the
+    //    status write, and without it finished Jobs never expire.
+    //  * `configmaps` gets `create` and `get` only: nothing watches them.
+    //  * `create` on `backups`, which is how a `BackupSchedule` produces a run.
     let weirkeeper = vec![
         (
             v(&["logweir.dev"]),
             v(&SIX_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D2 W7 (PLAT-08.1): the `BackupDestination` reconciler's `list`/`watch`
+        // The `BackupDestination` reconciler's `list`/`watch`
         // and `destination::resolve_ref`'s `get_opt`. A SEPARATE rule, so the
         // six-kind list the `logweir-viewer` role also names stays exactly what
         // it was.
@@ -1211,31 +1102,23 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["backupdestinations"]),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D2 W8 (PLAT-09.1): the `TopicDiscovery` reconciler's `Controller::new`
-        // watch, and NOTHING else. No `get`: the reconciler never re-reads a
-        // discovery, and a granted verb with no caller is critique B M18.
+        // The `TopicDiscovery` reconciler's `Controller::new` watch, and
+        // NOTHING else: the reconciler never re-reads a discovery.
         (
             v(&["logweir.dev"]),
             v(&["topicdiscoveries"]),
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D3 W8 (PLAT-15.1): `Controller::new(api, …)` in
-        // `controllers/recovery_catalog.rs`. A SEPARATE rule for the same
-        // reason `backupdestinations` and `topicdiscoveries` have one: folding
-        // a ninth kind into the six-kind list would silently widen
-        // `logweir-viewer` in a diff that reads as a controller change.
-        //
-        // `get` WAS FOLDED IN BY D3 W6 (PLAT-14.2), not given a second rule on
-        // the same resource: `controllers/protection_policy.rs` `get_opt`s the
-        // ONE catalog a `ProtectionPolicy` names, to read its view's expiry and
-        // its page `ConfigMap` names. Two rules naming `recoverycatalogs` would
-        // invite a later edit to widen one of them with the other unexamined.
+        // `Controller::new(api, …)` in `controllers/recovery_catalog.rs`, and
+        // `controllers/protection_policy.rs`'s `get_opt` of the ONE catalog a
+        // `ProtectionPolicy` names. A SEPARATE rule: folding a ninth kind into
+        // the six-kind list would silently widen `logweir-viewer`.
         (
             v(&["logweir.dev"]),
             v(&["recoverycatalogs"]),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // D2 W9 (PLAT-03.1 / PLAT-03.2): the `Preflight` reconciler's
+        // The `Preflight` reconciler's
         // `Controller::new` watch, and nothing else. No `get` — a `Preflight`
         // is referenced by no other object and D2 §6.8 forbids any execution
         // path from looking one up, so a granted `get` would have no caller.
@@ -1245,7 +1128,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
         // `create` is one `Backup` per due slot;
-        // `patch` is PLAT-05.2's history migration (D1 §6.8):
+        // `patch` is the history migration (D1 §6.8):
         // `controllers/schedule_history.rs` removes the schedule's own
         // controller ownerReference from a TERMINAL run with one metadata merge
         // patch, so that deleting the schedule stops collecting its history.
@@ -1269,35 +1152,35 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             ]),
             v(&["patch"]),
         ),
-        // D2 W7: `controllers/backup_destination.rs`'s `Api::patch_status`, a
+        // `controllers/backup_destination.rs`'s `Api::patch_status`, a
         // merge PATCH — seam S7, and no `update` anywhere.
         (
             v(&["logweir.dev"]),
             v(&["backupdestinations/status"]),
             v(&["patch"]),
         ),
-        // D2 W8: `controllers/topic_discovery.rs`'s `Api::patch_status`, a merge
+        // `controllers/topic_discovery.rs`'s `Api::patch_status`, a merge
         // PATCH carrying `metadata.resourceVersion` — seam S7.
         (
             v(&["logweir.dev"]),
             v(&["topicdiscoveries/status"]),
             v(&["patch"]),
         ),
-        // D3 W8: `controllers/recovery_catalog.rs`'s `Api::patch_status`, a
+        // `controllers/recovery_catalog.rs`'s `Api::patch_status`, a
         // merge PATCH carrying `metadata.resourceVersion` — seam S7.
         (
             v(&["logweir.dev"]),
             v(&["recoverycatalogs/status"]),
             v(&["patch"]),
         ),
-        // D2 W9: `controllers/preflight.rs`'s `Api::patch_status`, a merge
+        // `controllers/preflight.rs`'s `Api::patch_status`, a merge
         // PATCH carrying `metadata.resourceVersion` — seam S7.
         (
             v(&["logweir.dev"]),
             v(&["preflights/status"]),
             v(&["patch"]),
         ),
-        // D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule in the install,
+        // The ONE `delete` rule in the install,
         // on the two TRANSIENT check kinds and nothing else. Its callers are
         // `controllers::{topic_discovery,preflight}::collect_expired`, which
         // list only terminal objects, delete with a UID precondition and cap
@@ -1313,40 +1196,26 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["jobs"]),
             v(&["create", "get", "list", "watch", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
-        // `list` ALONE since Task 22 (Task 21 review, LOW-1): `Api<Pod>` is
-        // only ever `.list(&ListParams…)` or `.logs(…)`, so `get` and `watch`
-        // — spec §9's shape, carried verbatim by Task 21 — had no caller.
+        // `list` ALONE: `Api<Pod>` is only ever `.list(&ListParams…)` or
+        // `.logs(…)`.
         (v(&[""]), v(&["pods"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["pods/log"]), v(&["get"])),
-        // D2 §7.1 / W9, and every Job-owning reconciler since FX-11:
+        // Every Job-owning reconciler (D2 §7.1):
         // `FailedCreate` and `FailedMount` for the Jobs and pods the
         // controller owns. `list` and nothing else.
         (v(&[""]), v(&["events"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
-        // PLAT-19.1 — the `TrustPolicy` reconciler's own two rows, added by the
-        // wave-1 trust worker because `every_call_site_has_a_grant` above is a
-        // hard failure without them. TWO SEPARATE RULES rather than a seventh
-        // entry in the six-kinds rule: that list is shared verbatim with
-        // `viewer_role.yaml`, and whether an ordinary viewer may read a trust
-        // policy is the wave-4 RBAC worker's decision, not this one's.
+        // The `TrustPolicy` reconciler's own two rows, SEPARATE from the
+        // six-kinds rule, which is shared verbatim with `viewer_role.yaml`.
         //
-        // NO `get`. Nothing in the crate calls `Api<TrustPolicy>::get` — a
-        // namespace never names its own trust (D3 §7.1), so there is no name
-        // to get, and the conflict rule needs the whole set anyway. A granted
-        // `get` here would be a verb with no caller, which is exactly what
-        // `every_granted_verb_has_a_caller` above exists to refuse.
+        // NO `get`: a namespace never names its own trust (D3 §7.1), and the
+        // conflict rule needs the whole set. NO `update`: editing a key's
+        // lifecycle is `logweir-trust-admin`'s.
         //
-        // NO `update` ANYWHERE. `update` on `trustpolicies` is PLAT-19.1's
-        // authorized-update half and belongs to the new `logweir-trust-admin`
-        // ClusterRole, which the wave-4 worker adds. The controller holds
-        // none of it: it reads policies and writes their status, and an
-        // administrator is the only thing that edits a key's lifecycle.
-        //
-        // `patch` ON THE OBJECT is the compromise-revocation finalizer
-        // (TRUSTPOLICY-DELETE-DROPS-REVOCATION): `metadata.finalizers` under a
-        // resourceVersion precondition, from ONE call site whose body
-        // `trust_revocation_durable.rs` pins. RBAC cannot grant less than the
-        // object, which is why the call site is pinned instead.
+        // `patch` ON THE OBJECT is the compromise-revocation finalizer:
+        // `metadata.finalizers` under a resourceVersion precondition, from ONE
+        // call site whose body `trust_revocation_durable.rs` pins. RBAC cannot
+        // grant less than the object, which is why the call site is pinned.
         (
             v(&["logweir.dev"]),
             v(&["trustpolicies"]),
@@ -1357,10 +1226,9 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["trustpolicies/status"]),
             v(&["patch"]),
         ),
-        // PLAT-14.2 (D3 W6) — the `ProtectionPolicy` reconciler's own rows.
-        // `list`/`watch` is `Controller::new`; there is NO `get` on the kind,
-        // because the reconciler never re-reads a policy it was handed by the
-        // watcher, and a granted verb with no caller is critique B M18.
+        // The `ProtectionPolicy` reconciler's own rows. `list`/`watch` is
+        // `Controller::new`; NO `get`, because the reconciler never re-reads a
+        // policy it was handed by the watcher.
         (
             v(&["logweir.dev"]),
             v(&["protectionpolicies"]),
@@ -1371,7 +1239,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies/status"]),
             v(&["patch"]),
         ),
-        // PLAT-16.1 / PLAT-16.2 (D3 W9) — the `RetentionPolicy` reconciler's
+        // The `RetentionPolicy` reconciler's
         // own rows. `watch` is `Controller::new`; `list` is the conflict check,
         // which needs the whole namespace to find a second policy covering the
         // same destination. NO `get` on the kind — the watcher hands the object
@@ -1440,7 +1308,7 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     // `create` on the four operational kinds, plus PLAIN `update` AND `patch`
     // on `backupschedules`. What may change is the CRD's CEL rule — see
     // `the_schedule_edit_restriction_is_cel_not_rbac`. `patch` is there because
-    // PLAT-05.1 makes the policy editable and the two commands an operator
+    // the policy is editable and the two commands an operator
     // runs (`kubectl edit`, `kubectl apply`) both send a PATCH, so `update`
     // alone is a grant nobody can use.
     let operator = vec![
@@ -1673,25 +1541,17 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
 }
 
 /// **No role this repository ships grants `update`, `patch` or `delete` on
-/// `secrets` to anything** — review finding **F5**, fix round 1.
-///
-/// # Why the VAP is not enough on its own
+/// `secrets` to anything**.
 ///
 /// `charts/logweir/templates/admission-policy.yaml` fences the console API's
-/// `create` on Secrets to the two Logweir credential types, and its header
-/// says "`logweir-api` holds no update, delete or read verb on Secrets, so
-/// there is no other operation to fence". That is true today and **nothing
-/// pinned it**: the policy matches `CREATE` only, so the day a console role
-/// lands carrying `patch` or `update` on `secrets`, the fence is bypassed in
-/// full and no test anywhere fails. A credential the console could PATCH is a
-/// credential it can overwrite with one it chose, which is the whole
-/// write-only property gone.
+/// `create` on Secrets and matches `CREATE` only, so a console role carrying
+/// `patch` or `update` on `secrets` would bypass the fence in full: a
+/// credential the console could PATCH is one it can overwrite with its own.
 ///
 ///  What is asserted, and the one grant that is allowed to exist
 ///
-/// Across every shipped manifest — `config/samples/` and every rendered chart
-/// file — no `Role` or `ClusterRole`
-/// rule names `secrets` (or `*`) with:
+/// Across every shipped manifest, no `Role` or `ClusterRole` rule names
+/// `secrets` (or `*`) with:
 ///
 /// * `delete`, `deletecollection` or `*`, **ever**, however scoped; or
 /// * `update`, `patch`, `get`, `list` or `watch` **without a non-empty
@@ -1707,10 +1567,6 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
 /// `logweir-api`'s future `create` passes too: `create` cannot name a
 /// `resourceName` at all (the object does not exist yet), which is exactly why
 /// the ValidatingAdmissionPolicy — not RBAC — is what bounds its SHAPE.
-///
-/// MUTANTS: add `patch` on `secrets` to any role without `resourceNames`; drop
-/// the `resourceNames` from the bootstrap Role; add `delete` to it even
-/// scoped. Each fails naming the file, the role and the verb.
 #[test]
 fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
     /// Refused at ANY scope, `resourceNames` or not. `update`/`patch` and the
@@ -1805,19 +1661,14 @@ fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
 /// What an operator may change on a `BackupSchedule` is the CRD's CEL rule, and
 /// `operator_role.yaml` says so instead of trying to express it.
 ///
-/// Critique B **H13**, spec §9 amendment 4b, claim **C97**. An RBAC `rules[]`
-/// entry is `apiGroups`/`resources`/`verbs`/`resourceNames` and nothing else —
-/// there is no field a CEL expression could go in. An implementer who tries
-/// produces either a ClusterRole the API server rejects or a key it silently
-/// ignores, and the second is worse: the install succeeds and the restriction
-/// does not exist.
+/// An RBAC `rules[]` entry is `apiGroups`/`resources`/`verbs`/`resourceNames`
+/// and nothing else, so a CEL restriction written into a role is either
+/// rejected or silently ignored, and the second is worse: the install
+/// succeeds and the restriction does not exist.
 ///
-/// PLAT-05.1 INVERTED WHAT THE RULE SAYS, NOT WHERE IT LIVES. The seal used to
-/// name every field but `suspend`; it now names `sourceRef` alone, because a
-/// schedule's policy is editable and its identity is the cluster it protects.
-/// The RBAC half is unchanged in kind and grew one verb: `kubectl edit` and
-/// `kubectl apply` send a PATCH, so an `update`-only grant left an operator
-/// unable to perform the edit the CRD now permits.
+/// The seal names `sourceRef` alone, because a schedule's policy is editable
+/// and its identity is the cluster it protects. `kubectl edit` and `kubectl
+/// apply` send a PATCH, so the role grants `patch` beside `update`.
 #[test]
 fn the_schedule_edit_restriction_is_cel_not_rbac() {
     // The role's prose lives in the chart template; its rules in the render.
@@ -1828,7 +1679,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     // A CEL expression written into this file has to appear as a key or a value
     // in the PARSED document, so the parse is where it is caught. An RBAC rule
     // is `apiGroups`/`resources`/`verbs`/`resourceNames` and nothing else
-    // (claim C97), and the API server SILENTLY IGNORES an unknown key — which
+    // and the API server SILENTLY IGNORES an unknown key — which
     // is the dangerous half: the install succeeds and the restriction does not
     // exist.
     const RULE_KEYS: [&str; 4] = ["apiGroups", "resources", "verbs", "resourceNames"];
@@ -1891,7 +1742,7 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     );
 
     // And the CRD really does carry it, over `sourceRef` and nothing else
-    // (Task 15b's shape, D1 §5.1's content).
+    // (D1 §5.1).
     let crd = manifests_in(&repo().join("charts/logweir/crds/backupschedules.yaml"));
     let schema =
         &crd[0].value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
@@ -1944,14 +1795,12 @@ fn the_schedule_edit_restriction_is_cel_not_rbac() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tokens
-// ---------------------------------------------------------------------------
+// Tokens.
 
 /// Runner pods automount no ServiceAccount token; the controller Deployment is
 /// the one exemption, asserted on the chart's default render (arm (b)).
 ///
-/// Critique B **H14**, spec §9. Runner pods make zero Kubernetes API calls and
+/// Spec §9. Runner pods make zero Kubernetes API calls and
 /// hold the signing key; the controller is the only Kubernetes API client in
 /// the design (`design-operator.md:355-359`) and cannot open a watch without
 /// its token.
@@ -1999,11 +1848,9 @@ fn runner_pods_do_not_automount_a_token() {
     // --- arm (a), continued: what `job::build` renders ---------------------
     //
     // `crates/logweir` does not (and must not) depend on `crates/weirkeeper`,
-    // so the rendered Job cannot be built here. The statement in the source is
-    // asserted instead, and the three tests that assert the RENDERED result are
-    // named so a reviewer can find them:
-    // `weirkeeper/tests/backup_controller.rs:594`,
-    // `kafka_cluster_controller.rs:345`, `restore_controller.rs:1522`.
+    // so the rendered Job cannot be built here; the statement in the source is
+    // asserted instead; the backup, kafka_cluster and restore controller
+    // suites under `weirkeeper/tests/` assert the RENDERED result.
     let job_rs = read("crates/weirkeeper/src/job.rs");
     assert!(
         job_rs.contains("automount_service_account_token: Some(false)"),
@@ -2071,9 +1918,7 @@ fn the_trustroster_sample_is_named_default() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The selection rule itself, and drift
-// ---------------------------------------------------------------------------
+// The selection rule itself, and drift.
 
 /// The five non-manifest files under `examples/` are skipped BY THE PARSE.
 ///
@@ -2125,19 +1970,14 @@ impl std::ops::Index<&str> for Manifest {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Install docs and the two recipes
-// ---------------------------------------------------------------------------
+// Install docs and the two recipes.
 
 /// The install document carries a `kubectl create secret` line for each
 /// operator-managed Secret. New Restore Jobs receive a controller-generated,
 /// immutable per-Restore approval bundle rather than a global Secret.
 ///
-/// **The document moved, and this test followed it** (Task 29, chain W). Step 1
-/// was in `docs/kubernetes.md` §13; the tree now carries ONE install document,
-/// `docs/install.md`, and `docs/kubernetes.md` §13 is the pointer at it. The
-/// The property asserted here is that every Secret an adopter must provision
-/// has a runnable command, while the migration prose identifies the old global
+/// Every Secret an adopter must provision has a runnable command in
+/// `docs/install.md`, and the migration prose identifies the old global
 /// approval bundle as legacy-only.
 #[test]
 fn install_docs_name_all_operator_managed_secrets() {
@@ -2196,7 +2036,7 @@ fn install_docs_name_all_operator_managed_secrets() {
 /// `just check-secrets` is its own recipe, names the current Secrets with
 /// `logweir-signing-key` first, and exits 1.
 ///
-/// Critique B **M15**, interface **I26**. The live `rc=1` run is a recorded
+/// Interface **I26**. The live `rc=1` run is a recorded
 /// transcript step; the recipe's SHAPE is asserted here, in-process (Global
 /// Constraint 22 forbids a `#[test]` that shells `just`).
 #[test]
@@ -2250,8 +2090,8 @@ fn check_secrets_refuses_a_missing_secret() {
 ///
 /// [`manifests_in`] returns nothing for a file it cannot read or parse, which
 /// is the right behaviour for a directory walk and the wrong behaviour for a
-/// shipped manifest. This is the assertion that a `.yaml` under `config/` is
-/// never silently skipped for being broken.
+/// shipped manifest. This is the assertion that a shipped `.yaml` is never
+/// silently skipped for being broken.
 #[test]
 fn every_shipped_yaml_file_parses() {
     let mut seen = 0usize;
@@ -2269,13 +2109,10 @@ fn every_shipped_yaml_file_parses() {
             seen += 1;
         }
     }
-    // The floor counted the `config/` tree's manifests before PROD-17.1 C6.
     assert!(seen >= 15, "only {seen} YAML files were walked");
 }
 
-// ---------------------------------------------------------------------------
-// Task 22 — the approval bundle is a Secret, in every manifest
-// ---------------------------------------------------------------------------
+// The approval bundle is a Secret, in every manifest.
 
 /// The four files at `/approval` are the KEYS of a Secret, in every shipped
 /// manifest, and **never** of a ConfigMap.
@@ -2306,7 +2143,6 @@ fn manifest_lint_approval_bundle_comes_from_a_secret() {
     const BUNDLE: &str = "logweir-approval-bundle";
 
     let manifests = all_manifests();
-    // The floor counted the `config/` tree's manifests before PROD-17.1 C6.
     assert!(
         manifests.len() >= 15,
         "only {} manifests were walked; this gate would pass vacuously",
@@ -2428,7 +2264,7 @@ fn the_bundle_comment_states_the_reason() {
     );
 }
 
-/// `docs/stability.md` records the `kube`/`k8s-openapi` pair Task 15 resolved
+/// `docs/stability.md` records the resolved `kube`/`k8s-openapi` pair
 /// and the toolchain they were pinned against — read from the manifests, so
 /// the page cannot drift from the build.
 #[test]
@@ -2476,9 +2312,7 @@ fn the_stability_note_records_the_resolved_kube_pair() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 23 — digest-only image references, and the org-root anchor
-// ---------------------------------------------------------------------------
+// Digest-only image references, and the org-root anchor.
 
 /// Every container image reference in every shipped manifest, as
 /// `(where, reference)`.
@@ -2534,20 +2368,13 @@ fn images_in(m: &Manifest) -> Vec<(String, String)> {
 /// **Global Constraint 7: pinning is by digest, never by tag** — in every
 /// shipped Kubernetes manifest.
 ///
-/// WHY THIS IS A SECURITY GATE AND NOT TIDINESS. `examples/cronjob-drill.yaml`
-/// referenced `logweir:v0.1.0`, a MUTABLE TAG, under the mandatory
-/// `imagePullPolicy: Never` on a single node — so the org-root anchor baked
-/// into that image could be replaced by a `docker build -t logweir:v0.1.0` on
-/// that node **without touching a single Kubernetes object**. The controller
-/// Deployment had the same shape, which made the whole control plane
-/// replaceable the same way. A digest names bytes; a tag names whatever was
-/// built last.
+/// A MUTABLE TAG under `imagePullPolicy: Never` on a single node can be
+/// replaced by a local `docker build -t` without touching a single Kubernetes
+/// object. A digest names bytes; a tag names whatever was built last.
 ///
-/// THE SELECTION IS THE PARSE (Task 21's rule, inherited). `examples/drill.yaml`,
-/// `backup.yaml`, `restore.yaml` and the two `.json` files carry no
-/// `apiVersion`/`kind` pair, so they are skipped by
-/// [`manifests_in`] and never by a filename special case — see
-/// [`manifest_lint_selects_by_parsed_api_version_and_kind`].
+/// THE SELECTION IS THE PARSE: files without an `apiVersion`/`kind` pair are
+/// skipped by [`manifests_in`], never by a filename special case (see
+/// [`manifest_lint_selects_by_parsed_api_version_and_kind`]).
 #[test]
 fn manifest_lint_every_image_reference_is_a_digest() {
     let refs = image_references();
@@ -2578,17 +2405,11 @@ fn manifest_lint_every_image_reference_is_a_digest() {
 /// The image walk is derived from the PARSE and covers a manifest that is in
 /// no list anywhere.
 ///
-/// THE MUTANT THIS EXISTS FOR: replacing the parsed selection with a hard-coded
-/// list of files — `["examples/cronjob-drill.yaml"]`.
-/// That mutant passes every other assertion in this file,
-/// because those are in fact the files that carry images today. It fails here,
-/// because this document is written to a temporary directory the repository
-/// has never heard of and is still selected and still has its image read.
-///
-/// The document is a `Job`, a kind no shipped manifest uses yet and one the
-/// `Backup`/`Restore` reconcilers create at runtime — so this is also the
-/// assertion that the day a `Job` manifest ships, its image is covered without
-/// anyone remembering to add it.
+/// A hard-coded list of files would pass every other assertion here, because
+/// those are the files that carry images today. This document is written to a
+/// temporary directory and must still be selected and have its image read. It
+/// is a `Job`, a kind the reconcilers create at runtime, so a `Job` manifest
+/// that ships is covered without anyone remembering to add it.
 #[test]
 fn the_image_walk_covers_a_manifest_that_is_not_in_any_list() {
     let dir = std::env::temp_dir().join(format!(
@@ -2636,10 +2457,9 @@ fn the_image_walk_covers_a_manifest_that_is_not_in_any_list() {
 ///
 /// WHAT THE VALUE IS, SAID ONCE AND HERE: the SHA-256 of the
 /// SubjectPublicKeyInfo DER encoding of the org root's **public** key,
-/// `third_party/org-root.pub.pem` — the same definition of "fingerprint"
-/// `docs/keys.md` gives for a signing key, and the same one stage-2 Task 16's
-/// T1 and `docs/platform/02-k8s-transition-plan.md:449-451` give for this
-/// anchor. It is a PUBLIC key's hash; no private key material is in the file,
+/// `third_party/org-root.pub.pem`, the definition of "fingerprint"
+/// `docs/keys.md` gives for a signing key. It is a PUBLIC key's hash; no
+/// private key material is in the file,
 /// in either image, or anywhere in this repository's `third_party/`.
 ///
 /// ONE LINE IS LOAD-BEARING, not tidiness: `just check-org-root` and
@@ -2706,10 +2526,8 @@ fn org_root_fingerprint_is_a_single_sha256_line() {
 /// only one of them leaves half the claim standing.
 ///
 /// THE IMAGE-INSPECTING HALF IS `just check-org-root`, deliberately not a
-/// `#[test]` (critique B M14): a test that shells `docker run` twice breaks
-/// Global Constraint 22's 15 s bound and STANDING RULE 7, and would make
-/// `just lint` require both images to exist. This half reads two checked-in
-/// files and finishes in microseconds.
+/// `#[test]`: a test that shells `docker run` would break Global Constraint
+/// 22 and make `just lint` require both images to exist.
 #[test]
 fn both_dockerfiles_copy_the_fingerprint() {
     // Split so this file's own text is not a match for the grep in
@@ -2732,7 +2550,7 @@ fn both_dockerfiles_copy_the_fingerprint() {
 
 /// **`Dockerfile.console` is the third image and it declares what it runs.**
 ///
-/// D0 stage 7 owns it, and four things about it are assertions rather than
+/// Four things about it are assertions rather than
 /// style — each one is a way the image can be wrong while every other gate in
 /// this repository stays green, because the other gates need a built image and
 /// this row reads checked-in bytes in microseconds:
@@ -2752,10 +2570,6 @@ fn both_dockerfiles_copy_the_fingerprint() {
 ///      the host `/usr/include`. Emulating the compile under QEMU is forbidden
 ///      (STANDING RULE 10), so the refusal is the supported answer and
 ///      `.github/workflows/images.yml` runs one native runner per architecture.
-///
-/// MUTANT: replace the two globs with `COPY ui /ui`, drop
-/// `THIRD_PARTY_NOTICES.md`, add the fingerprint COPY, or delete the
-/// cross-compile refusal — each fails here naming what changed.
 #[test]
 fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
     let text = read("Dockerfile.console");
@@ -2799,8 +2613,8 @@ fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
          default vector here would be a second place the console's MODE could come from"
     );
 
-    // AND THE BUILD CONTEXT EXCLUDES IT, for the reason Task 9 and Task 23 give
-    // about the other two compiling Dockerfiles: `COPY . .` is the last thing
+    // AND THE BUILD CONTEXT EXCLUDES IT, as for the other two compiling
+    // Dockerfiles: `COPY . .` is the last thing
     // before the cargo layer, so a Dockerfile that reaches the context tar makes
     // an edit to ITS comments invalidate the OTHER images' compiles.
     let ignore = read(".dockerignore");
@@ -2813,17 +2627,10 @@ fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
 
 /// Nothing under `crates/` opens the baked anchor. **Phase 0 does not read it.**
 ///
-/// This is the assertion that the task ships an anchor and not a control it
-/// does not have. The file and its build-time pinning exist so that the anchor
-/// is in place BEFORE anything verifies against it — G5's pod-side `--org-key`
-/// refusal is Phase 3 — and saying so with a test is the difference between
-/// "not yet wired" and "quietly believed to be wired".
-///
-/// THE MUTANT: read the fingerprint at phase 0. That is a real, attractive
-/// change — it looks like a hardening — and it is out of scope here because the
-/// refusal it would implement has no `--org-key` flag to refuse, no roster to
-/// check and no test for either. This fails the moment the path appears in a
-/// `.rs` file.
+/// The anchor is in place BEFORE anything verifies against it (the pod-side
+/// `--org-key` refusal is Phase 3), and this says so with a test: reading the
+/// fingerprint at phase 0 would be a refusal with no flag, no roster and no
+/// test behind it.
 #[test]
 fn the_fingerprint_is_not_read_at_runtime() {
     // Built from pieces: this file lives under `crates/` and a literal here
@@ -2881,13 +2688,9 @@ fn the_fingerprint_is_not_read_at_runtime() {
 ///
 /// `crates/weirkeeper/tests/crd_shape.rs`'s `the_runner_image_is_named_once`
 /// asserts the same one-place property over the REGISTRY PATH. This one is
-/// about the FORM: after this task the constant is the runner repository
-/// followed by `@sha256:` and 64 hex, so a second call site introduced during a
-/// digest bump — the mutant, "duplicate the runner image string into
-/// `restore.rs`" — fails here as well, and a silent reversion to a mutable tag
-/// fails here and nowhere else. (The registry path is not spelled out anywhere
-/// in this file, for the reason below: this file lives under `crates/`, and
-/// `crd_shape.rs::the_runner_image_is_named_once` counts occurrences there.)
+/// about the FORM: the constant is the runner repository followed by
+/// `@sha256:` and 64 hex, so a second call site or a reversion to a mutable
+/// tag fails here.
 ///
 /// THE NEEDLES ARE BUILT FROM PIECES, for the reason `crd_shape.rs` gives: this
 /// file is under `crates/`, so a literal would be its own second occurrence.
@@ -2939,26 +2742,19 @@ fn the_runner_image_lives_in_exactly_one_place() {
 /// `just image-weirkeeper` takes its platform from the environment, builds ONE
 /// platform, and loads the result.
 ///
-/// THREE PROPERTIES, THREE MUTANTS.
+/// THREE PROPERTIES.
 ///
-/// (a) Hard-coding `linux/arm64` makes Task 31's GitHub-hosted amd64 runner
-/// compile this workspace under QEMU — STANDING RULE 10's forbidden case,
-/// measured at 33x in `docs/stability.md`.
+/// (a) Hard-coding `linux/arm64` makes the GitHub-hosted amd64 runner compile
+/// this workspace under QEMU, STANDING RULE 10's forbidden case (measured at
+/// 33x in `docs/stability.md`).
 ///
 /// (b) `--platform linux/amd64,linux/arm64` cannot `--load`: the local image
-/// store holds single-platform images only, so a multi-platform build must
-/// `--push` to a registry, and nothing in this tree pushes — publication is
-/// `release.yml` on a pushed tag, which has never run (Global Constraint 37,
-/// `blocked: images not published`).
-/// `weirkeeper:check` would then not exist as a local tag,
-/// `scripts/check-image-weirkeeper.sh` would have nothing to inspect and
-/// `imagePullPolicy: Never` would find no image on the node (critique B H16).
+/// store holds single-platform images only, so `weirkeeper:check` would not
+/// exist as a local tag and `scripts/check-image-weirkeeper.sh` would have
+/// nothing to inspect.
 ///
-/// (c) An `image-weirkeeper-release` recipe is NOT created: multi-arch is
-/// produced in exactly one place, `release.yml`'s image job (Task 30b), and
-/// Task 30b is not a member of chain J and may not edit the justfile
-/// (STANDING RULE 17). A recipe whose body is `docker buildx build --push` on a
-/// laptop with no registry is a recipe that has never run.
+/// (c) No `image-weirkeeper-release` recipe: multi-arch is produced in exactly
+/// one place, `release.yml`'s image job.
 #[test]
 fn the_weirkeeper_image_recipe_takes_its_platform_from_the_environment() {
     let justfile = read("justfile");
@@ -3030,16 +2826,12 @@ fn the_weirkeeper_image_recipe_takes_its_platform_from_the_environment() {
 /// at all, so shipping that notice would be claiming a redistribution that does
 /// not happen — and `scripts/check-image-weirkeeper.sh` check 3 asserts the
 /// directory is ABSENT, which is the exact opposite of `check-image.sh`'s
-/// check 5 (critique B **H15**).
+/// check 5.
 ///
-/// THE ASSERTION IS OVER INSTRUCTION LINES, NOT THE WHOLE FILE, and that is
-/// deliberate: `Dockerfile.weirkeeper`'s comments say at length why there is no
-/// MIT notice and why `/usr/share/licenses/kafka-backup/` is absent, and a
-/// whole-file grep would report that explanation as the violation — the same
-/// mistake `scripts/check-dod.sh`'s Global Constraint 14 arm avoids by looking
-/// only at the three places a name would actually make something Logweir's own
-/// artefact. The mutant this kills — "fix" a red `check-image.sh` run by
-/// copying the MIT licence in — adds an INSTRUCTION, and is caught.
+/// THE ASSERTION IS OVER INSTRUCTION LINES, NOT THE WHOLE FILE:
+/// `Dockerfile.weirkeeper`'s comments explain why there is no MIT notice, and
+/// a whole-file grep would report that explanation as the violation. Copying
+/// the MIT licence in adds an INSTRUCTION, and is caught.
 #[test]
 fn the_controller_image_owes_no_mit_notice() {
     let text = read("Dockerfile.weirkeeper");
@@ -3072,9 +2864,7 @@ fn the_controller_image_owes_no_mit_notice() {
     // upstream's, and the inventory is the arm of it that covers the 392
     // packages this binary is statically linked against.
     //
-    // THREE FILES, NOT TWO (Task 29). Task 23 landed this line naming LICENSE
-    // and NOTICE, because `THIRD_PARTY_NOTICES.md` did not exist yet. The
-    // exhaustive, COPY-parsing form of this assertion is
+    // The exhaustive, COPY-parsing form of this assertion is
     // `crates/logweir/tests/doc_lint.rs::every_image_copies_the_licence_and_the_notice`,
     // which checks both images; this stays as the literal-prefix backstop.
     assert!(

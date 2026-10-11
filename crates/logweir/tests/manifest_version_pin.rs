@@ -1,9 +1,9 @@
-//! **FX-7 — keep earlier points valid after a manifest rewrite: the PIN.**
+//! **Keep earlier points valid after a manifest rewrite: the PIN.**
 //!
 //! A backup taken on a VERSIONED bucket records, in its signed receipt and in
 //! its catalog point record, the object version id of the manifest bytes it
-//! attests (`archive.manifest_version_id`, receipt and record format `1.2.0`,
-//! the MINOR after FX-4's `1.1.0`).
+//! attests (`archive.manifest_version_id`, receipt and record format
+//! `1.2.0`).
 //! A reader then compares the key's CURRENT version with that pin, so a set
 //! written again after the point was signed is seen even when the manifest
 //! bytes came out identical — which engine 0.21.0 does: it rewrites a set's
@@ -179,15 +179,13 @@ fn manifest_writer<'a>(
         })
 }
 
-// ---------------------------------------------------------------------------
-// The writer
-// ---------------------------------------------------------------------------
+// The writer.
 
 /// **The pin.** On a versioned bucket the receipt names the version of the
 /// manifest bytes it attests — the LAST one the engine wrote, which is the one
 /// the run read back — at format `1.2.0`, and the catalog record carries the
-/// same pin at its own `1.2.0`. FX-4's `config_coverage` travels beside it: a
-/// pinned receipt is FX-4's document plus the pin, never instead of it.
+/// same pin at its own `1.2.0`. `config_coverage` travels beside it: a pinned
+/// receipt is the unpinned document plus the pin, never instead of it.
 #[test]
 fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     let f = Fixture::new();
@@ -209,10 +207,9 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         "the pin is the version of the bytes the run READ BACK — the last write — not an \
          earlier one and not none"
     );
-    // PROD-05.1, PROD-03.0 and PROD-01.4a merged after FX-7: every receipt
-    // this build signs carries `topic_configuration`, `schema_dependency` and
-    // `generations`, so a pinned one is 1.6.0 too — its minor is at least the
-    // pin's, which is what a reader of the pin needs.
+    // Every receipt this build signs carries `topic_configuration`,
+    // `schema_dependency` and `generations`, so a pinned one is 1.6.0 too: its
+    // minor is at least the pin's, which is what a reader of the pin needs.
     assert_eq!(
         receipt.format_version,
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
@@ -231,9 +228,9 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
         receipt.archive.manifest_sha256,
         "the digest is over exactly the pinned version's bytes"
     );
-    // FX-4 and FX-7 merged: the pin is ADDED to FX-4's document, which keeps
-    // its coverage block, and the pair is a receipt both verifiers accept
-    // (arm 6 reads the 1.2.0 minor as at least 1).
+    // The pin is ADDED to the coverage document, which keeps its coverage
+    // block, and the pair is a receipt both verifiers accept (arm 6 reads the
+    // 1.2.0 minor as at least 1).
     let coverage = receipt
         .config_coverage
         .as_ref()
@@ -246,7 +243,7 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     assert_eq!(receipt.validate_invariants(), Ok(()));
 
     // The catalog record carries the receipt's pin, and says so in its own
-    // minor version — beside FX-4's per-topic coverage copy.
+    // minor version, beside its per-topic coverage copy.
     let record_key = outcome
         .catalog_key
         .clone()
@@ -277,10 +274,10 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
 }
 
 /// **Unpinned evidence keeps its shape.** On an unversioned bucket there is
-/// nothing to pin: the receipt is the document without the pin — FX-4's
-/// [`RECEIPT_FORMAT_VERSION`], with its `config_coverage` — with NO
+/// nothing to pin: the receipt is the document without the pin
+/// ([`RECEIPT_FORMAT_VERSION`], with its `config_coverage`) with NO
 /// `manifest_version_id` key at all (absent, never `null`), and so is the
-/// catalog record, at FX-4's record `FORMAT_VERSION`.
+/// catalog record, at the record `FORMAT_VERSION`.
 ///
 /// [`RECEIPT_FORMAT_VERSION`]: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
 #[test]
@@ -290,9 +287,9 @@ fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     let engine = manifest_writer(&store, None, 0);
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
-    // PROD-05.1, PROD-03.0 and PROD-01.4a: an unpinned receipt this build
-    // signs is 1.6.0 as well — it carries `topic_configuration`,
-    // `schema_dependency` and `generations` — and still has NO pin key.
+    // An unpinned receipt this build signs is 1.6.0 as well (it carries
+    // `topic_configuration`, `schema_dependency` and `generations`) and still
+    // has NO pin key.
     assert_eq!(
         receipt.format_version,
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS,
@@ -323,13 +320,11 @@ fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     assert!(record["archive"].get("manifest_version_id").is_none());
 }
 
-/// **The pin's format is a MINOR bump, the same for both documents** (FX-7
-/// fix round, review M-2). Its number lives in ONE constant per format, so a
-/// renumber (FX-4 merged first, so FX-7 is 1.2.0) is that constant and a
-/// schema file name, and the tests read the constants. This row keeps whatever
-/// the number becomes honest: inside major 1, a MINOR above the unpinned
-/// format this build writes (FX-4's, for the receipt and for the record), and
-/// the receipt's equal to the catalog record's.
+/// **The pin's format is a MINOR bump, the same for both documents.** Its
+/// number lives in ONE constant per format, and the tests read the constants.
+/// This row keeps whatever the number becomes honest: inside major 1, a MINOR
+/// above the unpinned format this build writes, for the receipt and for the
+/// record, and the receipt's equal to the catalog record's.
 #[test]
 fn the_pinned_format_is_a_minor_bump_of_both_documents() {
     use logweir_core::backup_receipt::{
@@ -384,9 +379,7 @@ fn a_null_or_blank_version_id_is_not_a_pin() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The catalog record: the receipt is the authority
-// ---------------------------------------------------------------------------
+// The catalog record: the receipt is the authority.
 
 fn pinned_receipt_and_bytes() -> (BackupReceipt, Vec<u8>) {
     let f = Fixture::new();
@@ -462,8 +455,8 @@ fn a_record_that_invents_a_pin_is_a_mismatch() {
 /// A record WITHOUT the pin, for a receipt that has one, is what an OLDER
 /// catalog writer produces: absent means unknown (rule 2), readers take the
 /// pin from the receipt, and the record is NOT a contradiction. Two older
-/// writers: FX-4's (record 1.1.0, the topic coverage copied, no pin) and one
-/// from before FX-4 (record 1.0.0, neither).
+/// writers: record 1.1.0 (the topic coverage copied, no pin) and record 1.0.0
+/// (neither).
 #[test]
 fn a_record_from_an_older_writer_without_the_pin_still_agrees() {
     use logweir::catalog::reader::{cross_check, CrossCheck};
@@ -551,7 +544,7 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
         )
         .unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    // The receipt is this build's 1.6.0 (PROD-01.4a), so its record is too —
+    // The receipt is this build's 1.6.0, so its record is too —
     // and still names no pin.
     assert_eq!(
         record["format_version"],

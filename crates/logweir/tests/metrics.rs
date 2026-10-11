@@ -1,4 +1,4 @@
-//! T0-7. What a terminal path leaves behind on the ONE observable surface v0.1
+//! What a terminal path leaves behind on the ONE observable surface v0.1
 //! has: the Prometheus textfile at `--metrics-file`.
 //!
 //! The split is deliberate. This file drives the public seam
@@ -27,7 +27,7 @@ fn a_scorecard() -> logweir_core::scorecard::Scorecard {
         .expect("the checked-in fixture parses")
 }
 
-/// T0-7 rung 2. `logweir_drill_last_run_timestamp_seconds` is rendered at
+/// `logweir_drill_last_run_timestamp_seconds` is rendered at
 /// `docs/kubernetes.md:202` inside a "Verified live" transcript and was emitted
 /// by nothing anywhere in the tree. This is the test that makes the
 /// documentation true — and the `±60 s` window is what stops it being made true
@@ -103,7 +103,7 @@ fn assert_samples_carry_no_run_id(t: &str) {
     }
 }
 
-/// T0-7 rung 1. The dashboard must carry the freshness panel, and its
+/// The dashboard must carry the freshness panel, and its
 /// expression must be the query `docs/metrics.md` tells an operator to alert on
 /// — a documented query and a shipped panel that disagree is how a dashboard
 /// silently stops meaning anything.

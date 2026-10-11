@@ -3,10 +3,6 @@ mod support;
 use logweir::drill::phase6_restore::assert_post_condition;
 use std::collections::BTreeMap;
 
-// ---------------------------------------------------------------------------
-// Task 18 fix round 1 (2026-09-04), per task-18-review.md. Everything below
-// this line is ADDITIVE: none of the four tests above are modified, per this
-// round's explicit instruction. New imports needed only by the tests below.
 use logweir::drill::DrillError;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PhaseObserver,
@@ -57,14 +53,11 @@ fn the_measured_window_brackets_the_subprocess_and_nothing_else() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fix round 1 additions. Doubles local to this file — no shared fixture is
-// touched, no injection hook, no env var, no cfg flag; GC4/GR7 are unaffected.
+// Doubles local to this file: no injection hook, no env var, no cfg flag.
 
-/// Mutant M4 (review): `run()`'s call to `assert_post_condition` could be
-/// deleted and every test above still passed, because `engine_that_sleeps_ms`'s
-/// `FakeReader` target holds a non-zero end offset (500). This test uses a
-/// target still at end offset 0 instead, so the backstop is load-bearing.
+/// `run()`'s call to `assert_post_condition` is load-bearing: the target here
+/// is still at end offset 0 (the `FakeReader` of `engine_that_sleeps_ms` holds
+/// 500, which would hide a deleted backstop).
 #[test]
 fn run_refuses_a_restore_that_left_the_target_empty() {
     let engine = fixtures::SleepEngine { ms: 1 };
@@ -81,7 +74,7 @@ fn run_refuses_a_restore_that_left_the_target_empty() {
     let Err(e) = r else {
         panic!("run() returned Ok for a target still at end offset 0")
     };
-    // The variant is what decides the exit code (Task 18 fix round 1, F1/F6):
+    // The variant is what decides the exit code:
     // it must be the not-pass finding, never Operational/Kafka/Engine.
     assert!(
         matches!(e, DrillError::RestoreNoOp(_)),
@@ -90,7 +83,7 @@ fn run_refuses_a_restore_that_left_the_target_empty() {
     assert!(e.to_string().contains("no-op"), "{e}");
 }
 
-/// Review finding F5: an empty topic mapping and an all-zero restore are NOT
+/// An empty topic mapping and an all-zero restore are NOT
 /// the same finding, and only one of them says anything about a restore that
 /// ran. This pins the empty-map branch's classification and its wording.
 #[test]
@@ -106,7 +99,7 @@ fn an_empty_topic_mapping_is_operational_not_a_restore_finding() {
     );
 }
 
-/// The other half of F5: an all-zero restore over a NON-EMPTY selection is a
+/// The other half: an all-zero restore over a NON-EMPTY selection is a
 /// positively established fact about the archive, so it must NOT share the
 /// empty-map's `Operational` classification.
 #[test]
@@ -122,12 +115,10 @@ fn all_zero_offsets_over_a_nonempty_selection_is_a_restore_finding_not_operation
 
 /// A minimal `DataEngine` double, local to this file: it never sleeps and
 /// never reads a real clock — it returns FIXED sentinel timestamps and
-/// records whether it was actually invoked. Review findings F3/M6/N6/N7/N18:
-/// a duration-tolerance assertion cannot tell "measured the subprocess" apart
-/// from "invented a plausible number" or "drifted by ~1s in either
-/// direction". Comparing for exact identity against the engine's own
-/// `RestoreFacts`, and asserting the engine was actually called, closes all
-/// four at once with zero tolerance.
+/// records whether it was actually invoked. A duration-tolerance assertion
+/// cannot tell "measured the subprocess" from "invented a plausible number";
+/// exact identity against the engine's own `RestoreFacts`, and the engine
+/// actually called, can.
 struct SentinelEngine {
     called: AtomicBool,
 }
@@ -189,7 +180,7 @@ fn the_measured_span_is_exactly_the_engines_own_facts_and_the_engine_is_actually
     );
     assert_eq!(out.started_at, fixtures::ts("2026-01-01T00:00:00Z"));
     assert_eq!(out.finished_at, fixtures::ts("2026-01-01T00:00:05Z"));
-    // F8: the engine's unknown-key warnings must survive phase 6, not be
+    // The engine's unknown-key warnings must survive phase 6, not be
     // silently dropped — nothing downstream can recover them otherwise.
     assert_eq!(
         out.unknown_key_warnings,
@@ -198,7 +189,7 @@ fn the_measured_span_is_exactly_the_engines_own_facts_and_the_engine_is_actually
 }
 
 /// A `ClusterReader` double whose `end_offsets` always fails, local to this
-/// file. Review finding F7/N4: a broker read failure during the post-restore
+/// file. A broker read failure during the post-restore
 /// check must surface as `DrillError::Kafka`, never be swallowed into a
 /// false "no-op" finding about the archive.
 fn failing_reader() -> Reader {
@@ -229,8 +220,7 @@ fn a_broker_failure_during_the_post_restore_read_surfaces_as_kafka_not_a_no_op()
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 6 (T0-14). ADDITIVE: nothing above this line is modified.
+// Phase-5 / phase-6 render divergence.
 
 /// Ruling **R-E**. A phase-5 / phase-6 `restore.yaml` divergence is detected
 /// inside `OsoCliEngine::restore`, i.e. AFTER phases 0-5 have run — the
@@ -238,12 +228,12 @@ fn a_broker_failure_during_the_post_restore_read_surfaces_as_kafka_not_a_no_op()
 /// `validate-restore` already executed. Global Constraint 11 reserves exit `3`
 /// for "plan refused by a guard, **before anything runs**", so it does not
 /// describe this at all. The refusal is `EngineError::Operational`, which the
-/// existing route at `crates/logweir/src/drill/mod.rs:105` maps through
+/// orchestrator maps through
 /// `DrillError::Engine` to exit `1` — operational error, no artifact. This
 /// test is the machine check on that route, and it is the kill for a mutant
 /// that re-points `DrillError::Engine(_)` at `ExitCode::GuardRefused`.
 ///
-/// It lives here rather than beside the other three T0-14 tests in
+/// It lives here rather than beside the render-equality tests in
 /// `crates/logweir-engine-oso/tests/render_equality.rs` because
 /// `logweir-engine-oso` does not depend on `logweir` and must not: adding the
 /// dependency would invert the crate graph.
@@ -457,7 +447,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
     }
 
     /// [`archive_signed`], with the receipt pinning `pin` as its manifest
-    /// version (FX-7) when given.
+    /// version when given.
     fn archive_with(
         signed: bool,
         pin: Option<&str>,
@@ -468,9 +458,8 @@ evidence: {{backend: filesystem, path: {evidence}}}
     /// [`archive_with`], with the receipt attesting its manifest at
     /// `manifest_key` and every `(key, bytes)` of `others` written beside it.
     /// The plan's filesystem storage has no prefix, so the key the engine
-    /// reads set `nightly-7` at is `nightly-7/manifest.json` (FX-16 fix round:
-    /// the binding refuses a receipt that attests any other; this fixture
-    /// said `logweir/backups/nightly-7/run-1.manifest.json` until then).
+    /// reads set `nightly-7` at is `nightly-7/manifest.json`, and the binding
+    /// refuses a receipt that attests any other.
     fn archive_laid_out(
         signed: bool,
         pin: Option<&str>,
@@ -638,13 +627,13 @@ evidence: {{backend: filesystem, path: {evidence}}}
         assert_ne!(run.code, 0, "no broker is running, so it cannot succeed");
     }
 
-    /// **FX-7 fix round (review H-1), through the real binary.** A receipt
+    /// **Through the real binary.** A receipt
     /// taken on a versioned bucket pins its manifest's version; the same
     /// signed point in a FILESYSTEM archive — which keeps no versions, like
     /// any unversioned copy of the archive — is the same point. The run gets
     /// past the binding (proven by its digest) and the runner LOGS that the
     /// pin could not be checked here, rather than refusing it as written
-    /// again (exit 3), which it did before the fix.
+    /// again (exit 3).
     #[test]
     fn a_pinned_point_in_an_unversioned_copy_gets_past_the_binding_with_a_note() {
         let (archive_dir, truthful, point_id, signer) =
@@ -753,7 +742,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
         refused_before_phase_zero(&run, "no evidence-signing keyring");
     }
 
-    /// **FX-16 fix round (review M-1), through the real binary.** The point's
+    /// **Through the real binary.** The point's
     /// set is nested under the plan's storage (`a/nightly-7/`) and another set
     /// with the same id and other bytes sits where the engine reads under that
     /// storage (`nightly-7/manifest.json`). The receipt and its signature
@@ -796,7 +785,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
         );
     }
 
-    /// **FX-16, through the real binary: a plan binding point A (of set
+    /// **Through the real binary: a plan binding point A (of set
     /// `nightly-7`) while naming set B is refused before phase 0.** The
     /// receipt, its signature under the mounted keyring and its manifest all
     /// verify — the truthful binding of the control row above — and the plan's

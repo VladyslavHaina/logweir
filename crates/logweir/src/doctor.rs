@@ -1,5 +1,5 @@
 //! `logweir doctor` — preflight checks, run before `logweir drill run` is
-//! attempted. Task 14b.
+//! attempted.
 //!
 //! Seven checks, each with its own gate: engine binary present, engine
 //! version pinned, drill spec parses, allowed-clusters parses, approver key
@@ -19,18 +19,15 @@ pub struct DoctorArgs {
     pub spec: PathBuf,
     pub allowed_clusters: PathBuf,
     pub approver_key: PathBuf,
-    /// Fix round 2, M5: a plain `0` exit does not distinguish "all seven
-    /// checks verified" from "storage skipped, the rest verified" — both are
-    /// silently the same to a script keying on exit code alone. GC11 leaves
-    /// no third exit code to add, so this is the non-breaking way: an
-    /// opt-in flag that maps `skipped > 0` onto `ExitCode::Operational`
-    /// instead of leaving it at `Ok`. Default `false` keeps today's
-    /// behaviour (a skip never fails a run that had no way to look).
+    /// `--strict`: a skip fails the run (`ExitCode::Operational`). A plain `0`
+    /// does not distinguish "all seven verified" from "one skipped, the rest
+    /// verified", and GC11 leaves no third exit code. Default `false`: a skip
+    /// never fails a run that had no way to look.
     pub strict: bool,
 }
 
 /// The outcome of one check. `Skipped` exists so a check that needs a live
-/// dependency (`just e2e-up`, Task 7b) is never reported green on the
+/// dependency (`just e2e-up`) is never reported green on the
 /// strength of not having looked, and never fails a run that had no way to
 /// look.
 pub enum CheckResult {
@@ -99,11 +96,8 @@ pub fn run(args: &DoctorArgs) -> ExitCode {
     skip_verdict(skipped, args.strict)
 }
 
-/// The `--strict`/skip-count decision (fix round 2, M5), factored out as a
-/// pure function so it is unit-testable on its own: reaching the "all seven
-/// genuinely passed vs. one skipped" branch of `run()` end-to-end needs a
-/// live, reachable target (`just e2e-up`, Task 7b), which the default
-/// `cargo test` run does not have (GR2) — this needs neither.
+/// The `--strict`/skip-count decision, a pure function so it is unit-testable:
+/// reaching it through `run()` needs a live target.
 fn skip_verdict(skipped: usize, strict: bool) -> ExitCode {
     if skipped > 0 && strict {
         ExitCode::Operational
@@ -138,18 +132,11 @@ fn check_engine_present() -> Result<String, String> {
 
 /// 2. `--version` matches the pin.
 ///
-/// Fix round 2, M1: `out.status` used to be discarded entirely, so an engine
-/// that could not run AT ALL (wrong architecture, missing interpreter, not
-/// executable) fell through to the same "version mismatch" text as an engine
-/// that ran fine and printed a different number. On darwin — the demo
-/// platform — `Command::output()` for the pinned linux/amd64 binary does not
-/// return an `Err` (unlike, say, a plain ENOENT for a missing file): the
-/// process runs (traditional Unix execve-without-a-recognised-magic falls
-/// back to `/bin/sh`), and `/bin/sh` itself prints "cannot execute binary
-/// file" to stderr and exits non-zero (conventionally 126) — so the SECOND
-/// line of the first command in the demo told a Mac user to go hunt a
-/// version problem that did not exist. `out.status.success()` is now
-/// consulted before anything else.
+/// An engine that cannot run at all (wrong architecture, missing interpreter,
+/// not executable) is told apart from one that ran and printed another
+/// version. On darwin the pinned linux/amd64 binary still spawns: `/bin/sh`
+/// prints "cannot execute binary file" and exits non-zero (conventionally
+/// 126), so `out.status.success()` is consulted first.
 fn check_engine_version() -> Result<String, String> {
     let path = engine_path();
     let out = std::process::Command::new(&path)
@@ -168,13 +155,11 @@ fn check_engine_version() -> Result<String, String> {
     evaluate_engine_version(&path, &out, declared.as_ref())
 }
 
-/// Split out of `check_engine_version` (fix round 2) so the exec-failure /
-/// version-mismatch distinction is directly unit-testable against a
-/// hand-built `std::process::Output` — no subprocess, no platform
-/// dependence, so the darwin-specific failure mode above is pinned on every
-/// CI runner regardless of what engine (if any) is actually installed there.
+/// Split out of `check_engine_version` so the exec-failure / version-mismatch
+/// distinction is unit-testable against a hand-built `std::process::Output`,
+/// on every platform.
 ///
-/// PROD-00.2 adds `declared`: the identity this host or image would SIGN
+/// `declared` is the identity this host or image would SIGN
 /// (`crate::engine_identity`), `None` where nothing declares one. Three
 /// answers, each naming which engine it is:
 ///
@@ -244,13 +229,12 @@ fn evaluate_engine_version(
 }
 
 /// The engine build Logweir pins: the `kafka-backup --version` token `doctor`
-/// accepts. PROD-00.2 made it LOGWEIR'S BUILD of the vendored OSO source,
+/// accepts: Logweir's build of the vendored OSO source,
 /// `<OSO release>+logweir.<n>` (`third_party/kafka-backup-build.env`), which
-/// no OSO release prints; PROD-00.3f had moved the OSO release from `0.21.0`
-/// to `0.23.3` (`docs/to-do/decisions/PROD-00-engine-route.md` section 12).
+/// no OSO release prints.
 ///
 /// It moves with the build and only with it: `third_party/kafka-backup-build.env`
-/// and its ledger, PROD-01.1's `CONTRACT_ENGINE`, the fake
+/// and its ledger, `CONTRACT_ENGINE`, the fake
 /// engine `doctor`'s tests run and the documented standalone identity must all
 /// name it, and `crates/logweir/tests/engine_pin.rs` fails when any does not.
 pub const ENGINE_PIN: &str = "0.23.3+logweir.3";
@@ -262,15 +246,11 @@ pub const ENGINE_UPSTREAM_RELEASE: &str = "0.23.3";
 
 /// Whether the engine's `--version` output names exactly `version`.
 ///
-/// Global Constraint 8 pins an EXACT version. Fix round 2, M6 replaced
-/// `s.contains("0.21.0")`, which accepted `0.21.01`, `10.21.0` and
-/// `0.21.0-rc1`, with an adjacency test. That test still accepted a build
-/// suffix (`0.21.0+anything`), a leading `v` glued to another word and any
-/// other non-digit, non-`.`, non-`-` neighbour. PROD-00.3f made it a whole
-/// token: the output is split on ASCII whitespace and one token must EQUAL the
-/// version. `kafka-backup 0.23.3+logweir.3` names [`ENGINE_PIN`];
-/// `0.23.3+logweir.30`, `0.23.3+logweir`, `0.23.3+build`, `v0.23.3+logweir.3`
-/// and `0.23.3+logweir.3,` do not.
+/// Global Constraint 8 pins an EXACT version: the output is split on ASCII
+/// whitespace and one token must EQUAL the version. `kafka-backup
+/// 0.23.3+logweir.3` names [`ENGINE_PIN`]; `0.23.3+logweir.30`,
+/// `0.23.3+logweir`, `0.23.3+build`, `v0.23.3+logweir.3` and
+/// `0.23.3+logweir.3,` do not.
 fn names_exactly(s: &str, version: &str) -> bool {
     s.split_ascii_whitespace().any(|token| token == version)
 }
@@ -310,12 +290,11 @@ fn check_approver(p: &std::path::Path) -> Result<String, String> {
 
 /// 6. One `list` against the configured prefix — proves credentials, endpoint
 ///    and bucket in a single call, AND that the archive holds something a
-///    drill could restore from (fix round 2, M3). A storage configuration
-///    that will not construct, or that constructs but is EMPTY, is a
-///    FAILURE. A credentials/not-found error is also a FAILURE, distinct
-///    from a genuinely unreachable endpoint (fix round 2, M4), which is the
-///    only case that SKIPs — `cargo test` and CI run with no MinIO (`just
-///    e2e-up`, Task 7b).
+///    drill could restore from. A storage configuration that will not
+///    construct, or that constructs but is EMPTY, is a FAILURE. A
+///    credentials/not-found error is also a FAILURE, distinct from a genuinely
+///    unreachable endpoint, which is the only case that SKIPs: `cargo test`
+///    and CI run with no MinIO.
 ///
 /// Uses `Store::read_only_from_url`, never `Store::from_url`: `source.storage`
 /// names the OSO archive being READ, not the evidence bucket that
@@ -332,7 +311,7 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
         Err(e) => return CheckResult::Failed(format!("storage: cannot read the drill spec: {e}")),
     };
     let loc = storage_location(&sp.source.storage);
-    // FX-20: the object-store binding `drill run` will check, before a store.
+    // The object-store binding `drill run` will check, before a store.
     if let Err(e) = crate::credential_binding::check_store_bindings() {
         return CheckResult::Failed(e.to_string());
     }
@@ -345,38 +324,22 @@ fn check_storage(spec: &std::path::Path) -> CheckResult {
 }
 
 /// The classification of a listing's RESULT, factored out of `check_storage`
-/// so it can be exercised directly against a synthesised `Result` — no
-/// bucket, no endpoint, no network — in `tests::` below. Task 5b.
+/// so it is exercised against a synthesised `Result` with no bucket, endpoint
+/// or network, as `check_target`/`evaluate_target` split: a decision about an
+/// outcome does not need the machine that produced it.
 ///
-/// PURE. It takes the result of a listing and never performs one. This is
-/// the exact split `check_target`/`evaluate_target` already made a few
-/// functions down, for the identical reason and stated in the identical
-/// words: the interesting behaviour is a decision about an outcome, and a
-/// decision about an outcome does not need the machine that produced it.
-/// `check_storage` never got that treatment when `check_target` did, so the
-/// one test that pins "unreachable must SKIP, never PASS" had to reach a
-/// real endpoint to get an unreachable answer — and paid `object_store`
-/// 0.14.1's unconfigured retry budget, ~12 s, on every `cargo test` run on
-/// every machine with no MinIO. Which is every machine, by default.
-///
-/// Only the ERROR half is a judgement call, and it is delegated to
-/// `classify_storage_error`; the two `Ok` arms are here because
-/// reachable-and-empty vs reachable-with-backups is the same kind of
-/// decision and belongs beside it.
+/// Only the ERROR half is a judgement call, delegated to
+/// `classify_storage_error`; the two `Ok` arms, reachable-and-empty versus
+/// reachable-with-backups, are here beside it.
 fn evaluate_storage(
     loc: &str,
     backup: &str,
     keys: Result<Vec<String>, logweir_core::engine::EngineError>,
 ) -> CheckResult {
     match keys {
-        // Fix round 2, M3: a reachable archive holding ZERO backup sets used
-        // to print `ok`. `source.backup: latestCompleted` has nothing to
-        // select from an empty archive and a drill against it fails in
-        // phase 1 — this is the build's signature defect ("a check that
-        // cannot fail") arriving in doctor: a green line in front of a
-        // guaranteed-failing drill. Reachable-and-empty is now its own
-        // FAILURE, distinct from reachable-with-backups (`Passed`) and from
-        // unreachable (`Skipped`, below).
+        // A reachable archive with zero backup sets is a FAILURE:
+        // `latestCompleted` has nothing to select and the drill fails in phase
+        // 1, so `ok` here would be a green line before a failing drill.
         Ok(keys) if keys.is_empty() => CheckResult::Failed(format!(
             "storage at {loc} is reachable but holds zero backup sets. `source.backup: {backup}` \
              has nothing to select, and a drill against this configuration would fail in phase 1 \
@@ -387,24 +350,12 @@ fn evaluate_storage(
     }
 }
 
-/// Fix round 2, M4: every `Err` from `list_manifest_keys` used to become an
-/// unconditional `Skipped` naming `just e2e-up` as the remedy. An S3
-/// `AccessDenied` (wrong credentials) or a not-found bucket/prefix (a typo)
-/// landed there too, alongside a genuinely down MinIO — telling someone with
-/// a credentials problem to go start a local compose stack wastes their
-/// time, and contradicts this check's own doc comment ("proves credentials,
-/// endpoint and bucket"). Classified against `object_store::Error`'s own
-/// Display text [VERIFIED object_store-0.14.1/src/lib.rs:2233-2331:
-/// `NotFound` renders "... not found: ...", `PermissionDenied` renders
-/// "...necessary privileges...", `Unauthenticated` renders "...valid
-/// authentication credentials..."] — `list_keys`
-/// (`crates/logweir-engine-oso/src/storage.rs:289`) stringifies the
-/// underlying `object_store::Error` directly via `.to_string()`, so these
-/// exact phrases survive into the `EngineError` this function receives.
-/// Anything that does not match one of those three (connection refused, DNS
-/// failure, a timeout) is a genuine reachability gap and still SKIPs.
+/// An error from `list_manifest_keys`: a permission, authentication or
+/// not-found answer is a FAILURE (someone with a credentials problem must not
+/// be sent to start a compose stack); anything else (connection refused, DNS,
+/// a timeout) is a reachability gap and SKIPs.
 fn classify_storage_error(loc: &str, e: &str) -> CheckResult {
-    // The store's own classifier (PROD-01.2 review, M1): it reads the answer's
+    // The store's own classifier: it reads the answer's
     // status and code, and `object_store`'s wording only where nothing
     // answered, so a bucket or a prefix that happens to spell "not found"
     // does not choose the sentence below.
@@ -428,12 +379,9 @@ fn classify_storage_error(loc: &str, e: &str) -> CheckResult {
     }
 }
 
-/// A human-readable location for `check_storage`'s messages. `StorageUrl`'s
-/// own `prefix()` method returns `""` for `Filesystem` (it has no such
-/// field), so interpolating "under {prefix}" alone (the round-1 shape) left
-/// a message ending in a dangling "under " for that backend (fix round 2,
-/// M3, second half) — this names the backend's own bucket/container/path,
-/// appending the prefix only when there is one to show.
+/// A human-readable location for `check_storage`'s messages: the backend's own
+/// bucket, container or path, with the prefix only when there is one
+/// (`StorageUrl::prefix()` is `""` for `Filesystem`).
 fn storage_location(u: &logweir_core::engine::StorageUrl) -> String {
     use logweir_core::engine::StorageUrl;
     match u {
@@ -473,13 +421,8 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
         Ok(al) => al,
         Err(e) => return CheckResult::Failed(e.to_string()),
     };
-    // **Interface I1.** The second of the two sites that hard-coded the
-    // plaintext arm. `doctor` exists to tell an adopter whether a
-    // drill would work, so it must dial the target the way `drill run` will:
-    // with plaintext against a SCRAM cluster it reported "target unreachable"
-    // on a cluster that was perfectly reachable and simply required
-    // authentication — the single most misleading answer this command can
-    // give.
+    // Interface I1: dial the target the way `drill run` will, or a SCRAM
+    // cluster that requires authentication reads as "target unreachable".
     //
     // Every failure here is a `CheckResult::Failed`, never an exit code:
     // `doctor` reports, it does not refuse. So an unrenderable projected
@@ -491,11 +434,11 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
             Ok(ca) => ca,
             Err(e) => return CheckResult::Failed(e),
         };
-    // PROD-01.3 security follow-up: the binding `drill run` will check.
+    // The binding `drill run` will check.
     if let Err(e) = crate::credential_binding::check_side(crate::tls_ca::Side::Target) {
         return CheckResult::Failed(e.to_string());
     }
-    // PROD-01.3: the `mtls` pair, as `drill run` will present it.
+    // The `mtls` pair, as `drill run` will present it.
     let target_client_certificate =
         match crate::tls_ca::projected_client_certificate(crate::tls_ca::Side::Target) {
             Ok(files) => files,
@@ -535,18 +478,11 @@ fn check_target(spec: &std::path::Path, allowed: &std::path::Path) -> CheckResul
 }
 
 /// The reachability/allow-list/marker-topic evaluation, factored out of
-/// `check_target` so it can be exercised directly against a stub
-/// `ClusterReader` — no broker needed — in `tests::` below. Mirrors
-/// `drill::phase0_admit::run`'s identical split for the identical reason
-/// (see that function's own doc comment): the marker topic must be
-/// CONFIRMED HEALTHY, not merely named in the list. Fix round 1: this used
-/// to check presence by name alone (`topics.iter().any(...)`), which is the
-/// same defect Task 14 fixed in phase 0 — a topic mid-leader-election, or
-/// one this principal cannot describe, still appears in `list_topics`'s
-/// output (by `TopicMeta`'s own contract) carrying `partitions: 0` and an
-/// `error`, and reporting "ok" on name alone would send an adopter into a
-/// drill phase 0 immediately refuses — the worst possible ordering for
-/// trust in a command whose one job is catching this before a drill runs.
+/// `check_target` so a stub `ClusterReader` can drive it, as
+/// `drill::phase0_admit::run` splits. The marker topic must be CONFIRMED
+/// HEALTHY, not merely named in the list: a topic mid-leader-election, or one
+/// this principal cannot describe, still appears in `list_topics` with
+/// `partitions: 0` and an `error`.
 fn evaluate_target(
     sp: &logweir_core::spec::DrillSpec,
     al: &logweir_core::spec::AllowedClusters,
@@ -566,7 +502,7 @@ fn evaluate_target(
         Err(e) => return CheckResult::Failed(format!("target: {e}")),
     };
     match topics.iter().find(|t| t.name == sp.target.marker_topic) {
-        // PROD-01.2: absent from the listing is "does not exist" OR "not
+        // Absent from the listing is "does not exist" OR "not
         // describable by this principal" (`phase0_admit`'s twin of this arm).
         None => CheckResult::Failed(format!(
             "target marker topic `{}` does not exist, or this principal may not Describe it \
@@ -591,28 +527,10 @@ fn parse_spec(p: &std::path::Path) -> Result<logweir_core::spec::DrillSpec, Stri
     serde_yaml::from_str(&t).map_err(|e| e.to_string())
 }
 
-// The engine resolution that lived here — `engine_path`, `which_on_path`,
-// `find_on_path`, `is_executable` — moved to `crate::engine_bin`, which
-// `crate::drill` now calls too. They used to disagree: this module walked
-// `$LOGWEIR_ENGINE_BIN` -> `/usr/local/bin/kafka-backup` -> `$PATH`, while
-// `crate::drill`'s default was the literal `.engine/kafka-backup`, and
-// `Command::new` never searches `$PATH` for a path containing a slash. So the
-// install `README.md` documents — the engine on `$PATH` — produced a green
-// `doctor` and a drill that died at phase 5.
-
-/// Fix round 1 (coordinator ruling on the task-14b review): the CLI-level
-/// tests in `crates/logweir/tests/doctor.rs` assert on `run()`'s AGGREGATE
-/// output. That is blind to one specific mutation: gutting a check's
-/// function body to a fake `Ok`/`Passed` while leaving its entry in the
-/// `checks` Vec untouched, because the entry's own static label still
-/// prints on an "ok" line, and a later check's real, unrelated failure
-/// (`storage`'s unreachable-endpoint skip, or `target`'s ~20s
-/// unreachable-broker timeout) still keeps the overall exit code at 1 —
-/// see task-14b-report.md's "mutant table" for the four survivors this
-/// found (mutants 3-6). These unit tests call each check function DIRECTLY
-/// and assert on ITS OWN return value, so they die at assertion time
-/// regardless of what any other check does. The existing named tests in
-/// `tests/doctor.rs` are unmodified; these are additive.
+/// Each check function is called directly and asserted on its own return
+/// value: `tests/doctor.rs` asserts on `run()`'s aggregate output, which cannot
+/// see a check gutted to `Passed` while a later check's real failure keeps the
+/// exit code at 1.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,29 +582,12 @@ mod tests {
     /// structurally distinct from `Passed`, never folded into a bare
     /// `Ok`/"ok" that a reader can't tell from a genuine pass.
     ///
-    /// Task 5b, addendum ruling B1(b): this used to run `check_storage`
-    /// against `examples/drill.yaml` and get its unreachable answer from the
-    /// network. **It cost 6.7 s of every `cargo test` run** — and not, as
-    /// everyone assumed, waiting on `localhost:9000`. MEASURED: with no AWS
-    /// credentials in the environment, `AmazonS3Builder::from_env()` falls
-    /// through to the EC2 instance-metadata credential provider and the
-    /// retries are against the LINK-LOCAL address `169.254.169.254`, ten of
-    /// them, before the endpoint is ever contacted. A unit test was reaching
-    /// off the loopback interface (GC17) to prove a classification.
-    ///
-    /// The property is about `check_storage`'s CLASSIFICATION of an
-    /// unreachable result, and classification is pure, so it is asserted
-    /// against `evaluate_storage` with a synthesised `Err` — the identical
-    /// discipline the three `classify_storage_error` tests below already use.
-    /// The dialling form is NOT deleted: see
-    /// `check_storage_skips_a_genuinely_unreachable_endpoint`, which runs the
-    /// original body under `--features e2e`.
-    ///
-    /// The input strings are `object_store` 0.14.1's own Display text,
-    /// CAPTURED VERBATIM from a real run of this check on this workstation
-    /// with no stack up (the first) and from the same generic form with the
-    /// configured endpoint in it (the second) — a synthesised error that does
-    /// not look like the real one proves nothing about the real one.
+    /// Asserted against `evaluate_storage` with a synthesised `Err`: the
+    /// classification is pure, and the dialling form reached off loopback
+    /// (GC17) through the EC2 metadata provider. The dialling form is
+    /// `check_storage_skips_a_genuinely_unreachable_endpoint` under `--features
+    /// e2e`. The inputs are `object_store` 0.14.1's own Display text, captured
+    /// verbatim from a real run with no stack up.
     #[test]
     fn check_storage_reports_skipped_not_passed_when_it_cannot_reach_a_well_formed_target() {
         const UNREACHABLE: [&str; 2] = [
@@ -716,31 +617,12 @@ mod tests {
         }
     }
 
-    /// The dialling half of the test above, RETAINED rather than deleted
-    /// (Task 5b, addendum ruling B1(b)). Trading an end-to-end proof for a
-    /// unit proof would quietly lose the guarantee that `object_store`'s real
-    /// unreachable error still classifies as `Skipped` — the synthesised
-    /// strings above are only as good as the day they were captured, and a
-    /// dependency bump can reword them.
-    ///
-    /// It runs under `just e2e` and never in the default suite. That is where
-    /// a genuinely dead endpoint is arrangeable and honest: the compose stack
-    /// is up, so port 1 on loopback is dead because nothing listens there,
-    /// not because the whole machine has no object storage.
-    ///
-    /// The `StorageUrl` is built from a YAML literal rather than from a new
-    /// fixture file, the same way `spec_with_marker_topic` below builds a
-    /// `DrillSpec` — the subject is one storage config, not a whole drill.
-    ///
-    /// Fix round 1 (review F7): `just e2e` now exports
-    /// `AWS_EC2_METADATA_DISABLED=true`, which takes this test from 9.86 s to
-    /// 4.21 s (measured). Without it, `AmazonS3Builder::from_env()` finds no
-    /// credentials, falls through to the EC2 instance-metadata provider, and
-    /// object_store spends ten retries on the link-local 169.254.169.254
-    /// before 127.0.0.1:1 is contacted at all — off-loopback traffic that
-    /// proves nothing about this test's subject. Run it OUTSIDE `just e2e`
-    /// (`cargo test -p logweir --features e2e --lib`) and you pay that ~5.6 s
-    /// again; export the variable yourself if it matters.
+    /// The dialling half of the test above: the synthesised strings are only as
+    /// good as the day they were captured, and a dependency bump can reword
+    /// them. It runs under `just e2e`, where port 1 on loopback is dead because
+    /// nothing listens there. `just e2e` exports `AWS_EC2_METADATA_DISABLED=true`;
+    /// outside it, `AmazonS3Builder::from_env()` spends ten retries on the EC2
+    /// metadata address (169.254.169.254) first.
     #[cfg(feature = "e2e")]
     #[test]
     fn check_storage_skips_a_genuinely_unreachable_endpoint() {
@@ -785,9 +667,8 @@ mod tests {
         fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
             Ok(BTreeMap::new())
         }
-        /// Task 8 (guard G-TS) added this to `ClusterReader`. `doctor` never
-        /// reads it — the target-topic preflight is phase 0's, and `doctor`
-        /// refuses to create anything.
+        /// `doctor` never reads it: the target-topic preflight is phase 0's,
+        /// and `doctor` creates nothing.
         fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
             Ok(BTreeMap::new())
         }
@@ -842,27 +723,12 @@ mod tests {
         }
     }
 
-    /// Task 5b: the DEFAULT-SUITE half of check 7's property. An unreachable
-    /// target must produce a NAMED `target` failure, never a generic "doctor
-    /// failed" — an adopter with a firewall problem who reads only the latter
-    /// has been told nothing.
-    ///
-    /// `crates/logweir/tests/doctor.rs`'s
-    /// `check_7_an_unreachable_target_is_named_as_a_target_problem` proves
-    /// the same property through the compiled binary, and MEASURED 26.6 s to
-    /// do it: 20 s of `rdkafka_reader.rs:16`'s `const T` (a refused connect
-    /// does NOT shorten it — librdkafka retries the connection and the
-    /// metadata REQUEST waits out `T`, so the fixture's unroutable
-    /// `127.0.0.1:1` buys nothing) plus ~6.5 s of object_store retries on the
-    /// storage check ahead of it. It is now `--features e2e`; this is what
-    /// the default suite runs instead, in microseconds, against the stub
-    /// reader the file already has.
-    ///
-    /// The two halves together are the whole property: this one pins the
-    /// wording and the `Failed` verdict, and `run`'s check table — where
-    /// `("target", ...)` is the name printed beside it — is what makes it
-    /// reach the operator as `FAIL  target`. Shortening `T` to make the CLI
-    /// form fast is NOT the alternative: that constant is open decision O18's.
+    /// The default-suite half of check 7's property: an unreachable target is
+    /// a NAMED `target` failure, never a generic "doctor failed". `tests/doctor.rs`'s
+    /// `check_7_an_unreachable_target_is_named_as_a_target_problem` proves it
+    /// through the binary under `--features e2e` (it waits out
+    /// `rdkafka_reader.rs:16`'s 20 s `T`); this pins the wording and the
+    /// `Failed` verdict against the stub reader.
     #[test]
     fn evaluate_target_fails_and_names_the_target_when_the_cluster_is_unreachable() {
         let sp = spec_with_marker_topic("logweir.scratch");
@@ -892,8 +758,7 @@ mod tests {
         }
     }
 
-    /// Fix round 1, item 2: the identical defect Task 14 fixed in phase 0
-    /// (`drill::phase0_admit`) — a marker topic present in `list_topics`'s
+    /// As in `drill::phase0_admit`: a marker topic present in `list_topics`'s
     /// output but carrying an `error` (leader election, an authorization
     /// gap) must be a NAMED failure, distinguishable from the topic being
     /// absent, never read as healthy on name alone.
@@ -966,13 +831,9 @@ mod tests {
         }
     }
 
-    // ---- Fix round 2 -----------------------------------------------------
-
-    /// Fix round 2, M5's regression test: `--strict` must turn a skip into a
-    /// failure, and must never fail a run with zero skips even under
-    /// `--strict`. Pure-function unit test — reaching this branch of
-    /// `run()` for real needs a live, reachable target (`just e2e-up`), which
-    /// the default `cargo test` run does not have (GR2).
+    /// `--strict` turns a skip into a failure, and never fails a run with zero
+    /// skips. A pure-function row: reaching this branch of `run()` needs a live
+    /// target.
     #[test]
     fn skip_verdict_is_ok_without_strict_regardless_of_skips() {
         assert_eq!(skip_verdict(0, false), ExitCode::Ok);
@@ -1007,10 +868,10 @@ mod tests {
         assert!(!version_matches("kafka-backup 0.21.0"));
         assert!(!version_matches("kafka-backup 0.22.0"));
         assert!(!version_matches("kafka-backup 0.19.1"));
-        // FX-21: Logweir's previous build, whose manifest records the
+        // Logweir's previous build, whose manifest records the
         // replication factor for the first topic only.
         assert!(!version_matches("kafka-backup 0.23.3+logweir.1"));
-        // PROD-00.3g: the build before patch 0003, whose restore checkpoint
+        // The build before patch 0003, whose restore checkpoint
         // ignores its interval and hashes its own paths.
         assert!(!version_matches("kafka-backup 0.23.3+logweir.2"));
         // So are Logweir's other builds, and the pin's sibling releases: an
@@ -1066,12 +927,9 @@ mod tests {
 
     use crate::engine_identity::{EngineIdentity, IdentitySource};
 
-    /// Fix round 2, M1's regression test: an engine that could not execute
-    /// at all must never be reported as a version mismatch. Built from a
-    /// hand-crafted `std::process::Output` (exit 126, the conventional shell
-    /// "command found but not executable" code) rather than a real
-    /// subprocess, so this is pinned on every platform regardless of what
-    /// engine binary (if any) happens to be installed on the CI runner.
+    /// An engine that could not execute at all is never reported as a version
+    /// mismatch. Built from a hand-crafted `std::process::Output` (exit 126)
+    /// rather than a subprocess, so it is pinned on every platform.
     #[test]
     fn evaluate_engine_version_names_an_exec_failure_distinctly_from_a_version_mismatch() {
         let out = fake_output(126, "", "kafka-backup: ...: cannot execute binary file\n");
@@ -1094,7 +952,7 @@ mod tests {
             e.contains("version mismatch: expected 0.23.3+logweir.3"),
             "got: {e}"
         );
-        // The old pin is a mismatch, named as one (PROD-00.3f).
+        // The old pin is a mismatch, named as one.
         let out = fake_output(0, "kafka-backup 0.21.0\n", "");
         let e = evaluate_engine_version(Path::new("/fake/kafka-backup"), &out, None).unwrap_err();
         assert!(
@@ -1122,7 +980,7 @@ mod tests {
         }
     }
 
-    /// PROD-00.2: OSO's own binary of the same release is named as OSO's, and
+    /// OSO's own binary of the same release is named as OSO's, and
     /// passes only as the DECLARED rollback.
     #[test]
     fn osos_release_is_named_distinctly_and_passes_only_as_the_declared_rollback() {
@@ -1147,7 +1005,7 @@ mod tests {
         }
     }
 
-    /// PROD-00.2: whatever the engine is, a declared identity it does not
+    /// Whatever the engine is, a declared identity it does not
     /// print is refused — that is a signature over the wrong engine.
     #[test]
     fn a_declared_identity_the_engine_does_not_print_is_refused() {
@@ -1172,11 +1030,7 @@ mod tests {
         }
     }
 
-    // The three `find_on_path_*` tests that lived here moved to
-    // `crate::engine_bin::tests` with the function itself, unrenamed, when
-    // `doctor` and `drill run` were unified onto one resolution.
-
-    /// Fix round 2, M3's regression test: a reachable archive holding zero
+    /// A reachable archive holding zero
     /// backup sets must FAIL, never `Passed`. `e2e/fixtures/empty-archive/`
     /// is a real, checked-in, genuinely empty directory (tracked via its
     /// `.gitkeep`, which does not end in `/manifest.json` and so never
@@ -1189,7 +1043,7 @@ mod tests {
         }
     }
 
-    /// Fix round 2, M4: credentials/permission and not-found errors must be
+    /// Credentials/permission and not-found errors must be
     /// named as FAILURES, distinct from a genuine reachability gap, which
     /// alone SKIPs. The input strings mirror `object_store::Error`'s own
     /// Display text verbatim (verified against
@@ -1235,8 +1089,8 @@ mod tests {
         }
     }
 
-    /// Fix round 2, M3's second half: `Filesystem` has no `prefix()`, so
-    /// naming it must not end in a dangling "under " with nothing after it.
+    /// `Filesystem` has no `prefix()`, so naming it must not end in a dangling
+    /// "under " with nothing after it.
     #[test]
     fn storage_location_never_ends_in_a_dangling_under_for_filesystem() {
         let u = logweir_core::engine::StorageUrl::Filesystem {
