@@ -243,7 +243,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-00.2 | Build the engine from the vendored source, with a patch folder (amd64 and arm64) | P1 | M1 | infra | 00.1 | — | compose | A | Done |
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Done |
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Done |
-| 3 | PROD-01.2a | Fixtures behind the matrix's hand-run and untested cells: a SCRAM-SHA-512 TLS listener in the `auth` profile with its `auth_modes` row (the mode Amazon MSK's SCRAM endpoint needs); RustFS and versitygw as opt-in profiles or weekly rows; a directory-archive row for the standalone CLI (`backend: filesystem`); and a weekly job for the rows PROD-01.2 ran by hand (Confluent Platform, Redpanda, SeaweedFS, Karapace), so a supported cell is re-proven without a person | P2 | M3 | infra | 01.2 | — | compose | B | In progress |
+| 3 | PROD-01.2a | Fixtures behind the matrix's hand-run and untested cells: a SCRAM-SHA-512 TLS listener in the `auth` profile with its `auth_modes` row (the mode Amazon MSK's SCRAM endpoint needs); RustFS and versitygw as opt-in profiles or weekly rows; a directory-archive row for the standalone CLI (`backend: filesystem`); and a weekly job for the rows PROD-01.2 ran by hand (Confluent Platform, Redpanda, SeaweedFS, Karapace), so a supported cell is re-proven without a person | P2 | M3 | infra | 01.2 | — | compose | B | Done |
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Proposed |
 | 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11, OD-12 | none | A | In progress |
 | 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | In progress |
@@ -288,7 +288,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-00.3h | Enforce the byte-rate limit (C12) | P2 | M3 | impl | 00.1, 00.2 | — | compose | B | Deferred to v2 |
 | 3 | PROD-00.3i | YAML record-filter rules: erasure, offset ranges, resume point (C10, C11) | P2 | M3 | impl | 00.1, 00.2 | — | compose | A | Deferred to v2 |
 | 3 | PROD-00.3j | The engine restores into an endpoint that serves Produce below v8 (C8): it sends Produce v8 and never negotiates, so a restore into Redpanda v26.2.4 (Produce v0 to v7) ends "early eof" (PROD-01.2; `target.engineProtocol` now refuses it first). Negotiate from the endpoint's ApiVersions answer, or choose a version inside its range. Acceptance: the Redpanda restore passes and its matrix row moves from limited to supported; then the topic-level timestamp fallback (PROD-01.2's P10) has a use | P2 | M3 | impl | 00.1, 00.2, 01.2 | — | compose | A | Deferred to v2 |
-| 1 | PROD-00.3o | Weekly archive-compatibility rows for operator-written archives | P2 | M1 | infra | FX-1 | — | compose | B | In progress |
+| 1 | PROD-00.3o | Weekly archive-compatibility rows for operator-written archives | P2 | M1 | infra | FX-1 | — | compose | B | Done |
 | 3 | PROD-02.3 | Decide the continuous capture protocol | P2 | M3 | research | 02.2, 01.4, 00.3 | — | compose | B | Deferred to v2 |
 | 3 | PROD-02.4 | Streaming protection with a coverage timeline | P2 | M3 | impl | 02.3 | — | k8s | A | Deferred to v2 |
 | 3 | PROD-03.1 | Capture a usable registry dependency set | P2 | M3 | impl | 03.0, 01.2 | OD-2 | compose | A | Deferred to v2 |
@@ -750,6 +750,7 @@ What it fixed:
 - **In progress:**
   - **PROD-01.2a and PROD-00.3o (item 81):** the SCRAM-SHA-512 TLS listener, the filesystem archive, the RustFS and versitygw profiles, and the weekly compatibility and archive rows. Done after the first green run of `compat-weekly.yml`, which the orchestrator dispatches.
   - **PROD-16.4:** the audit-log recipe and the per-provider group notes are merged. Its live IdP-groups row runs in PROD-14.1, beside the unverified Entra ID and Okta `groups` scope.
+- **Then Done:** PROD-01.2a and PROD-00.3o. `compat-weekly.yml`'s first run (38173674272, dispatched on main) passed all five jobs: the operator archives, Redpanda, Confluent, the stores and the registry. Main run 38173609124 signed `sha-d4e32956`, which carries engine build 3.
 - **Blocked on the owner:**
   - **PROD-04.0c:** Amendment D was merged and reverted (`ab8a6ec9`) until the owner's yes (rule 8).
   - **PROD-01.4b:** the rust-rdkafka `DescribeTopics` patch and draft PR are in `claude/artifacts/c-engine/rdkafka/`. Opening it upstream needs the owner's go-ahead, and the tag does not wait on upstream.
