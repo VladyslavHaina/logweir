@@ -20,9 +20,9 @@ use logweir::drill::phase7_verify::{compare, lineage_faults, run_with_coverage, 
 use logweir::drill::DrillError;
 use logweir_core::backup_receipt::SourceConfigCoverage;
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineRun, PartitionFacts,
-    PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
-    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PartitionFacts, PhaseObserver,
+    PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection, SegmentFacts,
+    StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::CompleteVerification;
@@ -391,9 +391,6 @@ impl DataEngine for SampledEngine {
                 ),
             })
             .collect())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 

@@ -2238,12 +2238,6 @@ impl logweir_core::engine::DataEngine for ListsACopyFirst {
     {
         self.inner.fingerprints(sel)
     }
-    fn validation_run(
-        &self,
-        plan: &logweir_core::engine::RestorePlan,
-    ) -> Result<logweir_core::engine::EngineRun, logweir_core::engine::EngineError> {
-        self.inner.validation_run(plan)
-    }
 }
 
 /// **FX-16 fix round (review L-1): a same-id copy that sorts first does not

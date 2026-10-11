@@ -65,8 +65,8 @@ archive holding transaction markers is refused unless the plan allows them), 68
 (PROD-02.1, a backup of a source whose records all expired is a signed, named
 empty capture), 69 (FX-44, a failed restore removes or names the scratch
 topic it created), 70 (FX-49, the console's original-name box takes effect
-when ticked) and 71 (FX-50, a catalog's `viewLimit` window holds the newest
-points) so far. Items continue the next entry's
+when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
+points) and 73 (PROD-17.1, four parts v1 does not use are withdrawn) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3302,6 +3302,19 @@ walks' `Synced` messages and `truncated`).
 older runner lists the first points its walk meets; an older controller drops
 the sentence.
 
+#### 73. Withdrawn for v1: alert sinks, the drill's notification post, an unused ACL read and phase 7's engine validation call (PROD-17.1)
+
+**Withdrawn.** v1 is cut to what one team per install needs (owner decision
+OD-12); each part below did nothing v1 uses.
+- **Phase 7 no longer calls the engine's `validation run`.** The engine never
+  implemented it, so every drill logged a WARN that it "failed or could not
+  be run", and nothing read the result. No verdict changes, and
+  `engine_subreport` stays `null`.
+
+**Do:** nothing for this part.
+**Scope:** runner rows (phase 7's verdicts, unchanged, with the call gone).
+**Rollback:** roll back the runner; an older runner logs the warning again.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3412,7 +3425,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70 and 71, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71 and 73, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3492,7 +3505,8 @@ console and the chart, and needs nothing until a namespace is bound
 runner and the controller's list of restore refusal codes, and needs the two
 rolled together and a plan field for a restore of an archive that holds
 transaction markers; items 69 and 71 change the runner and the controller and
-need nothing, in either order; item 70 changes the console only. To roll back to
+need nothing, in either order; item 70 changes the console only; item 73
+withdraws what its own section lists. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

@@ -660,26 +660,10 @@ fn scram_drill_spec() -> serde_yaml::Value {
     v
 }
 
-/// **A WHOLE DRILL COMPLETES OVER SCRAM, THE ENGINE'S `validation run`
-/// INCLUDED** (Task 6 carry 2).
-///
-/// # Two corrections to the carry's wording, both measured
-///
-/// Task 6's carry 2 asks for "phase 6 (`validation run`) completed". In the
-/// SHIPPED phase table `record(&mut sc, 6, "restore", …)` makes phase 6 the
-/// engine's `restore`, and `validation run` is driven from **phase 7**
-/// (`drill::phase7_verify::engine_validation_run`). And the `PhaseRecord`
-/// outcome vocabulary is `"ok"`, not `"completed"` (`drill::record`). So this
-/// row asserts what the carry is actually about, with the numbers the code
-/// uses: phases 6 AND 7 both `"ok"`.
-///
-/// Why phase 7 is the one that matters here: it is the phase whose rendered
-/// `validation.yaml` carries its own `security:` block — the
-/// `render_validation.rs` change Task 6 made and could not prove — and it runs
-/// AFTER phase 6's restore has already succeeded, so an unauthenticated
-/// validation document would fail late, with a signed scorecard already
-/// half-built. Asserting only `outcome: pass` would not distinguish that from
-/// a drill that never reached the engine's validator at all.
+/// **A WHOLE DRILL COMPLETES OVER SCRAM** (Task 6 carry 2): phase 6 (the
+/// engine's `restore`) and phase 7 (`verify`, Logweir's own consumer reading
+/// the target) both `"ok"` in the shipped phase table. Asserting only
+/// `outcome: pass` would not show that both authenticated halves ran.
 #[test]
 fn a_drill_passes_over_scram() {
     let spec = scram_drill_spec();
@@ -719,9 +703,8 @@ fn a_drill_passes_over_scram() {
     assert_eq!(
         phases.get(&7).map(String::as_str),
         Some("ok"),
-        "PHASE 7 (`verify`) must have completed — it is the phase that drives the engine's \
-         `validation run`, whose rendered document carries its own `security:` block. \
-         Phase table: {phases:?}"
+        "PHASE 7 (`verify`) must have completed — it reads the restored target over \
+         SCRAM. Phase table: {phases:?}"
     );
     assert_eq!(
         phase(&sc, 7)["name"].as_str(),

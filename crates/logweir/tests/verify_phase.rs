@@ -233,16 +233,16 @@ fn a_partition_count_divergence_is_reported_as_intended() {
 // The brief's Step 1 tests exercise `compare`/`classify_parity` directly and
 // the two fixture constructors — none of them ever call `phase7_verify::run`
 // itself, so none of them would fail if `run`'s OWN wiring (the topic-rename
-// mapping, the empty-selection/empty-mapping guards, the "known issue"
-// engine-validation-run decoupling) were broken or deleted outright. That is
+// mapping, the empty-selection/empty-mapping guards) were broken or deleted
+// outright. That is
 // exactly the "call site not pinned" failure mode Tasks 17/18's reviews found
 // real defects through — these tests pin `run`'s call sites specifically.
 use logweir::drill::phase7_verify::run;
 use logweir::drill::DrillError;
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineRun, PartitionFacts,
-    PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
-    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, PartitionFacts, PhaseObserver,
+    PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection, SegmentFacts,
+    StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::collections::BTreeMap;
@@ -445,16 +445,10 @@ impl ClusterReader for MapReader {
     }
 }
 
-enum ValidationBehavior {
-    Success(i32),
-    Failing(String),
-}
-
 struct VerifyEngine {
     facts: BackupSetFacts,
     fingerprints: Vec<RecordFingerprint>,
     unsupported: Option<String>,
-    validation: ValidationBehavior,
 }
 
 impl DataEngine for VerifyEngine {
@@ -486,12 +480,6 @@ impl DataEngine for VerifyEngine {
             return Err(EngineError::Unsupported(reason.clone()));
         }
         Ok(self.fingerprints.clone())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        match &self.validation {
-            ValidationBehavior::Success(code) => Ok(EngineRun { exit_code: *code }),
-            ValidationBehavior::Failing(msg) => Err(EngineError::Operational(msg.clone())),
-        }
     }
 }
 
@@ -531,7 +519,6 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -626,7 +613,6 @@ fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let out = run(
         &engine,
@@ -679,7 +665,6 @@ fn a_sha256_mismatch_against_the_manifest_fails_integrity_even_when_the_canary_m
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -734,7 +719,6 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -800,7 +784,6 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
         facts: facts.clone(),
         fingerprints: vec![],
         unsupported: Some("kbak level below the gate".into()),
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -858,7 +841,6 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
         facts: facts.clone(),
         fingerprints: vec![],
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let reader = MapReader {
         topics: BTreeMap::new(),
@@ -923,7 +905,6 @@ fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() 
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -987,7 +968,6 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -1019,58 +999,6 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         .intentionally_deviated
         .iter()
         .any(|s| s.contains("retention.ms")));
-}
-
-/// The "known issue" resolution, end to end: `kafka-backup`'s own `validation
-/// run` compares against unmapped SOURCE topic names and is therefore
-/// EXPECTED to report a discrepancy (here, simulated as an outright `Err`)
-/// on every renamed drill, healthy or not. This must never fail or abort
-/// `run` — only Logweir's own canary comparison may set `integrity.result`.
-#[test]
-fn a_failing_engine_validation_run_never_fails_or_aborts_the_drill() {
-    let (store, sha) = store_with_matching_segment();
-    let facts = facts_with_segment(&sha);
-    let (archive, cons) = fixtures::matching_pair(50);
-
-    let mut topics = BTreeMap::new();
-    topics.insert(
-        "drill-orders".to_string(),
-        TopicData {
-            end_offsets: vec![(0, 50)],
-            configs: fixtures::target_configs(&[
-                ("cleanup.policy", "delete"),
-                ("retention.ms", "-1"),
-            ]),
-            records: cons,
-        },
-    );
-    let reader = MapReader { topics };
-    let engine = VerifyEngine {
-        facts: facts.clone(),
-        fingerprints: archive,
-        unsupported: None,
-        validation: ValidationBehavior::Failing(
-            "message_count mismatch: expected topic `orders`, target has no such topic".into(),
-        ),
-    };
-    let mapping = fixtures::mapping("orders", "drill-orders");
-    let plan = plan_orders_to_drill_orders();
-
-    let out = run(
-        &engine,
-        &reader,
-        &store,
-        &facts,
-        &sel_orders(),
-        &mapping,
-        &plan,
-        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
-        logweir_core::spec::TargetMode::Scratch,
-    )
-    .expect("an engine-side validation-run failure must never abort phase 7");
-
-    assert_eq!(out.integrity.result, IntegrityResult::Pass);
-    assert_eq!(out.integrity.records_sampled_matching, 50);
 }
 
 /// A `DataEngine` whose `fingerprints` answers PER-TOPIC, unlike `VerifyEngine`
@@ -1109,9 +1037,6 @@ impl DataEngine for MultiTopicEngine {
     }
     fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
         Ok(self.by_topic.get(&s.topic).cloned().unwrap_or_default())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 
@@ -1695,7 +1620,6 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         // nothing to compare.
         fingerprints: vec![],
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     // Task 10: the count bound is deliberately non-binding here — see
@@ -1886,7 +1810,6 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -1964,7 +1887,6 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
@@ -2040,9 +1962,6 @@ impl DataEngine for PerPartitionEngine {
             .get(&s.partition)
             .cloned()
             .unwrap_or_default())
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 
@@ -2283,9 +2202,6 @@ impl DataEngine for LaneEngine {
             Some(Err(reason)) => Err(EngineError::Unsupported(reason.clone())),
             None => Ok(vec![]),
         }
-    }
-    fn validation_run(&self, _: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Ok(EngineRun { exit_code: 0 })
     }
 }
 
@@ -2873,7 +2789,6 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let reader = MapReader {
         topics: [target("drill-orders", vec![(0, 50)], cons)]
@@ -2927,7 +2842,6 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let reader = MapReader {
         topics: [target("drill-orders", vec![(0, 50)], cons)]
@@ -3254,7 +3168,6 @@ fn healthy_parts() -> (
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     (store, facts, MapReader { topics }, engine)
 }
@@ -3671,7 +3584,6 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = fixtures::mapping("orders", "restore-orders");
@@ -3737,7 +3649,6 @@ fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstruct
         facts: facts.clone(),
         fingerprints: archive,
         unsupported: None,
-        validation: ValidationBehavior::Success(0),
     };
     let out = run(
         &engine,

@@ -808,16 +808,6 @@ pub struct RestoreFacts {
     pub engine_report: EngineReport,
 }
 
-/// Task 19 glue: the engine's own `validation run --config validation.yaml
-/// --triggered-by <s>` subcommand prints human text only and writes no
-/// machine-readable report to stdout — its ONLY per-run signal reachable
-/// through this trait is the exit code (see `DataEngine::validation_run`'s
-/// doc comment for why phase 7 never reads more than that).
-#[derive(Debug, Clone, Copy)]
-pub struct EngineRun {
-    pub exit_code: i32,
-}
-
 #[derive(Debug, Clone)]
 pub struct SampleSelection {
     /// Which backup set's segments to sample. Without this, a `Store` whose
@@ -913,39 +903,11 @@ pub trait DataEngine {
     ) -> Result<RestoreFacts, EngineError>;
     fn fingerprints(&self, sel: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError>;
 
-    /// Task 19 glue, not in this trait's original Task 8a contract. Phase 7's
-    /// brief (`crates/logweir/src/drill/phase7_verify.rs`) calls
-    /// `OsoCliEngine::validation_run(plan)` "through the concrete engine
-    /// handle the orchestrator holds" — but phase 7's own signature only ever
-    /// receives `engine: &dyn DataEngine`, and this trait had no method that
-    /// could reach that subprocess through a trait object. Adding it here
-    /// WITH A DEFAULT BODY is the minimal fix: every existing implementor
-    /// (`OsoCliEngine`, and every test double across `logweir-core`,
-    /// `logweir-engine-oso` and `crates/logweir`'s own test fixtures) keeps
-    /// compiling unchanged, because none of them override it.
-    ///
-    /// The default returns `Operational` rather than a fabricated
-    /// `EngineRun { exit_code: 0 }`: a silent fake pass here would let phase
-    /// 7's `notify`/logging code report an engine validation that never ran.
-    /// `OsoCliEngine`'s real override — spawning `validation run --config
-    /// validation.yaml --triggered-by <s>` — is NOT added by this task: it
-    /// needs the extracted `kafka-backup` binary to test against, and Docker
-    /// (this environment's only path to that binary) is unusable here. See
-    /// `phase7_verify::engine_validation_run`'s doc comment for the further,
-    /// separate reason (a known upstream topic-rename mismatch) this run's
-    /// CONTENT must never be trusted even once that override exists.
-    fn validation_run(&self, _plan: &RestorePlan) -> Result<EngineRun, EngineError> {
-        Err(EngineError::Operational(
-            "validation_run is not implemented by this engine".into(),
-        ))
-    }
-
     /// PRECONDITION: none. Runs the engine's `backup` subcommand over the
     /// rendered document.
     ///
     /// The default body returns `EngineError::Operational` so every existing
-    /// test double keeps compiling — exactly the `DataEngine::validation_run`
-    /// pattern above, and for the same reason: this trait is implemented by
+    /// test double keeps compiling: this trait is implemented by
     /// `OsoCliEngine` and by a double in `logweir-core`,
     /// `logweir-engine-oso` and `crates/logweir`, none of which can be made
     /// to override a new REQUIRED method in the task that adds it.
@@ -954,8 +916,7 @@ pub trait DataEngine {
     /// −1's caller reads this result and then reads the ARCHIVE the run was
     /// supposed to produce; a default that claimed a clean exit would put a
     /// `records_per_topic` and a covered window from somebody else's archive
-    /// behind a backup that never ran, which is the same class of defect as
-    /// `validation_run`'s silent fake pass.
+    /// behind a backup that never ran.
     /// `default_data_engine_backup_is_operational`
     /// (`logweir-core/tests/engine_trait.rs`) pins it.
     fn backup(
@@ -978,7 +939,7 @@ pub trait DataEngine {
     /// every notice (`logweir::drill::surface_archive_notices`).
     ///
     /// The default is `describe` and no notice, so every existing double keeps
-    /// compiling unchanged — the `validation_run` pattern above.
+    /// compiling unchanged — the `backup` pattern above.
     /// `default_describe_with_notices_is_describe_with_no_notice`
     /// (`logweir-core/tests/engine_trait.rs`) pins it.
     fn describe_with_notices(

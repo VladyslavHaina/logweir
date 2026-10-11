@@ -1399,12 +1399,10 @@ coverage and portability and PROD-05.2 applies a reviewed target configuration:
 ### `engine_subreport` is always null in v0.1
 
 The scorecard reserves `engine_subreport` for the upstream engine's own
-verbatim evidence report. **v0.1 never populates it.** `OsoCliEngine` does not
-override `DataEngine::validation_run`, so Logweir never runs the engine's
-`validation run` subcommand and nothing is ever written under
-`logweir/<run_id>/engine-validation/` for phase 8 to retain. The default
-implementation refuses rather than fabricating a report, so there is no risk of
-a scorecard claiming an engine validation that never happened — the field is
+verbatim evidence report. **v0.1 never populates it.** Logweir never runs the
+engine's `validation run` subcommand (phase 7's unused call to it was removed
+in v1, release-notes item 73), so nothing is ever written under
+`logweir/<run_id>/engine-validation/` for phase 8 to retain — the field is
 simply `null`.
 
 The structured log explains the missing report. The signed scorecard cannot
@@ -1413,9 +1411,8 @@ phase 8's own record is appended. Read null as "no engine sub-report retained",
 not as a successful upstream validation. Populated format fixtures are
 explained in the [fixture notes](../e2e/fixtures/README.md).
 
-`crates/logweir-engine-oso/tests/engine.rs` and
 `e2e/tests/full_drill.rs::the_engine_subreport_is_absent_until_oso_cli_engine_overrides_validation_run`
-record this limitation and fail when the implementation changes.
+records this limitation and fails when the implementation changes.
 
 ### A crashed restore is not resumable in v0.1
 
@@ -3389,7 +3386,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
 | 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07), through v0.4.0 (2026-10-06); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine (0.23.3 since PROD-00.3f), so what matters is the archive. The CLI drill reads 0.21, 0.22 and 0.23 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
-| 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
+| 4 | **`OsoCliEngine::validation_run`** | Not implemented: the engine's own validation run is never executed (v1 removed phase 7's unused call, release-notes item 73), and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
 | 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |

@@ -1216,9 +1216,8 @@ checked rather than asserted.
 
 ## `engine_subreport`
 
-**`null` in every scorecard v0.1 produces.** `OsoCliEngine` does not override
-`DataEngine::validation_run`, so the engine's own `validation run` is never
-invoked and nothing is retained. Reading `null` means **"no engine sub-report
+**`null` in every scorecard v0.1 produces.** Logweir never runs the engine's
+own `validation run`, so nothing is retained. Reading `null` means **"no engine sub-report
 was retained"**, not "the engine reported nothing wrong".
 
 When populated (a future version), it carries `retained_verbatim`,

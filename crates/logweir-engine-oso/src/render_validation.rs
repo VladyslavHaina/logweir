@@ -30,9 +30,8 @@ use logweir_core::engine::RestorePlan;
 /// `render` remains `pub` because its callers are this crate's test files
 /// (`tests/render.rs`, `tests/render_equality.rs`), which pin the document's
 /// bytes and its goldens; every PRODUCTION caller goes through this function.
-/// `DataEngine::validation_run` has no override at all today
-/// (`logweir-core/src/engine.rs:317`), so there is no production caller yet to
-/// convert — the sweep is here so that whoever lands that override cannot
+/// Nothing runs the engine's `validation run` today, so there is no
+/// production caller yet — the sweep is here so that whoever adds one cannot
 /// reach a digest without passing it.
 pub fn render_and_digest(
     plan: &RestorePlan,
@@ -114,14 +113,10 @@ pub fn render(
     // so as written they can never meet, and phase 8's retrieval would find
     // nothing however well the engine behaved.
     //
-    // It is inert today and only today: `OsoCliEngine` does not override
-    // `DataEngine::validation_run`, so this document is never handed to the
-    // engine and nothing is ever written under this prefix on either bucket.
-    // The `#[ignore]`d marker test
-    // `oso_cli_engine_must_override_validation_run_once_docker_is_available`
-    // (crates/logweir-engine-oso/tests/engine.rs), which CI runs on every
-    // build, is the obligation this note belongs to: whoever lands that
-    // override must decide which bucket the engine report lives in and make
+    // It is inert today: nothing hands this document to the engine, so
+    // nothing is ever written under this prefix on either bucket. Whoever
+    // wires the engine's `validation run` must decide which bucket the engine
+    // report lives in and make
     // BOTH sides name it, or phase 8's retrieval silently returns nothing and
     // publishes `engine_subreport: null` — a false negative in a signed
     // document, indistinguishable from the honest one v0.1 publishes.
