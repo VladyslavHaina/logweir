@@ -3039,6 +3039,10 @@ fn key_validity_row(
     }
 }
 
+// ---------------------------------------------------------------------------
+// The pod-status rows (tests/preflight_controller.rs finds this banner)
+// ---------------------------------------------------------------------------
+
 /// Which check a waiting code belongs to, adjusted for the operation.
 /// [`check::attribute`] answers in the neutral `connection.*` vocabulary; a
 /// restore's catalogue has the `target.*` equivalents instead.
