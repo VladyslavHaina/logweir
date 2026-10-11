@@ -726,6 +726,7 @@ What it fixed:
   - Left for wave 3: the console form still offers `keepLast`/`keepDays` (w3-surfaces).
 - **`w2-tests`:** B7 shared helpers and B6 one double per runner trait (36 of 74 fakes). The test-name set is identical.
 - **Size:** 156 files, −10,317 / +3,938. Test names went from 5,485 to 5,427, exactly the branches' adds and removes.
+- **Published and signed:** main run 38157455488 signed `sha-ae967d0b`.
 
 ## Carried over from the PLAT tracker
 
