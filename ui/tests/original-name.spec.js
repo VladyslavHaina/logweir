@@ -33,6 +33,7 @@ import {
   draftFrom,
   initialState,
   mappingProblems,
+  mountRestoreWizard,
   originalNameChosen,
   preparePlan,
   preparePlanOrProblem,
@@ -55,6 +56,7 @@ import {
 import { renderPlanBytes } from "../plan.js";
 import { decodeConsoleItem } from "../contract.js";
 import { schemaFindings, wire as wireDocument } from "./console-fixture.js";
+import { fakeView, parse as viewParse } from "./fake-view.js";
 
 /** A console fixture's wire document, with `change` applied to it first. */
 function wire(name, change) {
@@ -921,5 +923,117 @@ test("fx48_the_console_shows_the_approval_subject_the_api_publishes", async () =
     assert.deepEqual(Object.keys(restore.spec.target.topicNaming), ["prefix"]);
   } finally {
     plain.restore();
+  }
+});
+
+// ------------------------------------------- FX-49: the boxes call `refresh`
+
+/** The plan `#plan-bytes` shows -- "exactly as it will be sent" -- decoded,
+ *  or `null` when the page shows `#plan-problem` instead. */
+function shownPlan(view) {
+  const pre = /<pre class="plan-bytes" id="plan-bytes">([\s\S]*?)<\/pre>/.exec(view.html());
+  return pre === null ? null : visible(pre[1]);
+}
+
+test("fx49_ticking_the_original_name_box_on_the_mounted_page_changes_the_plan", async () => {
+  // R1. Only DOM `change` events on the real page; no `refresh`, no state.
+  const backups = fixture("wizard-backups.json");
+  const point = recoveryPoints(backups)[0];
+  const view = fakeView();
+  await mountRestoreWizard(view.root, "team-fx49",
+    { uid: point.metadata.uid, backup: point.metadata.name }, viewParse, {
+      list: async (_ns, plural) =>
+        (plural === "kafkaclusters" ? fixture("wizard-clusters.json") : backups),
+      approvalPolicy: async () => null,
+      latestDiscoveries: async () => ({ lastSuccessful: null, latestAttempt: null }),
+    });
+  const before = shownPlan(view);
+  assert.ok(before !== null && !before.includes("original_name"), "an ordinary plan first");
+  assert.ok(!before.includes("coverage: \"complete\""));
+  assert.equal(view.find("#original-name-no-owner"), null);
+
+  const box = view.find("#original-name");
+  box.checked = true;
+  await box.dispatch("change");
+  // KILLS mutant 1 (`#original-name` not listened): no owner box, no lock.
+  const owner = view.find("#original-name-no-owner");
+  assert.ok(owner !== null, "NEGATIVE CONTROL: the tick changed nothing on screen");
+  assert.equal(view.find("#original-name").checked, true, "the repaint keeps it ticked");
+  const coverage = view.find("#coverage-complete");
+  assert.equal(coverage.checked, true, "complete coverage is selected with the choice");
+  assert.equal(coverage.disabled, true, "and locked");
+  assert.ok(visible(view.html()).includes(ORIGINAL_NAME_COVERAGE_SENTENCE));
+  assert.match(visible(view.html()),
+    /approval subject\s*originalName -- a restore under the ORIGINAL topic names/);
+  // Without the owner statement there is nothing to send.
+  assert.equal(shownPlan(view), null);
+  assert.match(visible(view.html()), /nothing to submit: .*OriginalNameOwnerNotChecked/);
+
+  owner.checked = true;
+  await owner.dispatch("change");
+  // KILLS mutant 2 (`#original-name-no-owner` not listened): still no plan.
+  const sent = shownPlan(view);
+  assert.ok(sent !== null, "NEGATIVE CONTROL: the owner tick changed nothing that is sent");
+  assert.match(sent, /topic_naming:\n {4}prefix: ""\n {4}original_name:\n {6}owners: \[\]\n/);
+  assert.match(sent, /\n {2}topic_mapping_prefix: "restore-[^"]+-"\n/,
+    "the scratch prefix stays for the probe");
+  assert.match(sent, /\n {2}coverage: "complete"\n/);
+  assert.equal(view.find("#original-name-no-owner").checked, true);
+});
+
+/** FX-49 R2: an id `refresh` reads that no `change` listener re-reads, with
+ *  why. A new entry needs its reason; none is needed today. */
+const READ_ONLY_AT_SUBMIT = Object.freeze({});
+
+/** The `#id`s `wire`'s `refresh` reads, and those in its `change` list. */
+function refreshReads(source) {
+  const start = source.indexOf("\nfunction wire(node, state, parse, api, lifecycle, prepared) {");
+  const open = source.indexOf("\n  const refresh = async () => {", start);
+  const list = source.indexOf("\n  for (const field of [", open);
+  const close = source.indexOf("\n  ]) {", list);
+  assert.ok(start >= 0 && open > start && list > open && close > list, "the scan's anchors moved");
+  const declared = new Map();
+  for (const m of source.slice(start, open).matchAll(/const (\w+) = node\.querySelector\("#([\w-]+)"\);/g)) {
+    declared.set(m[1], m[2]);
+  }
+  const body = source.slice(open, list);
+  const read = new Set();
+  for (const [name, id] of declared) {
+    if (new RegExp("(?<![\\w.$])" + name + "(?![\\w$])").test(body)) {
+      read.add(id);
+    }
+  }
+  for (const m of body.matchAll(/querySelector\("#([\w-]+)"\)|readClusterSelection\(node, "([\w-]+)"\)/g)) {
+    read.add(m[1] || m[2]);
+  }
+  const listened = new Set();
+  for (const m of source.slice(list, close).matchAll(/^ {4}(\w+),$/gm)) {
+    if (declared.has(m[1])) {
+      listened.add(declared.get(m[1]));
+    }
+  }
+  return {
+    read: [...read].sort(),
+    unlistened: [...read].filter((id) => !listened.has(id) && !(id in READ_ONLY_AT_SUBMIT)).sort(),
+  };
+}
+
+test("fx49_every_field_refresh_reads_is_listened_or_allowlisted_with_a_reason", () => {
+  const source = readFileSync(fileURLToPath(new URL("../pages/restore-wizard.js", import.meta.url)),
+    "utf8");
+  const scan = refreshReads(source);
+  // KILLS mutant 3 (a scan that reads nothing passes vacuously).
+  for (const id of ["original-name", "original-name-no-owner", "time-basis", "target-cluster"]) {
+    assert.ok(scan.read.includes(id), "the scan sees `refresh` read #" + id);
+  }
+  assert.deepEqual(scan.unlistened, [], "a field `refresh` reads that no change re-reads");
+  for (const [id, why] of Object.entries(READ_ONLY_AT_SUBMIT)) {
+    assert.ok(scan.read.includes(id) && why.length > 0, "a stale or unexplained entry: " + id);
+  }
+  // NEGATIVE CONTROL: the same source with one listed field removed fails.
+  for (const [name, id] of [["originalName", "original-name"], ["coverageBound", "coverage-bound"]]) {
+    const dropped = source.replace("\n    " + name + ",\n", "\n");
+    assert.notEqual(dropped, source, name + " is in the list");
+    assert.deepEqual(refreshReads(dropped).unlistened, [id]);
   }
 });

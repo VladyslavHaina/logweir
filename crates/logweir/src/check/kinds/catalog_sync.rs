@@ -1009,12 +1009,28 @@ impl WalkStop {
     }
 }
 
+/// **FX-50.** How an entry stands in a full window. The order is the order
+/// in which places are given up: an entry whose record gave no facts and
+/// carries no integrity evidence first ([`displaceable`]), then the points
+/// with a record, oldest first. Bytes that are not a record are never given
+/// up (FX-33).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Standing {
+    GivesWay,
+    Record,
+    Kept,
+}
+
+/// **FX-50.** An entry's place in the window: its standing, then its
+/// recovery point (newer ranks higher), then its point id (smaller ranks
+/// higher, the controller's own tie-break), so the window is the same set
+/// whatever order the walk met the points in.
+type Rank = (Standing, i64, std::cmp::Reverse<String>);
+
 /// The state one walk accumulates.
 struct Walk {
-    entries: Vec<CatalogEntry>,
-    /// FX-33: beside each entry, whether it may give its place in a full
-    /// window to an `Available` point ([`displaceable`]).
-    displaceable: Vec<bool>,
+    /// FX-50: the window, at most `viewLimit` entries, least rank first.
+    window: BTreeMap<Rank, CatalogEntry>,
     counts: CatalogCounts,
     by_day: BTreeMap<String, i64>,
     signers: BTreeMap<String, i64>,
@@ -1046,8 +1062,7 @@ impl Walk {
 
     fn new() -> Self {
         Self {
-            entries: Vec::new(),
-            displaceable: Vec::new(),
+            window: BTreeMap::new(),
             counts: CatalogCounts::default(),
             by_day: BTreeMap::new(),
             signers: BTreeMap::new(),
@@ -1076,6 +1091,20 @@ impl Walk {
     /// was not counted.
     fn affordable_point(&self, budget: i64, deadline: Deadline) -> bool {
         self.objects.saturating_add(OBJECTS_PER_POINT) <= budget && deadline.has_room()
+    }
+
+    /// The window in body order: newest recovery point first, then point id,
+    /// the order the controller sorts a view in (an entry with no record
+    /// carries instant 0, so it comes last).
+    fn listed(&mut self) -> Vec<CatalogEntry> {
+        let mut entries: Vec<CatalogEntry> =
+            std::mem::take(&mut self.window).into_values().collect();
+        entries.sort_by(|a, b| {
+            b.recovery_point_at_ms
+                .cmp(&a.recovery_point_at_ms)
+                .then_with(|| a.point_id.cmp(&b.point_id))
+        });
+        entries
     }
 }
 
@@ -1127,7 +1156,8 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
         return Emission::of(result);
     }
 
-    let body = render_body(req, &walk);
+    let entries = walk.listed();
+    let body = render_body(req, &walk, &entries);
 
     let mut row = catalogue::outcome(
         CheckId::DestinationArchiveListable,
@@ -1138,7 +1168,7 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     .with_message(&format!(
         "the durable catalog was walked: {} points examined, {} relayed, walk {}",
         walk.counts.total,
-        walk.entries.len(),
+        entries.len(),
         if walk.complete() {
             "complete"
         } else {
@@ -1147,7 +1177,7 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     ))
     .with_fact("catalogPoints", &walk.counts.total.to_string())
     .with_fact("catalogExamined", &examined(&walk.counts).to_string())
-    .with_fact("catalogEntries", &walk.entries.len().to_string())
+    .with_fact("catalogEntries", &entries.len().to_string())
     .with_fact("catalogPages", &body.pages.to_string())
     .with_fact("catalogObjectsRead", &walk.objects.to_string())
     .with_fact("catalogWalkComplete", &walk.complete().to_string())
@@ -1626,17 +1656,6 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    // EVERY COUNTED POINT THAT FITS THE WINDOW IS LISTED (FX-33), and a point
-    // with a record is not kept out of it by points that only failed to be
-    // read. The window is `viewLimit` entries in walk order, and an archive can
-    // hold many points nobody can take — an older build's oversized points,
-    // reads that failed. When the window is full, a point with a record —
-    // `Available` or not, since either may name a set retention keeps — takes
-    // the place of the last-listed DISPLACEABLE entry ([`displaceable`]), so
-    // the listed points with a record are a walk-order prefix (review HUNT-1:
-    // a newer receipt of a set is never overtaken by its older sibling).
-    // Either way the walk counted more than it listed, so the view says it is
-    // a window (`truncated`), and the counts name every point.
     if observation.point.is_none()
         && observation.cause.is_some_and(|c| {
             c.document == CauseDocument::Record && c.reason == CauseReason::ReadFailed
@@ -1644,22 +1663,46 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
     {
         walk.records_unread = walk.records_unread.saturating_add(1);
     }
-    let can_give_way = displaceable(&observation);
+    // THE WINDOW IS THE NEWEST `viewLimit` POINTS WITH A RECORD (FX-50), kept
+    // in at most `viewLimit` entries while the walk runs. It used to be the
+    // first `viewLimit` the walk met, which is newest first on an `Index` walk
+    // but point-id order on a `Full` rescan: a time-random subset. FX-33's
+    // rules stand. Every counted point is listed while there is room. When
+    // the window is full, a point with a record — `Available` or not, since
+    // either may name a set retention keeps — takes the place of an entry
+    // whose record gave no facts ([`displaceable`]) first, and otherwise of
+    // the oldest point with a record, when it is newer: a set's newer receipt
+    // is never overtaken by its older one (review HUNT-1). Bytes that are not
+    // a record keep their place. The walk then counted more than it listed,
+    // so the view says it is a window (`truncated`), and the counts name
+    // every point.
+    let standing = if observation.point.is_some() {
+        Standing::Record
+    } else if displaceable(&observation) {
+        Standing::GivesWay
+    } else {
+        Standing::Kept
+    };
     let entry = build_entry(&observation);
-    if walk.entries.len() < view_limit {
-        walk.entries.push(entry);
-        walk.displaceable.push(can_give_way);
-    } else if observation.point.is_some() {
-        if let Some(at) = walk.displaceable.iter().rposition(|d| *d) {
-            walk.entries.remove(at);
-            walk.displaceable.remove(at);
-            walk.entries.push(entry);
-            walk.displaceable.push(can_give_way);
-        }
+    let rank = (
+        standing,
+        entry.recovery_point_at_ms,
+        std::cmp::Reverse(entry.point_id.clone()),
+    );
+    if walk.window.len() < view_limit {
+        walk.window.insert(rank, entry);
+    } else if standing == Standing::Record
+        && walk
+            .window
+            .first_key_value()
+            .is_some_and(|(least, _)| *least < rank)
+    {
+        walk.window.pop_first();
+        walk.window.insert(rank, entry);
     }
 }
 
-/// **FX-33.** Whether a listed entry may give its place in a full window to a
+/// **FX-33.** Whether a listed entry gives its place in a full window to any
 /// point with a record: only an entry whose RECORD gave no facts, and of those
 /// only one that carries no evidence about the archive's integrity.
 ///
@@ -1667,14 +1710,13 @@ fn push(req: &CatalogSyncRequest, walk: &mut Walk, observation: Observation, vie
 ///   error), is over its read bound (a size) or is of a newer format. Such an
 ///   entry names no set and no location, so it protects nothing a reader
 ///   could lose, and it says nothing about bytes other than what was written.
-/// - **Never**: any entry with a record (review finding H1): whatever its
-///   state, it may name a backup set that retention must keep for it (a
-///   newer receipt of a set whose older receipt is `Available`), and it
-///   carries the signature and `Conflict` verdicts; nor a record whose bytes
-///   are not a record (`malformed`), which is what tampered bytes look like
-///   and also a crashed run's half-written record, which the walk cannot tell
-///   apart. A signature verdict exists only beside a record, so the record
-///   rule covers it.
+/// - **Not to any point**: an entry with a record (review finding H1) may
+///   name a backup set that retention must keep for it, so it gives its place
+///   only to a NEWER point with a record (FX-50), which keeps a set's newer
+///   receipt listed whenever its older one is. A record whose bytes are not a
+///   record (`malformed`) never gives its place: it is what tampered bytes
+///   look like and also a crashed run's half-written record, which the walk
+///   cannot tell apart.
 fn displaceable(observation: &Observation) -> bool {
     if observation.point.is_some() {
         return false;
@@ -2312,11 +2354,11 @@ fn entry_renderings(entry: &CatalogEntry) -> (String, String) {
 /// pages in `1..=n`, then the three summary lines with `catalog-cursor=` LAST
 /// — the fence, so a truncated read cannot end with a cursor that claims a
 /// walk reached further than it did.
-fn render_body(req: &CatalogSyncRequest, walk: &Walk) -> RenderedBody {
+fn render_body(req: &CatalogSyncRequest, walk: &Walk, entries: &[CatalogEntry]) -> RenderedBody {
     // Each entry in two renderings: with its topics, and SLIM — without them,
     // `topicsOmitted` counting what was left out (PROD-05.1). The topics are an
     // enhancement and never cost a point its place in the view.
-    let rendered: Vec<(String, String)> = walk.entries.iter().map(entry_renderings).collect();
+    let rendered: Vec<(String, String)> = entries.iter().map(entry_renderings).collect();
 
     // The summary lines are rendered FIRST so the byte budget is spent on the
     // pages that are left after the numbers that describe them. A body whose

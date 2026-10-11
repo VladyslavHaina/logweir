@@ -10822,8 +10822,13 @@ fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
     // is the one cause whose remedy names the grant.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "both points are listed: {body}");
-    for (entry, f) in entries.iter().zip([&newer, &older]) {
-        assert_eq!(entry["pointId"], f.point.point_id.as_str(), "{entry}");
+    for f in [&newer, &older] {
+        // FX-50: entries with no record carry no instant, so the body lists
+        // them last, by point id.
+        let entry = entries
+            .iter()
+            .find(|e| e["pointId"] == f.point.point_id.as_str())
+            .unwrap_or_else(|| panic!("{} is listed: {body}", f.point.point_id));
         assert_eq!(entry["availability"], "Unreadable", "{entry}");
         assert_eq!(entry["receiptKey"], "", "nothing was read: {entry}");
         assert!(
@@ -10896,7 +10901,8 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
     // is, with the version it declares.
     let entries = entries_of(&body);
     assert_eq!(entries.len(), 2, "{body}");
-    let unsupported = &entries[0];
+    // FX-50: an entry with no record carries no instant, so it is listed last.
+    let unsupported = &entries[1];
     assert_eq!(unsupported["pointId"], newer.point.point_id.as_str());
     assert_eq!(
         unsupported["availability"], "UnsupportedFormat",
@@ -10910,7 +10916,7 @@ fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
             .is_some_and(|r| r.contains("newer Logweir")),
         "{unsupported}"
     );
-    assert_eq!(entries[1]["availability"], "Available", "{body}");
+    assert_eq!(entries[0]["availability"], "Available", "{body}");
 }
 
 /// The window is the plan's `viewLimit`; everything beyond it is COUNTED.
@@ -13261,7 +13267,7 @@ fn a_counted_point_is_always_listed_with_its_own_reason() {
 /// **Points that only failed to be read never push a readable point out of
 /// the window.** An archive can hold many points nobody can take — an older
 /// build's oversized points, reads that failed — and the window is
-/// `viewLimit` entries in walk order. Here five such points are NEWER than
+/// `viewLimit` entries. Here five such points are NEWER than
 /// three readable ones, so the walk meets them first, and the window holds
 /// three: it lists the three readable points, and counts all eight (so the
 /// controller's view says it is a window). CONTROL: with room for all eight,
@@ -13340,13 +13346,15 @@ fn unreadable_points_never_push_a_readable_point_out_of_the_window() {
 /// **A readable point never pushes EVIDENCE out of the window.** Entries
 /// that say something about the archive's integrity — a `Conflict` (the
 /// archive contradicts the signed receipt), a record whose bytes are not a
-/// record — are never the ones an `Available` point displaces. Here three
-/// such points are newer than three readable ones, the window holds three,
-/// and it keeps the three pieces of evidence; the readable points are
-/// counted, and the view says it is a window.
+/// record — are never the ones an OLDER `Available` point displaces (since
+/// FX-50 a newer point with a record takes the place of an older one, and
+/// bytes that are not a record keep theirs). Here three such points are
+/// newer than three readable ones, the window holds three, and it keeps the
+/// three pieces of evidence; the readable points are counted, and the view
+/// says it is a window.
 ///
 /// KILLS: an `Available` point displacing any entry that is not `Available`
-/// (a tampered point pushed out of the listing by points written after it).
+/// (a tampered point pushed out of the listing by older points).
 #[test]
 fn a_readable_point_never_pushes_integrity_evidence_out_of_the_window() {
     let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
@@ -13552,6 +13560,198 @@ fn a_newer_receipt_of_a_set_is_never_overtaken_by_its_older_sibling() {
         ("Unreadable", "set-y")
     );
     assert_eq!(fx33_listed(&objects, 5).len(), 5, "CONTROL");
+}
+
+// ---------------------------------------------------------------------------
+// FX-50: the window is the newest `viewLimit` points, whatever the walk order
+// ---------------------------------------------------------------------------
+
+/// The entries (in body order) and the counts of one sync of `objects`.
+fn fx50_sync(
+    objects: &FakeObjects,
+    mode: logweir_core::check_contract::CatalogSyncMode,
+    view_limit: i64,
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    let body = body_of(&drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            mode,
+            view_limit,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    ));
+    (entries_of(&body), summary_of(&body, "catalog-counts="))
+}
+
+fn fx50_ids(entries: &[serde_json::Value]) -> BTreeSet<String> {
+    entries
+        .iter()
+        .map(|e| e["pointId"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+/// One point of set `set` recorded at `at`.
+fn fx50_point(set: &str, at: DateTime<Utc>) -> CatalogFixture {
+    catalog_fixture(
+        &catalog_receipt(
+            set,
+            "run-a",
+            &at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        "s3://lw-archive/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    )
+}
+
+/// **FX-50 R1: a window over a larger archive holds its newest points with a
+/// record, in either walk.** PoC batch 7's `pb7-c1` (`mode: Full`,
+/// `viewLimit: 100`, 386 points) listed about the first 100 point ids in key
+/// order, without the newest point. Here 386 points, one an hour, whose ids
+/// are digests and so in an order unrelated to time. The newest has a record
+/// and a deleted manifest (`Missing`, as on the PoC); one has a record over
+/// its read bound, so no record and no instant. A `Full` rescan and an
+/// `Index` walk each list exactly the 100 newest points with a record,
+/// newest first, and count all 386.
+///
+/// CONTROL: the fixture tells the selections apart. The first 100 points with
+/// a record in key order, the ones a `Full` rescan meets first and the old
+/// window kept, share fewer than half their ids with the newest 100.
+///
+/// KILLS: the first `viewLimit` points the walk met kept (FX-50 mutant 1).
+#[test]
+fn fx50_a_window_holds_the_newest_points_with_a_record_in_either_walk() {
+    use logweir_core::check_contract::CatalogSyncMode;
+    use logweir_engine_oso::storage::caps;
+    let start = catalog_ts("2026-09-16T00:00:00Z");
+    let mut objects = FakeObjects::new();
+    // Newest first, as `i` counts hours back.
+    let mut with_record: Vec<String> = Vec::new();
+    for i in 0..386 {
+        let f = fx50_point(&format!("set-{i}"), start - chrono::Duration::hours(i));
+        objects = match i {
+            0 => objects
+                .with_object(&f.log_key, &f.log_bytes)
+                .with_object(&f.record_key, &f.record_bytes)
+                .with_object(&f.receipt_key, &f.receipt_bytes)
+                .with_object(&f.sidecar_key, &f.sidecar_bytes),
+            7 => place(objects, &f).reporting_size(&f.record_key, caps::CATALOG_RECORD + 1),
+            _ => place(objects, &f),
+        };
+        if i != 7 {
+            with_record.push(f.point.point_id.clone());
+        }
+    }
+    let newest: BTreeSet<String> = with_record[..100].iter().cloned().collect();
+    // CONTROL: what the walk-order window held.
+    let mut in_key_order = with_record.clone();
+    in_key_order.sort_unstable();
+    let walk_order: BTreeSet<String> = in_key_order[..100].iter().cloned().collect();
+    assert!(
+        walk_order.intersection(&newest).count() < 50,
+        "the fixture must tell walk order from time order"
+    );
+
+    for mode in [CatalogSyncMode::Full, CatalogSyncMode::Index] {
+        let (listed, counts) = fx50_sync(&objects, mode, 100);
+        assert_eq!(
+            (
+                &counts["total"],
+                &counts["available"],
+                &counts["missing"],
+                &counts["unreadable"]
+            ),
+            (
+                &serde_json::json!(386),
+                &serde_json::json!(384),
+                &serde_json::json!(1),
+                &serde_json::json!(1)
+            ),
+            "{mode:?}: every point is counted: {counts}"
+        );
+        assert_eq!(fx50_ids(&listed), newest, "{mode:?}: the 100 newest");
+        assert_eq!(listed[0]["pointId"], with_record[0].as_str(), "{mode:?}");
+        assert_eq!(
+            (&listed[0]["availability"], &listed[0]["backupId"]),
+            (&serde_json::json!("Missing"), &serde_json::json!("set-0")),
+            "{mode:?}: the newest point is listed, naming its set"
+        );
+        let instants: Vec<i64> = listed
+            .iter()
+            .map(|e| e["recoveryPointAtMs"].as_i64().expect("an instant"))
+            .collect();
+        assert!(
+            instants.windows(2).all(|w| w[0] > w[1]),
+            "{mode:?}: newest first"
+        );
+        // The histogram still covers the walk: a `Full` rescan dates the
+        // points with a record, an `Index` walk every point it listed.
+        let histogram: i64 = counts["byDay"]
+            .as_array()
+            .expect("a histogram")
+            .iter()
+            .map(|d| d["points"].as_i64().expect("a count"))
+            .sum();
+        let dated = if mode == CatalogSyncMode::Full {
+            385
+        } else {
+            386
+        };
+        assert_eq!(histogram, dated, "{mode:?}");
+    }
+}
+
+/// **FX-50: a tie at the window's edge is broken by point id, so every walk
+/// of one archive lists one window.** Six points recorded at one instant,
+/// `viewLimit: 3`. An `Index` walk meets them in descending point-id order
+/// (the log key ends in the id), a `Full` rescan in ascending order; both
+/// list the three smallest ids, which is the controller's own order for a
+/// tie. CONTROL: `viewLimit: 6` lists all six in both walks.
+///
+/// KILLS: the tie-break dropped (FX-50 mutant 2): the `Index` walk keeps the
+/// three it met first, the three largest ids.
+#[test]
+fn fx50_a_tie_at_the_edge_lists_the_same_window_in_either_walk() {
+    use logweir_core::check_contract::CatalogSyncMode;
+    let at = catalog_ts("2026-09-15T03:00:00Z");
+    let mut objects = FakeObjects::new();
+    let mut ids: Vec<String> = Vec::new();
+    for i in 0..6 {
+        let f = fx50_point(&format!("set-t{i}"), at);
+        objects = place(objects, &f);
+        ids.push(f.point.point_id.clone());
+    }
+    ids.sort_unstable();
+    let smallest: BTreeSet<String> = ids[..3].iter().cloned().collect();
+    for mode in [CatalogSyncMode::Index, CatalogSyncMode::Full] {
+        let (listed, _) = fx50_sync(&objects, mode, 3);
+        assert_eq!(fx50_ids(&listed), smallest, "{mode:?}");
+        let (all, _) = fx50_sync(&objects, mode, 6);
+        assert_eq!(all.len(), 6, "{mode:?}: CONTROL");
+    }
+}
+
+/// **FX-50 R2: FX-33's window rules hold in a `Full` rescan too.** The rows
+/// above walk `Index`, newest first; a `Full` rescan meets the same points in
+/// point-id order. On the H1 fixtures the newer receipt of `set-x` (its
+/// receipt read failing, so `Unreadable` with its record) stays listed,
+/// naming its set, in both walks. CONTROL: the FX-33 rows above, unchanged.
+#[test]
+fn fx50_a_newer_receipt_stays_listed_in_a_full_rescan() {
+    use logweir_core::check_contract::CatalogSyncMode;
+    for (others, view_limit) in [(1, 2), (2, 3)] {
+        let (objects, newer) = fx33_shared_set(others);
+        for mode in [CatalogSyncMode::Index, CatalogSyncMode::Full] {
+            let (listed, _) = fx50_sync(&objects, mode, view_limit);
+            assert_eq!(listed.len(), usize::try_from(view_limit).expect("small"));
+            assert!(
+                listed.iter().any(|e| e["pointId"] == newer.as_str()
+                    && e["availability"] == "Unreadable"
+                    && e["backupId"] == "set-x"),
+                "{mode:?} at viewLimit {view_limit}: {listed:?}"
+            );
+        }
+    }
 }
 
 /// **Review finding M1: a record read that did not answer leaves the walk

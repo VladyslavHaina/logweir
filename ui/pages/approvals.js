@@ -1572,7 +1572,10 @@ export function renderApprovalScope(scope) {
     ["replication factor", esc(String(target.replicationFactor))],
     ["afterwards", target.mode === "scratch" && target.teardown === "delete"
       ? "<strong id=\"scope-teardown\">the topics this run creates are deleted</strong>"
-      : "nothing is deleted (teardown " + esc(target.teardown) + ")"],
+      : target.mode === "newTopic"
+        ? "<strong id=\"scope-teardown\">the topics this run creates stay on the target cluster: " +
+          "a newTopic restore never deletes them (teardown applies to scratch drills only)</strong>"
+        : "nothing is deleted (teardown " + esc(target.teardown) + ")"],
     ["topic prefix", typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? "<code>" + esc(target.topicPrefix) + "</code>"
       : "none: every topic is written under its own name"],

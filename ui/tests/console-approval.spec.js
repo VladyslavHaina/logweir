@@ -497,19 +497,32 @@ test("an_ordinary_request_shows_the_whole_scope_and_not_only_a_hash", () => {
   assert.ok(html.includes("<code>restore-20260907T140500Z-</code>"), "the prefix");
   assert.ok(html.includes("<code>s3://logweir-evidence/logweir/</code>"), "the evidence");
   assert.ok(html.includes("2 topic(s), every one listed"));
-  // What happens afterwards: a newTopic restore deletes nothing; a scratch
-  // drill with teardown delete deletes the topics it creates, and says so.
-  assert.ok(html.includes("nothing is deleted (teardown delete)"), html);
-  const scratch = structuredClone(request("pending"));
-  scratch.scope.target.mode = "scratch";
-  assert.match(renderConsoleApprovalPanel(view(TWO_PERSON, { request: scratch })),
-    /<strong id="scope-teardown">the topics this run creates are deleted<\/strong>/);
+  // What happens afterwards: fx49_a_newtopic_scope_says_the_created_topics_stay.
   assert.ok(html.includes("replication factor"));
   // A partition subset is listed number by number.
   const subset = structuredClone(request("pending"));
   subset.scope.topics[0].partitions = [0, 2, 5];
   assert.ok(renderConsoleApprovalPanel(view(TWO_PERSON, { request: subset }))
     .includes("restore-20260907T140500Z-orders</code>, partitions 0, 2, 5</li>"));
+});
+
+test("fx49_a_newtopic_scope_says_the_created_topics_stay", () => {
+  // F-5: "nothing is deleted (teardown delete)" read as a contradiction. The
+  // runner never deletes what a newTopic restore created (phase 9).
+  const pending = request("pending");
+  assert.equal(pending.scope.target.mode, "newTopic");
+  assert.equal(pending.scope.target.teardown, "delete");
+  const afterwards = (r) => /<dt>afterwards<\/dt><dd>([\s\S]*?)<\/dd>/
+    .exec(renderConsoleApprovalPanel(view(TWO_PERSON, { request: r })))[1].replace(/<[^>]*>/g, "");
+  assert.equal(afterwards(pending), "the topics this run creates stay on the target cluster: " +
+    "a newTopic restore never deletes them (teardown applies to scratch drills only)");
+  // NEGATIVE CONTROL: a scratch drill under delete deletes them, under keep
+  // nothing; neither gets the newTopic sentence.
+  const scratch = structuredClone(pending);
+  scratch.scope.target.mode = "scratch";
+  assert.equal(afterwards(scratch), "the topics this run creates are deleted");
+  scratch.scope.target.teardown = "keep";
+  assert.equal(afterwards(scratch), "nothing is deleted (teardown keep)");
 });
 
 test("a_request_at_the_bound_renders_every_topic_by_count_and_by_name", () => {
