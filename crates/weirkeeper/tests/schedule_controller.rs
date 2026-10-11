@@ -1,27 +1,17 @@
 //! The `BackupSchedule` cron reconciler, and guard **G-SLOT**.
 //!
-//! EVERY TEST HERE IS A PURE-FUNCTION TEST OR A `mock_client` TEST, WITH ONE
-//! DELIBERATE EXCEPTION. Nothing dials a socket, nothing waits on a Job, and
-//! nothing approaches Global Constraint 22's 15 s per-test bound — the
-//! transport is a `tower` closure and the clock is an argument.
-//!
-//! The exception is `the_backup_runner_argv_is_one_the_cli_accepts`, which
-//! SHELLS OUT to `target/debug/logweir` on purpose. Erratum **E20** is why:
-//! this crate emitted a `Backup` argv the CLI refused, every scheduled
-//! `Backup` in the tree exited 1 for six tasks, and three green reviews missed
-//! it because **every assertion about the argv compared the reconciler's
-//! output against a literal written in the same repository**. An argv a
-//! controller emits is an interface with another binary, and it is tested only
-//! when it is handed to that binary's real parser. Task 22's
-//! `restore_controller.rs::the_restore_job_projects_every_unexpired_roster_key_id`
-//! is the same shape, and it exists because erratum E10 caught the identical
-//! class on the `Restore` side. It dials nothing: the run stops at the
-//! credential projection, before any librdkafka handle exists.
+//! Every test here is a pure-function or `mock_client` test, with one
+//! deliberate exception: `the_backup_runner_argv_is_one_the_cli_accepts`
+//! SHELLS OUT to `target/debug/logweir`. An argv a controller emits is an
+//! interface with another binary, and it is tested only when it is handed to
+//! that binary's real parser; a literal written in the same repository proves
+//! nothing. It dials nothing: the run stops at the credential projection,
+//! before any librdkafka handle exists.
 //!
 //! THE GUARD IS `a_crash_between_create_and_status_write_yields_exactly_one_backup`.
-//! Read it first: everything else in this file exists to make its assertions
+//! Read it first: everything else in this file makes its assertions
 //! meaningful (the name is legal, the name is refused when it would not fit,
-//! the name is not computed from a clock or a status) or to make the horizon
+//! the name is not computed from a clock or a status) or makes the horizon
 //! and `suspend` arms checkable.
 
 mod support;
@@ -49,11 +39,9 @@ use weirkeeper::slot::{
 };
 use weirkeeper::testing::{mock_client_recording, mock_client_recording_bodies, Route, SeenBody};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
-/// The task's namespace (STANDING RULE 13).
+/// The test namespace.
 const NS: &str = "logweir-t18";
 
 /// The schedule's UID, as the API server would have minted it.
@@ -63,10 +51,7 @@ const UID: &str = "3f1c8a5e-0000-4000-8000-000000000001";
 const OTHER_UID: &str = "3f1c8a5e-0000-4000-8000-000000000002";
 
 /// A `BackupSchedule` body the double answers a `GET` with, and that the pure
-/// functions take by value.
-///
-/// `17 3 * * 1` — 03:17 UTC every Monday — is the brief's own expression, so
-/// the instants in this file line up with `cron_last_fire_is_utc_and_stable`.
+/// functions take by value. `17 3 * * 1` is 03:17 UTC every Monday.
 fn schedule_json(name: &str, uid: &str, cron: &str, suspend: bool) -> String {
     format!(
         r#"{{
@@ -128,13 +113,10 @@ fn backup_value(
                 "logweir.dev/schedule": "nightly",
                 "logweir.dev/schedule-uid": owner_uid
             }
-            // NO `ownerReferences` SINCE PLAT-05.2 (D1 §6.1). This fixture is
-            // what THIS controller creates, and it stopped making its runs the
-            // schedule's dependents: membership is `spec.scheduleRef {name,
-            // uid}` below, which survives the schedule being deleted. The
-            // LEGACY shape — a controller ownerReference and a `scheduleRef`
-            // with no UID — is what `tests/schedule_history.rs` builds, because
-            // migrating it is that file's subject.
+            // No `ownerReferences`: membership is `spec.scheduleRef {name, uid}`
+            // below, which survives the schedule being deleted. The LEGACY shape
+            // (a controller ownerReference and a `scheduleRef` with no UID) is
+            // `tests/schedule_history.rs`'s subject.
         },
         "spec": {
             "sourceRef": { "name": "prod" },
@@ -159,16 +141,14 @@ fn backup_list_body(items: Vec<serde_json::Value>) -> String {
     .to_string()
 }
 
-/// The body a successful `POST …/backups` is answered with — the API server
+/// The body a successful `POST …/backups` is answered with: the API server
 /// echoing the created object.
 ///
 /// IT CARRIES `spec.trigger` AND `spec.scheduleRef.uid`, AND THE RECONCILER
-/// READS THEM. D1 §4.9's CRD-before-controller guard checks its own write
-/// responses: the API server silently PRUNES a field an older CRD does not
+/// READS THEM: the API server silently PRUNES a field an older CRD does not
 /// declare, so a created `Backup` that comes back without its identity fields
-/// means the CRD is behind the controller, and the schedule stops admitting
-/// rather than creating runs that execute under an ambiguous identity. An echo
-/// that dropped them would therefore be indistinguishable from that outage.
+/// means the CRD is behind the controller, and the schedule stops admitting.
+/// An echo that dropped them would look exactly like that outage.
 fn created_backup_body(name: &str) -> String {
     let slot = name
         .get(name.len().saturating_sub(15)..)
@@ -203,8 +183,8 @@ fn patched_schedule_body() -> String {
     schedule_json("nightly", UID, "17 3 * * 1", false)
 }
 
-/// Midnight every day — the expression whose healthy steady state review
-/// finding HIGH-1 is about.
+/// Midnight every day, the expression whose healthy steady state the
+/// missed-slot rows are about.
 const DAILY: &str = "0 0 * * *";
 
 /// The two routes one reconcile of a [`DAILY`] schedule can need: the
@@ -212,28 +192,23 @@ const DAILY: &str = "0 0 * * *";
 /// that follows it either way.
 ///
 /// `post_status` IS 409 FOR EVERY RECONCILE AFTER THE FIRST, because that is
-/// what the API server really answers once the slot's `Backup` exists — the
-/// mechanism working. A route is present even in the arms that assert zero
-/// `POST`s, for the reason `a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so`
-/// spells out: a reconcile that DECLINED to create proves more than one that
-/// could not.
+/// what the API server answers once the slot's `Backup` exists. A route is
+/// present even in the arms that assert zero `POST`s: a reconcile that
+/// DECLINED to create proves more than one that could not.
 fn daily_routes(name: &str, post_status: u16) -> Vec<Route> {
     daily_routes_phase(name, post_status, "Succeeded")
 }
 
-/// [`daily_routes`], with the phase the slot's existing `Backup` reports.
-///
-/// THE PHASE IS PART OF THE FIXTURE NOW BECAUSE THE RECONCILER READS IT. D1
-/// §4.5 step 6 asks the slot's deterministic object what happened to it —
-/// running, succeeded, failed retryably — and decides from the answer, so a
-/// table that did not say which was a table describing no particular cluster.
+/// [`daily_routes`], with the phase the slot's existing `Backup` reports: the
+/// reconciler asks the slot's deterministic object what happened to it
+/// (running, succeeded, failed retryably) and decides from the answer.
 fn daily_routes_phase(name: &str, post_status: u16, phase: &str) -> Vec<Route> {
-    // THE FIXTURE HAS TO BE INTERNALLY CONSISTENT NOW, and it was not before.
-    // D1 §4.5 step 6 discovers the attempt chain by `GET`ting the slot's
-    // deterministic name, so a table that answers that `GET` with a Running
-    // object AND expects a 201 from the `POST` describes a cluster in which the
-    // run both does and does not exist. `post_status` picks which world this is:
-    // 201 means "the slot has not run", 409 means "it has".
+    // THE FIXTURE HAS TO BE INTERNALLY CONSISTENT. The attempt chain is found
+    // by `GET`ting the slot's deterministic name, so a table answering that
+    // `GET` with a Running object AND expecting a 201 from the `POST` would
+    // describe a run that both does and does not exist. `post_status` picks
+    // which world this is: 201 means "the slot has not run", 409 means "it
+    // has".
     let fired = post_status != 201;
     let existing = backup_value(name, UID, Some(phase), Some(name));
     vec![
@@ -285,14 +260,11 @@ fn daily_routes_phase(name: &str, post_status: u16, phase: &str) -> Vec<Route> {
 /// The body the API server answers a reservation `PATCH` with: the object, plus
 /// the reservation it has just accepted.
 ///
-/// D1 §4.9's CRD-BEFORE-CONTROLLER GUARD READS THIS BACK. The API server
-/// silently PRUNES a field the installed CRD does not declare, so the
-/// controller checks its own write response for `status.pendingRun` and admits
-/// nothing when it is missing — a `Backup` created without its identity fields
-/// would have neither `scheduleRef.uid` nor an ownerReference and would be
-/// refused `ScheduledIdentityMismatch` before it ever ran. A double that echoed
-/// the PRE-patch object therefore looks exactly like an outdated CRD, which is
-/// the guard working, and is why this helper exists.
+/// THE CRD-BEFORE-CONTROLLER GUARD READS THIS BACK. The API server silently
+/// PRUNES a field the installed CRD does not declare, so the controller
+/// checks its own write response for `status.pendingRun` and admits nothing
+/// when it is missing. A double that echoed the PRE-patch object would look
+/// exactly like an outdated CRD.
 fn reservation_echo(schedule_body: &str, name: &str, slot: &str, attempt: i32) -> String {
     let mut v: serde_json::Value =
         serde_json::from_str(schedule_body).expect("a schedule fixture is JSON");
@@ -324,11 +296,10 @@ fn not_found_body(name: &str) -> String {
 
 /// The `GET` that answers "this attempt does not exist".
 ///
-/// D1 §4.5 STEP 6 DISCOVERS THE ATTEMPT CHAIN BY NAME, not by listing: it
-/// `GET`s `name(S, 0)`, `name(S, 1)`, … and stops at the first 404. A 404 is a
-/// real API-server answer and has to be recorded as one — the double PANICS on
-/// a request it has no route for, precisely so that "the reconciler asked for
-/// exactly these objects" stays a property a test can see.
+/// THE ATTEMPT CHAIN IS FOUND BY NAME, not by listing: `GET` `name(S, 0)`,
+/// `name(S, 1)`, … up to the first 404. The double PANICS on an unrouted
+/// request, so "the reconciler asked for exactly these objects" stays a
+/// property a test can see.
 fn absent_backup(name: &str) -> Route {
     Route {
         method: "GET",
@@ -338,9 +309,8 @@ fn absent_backup(name: &str) -> Route {
     }
 }
 
-/// The owned-`Backup` LIST that D1 §4.5 step 1 makes when `status.activeRuns`
-/// has never been written — the bootstrap branch PLAT-05.2's inventory
-/// replaces.
+/// The owned-`Backup` LIST made when `status.activeRuns` has never been
+/// written (the bootstrap branch).
 fn no_backups() -> Route {
     Route {
         method: "GET",
@@ -372,14 +342,12 @@ fn patched_status(bodies: &[SeenBody]) -> serde_json::Value {
 
 /// Whether a recorded `/status` patch body is a slot RESERVATION.
 ///
-/// BOTH STATUS WRITES ARE NOW `PATCH`es — the admission reservation used to be
-/// an `Api::replace_status`, which is a `PUT` the API server authorises as the
-/// verb `update` on `backupschedules/status`, and the shipped ClusterRole
-/// grants only `patch` there (W0). So a test can no longer tell the two apart
-/// by method, and tells them apart by CONTENT instead: only a reservation
-/// writes a `status.pendingBackupRef` OBJECT. A finalization either clears that
-/// reference (explicit `null`, [`PendingRefUpdate::Clear`]) or leaves it alone
-/// (absent key), and there is no third writer of the field in the reconciler.
+/// BOTH STATUS WRITES ARE `PATCH`es (the shipped ClusterRole grants only
+/// `patch` on `backupschedules/status`), so they are told apart by CONTENT:
+/// only a reservation writes a `status.pendingBackupRef` OBJECT. A
+/// finalization either clears that reference (explicit `null`,
+/// [`PendingRefUpdate::Clear`]) or leaves it alone (absent key), and nothing
+/// else in the reconciler writes the field.
 fn is_reservation(status: &serde_json::Value) -> bool {
     status["pendingBackupRef"].is_object()
 }
@@ -408,21 +376,14 @@ fn reserved_status(bodies: &[SeenBody]) -> serde_json::Value {
 }
 
 /// The `status` object out of the recorded `PATCH` bodies, or `None` when the
-/// reconciler sent NO patch.
+/// reconciler sent NO patch: a reconcile whose computed status equals the one
+/// already on the object sends nothing, so "no patch" is an expected outcome.
 ///
-/// TASK 16b. A reconcile whose computed status equals the one already on the
-/// object now sends nothing at all (plan erratum E11(d), review findings
-/// H-1/H-2/M-1) — a steady `BackupSchedule` on a 30 s requeue used to issue
-/// 2,880 identical `PATCH`es a day, and one with an archive configured spun,
-/// because `retentionReport.evaluatedAt = now` made each of them a change.
-/// "No patch" is now an expected outcome, so it is a `None` a test can assert
-/// on rather than a panic inside a helper.
-/// W0: THE FINALIZATION AND NOT THE RESERVATION. A `Forbid` admission now
-/// sends two `PATCH`es to the same path — the reservation, then the
-/// finalization — so "the first PATCH" would silently become the reservation
-/// for every admitting test, and every assertion about the settled status
-/// would be about a body written before the child existed. [`is_reservation`]
-/// is the discriminator, and the finalization is the last body that is not one.
+/// THE FINALIZATION AND NOT THE RESERVATION: a `Forbid` admission sends two
+/// `PATCH`es to the same path, the reservation then the finalization, and
+/// "the first PATCH" would be a body written before the child existed.
+/// [`is_reservation`] is the discriminator, and the finalization is the last
+/// body that is not one.
 fn patched_status_opt(bodies: &[SeenBody]) -> Option<serde_json::Value> {
     status_patches(bodies)
         .into_iter()
@@ -447,12 +408,8 @@ fn source_of(relative: &str) -> String {
 /// crate: `crates/logweir/src/cli.rs` belongs to another crate and
 /// `the_backup_id_override_is_passed_not_defined` asserts on its shape.
 ///
-/// IT PANICS RATHER THAN SKIPPING. A source-shape assertion that cannot find
-/// its source has not passed — it has not run. That is review finding HIGH-2's
-/// second half: the assertion this helper replaces wrapped a `git` invocation
-/// in `if let Ok(out) { if out.status.success() {`, so it passed SILENTLY
-/// wherever git was absent and failed hard wherever git worked and the base
-/// commit had moved.
+/// IT PANICS RATHER THAN SKIPPING: a source-shape assertion that cannot find
+/// its source has not passed, it has not run.
 fn workspace_source(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -461,12 +418,10 @@ fn workspace_source(relative: &str) -> String {
 /// Every `.rs` file under `crates/weirkeeper/src/`, as `(path relative to
 /// `src/`, text)`.
 ///
-/// READ OFF THE CHECKED-IN TREE, WITH NO `git` AND NO BASE COMMIT. What the
-/// assertion needs to know is a property of the source as it stands — this
-/// crate defines no CLI flag — and that property is true or false in the
-/// working tree alone, whatever any commit before it did. A `git diff` against
-/// a hard-coded SHA answers a different question and stops answering it the
-/// moment the branch rebases (review finding HIGH-2).
+/// READ OFF THE CHECKED-IN TREE, WITH NO `git` AND NO BASE COMMIT: whether
+/// this crate defines a CLI flag is a property of the working tree, and a
+/// diff against a fixed commit stops answering it the moment the branch
+/// rebases.
 fn weirkeeper_sources() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
@@ -498,12 +453,8 @@ fn weirkeeper_sources() -> Vec<(String, String)> {
 }
 
 /// The body of the first `fn` whose signature contains `needle`, by brace
-/// matching from the signature's opening `{`.
-///
-/// A HAND-WRITTEN BRACE MATCH AND NOT A REGEX, for the same reason
-/// `scripts/check-no-oso.sh`'s check A is a Python paren matcher: brace
-/// matching is not a regular language, and a regex that pretends otherwise
-/// makes a source-reading gate report "ok" on a violation.
+/// matching from the signature's opening `{`. Hand-written and not a regex:
+/// brace matching is not a regular language.
 fn fn_body(src: &str, needle: &str) -> String {
     let at = src
         .find(needle)
@@ -526,25 +477,22 @@ fn fn_body(src: &str, needle: &str) -> String {
     panic!("the body of {needle:?} is unbalanced");
 }
 
-// ---------------------------------------------------------------------------
 // G-SLOT
-// ---------------------------------------------------------------------------
 
 /// **G-SLOT.** A crash between the `create` and the status write yields
 /// EXACTLY ONE `Backup`.
 ///
 /// Reconcile once with the `POST` answered 201 and the following `PATCH
-/// …/status` answered **500** — the crash. Reconcile a second time at a
+/// …/status` answered **500** (the crash). Reconcile a second time at a
 /// **later** `now` inside the same cron slot, with the `POST` answered **409
 /// AlreadyExists**. Two `POST`s were made, both carried the identical
 /// `metadata.name`, and the second reconcile returned `Ok`: the 409 is success,
 /// so exactly one object exists.
 ///
-/// WHY THE SECOND `now` IS LATER. It is what separates a name derived from the
-/// trigger from a name derived from a reconcile-time clock. Both instants sit
-/// inside the slot that fired at 2026-09-07T03:17:00Z, so a pure function of
-/// the trigger returns one name for both while `slot_name(Utc::now())` returns
-/// two.
+/// The second `now` is later so a name derived from a reconcile-time clock
+/// differs: both instants sit inside the slot that fired at
+/// 2026-09-07T03:17:00Z, so a pure function of the trigger returns one name
+/// for both while `slot_name(Utc::now())` returns two.
 #[tokio::test]
 async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
     let schedule = schedule("nightly", UID, "17 3 * * 1", false);
@@ -556,8 +504,7 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
     //
     // The admission is a resourceVersion-conditional status PATCH that happens
     // BEFORE the create, so a status write that does not land is a run that was
-    // never created. This arm is stronger than the one it replaces: it is no
-    // longer "the fire was recorded late", it is "nothing exists to record".
+    // never created.
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
         absent_backup(&expected),
@@ -671,13 +618,10 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
     // ---- ARM 3: the LIST is stale, so the 409 is the idempotence key -----
     //
     // The reservation is outstanding and the namespace listing has not caught
-    // up with the object the crashed process created, so the resume path does
-    // what it is for and POSTs the reserved name. That is the one case where a
-    // second POST is still made, and it is the case the whole design turns on:
-    // BOTH POSTs carry the identical `metadata.name`, so the API server answers
-    // 409 and exactly one object exists. Two different names is a name derived
-    // from a reconcile-time clock or from `status.lastFireTime`, and it produces
-    // two partial archives under colliding backup_ids.
+    // up with the object the crashed process created, so the resume path POSTs
+    // the reserved name. BOTH POSTs carry the identical `metadata.name`, so the
+    // API server answers 409 and exactly one object exists. Two different names
+    // would produce two partial archives under colliding backup_ids.
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
         Route {
@@ -743,14 +687,10 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
 }
 
 /// The object name is a DNS-1123 subdomain, asserted on the string that
-/// actually becomes an object name.
-///
-/// TWO STRINGS, AND THE FIRST ONE IS THE POINT (critique B L6). The regex is
-/// asserted on `scheduled_backup_name("nightly", &slot_name(t))?` — the value
-/// that goes into `metadata.name` — and separately on `slot_name(t)`. A test
-/// that checked only the slot would pass for a composed name that was illegal.
-/// Parameterised over twelve instants including midnight, a leap day and a
-/// second boundary.
+/// actually becomes an object name: `scheduled_backup_name("nightly",
+/// &slot_name(t))?`, and separately on `slot_name(t)`, since a test of the
+/// slot alone would pass for an illegal composed name. Parameterised over
+/// twelve instants including midnight, a leap day and a second boundary.
 #[test]
 fn the_object_name_is_a_dns1123_subdomain() {
     let instants = [
@@ -805,12 +745,8 @@ fn the_object_name_is_a_dns1123_subdomain() {
     }
 }
 
-/// `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, hand-written.
-///
-/// THE PATTERN IS SPELLED IN THIS DOC COMMENT AND IMPLEMENTED BELOW rather
-/// than compiled by a crate: Global Constraint 38 closes the workspace graph
-/// and `regex` is not in it, and this particular pattern is four lines of
-/// character tests.
+/// `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, hand-written: `regex` is not a
+/// dependency, and this pattern is four lines of character tests.
 fn is_dns1123(s: &str) -> bool {
     let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     let mut chars = s.chars();
@@ -832,11 +768,10 @@ fn is_dns1123(s: &str) -> bool {
 /// A schedule name that would push the object name past 63 characters is
 /// refused, naming the limit.
 ///
-/// WHY 63 AND NOT 253. A Kubernetes object *name* may be 253 characters; a
-/// **label value** may be 63. The runner pod's `batch.kubernetes.io/job-name`
-/// label is derived from this name, so a longer one yields pods that cannot be
-/// labelled — pods Task 17's reconciler could never find by label selector, and
-/// an exit code it could never read.
+/// 63 and not 253: an object *name* may be 253 characters, but the runner
+/// pod's `batch.kubernetes.io/job-name` **label value** is derived from this
+/// name and may be 63, and a pod that cannot be labelled cannot be found by
+/// selector or have its exit code read.
 #[test]
 fn a_schedule_name_that_would_exceed_sixty_three_characters_is_refused() {
     let long = "n".repeat(52);
@@ -872,11 +807,9 @@ fn a_schedule_name_that_would_exceed_sixty_three_characters_is_refused() {
     assert!(scheduled_backup_name(&"n".repeat(33), &slot).is_err());
 }
 
-/// The name never reads a reconcile clock or a status.
-///
-/// A SOURCE-READING TEST, because the property is about what the code CANNOT
-/// do. `decide` is where the name is minted, and it must compute it from
-/// `slot_name(due)` — the fired slot — with no clock read anywhere between
+/// The name never reads a reconcile clock or a status. A SOURCE-READING TEST,
+/// because the property is about what the code CANNOT do: `decide` must mint
+/// the name from `slot_name(due)`, the fired slot, with no clock read between
 /// `last_fire_at_or_before` and the `POST`.
 #[test]
 fn the_name_never_reads_a_reconcile_clock_or_a_status() {
@@ -896,11 +829,8 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         slot_at < name_at,
         "the slot is computed from `due` BEFORE the name is minted from it"
     );
-    // THE DUE SLOT COMES FROM THE CADENCE ENGINE, WHICH IS ALSO CLOCK-FREE.
-    // PLAT-04.2 moved the walk behind `Cadence`, so that a zoned expression and
-    // a UTC one answer the same question in the same place; the ORDER is what
-    // this assertion is about and it is unchanged — the instant, then the slot
-    // string, then the name.
+    // THE DUE SLOT COMES FROM THE CADENCE ENGINE, WHICH IS ALSO CLOCK-FREE. The
+    // ORDER is the assertion: the instant, then the slot string, then the name.
     let due_at = decide_body
         .find("latest_due_slot(now)")
         .expect("`decide` must take the due slot from `Cadence::latest_due_slot`");
@@ -917,23 +847,12 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         );
     }
 
-    // TASK 19 MOVED THIS BODY, AND THE NEEDLE FOLLOWED IT. The
-    // API-server-facing half is now `reconcile_schedule_with_archive`, which
-    // carries the controller's read-only archive handle for the retention
-    // report; `reconcile_schedule` is that function with `None`, so Task 18's
-    // three-argument contract is unchanged for every caller. The property this
-    // test is about — no clock read, decision before the POST, status write
-    // after it — is asserted over the body that now holds it, and the
-    // delegation is PINNED below so the three-argument form cannot quietly
-    // grow a second implementation.
-    // D3 W9 MOVED IT AGAIN, AND THE NEEDLE FOLLOWED IT AGAIN. The
-    // API-server-facing half is now `reconcile_schedule_with_archive_at`, which
-    // takes the controller's own archive LOCATION beside its handle so that
-    // "the handle points at a different destination" (D3 §6.3, defect
-    // RET-WRONGBUCKET) is a comparison a test can construct rather than a
-    // `std::env::var` behind an `async fn`. Both shorter forms are pinned below
-    // as pure delegations, so the ordering this test asserts cannot come to hold
-    // in only one of three implementations.
+    // The API-server-facing half is `reconcile_schedule_with_archive_at`,
+    // which takes the controller's archive handle and its LOCATION so that "the
+    // handle points at a different destination" is a comparison a test can
+    // construct. Both shorter forms are pinned below as pure delegations, so the
+    // ordering this test asserts cannot hold in only one of three
+    // implementations.
     let reconcile_body = fn_body(&src, "pub async fn reconcile_schedule_with_archive_at(");
     let delegating_body = fn_body(&src, "pub async fn reconcile_schedule(");
     assert!(
@@ -955,13 +874,9 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
          reconcile begins. A clock read between `decide` and the POST is the mutant G-SLOT \
          kills."
     );
-    // THE ORDERING NOW SPANS THREE FUNCTIONS, AND THE PROPERTY IS THE SAME
-    // ONE. D1 §4.5's algorithm has ten exits, so the create and the final
-    // status write are named helpers rather than inline code — `admit` reserves
-    // and then creates, `create_run` is the only `POST`, and `finish` is the
-    // only final `/status` write. The assertions follow them there, because a
-    // property asserted over a body the code no longer has is not asserted at
-    // all.
+    // THE ORDERING SPANS THREE FUNCTIONS: `admit` reserves and then creates,
+    // `create_run` is the only `POST`, and `finish` is the only final `/status`
+    // write. The assertions follow them there.
     let decide_call = reconcile_body
         .find("decide(&name, &schedule.spec, now)")
         .expect(
@@ -1016,9 +931,8 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
 
     // The one clock read in the whole file is in the `kube::runtime` wrapper,
     // before anything is decided. Counted over CODE lines only: this module's
-    // own documentation names `Utc::now()` twice, to say where it is and where
-    // it must not be, and a count that included prose would be a count of
-    // comments.
+    // own documentation names `Utc::now()`, and a count that included prose
+    // would be a count of comments.
     let code_reads = src
         .lines()
         .filter(|l| {
@@ -1031,12 +945,10 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         "this file reads the clock exactly once, in the `kube::runtime` reconcile wrapper. A \
          second read is a second slot."
     );
-    // FX-29 REVIEW M-1 MOVED THE BODY, AND THE NEEDLE FOLLOWED IT. The
-    // wrapper now reads the clock once and hands it, as an argument, to
-    // `reconcile_pass` — public so a test can drive the controller by its own
-    // requeue — and `reconcile_pass` hands that ONE instant to both the
-    // decision and the requeue. The property is unchanged: one read, bound
-    // once, and the decision and the requeue agree about what time it is.
+    // The wrapper reads the clock once and hands it, as an argument, to
+    // `reconcile_pass` (public so a test can drive the controller by its own
+    // requeue), which hands that ONE instant to both the decision and the
+    // requeue: one read, bound once, and both agree about what time it is.
     let wrapper = fn_body(
         &src,
         "async fn reconcile(\n    schedule: Arc<BackupSchedule>,",
@@ -1055,11 +967,9 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
          about what time it is. Got:\n{wrapper}\n{pass}"
     );
 
-    // AND `slot.rs` READS NO CLOCK AT ALL (review finding LOW-2). Both the
-    // module header and the task report claim it; nothing tested it, and the
-    // claim is the load-bearing half of "the name is a pure function of the
-    // trigger" — `slot_name` is where a `Utc::now()` would be cheapest to add
-    // and hardest to see. Counted over CODE lines, for the reason above.
+    // AND `slot.rs` READS NO CLOCK AT ALL: "the name is a pure function of the
+    // trigger" depends on it, and `slot_name` is where a `Utc::now()` would be
+    // cheapest to add and hardest to see. Counted over CODE lines.
     let slot_src = source_of("src/slot.rs");
     let slot_clock_reads = slot_src
         .lines()
@@ -1075,12 +985,11 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
          above could never see it"
     );
 
-    // AND THE STATUS-READING REFINEMENT CANNOT MINT A NAME. `refine_against_last_fire`
-    // is the one function in this file that sees `status.lastFireTime` (review
-    // finding HIGH-1). It exists so the missed-slot REASON can consult the
-    // status while the NAME cannot, and that separation is only real if it
-    // never touches the name: it must not call `scheduled_backup_name`, must
-    // not call `slot_name`, and must not construct `SlotDecision::Due`.
+    // AND THE STATUS-READING REFINEMENT CANNOT MINT A NAME. `refine_against_status`
+    // is the one function in this file that sees `status.lastFireTime`, so that
+    // the missed-slot REASON can consult the status while the NAME cannot. It
+    // must not call `scheduled_backup_name`, must not call `slot_name`, and must
+    // not construct `SlotDecision::Due`.
     let refine_body = fn_body(&src, "pub fn refine_against_status(");
     for forbidden in [
         "scheduled_backup_name",
@@ -1121,15 +1030,11 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The cron parser
-// ---------------------------------------------------------------------------
 
-/// The parser refuses what it does not understand, naming the field.
-///
-/// A CRON PARSER WHOSE UNKNOWN TOKEN BECOMES `*` turns a typo into "every
-/// minute of every day", which for a backup schedule is a broker read a minute
-/// forever. Each refusal below names the part it refused.
+/// The parser refuses what it does not understand, naming the field. A parser
+/// whose unknown token became `*` would turn a typo into a broker read every
+/// minute forever.
 #[test]
 fn cron_parse_refuses_what_it_does_not_understand() {
     // `"L"` — Quartz's last-day-of-month, which this grammar does not have.
@@ -1190,12 +1095,9 @@ fn cron_parse_refuses_what_it_does_not_understand() {
         ("0 0 5-1 * *", "field 3 (day-of-month)"),
         ("1,,2 * * * *", "field 1 (minute)"),
         ("1-30/5 * * * *", "field 3"),
-        // A LEADING `+` IS NOT A CRON NUMBER (review finding LOW-1). Rust's
-        // integer `FromStr` accepts one, so all four of these PARSED before
-        // the fix — each to the obvious intent, which is why no firing set was
-        // wrong and why it was a LOW — while Vixie refuses all four. A parser
-        // documented as five forms must not accept a sixth spelling by
-        // accident of the standard library.
+        // A LEADING `+` IS NOT A CRON NUMBER. Rust's integer `FromStr` accepts one;
+        // Vixie refuses all four, and a parser documented as five forms must not
+        // accept a sixth spelling by accident of the standard library.
         ("+5 * * * *", "field 1 (minute)"),
         ("*/+5 * * * *", "field 1 (minute)"),
         ("+0-+5 * * * *", "field 1 (minute)"),
@@ -1213,12 +1115,9 @@ fn cron_parse_refuses_what_it_does_not_understand() {
     }
 }
 
-/// `last_fire_at_or_before` is UTC and stable.
 /// Every day of September 2026 on which `expr` fires, by walking the public
-/// `next_fire_after` from the last instant of August.
-///
-/// A WALK AND NOT A HAND-WRITTEN SET, so the count is the parser's own answer
-/// rather than the test's opinion of it.
+/// `next_fire_after` from the last instant of August: a walk and not a
+/// hand-written set, so the count is the parser's own answer.
 fn firing_days(expr: &str) -> Vec<u32> {
     use chrono::Datelike as _;
     let cron = Cron::parse(expr).unwrap_or_else(|e| panic!("{expr}: {e}"));
@@ -1247,34 +1146,27 @@ fn firing_days(expr: &str) -> Vec<u32> {
 /// The day rule reads the FIRST CHARACTER of the day fields, and is cronie's
 /// predicate exactly.
 ///
-/// REVIEW FINDING HIGH-3, RULED cronie-EXACT. `restricted` was `field != "*"`,
-/// so `*/2` in day-of-month counted as narrow, the union arm of the day rule
-/// engaged, and `0 0 */2 * 1` fired on 17 days of September 2026. cronie's
-/// `find_jobs` is `(DOM_STAR || DOW_STAR) ? (dom && dow) : (dom || dow)` with
-/// the star flags taken from each field's FIRST CHARACTER, which makes that
-/// expression the odd-numbered Mondays: **2** days. Fix round 1 got the star
-/// flag right and then let a starred-and-narrowed field stand aside, which
-/// gave 4; the ruling is that a starred field still restricts, because its
-/// step is in the bitset and cronie intersects the bitset in. An adopter's
-/// migrated crontab means here what it meant there only if this holds.
+/// cronie's `find_jobs` is `(DOM_STAR || DOW_STAR) ? (dom && dow) : (dom ||
+/// dow)` with the star flags taken from each field's FIRST CHARACTER, and a
+/// starred field still restricts, because its step is in the bitset and
+/// cronie intersects the bitset in. So `0 0 */2 * 1` is the odd-numbered
+/// Mondays: **2** days of September 2026. A migrated crontab means here what
+/// it meant there only if this holds.
 ///
-/// THE COUNTS ARE OVER SEPTEMBER 2026 — 30 days, the 1st a Tuesday, the
-/// Mondays the 7th, 14th, 21st and 28th — and the eight rows are the ruling's
-/// own eight. `*/2 * 1` (2) and `*/7 * 1` (0) are the two that separate this
-/// reading from fix round 1's 4 and 4. `* * 1` (4) and `1-31 * 1` (30) are the
-/// controls that agree under both readings and fail if the day rule is simply
+/// THE COUNTS ARE OVER SEPTEMBER 2026: 30 days, the 1st a Tuesday, the
+/// Mondays the 7th, 14th, 21st and 28th. `*/2 * 1` (2) and `*/7 * 1` (0)
+/// separate this reading from "a starred field stands aside" (4 and 4).
+/// `* * 1` (4) and `1-31 * 1` (30) are controls that fail if the day rule is
 /// switched off; `15 * 1` (5) is the union arm, which only two narrow fields
 /// reach; `*/2 * *` (15) is a starred field's bits deciding against an
 /// all-ones partner; `* * *` (30) and `*/1 * 1` (4) are the ends of the range.
-/// The ninth row is retained from fix round 1 because the ruling's eight never
-/// pair a narrow day-of-month with a starred day-of-week, and that arm needs a
-/// witness too.
+/// The ninth row pairs a narrow day-of-month with a starred day-of-week.
 #[test]
 fn the_day_rule_reads_the_first_character_of_the_field() {
     // September 2026: 30 days, the 1st is a Tuesday, the Mondays are 7, 14, 21
     // and 28, `*/2` in day-of-month is {1, 3, …, 29} (fifteen days, the step
     // counting from the range's first value, 1) and `*/7` is {1, 8, 15, 22,
-    // 29} — none of which is a Monday, which is why one row expects nothing.
+    // 29}, none of which is a Monday, which is why one row expects nothing.
     let mondays: Vec<u32> = vec![7, 14, 21, 28];
     let every_day: Vec<u32> = (1..=30).collect();
     let odd_days: Vec<u32> = (1..=30).filter(|d| d % 2 == 1).collect();
@@ -1408,16 +1300,12 @@ fn cron_last_fire_is_utc_and_stable() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The horizon, and `suspend`
-// ---------------------------------------------------------------------------
 
-/// A missed slot older than the horizon creates nothing — AND says so.
-///
-/// TWO HALVES, AND THE SECOND IS CRITIQUE B M20'S. Zero `POST`s is the horizon
-/// working; `lastMissedSlot` plus a `SlotMissed` condition is what makes a
-/// correct implementation distinguishable from a broken schedule. Skipping the
-/// slot without recording it fails the second half.
+/// A missed slot older than the horizon creates nothing, AND says so. Zero
+/// `POST`s is the horizon working; `lastMissedSlot` plus a `SlotMissed`
+/// condition is what makes a correct implementation distinguishable from a
+/// broken schedule.
 #[tokio::test]
 async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
     let schedule = schedule("nightly", UID, "17 3 * * 1", false);
@@ -1428,12 +1316,9 @@ async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
         absent_backup(&scheduled_backup_name("nightly", &slot).expect("the fixture name fits")),
-        // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
-        // ZERO POSTs are made. Without it the double would PANIC on the
-        // unrouted request (see `src/testing.rs`), which fails the test for the
-        // right reason but at the wrong place: the assertion that must fire is
-        // the zero-POST count, and a test that only proves the reconciler COULD
-        // NOT create proves less than one that proves it CHOSE not to.
+        // A POST ROUTE IS PRESENT ON PURPOSE, though ZERO POSTs are asserted: the
+        // assertion that must fire is the zero-POST count, and a reconciler that
+        // CHOSE not to create proves more than one that COULD NOT.
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -1532,20 +1417,13 @@ async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
 
 /// `lastTransitionTime` MOVES ONLY WHEN THE CONDITION TRANSITIONS.
 ///
-/// REVIEW FINDING MED-1. This reconciler has no watch to wake it for a clock
-/// tick, so it requeues every `REQUEUE_SECS` = 30 seconds — 2,880 status
-/// writes a day per schedule. Every one of them used to carry
-/// `lastTransitionTime: now`, so an operator asking "how long has this
-/// schedule been Ready?" was told "thirty seconds" about a schedule that had
-/// been Ready for a month, and every write bumped a `resourceVersion` that
-/// every watcher in the cluster then had to receive.
-///
-/// The Kubernetes condition contract is that the field moves when the
-/// condition transitions. The four arms below are: the first write (it is a
-/// transition — there was no condition), the 30 s requeue (not a transition),
-/// a later reconcile whose MESSAGE differs while `status` and `reason` do not
-/// (not a transition — the message carries the next firing, which moves at
-/// every slot boundary by design), and a real change of state (a transition).
+/// This reconciler requeues every `REQUEUE_SECS` = 30 seconds, so a
+/// `lastTransitionTime: now` on every write would tell an operator a schedule
+/// Ready for a month had been Ready for thirty seconds. The four arms: the
+/// first write (a transition: there was no condition), the 30 s requeue (not
+/// a transition), a later reconcile whose MESSAGE differs while `status` and
+/// `reason` do not (not a transition: the message carries the next firing),
+/// and a real change of state (a transition).
 #[tokio::test]
 async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1577,19 +1455,16 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
             i64::try_from(REQUEUE_SECS).expect("the requeue interval is 30 seconds"),
         );
     //
-    // `expected_patches` IS TASK 16b's ADDITION, and it is the sharper form of
-    // this test's own property, now measured over the three states a slot
-    // really passes through. At the 30 s requeue the run created at midnight is
-    // RUNNING, which is a different message from "is due" — so one patch. At
-    // +60 s nothing at all has moved, and the reconcile sends NOTHING (plan
-    // erratum E11(d)). At +12 h the run has Succeeded, whose message differs
-    // again while `status` and `reason` do not, so one patch is sent and
-    // `lastTransitionTime` must still be the original instant — which is the
-    // MED-1 assertion, unchanged.
+    // `expected_patches` measures the three states a slot passes through. At
+    // the 30 s requeue the run created at midnight is RUNNING, a different
+    // message from "is due", so one patch. At +60 s nothing has moved, and the
+    // reconcile sends NOTHING. At +12 h the run has Succeeded, whose message
+    // differs again while `status` and `reason` do not, so one patch is sent and
+    // `lastTransitionTime` must still be the original instant.
     //
-    // THE ZERO-PATCH ARM IS THE ONE THAT MATTERS, and it is the middle one:
-    // this reconciler wakes every 30 s forever, so "the state did not move" has
-    // to cost nothing. Its `stored` is the arm before it, threaded through.
+    // THE ZERO-PATCH ARM IS THE ONE THAT MATTERS: this reconciler wakes every
+    // 30 s forever, so "the state did not move" has to cost nothing. Its
+    // `stored` is the arm before it, threaded through.
     let mut carried = stored.clone();
     for (label, now, phase, expected_patches) in [
         ("the 30 s requeue", requeue, "Running", 1),
@@ -1680,20 +1555,13 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
 
 /// A HEALTHY schedule is never reported as having missed the slot it fired.
 ///
-/// REVIEW FINDING HIGH-1, AND THE MEASUREMENT THAT MADE IT ONE. Before the fix
-/// a `0 0 * * *` schedule fired at midnight and then, from 01:00 until the next
-/// midnight, found its own 00:00 slot outside the one-hour horizon and wrote
-/// **that slot** into `status.lastMissedSlot` with the message "was not fired":
-/// `SlotMissed` for **1379 of 1440 minutes a day**. The field critique B M20
-/// added so that a correct implementation is distinguishable from a broken
-/// schedule was therefore written by normal operation on every schedule slower
-/// than hourly — the remedy inverted.
-///
-/// The fix is that a slot is missed only if it was NEVER FIRED, decided by
-/// `refine_against_last_fire` from `status.lastFireTime` AFTER the name has
-/// been minted. This test drives the real reconciler over the real status: it
-/// fires the midnight slot, feeds the patched status back as the API server
-/// would, and reconciles again at +5 min, +12 h and +23 h 59 min.
+/// A `0 0 * * *` schedule that fired at midnight finds its own 00:00 slot
+/// outside the one-hour horizon from 01:00 on; reported as missed, it would
+/// read `SlotMissed` for 1379 of 1440 minutes a day. A slot is missed only if
+/// it was NEVER FIRED, decided by `refine_against_status` from
+/// `status.lastFireTime` AFTER the name has been minted. This test fires the
+/// midnight slot, feeds the patched status back as the API server would, and
+/// reconciles again at +5 min, +12 h and +23 h 59 min.
 #[tokio::test]
 async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -1720,13 +1588,11 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
     // just after the fire (still inside the horizon), the middle of the day,
     // and one minute before the next slot.
     //
-    // `expected_patches` IS TASK 16b's ADDITION. At +5 min the slot is still
-    // inside the horizon, so the decision, the name, `nextFireTime` and the
-    // whole condition are byte-identical to what the midnight pass already
-    // wrote — and a reconcile that computes the status the object already
-    // carries now sends NO patch (plan erratum E11(d)). At +12 h and
-    // +23 h 59 min the decision has become `AlreadyFired`, whose message
-    // differs, so one patch IS sent.
+    // At +5 min the slot is still inside the horizon, so the decision, the
+    // name, `nextFireTime` and the whole condition are byte-identical to what
+    // the midnight pass wrote, and NO patch is sent. At +12 h and +23 h 59 min
+    // the decision has become `AlreadyFired`, whose message differs, so one
+    // patch IS sent.
     for (label, now, expected_posts, expected_patches) in [
         ("+5 min", utc(2026, 9, 10, 0, 5), 0, 1),
         ("+12 h", utc(2026, 9, 10, 12, 0), 0, 1),
@@ -1735,14 +1601,13 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
         let mut later = schedule("nightly", UID, DAILY, false);
         later.status = Some(stored.clone());
         // 409, because the midnight Backup EXISTS. A POST route is present in
-        // every arm, including all three that make none: a reconcile that
-        // declined to create proves more than one that could not.
+        // every arm: a reconcile that declined to create proves more than one that
+        // could not.
         //
-        // ZERO POSTs IN EVERY ARM, WHICH IS STRICTER THAN BEFORE. D1 §4.5 step
-        // 6 asks the slot's deterministic object what happened to it before
-        // deciding anything, so a slot whose run already succeeded is answered
-        // without a `POST` at all — the 409 that used to be the idempotence key
-        // is now a fallback for the race, not the steady state.
+        // ZERO POSTs IN EVERY ARM: the slot's deterministic object is asked what
+        // happened to it first, so a slot whose run already succeeded is answered
+        // without a `POST`; the 409 is a fallback for the race, not the steady
+        // state.
         let (client, calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
         let outcome = reconcile_schedule(&later, &client, now)
             .await
@@ -1772,8 +1637,7 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
             "{label}: a reconcile that changes nothing writes nothing (plan erratum E11(d))"
         );
         // The status the object CARRIES after this pass: the patch when one was
-        // sent, and otherwise the one it already had — which is the same
-        // object either way, and is what the assertions below are about.
+        // sent, and otherwise the one it already had.
         let status = patched_status_opt(&recorded).unwrap_or_else(|| {
             serde_json::to_value(&stored).expect("the stored status serialises")
         });
@@ -1830,12 +1694,9 @@ async fn suspend_creates_nothing() {
 
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
-        // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
-        // ZERO POSTs are made. Without it the double would PANIC on the
-        // unrouted request (see `src/testing.rs`), which fails the test for the
-        // right reason but at the wrong place: the assertion that must fire is
-        // the zero-POST count, and a test that only proves the reconciler COULD
-        // NOT create proves less than one that proves it CHOSE not to.
+        // A POST ROUTE IS PRESENT ON PURPOSE, though ZERO POSTs are asserted: the
+        // assertion that must fire is the zero-POST count, and a reconciler that
+        // CHOSE not to create proves more than one that COULD NOT.
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -1882,9 +1743,7 @@ async fn suspend_creates_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The backup id, and interface I10
-// ---------------------------------------------------------------------------
+// The backup id
 
 /// `backup_id` includes the schedule UID, so two same-named schedules in two
 /// namespaces cannot collide in one archive.
@@ -1904,11 +1763,11 @@ fn backup_id_includes_the_schedule_uid() {
     assert_eq!(a, format!("{UID}-{slot}"));
     assert!(a.contains(UID) && b.contains(OTHER_UID));
 
-    // And through the whole object, which is where it actually reaches the
-    // archive: the same name, the same slot, two namespaces. The Backup
-    // reconciler derives the run identity from the object this reconciler
-    // creates — with the UID the API server gives it — and never from an
-    // annotation, so the property is asserted over that derivation.
+    // And through the whole object, which is where it reaches the archive: the
+    // same name, the same slot, two namespaces. The Backup reconciler derives
+    // the run identity from the object this reconciler creates, with the UID
+    // the API server gives it, so the property is asserted over that
+    // derivation.
     let one = schedule("nightly", UID, "17 3 * * 1", false);
     let two = schedule("nightly", OTHER_UID, "17 3 * * 1", false);
     let name = scheduled_backup_name("nightly", &slot).unwrap();
@@ -1924,15 +1783,10 @@ fn backup_id_includes_the_schedule_uid() {
     assert_ne!(id_of(&one, UID), id_of(&two, OTHER_UID));
 }
 
-/// The `--backup-id-override` flag is PASSED by this crate, not defined here —
-/// and since PLAT-06.1 it is passed by the `Backup` reconciler's derived argv,
-/// never by an annotation the schedule writes.
-///
-/// INTERFACE **I10** IS TASK 4'S. The flag lives on `logweir backup run`; this
-/// crate writes it into the runner argv `backup_execution::runner_argv`
-/// derives, and adds no file under `crates/logweir/` at all (critique B
-/// H10(c): the first draft mandated a new CLI flag from a task whose Files
-/// block names no `crates/logweir/` file, on a chain it does not own).
+/// The `--backup-id-override` flag is PASSED by this crate, not defined here,
+/// and it is passed by the `Backup` reconciler's derived argv, never by an
+/// annotation the schedule writes. The flag lives on `logweir backup run`;
+/// this crate writes it into the argv `backup_execution::runner_argv` derives.
 ///
 /// KILLS: re-adding the `logweir.dev/runner-argv` annotation to the scheduled
 /// Backup; deriving the scheduled backup id from anything but the schedule UID
@@ -1995,13 +1849,10 @@ fn the_backup_id_override_is_passed_not_defined() {
         backup.spec.schedule_ref.as_ref().map(|r| r.name.as_str()),
         Some("nightly")
     );
-    // NO ownerReference TO THE SCHEDULE — PLAT-05.2, D1 §6.1. This assertion
-    // used to require one, `controller: true` and `blockOwnerDeletion: true`;
-    // that reference is what made `kubectl delete backupschedule` delete the
-    // history, and removing it is the whole of PLAT-05.2. The identity this
-    // test is about — `backup_id_for(scheduleUid, slot)` — is unchanged,
-    // because it is built from `spec.scheduleRef.uid`, asserted above, and
-    // never from an owner entry.
+    // NO ownerReference TO THE SCHEDULE: that reference would make
+    // `kubectl delete backupschedule` delete the history. The identity,
+    // `backup_id_for(scheduleUid, slot)`, is built from
+    // `spec.scheduleRef.uid`, asserted above.
     assert_eq!(
         backup
             .metadata
@@ -2021,27 +1872,15 @@ fn the_backup_id_override_is_passed_not_defined() {
     assert_eq!(labels[SLOT_LABEL], slot);
 
     // -----------------------------------------------------------------------
-    // THE SOURCE-SHAPE HALF: the flag is DEFINED in Task 4's crate and only
-    // PASSED here.
-    //
-    // ASSERTED OVER THE CHECKED-IN TREE, WITH NO `git` AND NO BASE COMMIT.
-    // This half used to shell `git diff --name-only e2eb5b7 -- crates/logweir/`
-    // — a hard-coded base SHA. main moved six files under `crates/logweir/`
-    // after `e2eb5b7`, so the assertion went red on a conflict-free rebase and
-    // the branch could not land (review finding HIGH-2); and because the git
-    // call was wrapped in `if let Ok(out) { if out.status.success() {`, it
-    // passed silently wherever git was absent. "Which files did this commit
-    // touch" was always a proxy anyway. What the brief actually asks — the flag
-    // belongs to `logweir backup run` and this crate merely writes it into an
-    // argv — is a property of the SOURCE, true or false in the working tree
-    // whatever any earlier commit did, and that is what is asserted below.
+    // THE SOURCE-SHAPE HALF: the flag is DEFINED in the CLI's crate and only
+    // PASSED here, asserted over the checked-in tree with no `git` and no base
+    // commit: it is a property of the source as it stands.
     // -----------------------------------------------------------------------
 
-    // 1. TASK 4'S CRATE DEFINES IT, and defines it as a clap long flag. The
-    //    flag's spelling is DERIVED from the field name rather than repeated,
-    //    because clap derives it the same way: rename the field there and this
-    //    assertion fails here, which is exactly the coupling that matters —
-    //    the runner would otherwise be handed a flag it does not know.
+    // 1. THE CLI'S CRATE DEFINES IT, as a clap long flag. The spelling is
+    //    DERIVED from the field name, as clap derives it: rename the field
+    //    there and this assertion fails here, before the runner is handed a
+    //    flag it does not know.
     let cli = workspace_source("crates/logweir/src/cli.rs");
     let field = "backup_id_override";
     let at = cli.find(&format!("{field}:")).unwrap_or_else(|| {
@@ -2066,10 +1905,8 @@ fn the_backup_id_override_is_passed_not_defined() {
         "the argv carries the flag Task 4 declared: {argv:?}"
     );
 
-    // 2. THIS CRATE DEFINES NO CLI FLAG AT ALL. No `#[arg(…)]` anywhere under
-    //    `crates/weirkeeper/src/`, and no `clap` in its manifest — so there is
-    //    nowhere for a second definition of I10 to hide, which is what critique
-    //    B H10(c) was about.
+    // 2. THIS CRATE DEFINES NO CLI FLAG AT ALL: no `#[arg(…)]` anywhere under
+    //    `crates/weirkeeper/src/`, and no `clap` in its manifest.
     let sources = weirkeeper_sources();
     for (path, text) in &sources {
         assert!(
@@ -2085,14 +1922,10 @@ fn the_backup_id_override_is_passed_not_defined() {
          crate's"
     );
 
-    // 3. AND THE FLAG IS NAMED IN EXACTLY ONE PLACE IN THIS CRATE'S CODE —
+    // 3. AND THE FLAG IS NAMED IN EXACTLY ONE PLACE IN THIS CRATE'S CODE,
     //    `backup_execution::runner_argv`'s token array. Counted over CODE
-    //    lines only, the way `the_name_never_reads_a_reconcile_clock_or_a_status`
-    //    counts clock reads: documentation names the flag to say whose it is,
-    //    and a count including prose would be a count of comments. A second
-    //    code line — an annotation writer, a message quoting the token, a
-    //    second argv builder — is a second place the executed identity could
-    //    come from.
+    //    lines only (documentation names the flag to say whose it is). A second
+    //    code line is a second place the executed identity could come from.
     for (path, text) in &sources {
         let code = text
             .lines()
@@ -2132,24 +1965,12 @@ fn the_backup_id_override_is_passed_not_defined() {
     );
 }
 
-/// **The runner argv is one `logweir backup run` ACCEPTS** — Task 24, found by
-/// execution on a live cluster.
-///
-/// `logweir backup run` writes exactly ONE document and `--receipt-out` takes
-/// precedence over `--out`, so the CLI refuses two flags naming DIFFERENT
-/// paths with exit **1**, before the engine is spawned and before any broker
-/// client exists (`refuse_two_receipt_paths`, in the CLI's own
-/// `backup/phase_minus1_admit.rs`). This argv passed both —
-/// `--out /work/backup.json --receipt-out /work/receipt.json` — so **every
-/// scheduled `Backup` in the shipped tree exited 1 and archived nothing**,
-/// with the message
-///
-/// > operational: --receipt-out /work/receipt.json and --out /work/backup.json
-/// > name DIFFERENT paths … NO backup was taken
-///
-/// measured in `logweir-t24` during the Phase B demo. The stub could not see
-/// it and no unit test asserted it, because the argv was only ever compared
-/// against itself.
+/// **The runner argv names at most one output path.** `logweir backup run`
+/// writes exactly ONE document and `--receipt-out` takes precedence over
+/// `--out`, so the CLI refuses two flags naming DIFFERENT paths with exit
+/// **1**, before the engine is spawned (`refuse_two_receipt_paths`, in the
+/// CLI's own `backup/phase_minus1_admit.rs`); every scheduled `Backup` would
+/// archive nothing.
 ///
 /// KILLS: re-adding `--out` beside `--receipt-out`, in either order.
 #[test]
@@ -2167,9 +1988,8 @@ fn the_runner_argv_names_at_most_one_output_path() {
         "`--out` beside `--receipt-out` at a different path is exit 1 before anything runs — the \
          defect that made every scheduled Backup in this tree fail. Got {argv:?}"
     );
-    // AND THE TWO PATHS ARE STILL DIFFERENT CONSTANTS, so a future editor who
-    // re-adds the flag cannot do it "safely" by pointing both at one file and
-    // then have the two drift apart again.
+    // AND THE TWO PATHS ARE STILL DIFFERENT CONSTANTS, so the flag cannot be
+    // re-added "safely" by pointing both at one file.
     assert_ne!(
         OUT_PATH, RECEIPT_OUT_PATH,
         "if these ever became equal the CLI would accept both flags, and this test would stop \
@@ -2177,27 +1997,19 @@ fn the_runner_argv_names_at_most_one_output_path() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The argv, handed to the parser that has to accept it — erratum E20
-// ---------------------------------------------------------------------------
+// The argv, handed to the parser that has to accept it
 
-/// `target/debug/logweir`, the runner's own binary (interface **E9**), located
-/// from this crate's manifest directory.
+/// `target/debug/logweir`, the runner's own binary, located from this crate's
+/// manifest directory.
 ///
-/// A weirkeeper test cannot use `env!("CARGO_BIN_EXE_logweir")`: that variable
-/// exists only for targets of the package that declares the binary, and
-/// `weirkeeper` must NOT declare `logweir` as a dependency of any kind —
-/// `scripts/check-one-signer.sh`'s check 1 counts normal, build **and** dev
-/// edges, and the set of crates from which `logweir-evidence` is reachable is
-/// pinned at exactly `{logweir, e2e}`. Taking even a dev-dependency here would
-/// put `weirkeeper` in that set and turn the link-time single-signer gate red.
-/// So the two sides meet through the filesystem and a process, which is also
-/// what they do in a cluster. Task 22's `restore_controller.rs` carries the
-/// identical helper for the identical reason.
+/// `env!("CARGO_BIN_EXE_logweir")` exists only for the package that declares
+/// the binary, and `weirkeeper` must not depend on `logweir` in any way:
+/// `scripts/check-one-signer.sh` pins the crates that reach
+/// `logweir-evidence` (normal, build and dev edges) to `{logweir, e2e}`. So
+/// the two sides meet through the filesystem and a process, as they do in a
+/// cluster; `restore_controller.rs` carries the same helper.
 ///
-/// AN ABSENT BINARY IS A LOUD, NAMED FAILURE AND NEVER A SILENT SKIP. A row
-/// that quietly passes when its subject is missing is the defect this whole
-/// file exists to avoid.
+/// AN ABSENT BINARY IS A LOUD, NAMED FAILURE AND NEVER A SILENT SKIP.
 fn runner_binary() -> std::path::PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || {
@@ -2218,12 +2030,9 @@ fn runner_binary() -> std::path::PathBuf {
     bin
 }
 
-/// A scratch directory under the system temp dir, made by hand.
-///
-/// `tempfile` is not a dependency of this crate and is not being added for one
-/// test: `tests/linkage.rs` measures this crate's declared entries, and a new
-/// one would have to justify itself there. The same decision
-/// `tests/restore_controller.rs` and `tests/verification.rs` record.
+/// A scratch directory under the system temp dir, made by hand: `tempfile` is
+/// not a dependency of this crate (`tests/linkage.rs` measures its declared
+/// entries).
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("logweir-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2235,11 +2044,10 @@ fn scratch_dir(tag: &str) -> std::path::PathBuf {
 /// machine, and NOTHING ELSE TOUCHED.
 ///
 /// Flag tokens, their order, and every non-path value are the reconciler's
-/// own. The substitution is by EXACT CONSTANT — `SPEC_PATH`,
-/// `ALLOWED_CLUSTERS_PATH`, `SIGNING_KEY_PATH`, `RECEIPT_OUT_PATH` — and the
+/// own. The substitution is by EXACT CONSTANT (`SPEC_PATH`,
+/// `ALLOWED_CLUSTERS_PATH`, `SIGNING_KEY_PATH`, `RECEIPT_OUT_PATH`), and the
 /// caller asserts afterwards that no absolute path survived it, so a fifth
-/// path flag added to `runner_argv` cannot slip through this row untested: it
-/// would still be `/…` and the assertion would name it.
+/// path flag added to `runner_argv` would still be `/…` and be named.
 fn argv_against(dir: &std::path::Path, argv: &[String]) -> Vec<String> {
     argv.iter()
         .map(|a| match a.as_str() {
@@ -2252,36 +2060,21 @@ fn argv_against(dir: &std::path::Path, argv: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// **THE `Backup` ARGV IS ONE `logweir backup run` ACCEPTS** — erratum
-/// **E20**, and this row is end-to-end for exactly that reason.
-///
-/// # What a shape assertion could not see
-///
-/// `backup_schedule::runner_argv` emitted `--out /work/backup.json` beside
-/// `--receipt-out /work/receipt.json`. `logweir backup run` writes ONE
-/// document and refuses two flags naming different paths with exit **1**,
-/// before the engine is spawned — so **every scheduled `Backup` in the shipped
-/// tree exited 1 from Task 18 to Task 24 and nothing was ever archived**.
-/// Tasks 17, 18 and 19 and all three reviews were green, because every
-/// assertion about this argv compared the reconciler's output against a
-/// literal written in the same repository. The rule the plan carries forward:
-/// **an argv a controller emits is an interface with another binary, and it is
-/// tested only when it is handed to that binary's real parser.**
-///
-/// # What is asserted, and why the run fails where it does
+/// **THE `Backup` ARGV IS ONE `logweir backup run` ACCEPTS**, end to end: an
+/// argv a controller emits is an interface with another binary, and a shape
+/// assertion against a literal in the same repository cannot see a flag the
+/// CLI refuses.
 ///
 /// The argv is `runner_argv`'s own, with only its four in-pod paths pointed at
 /// stub files in a scratch directory. The stub spec is a real `BackupSpec`
-/// with `auth.mode: scramSha512`, so the run passes clap, passes every local
-/// guard — including the `--out`/`--receipt-out` refusal, which is phase −1's
-/// step 4 — and stops at the credential projection with `$LOGWEIR_SOURCE_PASSWORD`
+/// with `auth.mode: scramSha512`, so the run passes clap and every local
+/// guard (including the `--out`/`--receipt-out` refusal, phase −1's step 4)
+/// and stops at the credential projection with `$LOGWEIR_SOURCE_PASSWORD`
 /// unset: exit 1, named, **before any librdkafka handle exists**, so this row
-/// dials nothing and takes milliseconds. That is the first point at which a
-/// real broker or archive would be needed.
+/// dials nothing and takes milliseconds.
 ///
-/// The negative twin appends `--out` at a different path and requires the E20
-/// refusal, so the positive half is not vacuous: a build that accepted
-/// anything would fail it.
+/// The negative twin appends `--out` at a different path and requires the
+/// refusal, so the positive half is not vacuous.
 ///
 /// KILLS: putting `--out` back beside `--receipt-out` in `runner_argv`; any
 /// flag this crate spells differently from the CLI (`unexpected argument`);
@@ -2328,12 +2121,11 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
         .expect("the stub allowlist serialises"),
     )
     .expect("the scratch allowlist is writable");
-    // A valid PKCS#8 signer in the SCRATCH path. Signing readiness is checked
+    // A valid PKCS#8 signer in the SCRATCH path: signing readiness is checked
     // before credential projection, so a malformed placeholder would stop at
-    // exit 4 and cease to prove that the controller's complete argv reaches
-    // the expected missing-password boundary. The checked-in key is test-only
-    // fixture material; copying it keeps the runner path identical to its pod
-    // mount without adding a signer dependency to this controller crate.
+    // exit 4. The checked-in key is test-only fixture material; copying it
+    // keeps the runner path identical to its pod mount without adding a signer
+    // dependency to this crate.
     std::fs::copy(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../e2e/fixtures/signed/signing.pem"),
@@ -2399,9 +2191,9 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
          be needed, reached before any librdkafka handle exists. First stderr line: {first}"
     );
 
-    // THE NEGATIVE TWIN. Re-add the flag that caused E20 and the same argv is
-    // refused, so the assertions above are about this build and not about a
-    // parser that accepts everything.
+    // THE NEGATIVE TWIN: re-add `--out` and the same argv is refused, so the
+    // assertions above are about this build and not about a parser that
+    // accepts everything.
     let mut mutated = argv.clone();
     mutated.push("--out".to_string());
     mutated.push(dir.join("backup.json").display().to_string());
@@ -2421,9 +2213,7 @@ fn the_backup_runner_argv_is_one_the_cli_accepts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---------------------------------------------------------------------------
 // The status write
-// ---------------------------------------------------------------------------
 
 /// A due slot records `lastFireTime`, `nextFireTime` and `activeBackupRef` —
 /// and the `Ready` reason is `Scheduled`.
@@ -2473,10 +2263,8 @@ async fn the_reconciler_patches_only_status_and_never_deletes() {
     let name = scheduled_backup_name("nightly", &slot).unwrap();
 
     // The route table has NO DELETE route and no route for any object this
-    // reconciler does not name, so the double PANICS on either — see
-    // `src/testing.rs` for why a panic and not a 404. The two reads it does
-    // make are the bootstrap listing and the slot's own attempt-0 GET, and both
-    // are reads.
+    // reconciler does not name, so the double PANICS on either. The two reads
+    // it does make are the bootstrap listing and the slot's own attempt-0 GET.
     let (client, calls) = mock_client_recording(vec![
         no_backups(),
         absent_backup(&name),
@@ -2545,12 +2333,9 @@ async fn an_unparseable_schedule_creates_nothing_and_names_the_field() {
     let schedule = schedule("nightly", UID, "L * * * *", false);
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
-        // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
-        // ZERO POSTs are made. Without it the double would PANIC on the
-        // unrouted request (see `src/testing.rs`), which fails the test for the
-        // right reason but at the wrong place: the assertion that must fire is
-        // the zero-POST count, and a test that only proves the reconciler COULD
-        // NOT create proves less than one that proves it CHOSE not to.
+        // A POST ROUTE IS PRESENT ON PURPOSE, though ZERO POSTs are asserted: the
+        // assertion that must fire is the zero-POST count, and a reconciler that
+        // CHOSE not to create proves more than one that COULD NOT.
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -2599,12 +2384,9 @@ async fn a_name_that_does_not_fit_is_reported_rather_than_dropped() {
 
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
         no_backups(),
-        // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
-        // ZERO POSTs are made. Without it the double would PANIC on the
-        // unrouted request (see `src/testing.rs`), which fails the test for the
-        // right reason but at the wrong place: the assertion that must fire is
-        // the zero-POST count, and a test that only proves the reconciler COULD
-        // NOT create proves less than one that proves it CHOSE not to.
+        // A POST ROUTE IS PRESENT ON PURPOSE, though ZERO POSTs are asserted: the
+        // assertion that must fire is the zero-POST count, and a reconciler that
+        // CHOSE not to create proves more than one that COULD NOT.
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -2643,18 +2425,10 @@ async fn a_name_that_does_not_fit_is_reported_rather_than_dropped() {
     );
 }
 
-/// The CRD field descriptions state the missed-slot horizon, the field that now
-/// sets it, and what an absent field means.
-///
-/// # What PLAT-04.2 changed about this obligation
-///
-/// The horizon used to be a constant nobody could see from the cluster, so the
-/// obligation was that its description said "one hour". It is now
-/// `spec.startingDeadlineSeconds`, and the obligation grew a second half: the
-/// DEFAULT has to be discoverable too, because the whole compatibility promise
-/// is that an absent field reproduces the old constant. A description that
-/// named the field but not the default would leave every existing schedule's
-/// behaviour undocumented at exactly the moment it became configurable.
+/// The CRD field descriptions state the missed-slot horizon, the field that
+/// sets it (`spec.startingDeadlineSeconds`), and what an absent field means:
+/// an absent field reproduces the old one-hour constant, so the default has
+/// to be discoverable too.
 #[test]
 fn the_crd_states_the_missed_slot_horizon() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2683,19 +2457,14 @@ fn the_crd_states_the_missed_slot_horizon() {
     }
 }
 
-// ===========================================================================
-// TASK 16b — THE STEADY-OBJECT ROW, plan erratum E11(d)
-// ===========================================================================
+// The steady-object row
 
 /// The status the API server would hold after applying `patch` to `previous`.
 ///
-/// ONTO THE PREVIOUS STATUS, NOT ONTO NOTHING, and that is the whole point of
-/// using a real merge. `SlotDecision::AlreadyFired` deliberately writes NEITHER
-/// `lastFireTime` NOR `activeBackupRef` — omitting a key in a merge patch means
-/// "leave it alone" — so a test that rebuilt the object from the patch alone
-/// would silently drop the record of the fire and turn a healthy schedule into
-/// `SlotMissed` on the next pass. The API server does not do that, and neither
-/// does this.
+/// ONTO THE PREVIOUS STATUS, NOT ONTO NOTHING: `SlotDecision::AlreadyFired`
+/// writes NEITHER `lastFireTime` NOR `activeBackupRef` (an omitted key in a
+/// merge patch means "leave it alone"), so an object rebuilt from the patch
+/// alone would drop the record of the fire and read `SlotMissed` next pass.
 fn stored_after(
     previous: Option<&BackupScheduleStatus>,
     patch: &serde_json::Value,
@@ -2707,18 +2476,12 @@ fn stored_after(
     serde_json::from_value(stored).expect("the patched status is a BackupScheduleStatus")
 }
 
-/// **Task 16b.** A steady `BackupSchedule` is patched once per real change and
-/// never otherwise; a `suspend` flip is a real change.
+/// A steady `BackupSchedule` is patched once per real change and never
+/// otherwise; a `suspend` flip is a real change.
 ///
-/// # Why a route-table count and not another byte comparison
-///
-/// `two_reconciles_with_no_change_do_not_move_last_transition_time` already
-/// pins the timestamp. What it could not see is that the reconciler used to
-/// send the identical patch anyway, 2,880 times a day per schedule — invisible
-/// on the wire only because the API server answers "this changed nothing".
-/// With an archive configured it was not even invisible: `evaluatedAt = now`
-/// made every one of those a real write, and the schedule spun. This row counts
-/// REQUESTS.
+/// `two_reconciles_with_no_change_do_not_move_last_transition_time` pins the
+/// timestamp; this row counts REQUESTS, because an identical patch is
+/// invisible in the object and still a write every 30 s.
 ///
 /// Each pass's object is the previous pass's own patch applied as the API
 /// server would apply it (`conditions::apply_merge_patch`, RFC 7386).
@@ -2760,19 +2523,15 @@ async fn a_steady_backup_schedule_is_patched_once_and_a_suspend_flip_once_more()
         .and_then(|c| c.last_transition_time)
         .expect("the settled condition carries a transition time");
 
-    // PASS 3 — half an hour later, nothing about the schedule or the slot has
+    // PASS 3, half an hour later: nothing about the schedule or the slot has
     // moved. ZERO requests to `/status`.
     //
-    // HALF AN HOUR AND NOT AN HOUR SINCE PLAT-05.2, and the difference is a
-    // fact and not a fudge. D1 §6.7 re-inventories a schedule every 60 minutes,
-    // and `status.history.inventoriedAt` is when that last happened — so a pass
-    // exactly 3 600 s after pass 2 DOES move the status, once, because it took
-    // a real inventory. That is 24 writes a day, not the 2 880 this test is
-    // about, and it is guarded on its own in `tests/schedule_history.rs`
-    // (`the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status`).
-    // Pass 3 therefore sits INSIDE the inventory window, where the property it
-    // names — a recomputed status equal to the stored one writes nothing — is
-    // the only thing in play.
+    // HALF AN HOUR AND NOT AN HOUR: a schedule is re-inventoried every 60
+    // minutes and `status.history.inventoriedAt` records it, so a pass 3 600 s
+    // after pass 2 moves the status once
+    // (`the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status` in
+    // `tests/schedule_history.rs`). Inside the inventory window, a recomputed
+    // status equal to the stored one writes nothing.
     let mut steady = schedule("nightly", UID, DAILY, false);
     steady.status = Some(settled.clone());
     let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
@@ -2825,9 +2584,7 @@ async fn a_steady_backup_schedule_is_patched_once_and_a_suspend_flip_once_more()
     );
 }
 
-// ===========================================================================
-// PLAT-04.1 — ACTUAL-RUN CONCURRENCY
-// ===========================================================================
+// Actual-run concurrency
 
 #[test]
 fn omitted_concurrency_policy_defaults_to_forbid_and_the_schema_validates_both_values() {
@@ -2853,10 +2610,8 @@ fn omitted_concurrency_policy_defaults_to_forbid_and_the_schema_validates_both_v
         ["properties"]["concurrencyPolicy"];
     assert_eq!(policy["default"], serde_json::json!("Forbid"));
     assert_eq!(policy["enum"], serde_json::json!(["Forbid", "Allow"]));
-    // PLAT-05.1 MADE IT EDITABLE, AND THAT IS THE ASSERTION NOW. Before D1 the
-    // policy was sealed with the rest of the spec, so an old omitted-field
-    // schedule needed a replacement object to opt into `Allow`; it is now a
-    // one-field edit, and the seal names `sourceRef` and nothing else.
+    // THE POLICY IS EDITABLE: the seal names `sourceRef` and nothing else, so
+    // opting an old schedule into `Allow` is a one-field edit.
     assert!(
         !SOURCE_REF_IMMUTABLE_RULE.contains("concurrencyPolicy"),
         "concurrencyPolicy is editable policy (D1 §5.1) and must not appear in the seal"
@@ -2985,9 +2740,9 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
         },
         absent_backup(&current),
         Route {
-            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
-            // route and the finalization one below answer the same method and
-            // path, which is exactly what the shipped RBAC grants.
+            // THE RESERVATION IS A `PATCH` (see `is_reservation`): this route and the
+            // finalization one below answer the same method and path, which is
+            // exactly what the shipped RBAC grants.
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
@@ -3050,9 +2805,9 @@ async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
         },
         absent_backup(&current),
         Route {
-            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
-            // route and the finalization one below answer the same method and
-            // path, which is exactly what the shipped RBAC grants.
+            // THE RESERVATION IS A `PATCH` (see `is_reservation`): this route and the
+            // finalization one below answer the same method and path, which is
+            // exactly what the shipped RBAC grants.
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
@@ -3156,11 +2911,8 @@ async fn allow_explicitly_permits_a_new_slot_without_active_run_admission() {
     });
     assert_eq!(schedule.spec.concurrency_policy, ConcurrencyPolicy::Allow);
     let (client, calls) = mock_client_recording(vec![
-        // `Allow` RESERVES TOO NOW (D1 §4.5 ADMIT). The reservation used to be
-        // `Forbid`-only, which left `Allow` runs unrecorded between the create
-        // and the status write and gave the two policies different crash
-        // semantics. It is uniform, so `status.activeRuns` is complete by
-        // construction for both.
+        // `Allow` RESERVES TOO, so both policies have the same crash semantics and
+        // `status.activeRuns` is complete by construction for both.
         no_backups(),
         absent_backup(&current),
         Route {
@@ -3308,12 +3060,12 @@ async fn a_wrong_owner_uid_at_the_deterministic_name_is_not_adopted() {
         },
     ]);
     let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
-    // D1 §4.7 ROW 6, AND IT IS A REPORT RATHER THAN AN ERROR NOW. A same-named
-    // schedule recreated under a new UID leaves the old schedule's objects
-    // sitting on the deterministic names of the new one's slots; treating that
-    // as a reconcile failure would requeue forever and say nothing an operator
-    // can act on. The slot is skipped, RECORDED, and never re-run under a
-    // different name — the identity of a scheduled run is its name.
+    // A REPORT RATHER THAN AN ERROR. A same-named schedule recreated under a
+    // new UID leaves the old schedule's objects on the deterministic names of
+    // the new one's slots; a reconcile failure would requeue forever and say
+    // nothing an operator can act on. The slot is skipped, RECORDED, and never
+    // re-run under a different name: the identity of a scheduled run is its
+    // name.
     assert_eq!(outcome.decision.reason(), "SlotNameUnavailable");
     assert_eq!(outcome.created, None);
     assert!(
@@ -3369,9 +3121,9 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
         },
         absent_backup(&current),
         Route {
-            // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
-            // route and the finalization one below answer the same method and
-            // path, which is exactly what the shipped RBAC grants.
+            // THE RESERVATION IS A `PATCH` (see `is_reservation`): this route and the
+            // finalization one below answer the same method and path, which is
+            // exactly what the shipped RBAC grants.
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
@@ -3529,10 +3281,9 @@ async fn a_newer_due_slot_cannot_overtake_an_accepted_previous_reservation() {
     ]);
     let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
     // THE ACCEPTED RESERVATION IS RESUMED AND THE NEWER SLOT IS NOT CONSIDERED
-    // AT ALL. D1 §4.5 step 2 goes straight to the status write after creating a
-    // reserved child, which is what makes the boundary atomic: one admission
-    // per reconcile, and the newer slot is decided on the next pass — where the
-    // run just created is exactly what blocks it under `Forbid`.
+    // AT ALL: creating a reserved child goes straight to the status write, so
+    // there is one admission per reconcile, and the newer slot is decided on
+    // the next pass, where the run just created blocks it under `Forbid`.
     assert_eq!(outcome.created.as_deref(), Some(accepted.as_str()));
     assert_eq!(outcome.decision.reason(), REASON_SCHEDULED);
     assert_eq!(
@@ -3597,22 +3348,16 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
                     // the status resourceVersion is the actual admission CAS.
                     (200, backup_list_body(vec![]))
                 } else if method == "GET" && path.contains("/backups/") {
-                    // AND THE SAME 404 FOR THE ATTEMPT CHAIN. Both replicas ask
-                    // the slot's deterministic name whether it has a run, and
-                    // both are told it does not — which is the whole premise of
-                    // this race: two replicas that agree about the world and
-                    // disagree only about who gets to act on it.
+                    // AND THE SAME 404 FOR THE ATTEMPT CHAIN: two replicas that agree about
+                    // the world and disagree only about who gets to act on it.
                     let name = path.rsplit('/').next().unwrap_or_default().to_string();
                     (404, not_found_body(&name))
                 } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
-                    // THE API SERVER'S OWN RULE, MODELLED AND NOT ASSERTED.
-                    // A merge patch is applied to the CURRENT object, so a body
-                    // that carries no `metadata.resourceVersion` inherits the
-                    // stored one and can never conflict — which is precisely
-                    // what dropping the precondition would do. Modelling that
-                    // (rather than asserting the token inside the double) is
-                    // what makes the mutant show up as TWO winners and TWO
-                    // POSTs instead of as a panic on a spawned task.
+                    // THE API SERVER'S OWN RULE, MODELLED AND NOT ASSERTED. A merge patch is
+                    // applied to the CURRENT object, so a body without
+                    // `metadata.resourceVersion` inherits the stored one and never conflicts.
+                    // Modelling that makes the dropped-precondition mutant show up as TWO
+                    // winners and TWO POSTs instead of as a panic on a spawned task.
                     let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     let mut state = state.lock().unwrap();
                     let stored_version = state.stored["metadata"]["resourceVersion"]
@@ -3807,13 +3552,11 @@ async fn an_invalid_pending_reference_is_cleared_with_a_resource_version_precond
             .body,
     )
     .unwrap();
-    // BOTH SPELLINGS, AND EXPLICITLY. `is_null()` passes for a key the patch
-    // simply did not carry, and an absent key in a merge patch means "leave it
-    // alone" — so the weaker form was green for a controller that had stopped
-    // clearing the field at all. This schedule is SUSPENDED, so there is no
-    // admission to clear it as a side effect: the clear has to be a decision of
-    // its own, or the stale reservation stands forever and every reader shows
-    // accepted work that does not exist.
+    // BOTH SPELLINGS, AND EXPLICITLY: `is_null()` passes for a key the patch
+    // did not carry, and an absent key in a merge patch means "leave it alone".
+    // This schedule is SUSPENDED, so no admission clears the field as a side
+    // effect: the clear is a decision of its own, or a stale reservation stands
+    // forever.
     assert_cleared(&patch["status"], "pendingBackupRef");
     assert_cleared(&patch["status"], "pendingRun");
     assert_eq!(patch["metadata"]["name"], serde_json::json!("nightly"));
@@ -3837,14 +3580,11 @@ async fn an_invalid_pending_reference_is_cleared_with_a_resource_version_precond
 async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
     let now = utc(2026, 9, 10, 12, 1);
     let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
-    // THE THREE WAYS TO FAIL MEMBERSHIP, RESPELLED FOR PLAT-05.2. They used to
-    // be three shapes of ownerReference, because that was the authority; D1 §6.1
-    // removed the reference, so `spec.scheduleRef` is. The cases are the same
-    // three facts — a different schedule UID, no reference at all, and a
-    // reference naming another schedule — plus a fourth that the old spelling
-    // could not express: a LEGACY object, with no `scheduleRef.uid`, whose
-    // surviving controller ownerReference names somebody else. Membership rule
-    // 2 still reads that one, so it still has to be refused.
+    // THE WAYS TO FAIL MEMBERSHIP, which is `spec.scheduleRef`: a different
+    // schedule UID, no reference at all, a reference naming another schedule,
+    // and a LEGACY object, with no `scheduleRef.uid`, whose surviving
+    // controller ownerReference names somebody else. Membership still reads
+    // that one, so it still has to be refused.
     let mut wrong_name = backup_value(&current, UID, Some("Running"), None);
     wrong_name["spec"]["scheduleRef"]["name"] = serde_json::json!("retired-nightly");
     let mut ownerless = backup_value(&current, UID, Some("Running"), None);
@@ -3895,11 +3635,9 @@ async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
                 body: serde_json::to_string(&schedule).unwrap(),
             },
         ]);
-        // MEMBERSHIP IS CHECKED WHERE THE OBJECT IS FIRST SEEN, WHICH IS NOW
-        // THE ATTEMPT-CHAIN GET RATHER THAN THE 409 WINNER. The three ways to
-        // fail it are unchanged — a different schedule UID, no controller
-        // ownerReference at all, and a controller reference naming another
-        // schedule — and none of them is adopted, overwritten or worked around.
+        // MEMBERSHIP IS CHECKED WHERE THE OBJECT IS FIRST SEEN, the attempt-chain
+        // GET. None of the ways to fail it is adopted, overwritten or worked
+        // around.
         let outcome = reconcile_schedule(&schedule, &client, now)
             .await
             .unwrap_or_else(|e| panic!("{case}: a held name is a decision, not an error: {e}"));
@@ -3953,12 +3691,11 @@ async fn allow_accepts_only_the_owned_409_winner_and_observes_its_terminal_state
         },
     ]);
 
-    // THE OWNED OBJECT IS OBSERVED, NOT ADOPTED THROUGH A COLLISION. D1 §4.5
-    // step 6 asks the slot's deterministic name what happened to it before
-    // deciding anything, so the terminal state of an owned run reaches the
-    // status without a `POST` having to fail first. The `Failed` run has no
-    // exit code and no terminal condition, so it is not retryable — a failure
-    // nobody classified is never re-run.
+    // THE OWNED OBJECT IS OBSERVED, NOT ADOPTED THROUGH A COLLISION: the slot's
+    // deterministic name is asked first, so the terminal state of an owned run
+    // reaches the status without a `POST` having to fail. The `Failed` run has
+    // no exit code and no terminal condition, so it is not retryable: a
+    // failure nobody classified is never re-run.
     let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
     assert!(outcome.already_existed);
     assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
@@ -4021,10 +3758,10 @@ async fn allow_409_followed_by_get_404_is_transient_not_owned_success() {
     ]);
 
     // THE READ THAT HAS NOT CAUGHT UP. The attempt-chain GET says the slot has
-    // no run, so the slot is admitted and the create collides — and the GET
-    // that follows the 409 still says 404. That is a transient disagreement
-    // between two reads, not ownership: the reconcile requeues rather than
-    // writing a success status for an object it has never seen.
+    // no run, so the slot is admitted and the create collides, and the GET
+    // after the 409 still says 404. That is a transient disagreement between
+    // two reads, not ownership: the reconcile requeues rather than writing a
+    // success status for an object it has never seen.
     let error = reconcile_schedule(&schedule, &client, now)
         .await
         .expect_err("a 404 after 409 must requeue rather than claim ownership");
@@ -4172,18 +3909,11 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
         .iter()
         .all(|call| call.method != "DELETE"));
 
-    // THE DOCUMENTED PROCEDURE THIS TEST IS PAIRED WITH CHANGED WITH PLAT-05.2,
-    // and it changed because the reason for it went away. The old §9 said
-    // "retain the old, suspended schedule, because deleting it can let
-    // Kubernetes garbage collection delete that history" — true while every
-    // run carried a controller ownerReference to its schedule, and false now
-    // that none does (D1 §6.1). A test that still demanded that paragraph
-    // would be holding the documentation to a hazard the code no longer has.
-    //
-    // What this test's BEHAVIOUR asserts is unchanged and still passes: the old
-    // schedule is suspended, its running child is observed, the differently
-    // named replacement fires its own slot, and NOTHING is deleted. What the
-    // documentation must now say is the half an operator acts on.
+    // Deleting the old schedule no longer endangers its history (runs carry
+    // no ownerReference to it), so the documentation must say only the half an
+    // operator acts on. What this test's BEHAVIOUR asserts: the old schedule is
+    // suspended, its running child is observed, the differently named
+    // replacement fires its own slot, and NOTHING is deleted.
     let docs = workspace_source("docs/kubernetes.md");
     let retained_history = docs
         .split("### Deleting a schedule keeps its history\n")
@@ -4271,11 +4001,10 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
 
                 if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
                     let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                    // A's OLD FINALIZER IS HELD, AND ONLY IT. W0 made the
-                    // reservation a `PATCH` too, so `resourceVersion == 18`
-                    // alone now also matches B's reservation — which is the one
-                    // write this gate is waiting FOR, and gating it would
-                    // deadlock. `is_reservation` separates them.
+                    // A's OLD FINALIZER IS HELD, AND ONLY IT. The reservation is a `PATCH` too,
+                    // so `resourceVersion == 18` alone also matches B's reservation, which is
+                    // the write this gate waits FOR; gating it would deadlock.
+                    // `is_reservation` separates them.
                     if patch["metadata"]["resourceVersion"] == serde_json::json!("18")
                         && !is_reservation(&patch["status"])
                     {
@@ -4293,11 +4022,8 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             backup_list_body(state.backups.values().cloned().collect()),
                         )
                     } else if method == "GET" && path.contains("/backups/") {
-                        // D1 §4.5 STEP 6 ASKS FOR A SLOT'S ATTEMPT BY NAME.
-                        // Answering it out of the same map the POSTs write
-                        // keeps this fake API server internally consistent —
-                        // the chain and the listing cannot disagree about what
-                        // exists.
+                        // The attempt is asked for by name. Answering it out of the same map the
+                        // POSTs write keeps this fake API server internally consistent.
                         let name = path.rsplit('/').next().unwrap_or_default().to_string();
                         match state.backups.get(&name) {
                             Some(existing) => (200, existing.to_string()),
@@ -4334,11 +4060,10 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             .unwrap()
                             .parse::<u64>()
                             .unwrap();
-                        // A MERGE PATCH WITH NO `resourceVersion` INHERITS THE
-                        // STORED ONE and can never conflict — the API server's
-                        // own rule, modelled rather than `unwrap`ed, so that a
-                        // reservation sent without a precondition shows up as a
-                        // wrong OUTCOME here instead of as a hang.
+                        // A MERGE PATCH WITH NO `resourceVersion` INHERITS THE STORED ONE and can
+                        // never conflict: the API server's own rule, modelled, so a reservation
+                        // sent without a precondition shows up as a wrong OUTCOME instead of as a
+                        // hang.
                         let offered = patch["metadata"]["resourceVersion"]
                             .as_str()
                             .and_then(|v| v.parse::<u64>().ok());
@@ -4351,9 +4076,7 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             weirkeeper::conditions::apply_merge_patch(&mut state.schedule, &patch);
                             state.schedule["metadata"]["resourceVersion"] =
                                 serde_json::json!((expected + 1).to_string());
-                            // B's RESERVATION IS THE EVENT A's FINALIZER WAITS
-                            // FOR — one merge patch away from the write that
-                            // used to be a replace.
+                            // B's RESERVATION IS THE EVENT A's FINALIZER WAITS FOR.
                             let pending = state.schedule["status"]["pendingBackupRef"]["name"]
                                 .as_str()
                                 .unwrap_or_default()
@@ -4446,16 +4169,12 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
     );
 }
 
-// ===========================================================================
-// D1 §12 — PLAT-05.1: an editable policy with immutable run snapshots
-// ===========================================================================
+// An editable policy with immutable run snapshots
 
-/// Whether a recorded request targets the `backups` resource.
-///
-/// A PATH SEGMENT AND NOT A SUBSTRING. `/namespaces/x/backupschedules/nightly/status`
-/// contains the text `/backups`, so a substring test would report every status
-/// patch this reconciler makes as a write against a run — a green assertion
-/// about the wrong thing, or a red one about nothing.
+/// Whether a recorded request targets the `backups` resource, by PATH
+/// SEGMENT: `/namespaces/x/backupschedules/nightly/status` contains the text
+/// `/backups`, so a substring test would count every status patch as a write
+/// against a run.
 fn targets_backups(uri: &str) -> bool {
     uri.split('?')
         .next()
@@ -4484,7 +4203,8 @@ fn schedule_with(uid: &str, generation: i64, resource_version: &str, spec: &str)
     .expect("the fixture is a BackupSchedule")
 }
 
-/// The spec every PLAT-05.1 fixture starts from: `Forbid`, daily, two topics.
+/// The spec every editable-policy fixture starts from: `Forbid`, daily, two
+/// topics.
 const EDITABLE_SPEC: &str = r#"{
     "schedule": "0 0 * * *",
     "sourceRef": { "name": "prod" },
@@ -4540,16 +4260,15 @@ fn posted_spec(bodies: &[SeenBody]) -> serde_json::Value {
     v["spec"].clone()
 }
 
-/// D1 §5.3 and §5.4's invariant: **a Backup's copied policy equals the schedule
-/// spec at the generation recorded in it.**
+/// **A Backup's copied policy equals the schedule spec at the generation
+/// recorded in it.**
 ///
-/// The run records `uid`, `generation` and `runPolicySha256`, and the digest it
-/// records is the digest of the fields it actually carries — which is exactly
-/// what `identity::check_run_policy_digest` recomputes before the Backup
-/// controller freezes anything. A scheduler that copied the policy of one
-/// generation and stamped the number of another would produce a run the Backup
-/// controller refuses terminally with `RunPolicyDigestMismatch`, so this is the
-/// assertion that keeps that refusal unreachable in normal operation.
+/// The run records `uid`, `generation` and `runPolicySha256`, and the digest
+/// is of the fields it actually carries, which is what
+/// `identity::check_run_policy_digest` recomputes before the Backup controller
+/// freezes anything. A scheduler that copied one generation's policy and
+/// stamped another's number would produce a run refused terminally with
+/// `RunPolicyDigestMismatch`.
 #[tokio::test]
 async fn a_created_run_records_the_revision_whose_policy_it_copied() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -4629,12 +4348,9 @@ async fn a_created_run_records_the_revision_whose_policy_it_copied() {
     );
 }
 
-/// The run policy digest covers WHAT a run does and not WHEN it runs.
-///
-/// This is the whole value of the field: an operator who suspends and resumes a
-/// schedule sees `metadata.generation` move twice and `runPolicySha256` stand
-/// still, so "did anything about my backups change?" has an answer that is not
-/// "diff two YAML documents".
+/// The run policy digest covers WHAT a run does and not WHEN it runs: an
+/// operator who suspends and resumes a schedule sees `metadata.generation`
+/// move twice and `runPolicySha256` stand still.
 #[test]
 fn run_policy_digest_ignores_cadence_suspension_and_topic_order() {
     let base = schedule_with(UID, 1, "1", EDITABLE_SPEC);
@@ -4737,14 +4453,14 @@ fn run_policy_digest_ignores_cadence_suspension_and_topic_order() {
     }
 }
 
-/// D1 §5.4: an edit that lands between the read and the reservation gets a
-/// **409**, and the reconcile creates nothing.
+/// An edit that lands between the read and the reservation gets a **409**,
+/// and the reconcile creates nothing.
 ///
 /// The reservation is a merge PATCH carrying `metadata.resourceVersion`, which
-/// Kubernetes applies as an update precondition. The 409 is the whole
-/// mechanism: the reconcile aborts, requeues, re-reads the newer object and
-/// decides again under the new generation — so a run is never created from a
-/// policy the reservation did not agree with.
+/// Kubernetes applies as an update precondition: the reconcile aborts,
+/// requeues, re-reads the newer object and decides again under the new
+/// generation, so a run is never created from a policy the reservation did
+/// not agree with.
 #[tokio::test]
 async fn an_edit_between_the_read_and_the_reservation_gets_409_and_creates_nothing() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -4795,15 +4511,11 @@ async fn an_edit_between_the_read_and_the_reservation_gets_409_and_creates_nothi
     );
 }
 
-/// D1 §5.4, the other half: a restart after an accepted reservation creates the
-/// child **with the generation it reads now**, and records that generation.
-///
-/// The decision tree says so in one line — "crash before POST → restart reads
-/// G_m ≥ G_n → step 2: create with G_m, recording G_m" — and the reason is that
-/// there is nothing else to be truthful about. The reservation named a slot and
-/// an object name, not a policy; the object the controller can see is the
-/// current one; and recording the current generation keeps the invariant that a
-/// run's copied policy equals the spec at the generation written inside it.
+/// A restart after an accepted reservation creates the child **with the
+/// generation it reads now**, and records that generation. The reservation
+/// named a slot and an object name, not a policy, and recording the current
+/// generation keeps the invariant that a run's copied policy equals the spec
+/// at the generation written inside it.
 #[tokio::test]
 async fn a_restart_after_a_reservation_creates_under_the_generation_it_reads() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -4866,12 +4578,9 @@ async fn a_restart_after_a_reservation_creates_under_the_generation_it_reads() {
     assert_cleared(&status, "pendingRun");
 }
 
-/// D1 §12: editing a schedule never touches a running `Backup`.
-///
-/// The reconciler's whole write surface against `backups` is a `POST`; there is
-/// no PUT, no PATCH and no DELETE. So an edit cannot reach a run's spec, its
-/// frozen inputs or its Job — which is what makes "immutable run snapshots"
-/// true by construction rather than by care.
+/// Editing a schedule never touches a running `Backup`: the reconciler's whole
+/// write surface against `backups` is a `POST`, so "immutable run snapshots"
+/// is true by construction.
 #[tokio::test]
 async fn editing_a_schedule_never_writes_to_a_running_backup() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -4926,14 +4635,12 @@ async fn editing_a_schedule_never_writes_to_a_running_backup() {
     );
 }
 
-/// D1 §5.5: an edit the schema accepts but the controller cannot run stops
-/// admissions, says why, and leaves running work alone.
-///
-/// The converse of R2 — "`topics: []` requires `allUserTopics`" — is not
-/// expressible in CEL on the 1.29 floor without stranding every object already
-/// stored with an empty list, and cron and time-zone validity are not
-/// expressible at all. So the controller is the gate, and this is the table of
-/// what it refuses.
+/// An edit the schema accepts but the controller cannot run stops admissions,
+/// says why, and leaves running work alone. "`topics: []` requires
+/// `allUserTopics`" cannot be a CEL rule on the 1.29 floor without stranding
+/// every stored object with an empty list, and cron and time-zone validity
+/// cannot be CEL at all, so the controller is the gate and this is the table
+/// of what it refuses.
 #[tokio::test]
 async fn semantic_invalid_edits_fail_closed_with_reasons() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -5014,14 +4721,12 @@ async fn semantic_invalid_edits_fail_closed_with_reasons() {
     }
 }
 
-/// D1 §4.5 step 2 / §4.7 row 2: an invalid policy RELEASES a pending
-/// reservation instead of resuming it.
+/// An invalid policy RELEASES a pending reservation instead of resuming it.
 ///
-/// Resuming it would POST a `Backup` whose copied policy the Backup controller
-/// refuses terminally (`InvalidTopicSelection`), which costs an object, a
-/// condition and an operator's attention to reach the same conclusion the
-/// scheduler already had. Releasing it means that fixing the spec resumes the
-/// schedule within one reconcile, and the slot is accounted rather than run.
+/// Resuming it would POST a `Backup` the Backup controller refuses terminally
+/// (`InvalidTopicSelection`). Releasing it means that fixing the spec resumes
+/// the schedule within one reconcile, and the slot is accounted rather than
+/// run.
 #[tokio::test]
 async fn an_invalid_policy_releases_a_pending_reservation_and_leaves_running_work_alone() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -5095,15 +4800,14 @@ async fn an_invalid_policy_releases_a_pending_reservation_and_leaves_running_wor
     }
 }
 
-/// D1 §5.7: a schedule stored before PLAT-05.1 reconciles with no rewrite, and
+/// A schedule stored by an older controller reconciles with no rewrite, and
 /// its absent fields mean what they meant.
 ///
-/// The object here is byte-for-byte what an older controller stored: no
-/// `timeZone`, no deadlines, no catch-up, no retry, no dynamic selection, and a
-/// status that has never held `observedGeneration` or `policy`. Nothing about
-/// it is converted; the controller reads the defaults, fires the slot it would
-/// always have fired, under the name it would always have used, and ADDS the
-/// revision block.
+/// The object has no `timeZone`, no deadlines, no catch-up, no retry, no
+/// dynamic selection, and a status that has never held `observedGeneration`
+/// or `policy`. Nothing is converted; the controller reads the defaults, fires
+/// the slot it would always have fired, under the name it would always have
+/// used, and ADDS the revision block.
 #[tokio::test]
 async fn a_pre_upgrade_schedule_reconciles_without_a_rewrite() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -5172,15 +4876,10 @@ async fn a_pre_upgrade_schedule_reconciles_without_a_rewrite() {
     );
 }
 
-/// D1 §5.7 rollback shape: a status written by an older controller — a
-/// `pendingBackupRef` with no `pendingRun` beside it — is resumed, not
-/// discarded.
-///
-/// This is the state a roll-forward finds after an older controller made a
-/// reservation and stopped. The typed block is the newer spelling; the mirror
-/// is the one the old controller wrote, and it is still the authority for
-/// resuming, so no accepted slot is lost across a version boundary in either
-/// direction.
+/// A status written by an older controller (a `pendingBackupRef` with no
+/// `pendingRun` beside it) is resumed, not discarded: the mirror is still the
+/// authority for resuming, so no accepted slot is lost across a version
+/// boundary in either direction.
 #[tokio::test]
 async fn an_old_style_reservation_without_pending_run_is_resumed() {
     let fire = utc(2026, 9, 10, 0, 0);
@@ -5228,20 +4927,15 @@ async fn an_old_style_reservation_without_pending_run_is_resumed() {
     assert_cleared(&status, "pendingRun");
 }
 
-// ===========================================================================
-// D1 §12 — PLAT-04.2: zones, deadlines, catch-up, retries and the truth table
-// ===========================================================================
+// Zones, deadlines, catch-up, retries and the truth table
 
-/// Assert that a status patch CLEARS `key` — an explicit JSON `null`, not an
+/// Assert that a status patch CLEARS `key`: an explicit JSON `null`, not an
 /// absent key.
 ///
-/// THE DIFFERENCE IS THE WHOLE OF MERGE-PATCH SEMANTICS, and `Value::Index`
-/// hides it: `status["pendingRun"]` returns `Null` both for a key set to null
-/// and for a key that is not there at all. An absent key in a merge patch means
-/// "leave it alone", so a test written with `assert_eq!(status["x"], Null)`
-/// passes for a controller that stopped clearing the field — which is exactly
-/// how a released reservation comes to still look outstanding to whichever
-/// reader looked at the field the patch forgot.
+/// `Value::Index` returns `Null` both for a key set to null and for a key that
+/// is not there, and an absent key in a merge patch means "leave it alone", so
+/// `assert_eq!(status["x"], Null)` would pass for a controller that stopped
+/// clearing the field.
 fn assert_cleared(status: &serde_json::Value, key: &str) {
     assert_eq!(
         status.get(key),
@@ -5252,13 +4946,8 @@ fn assert_cleared(status: &serde_json::Value, key: &str) {
 }
 
 /// A `Backup` that reached a terminal phase, with the terminal condition the
-/// retry delay is measured from.
-///
-/// THE CONDITION IS NOT DECORATION. D1 §4.6 measures `delaySeconds` from
-/// `finishedAt(k)` — the `Failed` condition's `lastTransitionTime`, written
-/// once by the terminal patch — so a fixture without one describes a run whose
-/// retry could not be scheduled at any particular instant, and the controller
-/// treats it as not retryable for exactly that reason.
+/// retry delay is measured from: `delaySeconds` runs from the `Failed`
+/// condition's `lastTransitionTime`, and a run without one is not retryable.
 fn terminal_backup(
     name: &str,
     phase: &str,
@@ -5293,11 +4982,10 @@ fn cadence_schedule(extra: &str) -> BackupSchedule {
 
 /// [`cadence_schedule`] on an arbitrary expression.
 ///
-/// THE DEADLINE TESTS NEED SLOTS FURTHER APART THAN THE DEADLINE. With
-/// one-minute slots and a 60-second starting deadline a slot is never past its
-/// deadline while it is still the latest one — the next slot arrives at the
-/// same instant the deadline expires — so "past the deadline" is not a state a
-/// `* * * * *` schedule can be observed in. `*/5` with a 60-second deadline can.
+/// THE DEADLINE TESTS NEED SLOTS FURTHER APART THAN THE DEADLINE: with
+/// one-minute slots and a 60-second starting deadline the next slot arrives as
+/// the deadline expires, so "past the deadline" is never observable on a
+/// `* * * * *` schedule. `*/5` with a 60-second deadline can be.
 fn cadence_schedule_cron(cron: &str, extra: &str) -> BackupSchedule {
     schedule_with(
         UID,
@@ -5316,10 +5004,10 @@ fn cadence_schedule_cron(cron: &str, extra: &str) -> BackupSchedule {
     )
 }
 
-/// D1 §4.3 through the controller: a zoned schedule fires at the UTC instant
-/// its local expression names, and the run records the zone it was computed in.
+/// A zoned schedule fires at the UTC instant its local expression names, and
+/// the run records the zone it was computed in.
 ///
-/// `Europe/Berlin`, `30 2 * * *`, 2026-10-25 — the night the local hour 02:00
+/// `Europe/Berlin`, `30 2 * * *`, 2026-10-25, the night the local hour 02:00
 /// happens twice. The decision names the FIRST occurrence's UTC instant
 /// (00:30Z), the object is named from that instant, and `spec.trigger.timeZone`
 /// carries `Europe/Berlin` so a history row keeps its local time after somebody
@@ -5398,8 +5086,8 @@ async fn a_time_zone_schedule_fires_at_the_utc_slot_and_records_the_zone() {
         .ends_with("+01:00"));
 }
 
-/// D1 §4.3: a zone this build's database does not have is `Ready=False` and
-/// admits nothing. **Never silently UTC.**
+/// A zone this build's database does not have is `Ready=False` and admits
+/// nothing. **Never silently UTC.**
 #[tokio::test]
 async fn an_unknown_timezone_is_ready_false_and_creates_nothing() {
     let schedule = cadence_schedule(r#", "timeZone": "Mars/Olympus""#);
@@ -5443,8 +5131,8 @@ async fn an_unknown_timezone_is_ready_false_and_creates_nothing() {
         .contains("is never read as UTC"));
 }
 
-/// D1 §4.7 rows 18 and 22: a week of downtime with `catchUpPolicy: None` runs
-/// nothing and counts what it skipped.
+/// A week of downtime with `catchUpPolicy: None` runs nothing and counts what
+/// it skipped.
 #[tokio::test]
 async fn downtime_with_catch_up_none_records_missed_and_creates_nothing() {
     // The controller was last here at 12:00 and comes back at 12:30: thirty
@@ -5465,10 +5153,9 @@ async fn downtime_with_catch_up_none_records_missed_and_creates_nothing() {
     });
     let latest = utc(2026, 9, 10, 12, 30);
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
-        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
-        // LIST, and it runs on the FIRST pass over a schedule whose
-        // `status.history` is absent. This schedule has no runs, so the
-        // one page it reads is empty.
+        // The inventory runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the one page
+        // it reads is empty.
         no_backups(),
         absent_backup(&due_name(latest)),
         Route {
@@ -5541,8 +5228,8 @@ async fn downtime_with_catch_up_none_records_missed_and_creates_nothing() {
     );
 }
 
-/// D1 §4.7 row 21: the same downtime with `catchUpPolicy: Latest` runs
-/// **exactly one** `CatchUp`, for the most recent slot only.
+/// The same downtime with `catchUpPolicy: Latest` runs **exactly one**
+/// `CatchUp`, for the most recent slot only.
 #[tokio::test]
 async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
     let away_since = utc(2026, 9, 10, 12, 0);
@@ -5575,10 +5262,9 @@ async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
     });
     let name: &'static str = Box::leak(due_name(latest).into_boxed_str());
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
-        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
-        // LIST, and it runs on the FIRST pass over a schedule whose
-        // `status.history` is absent. This schedule has no runs, so the
-        // one page it reads is empty.
+        // The inventory runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the one page
+        // it reads is empty.
         no_backups(),
         absent_backup(name),
         Route {
@@ -5631,13 +5317,11 @@ async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
         serde_json::json!(5),
         "the five slots the catch-up did not cover are still counted: {status}"
     );
-    // AND THE COUNT COMES WITH ONE ENTRY AN OPERATOR CAN READ. This slot was
-    // not itself skipped — it ran, as a catch-up — so without a boundary entry
-    // `recent` would be empty beside a `count` of five, and a number with no
-    // sample is a number nobody can act on. The names of the gap itself are
-    // deliberately not enumerated (a week of one-minute slots is ten thousand
-    // of them); one entry naming the slot the accounting caught up AT, with the
-    // reason those slots were skipped, is what makes the count legible.
+    // AND THE COUNT COMES WITH ONE ENTRY AN OPERATOR CAN READ. This slot ran,
+    // as a catch-up, so without a boundary entry `recent` would be empty beside
+    // a `count` of five. The gap's names are not enumerated (a week of
+    // one-minute slots is ten thousand); one entry naming the slot the
+    // accounting caught up AT, with the reason, makes the count legible.
     assert_eq!(
         status["missedSlots"]["recent"],
         serde_json::json!([{
@@ -5649,12 +5333,9 @@ async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
     );
 }
 
-/// D1 §4.7 row 19: a catch-up never runs a slot older than the revision in
-/// force.
-///
-/// Editing a schedule at noon must not retroactively back up the morning under
-/// the new policy — the run would carry the new topic list and the new archive
-/// and claim to be a backup of a window that policy never covered.
+/// A catch-up never runs a slot older than the revision in force: a noon edit
+/// must not back up the morning under the new policy, claiming a window that
+/// policy never covered.
 #[tokio::test]
 async fn catch_up_never_runs_a_slot_before_the_observed_revision() {
     let latest = utc(2026, 9, 10, 12, 30);
@@ -5678,10 +5359,9 @@ async fn catch_up_never_runs_a_slot_before_the_observed_revision() {
         ..BackupScheduleStatus::default()
     });
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
-        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
-        // LIST, and it runs on the FIRST pass over a schedule whose
-        // `status.history` is absent. This schedule has no runs, so the
-        // one page it reads is empty.
+        // The inventory runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the one page
+        // it reads is empty.
         no_backups(),
         absent_backup(&due_name(latest)),
         // PRESENT AND UNUSED.
@@ -5712,8 +5392,8 @@ async fn catch_up_never_runs_a_slot_before_the_observed_revision() {
     );
 }
 
-/// D1 §4.7 row 13: a **retryable** failure is retried once its delay has
-/// elapsed, under a new name, a new execution id and the CURRENT generation.
+/// A **retryable** failure is retried once its delay has elapsed, under a new
+/// name, a new execution id and the CURRENT generation.
 #[tokio::test]
 async fn a_retryable_failure_creates_r1_after_the_delay() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -5740,8 +5420,7 @@ async fn a_retryable_failure_creates_r1_after_the_delay() {
             method: "GET",
             path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
             status: 200,
-            // exit 1 — `operational`, no artifact. THE one exit code D1 §4.6
-            // retries by number.
+            // exit 1, `operational`, no artifact: the one exit code retried by number.
             body: terminal_backup(attempt0, "Failed", Some(1), Some("operational"), failed_at)
                 .to_string(),
         },
@@ -5833,13 +5512,9 @@ async fn a_retryable_failure_creates_r1_after_the_delay() {
     assert_eq!(status["activeRuns"][0]["kind"], serde_json::json!("Retry"));
 }
 
-/// D1 §4.6 and §4.7 row 9: a **decision** is never retried.
-///
-/// A guard refusal, a drill that did not pass and a signing failure are all
-/// answers the product already gave. Re-running them asks the same question of
-/// the same cluster and gets the same answer, at the cost of another broker
-/// read — and, worse, tells an operator watching the schedule that something
-/// might still change.
+/// A **decision** is never retried: a guard refusal, a drill that did not pass
+/// and a signing failure are answers the product already gave, and re-running
+/// them asks the same cluster the same question.
 #[tokio::test]
 async fn a_guard_refusal_is_never_retried() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -5914,8 +5589,8 @@ async fn a_guard_refusal_is_never_retried() {
     }
 }
 
-/// D1 §4.7 row 10: the chain stops at `maxRetries` and says so, and a
-/// `maxRetries` LOWERED by an edit still sees the attempts that exist.
+/// The chain stops at `maxRetries` and says so, and a `maxRetries` LOWERED by
+/// an edit still sees the attempts that exist.
 #[tokio::test]
 async fn retries_stop_at_max_retries_and_report_exhausted() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -5923,11 +5598,10 @@ async fn retries_stop_at_max_retries_and_report_exhausted() {
     let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
     let attempt1: &'static str = Box::leak(format!("{attempt0}-r1").into_boxed_str());
 
-    // THE THIRD ARM IS THE ONE D1 §4.7 ROW 10 CALLS OUT. `RetryExhausted` on a
-    // schedule that never configured retries reads as "your retries ran out" to
-    // an operator who asked for none, so an ABSENT `spec.retry` reports
-    // `RunFailed` instead. `maxRetries: 0` is different: the operator DID
-    // consider retries and chose zero, and the ceiling really was reached.
+    // THE THIRD ARM: `RetryExhausted` on a schedule that never configured
+    // retries would read as "your retries ran out", so an ABSENT `spec.retry`
+    // reports `RunFailed`. `maxRetries: 0` is different: the operator chose zero,
+    // and the ceiling really was reached.
     for (label, retry, expected_reason) in [
         (
             "the ceiling is reached",
@@ -5942,15 +5616,12 @@ async fn retries_stop_at_max_retries_and_report_exhausted() {
         ("the retry block was REMOVED by an edit", "", "RunFailed"),
     ] {
         let mut schedule = cadence_schedule_cron("*/30 * * * *", retry);
-        // THE STORED `lastSlot` IS WHAT KEEPS AN EXISTING CHAIN VISIBLE AFTER
-        // THE POLICY THAT CREATED IT IS REMOVED. The attempt-chain walk stops
-        // at attempt 0 on a schedule that has no retry policy and no record of
-        // one — this controller is the only writer of `-r<k>` names, so walking
-        // further could not find anything — and `status.lastSlot.attempt`, plus
-        // any `-r<k>` in `status.activeRuns`, is how a schedule whose retry
-        // block was just deleted still sees the attempts it already made. That
-        // is D1 §3.1 rule 7's "a lowered maxRetries still sees existing
-        // attempts", bounded so the steady-state reconcile costs one GET.
+        // THE STORED `lastSlot` KEEPS AN EXISTING CHAIN VISIBLE AFTER THE POLICY
+        // THAT CREATED IT IS REMOVED. On a schedule with no retry policy and no
+        // record of one the attempt-chain walk stops at attempt 0 (only this
+        // controller writes `-r<k>` names), so `status.lastSlot.attempt`, plus any
+        // `-r<k>` in `status.activeRuns`, is how a lowered `maxRetries` still sees
+        // the attempts it made, at one GET per steady-state reconcile.
         schedule.status = Some(BackupScheduleStatus {
             last_slot: Some(weirkeeper::crds::backup_schedule::LastSlot {
                 slot: slot_name(slot),
@@ -6038,8 +5709,8 @@ async fn retries_stop_at_max_retries_and_report_exhausted() {
     }
 }
 
-/// D1 §4.7 row 12: a retry that is due waits for concurrency like any other
-/// admission, and the slot stays admissible while it waits.
+/// A retry that is due waits for concurrency like any other admission, and the
+/// slot stays admissible while it waits.
 #[tokio::test]
 async fn a_retry_is_blocked_by_an_active_forbid_run() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -6091,8 +5762,7 @@ async fn a_retry_is_blocked_by_an_active_forbid_run() {
         .contains("is still unfinished"));
 }
 
-/// D1 §4.7 row 7: a succeeded attempt ends the slot, whatever the retry policy
-/// says.
+/// A succeeded attempt ends the slot, whatever the retry policy says.
 #[tokio::test]
 async fn a_succeeded_attempt_is_never_retried() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -6130,9 +5800,8 @@ async fn a_succeeded_attempt_is_never_retried() {
     assert!(posts(&bodies.lock().expect("readable")).is_empty());
 }
 
-/// D1 §4.7's "blocked" definition for `Allow`: ten concurrent schedule-created
-/// runs is the ceiling, and reaching it is reported rather than silently
-/// obeyed.
+/// Ten concurrent schedule-created runs is the `Allow` ceiling, and reaching
+/// it is reported rather than silently obeyed.
 #[tokio::test]
 async fn the_active_run_limit_caps_allow_at_ten() {
     let now = utc(2026, 9, 10, 12, 10);
@@ -6181,8 +5850,8 @@ async fn the_active_run_limit_caps_allow_at_ten() {
     assert_eq!(status["lastMissedSlot"], slot_name(now));
 }
 
-/// D1 §4.9's CRD-before-controller guard: a reservation the API server pruned
-/// stops admission instead of creating a run without an identity.
+/// The CRD-before-controller guard: a reservation the API server pruned stops
+/// admission instead of creating a run without an identity.
 #[tokio::test]
 async fn a_pruned_reservation_response_stops_admission_as_crd_outdated() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -6223,8 +5892,8 @@ async fn a_pruned_reservation_response_stops_admission_as_crd_outdated() {
     );
 }
 
-/// D1 §3.1 rule 6: a retry policy whose names cannot fit is an INVALID POLICY,
-/// not a schedule that silently never retries.
+/// A retry policy whose names cannot fit is an INVALID POLICY, not a schedule
+/// that silently never retries.
 #[test]
 fn a_retry_policy_that_cannot_be_named_is_refused_as_a_policy() {
     let thirty = "n".repeat(30);
@@ -6255,8 +5924,8 @@ fn a_retry_policy_that_cannot_be_named_is_refused_as_a_policy() {
         decision.message()
     );
 
-    // AND `maxRetries: 0` ON THE SAME NAME IS FINE, because no `-r<N>` name is
-    // ever composed. That is the exemption the CRD's root rule R3 carries too.
+    // AND `maxRetries: 0` ON THE SAME NAME IS FINE: no `-r<N>` name is ever
+    // composed, the exemption the CRD's root rule carries too.
     let mut zero = spec.spec.clone();
     zero.retry = Some(weirkeeper::crds::backup_schedule::RetrySpec {
         max_retries: 0,
@@ -6268,24 +5937,17 @@ fn a_retry_policy_that_cannot_be_named_is_refused_as_a_policy() {
     );
 }
 
-/// D1 §2 and §8.3: a **manual** run of this schedule is part of its history and
-/// is **not** a schedule-created run — it neither occupies a `Forbid` slot nor
-/// is blocked by one.
+/// A **manual** run of this schedule is part of its history and is **not** a
+/// schedule-created run: it neither occupies a `Forbid` slot nor is blocked by
+/// one.
 ///
-/// # The trap this closes, which the W3b review found before it bit
-///
-/// Membership used to be the complete `BackupSchedule` controller
-/// ownerReference, and a manual `Backup` has none — so "not counted" held by
-/// accident. PLAT-05.1 moves membership onto `spec.scheduleRef {name, uid}`,
-/// which a manual run created from a schedule DOES carry (the API copies the
-/// revision so the run records what policy it ran), and PLAT-05.2 removes the
-/// ownerReference outright. Without a trigger-kind clause, "Back up now" would
-/// silently start blocking the next scheduled slot — and an operator would see
-/// `ConcurrencyBlocked` on a schedule that is working exactly as designed.
-///
+/// Membership is `spec.scheduleRef {name, uid}`, which a manual run created
+/// from a schedule carries (the API copies the revision). Without a
+/// trigger-kind clause, "Back up now" would block the next scheduled slot and
+/// an operator would see `ConcurrencyBlocked` on a working schedule.
 /// `participates_in_concurrency` is where the two questions part:
-/// history-membership stays `is_run_of_schedule` (PLAT-05.2's inventory and
-/// migration need the manual run), and ACCOUNTING adds the kind.
+/// history-membership stays `is_run_of_schedule`, and ACCOUNTING adds the
+/// kind.
 #[tokio::test]
 async fn a_manual_run_of_this_schedule_is_neither_counted_nor_blocked() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -6374,24 +6036,15 @@ async fn a_manual_run_of_this_schedule_is_neither_counted_nor_blocked() {
     );
 }
 
-/// D1 §3.1 rule 1, R8: a **non-scheduled** object sitting on a slot's
-/// deterministic name is a foreign occupant, not an attempt of that slot.
+/// A **non-scheduled** object sitting on a slot's deterministic name is a
+/// foreign occupant, not an attempt of that slot.
 ///
-/// # Why it is not read as the slot's run
-///
-/// Rule 1 constrains the names of scheduled kinds only, so nothing refuses a
-/// `Manual` Backup called `logweir-backup-<schedule>-<slot>` — the repository's
-/// own `pre-connection-contract-inputs.json` fixture is exactly that shape.
-/// D1 §2 discovers attempt chains by GETTING those names, so such an object
-/// would otherwise look like attempt 0 of the slot.
-///
-/// It is not. A manual run executes under its OWN UID and therefore its own
-/// execution id, so the archive it writes is not the archive slot S's run would
-/// have written; adopting it would make the scheduler report a window as
-/// covered by a run that covered a different one. The slot is reported
-/// `SlotNameUnavailable`, the skip is recorded, and nothing is created under a
-/// different name — the same answer another schedule's object gets, for the
-/// same reason.
+/// Nothing refuses a `Manual` Backup called `logweir-backup-<schedule>-<slot>`
+/// (`pre-connection-contract-inputs.json` is that shape), and attempt chains
+/// are found by GETTING those names. A manual run executes under its OWN UID
+/// and execution id, so adopting it would report a window covered by a run
+/// that covered a different one. The slot is reported `SlotNameUnavailable`,
+/// the skip is recorded, and nothing is created under a different name.
 #[tokio::test]
 async fn a_manual_run_squatting_a_slot_name_is_a_foreign_occupant() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -6449,24 +6102,18 @@ async fn a_manual_run_squatting_a_slot_name_is_a_foreign_occupant() {
         .contains("held by an object this schedule does not own"));
 }
 
-/// D1 §4.5 step 5: a slot that is only WAITING is not counted, and waiting
-/// longer does not count it again.
+/// A slot that is only WAITING is not counted, and waiting longer does not
+/// count it again.
 ///
-/// # The double-counting this closes
-///
-/// The skipped-slot accounting walks the open interval
-/// `(lastEvaluatedSlot, S)` and adds what it finds. That is idempotent only
-/// because `lastEvaluatedSlot` advances when — and only when — `S` reaches a
-/// disposition it cannot come back from. A blocked slot has not: it stays
-/// admissible while it is the latest due one, and it may yet run. Advancing the
-/// marker there would count the same slot on every 30-second reconcile for as
-/// long as the block lasts (a schedule blocked for an hour would report 120
-/// missed slots that never came due), and it would also skip the slots BEFORE
-/// it over — the interval they were in has been closed behind them.
+/// The skipped-slot accounting walks `(lastEvaluatedSlot, S)` and is
+/// idempotent only because `lastEvaluatedSlot` advances when, and only when,
+/// `S` reaches a disposition it cannot come back from. A blocked slot may yet
+/// run; advancing the marker there would count it on every 30-second
+/// reconcile while the block lasts, and close the interval behind the slots
+/// before it.
 ///
 /// So this drives the same blocked slot twice and asserts the accounting stands
-/// still, then lets the block clear and asserts the slot RUNS — proving the
-/// wait was a wait and not a skip.
+/// still, then lets the block clear and asserts the slot RUNS.
 #[tokio::test]
 async fn a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_again() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -6495,12 +6142,9 @@ async fn a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_agai
             status: 200,
             body: backup_value(&blocker, UID, Some("Running"), Some(&blocker)).to_string(),
         },
-        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
-        // LIST, and it runs on the FIRST pass over a schedule whose
-        // `status.history` is absent. IT SEES THE BLOCKER, because that is
-        // what the inventory is for: a repaired `activeRuns` has to contain
-        // the run that is blocking, or the slot this test says is blocked
-        // would be admitted instead.
+        // The inventory runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. IT SEES THE BLOCKER: a repaired `activeRuns`
+        // has to contain the blocking run, or the slot would be admitted.
         Route {
             method: "GET",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -6626,24 +6270,19 @@ async fn a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_agai
     );
 }
 
-// ===========================================================================
-// Fix round 1 — the reviewer's findings, each with the row that guards it
-// ===========================================================================
+// Final dispositions, foreign later attempts, every created kind, impossible
+// slots and the reservation message
 
-/// **H-1.** A slot that has already received a FINAL disposition is not counted
-/// again on the next pass.
+/// A slot that has already received a FINAL disposition is not counted again
+/// on the next pass.
 ///
-/// # Why the existing guard could not catch this
-///
-/// `a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_again`
-/// drives the NON-final branch, where `account_skipped` returns before it
-/// touches anything. This is the other branch, and it is the steady state of a
-/// missed slot: a slot that was missed stays the latest due slot until the next
-/// one comes due, so the controller reaches the same final disposition for it
-/// on every pass in between. On a 30-second requeue a daily schedule that
-/// misses one slot would inflate `count` by roughly 2,880 for that single slot,
-/// fill `recent` with ten copies of it, and bump `resourceVersion` every time —
-/// the churn erratum E11(d) exists to prevent, reached through a third field.
+/// The other branch from
+/// `a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_again`,
+/// and the steady state of a missed slot: it stays the latest due slot until
+/// the next one comes due, so the same final disposition is reached on every
+/// pass in between. Counted each time, a daily schedule missing one slot would
+/// inflate `count` by about 2,880, fill `recent` with copies of it, and write
+/// the status every pass.
 #[tokio::test]
 async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
     let away_since = utc(2026, 9, 10, 12, 0);
@@ -6661,10 +6300,9 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
     });
 
     let routes = vec![
-        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
-        // LIST, and it runs on the FIRST pass over a schedule whose
-        // `status.history` is absent. This schedule has no runs, so the
-        // one page it reads is empty.
+        // The inventory runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the one page
+        // it reads is empty.
         no_backups(),
         absent_backup(&due_name(latest)),
         // PRESENT AND UNUSED in both passes.
@@ -6728,12 +6366,10 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
         }
     }
 
-    // PASS 3 — the NEXT slot, and it runs. The marker is the slot immediately
-    // before it, so the gap between them is EMPTY: nothing was skipped, and
-    // `recent` must not gain a boundary entry saying otherwise. A boundary
-    // entry pushed whenever a marker exists would put a `ControllerUnavailable`
-    // row into `recent` on every successful admission of every healthy
-    // schedule — a sample that contradicts its own count.
+    // PASS 3: the NEXT slot, and it runs. The marker is the slot immediately
+    // before it, so the gap between them is EMPTY and `recent` must not gain a
+    // boundary entry: one pushed whenever a marker exists would add a
+    // `ControllerUnavailable` row on every admission of every healthy schedule.
     let next = latest + chrono::Duration::minutes(5);
     let admitted: &'static str = Box::leak(due_name(next).into_boxed_str());
     let mut healthy = schedule.clone();
@@ -6752,8 +6388,8 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
         ..BackupScheduleStatus::default()
     });
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
-        // PLAT-05.2: this pass's status carries no `history` block either, so
-        // step 1 inventories before it admits. The schedule has no runs yet.
+        // This pass's status carries no `history` block either, so it inventories
+        // before it admits. The schedule has no runs yet.
         no_backups(),
         absent_backup(admitted),
         Route {
@@ -6797,20 +6433,13 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
     );
 }
 
-/// **M-1.** A foreign object at a LATER attempt does not erase what the earlier
+/// A foreign object at a LATER attempt does not erase what the earlier
 /// attempts proved about the window.
 ///
-/// # The history this keeps honest
-///
-/// The walk used to abandon the whole chain at the first name this schedule
-/// does not own, so a `Succeeded` attempt 0 sitting beside a squatted `-r1`
-/// was reported `SlotNameUnavailable`: `lastFireTime` did not advance,
-/// `lastSlot.backupRef` was `None`, and `missedSlots` counted a window that a
-/// successful run had in fact covered — a false entry in the one record an
-/// operator reads to tell a correct implementation from a broken schedule.
-///
-/// A held name matters only when something would be created under it. Attempt 0
-/// succeeded, so nothing would be; the honest answer is what the attempts say.
+/// A `Succeeded` attempt 0 beside a squatted `-r1` must not read
+/// `SlotNameUnavailable`, with `lastFireTime` not advanced and `missedSlots`
+/// counting a window a successful run covered. A held name matters only when
+/// something would be created under it; attempt 0 succeeded, so nothing would.
 #[tokio::test]
 async fn a_foreign_object_at_a_later_attempt_does_not_erase_a_succeeded_one() {
     let slot = utc(2026, 9, 10, 12, 30);
@@ -6822,7 +6451,7 @@ async fn a_foreign_object_at_a_later_attempt_does_not_erase_a_succeeded_one() {
     let squatted: &'static str = Box::leak(format!("{attempt0}-r1").into_boxed_str());
 
     // Someone's manual Backup is sitting on the retry name. Nothing refuses
-    // that — it is R8's own premise.
+    // that.
     let mut squatter = backup_value(squatted, UID, Some("Running"), None);
     squatter["metadata"]
         .as_object_mut()
@@ -6936,18 +6565,14 @@ async fn a_foreign_object_at_a_later_attempt_does_not_erase_a_succeeded_one() {
     assert!(posts(&bodies.lock().expect("readable")).is_empty());
 }
 
-/// **M-2.** Every schedule-created kind is counted, not just `Scheduled`.
+/// Every schedule-created kind is counted, not just `Scheduled`.
 ///
-/// # What the reviewer's mutant walked through
-///
-/// `participates_in_concurrency`'s trigger-kind clause was guarded only at its
-/// `Manual` boundary: `a_manual_run_of_this_schedule_is_neither_counted_nor_blocked`
-/// proves `Manual` is OUT, and nothing proved `CatchUp` and `Retry` are IN.
-/// Narrowing the clause to `Scheduled | Retry` survived the whole suite — and
-/// with that mutation live, a running catch-up does not block the next
-/// scheduled slot (two concurrent runs of one schedule, which is precisely what
-/// `Forbid` promises not to do), never appears in `status.activeRuns`, and is
-/// classified `ForeignBackup` by `create_run`'s own 409 adoption.
+/// `a_manual_run_of_this_schedule_is_neither_counted_nor_blocked` proves
+/// `Manual` is OUT; this proves `CatchUp` and `Retry` are IN. With the clause
+/// narrowed to `Scheduled | Retry`, a running catch-up would not block the
+/// next scheduled slot (two concurrent runs under `Forbid`), would never
+/// appear in `status.activeRuns`, and would be classified `ForeignBackup` by
+/// `create_run`'s own 409 adoption.
 #[tokio::test]
 async fn every_schedule_created_kind_blocks_a_later_slot_under_forbid() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -6955,9 +6580,8 @@ async fn every_schedule_created_kind_blocks_a_later_slot_under_forbid() {
     let earlier = due_name(utc(2026, 9, 10, 12, 0));
 
     for (label, kind, attempt) in [("a catch-up", "CatchUp", 0), ("a retry", "Retry", 1)] {
-        // A nonterminal run of THIS schedule, of a kind that is not
-        // `Scheduled`. A retry is named `…-r1`, and its name is not what makes
-        // it count — its trigger kind is.
+        // A nonterminal run of THIS schedule, of a kind that is not `Scheduled`. A
+        // retry is named `…-r1`, but its trigger kind is what makes it count.
         let running = if attempt == 0 {
             earlier.clone()
         } else {
@@ -7024,19 +6648,14 @@ async fn every_schedule_created_kind_blocks_a_later_slot_under_forbid() {
 /// A reservation naming a slot the calendar does not have is **stale status**,
 /// not work to resume.
 ///
-/// # Why the composed-name check cannot catch this on its own
+/// `reserved_slot` re-derives `name(schedule, slot, attempt)`, but the name
+/// carries the slot string VERBATIM, so a non-calendar slot re-composes and
+/// passes. `identity::run_identity` asks the calendar of `spec.slot`: a slot
+/// IS a UTC instant, half of the run's name and half of its archive prefix,
+/// and an instant that never occurs is a prefix no schedule can mint.
 ///
-/// `reserved_slot` re-derives `name(schedule, slot, attempt)` and compares it
-/// with the recorded name — but the name carries the slot string VERBATIM, so a
-/// non-calendar slot re-composes exactly and passes. The calendar is a separate
-/// question, and `identity::run_identity` now asks it of `spec.slot`: a slot IS
-/// a UTC instant, half of the run's name and half of its archive prefix, so an
-/// object named after an instant that never occurs takes a prefix no schedule
-/// can ever mint and no later run can collide with to reveal the mistake.
-///
-/// Resuming such a reservation would create a `Backup` only for the Backup
-/// controller to refuse it terminally. The scheduler clears it instead — and
-/// the schedule still fires its real due slot, which is what an operator needs.
+/// Resuming it would create a `Backup` the Backup controller refuses
+/// terminally. The scheduler clears it, and still fires its real due slot.
 #[tokio::test]
 async fn a_reservation_naming_an_impossible_slot_is_cleared_rather_than_resumed() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -7088,9 +6707,8 @@ async fn a_reservation_naming_an_impossible_slot_is_cleared_rather_than_resumed(
             .await
             .unwrap_or_else(|e| panic!("{bad}: stale status is not an error: {e}"));
 
-        // NOTHING WAS ASKED ABOUT THE IMPOSSIBLE NAME. No route answers it and
-        // the double panics on a request it has no route for, so this is a
-        // property the table can see rather than an assertion about a result.
+        // NOTHING WAS ASKED ABOUT THE IMPOSSIBLE NAME: no route answers it and the
+        // double panics on an unrouted request.
         for seen in calls.lock().expect("readable").iter() {
             assert!(
                 !seen.uri.contains(bad),
@@ -7114,13 +6732,10 @@ async fn a_reservation_naming_an_impossible_slot_is_cleared_rather_than_resumed(
     }
 }
 
-/// **L-1.** The reservation's `Ready` message names the schedule's ACTUAL
-/// concurrency policy.
-///
-/// `admit` is the uniform path for both policies, so the hard-coded `Forbid`
-/// this replaces made an `Allow` schedule publish a condition naming the wrong
-/// one. The final write replaces it moments later — but a watcher,
-/// `kubectl get -w` or the console reads what is on the object at the time.
+/// The reservation's `Ready` message names the schedule's ACTUAL concurrency
+/// policy. `admit` is the one path for both policies, and although the final
+/// write replaces the message moments later, a watcher (`kubectl get -w`, the
+/// console) reads what is on the object at the time.
 #[tokio::test]
 async fn the_reservation_message_names_the_policy_that_admitted_the_slot() {
     let now = utc(2026, 9, 10, 12, 1);
@@ -7170,20 +6785,13 @@ async fn the_reservation_message_names_the_policy_that_admitted_the_slot() {
 }
 
 /// **THE DESTINATION-BACKED `Backup` ARGV IS ONE `logweir backup run` ACCEPTS,
-/// AND THE HANDSHAKE IT CARRIES IS ENFORCED AT BOTH ENDS** — erratum **E20**,
-/// applied to D2 §3.5's store contract.
-///
-/// # Why this is end-to-end and not a literal compared against a literal
+/// AND THE STORE-CONTRACT HANDSHAKE IT CARRIES IS ENFORCED AT BOTH ENDS.**
 ///
 /// `weirkeeper::destination::STORE_CONTRACT_VERSION_ARG` and
 /// `logweir::backup::store_contract::VERSION_ARG` are two declarations of one
 /// string, in two crates that deliberately do not depend on each other (the
-/// `logweir` binary ships without a Kubernetes client). Every assertion that
-/// compared them would compare two literals in the same repository — which is
-/// exactly how E20 shipped a `Backup` argv the CLI refused and three green
-/// reviews missed it. An argv a controller emits is an interface with another
-/// binary, and it is tested only when it is handed to that binary's real
-/// parser.
+/// `logweir` binary ships without a Kubernetes client). Comparing the two
+/// literals proves nothing; the argv is handed to the real parser.
 ///
 /// KILLS: renaming either constant on one side; and dropping the version check
 /// in `store_contract::admit`, which the negative arm below catches by handing
@@ -7257,12 +6865,11 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
             weirkeeper::destination::STORE_CONTRACT_VERSION,
         )
         .env("LOGWEIR_ARCHIVE_CREDENTIALS", "static")
-        // THE REST OF THE CONTRACT, because the runner now builds its stores
-        // BEFORE it dials (see
-        // `the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`):
-        // a store that cannot be built is a local refusal and must not cost a
-        // socket to the production cluster to report. This row is about the
-        // ARGV, so it supplies what the kubelet would and lets the run reach
+        // THE REST OF THE CONTRACT: the runner builds its stores BEFORE it dials
+        // (see
+        // `the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`),
+        // so a store that cannot be built is a local refusal. This row is about
+        // the ARGV, so it supplies what the kubelet would and lets the run reach
         // the password boundary it asserts on.
         .env("LOGWEIR_EVIDENCE_CREDENTIALS", "archive")
         .env("AWS_ACCESS_KEY_ID", "test-access-key-id")
@@ -7312,13 +6919,10 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
          improvising its store configuration is how an approved plan reaches a different bucket. \
          stderr: {stderr}"
     );
-    // AND FOR THE RIGHT REASON. Exit 3 alone is not enough here, and the
-    // rebase onto D3 W2 is what proved it: the runner now builds its stores
-    // BEFORE it dials, so a mutant that admits any version reaches the store
-    // builders — which refuse for want of `LOGWEIR_ARCHIVE_CREDENTIALS` and
-    // exit 3 as well. The code was identical and the mutant survived. The
-    // MESSAGE is what separates "the version was refused" from "something else
-    // downstream was".
+    // AND FOR THE RIGHT REASON. Exit 3 alone is not enough: a mutant that
+    // admits any version reaches the store builders, which refuse for want of
+    // `LOGWEIR_ARCHIVE_CREDENTIALS` and exit 3 as well. The MESSAGE separates
+    // "the version was refused" from "something else downstream was".
     assert!(
         stderr.contains("store contract version 2"),
         "…and the refusal names the VERSION it does not implement, not some later failure that \
@@ -7349,41 +6953,25 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
 }
 
 /// **THE ENVIRONMENT A DESTINATION-BACKED JOB CARRIES DRIVES THE REAL RUNNER
-/// PAST ITS STORE BUILDERS** — the independent review's **C1**, closed
-/// end-to-end.
+/// PAST ITS STORE BUILDERS.**
 ///
-/// # What was broken, and why every other row was green
+/// A backup writes the archive through `archiveWrite` and its signed receipt
+/// through `evidenceWrite`. The runner builds two stores, before the Kafka
+/// client, and refuses a run whose `LOGWEIR_EVIDENCE_CREDENTIALS` it does not
+/// recognise, including the empty string an unset variable produces. So the
+/// `$LOGWEIR_SOURCE_PASSWORD is unset` stop proves the stores were built.
 ///
-/// A backup writes two things: the archive, through `archiveWrite`, and its
-/// signed receipt, through `evidenceWrite` over Global Constraint 6's
-/// `logweir/` root. The runner builds two stores and refuses a run whose
-/// `LOGWEIR_EVIDENCE_CREDENTIALS` it does not recognise — including the empty
-/// string an unset variable produces. The controller never rendered that
-/// variable, so **every destination-backed run exited 3 at the store builder**,
-/// with the archive handles already open and nothing archived.
-///
-/// Its sibling row above drives the real binary too, and did not catch this:
-/// it asserts the run stops at `$LOGWEIR_SOURCE_PASSWORD is unset`, which
-/// happened *before* any store was built. So the runner now builds its stores
-/// in front of the Kafka client — a purely local act, and under the contract a
-/// refusal point, which this file's own rule ("every guard that can refuse
-/// locally, before a client exists") already required — and that same assertion
-/// becomes proof the stores were built.
-///
-/// # This row renders the Job and runs the binary on ITS env
-///
-/// Not on a hand-written list. `runner_job_spec_from_inputs` produces the
-/// literals a kubelet would set, and the two `secretKeyRef` names are the ones
-/// it would project — supplied here as values, since there is no kubelet. A
-/// variable this crate forgets to render is therefore a variable the real
-/// parser and the real store builders never see, which is the whole shape of
-/// erratum **E20**.
+/// The Job is rendered and the binary run on ITS env, not a hand-written list:
+/// `runner_job_spec_from_inputs` produces the literals a kubelet would set,
+/// and the two `secretKeyRef` names it would project are supplied here as
+/// values. A variable this crate forgets to render is one the real parser and
+/// store builders never see.
 ///
 /// KILLS: dropping `evidence_job_env` from the rendered Job (the negative arm
 /// below IS that mutant, planted by removing the variable from the env this row
 /// passes); and moving the store construction back behind the Kafka client,
-/// which makes the positive arm stop proving anything — caught by the
-/// `refusal-reason` assertion on the negative arm, which would then never fire.
+/// which makes the positive arm stop proving anything, caught by the
+/// `refusal-reason` assertion on the negative arm.
 #[test]
 fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders() {
     let dir = scratch_dir("d2w10-store-contract-e2e");
@@ -7454,27 +7042,25 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
         for (name, value) in env {
             command.env(name, value);
         }
-        // THE TWO VALUES A KUBELET WOULD PROJECT from the grant's Secret. The
-        // controller writes them as `secretKeyRef`s; there is no kubelet here,
-        // so the row supplies them — and `CredentialSource::StaticFromEnv`
-        // reads exactly these two NAMED variables and nothing else, which is
-        // the property that makes a stray `AWS_PROFILE` in the image harmless.
+        // THE TWO VALUES A KUBELET WOULD PROJECT from the grant's Secret, supplied
+        // here as values. `CredentialSource::StaticFromEnv` reads exactly these two
+        // NAMED variables and nothing else, which makes a stray `AWS_PROFILE` in
+        // the image harmless.
         command
             .env("AWS_ACCESS_KEY_ID", "test-access-key-id")
             .env("AWS_SECRET_ACCESS_KEY", "test-secret-access-key");
-        // AND THE BINDING A BOUND CREDENTIAL SECRET WOULD PROJECT (PROD-01.3
-        // security follow-up): the controller renders the EXPECTED binding as
-        // a literal and the Secret's `logweir-binding` as an optional
-        // `secretKeyRef`; a Secret the console created for this connection
-        // carries exactly the expected value, so the row supplies it.
+        // AND THE BINDING A BOUND CREDENTIAL SECRET WOULD PROJECT: the controller
+        // renders the EXPECTED binding as a literal and the Secret's
+        // `logweir-binding` as an optional `secretKeyRef`; a Secret the console
+        // created for this connection carries exactly the expected value.
         if let Some((_, expected)) = env
             .iter()
             .find(|(n, _)| n == "LOGWEIR_SOURCE_CREDENTIAL_BINDING_EXPECTED")
         {
             command.env("LOGWEIR_SOURCE_CREDENTIAL_BINDING", expected);
         }
-        // FX-20: the same for the DESTINATION's Secret — its `logweir-binding`
-        // carries the destination's binding when the console created it.
+        // The same for the DESTINATION's Secret: its `logweir-binding` carries the
+        // destination's binding when the console created it.
         if let Some((_, expected)) = env
             .iter()
             .find(|(n, _)| n == "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED")
@@ -7517,8 +7103,8 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
 
     // ---- NEGATIVE: the defect itself, replanted ------------------------
     //
-    // The same argv and the same env MINUS the one variable. This is the state
-    // of the world before the fix, and it must be loud.
+    // The same argv and the same env MINUS the one variable, which must be
+    // loud.
     let without: Vec<(String, String)> = rendered
         .iter()
         .filter(|(n, _)| n != "LOGWEIR_EVIDENCE_CREDENTIALS")
@@ -7537,12 +7123,12 @@ fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders
          reason off the pod log. stdout: {stdout}"
     );
 
-    // ---- FX-20: the destination Secret bound to ANOTHER destination -----
+    // ---- the destination Secret bound to ANOTHER destination -----
     //
     // The complete rendered env, but the archive Secret's `logweir-binding`
     // names another destination: the real runner refuses with
     // `CredentialBindingMismatch` before it builds a store (the positive arm
-    // above is the control: same env, bound Secret, past the stores).
+    // above is the control).
     let foreign = logweir_core::credential_binding::destination_binding(
         "e0000000-0000-4000-8000-0000000000ff",
         &logweir_core::engine::StorageUrl::S3 {
@@ -7650,12 +7236,10 @@ fn destination_backed_job_env() -> Vec<(String, String)> {
         .env_literal
 }
 
-// ---------------------------------------------------------------------------
-// SCHEDULE-FIRES-SLOT-BEFORE-CREATION (D1 / PLAT-04.2, decided 2026-09-22)
-// ---------------------------------------------------------------------------
+// A schedule never fires a slot that came due before it was created
 
-/// The lab's own shape: `30 2 * * *` in `Europe/Berlin` is 00:30:00Z in
-/// September (CEST), and lab-refresh-8's schedule was created at 00:53:11Z.
+/// `30 2 * * *` in `Europe/Berlin` is 00:30:00Z in September (CEST); the
+/// schedule below is created at 00:53:11Z.
 const BERLIN_NIGHTLY: &str = "30 2 * * *";
 
 /// [`schedule`] with a time zone and a `metadata.creationTimestamp`.
@@ -7680,13 +7264,11 @@ fn at(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTime<Utc> {
         .expect("the fixture instant exists")
 }
 
-/// A schedule created at 00:53:11Z does NOT fire its 00:30:00Z slot, even though
-/// that slot is 23 minutes old and well inside the one-hour starting deadline.
-///
-/// THE LAB MEASUREMENT, REPLAYED (lab-refresh-8 `lr8merged-20260923t0052z`).
-/// Before the bound, `decide` said `Due` and the reconcile POSTed
-/// `logweir-backup-nightly-20260923-003000`. Removing the `bound_by_creation`
-/// call from `reconcile_schedule_with_archive_at` makes the POST count 1.
+/// A schedule created at 00:53:11Z does NOT fire its 00:30:00Z slot, even
+/// though that slot is 23 minutes old and well inside the one-hour starting
+/// deadline. Without the `bound_by_creation` call in
+/// `reconcile_schedule_with_archive_at`, the reconcile POSTs
+/// `logweir-backup-nightly-20260923-003000`.
 #[tokio::test]
 async fn a_schedule_created_after_its_slot_came_due_does_not_fire_that_slot() {
     let created = at(2026, 9, 23, 0, 53, 11);
@@ -7848,9 +7430,9 @@ fn the_creation_bound_is_strict_and_covers_every_slot_bearing_decision() {
     );
 }
 
-/// A slot missed AFTER creation keeps D1 §4.7 exactly: row 17 inside the
-/// deadline, row 18 (`None`) counted as missed past it, row 21 (`Latest`) one
-/// catch-up past it. The creation bound changes none of them.
+/// A slot missed AFTER creation keeps the missed-slot rules exactly: fired
+/// inside the deadline, counted as missed past it under `None`, one catch-up
+/// past it under `Latest`. The creation bound changes none of them.
 #[test]
 fn a_slot_missed_after_creation_still_follows_d1() {
     // Created the day before; the controller wakes at various points after the
@@ -7940,12 +7522,10 @@ fn quiet_routes(name: &str) -> Vec<Route> {
 }
 
 /// A schedule created MID-DAY, whose morning slot is past its starting
-/// deadline, neither fires that slot nor records it as missed — at reconcile
-/// level (review LOW-3). Before the bound this was `SlotMissed`, a
-/// `lastMissedSlot`, a `missedSlots.count` of 1 and a `lastSlot` of `Missed`,
-/// all for a slot the schedule did not exist for. MUTANT: let
-/// `bound_by_creation` pass `Missed` through, and every assertion below on the
-/// missed-slot fields fails.
+/// deadline, neither fires that slot nor records it as missed (no
+/// `SlotMissed`, `lastMissedSlot`, `missedSlots.count` or `lastSlot` of
+/// `Missed` for a slot the schedule did not exist for). MUTANT: let
+/// `bound_by_creation` pass `Missed` through.
 #[tokio::test]
 async fn a_schedule_created_mid_day_does_not_record_its_morning_slot_as_missed() {
     let schedule = created_schedule(
@@ -7997,10 +7577,10 @@ async fn a_schedule_created_mid_day_does_not_record_its_morning_slot_as_missed()
     );
 }
 
-/// THE UPGRADE CASE (review LOW-1). An older controller, which had no creation
-/// bound, fired the pre-creation slot: `status.lastFireTime` records it. This
-/// controller still neither fires nor retries it, but its message says an
-/// earlier controller fired it instead of "never fired".
+/// THE UPGRADE CASE. An older controller, which had no creation bound, fired
+/// the pre-creation slot: `status.lastFireTime` records it. This controller
+/// still neither fires nor retries it, but its message says an earlier
+/// controller fired it instead of "never fired".
 #[tokio::test]
 async fn a_pre_creation_slot_an_older_controller_fired_is_not_called_never_fired() {
     let mut schedule = created_schedule(
@@ -8067,12 +7647,10 @@ async fn a_pre_creation_slot_an_older_controller_fired_is_not_called_never_fired
     );
 }
 
-/// **FX-2's class sweep: `BackupSchedule.spec.activeDeadlineSeconds`**,
-/// documented as "the Job deadline copied into every created `Backup`'s
-/// `spec.deadlineSeconds`". The only reconcile row that read the created
-/// spec's deadline used an ABSENT field and so the 3600 default; a set value
-/// must be the one the run carries (and, through `Backup.spec.deadlineSeconds`,
-/// its Job's `activeDeadlineSeconds`).
+/// **`BackupSchedule.spec.activeDeadlineSeconds` is the deadline each created
+/// `Backup` carries** (and, through `Backup.spec.deadlineSeconds`, its Job's
+/// `activeDeadlineSeconds`). A set value, since the 3600 default would hide a
+/// reconcile that ignored the field.
 ///
 /// MUTANT: `deadline_seconds: SCHEDULED_DEADLINE_SECONDS` in
 /// `run_policy_spec`, ignoring the field.
@@ -8107,10 +7685,10 @@ async fn a_schedules_run_deadline_is_the_deadline_its_backup_carries() {
     );
 }
 
-/// **PROD-04.1.** A schedule's `consumerGroups` is part of the run policy it
-/// copies into every run: the runs carry it, their recorded digest is their
-/// own, and a schedule that selects none (absent or empty) digests as it did
-/// before the field existed.
+/// A schedule's `consumerGroups` is part of the run policy it copies into
+/// every run: the runs carry it, their recorded digest is their own, and a
+/// schedule that selects none (absent or empty) digests as it did before the
+/// field existed.
 #[test]
 fn a_schedules_consumer_groups_reach_every_run_and_an_absent_selection_digests_as_before() {
     use weirkeeper::controllers::backup_schedule::{run_policy_digest, run_policy_spec};
@@ -8135,13 +7713,12 @@ fn a_schedules_consumer_groups_reach_every_run_and_an_absent_selection_digests_a
     );
 }
 
-/// **FX-33 — a `BackupSchedule` naming more topics than one backup may is
-/// refused AS A POLICY**, not slot by slot: `decide` answers
-/// `InvalidRunPolicy` naming `spec.topics` and the maximum, so the schedule is
-/// `Ready=False` and fires no run whose receipt nothing could read. A schedule
-/// naming exactly the maximum is due as before.
-///
-/// This is what a schedule stored BEFORE the upgrade does at its next pass.
+/// **A `BackupSchedule` naming more topics than one backup may is refused AS
+/// A POLICY**, not slot by slot: `decide` answers `InvalidRunPolicy` naming
+/// `spec.topics` and the maximum, so the schedule is `Ready=False` and fires
+/// no run whose receipt nothing could read. A schedule naming exactly the
+/// maximum is due as before. This is what a schedule stored under an older,
+/// higher bound does at its next pass.
 ///
 /// KILLS: the count refusal removed from the run policy (the slot is `Due`).
 #[test]
