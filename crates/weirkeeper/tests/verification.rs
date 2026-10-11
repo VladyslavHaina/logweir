@@ -1,28 +1,17 @@
-//! **Task 24.** `verify_evidence`, the two green-badge rules, the second
-//! status patch, and the Phase B demo's own shape.
+//! `verify_evidence`, the two green-badge rules, and the second status patch.
 //!
-//! # No socket, no cluster, no daemon
+//! No socket, no cluster: `Store::read_only_from_url(` over a **filesystem**
+//! URL (a scratch directory under `std::env::temp_dir()` holding the
+//! checked-in `e2e/fixtures/signed/` documents) and one `kube` test over a
+//! `tower` closure. `crates/logweir/tests/no_network_in_unit_tests.rs` carries
+//! this file's allow-list entry. `tempfile` is not a dependency:
+//! `std::env::temp_dir()` plus a removal guard is the same test.
 //!
-//! `Store::read_only_from_url(` over a **filesystem** URL — a scratch
-//! directory under `std::env::temp_dir()` holding the checked-in
-//! `e2e/fixtures/signed/` documents — and one `kube` test over a `tower`
-//! closure. STANDING RULE 18 requires the allow-list entry that names this
-//! file and that reason, and
-//! `crates/logweir/tests/no_network_in_unit_tests.rs` carries it.
-//!
-//! `tempfile` IS NOT ADDED TO THIS CRATE'S MANIFEST — Global Constraint 38
-//! closes the workspace graph, and `std::env::temp_dir()` plus a removal guard
-//! is the same test. The same decision `tests/retention.rs` records.
-//!
-//! # The fixtures are REAL signed documents, and that is the point
-//!
-//! `e2e/fixtures/signed/scorecard.json` + `.sig` and `backup-receipt.json` +
-//! `.sig` were signed by the stage-1 throwaway key whose PUBLIC half is
-//! `e2e/fixtures/signed/public.pem` (plan erratum **E10(e)**). A verification
-//! test over a hand-built sidecar would assert the shape of a struct; these
-//! assert that `logweir-verify` said yes about bytes a `logweir` binary
-//! actually signed, which is what makes `an_empty_signing_key_list_names_itself`'s
-//! second arm the proof that Phase B's exit criterion is REACHABLE.
+//! The fixtures are REAL signed documents: `e2e/fixtures/signed/scorecard.json`
+//! + `.sig` and `backup-receipt.json` + `.sig` were signed by a throwaway key
+//! whose PUBLIC half is `e2e/fixtures/signed/public.pem`. A test over a
+//! hand-built sidecar would assert the shape of a struct; these assert that
+//! `logweir-verify` said yes about bytes a `logweir` binary actually signed.
 //!
 //! **No private key is read by anything here.** `signing.pem` sits beside
 //! those files and this test never opens it.
@@ -65,15 +54,10 @@ use weirkeeper::verification::{
     UNVERIFIED,
 };
 
-// ===========================================================================
 // Paths, fixtures and a scratch evidence tree
-// ===========================================================================
-/// The `metadata.resourceVersion` every fixture object carries — the thing a
-/// watch always delivers and a hand-built fixture used not to.
-///
-/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
-/// this value, so a fixture without one is not an object this controller could
-/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+/// The `metadata.resourceVersion` every fixture object carries, as a watch
+/// always delivers: every `/status` write is a merge PATCH preconditioned on
+/// this value.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
 fn read(rel: &str) -> String {
@@ -120,9 +104,7 @@ impl EvidenceTree {
     }
 
     /// `read_only_from_url` AND NEVER `from_url`: the archive is never under
-    /// `logweir/` in production, and the write-path constructor's
-    /// `LOGWEIR_ROOT` guard exists to refuse exactly that (Global Constraint
-    /// 6). The read-only handle physically cannot put.
+    /// `logweir/` in production, and the read-only handle physically cannot put.
     fn handle(&self) -> Store {
         Store::read_only_from_url(&StorageUrl::Filesystem {
             path: self.root.clone(),
@@ -153,15 +135,10 @@ impl Drop for EvidenceTree {
 }
 
 /// The trust a ROSTER-ONLY cluster resolves to, given `keys` as its
-/// `signingKeys`.
-///
-/// PLAT-19.1 moved `verify_evidence` from a `TrustRosterSpec` to the
-/// namespace's resolved trust, and `weirkeeper::trust::synthesize_legacy` is
-/// exactly what the controller reaches for a cluster with no `TrustPolicy`
-/// (D3 §7.5). Every assertion below was written against the roster walk and now
-/// runs through the resolution layer unchanged — which is what makes them
-/// evidence for §7.5's byte-for-byte claim rather than tests that merely still
-/// compile.
+/// `signingKeys`: `weirkeeper::trust::synthesize_legacy`, what the controller
+/// reaches for a namespace with no `TrustPolicy`. Every assertion below runs
+/// through the resolution layer, which makes them evidence that the legacy
+/// path verifies byte for byte as the roster walk did.
 fn roster(keys: Vec<KeyEntry>) -> ResolvedTrust {
     weirkeeper::trust::synthesize_legacy(&roster_spec(keys))
 }
@@ -185,8 +162,8 @@ fn entry(key_id: &str, spki_pem: &str) -> KeyEntry {
     }
 }
 
-/// One signing key entry with a `notAfter` — the ONLY roster shape PLAT-19.1
-/// changes the behaviour of, and the one [`entry`] cannot express.
+/// One signing key entry with a `notAfter`, the roster shape whose verdict
+/// the trust lifecycle changes, and the one [`entry`] cannot express.
 fn entry_expiring(key_id: &str, spki_pem: &str, not_after: &str) -> KeyEntry {
     KeyEntry {
         not_after: Some(
@@ -218,21 +195,19 @@ fn verification(result: &str) -> Value {
     })
 }
 
-// ===========================================================================
-// Interface I21 — the two badge rules, ONE PER KIND
-// ===========================================================================
+// The two badge rules, ONE PER KIND
 
-/// **Interface I21, the `Backup` half.** Green ⟺ `Valid` AND `exitCode == 0`.
+/// **The `Backup` badge.** Green ⟺ `Valid` AND `exitCode == 0`.
 ///
 /// KILLS THREE MUTANTS:
-///  * "render a green `Backup` badge on `Valid` + `exitCode: 2`" — fixture 2;
+///  * "render a green `Backup` badge on `Valid` + `exitCode: 2`" (fixture 2);
 ///  * "return `Invalid` for an absent signing-key list" reaching the badge as
-///    `Invalid` on an exit-0 run — fixture 3 vs fixture 4 carry DIFFERENT
-///    reasons, so collapsing the two is a failure here;
+///    `Invalid` on an exit-0 run: fixtures 3 and 4 carry DIFFERENT reasons, so
+///    collapsing the two fails here;
 ///  * **"use one badge rule for both kinds by reading `status.outcome` on a
-///    `Backup`"** — fixture 1's status carries `exitCode` and no `outcome`,
-///    because `BackupStatus` HAS none (spec §3.2, C95), so a rule that read
-///    `outcome` would render the green case ungreen.
+///    `Backup`"**: fixture 1's status carries `exitCode` and no `outcome`,
+///    because `BackupStatus` HAS none, so a rule that read `outcome` would
+///    render the green case ungreen.
 #[test]
 fn a_backup_is_green_only_on_valid_and_exit_code_zero() {
     let green = renderable(verification("Valid"), json!({ "exitCode": 0 }));
@@ -277,10 +252,9 @@ fn a_backup_is_green_only_on_valid_and_exit_code_zero() {
         );
     }
 
-    // AND NONE OF THE FOUR EVER RENDERS THE WORD `pass`
-    // (`design-operator.md:135-139`). `pass` is a `Restore`'s own outcome
-    // value and means something; borrowing it for a badge would make the happy
-    // word appear over a document nobody checked.
+    // AND NONE OF THE FOUR EVER RENDERS THE WORD `pass`. `pass` is a
+    // `Restore`'s own outcome value; borrowed for a badge it would make the
+    // happy word appear over a document nobody checked.
     for status in [
         renderable(verification("Valid"), json!({ "exitCode": 0 })),
         renderable(verification("Valid"), json!({ "exitCode": 2 })),
@@ -308,13 +282,11 @@ fn a_backup_is_green_only_on_valid_and_exit_code_zero() {
     );
 }
 
-/// **Interface I21, the `Restore` half.** Green ⟺ `Valid` AND
-/// `outcome == pass`.
+/// **The `Restore` badge.** Green ⟺ `Valid` AND `outcome == pass`.
 ///
-/// KILLS: "render a green `Restore` badge on `Valid` + `fail-integrity`" —
-/// a `fail-integrity` run produced a perfectly valid SIGNED document saying
-/// the restore did not reconcile, which is the most valuable thing the tool
-/// reports and the last thing a green badge should sit on.
+/// KILLS: "render a green `Restore` badge on `Valid` + `fail-integrity`": a
+/// `fail-integrity` run produced a valid SIGNED document saying the restore
+/// did not reconcile, the last thing a green badge should sit on.
 #[test]
 fn a_restore_is_green_only_on_valid_and_a_pass_outcome() {
     let green = renderable(verification("Valid"), json!({ "outcome": "pass" }));
@@ -364,16 +336,13 @@ fn a_restore_is_green_only_on_valid_and_a_pass_outcome() {
     );
 }
 
-// ===========================================================================
-// `verify_evidence` — the four steps
-// ===========================================================================
+// `verify_evidence`: the four steps
 
 /// The roster must carry KEY MATERIAL, and both arms of that are here.
 ///
 /// KILLS: "resolve signing keys from `signingKeyIds` with no key material"
-/// (second arm — nothing would ever be `Valid` and Phase B's exit criterion
-/// would be unreachable) and "return `Invalid` for an absent signing-key list"
-/// (first arm).
+/// (second arm: nothing would ever be `Valid`) and "return `Invalid` for an
+/// absent signing-key list" (first arm).
 #[test]
 fn an_empty_signing_key_list_names_itself() {
     let payload = read("e2e/fixtures/signed/scorecard.json");
@@ -502,13 +471,10 @@ fn a_storage_failure_is_not_invalid() {
         r.detail
     );
 
-    // SECOND ARM — AN UNREADABLE OBJECT, which is `StoreError::Io` and NOT
-    // `NotFound`. This arm is the one that kills "map a StoreError other than
-    // NotFound to Invalid", and it took two attempts to write: a key naming a
-    // DIRECTORY comes back from `LocalFileSystem` as `NotFound` too, so the
-    // first version of this arm exercised the same branch as the first and the
-    // mutant SURVIVED at 14 passed / 0 failed. A file whose mode is `000` is
-    // the shape that actually reaches the other branch.
+    // SECOND ARM: AN UNREADABLE OBJECT, which is `StoreError::Io` and NOT
+    // `NotFound`. A key naming a DIRECTORY comes back from `LocalFileSystem` as
+    // `NotFound` too, so a file whose mode is `000` is the shape that reaches
+    // the other branch.
     let tree = EvidenceTree::new("unreadable", payload.as_bytes(), sidecar.as_bytes());
     let store = tree.handle();
     tree.chmod(PAYLOAD_KEY, 0o000);
@@ -536,9 +502,9 @@ fn a_storage_failure_is_not_invalid() {
          things for an operator to act on; got {detail}"
     );
 
-    // THIRD ARM — no credential at all. The documented switch (spec §9): an
-    // adopter who declines to give the control plane bucket access runs with
-    // verification display OFF and uses the printed CLI command.
+    // THIRD ARM: no credential at all. An adopter who declines to give the
+    // control plane bucket access runs with verification display OFF and uses
+    // the printed CLI command.
     let r = verify_evidence(
         None,
         &roster(keys),
@@ -610,9 +576,9 @@ fn not_attempted_is_a_verdict_distinct_from_invalid() {
     assert_eq!(VerificationVerdict::Invalid.as_str(), "Invalid");
     assert_eq!(VerificationVerdict::NotAttempted.as_str(), "NotAttempted");
 
-    // THE TIMESTAMP RULE (plan erratum E11(d)): a verdict whose SUBSTANCE has
-    // not changed keeps the instant it was reached at, so the second status
-    // patch is a no-op that is never sent and the reconciler stays quiet.
+    // THE TIMESTAMP RULE: a verdict whose SUBSTANCE has not changed keeps the
+    // instant it was reached at, so the second status patch is a no-op that is
+    // never sent.
     let r = VerificationResult {
         result: VerificationVerdict::Valid,
         matched_key_id: Some(FIXTURE_KEY_ID.to_string()),
@@ -646,9 +612,7 @@ fn not_attempted_is_a_verdict_distinct_from_invalid() {
     );
 }
 
-// ===========================================================================
 // The second patch, over `mock_client`
-// ===========================================================================
 
 const NS: &str = "logweir-t24";
 const NAME: &str = "logweir-backup-nightly-20261109-031700";
@@ -660,8 +624,7 @@ const RECEIPT_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000001";
 
 /// The inputs digest the fixture Backup's `status.execution` records and the
-/// fixture Job carries: a Backup whose Job this controller created from frozen
-/// inputs (PLAT-06.1). A label, not a real digest — the Job-observing path
+/// fixture Job carries. A label, not a real digest: the Job-observing path
 /// compares the two strings.
 const FIXTURE_INPUTS_SHA256: &str =
     "sha256:f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
@@ -711,11 +674,10 @@ fn job_body() -> String {
 }
 
 fn pod_list() -> String {
-    // THE OWNER REFERENCE IS NOT DECORATION (D-SEAMS **S6**, defect
-    // `SEC-PODLOG`). The reconciler reads a pod's exit code and stdout only
-    // when the pod's CONTROLLER owner reference is the Job it is holding, so a
-    // fixture without one is a fixture whose pod is never read and whose every
-    // verification assertion would be vacuous.
+    // THE OWNER REFERENCE IS NOT DECORATION. The reconciler reads a pod's exit
+    // code and stdout only when the pod's CONTROLLER owner reference is the Job
+    // it is holding; without one every verification assertion would be
+    // vacuous.
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
@@ -752,12 +714,10 @@ fn observed_archive(
             },
             covered: Some((1_760_000_000_000, 1_760_000_060_000)),
             receipt_sha256: Some(RECEIPT_DIGEST.to_string()),
-            // D3 W2 (PLAT-14.1, defect STATUS-RECORDS): two additive fields
-            // on the observation. `None` here on purpose — this fixture is
-            // about the VERIFICATION path, and a `Valid` verdict with nothing
-            // observed must write neither `status.records` nor
-            // `status.capture`. `tests/backup_controller.rs` owns the rows
-            // where they ARE observed.
+            // `None` on purpose: this fixture is about the VERIFICATION path, and a
+            // `Valid` verdict with nothing observed must write neither
+            // `status.records` nor `status.capture`. `tests/backup_controller.rs`
+            // owns the rows where they ARE observed.
             records: None,
             capture: None,
             empty_capture: false,
@@ -774,11 +734,9 @@ struct Seen {
 }
 
 /// A `kube::Client` whose Nth `PATCH …/status` answers `status_codes[N]`.
-///
-/// WRITTEN HERE RATHER THAN TAKEN FROM `weirkeeper::testing`, because this
-/// test's whole property is about the SECOND patch: a static route table
-/// answers both of them the same way, so "the second one 500s and the first
-/// one's values survive" is unassertable through it.
+/// Written here rather than taken from `weirkeeper::testing`: a static route
+/// table answers both patches the same way, so "the second one 500s and the
+/// first one's values survive" is unassertable through it.
 fn sequenced_client(status_codes: Vec<u16>) -> (kube::Client, Arc<Mutex<Vec<Seen>>>) {
     sequenced_client_with_pods(status_codes, pod_list())
 }
@@ -790,11 +748,8 @@ fn no_pods() -> String {
     r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string()
 }
 
-/// [`sequenced_client`] with the `/pods` answer as a parameter.
-///
-/// THE POD LIST IS THE VARIABLE IN THE CRASHED-PATH ROW and a constant
-/// everywhere else, so it is a parameter of this function and not a second
-/// copy of the double.
+/// [`sequenced_client`] with the `/pods` answer as a parameter: the variable
+/// in the crashed-path row.
 fn sequenced_client_with_pods(
     status_codes: Vec<u16>,
     pods: String,
@@ -867,15 +822,10 @@ fn valid_oracle(r: EvidenceRef) -> futures::future::BoxFuture<'static, Verificat
 
 /// The same answer, reached at `at`.
 ///
-/// SEPARATE BECAUSE THE INSTANT IS THE PROPERTY IN ONE TEST AND NOISE IN THE
-/// REST. `verify_evidence` reads its own clock (the brief's signature carries
-/// no `now`), so a re-verification on a later pass genuinely produces a later
-/// `verifiedAt` — and the rule that keeps the controller quiet is that a
-/// verdict whose SUBSTANCE has not changed keeps the instant it was reached
-/// at. A steady-object test whose oracle returns a CONSTANT instant cannot see
-/// that rule at all: measured, the mutant "verifiedAt is always now" left
-/// `a_verified_object_reconciles_without_a_patch` green at 13 passed / 1
-/// failed, killed only by `not_attempted_is_a_verdict_distinct_from_invalid`.
+/// `verify_evidence` reads its own clock, so a re-verification on a later pass
+/// produces a later `verifiedAt`, and the rule that keeps the controller quiet
+/// is that a verdict whose SUBSTANCE has not changed keeps the instant it was
+/// reached at. An oracle returning a CONSTANT instant cannot see that rule.
 fn valid_oracle_at(
     r: EvidenceRef,
     at: chrono::DateTime<Utc>,
@@ -1028,14 +978,10 @@ async fn verification_is_a_second_patch_after_the_status_patch() {
 
 /// **A VERIFIED OBJECT RECONCILES AGAIN AND SENDS NOTHING.**
 ///
-/// Plan erratum **E11(d)**, and this one was MEASURED ON A LIVE CLUSTER during
-/// the Phase B run that otherwise passed: **20 `Backup` reconciles and 20
-/// `Restore` reconciles per second**, each a real write. A JSON merge patch
-/// REPLACES arrays, so the terminal patch's `conditions: [Complete,
-/// EvidenceRecorded]` DELETED the `Verified` condition the second patch had
-/// just added; the second patch re-added it; the write woke the reconciler;
-/// forever. Every verdict on every pass was correct, and the object never
-/// stopped being rewritten.
+/// A JSON merge patch REPLACES arrays, so a terminal patch whose `conditions`
+/// omitted `Verified` would delete the condition the second patch had just
+/// added; the second patch would re-add it, and the write would wake the
+/// reconciler, forever.
 ///
 /// KILLS: removing `verification::carry_verified` from the terminal patch
 /// builder. The count goes from 0 to 2 and the `Verified` condition is absent
@@ -1086,12 +1032,9 @@ async fn a_verified_object_reconciles_without_a_patch() {
     settled["status"] = status;
     let settled: Backup = serde_json::from_value(settled).expect("the settled object is a Backup");
 
-    // …AND THE ORACLE'S OWN CLOCK MOVES TOO. `verify_evidence` reads the clock
-    // itself (the signature carries no `now`), so a second verification really
-    // does reach a later instant — and the rule that keeps this quiet is that
-    // an UNCHANGED verdict keeps the instant it was reached at. An oracle
-    // returning a constant would make this test blind to that rule; measured,
-    // the mutant "verifiedAt is always now" survived here until this line moved.
+    // …AND THE ORACLE'S OWN CLOCK MOVES TOO: an UNCHANGED verdict must keep the
+    // instant it was reached at, and an oracle returning a constant would make
+    // this test blind to that rule.
     let later =
         |r: EvidenceRef| valid_oracle_at(r, Utc.with_ymd_and_hms(2026, 9, 11, 18, 45, 0).unwrap());
     let (client, seen) = sequenced_client(vec![200, 200]);
@@ -1119,20 +1062,15 @@ async fn a_verified_object_reconciles_without_a_patch() {
         patches.join("\n  ")
     );
 
-    // …AND BOTH CLOCKS MOVED BETWEEN THE TWO PASSES — the reconcile's
-    // (03:20 -> 04:00) and the verification's own (03:20 -> 18:45). This is
-    // not passing because nothing changed: it is passing because `verifiedAt`
-    // and every `lastTransitionTime` are WHEN THE FACT CHANGED, not when it
-    // was last re-confirmed.
+    // …AND BOTH CLOCKS MOVED BETWEEN THE TWO PASSES: the reconcile's (03:20 ->
+    // 04:00) and the verification's own (03:20 -> 18:45). `verifiedAt` and
+    // every `lastTransitionTime` are WHEN THE FACT CHANGED, not when it was last
+    // re-confirmed.
 
-    // AND THE BUILDER ITSELF, REACHED DIRECTLY — Task 24 fix round 1.
-    //
-    // The zero above is now defended by TWO independent guards: `carry_verified`
-    // in this builder, and `reconcile_backup`'s already-terminal return (step
-    // 2b), which stops a settled object from reaching the builder at all. The
-    // second one masks the first, so the count alone can no longer tell whether
-    // `carry_verified` is still there. This arm asks the builder directly, and
-    // it is the arm that dies when `carry_verified` is removed.
+    // AND THE BUILDER ITSELF, REACHED DIRECTLY. The zero above is defended by
+    // TWO guards: `carry_verified` in this builder, and `reconcile_backup`'s
+    // already-terminal return, which masks the first. This arm asks the builder
+    // directly, and it is the arm that dies when `carry_verified` is removed.
     let rebuilt = weirkeeper::controllers::backup::finished_status_patch(
         &settled,
         0,
@@ -1155,13 +1093,9 @@ async fn a_verified_object_reconciles_without_a_patch() {
 
 /// The settled object of [`a_verified_object_reconciles_without_a_patch`]'s
 /// first pass: terminal, `exitCode: 0`, `Valid`, and carrying `Complete`,
-/// `EvidenceRecorded` and `Verified`.
-///
-/// Built by RUNNING the first pass and applying its two patches the way the
-/// API server would (`conditions::apply_merge_patch`), never by writing a
-/// status literal: a hand-written fixture would pin what this test's author
-/// believes a verified `Backup` looks like, and the defect below is about what
-/// the controller does to the one it actually produced.
+/// `EvidenceRecorded` and `Verified`. Built by RUNNING the first pass and
+/// applying its two patches as the API server would
+/// (`conditions::apply_merge_patch`), never from a status literal.
 async fn settled_verified_backup() -> Backup {
     let (client, seen) = sequenced_client(vec![200, 200]);
     reconcile_backup(
@@ -1209,9 +1143,9 @@ fn condition_types(status: &Value) -> Vec<String> {
 
 /// **A TERMINAL, VERIFIED `Backup` WHOSE RUNNER POD IS GONE IS LEFT ALONE.**
 ///
-/// Task 24 review, Milestone 5 — **proven on a live cluster**, not reasoned
-/// about. A `Backup` at `phase: Succeeded`, `exitCode: 0`, a signed receipt in
-/// the bucket and `verification.result: Valid` was turned into
+/// The Job survives its pod by seven days (`TTL_SECONDS_AFTER_FINISHED`), and
+/// in that window pod GC, an eviction or a node restart removes the pod.
+/// Re-deriving an exit code there would turn
 ///
 /// | field | before | after |
 /// |---|---|---|
@@ -1219,18 +1153,12 @@ fn condition_types(status: &Value) -> Vec<String> {
 /// | `status.exitReason` | *(absent)* | `operational` |
 /// | `status.conditions` | `[Complete, EvidenceRecorded, Verified]` | `[Failed/NoExitCode]` |
 ///
-/// by nothing more than `kubectl delete pod` on its already-finished runner.
-/// The Job survives its pod by seven days (`TTL_SECONDS_AFTER_FINISHED`), and
-/// in that window pod GC, an eviction or a node restart does the same thing;
-/// the `Restore` twin needs only a controller restart. The exit code was not
-/// re-read — it was RE-DERIVED from a pod that no longer exists, and a run that
-/// exited 0 and verified `Valid` was relabelled a failure that contradicts its
-/// own `exitCode`.
+/// a run that exited 0 and verified `Valid` into a failure that contradicts
+/// its own `exitCode`.
 ///
-/// KILLS: removing `reconcile_backup`'s already-terminal guard (step 2b,
-/// before `find_pod`). Without it this pass finds no pod, takes the crashed
-/// branch and PATCHES — the count goes from 0, and the patch's `conditions`
-/// array is what replaces the three above.
+/// KILLS: removing `reconcile_backup`'s already-terminal guard (before
+/// `find_pod`). Without it this pass finds no pod, takes the crashed branch
+/// and PATCHES.
 #[tokio::test]
 async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
     let settled = settled_verified_backup().await;
@@ -1247,8 +1175,7 @@ async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
         "…and it is terminal and green"
     );
 
-    // THE POD IS GONE AND THE JOB IS NOT. This is the cluster state the review
-    // produced with one `kubectl delete pod`.
+    // THE POD IS GONE AND THE JOB IS NOT.
     let (client, seen) = sequenced_client_with_pods(vec![200, 200], no_pods());
     reconcile_backup(
         &settled,
@@ -1290,10 +1217,9 @@ async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
         log.iter().map(|s| (&s.method, &s.path)).collect::<Vec<_>>()
     );
 
-    // BELT AND BRACES, AND IT IS A SEPARATE CLAIM. Even reached directly —
-    // by a future edit that moves the guard, or by a caller this file does not
-    // know about — the crashed-path builder no longer OWNS the whole condition
-    // array: it carries the `Verified` condition it did not write.
+    // A SEPARATE CLAIM: even reached directly, the crashed-path builder does
+    // not OWN the whole condition array: it carries the `Verified` condition it
+    // did not write.
     let crashed = weirkeeper::controllers::backup::crashed_status_patch(
         &settled,
         "NoExitCode",
@@ -1309,21 +1235,12 @@ async fn a_terminal_verified_backup_whose_pod_is_gone_is_not_re_patched() {
     );
 }
 
-/// **`status.backupId` SURVIVES THE VERIFICATION PASS.** Task 28a, defect 1,
-/// third row.
-///
-/// The finished patch writes the id (`controllers::backup::finished_status_patch`);
-/// the verification patch — the SECOND write of the same pass — follows it
-/// milliseconds later. A merge patch leaves a key it does not mention alone,
-/// so the id must still be on the object the API server holds afterwards, and
-/// this asserts that against the object BUILT BY RUNNING BOTH PATCHES rather
-/// than against a hand-written status literal.
-///
-/// It matters because the restore wizard reads `status.backupId` off a
-/// `Succeeded` `Backup`, which is by definition an object that has been
-/// through both patches. A second patch that nulled the field would put the
-/// page back in the error box Task 28 found it in, with every unit test on the
-/// first patch still green.
+/// **`status.backupId` SURVIVES THE VERIFICATION PASS.** The finished patch
+/// writes the id; the verification patch, the SECOND write of the same pass,
+/// follows. A merge patch leaves a key it does not mention alone, so the id
+/// must still be on the object built by RUNNING BOTH PATCHES. The restore
+/// wizard reads `status.backupId` off a `Succeeded` `Backup`, which has always
+/// been through both.
 ///
 /// KILLS: dropping the `backupId` line from `finished_status_patch`; a second
 /// patch that replaced the whole `status` object instead of merging into it.
@@ -1421,9 +1338,8 @@ fn shipped_deployment() -> Value {
 /// The shipped Deployment projects `logweir-evidence-ro` with
 /// `optional: true`, so a cluster without that Secret STARTS.
 ///
-/// KILLS: "make the evidence Secret mandatory" — the same mutant, checked on
-/// the manifest rather than on the code, because that is where it would
-/// actually be made.
+/// KILLS: "make the evidence Secret mandatory", checked on the manifest,
+/// where that mutant would actually be made.
 #[test]
 fn the_deployment_marks_the_evidence_secret_optional() {
     let doc = shipped_deployment();
@@ -1453,14 +1369,10 @@ fn the_deployment_marks_the_evidence_secret_optional() {
              down for want of a display feature. Got {e}"
         );
     }
-    // AND NO LAPTOP-SPECIFIC ENDPOINT IN THE SHIPPED DOCUMENT (Global
-    // Constraint 37): it installs unedited.
-    //
-    // CHECKED OVER THE PARSED DOCUMENT, NOT THE FILE TEXT. The file's comment
-    // block explains WHERE those literals live and therefore names the host —
-    // which is the sentence an operator needs and not a value the API server
-    // ever sees. A text grep here would forbid the explanation along with the
-    // thing it explains.
+    // AND NO LAPTOP-SPECIFIC ENDPOINT IN THE SHIPPED DOCUMENT: it installs
+    // unedited. Checked over the PARSED document: the file's comment block
+    // names the host to explain where those literals live, and a text grep
+    // would forbid the explanation along with the thing it explains.
     let shipped = serde_yaml::to_string(&doc).expect("the parsed Deployment re-serialises");
     assert!(
         !shipped.contains("host.docker.internal"),
@@ -1469,30 +1381,18 @@ fn the_deployment_marks_the_evidence_secret_optional() {
     );
 }
 
-/// **THE SHIPPED CONTROLLER CONTAINER PINS A LOG LEVEL** — Task 24 defect 3,
-/// and the row review finding 2 says was missing.
+/// **THE SHIPPED CONTROLLER CONTAINER PINS A LOG LEVEL.** `main.rs` builds its
+/// subscriber with `EnvFilter::from_default_env()`, and with `RUST_LOG` unset
+/// that filter enables NOTHING, including every `error!` on the startup path:
+/// `kubectl logs deploy/weirkeeper` would return zero bytes.
 ///
-/// # The measurement
-///
-/// During Task 24's Phase B run, `kubectl -n logweir-system logs
-/// deploy/weirkeeper` returned **exit 0 and ZERO BYTES** from a controller
-/// that had just reconciled six kinds, created two Jobs and verified two
-/// signed documents. `main.rs` builds its subscriber with
-/// `EnvFilter::from_default_env()`, and with `RUST_LOG` unset that filter
-/// enables NOTHING — including every `error!` on the startup path. A control
-/// plane whose diagnostics are invisible by default is one nobody can debug,
-/// and it is how E19(e)'s wrong ERROR line survived undetected: nothing was
-/// printing it.
-///
-/// PARSED, NEVER GREPPED. The file's comment block explains why the value is
-/// what it is and names `RUST_LOG` four times in prose; a text search would
-/// pass on the explanation alone, which is the defect
-/// `the_demo_addresses_minio_over_host_docker_internal` was faulted for.
+/// PARSED, NEVER GREPPED: the file's comment block names `RUST_LOG` in prose,
+/// and a text search would pass on the explanation alone.
 ///
 /// KILLS: deleting the `RUST_LOG` env entry from the controller container;
-/// setting it to a level below `info`, at which the per-object lines — the
+/// setting it to a level below `info`, at which the per-object lines (the
 /// exit code, the two evidence keys, the verification verdict and its matched
-/// key id — are lost.
+/// key id) are lost.
 #[test]
 fn the_deployment_sets_a_log_level() {
     let doc = shipped_deployment();
@@ -1531,19 +1431,17 @@ fn the_deployment_sets_a_log_level() {
     );
 }
 
-// ===========================================================================
-// PLAT-19.1 — the trust lifecycle wired into evidence verification (D3 §7.4)
+// The trust lifecycle wired into evidence verification.
 //
-// The rows D3 §13 names for PLAT-19.1, minus the ones W1 already proved. W1's
-// `crates/logweir-core/tests/trust_core.rs` covers §7.4's table over the PURE
-// `decide`, `may_sign_new`, `claimed_signing_time` and the `unknown` rule, and
-// `crates/weirkeeper/tests/trust_policy_controller.rs` covers resolution order,
-// the conflict refusal, `boundNamespaces` and the legacy synthesis's SHAPE.
-// What is below is what only this layer can answer: the same table reached
-// THROUGH a real signature over real signed fixtures, the re-trust pass in both
-// directions, the usage-separation refusal at the point a key is offered to a
-// verifier, and the legacy verdicts compared against the pre-change ones.
-// ===========================================================================
+// `crates/logweir-core/tests/trust_core.rs` covers the lifecycle table over
+// the PURE `decide`, `may_sign_new`, `claimed_signing_time` and the
+// `unknown` rule, and `crates/weirkeeper/tests/trust_policy_controller.rs`
+// covers resolution order, the conflict refusal, `boundNamespaces` and the
+// legacy synthesis's SHAPE. Below is what only this layer can answer: the
+// same table reached THROUGH a real signature over real signed fixtures,
+// the re-trust pass in both directions, the usage-separation refusal at the
+// point a key is offered to a verifier, and the legacy verdicts compared
+// against the pre-change ones.
 
 /// A `TrustPolicy` naming `namespaces`, carrying `keys`.
 fn policy(name: &str, namespaces: &[&str], keys: Vec<SpecKey>) -> TrustPolicy {
@@ -1641,8 +1539,8 @@ impl Signed {
 }
 
 /// The claim the scorecard fixture makes about when it was signed:
-/// `phases[last].at`. Asserted against the live reader rather than pasted, so
-/// this constant cannot drift away from the file.
+/// `phases[last].at`, asserted against the live reader so this constant
+/// cannot drift away from the file.
 const SCORECARD_SIGNED_AT: &str = "2026-09-03T09:00:00Z";
 
 /// The `detail` the pre-change roster walk produced for a `signingKeys` entry
@@ -1650,12 +1548,10 @@ const SCORECARD_SIGNED_AT: &str = "2026-09-03T09:00:00Z";
 /// the entry's declared `keyId`.
 const WRONG_KEY_DETAIL: &str = "wrong: key error: not a P-256 or Ed25519 public key: unknown/unsupported algorithm OID: 1.3.101.112";
 
-/// The fixture's claimed signing time is what `logweir_core` reads out of it.
-///
-/// A FIXTURE ASSERTION, and the reason every row below can be written against
-/// one instant. If the checked-in scorecard ever changes its last phase, this
-/// is the test that says so — rather than eight window comparisons quietly
-/// moving to the other side of a boundary.
+/// The fixture's claimed signing time is what `logweir_core` reads out of it:
+/// every row below is written against this one instant, so a change to the
+/// checked-in scorecard's last phase fails here rather than quietly moving
+/// eight window comparisons across a boundary.
 #[test]
 fn the_fixture_scorecards_claimed_signing_time_is_its_last_phase() {
     let json: Value = serde_json::from_str(&read("e2e/fixtures/signed/scorecard.json"))
@@ -1667,13 +1563,12 @@ fn the_fixture_scorecards_claimed_signing_time_is_its_last_phase() {
     );
 }
 
-/// **Overlap (§13 row 1, §7.6 step 1).** Two `Active` `EvidenceSigning` keys
-/// both verify, and the one that MATCHED is the one reported.
+/// **Overlap.** Two `Active` `EvidenceSigning` keys both verify, and the one
+/// that MATCHED is the one reported.
 ///
-/// KILLS: "stop at the first key in the list" — the outsider is declared first,
+/// KILLS: "stop at the first key in the list": the outsider is declared first,
 /// so a verifier that gave up after one would report `Invalid` for a document
-/// the second key genuinely signed, and a rotation window would be a trust gap
-/// instead of an overlap.
+/// the second key signed, and a rotation window would be a trust gap.
 #[test]
 fn a_rotation_overlap_verifies_under_either_active_key() {
     let signed = Signed::scorecard("overlap");
@@ -1711,21 +1606,17 @@ fn a_rotation_overlap_verifies_under_either_active_key() {
     }
 }
 
-/// **Retirement and revocation (§13 rows 2 and 3), through a real signature.**
-///
-/// D3 §7.4's table, every row this layer can reach, asserted on the STATUS
-/// BLOCK a console reads rather than on the pure verdict — because the pure
-/// verdict is W1's and what was missing was the projection.
+/// **Retirement and revocation, through a real signature**, asserted on the
+/// STATUS BLOCK a console reads rather than on the pure verdict.
 ///
 /// KILLS, one per row:
-///  * "treat `Retired` like `Active`" — row 2 would render `Current`;
-///  * "compare the claim against `notAfter` and ignore `retiredAt`" — row 3
+///  * "treat `Retired` like `Active`": row 2 would render `Current`;
+///  * "compare the claim against `notAfter` and ignore `retiredAt`": row 3
 ///    would render `Historical` for a document signed AFTER the retirement,
-///    which is the whole point of `accepted_through()` taking the earliest
-///    bound;
-///  * "treat every revocation as a retirement" — row 6 would render
+///    which is why `accepted_through()` takes the earliest bound;
+///  * "treat every revocation as a retirement": row 6 would render
 ///    `Historical` for a compromised key;
-///  * "read the DOCUMENT's claim on the compromise rows" — row 6's claim is
+///  * "read the DOCUMENT's claim on the compromise rows": row 6's claim is
 ///    inside every window, so a verifier that consulted it would render green
 ///    over the one key nobody should trust.
 #[test]
@@ -1822,9 +1713,9 @@ fn retirement_verifies_historically_and_compromise_never_does() {
         );
         assert_eq!(block["trust"]["basis"], json!(want_basis), "{label}");
         assert_eq!(block["trust"]["keyState"], json!(want_key_state), "{label}");
-        // A SIGNATURE ALWAYS HAPPENED. Every row above verified cryptographically
-        // — the difference between them is entirely the key's lifecycle — so
-        // none of them may be `Invalid` and all of them name the key.
+        // A SIGNATURE ALWAYS HAPPENED: every row above verified cryptographically,
+        // the difference is the key's lifecycle, so none may be `Invalid` and all
+        // name the key.
         assert_ne!(block["result"], json!("Invalid"), "{label}");
         assert_eq!(block["matchedKeyId"], json!(FIXTURE_KEY_ID), "{label}");
         if want_result == "Untrusted" {
@@ -1845,16 +1736,16 @@ fn retirement_verifies_historically_and_compromise_never_does() {
 /// **The compromise row that DOES read an observation**, and the two rules
 /// that make it safe.
 ///
-/// D3 §7.4: a compromise-revoked key with a controller-written observation from
-/// before the revocation renders `RecordedBeforeRevocation` — `Untrusted`, with
-/// the instant shown, never green. The observation is
+/// A compromise-revoked key with a controller-written observation from before
+/// the revocation renders `RecordedBeforeRevocation`: `Untrusted`, with the
+/// instant shown, never green. The observation is
 /// `status.evidence.verification.verifiedAt` from an EARLIER reconcile and
 /// nothing else.
 ///
-/// KILLS: "pass the document's own claimed signing time as the observation" —
-/// the fixture's claim (2026-09-03) is before the revocation, so that mutation
-/// would render `RecordedBeforeRevocation` for an archive this installation
-/// never saw, which is exactly the attacker-controlled input §7.4 refuses.
+/// KILLS: "pass the document's own claimed signing time as the observation":
+/// the fixture's claim (2026-09-03) is before the revocation, so that would
+/// render `RecordedBeforeRevocation` for an archive this installation never
+/// saw, an attacker-controlled input.
 #[test]
 fn only_a_controller_written_observation_reaches_recorded_before_revocation() {
     let signed = Signed::scorecard("compromise-observed");
@@ -1867,7 +1758,7 @@ fn only_a_controller_written_observation_reaches_recorded_before_revocation() {
     let trust = resolved(&policy("org-default", &[], vec![key]));
     let result = signed.verify(&trust);
 
-    // NO HISTORY — an imported archive. Fails closed (D3 §16).
+    // NO HISTORY: an imported archive. Fails closed.
     let fresh = result.to_status_value(None);
     assert_eq!(fresh["result"], json!("Untrusted"));
     assert_eq!(fresh["trust"]["basis"], json!("None"));
@@ -1913,19 +1804,17 @@ fn only_a_controller_written_observation_reaches_recorded_before_revocation() {
     );
 }
 
-/// **Usage separation (§7.3).** An evidence key is never accepted for a
-/// console confirmation and a confirmation key is never accepted for evidence.
+/// **Usage separation.** An evidence key is never accepted for a console
+/// confirmation and a confirmation key is never accepted for evidence.
 ///
-/// THE FILTER IS AT THE POINT THE KEY IS OFFERED. The material below is the
-/// same public key in all three rows — only the declared `usages` differ — so
-/// nothing but the usage decides, and a verifier that ignored it would return
-/// `Valid` for every one of them.
+/// THE FILTER IS AT THE POINT THE KEY IS OFFERED: the material is the same
+/// public key in all three rows and only the declared `usages` differ, so a
+/// verifier that ignored them would return `Valid` for every one.
 ///
 /// KILLS: "offer every resolved key to `verify_detached`" (rows 2 and 3 would
 /// verify) and "check the usage only inside `decide`" (the verdict would be
-/// `Untrusted/KeyUsageMismatch` instead of `NotAttempted`, which is a different
-/// and wronger sentence: no key was offered, so no verdict about a signer was
-/// reached).
+/// `Untrusted/KeyUsageMismatch` instead of `NotAttempted`, a wrong sentence:
+/// no key was offered, so no verdict about a signer was reached).
 #[test]
 fn an_evidence_key_is_never_accepted_for_a_confirmation_and_the_reverse() {
     let signed = Signed::scorecard("usage-separation");
@@ -1956,27 +1845,22 @@ fn an_evidence_key_is_never_accepted_for_a_confirmation_and_the_reverse() {
     }
 }
 
-/// **Upgrade from the default roster (§13 row 8, §7.5).** The synthesised
-/// `legacy-roster-v1` reaches the same verdict, the same `matchedKeyId` and the
-/// same badge as the pre-change roster walk did.
+/// **Upgrade from the default roster.** The synthesised `legacy-roster-v1`
+/// reaches the same verdict, the same `matchedKeyId` and the same badge as the
+/// pre-change roster walk did.
 ///
-/// # What "byte-for-byte" means here, exactly
-///
-/// D3 §7.4's status block is **additive**: `signedAt` and `trust` are new keys
-/// beside the old ones. So the claim under test is that every field that
-/// existed before this change carries the same value it carried before, and
-/// that the badge is identical — not that the block has the same key set,
-/// which §7.4 explicitly changes.
-///
-/// The expected values below are the pre-change output, written out: `result`,
-/// `matchedKeyId`, `payloadType` and `detail` as `verify_evidence` produced them
-/// against a `TrustRosterSpec`.
+/// The status block is **additive** (`signedAt` and `trust` are new keys), so
+/// "byte for byte" means every field that existed before carries the same
+/// value it carried before, and the badge is identical. The expected values
+/// are the pre-change output, written out: `result`, `matchedKeyId`,
+/// `payloadType` and `detail` as `verify_evidence` produced them against a
+/// `TrustRosterSpec`.
 ///
 /// KILLS: "synthesise `notBefore` as now" (the `Valid` row becomes
 /// `Untrusted/SignedOutsideValidity`, because the fixture signed in the past);
 /// "synthesise `state: Retired`" (the basis becomes `Historical`); "report the
 /// policy name for the legacy source" (`trustSource` stops being
-/// `legacy-roster-v1` and L10 has nothing to assert).
+/// `legacy-roster-v1`).
 #[test]
 fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
     let signed = Signed::scorecard("legacy-equivalence");
@@ -2037,15 +1921,11 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
                 "detail": WRONG_KEY_DETAIL,
             }),
         ),
-        // ---- THE ONE ROSTER THIS CHANGE ALTERS (review finding F3) --------
+        // ---- THE ONE ROSTER THIS CHANGE ALTERS ----------------------------
         //
-        // Every row above uses an entry with NO `notAfter`, which synthesises
-        // to 9999 — so none of them can see the tightening the report records:
-        // `verify_evidence` never consulted a signing key's `notAfter`, and
-        // under §7.4 it now does. A roster that SETS one is therefore both the
-        // only roster whose verdict moves and the only roster the byte-for-byte
-        // fixture could not observe, which is the definition of an uncompared
-        // behaviour change.
+        // Every row above uses an entry with NO `notAfter`, which synthesises to
+        // 9999. A signing key's `notAfter` is now consulted, so a roster that SETS
+        // one is the only roster whose verdict moves, and it is compared here.
         //
         // Signed BEFORE the expiry: still a pass, on a `Historical` basis.
         (
@@ -2095,7 +1975,7 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
                 );
             }
         }
-        // …AND THE SOURCE NAMES ITSELF, which is what D3 §15's L10 reads.
+        // …AND THE SOURCE NAMES ITSELF.
         if block["result"] == json!("Valid") {
             assert_eq!(
                 block["trust"]["policy"]["name"],
@@ -2107,9 +1987,8 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
                 "{label}: the synthesised policy is not an object, so it has no uid to name"
             );
         }
-        // THE BADGE, AND NOT ONLY THE BLOCK. The doc comment above claims the
-        // badge is identical; until finding F3 no badge was computed here at
-        // all, so the claim rested on nothing.
+        // THE BADGE, AND NOT ONLY THE BLOCK: the doc comment claims the badge is
+        // identical.
         let badge = backup_badge(&renderable(block.clone(), json!({"exitCode": 0})));
         assert_eq!(
             badge.green,
@@ -2192,9 +2071,9 @@ fn a_contested_namespace_verifies_nothing() {
         "{detail}"
     );
 
-    // AND A CLUSTER WITH NEITHER A POLICY NOR A ROSTER READS EXACTLY WHAT IT
-    // READS TODAY — `controllers::roster_spec` flattened a 404 into an empty
-    // roster, and that sentence must not change under an unmigrated install.
+    // AND A CLUSTER WITH NEITHER A POLICY NOR A ROSTER READS EXACTLY WHAT AN
+    // EMPTY ROSTER READS: a 404 roster is an empty one, and that sentence must
+    // not change under an unmigrated install.
     let r = weirkeeper::verification::verify_resolved(
         Some(&store),
         &Resolution::Unconfigured,
@@ -2207,14 +2086,12 @@ fn a_contested_namespace_verifies_nothing() {
     assert_eq!(r.detail.as_deref(), Some(NO_SIGNING_KEYS_DETAIL));
 }
 
-/// The observation refines the BASIS and never the RESULT.
+/// The observation refines the BASIS and never the RESULT, over the whole
+/// lifecycle table: `verify_evidence` decides `result` with no observation,
+/// and adding one later may only move the two compromise rows between each
+/// other.
 ///
-/// The claim [`VerificationResult::signed`]'s doc comment makes, asserted over
-/// the whole §7.4 table rather than trusted: `verify_evidence` decides `result`
-/// with no observation, and adding one later may only move the two compromise
-/// rows between each other.
-///
-/// KILLS: "read the observation on the retirement rows too" — a stored
+/// KILLS: "read the observation on the retirement rows too": a stored
 /// `verifiedAt` inside a retired key's window would then flip a
 /// `SignedOutsideValidity` into a pass.
 #[test]
@@ -2271,9 +2148,7 @@ fn the_observation_only_moves_the_basis() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The re-trust pass — D3 §7.4, "re-evaluation without re-fetching"
-// ---------------------------------------------------------------------------
+// The re-trust pass: re-evaluation without re-fetching
 
 /// A terminal `Backup` status carrying a `Valid` verdict reached at
 /// `verifiedAt`, signed at [`SCORECARD_SIGNED_AT`].
@@ -2299,18 +2174,17 @@ fn verified_status(verified_at: &str) -> Value {
 }
 
 /// **A key revoked AFTER an approval was granted.** The stored verdict is
-/// re-derived from the status alone — no storage read, no signature check — and
+/// re-derived from the status alone (no storage read, no signature check) and
 /// the object's own facts are untouched.
 ///
 /// KILLS, and each is a separate assertion below:
-///  * "re-fetch the document" — there is no `Store` in this test at all;
-///  * "rewrite `verifiedAt` with the new clock" — the next pass would then read
+///  * "re-fetch the document": there is no `Store` in this test at all;
+///  * "rewrite `verifiedAt` with the new clock": the next pass would then read
 ///    its own write as the observation and flip `RecordedBeforeRevocation` to
 ///    `Revoked` forever, which the last arm proves does not happen;
-///  * "patch the whole status" — `phase` and `exitCode` are asserted unchanged;
-///  * "leave the `Verified` condition alone" — a green condition beside an
-///    `Untrusted` result is the silent-revocation failure this task exists to
-///    prevent.
+///  * "patch the whole status": `phase` and `exitCode` are asserted unchanged;
+///  * "leave the `Verified` condition alone": a green condition beside an
+///    `Untrusted` result is a silent revocation.
 #[test]
 fn a_revocation_after_approval_downgrades_the_verdict_and_nothing_else() {
     let status = verified_status("2026-09-04T00:00:00Z");
@@ -2408,10 +2282,9 @@ fn a_revocation_after_approval_downgrades_the_verdict_and_nothing_else() {
          terminal condition; got {types:?}"
     );
 
-    // …AND A SECOND PASS OVER THE PATCHED OBJECT IS A NO-OP, which is only true
-    // because `verifiedAt` did not move. The object it runs against is the one
-    // the patch produced: the new block AND the new condition, because the
-    // comparison is over both (review finding F6).
+    // …AND A SECOND PASS OVER THE PATCHED OBJECT IS A NO-OP, true only because
+    // `verifiedAt` did not move. It runs against the object the patch produced,
+    // the new block AND the new condition, because the comparison is over both.
     let mut patched = status.clone();
     patched["evidence"]["verification"] = r.verification.clone();
     let patched_conditions: Vec<weirkeeper::crds::Condition> = existing
@@ -2435,9 +2308,7 @@ fn a_revocation_after_approval_downgrades_the_verdict_and_nothing_else() {
     );
 }
 
-/// **A key added after an `UntrustedSigner` verdict** — the other direction,
-/// which is D3 §15's L7 in miniature.
-///
+/// **A key added after an `UntrustedSigner` verdict**, the other direction.
 /// An imported archive verified under a key this installation did not carry;
 /// an administrator adds that key as `Retired/EvidenceSigning`; the point
 /// becomes trusted again on a HISTORICAL basis, with a recorded reason.
@@ -2592,15 +2463,13 @@ fn the_retrust_pass_declines_what_was_never_a_trust_verdict() {
     .is_none());
 }
 
-/// A policy edit that does not touch this object's signer writes NOTHING.
-///
-/// Plan erratum **E11(d)**: the comparison is over the rendered block, not over
-/// a "did the generation change" flag. One `kubectl apply` on a 64-key policy
-/// must not wake every terminal object in the cluster.
+/// A policy edit that does not touch this object's signer writes NOTHING: the
+/// comparison is over the rendered block, not over a "did the generation
+/// change" flag, so one `kubectl apply` on a 64-key policy does not wake every
+/// terminal object in the cluster.
 ///
 /// KILLS: "return `Some` whenever the resolved generation differs from the
-/// stored one" — the generation below moves from 4 to 9 and the verdict does
-/// not, so that mutation would send a patch per object per edit.
+/// stored one": the generation moves from 4 to 9 and the verdict does not.
 #[test]
 fn a_policy_edit_that_changes_no_verdict_sends_nothing() {
     let status = verified_status("2026-09-04T00:00:00Z");
@@ -2630,8 +2499,8 @@ fn a_policy_edit_that_changes_no_verdict_sends_nothing() {
     assert_eq!(r.verification["trust"]["policy"]["generation"], json!(9));
     assert_eq!(r.verification["verifiedAt"], json!("2026-09-04T00:00:00Z"));
 
-    // AND RE-RUNNING AGAINST THE SAME POLICY IS A TRUE NO-OP — over the block
-    // AND the condition the first pass wrote (review finding F6).
+    // AND RE-RUNNING AGAINST THE SAME POLICY IS A TRUE NO-OP, over the block
+    // AND the condition the first pass wrote.
     let mut patched = status.clone();
     patched["evidence"]["verification"] = r.verification.clone();
     let patched_conditions = vec![r.verified.clone()];
@@ -2649,15 +2518,13 @@ fn a_policy_edit_that_changes_no_verdict_sends_nothing() {
     );
 }
 
-/// A trust downgrade does not move `verifiedAt` on the FRESH path either.
-///
-/// The same rule as the re-trust pass, enforced where the verdict is first
-/// projected: the stored instant is the observation, and a verdict that
-/// re-confirms the SAME SIGNATURE keeps it whatever the trust layer decides.
+/// A trust downgrade does not move `verifiedAt` on the FRESH path either: the
+/// stored instant is the observation, and a verdict that re-confirms the SAME
+/// SIGNATURE keeps it whatever the trust layer decides.
 ///
 /// KILLS: "compare `result` and `detail` when deciding whether `verifiedAt`
-/// moves" — the pre-PLAT-19.1 rule. Under it, the arm below refreshes the
-/// instant to 2026-09-12 and the compromise row's own observation is destroyed.
+/// moves". Under it, the arm below refreshes the instant to 2026-09-12 and the
+/// compromise row's own observation is destroyed.
 #[test]
 fn a_trust_downgrade_keeps_the_stored_observation() {
     let signed = Signed::scorecard("stable-observation");
@@ -2701,12 +2568,11 @@ fn a_trust_downgrade_keeps_the_stored_observation() {
     );
 }
 
-/// The catalog's six-word vocabulary (D3 §5.4) and this module's badge cannot
-/// disagree about the same key.
+/// The catalog's six-word vocabulary and this module's badge cannot disagree
+/// about the same key.
 ///
-/// KILLS: "map every `Untrusted` to `UntrustedSigner`" — the revocation rows
-/// would stop being distinguishable in the catalog view, which is the one place
-/// D3 §15's L8 reads them.
+/// KILLS: "map every `Untrusted` to `UntrustedSigner`": the revocation rows
+/// would stop being distinguishable in the catalog view.
 #[test]
 fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
     use logweir_core::trust::{TrustBasis, TrustKeyState, TrustResult, UntrustReason, Verdict};
@@ -2771,10 +2637,10 @@ fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
             want.starts_with("Verified"),
             "{result:?} / {verdict:?}: the badge rule and §5.4's vocabulary must not diverge"
         );
-        // …AND THE ROW SURVIVES THE FLATTENING (review finding F4). Three rows
-        // become `UntrustedSigner` and two become `Revoked`; §5.4's definitions
-        // are true of only one of each, so the remedy an operator is handed can
-        // only be right if the reason travels beside the word.
+        // …AND THE ROW SURVIVES THE FLATTENING. Three rows become
+        // `UntrustedSigner` and two become `Revoked`; the catalog's definitions are
+        // true of only one of each, so the remedy is right only if the reason
+        // travels beside the word.
         assert_eq!(
             catalog.reason,
             verdict.as_ref().and_then(|v| v.reason),
@@ -2783,9 +2649,9 @@ fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
         assert_eq!(catalog.basis, verdict.as_ref().map(|v| v.basis));
     }
 
-    // THE TWO LOSSY PAIRS, NAMED. A consumer that renders §5.4's own remedy
-    // sentence from `state` alone tells an operator to add a key that is
-    // already there, or that nothing was observed when something was.
+    // THE TWO LOSSY PAIRS, NAMED. A consumer that renders the remedy sentence
+    // from `state` alone tells an operator to add a key that is already there,
+    // or that nothing was observed when something was.
     let lossy = [
         (UntrustReason::UntrustedSigner, "UntrustedSigner"),
         (UntrustReason::KeyUsageMismatch, "UntrustedSigner"),
@@ -2815,7 +2681,7 @@ fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
 /// overwrites one the builder already owns.
 ///
 /// KILLS: "carry only the first type" (the second assertion), "carry a type the
-/// builder already wrote" (the third — the stored `Verified` would replace the
+/// builder already wrote" (the third: the stored `Verified` would replace the
 /// fresh verdict and a changed badge would never land).
 #[test]
 fn carry_conditions_carries_each_type_it_is_given() {
@@ -2877,10 +2743,10 @@ fn carry_conditions_carries_each_type_it_is_given() {
 
 /// An `Untrusted` verdict gets its OWN condition reason, and no badge.
 ///
-/// KILLS: "fold `Untrusted` into the `NotAttempted` arm of `valid_verification`"
-/// — the badge would be ungreen either way, so only the reason distinguishes
-/// "we did not check" from "we checked and will not accept the signer", and an
-/// operator routes on that reason.
+/// KILLS: "fold `Untrusted` into the `NotAttempted` arm of
+/// `valid_verification`": the badge is ungreen either way, so only the reason
+/// distinguishes "we did not check" from "we checked and will not accept the
+/// signer", and an operator routes on that reason.
 #[test]
 fn an_untrusted_verdict_is_not_a_verification_that_did_not_happen() {
     let untrusted = json!({
@@ -2926,24 +2792,20 @@ fn an_untrusted_verdict_is_not_a_verification_that_did_not_happen() {
     assert!(backup_badge(&renderable(old, json!({"exitCode": 0}))).green);
 }
 
-// ===========================================================================
-// Fix round 1 — the review's findings, each with the row that would have
-// caught it
-// ===========================================================================
+// Stored observations, condition repair, unreadable trust blocks and the
+// policy trigger
 
-/// **F5.** A stored `verifiedAt` is an observation only when a SIGNATURE
-/// produced it.
+/// A stored `verifiedAt` is an observation only when a SIGNATURE produced it.
 ///
-/// Every verdict carries a `verifiedAt`, including the ones that never read the
-/// document — a `NotAttempted` written because no credential was configured,
-/// because the object could not be fetched, or because two policies contest the
-/// namespace; an `Invalid` written because the digest did not match. D3 §7.4's
-/// compromise rule rests on "this installation recorded having SEEN this
+/// Every verdict carries a `verifiedAt`, including the ones that never read
+/// the document: a `NotAttempted` (no credential, an unfetchable object, two
+/// policies contesting the namespace) and an `Invalid` from a digest mismatch.
+/// The compromise rule rests on "this installation recorded having SEEN this
 /// document", and none of those did.
 ///
-/// KILLS: "accept any stored `verifiedAt`" — the pre-fix rule. Under it the
-/// first three rows below render `RecordedBeforeRevocation` and put a false
-/// provenance sentence in front of an operator about a compromised key.
+/// KILLS: "accept any stored `verifiedAt`": the first three rows below would
+/// render `RecordedBeforeRevocation`, a false provenance sentence about a
+/// compromised key.
 #[test]
 fn a_stored_instant_is_an_observation_only_if_a_signature_produced_it() {
     let signed = Signed::scorecard("observation-provenance");
@@ -2962,9 +2824,8 @@ fn a_stored_instant_is_an_observation_only_if_a_signature_produced_it() {
                "verifiedAt": early}),
         json!({"result": "Invalid", "payloadType": "p", "detail": "digest mismatch",
                "verifiedAt": early}),
-        // `Valid` with NO matched key is not a shape this controller writes —
-        // and it is the shape a hand-edited status could carry, so it is
-        // refused rather than trusted.
+        // `Valid` with NO matched key is not a shape this controller writes; a
+        // hand-edited status could carry it, so it is refused rather than trusted.
         json!({"result": "Valid", "payloadType": "p", "verifiedAt": early}),
         json!({"result": "Valid", "matchedKeyId": "", "payloadType": "p", "verifiedAt": early}),
     ];
@@ -3002,16 +2863,12 @@ fn a_stored_instant_is_an_observation_only_if_a_signature_produced_it() {
     );
 }
 
-/// **F6.** A `Verified` condition inconsistent with an already-correct
-/// verification block is repaired.
+/// A `Verified` condition inconsistent with an already-correct verification
+/// block is repaired: the comparison is over the rendered block AND the
+/// rendered condition, so a condition clobbered by another builder, or left by
+/// a partially applied patch, is not left in place.
 ///
-/// The header always claimed the comparison was over the rendered block AND the
-/// rendered condition; the code compared the block alone. A condition clobbered
-/// by another builder writing the array, or left behind by a partially applied
-/// patch, was therefore never repaired — `retrust` saw an unchanged block and
-/// sent nothing.
-///
-/// KILLS: `if &verification == stored { return None; }` (the pre-fix form).
+/// KILLS: `if &verification == stored { return None; }`.
 #[test]
 fn the_retrust_pass_repairs_a_condition_that_contradicts_its_own_block() {
     // The block is ALREADY what the policy says: an `Untrusted` verdict with
@@ -3083,16 +2940,14 @@ fn the_retrust_pass_repairs_a_condition_that_contradicts_its_own_block() {
     );
 }
 
-/// **F7.** A `trust` block this build cannot read is not green.
+/// A `trust` block this build cannot read is not green.
 ///
-/// Two states were folded together: "no `trust` key at all" (or `trust: null`,
-/// the same absence), which is an object written before PLAT-19.1 and is
-/// correctly green, and "a `trust` block with no readable `basis`", which is
-/// malformed. This module argues at length for
-/// reading the basis clause BECAUSE one-field badge rules rot; the arm that
-/// keeps the old rule must not swallow a shape the old rule never had.
+/// "No `trust` key at all" (or `trust: null`, the same absence) is an older
+/// object and correctly green; "a `trust` block with no readable `basis`" is
+/// malformed, and the arm that keeps the old rule must not swallow a shape the
+/// old rule never had.
 ///
-/// KILLS: `Some(TRUST_BASIS_CURRENT) | None => false` (the pre-fix form).
+/// KILLS: `Some(TRUST_BASIS_CURRENT) | None => false`.
 #[test]
 fn a_trust_block_this_build_cannot_read_is_not_green() {
     let base = |trust: Option<Value>| {
@@ -3113,11 +2968,10 @@ fn a_trust_block_this_build_cannot_read_is_not_green() {
         backup_badge(&base(None)).green,
         "an object that predates the trust block is not downgraded by its absence"
     );
-    // `trust: null` IS THAT SAME ABSENCE, not a malformed block (review LOW-1
-    // of `trust-basis-class`): the CRD field is nullable, a null field carries
-    // no block, and every typed reader — protection, the rehearsal join,
-    // `logweir-api` — already reads it as `None`. `ValidBasis::of_json`
-    // documents the decision.
+    // `trust: null` IS THAT SAME ABSENCE, not a malformed block: the CRD field
+    // is nullable, a null field carries no block, and every typed reader
+    // (protection, the rehearsal join, `logweir-api`) reads it as `None`.
+    // `ValidBasis::of_json` documents the decision.
     assert!(
         backup_badge(&base(Some(json!(null)))).green,
         "`trust: null` reads as no block, exactly as a typed reader sees it"
@@ -3148,13 +3002,12 @@ fn a_trust_block_this_build_cannot_read_is_not_green() {
         .contains("signed before that key was retired"));
 }
 
-/// **F2.** The re-trust trigger maps a policy event to the objects that policy
-/// could govern, out of the controller's OWN store — no LIST at all.
+/// The re-trust trigger maps a policy event to the objects that policy could
+/// govern, out of the controller's OWN store: no LIST at all.
 ///
 /// KILLS: "return every object whatever the policy names" (row 2 would enqueue
 /// the unbound object) and "return nothing for a `default: true` policy" (row 3
-/// would leave a revoked key green in every namespace no policy names, which is
-/// most of them).
+/// would leave a revoked key green in every namespace no policy names).
 #[test]
 fn a_policy_event_enqueues_the_objects_it_could_govern_and_no_others() {
     use weirkeeper::trust::may_govern;
@@ -3198,9 +3051,7 @@ fn a_policy_event_enqueues_the_objects_it_could_govern_and_no_others() {
     ))));
 }
 
-// ===========================================================================
-// Fix round 2 — the wiring itself (review findings G1 and G2)
-// ===========================================================================
+// The trigger's wiring
 
 /// A `Backup` in `namespace`, named `name`, with a `resourceVersion`.
 fn backup_in(namespace: &str, name: &str, resource_version: &str) -> Backup {
@@ -3226,20 +3077,16 @@ fn backup_in(namespace: &str, name: &str, resource_version: &str) -> Backup {
     .expect("the fixture is a Backup")
 }
 
-/// **G1.** An edit that NARROWS wakes the namespace it stopped governing.
+/// An edit that NARROWS wakes the namespace it stopped governing.
 ///
-/// # The fail-open this closes
+/// A `watches` mapper is handed only the NEW object, whose scope no longer
+/// covers `team-a` after `team-a` is removed from `spec.namespaces` (or
+/// `spec.default` is cleared), although that edit changed `team-a`'s
+/// resolution. A terminal `Restore` parks on `Action::await_change()`, so if
+/// nothing wakes it and the new fallback lacks the signing key, it keeps a
+/// green badge indefinitely.
 ///
-/// A `watches` mapper is handed only the NEW object. Removing `team-a` from
-/// `spec.namespaces` — or clearing `spec.default` — makes the new object's own
-/// scope false for `team-a` and would enqueue nothing there, although that edit
-/// is precisely what changed `team-a`'s resolution. A terminal `Backup` heals
-/// on its next requeue; a terminal `Restore` parks on `Action::await_change()`
-/// and **nothing** wakes it, so if the namespace's new fallback does not carry
-/// the signing key the correct verdict is `UntrustedSigner` and the object
-/// keeps a green badge indefinitely.
-///
-/// KILLS: "enqueue only what the new object names" — rows 2 and 4 below.
+/// KILLS: "enqueue only what the new object names" (rows 2 and 4 below).
 #[test]
 fn a_policy_edit_that_narrows_still_wakes_what_it_stopped_governing() {
     use weirkeeper::trust::{PolicyScope, PolicyScopeMemory};
@@ -3293,7 +3140,7 @@ fn a_policy_edit_that_narrows_still_wakes_what_it_stopped_governing() {
     );
 }
 
-/// **G2.** The mapper returns the objects in scope and no others.
+/// The mapper returns the objects in scope and no others.
 ///
 /// KILLS: "return the whole store whatever the scope" (the unbound object) and
 /// "return nothing for `Everything`" (the third arm).
@@ -3339,13 +3186,10 @@ fn the_trigger_maps_a_scope_to_the_objects_in_it() {
     );
 }
 
-/// **G2.** `apply_retrust` sends ONE preconditioned `/status` PATCH, and
-/// nothing when the verdict has not moved.
-///
-/// This is the only function that writes the re-trust verdict and the only
-/// place seam **S7**'s `metadata.resourceVersion` precondition is applied, and
-/// until this row it had no test at all: a refactor that dropped the
-/// precondition, or that wrote a run fact, would have passed the whole suite.
+/// `apply_retrust` sends ONE preconditioned `/status` PATCH, and nothing when
+/// the verdict has not moved. It is the only function that writes the
+/// re-trust verdict, and the only place its `metadata.resourceVersion`
+/// precondition is applied.
 ///
 /// KILLS: "send the patch without `metadata.resourceVersion`"; "patch the whole
 /// status"; "send a patch even when `retrust` returned `None`".
@@ -3499,21 +3343,17 @@ async fn apply_retrust_sends_one_preconditioned_status_patch_or_nothing() {
     assert!(sent.lock().expect("the recorder").is_empty());
 }
 
-/// **G3.** The roster is the FALLBACK, so a namespace a policy governs costs
-/// **no** API call at all.
+/// The roster is the FALLBACK, so a namespace a policy governs costs **no** API
+/// call at all.
 ///
-/// # Why this counts requests instead of asserting a verdict
+/// The optimisation is invisible in the verdict (resolving with or without the
+/// roster gives the same `Resolution` wherever a policy answers), so the row
+/// counts the request that does not happen. The re-trust pass runs on every
+/// reconcile of every verdict-carrying object, so a roster `GET` per object per
+/// requeue is the cost this row holds down.
 ///
-/// Because the optimisation is invisible in the verdict: resolving with the
-/// roster fetched and resolving without it produce the same `Resolution` for
-/// every namespace a policy answers — that is precisely why it is safe. The
-/// only observable is the request that does not happen, and the re-trust pass
-/// runs on every reconcile of every verdict-carrying object, so "one
-/// `GET trustrosters/default` per object per requeue" is the cost this row
-/// exists to hold down.
-///
-/// KILLS: "always fetch the roster before resolving" — the first two arms then
-/// make one request each.
+/// KILLS: "always fetch the roster before resolving" (the first two arms then
+/// make one request each).
 #[tokio::test]
 async fn a_namespace_a_policy_governs_reads_no_roster() {
     let reads = Arc::new(AtomicUsize::new(0));
@@ -3591,38 +3431,23 @@ async fn a_namespace_a_policy_governs_reads_no_roster() {
     );
 }
 
-// ===========================================================================
-// Fix round 2, R4 — the re-trust patch clears what the new verdict does not hold
-// ===========================================================================
+// The re-trust patch clears what the new verdict does not hold
 
-/// **AN `Untrusted -> Valid` RE-DERIVATION TAKES ITS REFUSAL SENTENCE WITH IT**
-/// — review finding **R4**.
-///
-/// # The staleness, and why THIS writer is the one that matters
+/// **AN `Untrusted -> Valid` RE-DERIVATION TAKES ITS REFUSAL SENTENCE WITH IT.**
 ///
 /// `retrust` builds a fresh block and OMITS `detail`, `signedAt` and `trust`
-/// when the re-derived verdict has none — and `untrusted_detail` returns `None`
+/// when the re-derived verdict has none, and `untrusted_detail` returns `None`
 /// for a trust verdict that is `Valid`. A JSON merge patch (RFC 7386) leaves an
-/// omitted key in place, so an administrator who adds the signer's public half
-/// used to get `result: Valid` with the previous pass's *"the trust policy …
-/// does not accept it"* sentence still sitting under it: a green verdict
-/// carrying its own refusal.
-///
-/// The second patch has the same shape and no producer — `status_is_terminal`
-/// short-circuits every pass after the terminal write, so it runs at most once
-/// per object. **`apply_retrust` has one.** It runs on TERMINAL objects,
-/// repeatedly, every time a `TrustRoster` or an installation policy changes,
-/// which is exactly when a verdict moves. That is why R4 is reachable where R3
-/// was hypothetical.
-///
-/// # What is asserted
+/// omitted key in place, so without nulls an administrator who adds the
+/// signer's public half would get `result: Valid` with the previous pass's
+/// refusal sentence still under it. `apply_retrust` runs on TERMINAL objects,
+/// repeatedly, whenever a `TrustRoster` or an installation policy changes,
+/// which is exactly when a verdict moves.
 ///
 /// The scenario is `a_key_added_after_an_untrusted_verdict_is_re_granted_with_a_reason`'s
-/// two arms — the same fixtures, because the property is about what the SECOND
-/// pass's patch does to what the FIRST pass wrote. Then: the patch carries
-/// `detail: null`, applying it as the API server would REMOVES the sentence,
-/// the fields the new verdict DOES hold are untouched, and the re-grant is
-/// still green.
+/// two arms. The patch carries `detail: null`, applying it as the API server
+/// would REMOVES the sentence, the fields the new verdict DOES hold are
+/// untouched, and the re-grant is still green.
 ///
 /// KILLS: dropping `verification_patch_value` from `Retrust::patch`; turning
 /// its `or_insert` into an `insert`, which would null the `trust` block this
@@ -3732,9 +3557,9 @@ fn a_re_granted_verdict_does_not_keep_the_sentence_that_refused_it() {
     // ---- 4. THE BADGE IS THE UN-NULLED BLOCK'S -----------------------
     //
     // `retrust` computes the condition over the rendered block, BEFORE
-    // `Retrust::patch` wraps it — `valid_verification` reads `trust` as
-    // `None => compatible` but `Some(unreadable) => Untrusted`, so a badge
-    // computed over the nulled form would refuse a legacy `Valid`.
+    // `Retrust::patch` wraps it: `valid_verification` reads `trust` as `None =>
+    // compatible` but `Some(unreadable) => Untrusted`, so a badge computed over
+    // the nulled form would refuse a legacy `Valid`.
     assert_eq!(
         regranted.verified.status, "True",
         "the re-grant is green: {:?}",
@@ -3742,9 +3567,7 @@ fn a_re_granted_verdict_does_not_keep_the_sentence_that_refused_it() {
     );
 }
 
-// ===========================================================================
-// TRUST-UPGRADE-SIGNEDAT — the pre-`signedAt` status, repaired by ONE read
-// ===========================================================================
+// A status written before `signedAt` existed, repaired by ONE read
 
 /// The receipt fixture's own claimed signing time, read out of `finished_at`.
 const RECEIPT_FINISHED_AT: &str = "2026-09-09T11:04:46Z";
@@ -3763,14 +3586,10 @@ fn receipt_bytes() -> String {
     read("e2e/fixtures/signed/backup-receipt.json")
 }
 
-/// **THE LAB'S EXACT STATUS SHAPE**, from `lab-refresh-2.result.md` §8 and the
-/// D1 fence run's `artifacts/d1-live/20260918t1209z/objects/L-05.1-3/before.json`:
-/// a `Valid` verification block carrying `matchedKeyId`, `payloadType`,
-/// `result` and `verifiedAt` — and **no `signedAt` and no `trust`**, the two
-/// fields the controller that wrote it did not have.
-///
-/// The key id is the fixture's rather than the lab's `2c76e22f…` so the policy
-/// helpers in this file resolve it; every other field is the recorded shape.
+/// The status shape an older controller wrote: a `Valid` verification block
+/// carrying `matchedKeyId`, `payloadType`, `result` and `verifiedAt`, and **no
+/// `signedAt` and no `trust`**, the two fields that controller did not have.
+/// The key id is the fixture's, so the policy helpers in this file resolve it.
 fn pre_signedat_status() -> Value {
     json!({
         "phase": "Succeeded",
@@ -3790,11 +3609,9 @@ fn pre_signedat_status() -> Value {
     })
 }
 
-/// The lab's own shape, verbatim, with `basis` replaced.
-///
-/// `None` is `lab-refresh-3.result.md` §9's five objects; `Current` and
-/// `Historical` are the two bases that can only have been reached from a real
-/// claim and therefore must NOT be re-read.
+/// The older shape with `basis` replaced. `None` is the shape an intermediate
+/// build stamped; `Current` and `Historical` can only have been reached from a
+/// real claim and therefore must NOT be re-read.
 fn basis_status(basis: &str, result: &str) -> Value {
     let mut status = pre_signedat_status();
     status["evidence"]["verification"]["result"] = json!(result);
@@ -3834,22 +3651,20 @@ fn retrust_row(status: &Value, signing_time: &weirkeeper::verification::SigningT
     })
 }
 
-/// **ROW 1 — the pre-`signedAt` object is repaired to `Valid` after ONE read.**
+/// **The pre-`signedAt` object is repaired to `Valid` after ONE read.**
 ///
 /// The claim comes out of the REAL signed receipt fixture, through the same
 /// `read_claimed_signing_time` a fresh run uses, and the repaired block carries
 /// the `signedAt` a fresh run would have written.
 ///
-/// KILLS: "carry the absence forward and flip to `Untrusted`" — the shipped
-/// behaviour, which this row's `to` and `basis` both contradict; and "write the
-/// recovered instant somewhere other than `signedAt`", which the badge assertion
-/// catches because the green rule reads the basis the claim produced.
+/// KILLS: "carry the absence forward and flip to `Untrusted`", which this row's
+/// `to` and `basis` both contradict; and "write the recovered instant somewhere
+/// other than `signedAt`", which the badge assertion catches because the green
+/// rule reads the basis the claim produced.
 #[test]
 fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
-    // THE WHOLE CHAIN, NOT ONLY ITS LAST LINK. Feeding `Recovered` straight in
-    // proves what the pass does with a claim; it proves nothing about the pass
-    // ever ASKING for one, and a discriminator that never fires makes the rest
-    // of this row unreachable in production.
+    // THE WHOLE CHAIN, NOT ONLY ITS LAST LINK: feeding `Recovered` straight in
+    // proves nothing about the pass ever ASKING for a claim.
     assert!(
         weirkeeper::verification::signing_time_owed(Some(&pre_signedat_status())).is_some(),
         "a block with no `trust` at all compared nothing, so the read has to be asked for"
@@ -3894,8 +3709,8 @@ fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
          accepts and a pass that moved it would destroy the evidence it reasons from"
     );
 
-    // …AND THE NEXT PASS SENDS NOTHING (erratum E11(d)). The repaired block
-    // carries a `signedAt`, so it is no longer `NotRecorded` and needs no read.
+    // …AND THE NEXT PASS SENDS NOTHING. The repaired block carries a
+    // `signedAt`, so it is no longer `NotRecorded` and needs no read.
     let mut repaired = pre_signedat_status();
     repaired["evidence"]["verification"] = row["verification"].clone();
     assert!(
@@ -3917,16 +3732,14 @@ fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
     );
 }
 
-/// **ROWS 2 and 3 — an archive that does not answer, and a grant only a pod may
-/// hold.** Neither withdraws the verdict and neither presents one: the block
-/// becomes `NotAttempted` on an `Unverified` basis, saying which one it is.
+/// **An archive that does not answer, and a grant only a pod may hold.**
+/// Neither withdraws the verdict and neither presents one: the block becomes
+/// `NotAttempted` on an `Unverified` basis, saying which one it is.
 ///
-/// KILLS: "flip to `Untrusted` when the read fails" — the failure this whole
-/// task exists to prevent, now reachable through a temporarily unreachable
-/// bucket instead of through an upgrade; and "carry the stored `Valid` across"
-/// — review finding **F1**, which put a green *"verified by weirkeeper"* badge
-/// on the console and `VerificationState::Valid` on the API for a document
-/// nobody had re-verified.
+/// KILLS: "flip to `Untrusted` when the read fails" (a temporarily unreachable
+/// bucket would withdraw a sound verdict); and "carry the stored `Valid`
+/// across", which would put a green badge on the console and
+/// `VerificationState::Valid` on the API for a document nobody re-verified.
 #[test]
 fn an_unread_archive_neither_withdraws_nor_presents_a_verdict() {
     let rows = [
@@ -4008,22 +3821,21 @@ fn an_unread_archive_neither_withdraws_nor_presents_a_verdict() {
     }
 }
 
-/// **ROW 4 — a document that GENUINELY claims no signing time is still
-/// `Untrusted`.** Both when the stored block already says so, and when the one
-/// bounded read comes back and the bytes carry no `finished_at`.
+/// **A document that GENUINELY claims no signing time is still `Untrusted`**,
+/// both when the stored block already says so and when the one bounded read
+/// comes back and the bytes carry no `finished_at`.
 ///
-/// KILLS: "treat every missing `signedAt` as a pre-upgrade status" — which
+/// KILLS: "treat every missing `signedAt` as a pre-upgrade status", which
 /// would make a document whose timestamp field a future format renames verify
-/// green against a retired key, the exact fail-open `decide`'s rule exists for.
+/// green against a retired key.
 #[test]
 fn a_document_that_claims_no_signing_time_is_still_untrusted() {
     // ---- A BASIS THAT COULD ONLY HAVE COME FROM A REAL CLAIM -------------
     //
     // `Current` and `Historical` are reached only through `decide`'s window
-    // rows, and both of those rows are unreachable without `claim.signed_at`.
-    // A block carrying one has already compared a signing time to the key's
-    // window, so there is nothing an archive read could add — it stays
-    // `FieldAbsent` and fails closed, with no `get`.
+    // rows, which need `claim.signed_at`, so a block carrying one has already
+    // compared a signing time to the key's window. It stays `FieldAbsent` and
+    // fails closed, with no `get`.
     for basis in ["Current", "Historical"] {
         let compared = basis_status(basis, "Untrusted");
         assert!(
@@ -4068,13 +3880,13 @@ fn a_document_that_claims_no_signing_time_is_still_untrusted() {
     assert_eq!(read_back["verification"].get("signedAt"), None);
 }
 
-/// **ROW 5 — the ratchet, through the controller's own pass.** A
-/// `KeyCompromise` revocation flips a pre-`signedAt` object immediately, with
-/// no read and on `SigningTime::NotNeeded`.
+/// **The ratchet, through the controller's own pass.** A `KeyCompromise`
+/// revocation flips a pre-`signedAt` object immediately, with no read and on
+/// `SigningTime::NotNeeded`.
 ///
 /// KILLS: "park every pre-`signedAt` object on `Unverified` until a read
-/// succeeds" — which would leave a stolen key's signatures accepted for as long
-/// as a bucket stayed unreachable.
+/// succeeds", which would accept a stolen key's signatures for as long as a
+/// bucket stayed unreachable.
 #[test]
 fn a_compromise_revocation_does_not_wait_for_the_re_read() {
     let effective = at("2026-09-10T00:00:00Z");
@@ -4108,10 +3920,10 @@ fn a_compromise_revocation_does_not_wait_for_the_re_read() {
 /// `signing_time_need` asks for a read only when all three facts hold, and it
 /// knows both kinds' evidence field names.
 ///
-/// KILLS: "read the archive on every re-trust pass" — the `None` rows below are
-/// what keep one `kubectl apply` on a policy from turning into one bucket `get`
-/// per terminal object in the cluster; and "repair without checking the digest"
-/// — the `receiptSha256`-less row, which has nothing safe to read.
+/// KILLS: "read the archive on every re-trust pass" (the `None` rows keep one
+/// `kubectl apply` on a policy from becoming one bucket `get` per terminal
+/// object); and "repair without checking the digest" (the
+/// `receiptSha256`-less row, which has nothing safe to read).
 #[test]
 fn a_re_read_is_asked_for_only_when_it_can_be_done_safely() {
     let need = weirkeeper::verification::signing_time_owed(Some(&pre_signedat_status()))
@@ -4261,14 +4073,12 @@ fn the_bounded_read_goes_through_the_read_only_handle() {
 }
 
 /// **The implication the whole discriminator rests on.** On the fresh path, a
-/// block with a `matchedKeyId` ALWAYS carries a `trust` object — so
-/// "`matchedKeyId` and no `trust`" can only have come from a controller that
-/// predates PLAT-19.1.
+/// block with a `matchedKeyId` ALWAYS carries a `trust` object, so
+/// "`matchedKeyId` and no `trust`" can only have come from an older controller.
 ///
-/// KILLS: "write `trust` only when the verdict is interesting" — any such edit
-/// would make a block this build wrote indistinguishable from a pre-upgrade
-/// one, and the repair would start re-reading archives for documents whose
-/// absence is their own.
+/// KILLS: "write `trust` only when the verdict is interesting", which would
+/// make a block this build wrote indistinguishable from a pre-upgrade one and
+/// start re-reading archives for documents whose absence is their own.
 #[test]
 fn a_matched_key_is_always_written_beside_a_trust_block() {
     let signed = Signed::scorecard("implication");
@@ -4305,16 +4115,14 @@ fn a_matched_key_is_always_written_beside_a_trust_block() {
     }
 }
 
-/// **Review finding F1, the guard.** The block the undecided arm writes is not
-/// green on any surface that reads `result` — the CRD's own `SIGNED` printer
-/// column included, read out of the shipped CRD so the JSONPath cannot drift
-/// away from this assertion.
+/// The block the undecided arm writes is not green on any surface that reads
+/// `result`, the CRD's own `SIGNED` printer column included, read out of the
+/// shipped CRD so the JSONPath cannot drift away from this assertion.
 ///
-/// KILLS: "carry the stored `Valid` across while the read is outstanding" —
-/// `crds::TrustBasis`'s invariant is *"every old reader treats anything that is
-/// not `Valid` as unverified"*, and this is the first verdict that had to obey
-/// it without being a refusal. With `Valid` restored, the printer column below
-/// prints `Valid` for a document nobody re-verified.
+/// KILLS: "carry the stored `Valid` across while the read is outstanding":
+/// `crds::TrustBasis`'s invariant is that every old reader treats anything
+/// that is not `Valid` as unverified, and the printer column would print
+/// `Valid` for a document nobody re-verified.
 #[test]
 fn the_signed_printer_column_never_prints_valid_for_an_unread_verdict() {
     let row = retrust_row(
@@ -4351,15 +4159,15 @@ fn the_signed_printer_column_never_prints_valid_for_an_unread_verdict() {
     }
 }
 
-/// **Defence in depth for the same finding.** Even if a block shaped
-/// `result: Valid` + `basis: Unverified` ever reaches a badge — a hand-edited
-/// status, a rollback that half-wrote, a future builder — the Rust rule refuses
-/// it, and refuses it as *not attempted* rather than as *untrusted*.
+/// **Defence in depth.** Even if a block shaped `result: Valid` + `basis:
+/// Unverified` reaches a badge (a hand-edited status, a rollback that
+/// half-wrote, a future builder), the Rust rule refuses it, as *not
+/// attempted* rather than *untrusted*.
 ///
-/// KILLS: "drop the `Unverified` arm from `valid_verification`" — the block
-/// below would fall through to the catch-all and render
-/// `VerificationUntrusted`, accusing a document nobody examined; and any edit
-/// that made the basis clause permissive would make it green.
+/// KILLS: "drop the `Unverified` arm from `valid_verification`": the block
+/// would fall through to `VerificationUntrusted`, accusing a document nobody
+/// examined; and any edit that made the basis clause permissive would make it
+/// green.
 #[test]
 fn a_valid_result_on_an_unverified_basis_is_still_not_green() {
     let mut status = pre_signedat_status();
@@ -4393,16 +4201,15 @@ fn a_valid_result_on_an_unverified_basis_is_still_not_green() {
     }
 }
 
-/// **Review finding F2, the guard.** The pass's own output is still recognised
-/// as a status that predates `signedAt`, so an archive that was unreachable on
-/// the first policy event is re-read on the second — and the object ends
-/// `Valid` with the document's own `signedAt`.
+/// The pass's own output is still recognised as a status that predates
+/// `signedAt`, so an archive unreachable on the first policy event is re-read
+/// on the second, and the object ends `Valid` with the document's own
+/// `signedAt`.
 ///
-/// KILLS: "read the discriminator off the presence of `trust` alone" — the
-/// shipped behaviour, under which the undecided write destroyed its own
-/// evidence: `signing_time_need` returned `None` on the second event and the
-/// object was written `Untrusted` / *"the document carries no signing-time
-/// field"*, permanently, from one transient blip during an upgrade.
+/// KILLS: "read the discriminator off the presence of `trust` alone": the
+/// undecided write would destroy its own evidence, `signing_time_need` would
+/// return `None` on the second event, and one transient blip would leave the
+/// object `Untrusted` permanently.
 #[test]
 fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
     // ---- EVENT 1: the bucket does not answer ----------------------------
@@ -4454,7 +4261,7 @@ fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
         "two passes and still no re-observation"
     );
 
-    // ---- AND A REPEAT INSIDE THE BACKOFF WRITES NOTHING (E11(d)) --------
+    // ---- AND A REPEAT INSIDE THE BACKOFF WRITES NOTHING ----------------
     //
     // The controller's next reconcile is 15 s later, `trust.retryAfter` has not
     // passed, so the plan is `Deferred`: no `get`, the stored sentence and the
@@ -4475,20 +4282,18 @@ fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
     );
 }
 
-/// **Review finding F6, the guard.** Neither reconcile hook aborts on a kube
-/// API failure while resolving the evidence path: the error becomes the reason
-/// no read was attempted, and the verdict is still re-derived on that pass.
+/// Neither reconcile hook aborts on a kube API failure while resolving the
+/// evidence path: the error becomes the reason no read was attempted, and the
+/// verdict is still re-derived on that pass.
 ///
-/// A SOURCE SCAN, because reaching the error arm needs a `kube::Client` that
-/// fails only on the destination read, and the property is structural: this
-/// hook must not own a `?`. The window scanned is exactly the hunk between the
-/// need and the read, so an unrelated `?` elsewhere in either file is invisible
-/// to it.
+/// A SOURCE SCAN: reaching the error arm needs a `kube::Client` that fails
+/// only on the destination read, and the property is structural (this hook
+/// must not own a `?`). The window scanned is exactly the hunk between the
+/// need and the read, so an unrelated `?` elsewhere is invisible to it.
 ///
-/// KILLS: "`…evidence_source(…).await.map_err(BackupError::Api)?`" — the shipped
-/// shape, under which a transient API blip skipped the whole re-trust pass and
-/// delayed a `KeyCompromise` revocation on exactly the objects this hook exists
-/// for.
+/// KILLS: "`…evidence_source(…).await.map_err(BackupError::Api)?`", under
+/// which a transient API blip would skip the whole re-trust pass and delay a
+/// `KeyCompromise` revocation.
 #[test]
 fn an_evidence_path_api_failure_does_not_abort_the_re_trust_pass() {
     for relative in [
@@ -4523,16 +4328,13 @@ fn an_evidence_path_api_failure_does_not_abort_the_re_trust_pass() {
     assert!(detail.contains("next policy event"), "{detail}");
 }
 
-// ===========================================================================
-// TRUST-UPGRADE-SIGNEDAT, the THIRD shape — lab-refresh-3 §9
-// ===========================================================================
+// The third pre-`signedAt` shape: an intermediate build's re-stamp
 
-/// The key id the lab's five 2026-09-14 objects name, as
-/// `artifacts/lab-refresh-3/trust-selfheal/*.json` record it.
+/// The key id the objects an intermediate build re-stamped name.
 const LAB_MATCHED_KEY_ID: &str = "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe";
 
-/// The `detail` the intermediate `e7d0e79` build stamped on all five, verbatim
-/// — the sentence this defect exists to stop being told about sound archives.
+/// The `detail` the intermediate build stamped, verbatim: the sentence a
+/// sound archive must stop being told.
 fn lab_detail(payload_type: &str) -> String {
     format!(
         "the signature over this document verified under key {LAB_MATCHED_KEY_ID}, and the trust \
@@ -4542,12 +4344,11 @@ fn lab_detail(payload_type: &str) -> String {
     )
 }
 
-/// **`Backup/rotated-secret-backup`, verbatim** from
-/// `artifacts/lab-refresh-3/trust-selfheal/backup-rotated-secret-backup.json`:
-/// `result: Untrusted`, a `trust` block whose `basis` is the literal string
-/// `"None"`, and **no `signedAt`**. The digest is the checked-in receipt
-/// fixture's so the repaired path can be exercised end to end; every other
-/// field is the lab's own.
+/// **A `Backup` as the intermediate build left it**: `result: Untrusted`, a
+/// `trust` block whose `basis` is the literal string `"None"`, and **no
+/// `signedAt`**. The digest is the checked-in receipt fixture's so the
+/// repaired path can be exercised end to end; every other field is the
+/// recorded shape.
 fn lab_backup_status() -> Value {
     json!({
         "phase": "Succeeded",
@@ -4574,9 +4375,8 @@ fn lab_backup_status() -> Value {
     })
 }
 
-/// **`Restore/scram-record-restore`, verbatim** from the same directory — the
-/// same third shape on the other kind, whose evidence keys are
-/// `scorecardKey`/`scorecardSha256`.
+/// **A `Restore` as the intermediate build left it**: the same third shape on
+/// the other kind, whose evidence keys are `scorecardKey`/`scorecardSha256`.
 fn lab_restore_status() -> Value {
     json!({
         "phase": "Succeeded",
@@ -4604,17 +4404,16 @@ fn lab_restore_status() -> Value {
     })
 }
 
-/// **THE ROW THREE LAB REFRESHES FAILED.** The five objects
-/// `lab-refresh-3.result.md` §9 measured carry a `trust` block whose `basis` is
-/// the literal `"None"` — stamped by the intermediate `e7d0e79` build's own
-/// re-derivation, not by a document that claims nothing — and they end `Valid`
-/// with the document's own `signedAt` after one bounded re-read, on both kinds.
+/// **The intermediate build's shape is repaired by one read.** Objects whose
+/// `trust` block's `basis` is the literal `"None"`, stamped by an intermediate
+/// build's own re-derivation and not by a document that claims nothing, end
+/// `Valid` with the document's own `signedAt` after one bounded re-read, on
+/// both kinds.
 ///
-/// KILLS: "a `trust` block means a build that knows `signedAt` wrote this" (the
-/// first shipped discriminator) and "only the literal `Unverified` means
-/// undecided" (the second). Under either, `signing_time_need` below returns
-/// `None`, no `get` is ever issued, and these five objects stay `Untrusted`
-/// forever — which is exactly what three consecutive lab runs reported.
+/// KILLS: "a `trust` block means a build that knows `signedAt` wrote this" and
+/// "only the literal `Unverified` means undecided". Under either,
+/// `signing_time_need` returns `None`, no `get` is ever issued, and these
+/// objects stay `Untrusted` forever.
 #[test]
 fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
     /// One lab object: its name, its verbatim status, its kind's badge rule,
@@ -4728,15 +4527,14 @@ fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
 }
 
 /// A document that genuinely claims no signing time is written by a CURRENT
-/// build as `basis: None` with no `signedAt` — the same bytes as the lab's
-/// legacy re-stamp — so it is re-read once. **And exactly once:** the completed
-/// read records `trust.signingTimeRead: absent`, which says the absence is the
+/// build as `basis: None` with no `signedAt` (the same bytes as the legacy
+/// re-stamp), so it is re-read once. **And exactly once:** the completed read
+/// records `trust.signingTimeRead: absent`, which says the absence is the
 /// DOCUMENT's, and the object never asks the archive again.
 ///
-/// KILLS: "leave the block unchanged after a fruitless read" — review finding
-/// **G2**. A terminal object reconciles every `REQUEUE_SECS`, so without the
-/// marker below this document cost one `Store::get` every 15 seconds, for ever,
-/// for a verdict that provably cannot change.
+/// KILLS: "leave the block unchanged after a fruitless read": a terminal
+/// object reconciles every `REQUEUE_SECS`, so this document would cost one
+/// `Store::get` every 15 seconds, forever.
 #[test]
 fn a_fruitless_re_read_settles_the_object_for_good() {
     let absent = || {
@@ -4744,10 +4542,9 @@ fn a_fruitless_re_read_settles_the_object_for_good() {
             logweir_core::trust::ClaimAbsence::FieldAbsent,
         )
     };
-    // PASS 1 — the read comes back with the document's own absence. The block
-    // settles on `Untrusted` / basis `None`, which is where it already was in
-    // substance; this pass only rewrites the policy's own name into the
-    // sentence.
+    // PASS 1: the read comes back with the document's own absence. The block
+    // settles on `Untrusted` / basis `None`, which it already was in substance;
+    // this pass only rewrites the policy's own name into the sentence.
     let first = weirkeeper::verification::retrust_with(
         &lab_backup_status(),
         &org_default(),
@@ -4761,9 +4558,9 @@ fn a_fruitless_re_read_settles_the_object_for_good() {
     assert_eq!(first.to, "Untrusted");
     assert_eq!(first.verification["trust"]["basis"], json!("None"));
 
-    // PASS 2 — the SAME fruitless read over the settled block renders
-    // identical bytes, so nothing is sent. The cost of not being able to tell
-    // the two shapes apart on the status is one `get`, never a write.
+    // PASS 2: the SAME fruitless read over the settled block renders identical
+    // bytes, so nothing is sent. Not being able to tell the two shapes apart on
+    // the status costs one `get`, never a write.
     let mut settled = lab_backup_status();
     settled["evidence"]["verification"] = first.verification.clone();
     let second = weirkeeper::verification::retrust_with(
@@ -4798,11 +4595,10 @@ fn a_fruitless_re_read_settles_the_object_for_good() {
     );
 }
 
-/// **FX-31 review F8.** A document over the controller's read cap is not
-/// re-read every quarter hour for ever: the re-read SETTLES with
-/// `trust.signingTimeRead: overCap` and no `retryAfter`, the stored verdict is
-/// kept on an unverified basis with a sentence that says why, and the object
-/// never asks the archive again.
+/// A document over the controller's read cap is not re-read every quarter
+/// hour forever: the re-read SETTLES with `trust.signingTimeRead: overCap` and
+/// no `retryAfter`, the stored verdict is kept on an unverified basis with a
+/// sentence that says why, and the object never asks the archive again.
 ///
 /// KILLS: "an over-cap read is `Unreadable`" (a `retryAfter` is written and
 /// the next quarter hour reads again); "`overCap` does not settle" (the plan
@@ -4848,23 +4644,18 @@ fn an_over_cap_re_read_settles_and_says_why() {
     );
 }
 
-/// **Review finding G2, the guard.** Three reconciles with an unreachable
-/// archive issue **exactly one** `Store::get`.
+/// Three reconciles with an unreachable archive issue **exactly one**
+/// `Store::get`.
 ///
-/// # Why this counts real reads and not a plan enum
+/// `ReadPlan::Read` is the ONLY route to `read_signing_time`, the only caller
+/// of `Store::get` here, so the loop below performs a real read through a real
+/// read-only handle whenever the plan says to, over an evidence tree the
+/// object is missing from, and counts the reads. A deferred pass never reaches
+/// the handle at all.
 ///
-/// `ReadPlan::Read` is the ONLY route to `read_signing_time`, which is the only
-/// thing in this module that calls `Store::get` — so the loop below performs a
-/// real read through a real read-only handle whenever the plan says to, over an
-/// evidence tree the object is missing from, and counts the reads it made. A
-/// deferred pass never reaches the handle at all, which is also why it costs no
-/// `evidence_source` resolution in the controller.
-///
-/// KILLS: "re-read on every pass" — the shipped behaviour. A terminal object
-/// reconciles every `REQUEUE_SECS` (15 s), so the three passes below are 30
-/// seconds of one object's life; at the shipped rate a namespace holding a
-/// thousand such objects issued roughly 67 archive GETs a second, for ever, for
-/// verdicts that provably cannot change.
+/// KILLS: "re-read on every pass". A terminal object reconciles every
+/// `REQUEUE_SECS` (15 s); at that rate a namespace holding a thousand such
+/// objects would issue about 67 archive GETs a second, forever.
 #[test]
 fn three_reconciles_with_an_unreachable_archive_issue_one_get() {
     let tree = EvidenceTree::new("g2", b"unused", b"unused");
@@ -4944,10 +4735,9 @@ fn three_reconciles_with_an_unreachable_archive_issue_one_get() {
 /// A backoff must never outlive the thing it is bounding: a read that SUCCEEDS
 /// clears it, and a `KeyCompromise` revocation is not delayed by one.
 ///
-/// KILLS: "carry `retryAfter` forward unconditionally" — a repaired object
-/// would keep a stale instant nobody reads; and "defer before the key rows" —
-/// the ratchet has to survive the backoff, because a stolen key may not wait
-/// fifteen minutes.
+/// KILLS: "carry `retryAfter` forward unconditionally" (a repaired object
+/// would keep a stale instant); and "defer before the key rows" (the ratchet
+/// has to survive the backoff: a stolen key may not wait fifteen minutes).
 #[test]
 fn a_backoff_does_not_outlive_its_purpose() {
     let mut deferred_status = pre_signedat_status();
@@ -5000,17 +4790,17 @@ fn a_backoff_does_not_outlive_its_purpose() {
     assert_ne!(revoked.verification["trust"]["basis"], json!("Unverified"));
 }
 
-/// **The re-verification's hardening nit.** A stored `trust.retryAfter` can
-/// only ever mean "at most `RETRY_AFTER_SECS` from now", so a hand-written
-/// far-future instant defers one window and is then rewritten to a real one.
+/// A stored `trust.retryAfter` can only mean "at most `RETRY_AFTER_SECS` from
+/// now", so a hand-written far-future instant defers one window and is then
+/// rewritten to a real one.
 ///
-/// A forged value was already fail-closed — a deferred pass still re-derives
-/// the verdict, so it can neither hold a `Valid`, nor render green, nor delay a
-/// `KeyCompromise` revocation (both asserted below). What the clamp removes is
-/// the remaining denial: "this object can never be repaired".
+/// A forged value is already fail-closed: a deferred pass still re-derives the
+/// verdict, so it can neither hold a `Valid`, nor render green, nor delay a
+/// `KeyCompromise` revocation (both asserted below). The clamp removes the
+/// remaining denial: "this object can never be repaired".
 ///
-/// KILLS: "believe the stored instant" — the plan below would stay `Deferred`
-/// at every instant this century, and the block would carry `2099` for ever.
+/// KILLS: "believe the stored instant": the plan below would stay `Deferred`
+/// at every instant this century, and the block would carry `2099` forever.
 #[test]
 fn a_stored_retry_after_is_clamped_to_one_window() {
     let now = at("2026-09-19T12:00:00Z");
@@ -5121,10 +4911,8 @@ fn a_stored_retry_after_is_clamped_to_one_window() {
     assert_eq!(revoked.to, "Untrusted");
 }
 
-// ===========================================================================
-// legacy-point-restore P5's class sweep — an inline-archive `Backup`'s receipt
-// is read only through the controller's handle, and only in its bucket
-// ===========================================================================
+// An inline-archive `Backup`'s receipt is read only through the
+// controller's handle, and only in its bucket
 
 /// One finished pass over [`backup`] (archive `s3://kafka-backups/k8s-demo`)
 /// through `reconcile_backup_at` with the handle at `handle`. Returns the
@@ -5173,11 +4961,9 @@ async fn legacy_backup_pass(handle: Option<&str>) -> (Vec<Value>, usize, usize) 
 }
 
 /// A `Backup` whose archive is in a bucket the controller's handle does not
-/// read is NOT read through that handle — its receipt is not there — and says
-/// so, naming both buckets. It used to be read where the receipt never was and
-/// publish a store `NotFound`, which reads as "the receipt is missing".
-///
-/// FAILS ON THE OLD CODE: both oracles are consulted.
+/// read is NOT read through that handle (its receipt is not there), and says
+/// so, naming both buckets, rather than publishing a store `NotFound` that
+/// reads as "the receipt is missing".
 #[tokio::test]
 async fn a_legacy_backup_in_another_bucket_is_not_read_through_the_handle() {
     let (patches, archive_calls, verify_calls) =
@@ -5205,11 +4991,11 @@ async fn a_legacy_backup_in_another_bucket_is_not_read_through_the_handle() {
     );
 }
 
-/// **L2, the `Backup` twin.** The shipped reconcile states the handle location
-/// it read from its environment: a `Backup` under `s3://kafka-backups/…` with
-/// the handle over another bucket is `NotAttempted` by the GUARD, before any
-/// read — with the location dropped it would have been read through a handle
-/// this `Context` does not even hold, and answered `NoCredential`.
+/// The shipped reconcile states the handle location it read from its
+/// environment: a `Backup` under `s3://kafka-backups/…` with the handle over
+/// another bucket is `NotAttempted` by the GUARD, before any read. With the
+/// location dropped it would be read through a handle this `Context` does not
+/// hold, and answered `NoCredential`.
 #[tokio::test]
 async fn the_shipped_backup_reconcile_states_the_handle_location_it_read() {
     let (client, seen) = sequenced_client(vec![200, 200]);
@@ -5264,10 +5050,8 @@ async fn a_legacy_backup_in_the_handles_bucket_is_verified_as_before() {
     );
 }
 
-// ===========================================================================
-// PoC P12 — every controller-side `NotAttempted` has a retry class, decided
-// from the sentence its producer wrote
-// ===========================================================================
+// Every controller-side `NotAttempted` has a retry class, decided from the
+// sentence its producer wrote
 mod p12_not_attempted_classes {
     use super::*;
     use weirkeeper::evidence_fetch::{
@@ -5278,7 +5062,7 @@ mod p12_not_attempted_classes {
 
     /// **EVERY PRODUCER, ITS CLASS.** The retry decides from the sentence, so
     /// each function that writes a `NotAttempted` is held to the class its
-    /// cause belongs to — through the REAL producer wherever one can run
+    /// cause belongs to, through the REAL producer wherever one can run
     /// without a network: a `NotFound` from a real read-only store is final;
     /// a store that answered but could not be read (mode `000`, the same
     /// `StoreError::Io` a missing credential produces) is transient; a
@@ -5286,7 +5070,7 @@ mod p12_not_attempted_classes {
     ///
     /// KILLS: dropping the `NotFound` arm (an absent receipt would be read on
     /// the schedule and after every restart); a transient prefix the producer
-    /// no longer writes (the PoC's IMDS failure would be final again).
+    /// no longer writes (an IMDS credential failure would be final again).
     #[test]
     fn every_not_attempted_producer_has_its_retry_class() {
         let payload = read("e2e/fixtures/signed/scorecard.json");
@@ -5557,9 +5341,8 @@ mod p12_not_attempted_classes {
             ),
             None
         );
-        // REVIEW L4: a destination-backed run whose controller read ended on a
-        // CONFIGURATION refusal is not re-read on every start; a transient
-        // read failure is.
+        // A destination-backed run whose controller read ended on a CONFIGURATION
+        // refusal is not re-read on every start; a transient read failure is.
         let spent_destination = obs(MODE_CONTROLLER_IDENTITY, MAX_ATTEMPTS.into(), None);
         assert_eq!(
             owed(
@@ -5575,7 +5358,7 @@ mod p12_not_attempted_classes {
             Some(1)
         );
 
-        // REVIEW M1: the plan's other answers.
+        // The plan's other answers.
         use weirkeeper::evidence_fetch::{plan_controller_read, ControllerRead};
         let plan = |o: Option<&EvidenceObservation>, readable: Result<(), String>| {
             plan_controller_read(
@@ -5639,13 +5422,13 @@ mod p12_not_attempted_classes {
         );
     }
 
-    /// **THE RUNNING CONTROLLERS HOLD THE PROCESS MEMORY.** Every row above
-    /// passes a memory by hand; this is the one that holds the SHIPPED
-    /// `reconcile` of both kinds to passing the process's own — without it the
-    /// fix would be unreachable in production and every row would stay green.
+    /// **THE RUNNING CONTROLLERS HOLD THE PROCESS MEMORY.** Every row above passes
+    /// a memory by hand; this one holds the SHIPPED `reconcile` of both kinds to
+    /// passing the process's own, without which the retry would be unreachable in
+    /// production.
     ///
-    /// KILLS: `reconcile` passing `None` (P12 again: a spent or pre-fix
-    /// `NotAttempted` is never read by a restarted controller).
+    /// KILLS: `reconcile` passing `None` (a spent or older `NotAttempted` is never
+    /// read by a restarted controller).
     #[test]
     fn the_running_controllers_pass_the_process_read_memory() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
