@@ -1480,12 +1480,14 @@ and the ACL list as what a compose broker required:
     topic there and deletes it again. A topic outside that prefix is never
     deleted: the reader's `TopicDeleter` refuses every other name. **Without
     Delete a scratch restore still exits 0 with a signed `pass`, and leaves
-    its topics behind** (measured, PROD-01.2). The run says so: a warning
-    names the topic (`teardown left 1 scratch topic behind on the target
-    cluster: …`), the summary line repeats it beside `outcome pass`, and the
-    signed teardown attestation records it. It does not name the missing
-    grant, and a restore that FAILS leaves its topic without a line about it
-    (tracker row FX-44).
+    its topics behind** (measured, PROD-01.2). The run says so and why: a
+    warning names the topic and the grant (``teardown left 1 scratch topic
+    behind on the target cluster: …; the restore principal lacks `Delete` on
+    topic `…` ``), the summary line repeats the topic beside `outcome pass`,
+    the signed teardown attestation records it, and
+    `Restore.status.teardown.failed` names it. A restore that FAILS after
+    its creation step completed (from phase 6 onwards) removes its topics
+    the same way, or names what it could not remove (FX-44).
 * **MSK IAM authentication is not implemented.** `AuthConfig::Token` is a named
   refusal in the operator, not an oversight — SASL/SCRAM is the path.
 

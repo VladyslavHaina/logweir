@@ -308,7 +308,18 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
         ),
         "refusal-reason=CredentialBindingMismatch"
     );
-    assert_eq!(TERMINAL_STATES.len(), 6);
+    // PROD-01.1a's state, the seventh: an archive holding transaction markers
+    // under a plan that does not allow them.
+    assert_eq!(
+        refusal_reason_line(
+            &logweir_core::transaction_markers::refusal(
+                &[("txn".to_string(), [(0, 2u64)].into())].into()
+            )
+            .expect("a count refuses")
+        ),
+        "refusal-reason=TransactionMarkersInArchive"
+    );
+    assert_eq!(TERMINAL_STATES.len(), 7);
     // The line carries no whitespace and no quoting: a controller reads it as
     // the final stdout line and splits on `=`.
     let line = refusal_reason_line("CredentialNotRenderable: x");

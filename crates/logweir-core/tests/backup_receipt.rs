@@ -1,4 +1,4 @@
-//! `BackupReceipt::validate_invariants` has exactly FORTY arms — the four
+//! `BackupReceipt::validate_invariants` has exactly FORTY-FIVE arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
 //! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
 //! that read ONLY the 1.1.0 `config_coverage` block, plus since PROD-05.1 the
@@ -6,8 +6,9 @@
 //! the two (20-21) over its `owner_detection`, plus since PROD-03.0 the eight
 //! (22-29) that run only on the 1.5.0 `schema_dependency` block, plus since
 //! PROD-04.1 the six (30-35) that run only on the 1.7.0 `consumer_positions`
-//! block, and since PROD-01.4a the five (36-40) that read only the 1.6.0
-//! `generations` block — and each one refuses with an exact message. The
+//! block, since PROD-01.4a the five (36-40) that read only the 1.6.0
+//! `generations` block, and since PROD-02.1 the five (41-45) over the 1.8.0
+//! `source_watermarks` block — and each one refuses with an exact message. The
 //! positions document the `consumer_positions` block binds has its own fourteen
 //! (CP-1 to CP-14, `validate_consumer_positions_document`), asserted here the
 //! same way.
@@ -15,7 +16,7 @@
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_forty_two_return_err_statements` closes over
+//! `validate_invariants_has_exactly_forty_seven_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -101,6 +102,7 @@ fn pristine() -> BackupReceipt {
         schema_dependency: None,
         generations: None,
         consumer_positions: None,
+        source_watermarks: None,
     }
 }
 
@@ -113,7 +115,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_forty_two_return_err_statements` pins the
+/// `validate_invariants_has_exactly_forty_seven_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -348,16 +350,16 @@ fn the_written_version_follows_the_auth_mode() {
             username: None,
         };
         assert_eq!(
-            format_version_for(&doc.archive, false, false, &auth, false, false),
+            format_version_for(&doc.archive, false, false, &auth, false, false, false),
             RECEIPT_FORMAT_VERSION
         );
         assert_eq!(
-            format_version_for(&pinned, false, false, &auth, false, false),
+            format_version_for(&pinned, false, false, &auth, false, false, false),
             FORMAT_VERSION_WITH_MANIFEST_VERSION
         );
         for archive in [&doc.archive, &pinned] {
             assert_eq!(
-                format_version_for(archive, true, false, &auth, false, false),
+                format_version_for(archive, true, false, &auth, false, false, false),
                 FORMAT_VERSION_WITH_TOPIC_CONFIGURATION
             );
         }
@@ -370,7 +372,15 @@ fn the_written_version_follows_the_auth_mode() {
         for archive in [&doc.archive, &pinned] {
             for topic_configuration in [false, true] {
                 assert_eq!(
-                    format_version_for(archive, topic_configuration, false, &auth, false, false),
+                    format_version_for(
+                        archive,
+                        topic_configuration,
+                        false,
+                        &auth,
+                        false,
+                        false,
+                        false
+                    ),
                     FORMAT_VERSION_WITH_AUTH_MODES,
                     "{mode}, topic_configuration={topic_configuration}"
                 );
@@ -387,8 +397,8 @@ fn the_written_version_follows_the_auth_mode() {
 
 /// **THE TOTAL.** `validate_invariants` has exactly thirty-six refusing statements
 /// (arm 5 is three statements, so the twenty-nine arms through PROD-03.0's are
-/// thirty-one, PROD-04.1's six (30-35) make thirty-seven, and PROD-01.4a's five
-/// (36-40) make forty-two).
+/// thirty-one, PROD-04.1's six (30-35) make thirty-seven, PROD-01.4a's five
+/// (36-40) make forty-two, and PROD-02.1's five (41-45) make forty-seven).
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -401,7 +411,7 @@ fn the_written_version_follows_the_auth_mode() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_forty_two_return_err_statements() {
+fn validate_invariants_has_exactly_forty_seven_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -422,9 +432,9 @@ fn validate_invariants_has_exactly_forty_two_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 42,
+        total, 47,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 42. Every one of them needs a per-arm test in this file with \
+         statement(s), not 47. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -450,7 +460,7 @@ fn validate_invariants_has_exactly_forty_two_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_forty_two_return_err_statements`.
+/// `validate_invariants_has_exactly_forty_seven_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -1582,20 +1592,20 @@ fn the_written_version_defines_topic_configuration() {
     let mut archive = pristine().archive;
     let auth = pristine().source.auth;
     assert_eq!(
-        format_version_for(&archive, true, false, &auth, false, false),
+        format_version_for(&archive, true, false, &auth, false, false, false),
         "1.3.0"
     );
     assert_eq!(
-        format_version_for(&archive, false, false, &auth, false, false),
+        format_version_for(&archive, false, false, &auth, false, false, false),
         "1.1.0"
     );
     archive.manifest_version_id = Some("v1".into());
     assert_eq!(
-        format_version_for(&archive, true, false, &auth, false, false),
+        format_version_for(&archive, true, false, &auth, false, false, false),
         "1.3.0"
     );
     assert_eq!(
-        format_version_for(&archive, false, false, &auth, false, false),
+        format_version_for(&archive, false, false, &auth, false, false, false),
         "1.2.0"
     );
 }
@@ -2088,7 +2098,15 @@ fn the_written_version_defines_schema_dependency() {
         for archive in [&pristine().archive, &pinned] {
             for topic_configuration in [false, true] {
                 assert_eq!(
-                    format_version_for(archive, topic_configuration, true, &auth, false, false),
+                    format_version_for(
+                        archive,
+                        topic_configuration,
+                        true,
+                        &auth,
+                        false,
+                        false,
+                        false
+                    ),
                     "1.5.0",
                     "{mode}"
                 );
@@ -2504,6 +2522,7 @@ fn the_written_version_defines_generations() {
                         schema_dependency,
                         &auth,
                         true,
+                        false,
                         false
                     ),
                     "1.6.0",
@@ -2514,7 +2533,15 @@ fn the_written_version_defines_generations() {
     }
     archive.manifest_version_id = Some("v1".into());
     assert_eq!(
-        format_version_for(&archive, true, true, &pristine().source.auth, true, false),
+        format_version_for(
+            &archive,
+            true,
+            true,
+            &pristine().source.auth,
+            true,
+            false,
+            false
+        ),
         "1.6.0"
     );
 }
@@ -3104,28 +3131,28 @@ fn the_written_version_defines_consumer_positions() {
     let mut archive = pristine().archive;
     let mut auth = pristine().source.auth;
     assert_eq!(
-        format_version_for(&archive, true, false, &auth, false, true),
+        format_version_for(&archive, true, false, &auth, false, true, false),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
     archive.manifest_version_id = Some("v1".into());
     auth.mode = "mtls".into();
     assert_eq!(
-        format_version_for(&archive, true, false, &auth, false, true),
+        format_version_for(&archive, true, false, &auth, false, true, false),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
     assert_eq!(
-        format_version_for(&archive, true, false, &auth, false, false),
+        format_version_for(&archive, true, false, &auth, false, false, false),
         "1.4.0"
     );
     // A run with every block (integration batch 5): the highest version that
     // defines them all, never a lower one — PROD-04.1's over PROD-01.4a's
     // `generations` and PROD-03.0's `schema_dependency`.
     assert_eq!(
-        format_version_for(&archive, true, true, &auth, true, true),
+        format_version_for(&archive, true, true, &auth, true, true, false),
         FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     );
     assert_eq!(
-        format_version_for(&archive, true, true, &auth, true, false),
+        format_version_for(&archive, true, true, &auth, true, false, false),
         logweir_core::backup_receipt::FORMAT_VERSION_WITH_GENERATIONS
     );
 }
@@ -3580,4 +3607,228 @@ fn cp_14_refuses_counts_the_positions_do_not_give() {
          related, 0 not related, 1 never committed, 0 beyond the end, 0 failed, 1 not observed: \
          the receipt counts what the positions document records"
     );
+}
+
+// ------------------------------------------- PROD-02.1: source_watermarks, 41..45
+
+/// A 1.8.0 receipt over `orders` (2 partitions, one empty) and `payments`
+/// (1 partition): an ordinary backup with its source's watermarks.
+fn pristine_1_8() -> BackupReceipt {
+    let mut doc = pristine();
+    doc.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS.into();
+    doc.source_watermarks = Some(BTreeMap::from([
+        ("orders".to_string(), vec![[0, 12], [15, 15]]),
+        ("payments".to_string(), vec![[3, 10]]),
+    ]));
+    doc
+}
+
+/// The same receipt as an EMPTY CAPTURE: no record counted, every partition
+/// `low == high`, and the empty window `[t, t)`.
+fn empty_capture() -> BackupReceipt {
+    let mut doc = pristine_1_8();
+    doc.records.values_mut().for_each(|n| *n = 0);
+    doc.source_watermarks = Some(BTreeMap::from([
+        ("orders".to_string(), vec![[0, 0], [15, 15]]),
+        ("payments".to_string(), vec![[10, 10]]),
+    ]));
+    doc.covered.to_ms = doc.covered.from_ms;
+    doc
+}
+
+#[test]
+fn a_1_8_0_receipt_and_an_empty_capture_satisfy_every_invariant() {
+    pristine_1_8()
+        .validate_invariants()
+        .expect("an ordinary 1.8.0 receipt");
+    assert!(!pristine_1_8().is_empty_capture());
+    let empty = empty_capture();
+    empty.validate_invariants().expect("an empty capture");
+    assert!(empty.is_empty_capture());
+    assert_eq!(
+        logweir_core::backup_receipt::empty_partitions(empty.source_watermarks.as_ref().unwrap()),
+        vec![
+            ("orders".to_string(), 0),
+            ("orders".to_string(), 1),
+            ("payments".to_string(), 0)
+        ]
+    );
+    assert_eq!(
+        logweir_core::backup_receipt::empty_partitions(
+            pristine_1_8().source_watermarks.as_ref().unwrap()
+        ),
+        vec![("orders".to_string(), 1)],
+        "a partly empty source names its empty partitions"
+    );
+}
+
+/// Arm 4 is unchanged without the block: an empty window on a 1.7.0 document
+/// is refused with arm 4's own message, exactly as an older reader refuses
+/// an empty capture.
+#[test]
+fn arm_4_admits_the_empty_window_only_beside_source_watermarks() {
+    let mut doc = empty_capture();
+    doc.source_watermarks = None;
+    doc.format_version = "1.7.0".into();
+    let t = doc.covered.from_ms;
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(format!(
+            "covered.from_ms {t} is not before covered.to_ms {t}: the covered window's end is \
+             EXCLUSIVE, so an empty range covers no record"
+        ))
+    );
+    // A window that ends before it begins is refused WITH the block too.
+    let mut doc = empty_capture();
+    doc.covered.to_ms = doc.covered.from_ms - 1;
+    assert!(doc
+        .validate_invariants()
+        .unwrap_err()
+        .starts_with("covered.from_ms "));
+}
+
+#[test]
+fn arm_41_refuses_source_watermarks_under_a_minor_before_8() {
+    let mut doc = pristine_1_8();
+    doc.format_version = "1.7.0".into();
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(
+            "source_watermarks is present but format_version \"1.7.0\" predates it: the field \
+             is defined from 1.8.0"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn arm_42_refuses_source_watermarks_that_do_not_cover_the_named_topic_set() {
+    let mut doc = pristine_1_8();
+    doc.source_watermarks.as_mut().unwrap().remove("payments");
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(
+            "source_watermarks covers {\"orders\"} but the named topic set is {\"orders\", \
+             \"payments\"}"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn arm_43_refuses_a_topic_with_no_partition() {
+    let mut doc = pristine_1_8();
+    doc.source_watermarks
+        .as_mut()
+        .unwrap()
+        .insert("payments".into(), vec![]);
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(
+            "source_watermarks[\"payments\"] records no partition: every named topic records \
+             each of its partitions, at least one"
+                .to_string()
+        )
+    );
+}
+
+/// R4: `low > high` is refused, on an ordinary receipt and on an empty one.
+#[test]
+fn arm_44_refuses_a_low_watermark_above_its_high() {
+    let mut doc = pristine_1_8();
+    doc.source_watermarks
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()[1] = [16, 15];
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(
+            "source_watermarks[\"orders\"] partition 1 has low 16 above high 15: a partition's \
+             low watermark is never above its high"
+                .to_string()
+        )
+    );
+    let mut doc = empty_capture();
+    doc.source_watermarks
+        .as_mut()
+        .unwrap()
+        .get_mut("payments")
+        .unwrap()[0] = [11, 10];
+    assert!(doc
+        .validate_invariants()
+        .unwrap_err()
+        .starts_with("source_watermarks[\"payments\"] partition 0 has low 11 above high 10"));
+}
+
+/// R4: an empty capture that claims an empty partition whose low and high
+/// differ, or that counts a record, is refused.
+#[test]
+fn arm_45_refuses_an_empty_capture_the_watermarks_or_records_contradict() {
+    let mut doc = empty_capture();
+    doc.source_watermarks
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()[1] = [15, 20];
+    let t = doc.covered.from_ms;
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(format!(
+            "covered.from_ms {t} equals covered.to_ms {t}, an empty capture, but \
+             source_watermarks[\"orders\"] partition 1 has low 15 and high 20: an empty capture \
+             counts no record for any topic and recorded equal low and high watermarks for every \
+             partition"
+        ))
+    );
+    let mut doc = empty_capture();
+    doc.records.insert("payments".into(), 3);
+    assert_eq!(
+        doc.validate_invariants(),
+        Err(format!(
+            "covered.from_ms {t} equals covered.to_ms {t}, an empty capture, but \
+             records[\"payments\"] is 3: an empty capture counts no record for any topic and \
+             recorded equal low and high watermarks for every partition"
+        ))
+    );
+}
+
+/// The writer's version: the block names 1.8.0, over every other block.
+#[test]
+fn the_written_version_defines_source_watermarks() {
+    use logweir_core::backup_receipt::{
+        format_version_for, FORMAT_VERSION_WITH_SOURCE_WATERMARKS, SOURCE_WATERMARKS_SINCE_MINOR,
+    };
+    let minor: u64 = FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+        .split('.')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(minor, SOURCE_WATERMARKS_SINCE_MINOR);
+    let archive = pristine().archive;
+    let auth = pristine().source.auth;
+    assert_eq!(
+        format_version_for(&archive, true, true, &auth, true, true, true),
+        FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+    );
+    assert_eq!(
+        format_version_for(&archive, true, true, &auth, true, false, true),
+        FORMAT_VERSION_WITH_SOURCE_WATERMARKS
+    );
+}
+
+/// R3: a receipt without the block round-trips byte for byte (no
+/// `source_watermarks` key is ever written for it).
+#[test]
+fn a_receipt_without_source_watermarks_round_trips_byte_for_byte() {
+    let doc = pristine();
+    let bytes = logweir_core::det_json::to_deterministic_json(&doc).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("source_watermarks"));
+    let back: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        logweir_core::det_json::to_deterministic_json(&back).unwrap(),
+        bytes
+    );
+    assert!(back.source_watermarks.is_none());
 }

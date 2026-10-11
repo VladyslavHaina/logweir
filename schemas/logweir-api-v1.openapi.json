@@ -14326,6 +14326,10 @@
           "topicPrefix"
         ],
         "properties": {
+          "allowTransactionMarkers": {
+            "description": "`restore.allow_transaction_markers` (PROD-01.1a): present, and true, only when the run restores the archive's transaction markers and the records of aborted transactions as ordinary data instead of being refused. Absent: the plan does not allow them.",
+            "type": "boolean"
+          },
           "authMode": {
             "description": "How it authenticates there (`plaintext`, `scramSha512`, …).",
             "type": "string"
@@ -14895,7 +14899,7 @@
         }
       },
       "TeardownView": {
-        "description": "What phase 9 removed, from the SIGNED teardown attestation.",
+        "description": "What a run's teardown could not remove, from `Restore.status.teardown` (the runner's `teardown-failed=` line, FX-44).",
         "type": "object",
         "required": [
           "deletedTruncated"

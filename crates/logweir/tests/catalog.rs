@@ -92,6 +92,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         schema_dependency: None,
         generations: None,
         consumer_positions: None,
+        source_watermarks: None,
     }
 }
 
@@ -3143,4 +3144,95 @@ fn two_records_conflict_on_consumer_positions_only_where_both_carry_them() {
         }
         other => panic!("two copies disagreeing on the summary are a conflict: {other:?}"),
     }
+}
+
+/// **PROD-02.1.** An EMPTY CAPTURE (receipt 1.8.0): no record, every
+/// partition `low == high`, the empty window `[t, t)`.
+fn empty_capture_receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
+    let mut r = receipt(backup_id, run_id);
+    r.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_SOURCE_WATERMARKS.into();
+    r.records = BTreeMap::from([("orders".to_string(), 0u64)]);
+    r.source_watermarks = Some(BTreeMap::from([(
+        "orders".to_string(),
+        vec![[30, 30], [0, 0]],
+    )]));
+    r.covered.to_ms = r.covered.from_ms;
+    r.validate_invariants()
+        .expect("a well-formed empty capture");
+    r
+}
+
+fn sync_once(
+    store: &Store,
+    signer: &logweir::signer::ValidatedSigner,
+    trust: &[logweir_evidence::keys::VerifyingKey],
+) -> logweir::catalog::cli::SyncReport {
+    logweir::catalog::cli::sync_with(
+        &sync_args(100, None),
+        store,
+        signer,
+        trust,
+        ts("2026-09-16T00:00:00Z"),
+        "s3://kafka-backups/prod",
+    )
+    .unwrap()
+}
+
+/// **PROD-02.1 (security review).** A signed empty capture gets no record and
+/// is counted `empty-capture` — it is not a recovery point. The claim is read
+/// only from bytes whose signature verified: an empty capture signed by a key
+/// no one configured, or whose bytes were altered after signing, is
+/// `unverified-signer` and never `empty-capture`.
+#[test]
+fn sync_counts_an_empty_capture_only_over_verified_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (signer, key, _) = signer_in(dir.path());
+    let trust = vec![key.verifying_key()];
+
+    // Control: signed by the configured key.
+    let store = Store::in_memory("logweir/");
+    let r = empty_capture_receipt("nightly-20260916", "01J9X2QK7C4V0R8YB3ZP6MTS5B");
+    let (receipt_key, bytes) = seed_receipt(&store, &r, &key);
+    let report = sync_once(&store, &signer, &trust);
+    assert_eq!(report.empty_capture, 1);
+    assert_eq!(report.written, 0);
+    assert_eq!(report.unverified_signer, 0);
+    assert_eq!(
+        report.points,
+        vec![(receipt_key, point_id(&bytes), PointOutcome::EmptyCapture)]
+    );
+    assert!(store
+        .get_capped(
+            &record_key(&point_id(&bytes)),
+            logweir_engine_oso::storage::caps::SIGNED_DOCUMENT
+        )
+        .is_err());
+
+    // Signed by a stranger: unverified-signer, never empty-capture.
+    let store = Store::in_memory("logweir/");
+    let stranger = SigningKey::generate_ed25519();
+    seed_receipt(&store, &r, &stranger);
+    let report = sync_once(&store, &signer, &trust);
+    assert_eq!(report.unverified_signer, 1);
+    assert_eq!(report.empty_capture, 0);
+
+    // Altered after signing: the configured key's sidecar over other bytes.
+    let store = Store::in_memory("logweir/");
+    let keys = logweir::backup::phase_run::receipt_keys(&r.backup_id, &r.run_id);
+    let signed = receipt_bytes(&receipt("nightly-20260916", "01J9X2QK7C4V0R8YB3ZP6MTS5B"));
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        &signed,
+    )
+    .unwrap();
+    store
+        .put_create_only(&keys.receipt_key, &receipt_bytes(&r))
+        .unwrap();
+    store
+        .put_create_only(&keys.sidecar_key, &serde_json::to_vec(&sidecar).unwrap())
+        .unwrap();
+    let report = sync_once(&store, &signer, &trust);
+    assert_eq!(report.unverified_signer, 1);
+    assert_eq!(report.empty_capture, 0);
 }

@@ -435,7 +435,9 @@ bounded summary — one `catalog-point=<id> state=<state> receipt=<key>` line pe
 receipt examined, then `catalog-scanned=`, `catalog-written=`,
 `catalog-already-present=`, `catalog-conflict=`,
 `catalog-unsupported-format=`, `catalog-unverified-signer=`,
-`catalog-unreadable=`, and `catalog-next=<cursor>` when there is more to walk.
+`catalog-unreadable=`, `catalog-empty-capture=` (receipts of empty captures,
+which are not recovery points and get no record, PROD-02.1), and
+`catalog-next=<cursor>` when there is more to walk.
 Re-running it is idempotent: identity is content-derived, so a second run over
 the same archive produces the same ids and reports them as already present.
 

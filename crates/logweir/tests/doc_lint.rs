@@ -2231,6 +2231,25 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "two-person approval in the console",
             "approverSignature: Console",
         ),
+        // PROD-01.1a (2026-10-10, item 67): an archive holding transaction
+        // markers is refused unless the plan allows them; the plan field.
+        (
+            "an archive holding transaction markers is refused",
+            "restore.allow_transaction_markers: true",
+        ),
+        // PROD-02.1 (2026-10-10, item 68): a backup of a source whose
+        // records all expired is a signed empty capture; the reason an
+        // operator reads on the `Backup`.
+        (
+            "a backup of an emptied source is a named empty capture",
+            "EmptyCapture",
+        ),
+        // FX-44 (2026-10-10, item 69): a failed restore removes or names the
+        // scratch topic it created; the line the controller reads it from.
+        (
+            "a failed restore removes or names the scratch topic it created",
+            "teardown-failed=",
+        ),
     ];
     assert_eq!(
         items.len(),

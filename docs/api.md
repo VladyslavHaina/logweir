@@ -324,7 +324,8 @@ names by hash (never from the Restore object's other fields): `source`
 servers, auth mode and principal, mode, topic prefix, replication factor,
 teardown, and for an original-name restore `ownerStatement`: the requester's
 `owners` — absent when the plan states nothing, `[]` when it states none — and
-`ownerPath`), **`topics` — every one, `{source,
+`ownerPath`, and `allowTransactionMarkers: true` only when the plan restores
+transaction markers as data, `restore.allow_transaction_markers`), **`topics` — every one, `{source,
 target, originalName, partitions?}`, never a slice** — `topicsCount`,
 `verification` and `evidence`. It is present exactly when `scopeComplete` is
 `true`; otherwise `scopeIncomplete` (`tooManyTopics`, `planUnreadable`,

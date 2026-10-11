@@ -33,6 +33,7 @@
 //! | manifest key and version id | no | 1,024 bytes each (an S3 key's and a version id's limit) |
 //! | instants, exit code, covered window | no | nanosecond instants, `i32::MIN`, `i64::MIN` |
 //! | `consumer_positions` | the selection | `consumer_positions::worst_case_block` of the selection |
+//! | `source_watermarks` (PROD-02.1) | no (read just before the engine) | a block of `u64::MAX` pairs that reaches `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` |
 //!
 //! `tests/topic_budget.rs::no_real_receipt_is_larger_than_its_projection`
 //! holds the bound: real outcomes of every shape are never larger than what
@@ -226,6 +227,35 @@ fn every_topic<T: Clone>(topics: &[String], value: T) -> BTreeMap<String, T> {
     topics.iter().map(|t| (t.clone(), value.clone())).collect()
 }
 
+/// PROD-02.1's `source_watermarks` at its longest. The writer records the
+/// block only while it encodes within
+/// `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES`, so the first block of
+/// `u64::MAX` pairs that reaches the budget is never smaller than one it
+/// signs. `None` only for no topic.
+fn longest_source_watermarks(topics: &[String]) -> Option<BTreeMap<String, Vec<[u64; 2]>>> {
+    let topic = topics.first()?;
+    let budget = logweir_core::backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES;
+    let block = |n: usize| BTreeMap::from([(topic.clone(), vec![[u64::MAX; 2]; n])]);
+    // A block that does not encode is never smaller than the budget: the
+    // search stops there rather than measuring nothing.
+    let reaches =
+        |n: usize| match logweir_core::backup_receipt::source_watermarks_encoded_len(&block(n)) {
+            Ok(len) => len >= budget,
+            Err(_) => true,
+        };
+    // A partition takes at least 36 bytes, so `budget / 36 + 1` reaches it.
+    let (mut lo, mut hi) = (1, budget / 36 + 1);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if reaches(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(block(lo))
+}
+
 /// The outcome of this run with every undecided field at its longest — what
 /// [`project`] measures. `pub` for the row that holds it above real outcomes.
 #[must_use]
@@ -280,6 +310,7 @@ pub fn longest_outcome(known: &Known<'_>) -> BackupOutcome {
         generations: every_topic(known.topics, longest_identity()),
         consumer_positions,
         consumer_positions_document,
+        source_watermarks: longest_source_watermarks(known.topics),
         facts: BackupFacts {
             started_at: at,
             finished_at: at,

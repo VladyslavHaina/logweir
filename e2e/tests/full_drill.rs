@@ -191,11 +191,12 @@ fn a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard() {
 /// `logweir-core::guard`), and this test covers the reachable sibling: the
 /// drill refuses BEFORE restoring rather than restoring nothing and scoring it.
 ///
-/// MEASURED: exit 1 with NO scorecard, not exit 2. That is the product's own
-/// routing — `phase4_sample` raises an operational error, because a plan whose
-/// window matches no segment is a plan Logweir cannot execute, not a fact about
-/// a restore that ran. What matters for this suite is the invariant in the
-/// name: never 0, and never a signed document claiming a pass.
+/// MEASURED: exit 3 with NO scorecard. Since PROD-02.1 (release-notes item 68)
+/// a set with no segment for any topic the restore names is refused at
+/// admission, as soon as the manifest is read and before phase 2: no target
+/// topic is created and no engine starts (it used to reach phase 4 and exit
+/// 1). What matters for this suite is the invariant in the name: never 0, and
+/// never a signed document claiming a pass.
 #[test]
 fn a_drill_with_nothing_to_restore_is_refused_and_never_reports_a_pass() {
     let out = drill_run(&spec_with_unrestorable_topic());
@@ -207,18 +208,22 @@ fn a_drill_with_nothing_to_restore_is_refused_and_never_reports_a_pass() {
     );
     assert_eq!(
         code,
-        Some(1),
-        "expected the phase-4 refusal (operational, no artifact): {}",
+        Some(3),
+        "expected the admission refusal (guard, no artifact): {}",
         out.out.stderr_utf8()
     );
     let e = out.out.stderr_utf8();
     assert!(
-        e.contains("overlaps the window") && e.contains("would report a pass that means nothing"),
+        e.contains("records no segment for any of the topics this restore names"),
         "the refusal must say WHY, in the words the guard was written for:\n{e}"
     );
     assert!(
         !out.scorecard.exists(),
-        "exit 1 means Logweir could not do its job: NO scorecard may be written"
+        "a refusal before anything runs writes NO scorecard"
+    );
+    assert!(
+        !topic_exists("drill-orders-compacted"),
+        "a plan refused at admission creates no target topic"
     );
 }
 

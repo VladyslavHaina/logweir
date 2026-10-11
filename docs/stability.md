@@ -782,7 +782,9 @@ each judged against the partition's marks and the archive's offsets
   the receipt stays inside the one bound the catalog, the controller and the
   evidence fetch read it under (5,131,072 bytes, the topic budget of
   [kubernetes.md](kubernetes.md) §7b.5, whose base counts this block); the
-  positions grow in their own document, which none of them reads.
+  positions grow in their own document, which none of them reads. (Since
+  1.8.0 the receipt does grow on partitions, by `source_watermarks`, within
+  a 32 KiB budget: see below.)
 - **Six receipt arms, 30 to 35, and fourteen document arms, CP-1 to CP-14, are
   MINOR under OD-7 (a).** The receipt's arms read only the new block, so no
   document without it changes verdict; the document's run only when a reader
@@ -809,6 +811,22 @@ each judged against the partition's marks and the archive's offsets
   for documents: the 1.7.0 receipts, their positions documents and the records
   already written stay valid. An older controller refuses a frozen run that
   carries `consumerGroups` (`PlanConfigMapConflict`).
+
+### Receipt format 1.8.0: `source_watermarks` and the empty capture (PROD-02.1)
+
+PROD-02.1 adds one optional block, `source_watermarks` (per named topic, each
+partition's `[low, high]` watermark read before the engine), and the EMPTY
+CAPTURE: the empty window `[t, t)` beside it, for a backup of a source whose
+records all expired
+([the receipt format](formats/backup-receipt.md#source_watermarks-and-the-empty-capture-format-180)).
+Arms 41–45 read only the block and arm 4 admits the empty window only beside
+it, so it is MINOR under OD-7: an older reader refuses an empty capture (the
+safer verdict) and reads an ordinary 1.8.0 receipt as the 1.7.0 one under it.
+Absent is coverage NOT RECORDED, never complete. The block grows with the
+partition count and the writer caps it at **32 KiB** (32,768 bytes, about
+430–650 partitions); over that it is not recorded, so it stays inside the
+receipt's base budget and never pushes a receipt over the one bound every
+reader caps it at (5,131,072 bytes, FX-33). `verify_scorecard.py` is 1.30.0.
 
 ### Scorecard format 1.8.0: `target.original_name`, a restore under the original topic names (PROD-15.1)
 
@@ -1147,6 +1165,16 @@ reversible direction until the owning task rules.
   - a clause on `drill run`'s summary line naming the count and the topics. A
     clean run's line is unchanged.
 
+  The warning names the missing grant when the broker refused the deletion for
+  authorization (``the restore principal lacks `Delete` on topic `…` ``), and the
+  runner's `teardown-failed=` line puts each leftover topic on
+  `Restore.status.teardown.failed`. **A run that fails after its creation
+  step completed**, from phase 6 onwards (exit 1, 3 or 4), tears down what that
+  step created by phase 9's rule (scratch
+  mode, `teardown: delete`, never an original name), logs what it removed, and
+  names what it could not with the same warning and line. It signs nothing and
+  writes no attestation, as before (FX-44).
+
   The signed teardown attestation
   (`logweir/drills/{run_id}.teardown.json`) has always been honest about this —
   a refused topic goes in `topics_failed` and never in `topics_deleted` — and
@@ -1396,7 +1424,7 @@ restore process dies mid-run, there is no checkpoint to resume from: the drill r
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
 
-### Transactional topics are restored with aborted records and markers as data
+### An archive holding transaction markers is refused unless the plan allows it
 
 The pinned engine captures with `READ_UNCOMMITTED` and archives transaction control records as
 ordinary records; the restore replays every archived record non-transactionally. A restored
@@ -1407,6 +1435,37 @@ transactional recovery. Measured by
 ([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)): seven
 markers and five aborted or open-transaction records came back as data, and the drill was signed
 `pass`.
+
+Since PROD-01.1a, before it creates anything on the target, a restore reads the selected
+partitions' segments that its window overlaps and every segment after the window's end (a marker
+there can close a transaction with records in the window; segments whose last record is before
+the window's start are skipped), and counts the records shaped like a marker: key `00 00 00 00` or `00 00 00 01`, a 6-byte value starting `00 00`, and no header but
+`x-original-offset` and `x-original-timestamp`. If it finds any, the restore is refused, as a drill
+or as a `newTopic` restore. It exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the
+message names the topics, the partitions and the count. To restore such an archive as it is, state
+`restore.allow_transaction_markers: true` in the plan. The field is inside `plan_hash`, so the
+changed plan needs a new approval. Under the override the check is skipped, and the signed
+scorecard's `sample.coverage_note` (which `logweir show` prints) says so. A `RehearsalSchedule`
+cannot state the override, so its slots over such an archive are refused and its
+`lastFailed.reason` names the refusal, nor does a standing authorization: a `Restore` under
+`spec.authorization` whose plan states the override is refused as outside the signed scope, because
+no approver signed its plan bytes. A segment in the window that the check cannot decode refuses
+the run with `GuardRefused`. A segment after the window that the store does not hold or the check
+cannot read does not refuse the run, because the restore does not read it (PROD-08.1); the runner's
+output names it, and the scorecard's `sample.coverage_note` says how many could not be read and that
+a transaction closed there is not seen. Cost: the check reads each restored segment once more
+before the engine reads it, plus, for a point-in-time restore, every segment after the point: a
+restore of an old window reads the archive's tail after it. On a large archive that is about one
+more read of the selected partitions.
+
+The record's shape is the only signal: the check does not read the source. A record of your own
+with an integer key 0 or 1 and a 6-byte value starting `00 00` is counted too, and the override gets
+past it. These cases are not detected, and their records are still restored as data: a
+transaction open at backup time whose marker is not in the archive, a transaction opened after the
+backup began, a transaction whose marker is in a segment after the window that could not be read
+(the note above says so), a transaction whose marker is in a segment whose last record is before a
+stated window start (out-of-order timestamps put it there, and the engine skips that segment too),
+and a marker of another encoding version. Detecting them is deferred to PROD-01.1b and PROD-00.3a.
 
 ### Recovery-point selection uses segment first and last timestamps
 
@@ -1940,6 +1999,19 @@ mandatory evidence keys out of the controller's bounded tail.
 **Read it by key name, never by position.** Same rule as `refusal-reason=` and
 `offset-report-key=`, for the same reason (plan erratum E4).
 
+### `teardown-failed=` names what a teardown left (FX-44)
+
+```
+teardown-failed=[{"topic":"drill-orders","error":"the restore principal lacks `Delete` on topic `drill-orders`: TopicAuthorizationFailed (Broker: Topic authorization failed)"}]
+```
+
+Printed once, by phase 9 or by the teardown of a run that failed after its creation step,
+whenever that teardown left a topic; never otherwise. Kafka-legal names only, at most 256 entries,
+each `error` at most 256 characters on one line. It is printed before the summary line, so it
+moves none of the keys below. The controller reads the last one in its tail and copies it,
+held to the Restore's mapped target names, to `Restore.status.teardown.failed`. An older
+controller ignores it.
+
 ### `teardown-key=` is printed exactly when phase 9 attested, and it comes BEFORE interface I8's keys
 
 ```
@@ -2028,7 +2100,7 @@ the code does not show that line (it shows "the runner gave no readable reason")
 
 | run | codes |
 |---|---|
-| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation` |
+| `restore run` | `GuardRefused`, `CredentialNotRenderable`, `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`, `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive` |
 | `backup run` | `GuardRefused`, `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`, `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`, `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`, `WorkloadIdentityNotInjected` |
 
 **The two lines agree.** Both come from one refusal: the state on `refusal-reason=` is the detail's

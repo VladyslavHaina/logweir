@@ -2186,8 +2186,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        46,
-        "the forty-six terminal states that are NOT an exit code — the original ten, plus \
+        47,
+        "the forty-seven terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2226,7 +2226,9 @@ fn every_exit_code_maps_to_its_wire_reason() {
          off `refusal-reason=` like `TargetTopicConfigRefused`, plus PROD-01.3's two — \
          `PlainWithoutTls` (SASL/PLAIN without TLS, refused by the resolver and by the runner) \
          and `CredentialBindingMismatch` (a projected credential whose `logweir-binding` does not \
-         name the connection the Job was built for); \
+         name the connection the Job was built for), plus PROD-01.1a's \
+         `TransactionMarkersInArchive` (the runner's refusal of an archive holding transaction \
+         markers under a plan that does not allow them); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -4366,6 +4368,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
                 // writes no `status.records`.
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -4781,6 +4784,7 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
                     covered: None,
                     records: None,
                     capture: None,
+                    empty_capture: false,
                 })
             })
         };
@@ -9507,6 +9511,7 @@ async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
                 ),
                 records: Some(42),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9572,6 +9577,7 @@ async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
                 ),
                 records: Some(9001),
                 capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                empty_capture: false,
             })
         })
     };
@@ -9633,6 +9639,7 @@ async fn old_runner_missing_or_unreadable_receipt_is_explicitly_legacy_unbound()
                 receipt_sha256: None,
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -9713,6 +9720,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -10053,6 +10061,7 @@ async fn a_receipt_this_installation_refuses_never_populates_the_records_column(
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
+                empty_capture: false,
             })
         })
     };
@@ -11819,6 +11828,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
                 receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: None,
                 capture: None,
+                empty_capture: false,
             })
         })
     };
@@ -12037,6 +12047,7 @@ fn observed_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObs
             receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
             records: None,
             capture: None,
+            empty_capture: false,
         })
     })
 }
@@ -14085,6 +14096,7 @@ mod p12_controller_read_retry {
                         records: readable.then_some(75),
                         capture: readable
                             .then(|| (utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                        empty_capture: false,
                     })
                 })
             }
@@ -14715,6 +14727,7 @@ mod p12_controller_read_retry {
                     receipt_sha256: Some(format!("sha256:{}", "b".repeat(64))),
                     records: Some(75),
                     capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                    empty_capture: false,
                 })
             })
         };
@@ -16096,5 +16109,156 @@ mod fx_33 {
                 .any(|e| e.field == "spec.topics" && e.message.starts_with(SELECTION_TOO_LARGE)),
             "{errs:?}"
         );
+    }
+}
+
+// ------------------------------------------------- PROD-02.1: the empty capture
+
+/// A whole 1.8.0 receipt that is an EMPTY CAPTURE: no record, every
+/// partition `low == high`, the empty window `[t, t)`.
+fn empty_capture_document() -> Value {
+    json!({
+        "format_version": "1.8.0",
+        "run_id": "r1",
+        "backup_id": UID,
+        "requested_at": "2026-11-09T03:17:00Z",
+        "started_at": "2026-11-09T03:17:30Z",
+        "finished_at": "2026-11-09T03:19:00Z",
+        "exit_code": 0,
+        "triggered_by": "schedule",
+        "source": {"cluster_id": "c", "bootstrap_servers": ["k:9092"],
+                   "auth": {"mode": "plaintext", "username": null}, "topics": ["orders"]},
+        "engine": {"id": "oso-cli", "version": "0.23.3", "digest": "sha256:00"},
+        "archive": {"manifest_key": "p/b1/manifest.json", "manifest_sha256": "sha256:11",
+                    "prefix": "p"},
+        "records": {"orders": 0_u64},
+        "covered": {"from_ms": 1_760_000_000_000_i64, "to_ms": 1_760_000_000_000_i64},
+        "source_watermarks": {"orders": [[15, 15], [0, 0]]},
+    })
+}
+
+/// **PROD-02.1.** An empty window is never `windowCovered` (an empty capture
+/// is not a recovery point), and only a receipt whose arms hold is an empty
+/// capture: an empty window without the watermarks, or with a partition whose
+/// low and high differ, is not one.
+#[test]
+fn an_empty_capture_is_read_only_from_a_receipt_whose_arms_hold() {
+    use weirkeeper::controllers::backup::receipt_is_empty_capture;
+    let doc = empty_capture_document();
+    assert_eq!(covered_from_receipt(&doc), None);
+    assert!(receipt_is_empty_capture(&serde_json::to_vec(&doc).unwrap()));
+    // The controller's own read (FX-33's fold, integrate-10): the same rule.
+    let store = Store::in_memory("logweir/");
+    store
+        .put_create_only(RECEIPT_KEY, &serde_json::to_vec(&doc).unwrap())
+        .expect("the fixture receipt is written");
+    let keys = EvidenceKeys {
+        receipt: Some(RECEIPT_KEY.to_string()),
+        sidecar: None,
+        receipt_sha256: None,
+    };
+    let observed = observe_archive(&store, &keys).expect("a key was looked up");
+    assert_eq!(observed.covered, None, "an empty window is no window");
+    assert!(observed.empty_capture);
+
+    let mut tampered = empty_capture_document();
+    tampered["source_watermarks"]["orders"][0] = json!([0, 15]);
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&tampered).unwrap()
+    ));
+    let mut unproven = empty_capture_document();
+    unproven
+        .as_object_mut()
+        .unwrap()
+        .remove("source_watermarks");
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&unproven).unwrap()
+    ));
+    let mut ordinary = empty_capture_document();
+    ordinary["covered"]["to_ms"] = json!(1_760_000_000_001_i64);
+    ordinary["records"]["orders"] = json!(1);
+    assert!(!receipt_is_empty_capture(
+        &serde_json::to_vec(&ordinary).unwrap()
+    ));
+    assert!(!receipt_is_empty_capture(b"not json"));
+}
+
+/// **PROD-02.1, R1's status half.** A run whose VERIFIED receipt is an empty
+/// capture completes `Complete=True` reason `EmptyCapture`, with no
+/// `windowCovered`; the same bytes beside a verdict that is not a pass leave
+/// the reason `Ok`, and the terminal patch (before any signature is checked)
+/// always says `Ok`.
+#[tokio::test]
+async fn an_empty_capture_completes_with_its_reason_only_beside_a_verified_receipt() {
+    let bytes = serde_json::to_vec(&empty_capture_document()).unwrap();
+    let observation = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        let doc: Value = serde_json::from_slice(&bytes).expect("JSON");
+        let empty_capture = weirkeeper::controllers::backup::receipt_is_empty_capture(&bytes);
+        Box::pin(async move {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: covered_from_receipt(&doc),
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
+                records: records_from_receipt(&doc),
+                capture: capture_from_receipt(&doc),
+                empty_capture,
+            })
+        })
+    };
+    let run = |verify: bool| {
+        let observation = observation.clone();
+        async move {
+            let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+                &pod_list_terminated(0),
+                log_body(&i7_tail_with_digest()),
+                200,
+                "Complete",
+            ));
+            if verify {
+                reconcile_backup(
+                    &frozen_backup(),
+                    &client,
+                    &observation,
+                    &valid_evidence,
+                    utc(2026, 11, 9, 3, 20),
+                )
+                .await
+            } else {
+                reconcile_backup(
+                    &frozen_backup(),
+                    &client,
+                    &observation,
+                    &unverified_evidence,
+                    utc(2026, 11, 9, 3, 20),
+                )
+                .await
+            }
+            .expect("the reconcile succeeds");
+            let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+            statuses
+        }
+    };
+    let statuses = run(true).await;
+    let (_, reason, _) = condition_named(&statuses[0], "Complete").expect("Complete");
+    assert_eq!(
+        reason, "Ok",
+        "the terminal patch speaks before any signature is checked"
+    );
+    let last = statuses.last().unwrap();
+    let (state, reason, message) = condition_named(last, "Complete").expect("Complete");
+    assert_eq!((state.as_str(), reason.as_str()), ("True", "EmptyCapture"));
+    assert!(message.contains("EMPTY CAPTURE"), "{message}");
+    assert_eq!(last["records"].as_i64(), Some(0));
+    assert!(statuses.iter().all(|s| s["windowCovered"].is_null()));
+
+    // Control: the same bytes, not verified — never EmptyCapture.
+    let statuses = run(false).await;
+    for s in &statuses {
+        if let Some((_, reason, _)) = condition_named(s, "Complete") {
+            assert_eq!(reason, "Ok", "{s}");
+        }
     }
 }

@@ -157,6 +157,10 @@ pub struct ScopeTarget {
     /// such a run writes — the console gives the runner nothing else to look
     /// in. Absent for every other restore.
     pub owner_statement: Option<ScopeOwnerStatement>,
+    /// `restore.allow_transaction_markers` (PROD-01.1a): the run restores an
+    /// archive's transaction markers, and the records of aborted
+    /// transactions, as ordinary data instead of being refused.
+    pub allow_transaction_markers: bool,
 }
 
 /// One declarative owner the requester states (`{topic, kind, reference}`).
@@ -695,6 +699,7 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
                 TargetMode::NewTopic => "newTopic",
             },
             topic_prefix: prefix,
+            allow_transaction_markers: plan.restore.allow_transaction_markers,
         },
         topics,
         verification: ScopeVerification {
@@ -927,6 +932,27 @@ mod tests {
         for topic in &scope.topics {
             assert_eq!(topic.target, format!("{prefix}{}", topic.source));
         }
+    }
+
+    /// **A plan that allows transaction markers says so in its scope**
+    /// (integrate-10, PROD-16.2 review S-1's class): the override changes what
+    /// the run writes, so the second person sees it. Control: the same plan
+    /// without it.
+    /// KILLS: the field dropped from the scope.
+    #[test]
+    fn a_plan_allowing_transaction_markers_shows_it_in_its_scope() {
+        let topics: Vec<String> = vec!["orders".into()];
+        let allowed = plan_with(
+            &topics,
+            PREFIXED,
+            &format!("{AT}  allow_transaction_markers: true\n"),
+            "kafka-backups",
+        );
+        let scope = approval_scope(&request(&allowed, None), allowed.as_bytes()).expect("complete");
+        assert!(scope.target.allow_transaction_markers);
+        let plain = plan(&["orders"]);
+        let scope = approval_scope(&request(&plain, None), plain.as_bytes()).expect("complete");
+        assert!(!scope.target.allow_transaction_markers);
     }
 
     /// **A plan that is not the request's has no scope.** The function holds

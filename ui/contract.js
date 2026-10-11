@@ -966,7 +966,10 @@ const SCOPE_TARGET = shapeOf(
     bootstrapServers: listOf(str), authMode: str, mode: str, topicPrefix: str,
     replicationFactor: int, teardown: str,
   },
-  { authUsername: str, ownerStatement: objectOf(SCOPE_OWNER_STATEMENT) },
+  {
+    authUsername: str, ownerStatement: objectOf(SCOPE_OWNER_STATEMENT),
+    allowTransactionMarkers: bool,
+  },
 );
 const SCOPE_TOPIC = shapeOf(
   "ScopeTopicView",

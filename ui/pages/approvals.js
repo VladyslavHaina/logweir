@@ -1529,6 +1529,11 @@ export function ownerStatementBlock(statement) {
     "</p></div>";
 }
 
+/** PROD-01.1a's override, shown to the second person (integrate-10): it
+ *  changes what the run writes. */
+export const TRANSACTION_MARKERS_SENTENCE = "This plan restores transaction markers and the " +
+  "records of aborted transactions as ordinary data (restore.allow_transaction_markers: true).";
+
 /** THE APPROVAL SCOPE, ALL OF IT (PROD-16.2). Source, recovery point, target
  *  cluster, EVERY topic and the name it is restored under -- original names
  *  marked, partition subsets listed number by number -- the verification and
@@ -1591,6 +1596,10 @@ export function renderApprovalScope(scope) {
     "which the console's signature covers; none of it from the Restore object. Approving " +
     "approves all of it.</p>" +
     facts(rows) +
+    (target.allowTransactionMarkers === true
+      ? "<p class=\"caveat\" id=\"scope-transaction-markers\">" +
+        esc(TRANSACTION_MARKERS_SENTENCE) + "</p>"
+      : "") +
     (original ? "<p class=\"caveat\" id=\"request-original-topics\">" +
       esc(TWO_PERSON_ORIGINAL_NAME_SENTENCE) + "</p>" +
       ownerStatementBlock(target.ownerStatement) : "") +

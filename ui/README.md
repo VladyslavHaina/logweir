@@ -882,7 +882,9 @@ the page is built so that there is nowhere to do any of that:
   scope** (`renderApprovalScope`): the source archive and backup set, the
   recovery point, the target cluster's bootstrap servers, **every topic and the
   name it is restored under** (original names marked, partition subsets listed
-  number by number), the verification and where the evidence goes. Every one of
+  number by number), the verification and where the evidence goes, and one
+  sentence when the plan restores transaction markers as data
+  (`restore.allow_transaction_markers: true`). Every one of
   those is the server's, taken from bytes the console verified its own
   signature on and the plan they name by hash, and every one is rendered as
   text. The topic list is never sliced: it scrolls inside the panel
@@ -1197,7 +1199,9 @@ limit with the plan, after its copy caveat and before the approval-policy block
 and *Create the Restore*, on every plan (`RESTORE_SEMANTICS_SENTENCE`); under
 the approval block's heading it read as part of the approval:
 
-> Restores copy the archive as written: aborted transactions and transaction
+> Restores copy the archive as written: an archive holding transaction markers
+> is refused unless the plan allows them, and under that allowance, or for an
+> open transaction the check cannot see, aborted transactions and transaction
 > markers are restored as ordinary records, `LogAppendTime` timestamps come back
 > as producer `CreateTime`, repeated header keys keep one copy, and when
 > timestamps are out of order a full or point-in-time restore can miss records.

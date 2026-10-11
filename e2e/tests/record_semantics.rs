@@ -342,6 +342,9 @@ fn verdict(r: &Run) -> Value {
             .map(|p| json!([p["phase"], p["name"], p["duration_ms"]]))
             .collect::<Vec<_>>(),
         "records_restored": sc["sample"]["records_restored"],
+        // PROD-01.1a: where a run under `restore.allow_transaction_markers`
+        // says so.
+        "coverage_note": sc["sample"]["coverage_note"],
         "summary": pick("run ").into_iter().find(|l| l.starts_with("run ")),
         "count_bound": pick("manifest bounds the window"),
         "selection_verdicts": pick("selection verdict"),
@@ -510,6 +513,41 @@ fn restore_with_basis(
 ) -> Restored {
     let (prefix, target) = row.target(label, source);
     let spec = restore_spec_with_basis(backup_id, source, &prefix, pit, sample, producer_time);
+    restore_spec_run(row, label, target, spec)
+}
+
+/// **PROD-01.1a.** `restore` of a full archive, as a `newTopic` restore or
+/// (`scratch`) as a drill into `drill-<source>`, and with `allow` the plan's
+/// `restore.allow_transaction_markers: true`.
+fn restore_txn(
+    row: &mut Row,
+    label: &str,
+    backup_id: &str,
+    source: &str,
+    sample: (i64, i64),
+    scratch: bool,
+    allow: bool,
+) -> Restored {
+    let (prefix, mut target) = row.target(label, source);
+    let mut spec = restore_spec(backup_id, source, &prefix, None, sample);
+    let doc = spec.as_mapping_mut().expect("the spec is a mapping");
+    if scratch {
+        let t = doc
+            .get_mut("target")
+            .and_then(serde_yaml::Value::as_mapping_mut)
+            .expect("the spec has a target block");
+        t.remove("mode");
+        t.remove("topic_naming");
+        t.insert("marker_topic".into(), MARKER_TOPIC.into());
+        target = format!("drill-{source}");
+        row.topics.push(target.clone());
+    }
+    if allow {
+        doc.insert(
+            "restore".into(),
+            serde_yaml::from_str("allow_transaction_markers: true").expect("YAML"),
+        );
+    }
     restore_spec_run(row, label, target, spec)
 }
 
@@ -1000,6 +1038,9 @@ fn transactional_topic_committed_input_versus_restored_output() {
         .map(|part| Out::kv(part, None, &format!("l{part}"), &format!("l{part}-value")))
         .collect();
     kafka::produce_plain(&late, &late_plain).expect("late topic's committed records");
+    // PROD-01.1a R1's control: the same records written by a producer that is
+    // not transactional (no markers), in the same backup.
+    let plain = row.source_topic("txn-plain", &[("message.timestamp.type", "CreateTime")]);
     let mut p = Txn::new(&format!("{topic}-tx")).expect("transactional producer");
     let rec = |part: i32, name: &str| Out::kv(part, None, name, &format!("{name}-value"));
     let mut intended_raw: Vec<Out> = Vec::new();
@@ -1032,6 +1073,8 @@ fn transactional_topic_committed_input_versus_restored_output() {
     run_txn(&mut p, &b, "abort");
     run_txn(&mut p, &c, "commit");
     run_txn(&mut p, &d, "open");
+    let plain_recs: Vec<Out> = a.iter().chain(&b).chain(&c).chain(&d).cloned().collect();
+    kafka::produce_plain(&plain, &plain_recs).expect("the plain twin's records");
 
     let hwm_at_capture = kafka::high_watermarks(&topic, PARTS).expect("watermarks");
     // The open-transaction probes, taken while D is open (see
@@ -1059,7 +1102,7 @@ fn transactional_topic_committed_input_versus_restored_output() {
     }
     q.flush().expect("flush E");
     let backup_id = row.backup_id("txn");
-    backup_ok(&backup_id, &[&topic, &late], 1000);
+    backup_ok(&backup_id, &[&topic, &late, &plain], 1000);
     // D and E end AFTER the capture, as aborts.
     p.abort().expect("abort the open transaction");
     q.abort().expect("abort the late transaction");
@@ -1078,14 +1121,29 @@ fn transactional_topic_committed_input_versus_restored_output() {
     assert_fixture_landed("txn raw view", &ir, &raw);
 
     let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
-    let r = restore(
+    // PROD-01.1a R1: without the override the restore is refused by name, as
+    // a `newTopic` restore and as a drill, before anything reaches the target.
+    let shaped = archive
+        .records
+        .iter()
+        .filter(|x| is_control_shaped(x))
+        .count();
+    let span = archive_span(&archive);
+    let refused_new = restore_txn(&mut row, "refused", &backup_id, &topic, span, false, false);
+    let refused_drill = restore_txn(&mut row, "drill", &backup_id, &topic, span, true, false);
+    // R1's control: the plain twin restores as it always did.
+    let plain_archive = kafka::read_archive(&backup_id, &plain).expect("plain archive");
+    let rp = restore(
         &mut row,
-        "full",
+        "plain",
         &backup_id,
-        &topic,
+        &plain,
         None,
-        archive_span(&archive),
+        archive_span(&plain_archive),
     );
+    // R2: the same archive with `restore.allow_transaction_markers: true`
+    // restores, and the run says so. It is the row's contract restore below.
+    let r = restore_txn(&mut row, "full", &backup_id, &topic, span, false, true);
 
     let late_raw = kafka::read_topic(&late, PARTS, Isolation::Uncommitted).expect("late raw");
     let late_committed =
@@ -1172,6 +1230,12 @@ fn transactional_topic_committed_input_versus_restored_output() {
             "uncommitted_offsets": uncommitted,
             "archived_markers": marker_kinds,
             "detection_signals": sig.to_json(),
+            "prod_01_1a": {
+                "marker_shaped_records": shaped,
+                "refused_new_topic": refused_new.verdict,
+                "refused_drill": refused_drill.verdict,
+                "plain_twin": rp.verdict,
+            },
         }),
     );
     record_outcome(
@@ -1193,6 +1257,51 @@ fn transactional_topic_committed_input_versus_restored_output() {
     }
     assert_verdict("txn", &r, 0, "pass");
     assert_verdict("txn late", &rl, 0, "pass");
+    // PROD-01.1a R1: both default restores refused by name, with the
+    // reference predicate's count, and nothing on either target.
+    assert_eq!(shaped, markers.len(), "the archived markers have the shape");
+    for (what, refused) in [("newTopic", &refused_new), ("drill", &refused_drill)] {
+        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
+        assert_eq!(
+            refused.verdict["refusal_reason"], "refusal-reason=TransactionMarkersInArchive",
+            "{what}: {}",
+            refused.verdict
+        );
+        let said = refused.verdict["stderr_tail"].to_string();
+        assert!(
+            said.contains(&format!("holds {shaped} record(s)"))
+                && said.contains(&format!("in topic `{topic}` (partitions 0, 1, 2)")),
+            "{what}: {said}"
+        );
+        assert!(
+            !topic_exists(&refused.target) && refused.observed.is_empty(),
+            "{what}: a refused restore created {}",
+            refused.target
+        );
+    }
+    // R1's control: the plain twin is not refused.
+    assert_verdict("txn plain twin", &rp, 0, "pass");
+    // R2: the override restores, and the signed scorecard says so; the late
+    // topic (no marker archived: PROD-01.1b's case) and the twin carry no note.
+    let note = |x: &Restored| {
+        x.verdict["coverage_note"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+    assert!(
+        note(&r).contains("restore.allow_transaction_markers: true"),
+        "{}",
+        note(&r)
+    );
+    for x in [&rl, &rp] {
+        assert!(
+            !note(x).contains("allow_transaction_markers"),
+            "{}",
+            note(x)
+        );
+        assert!(!note(x).contains("transaction-marker"), "{}", note(x));
+    }
     // §6.2 on the main topic: markers, the open-at-probe gap on p0 and p2,
     // and D's records in the uncommitted tail.
     let d_ids: BTreeSet<(i32, i64)> = raw
@@ -1253,6 +1362,94 @@ fn transactional_topic_committed_input_versus_restored_output() {
         &r.observed,
         &want_e2e,
     );
+}
+
+/// **PROD-01.1a: a marker after the window's end.** One transaction writes
+/// two records on p0 at `T` and `T + 1` and aborts; the backup cuts a segment
+/// every two records, so the abort marker (stamped by the broker, now) is
+/// alone in p0's second segment. A point-in-time restore at `T + 1000` reads
+/// only the first segment, which holds the aborted records: it is refused all
+/// the same, by name, with nothing on the target. Control: the same archive
+/// restored to its end (the marker inside the window) is refused too.
+#[test]
+fn a_marker_after_the_window_refuses_a_point_in_time_restore() {
+    let mut row = Row::new("txn-after");
+    let topic = row.source_topic("txn-after", &[("message.timestamp.type", "CreateTime")]);
+    let mut p = Txn::new(&format!("{topic}-tx")).expect("transactional producer");
+    p.begin().expect("begin");
+    for (i, name) in ["x0", "x1"].into_iter().enumerate() {
+        let o = Out::kv(0, Some(T + i as i64), name, &format!("{name}-value"));
+        p.send(&topic, &o).expect("send");
+    }
+    p.flush().expect("flush");
+    p.abort().expect("abort");
+    let backup_id = row.backup_id("txn-after");
+    backup_ok(&backup_id, &[&topic], 2);
+    let raw = kafka::read_topic(&topic, PARTS, Isolation::Uncommitted).expect("raw");
+    let committed = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("committed");
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let pit = T + 1000;
+    let at_point = restore(&mut row, "pit", &backup_id, &topic, Some(pit), (T, pit));
+    let to_end = restore(
+        &mut row,
+        "end",
+        &backup_id,
+        &topic,
+        None,
+        archive_span(&archive),
+    );
+    let marker_segments: Vec<&kafka::Segment> = archive
+        .segments
+        .iter()
+        .filter(|s| {
+            archive.records.iter().any(|r| {
+                is_control_shaped(r)
+                    && r.partition == s.partition
+                    && (s.start_offset..=s.end_offset).contains(&r.offset)
+            })
+        })
+        .collect();
+    let where_markers: Vec<Value> = marker_segments
+        .iter()
+        .map(|s| json!([s.partition, s.key, s.start_timestamp]))
+        .collect();
+    record_outcome(
+        "txn-after",
+        &raw,
+        &committed,
+        &archive,
+        &[("pit", &at_point, &[], &[]), ("end", &to_end, &[], &[])],
+        &[],
+        json!({"point_in_time": pit, "marker_segments": where_markers}),
+    );
+    if !contract_applies("txn-after") {
+        return;
+    }
+    // The layout the row is about: one marker, in a segment wholly after the
+    // point; the two aborted records in the window.
+    assert_eq!(marker_segments.len(), 1, "{where_markers:?}");
+    assert!(
+        marker_segments[0].start_timestamp > pit,
+        "{where_markers:?}"
+    );
+    assert_eq!(raw.len(), 2, "the two aborted records");
+    assert!(committed.is_empty(), "the transaction aborted");
+    for (what, refused) in [("at the point", &at_point), ("to the end", &to_end)] {
+        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
+        assert_eq!(
+            refused.verdict["refusal_reason"], "refusal-reason=TransactionMarkersInArchive",
+            "{what}: {}",
+            refused.verdict
+        );
+        assert!(
+            refused.verdict["stderr_tail"]
+                .to_string()
+                .contains("holds 1 record(s)"),
+            "{what}: {}",
+            refused.verdict
+        );
+        assert!(!topic_exists(&refused.target), "{what}: {}", refused.target);
+    }
 }
 
 // ======================================================== TIMESTAMPS
@@ -2874,6 +3071,22 @@ fn complete_coverage_hashes_every_segment_outside_the_window() {
     // The sampled lane never reads an out-of-window segment: both faults pass.
     assert_verdict("corrupt sampled", &s1, 0, "pass");
     assert_verdict("omitted sampled", &s2, 0, "pass");
+    // PROD-01.1a: the marker check reads the segments after the window too;
+    // the omitted one does not refuse the run and is never silent. A segment
+    // it can decode (the corrupt one is p0's, well formed) says nothing.
+    let unread = logweir_core::transaction_markers::unread_after_window_note(1);
+    for (what, r, noted) in [
+        ("control sampled", &s0, false),
+        ("control complete", &c0, false),
+        ("corrupt sampled", &s1, false),
+        ("corrupt complete", &c1, false),
+        ("omitted sampled", &s2, true),
+        ("omitted complete", &c2, true),
+    ] {
+        let note = r.verdict["coverage_note"].as_str().unwrap_or("");
+        assert_eq!(note.contains(&unread), noted, "{what}: {note}");
+        assert_eq!(note.contains("transaction-marker"), noted, "{what}: {note}");
+    }
     for (what, c, key, words) in [
         (
             "corrupt complete",

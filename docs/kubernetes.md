@@ -1074,7 +1074,7 @@ cap in the table above is derived from it:
 |---|---|
 | The most topics one backup may name | **1,000 topics** |
 | What one topic may cost in a receipt | **5,000 bytes a topic** |
-| Everything in a receipt that is not per topic | 131,072 bytes (the consumer position summary is at most 80 KiB of it) |
+| Everything in a receipt that is not per topic | 131,072 bytes (the consumer position summary is at most 80 KiB of it, and receipt 1.8.0's `source_watermarks` at most 32 KiB) |
 | The largest receipt | **5,131,072 bytes** |
 | The largest catalog record | **6,131,072 bytes** (6,000 bytes a topic: a record indents the same blocks deeper) |
 
@@ -3299,15 +3299,21 @@ authorization is a different document.
 
 **The controller deletes no topic, ever.** Teardown is the runner's phase 9,
 which deletes the exact names it created through a deleter that refuses any name
-outside the prefix. Failures are read from the signed teardown attestation into
-`Restore.status.teardown` and mirrored to
+outside the prefix. A run that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), tears down what that step created by the
+same rule (FX-44). What either teardown could not remove
+is printed on the runner's `teardown-failed=` line, copied to
+`Restore.status.teardown.failed` and mirrored to
 `RehearsalSchedule.status.cleanup.pendingTopics`; while that list is non-empty
 the next slot is **skipped** with `LeftoverTopics`, because the run that would
 otherwise collide is not allowed to adopt or delete topics it did not create.
 
-**That guard covers an ATTESTED teardown failure and not a crash.** A run killed
-before phase 9 — deadline, OOM, node loss, an evicted pod — writes no teardown
-attestation at all, so `Restore.status.teardown` is absent, `pendingTopics` stays
+**That guard covers a teardown that ran, and not a crash or a stopped
+creation step.** A stopped creation step (`CreatedTopicsLeft`, named on
+`status.targetTopicsAppeared`; nothing deleted, not in `pendingTopics`) leaves
+the next slot to phase 0's refusal too. A run killed
+before its teardown — deadline, OOM, node loss, an evicted pod — prints no
+`teardown-failed=` line, so `Restore.status.teardown` is absent, `pendingTopics` stays
 empty and the next slot fires under the same per-schedule prefix over whatever
 the dead run left behind. What happens then is the runner's phase 0 question (it
 refuses a mapped name that already exists), not this controller's, and the
@@ -5310,6 +5316,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
+| **0** | `Succeeded` | `ok` | `Complete=True`, reason `EmptyCapture` | An empty capture (PROD-02.1): every selected partition was empty at capture, so the verified receipt records no record; no `windowCovered`, not a recovery point (a `ProtectionPolicy` does not count it). Set only after the receipt verifies. |
 | **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line, or `TargetTopicAppeared` / `CreatedTopicsLeft` off a restore runner's (a stopped creation step: §12, "Restoring under the original topic names") | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. With no reason: among others, a backup runner whose read of the archive to prove its set is new failed TRANSIENTLY (a transport error, a timeout, a 5xx the client had already retried; FX-7) — retryable, and a retry is a new execution id. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. The condition's message ends with the runner's own reason: see "What a refused run says about why" below. |
@@ -6577,7 +6584,8 @@ and cleans it before it is stored:
   `TargetTopicConfigRefused`, `PointInTimeByProducerTime`, `PlainWithoutTls`,
   `CredentialBindingMismatch`, `StorageRegionInvalid`, `AuthorizationInvalid`,
   `AuthorizationExpired`, `PointBindingMismatch`, `PointBindingSetMismatch`,
-  `PointUntrusted`, `RehearsalScopeViolation`. For a `Backup`: `GuardRefused`,
+  `PointUntrusted`, `RehearsalScopeViolation`, `TransactionMarkersInArchive`.
+  For a `Backup`: `GuardRefused`,
   `CredentialNotRenderable`, `PlainWithoutTls`, `CredentialBindingMismatch`,
   `StorageRegionInvalid`, `ConsumerGroupSelectionTooLarge`,
   `ConsumerGroupIdInvalid`, `ConsumerGroupSelectedTwice`,
@@ -7693,11 +7701,14 @@ Secrets" forbids one.
 
 ### Exit 3: the discriminator is a KEY NAME in a bounded tail
 
-`TargetTopicConfigRefused`, `CredentialNotRenderable` and (since FX-8)
+`TargetTopicConfigRefused`, `CredentialNotRenderable`, (since FX-8)
 `PointInTimeByProducerTime` — a point-in-time selection over a source topic
 recorded as `LogAppendTime`, in a plan that does not state
 `restore.time_basis: producerTime`
-([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — are all
+([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)) — and (since
+PROD-01.1a) `TransactionMarkersInArchive` — an archive holding transaction
+markers, in a plan that does not state `restore.allow_transaction_markers:
+true` ([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)) — are all
 exit 3, and the only thing that tells them apart is the runner's
 `refusal-reason=` line. The recovery-point binding's refusals —
 `PointBindingMismatch`, `PointUntrusted` and (since FX-16)

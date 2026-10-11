@@ -907,12 +907,26 @@ fn candidate_from_backup(
     // fields is how the two halves of this file come to disagree about which
     // set a run belongs to.
     let backup_id = backup_set_id(backup).filter(|id| !id.is_empty());
+    // PROD-02.1 (review EC-1): an EMPTY CAPTURE holds no record, so it is
+    // never a recovery point. Its `Complete` reason is written only beside a
+    // passing verdict, on the same patch as `status.capture`, so it is read
+    // here together with it; with no capture time the point is not available
+    // and the policy ages from the last real point.
+    let empty_capture = status
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.r#type == crate::conditions::CONDITION_COMPLETE)
+        })
+        .and_then(|c| c.reason.as_deref())
+        == Some(crate::conditions::CONDITION_REASON_EMPTY_CAPTURE);
     let candidate = p::PointCandidate {
         backup_name: Some(backup.name_any()),
         point_id,
         receipt_sha256,
         backup_id,
         recovery_point_at: status
+            .filter(|_| !empty_capture)
             .and_then(|s| s.capture.as_ref())
             .and_then(|c| c.started_at),
         newest_record_at,

@@ -589,7 +589,11 @@ impl ClusterReader for CountingReader {
 /// **Review L8.** A capture that described no group — every selected group
 /// excluded, as on a broker that types none — asked no position, so the run
 /// reads no marks after the engine: an unavailable leader costs it nothing.
-/// The control: one captured group, and the marks are read once.
+/// The control: one captured group, and the marks are read once more.
+///
+/// PROD-02.1: every run reads the marks ONCE before the engine (the
+/// receipt's `source_watermarks`), so the counts below are that one read plus
+/// the read after the engine this row is about.
 #[test]
 fn a_capture_that_asked_no_position_reads_no_marks_after_the_engine() {
     let reader = CountingReader {
@@ -613,8 +617,9 @@ fn a_capture_that_asked_no_position_reads_no_marks_after_the_engine() {
     );
     assert_eq!(
         reader.marks_reads.load(std::sync::atomic::Ordering::SeqCst),
-        0,
-        "no group was described, so no mark is read"
+        1,
+        "no group was described, so no mark is read after the engine (the one read is \
+         PROD-02.1's, before it)"
     );
     let reader = CountingReader {
         inner: GroupsReader {
@@ -631,6 +636,6 @@ fn a_capture_that_asked_no_position_reads_no_marks_after_the_engine() {
     f.execute_reading(&evidence(), &reader, Vec::new()).unwrap();
     assert_eq!(
         reader.marks_reads.load(std::sync::atomic::Ordering::SeqCst),
-        1
+        2
     );
 }

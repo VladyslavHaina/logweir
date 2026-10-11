@@ -59,8 +59,12 @@ its recovery point), 64 (FX-39 and FX-40, a retention policy over more than
 500 points keeps enforcing, and no run deletes from a partial or expired
 catalog view), 65 (FX-33, one
 backup names at most 1,000 topics, and a backup of many topics stays listed
-and verified) and 66 (PROD-16.2,
-two-person approval in the console, no key) so far. Items continue the next entry's
+and verified), 66 (PROD-16.2,
+two-person approval in the console, no key), 67 (PROD-01.1a, an
+archive holding transaction markers is refused unless the plan allows them), 68
+(PROD-02.1, a backup of a source whose records all expired is a signed, named
+empty capture) and 69 (FX-44, a failed restore removes or names the scratch
+topic it created) so far. Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -235,6 +239,24 @@ backup of 500 topics; it changes the runner, the check Jobs, the controller
 and (one line) the product API, signs nothing differently, and
 the PoC upgrade that carries it takes a backup of several hundred topics and
 reads its catalog entry, its verdict and the controller's memory.
+Item 67 is row PROD-01.1a, proven by unit and phase-sequence rows and on the
+compose stack with the shipped engine (the PROD-01.1 transactional fixture,
+refused as a drill and as a `newTopic` restore, restored under the override,
+and a non-transactional twin as the control; a marker after a point-in-time
+window refused); it changes the runner and the controller's list of restore
+refusal codes, and the PoC upgrade that carries it restores one ordinary
+point unchanged.
+Item 68 is PROD-02.1 (narrowed by OD-11), proven by live rows on the compose
+stack over a topic whose records were produced and deleted, by runner,
+catalog and controller rows, and by both verifiers over a corpus; it changes
+the runner, the receipt format (1.8.0), both verifiers and the controller, and
+the PoC upgrade that carries it runs the schedules over an emptied source.
+Item 69 is fix-now row FX-44, proven by unit rows, controller rows over a
+recording API double and the compose ACL row; it changes the runner (the
+failure-path teardown, the warning's grant clause, one more stdout line) and
+the controller (`status.teardown.failed`), and the PoC upgrade that carries it
+runs a scratch `Restore` that fails after creating its topic and reads the
+topic gone, and one whose topic cannot be deleted and reads it on the status.
 
 #### 28. The engine is `kafka-backup` 0.23.3; an `http://` archive endpoint needs `allow_http: true` (PROD-00.3f)
 
@@ -3111,6 +3133,127 @@ then refused and submitted again. Scorecards stay valid under older readers.
 SECURITY.md states the residual: whoever controls the console, its key or the
 identity provider can produce both halves.
 
+#### 67. An archive holding transaction markers is refused unless the plan allows them (PROD-01.1a)
+
+**Changed.** The engine archives every transaction commit and abort marker as
+an ordinary record, and a restore wrote each one, with the records of aborted
+transactions beside it, as data every consumer reads. Before it creates
+anything on the target, a restore now reads the segments its window overlaps
+and every segment after the window's end (a marker there can close a
+transaction with records in the window), and counts the records shaped like a
+marker. If there
+are any, the restore is refused, as a drill or as a `newTopic` restore. It
+exits 3 with `refusal-reason=TransactionMarkersInArchive`, and the sentence
+names the topics, partitions and count. The `Restore`'s `exitReason`, the
+product API's `result.exitReason` and the console show the name; the
+`Restore`'s status carries the sentence through item 61's `refusal-detail=`
+line, whose closed list of restore codes gains this one. The plan field
+`restore.allow_transaction_markers: true` restores the archive as before. The
+field is inside `plan_hash`. Under the override the check is skipped, and the
+signed scorecard's `sample.coverage_note` says so. A segment after the window
+that cannot be read does not refuse the run (the restore does not read it);
+the runner's output and the same note say how many. The check reads each
+restored segment once more before the engine runs, and a point-in-time restore
+of an old window also reads the archive's tail after it. It reads the shape only,
+so a record of your own with that shape is counted too. A transaction open at
+backup time whose marker is not archived, a transaction opened after the backup
+began, one whose marker is in an unreadable segment after the window, one whose
+marker is in a segment whose last record is before a stated window start, and
+a marker of another encoding version are not detected
+([stability.md](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
+**Do:** nothing, unless you restore transactional topics (Kafka Streams or
+Connect exactly-once, Flink): to restore one as it is, add
+`restore.allow_transaction_markers: true` to its plan and approve the changed
+plan. A `RehearsalSchedule` cannot state the field, so its slots over such an
+archive are refused and `lastFailed.reason` names the refusal; a standing
+authorization never admits a plan that states it.
+**Scope:** the shape predicate on hand-built records (a marker of each type,
+a user record of the same shape, a 7-byte value and a non-zero key prefix
+not caught); the whole run over doubles, refused in both target modes with no
+target topic and no scorecard, run under the override with the note, the
+override outside the approved plan refused at phase 1, an unreadable segment
+in the window refused, a marker in a segment after the window refused, and
+unreadable segments after the window noted and not refused; and live on the
+compose stack with engine `0.23.3+logweir.2` (`e2e/tests/record_semantics.rs`:
+the transactional row refused as a drill and as a `newTopic` restore with the
+7 archived markers named and nothing on the target, the non-transactional twin
+restored and `pass`, the override's restore `pass` with the note; a
+point-in-time restore whose marker is in a segment after the point refused;
+and PROD-08.1's omitted segment after the window still `pass` sampled and
+`fail-integrity` complete, now with the note).
+**Rollback:** an older runner ignores the plan field and restores such an
+archive without the check, as before. A controller older than this item does
+not know the new code, so for this refusal its status says "the runner gave
+no readable reason" (item 61) while `exitReason` still names it: roll the
+controller with the runner. Plans and approvals are unaffected.
+
+#### 68. A backup of a source whose records all expired is a signed, named empty capture (PROD-02.1)
+
+**Changed.** A scheduled backup of a topic that retention had emptied failed
+exit 1 "operational" (the PoC's nightly schedules, 2026-10-02 to 10-05): the
+engine wrote a manifest with no segment and the run refused it. Now
+`logweir backup run` reads every named partition's low and high watermark
+once before the engine and records them in the receipt (format **1.8.0**,
+optional `source_watermarks`). When nothing was captured and every partition
+was empty, the run exits 0 as an **empty capture**: the summary says so, the
+signed receipt counts no record and carries the empty window `[t, t)`, no
+catalog point is written (`catalog sync` counts it `empty-capture`), and the
+`Backup` completes with reason `EmptyCapture`, set only after the controller
+verifies the receipt, with no `windowCovered`. An empty capture is not a
+recovery point: a `ProtectionPolicy` never counts it (it ages from the last
+real point), and a restore of its set is refused by name, exit 3, before
+anything runs. A partly empty source is an ordinary backup whose summary and
+receipt name the empty partitions. Nothing captured over a partition that
+held records, or with the watermarks unread, is still exit 1. Both verifiers
+(`verify_scorecard.py` 1.30.0) check arms 41–45 and print "coverage not
+recorded" for every receipt without the block, never complete. The block grows
+with the partition count and is recorded only up to 32 KiB (about 430–650
+partitions); a larger source's receipt reads "coverage not recorded", and an
+empty capture of it stays exit 1.
+
+**Scope:** `e2e/tests/empty_capture.rs` (R1, R2, R5 on compose, the
+shipped engine `0.23.3+logweir.2`), `crates/logweir/tests/backup_run.rs`,
+`crates/logweir/tests/catalog.rs`, `crates/weirkeeper/tests/backup_controller.rs`,
+`crates/logweir-core/tests/backup_receipt.rs`, the corpus and
+`scripts/check-verifier-parity.sh`. Not proven live in this branch: the
+`Backup` status, which the PoC upgrade that carries it reads over a schedule
+of an emptied source.
+**Rollback:** an older runner fails the empty source exit 1 again; receipts
+already signed keep verifying with this build, and an older verifier refuses
+an empty capture's receipt (arm 4) — the safer verdict.
+
+#### 69. A failed restore removes or names the scratch topic it created (FX-44)
+
+**Changed.** A restore that fails after its creation step completed, from
+phase 6 onwards (exit 1, 3 or 4), now tears down the topics that step
+created by phase 9's rule: deleted in `scratch` mode under
+`teardown: delete`, never in `newTopic` mode, never a topic it did not
+create. A creation step that stops partway still deletes nothing. It logs
+`the restore failed after it created its target topics; teardown removed 1
+scratch topic: <topic>`. Before, it left them and said nothing, and a
+leftover `drill-` topic refused the next run.
+A topic the broker would not delete is named, on a pass and on a failure, by
+the teardown warning, which now also names the grant when the broker's answer
+was an authorization refusal (``…; the restore principal lacks `Delete` on
+topic `<topic>` ``), and by a new stdout line, `teardown-failed=`, which the
+controller copies to `Restore.status.teardown.failed` (until now declared and
+never written). The product API's `teardown` and the console's Teardown
+section show it, and a `RehearsalSchedule` skips its next slot with
+`LeftoverTopics`. The failure path signs nothing and writes no attestation,
+as before; a pass's signed attestation is unchanged.
+**Do:** nothing. Give the restore identity `Delete` on the scratch prefix.
+**Scope:** unit rows (the failure-path teardown over a fixture drill, only
+the topics the run created, nothing in `newTopic` mode or under `keep`, the
+grant only for an authorization refusal, the line's bounds), controller rows
+over a recording API double (exit 1 and exit 0, an unmapped name dropped, no
+line no block), a rehearsal row (a failed child's block becomes
+`pendingTopics`), and the compose ACL row (`Write`, `Read`, `Delete`, and
+`Write` with `Delete` removed; an existing target topic is not deleted).
+[UNVERIFIED — no controller has read a `teardown-failed=` line on a cluster yet; the PoC upgrade that carries this item runs it.]
+**Rollback:** roll back the runner and the controller in either order. An
+older controller ignores the line; an older runner prints none, and leaves a
+failed run's topics as before.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3221,7 +3364,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65 and 66, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68 and 69, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3297,7 +3440,11 @@ needs every `Backup` and `BackupSchedule` that names or resolves
 to more than 1,000 topics split before the upgrade, and each
 `RecoveryCatalog` synced again after the runner image rolls; item 66 changes the controller, the runner, the product API, the
 console and the chart, and needs nothing until a namespace is bound
-`two-person`. To roll back to
+`two-person`; item 67 changes the
+runner and the controller's list of restore refusal codes, and needs the two
+rolled together and a plan field for a restore of an archive that holds
+transaction markers; item 69 changes the runner and the controller and needs
+nothing, in either order. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

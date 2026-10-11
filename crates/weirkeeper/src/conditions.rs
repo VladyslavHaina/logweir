@@ -97,6 +97,12 @@ pub fn wire_reason_for_exit(code: i32) -> &'static str {
 
 /// Exit **0**'s condition `reason`.
 pub const CONDITION_REASON_OK: &str = "Ok";
+/// **PROD-02.1.** Exit **0**'s `Complete` reason for an EMPTY CAPTURE, set
+/// only beside a passing verification of a receipt whose arms hold and whose
+/// window is empty (`controllers::backup::with_empty_capture`): the source
+/// held no record in any selected partition, so the signed receipt records
+/// none and the run is not a recovery point. Never an operational failure.
+pub const CONDITION_REASON_EMPTY_CAPTURE: &str = "EmptyCapture";
 /// Exit **1**'s condition `reason`. The crashed-Job case's `exitReason` says
 /// the same thing in the other vocabulary ([`REASON_OPERATIONAL`]).
 pub const CONDITION_REASON_OPERATIONAL: &str = "Operational";
@@ -169,6 +175,9 @@ pub const TERMINAL_STATES: &[&str] = &[
     // PROD-01.3 security follow-up: a projected credential whose binding does
     // not name the connection the Job was built for, read off `refusal-reason=`.
     TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH,
+    // PROD-01.1a: an archive holding transaction markers under a plan that
+    // does not allow them, read off `refusal-reason=`.
+    logweir_core::guard::TERMINAL_STATE_TRANSACTION_MARKERS_IN_ARCHIVE,
     "NoExitCode",
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
@@ -820,6 +829,7 @@ pub const REASON_RUNNER_ARGV_ANNOTATION_MALFORMED: &str = "AnnotationMalformed";
 /// asserts no member of either is a [`wire_reason_for_exit`] value.
 pub const CONDITION_REASONS: &[&str] = &[
     CONDITION_REASON_OK,
+    CONDITION_REASON_EMPTY_CAPTURE,
     CONDITION_REASON_OPERATIONAL,
     CONDITION_REASON_DRILL_NOT_PASS,
     CONDITION_REASON_GUARD_REFUSED,

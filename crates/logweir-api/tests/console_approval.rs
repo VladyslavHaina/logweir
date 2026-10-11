@@ -1923,6 +1923,44 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     assert_eq!(policy["ticketRequired"], true);
 }
 
+/// **integrate-10 (PROD-16.2 review S-1's class): PROD-01.1a's override is
+/// shown to the second person**, from the plan the request hashes, because
+/// it changes what the run writes. Control: the same plan without it carries
+/// no `allowTransactionMarkers`.
+/// KILLS: the field dropped from the approver's view.
+#[tokio::test]
+async fn a_plan_allowing_transaction_markers_is_shown_to_the_approver() {
+    let (app, _console) = pair_app();
+    let alice = signed_in(&app, "alice", &["ops"]);
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    for (tag, allowed) in [("txn-allowed", true), ("txn-plain", false)] {
+        let mut plan = support::golden_plan();
+        if allowed {
+            plan = plan.replace(
+                "restore:\n",
+                "restore:\n  allow_transaction_markers: true\n",
+            );
+        }
+        let mut body = support::restore_body(&plan);
+        body["approvalRef"]["name"] = json!(format!("approval-{tag}"));
+        body["ticket"] = json!(TICKET);
+        let created = request_as(&app, &alice, tag, body).await;
+        assert_eq!(created.status, 201, "{}", created.text());
+        let restore = created.json()["item"]["name"]
+            .as_str()
+            .expect("name")
+            .to_string();
+        let item = view(&app, &bob, &restore).await.json()["item"].clone();
+        assert_eq!(item["scopeComplete"], true, "{item}");
+        let shown = &item["scope"]["target"]["allowTransactionMarkers"];
+        if allowed {
+            assert_eq!(shown, &json!(true), "{item}");
+        } else {
+            assert!(shown.is_null(), "{item}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The combination with PROD-15.1
 // ---------------------------------------------------------------------------

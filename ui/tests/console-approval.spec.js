@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 
 import { apiClient, resetMode, selectMode } from "../client.js";
 import { decodeApprovalRequest, isContractFailure } from "../contract.js";
-import { decoded } from "./console-fixture.js";
+import { decode, decoded } from "./console-fixture.js";
 import {
   APPROVE_COMMAND,
   approvalPolicyBlock,
@@ -47,6 +47,7 @@ import {
   renderApprovalSubject,
   renderConsoleApprovalPanel,
   submitConsoleApproval,
+  TRANSACTION_MARKERS_SENTENCE,
   twoPersonPolicy,
 } from "../pages/approvals.js";
 
@@ -415,6 +416,34 @@ test("an_original_name_request_shows_the_requesters_owner_statement", () => {
     .includes("does not set owner_path, so the run will refuse"));
   // An ordinary restore carries no statement and shows none.
   assert.ok(!/id="scope-owner-statement"/.test(renderConsoleApprovalPanel(view(TWO_PERSON))));
+});
+
+test("a_plan_allowing_transaction_markers_says_so_to_the_second_person", () => {
+  // integrate-10 (PROD-16.2 review S-1's class): PROD-01.1a's override changes
+  // what the run writes, so the approver sees it. Decoded through the
+  // contract, so a contract that drops `allowTransactionMarkers` fails here.
+  const read = decode("approval-request-pending.json", (body) => {
+    body.item.scope.target.allowTransactionMarkers = true;
+  });
+  assert.deepEqual(read.unknown, [], "the field is declared");
+  const allowed = read.value.item;
+  assert.equal(allowed.scope.target.allowTransactionMarkers, true);
+  const html = renderConsoleApprovalPanel(view(TWO_PERSON, { request: allowed }));
+  assert.match(html, /id="scope-transaction-markers"/);
+  assert.ok(html.includes("This plan restores transaction markers and the records of aborted " +
+    "transactions as ordinary data (restore.allow_transaction_markers: true)."), html);
+  assert.ok(TRANSACTION_MARKERS_SENTENCE.includes("restore.allow_transaction_markers: true"));
+  // NEGATIVE CONTROL: the same request without the override (the API sends
+  // nothing for false), and with an explicit false, say nothing about it.
+  for (const change of [undefined, (body) => {
+    body.item.scope.target.allowTransactionMarkers = false;
+  }]) {
+    const plain = decode("approval-request-pending.json", change);
+    assert.deepEqual(plain.unknown, []);
+    const plainHtml = renderConsoleApprovalPanel(view(TWO_PERSON, { request: plain.value.item }));
+    assert.match(plainHtml, /id="approval-scope"/);
+    assert.ok(!plainHtml.includes("transaction markers"), plainHtml);
+  }
 });
 
 test("an_original_name_request_marks_every_name_it_writes_under", () => {

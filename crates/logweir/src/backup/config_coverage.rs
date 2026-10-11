@@ -689,6 +689,7 @@ mod tests {
             consumer_positions: None,
             schema_dependency: None,
             generations: None,
+            source_watermarks: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }
@@ -895,6 +896,7 @@ mod tests {
             consumer_positions: None,
             schema_dependency: None,
             generations: None,
+            source_watermarks: None,
         };
         assert_eq!(receipt.validate_invariants(), Ok(()));
     }
