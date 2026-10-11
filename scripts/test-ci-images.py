@@ -21,7 +21,6 @@ NS = "promotion-test"
 PLATFORMS = {
     "logweir": ("amd64", "arm64"),
     "weirkeeper": ("amd64", "arm64"),
-    "logweir-ui": ("amd64", "arm64"),
     "logweir-console": ("amd64", "arm64"),
 }
 
@@ -204,7 +203,7 @@ class PromotionTests(unittest.TestCase):
                     artifact.write_text(original)
 
     def test_candidate_identity_and_digest_must_match_before_publication(self):
-        artifact = self.artifact("logweir-ui", "arm64")
+        artifact = self.artifact("logweir-console", "arm64")
         original = json.loads(artifact.read_text())
         for field, value in (("sha", "b" * 40), ("product", "logweir"),
                              ("arch", "amd64"), ("digest", "not-a-digest")):
@@ -215,7 +214,7 @@ class PromotionTests(unittest.TestCase):
         artifact.write_text(json.dumps(original))
 
     def test_unavailable_candidate_refuses_before_publication(self):
-        self.env["MOCK_FAIL_INSPECT_REF"] = self.expected_refs["logweir-ui"][-1]
+        self.env["MOCK_FAIL_INSPECT_REF"] = self.expected_refs["logweir-console"][-1]
         self.run_promotion(success=False)
         self.assert_no_publication()
 
@@ -237,7 +236,6 @@ class PromotionTests(unittest.TestCase):
             output_name = {
                 "logweir": "runner_digest",
                 "weirkeeper": "controller_digest",
-                "logweir-ui": "ui_digest",
                 "logweir-console": "console_digest",
             }[product]
             self.assertIn(f"{output_name}={published['digest']}\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
@@ -448,7 +446,7 @@ class ChartPublicationTests(unittest.TestCase):
         meta, values, chart = self.packaged(key)
         self.assertEqual(meta, {"version": version, "appVersion": "sha-" + SHA})
         self.assertIn("name: logweir-chart\n", chart)
-        for image in ("weirkeeper", "logweir", "logweir-console", "logweir-ui"):
+        for image in ("weirkeeper", "logweir", "logweir-console"):
             self.assertIn(f"docker.io/{NS}/{image}:sha-{SHA}", values)
         self.assertNotIn(":latest", values)
         self.assertIn(f"chart_version={version}\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
@@ -461,13 +459,13 @@ class ChartPublicationTests(unittest.TestCase):
                                     "--version", version])
         push = next(i for i, c in enumerate(self.helm_calls()) if c[0] == "push")
         self.assertLess(push, self.helm_calls().index(pull), "verified after the push")
-        # "Public" is asked anonymously (review L5): the four image inspections
+        # "Public" is asked anonymously (review L5): the three image inspections
         # of the chart step run with a fresh Docker config holding no login, and
         # the pull-back with a Helm registry configuration that does not exist.
         chart_inspects = [json.loads(line) for line in self.docker_env.read_text().splitlines()]
         chart_inspects = [i for i in chart_inspects
                           if i["ref"].endswith(f":sha-{SHA}") and i["docker_config"]]
-        self.assertEqual(len(chart_inspects), 4, chart_inspects)
+        self.assertEqual(len(chart_inspects), 3, chart_inspects)
         pull_env = json.loads(self.pull_env.read_text())
         registry_config = pull_env["registry_config"]
         self.assertTrue(registry_config, "the pull-back must name its own registry config")
@@ -512,14 +510,14 @@ class ChartPublicationTests(unittest.TestCase):
     def test_a_release_chart_without_digests_is_refused(self):
         result = self.package("v1.2.3", None)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("pins its four images by digest", result.stderr)
+        self.assertIn("pins its three images by digest", result.stderr)
         self.assertFalse((self.root / "pkg/logweir-chart-1.2.3.tgz").exists())
         # A digest missing for ONE image refuses the whole package too.
         partial = dict(self.RELEASE_DIGESTS)
-        partial.pop("logweir-ui")
+        partial.pop("logweir-console")
         result = self.package("v1.2.3", partial)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no sha256 digest for logweir-ui", result.stderr)
+        self.assertIn("no sha256 digest for logweir-console", result.stderr)
         # A main chart keeps its tag: no digests asked for, none written.
         result = self.package("sha-" + SHA, None)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -70,11 +70,6 @@ async function consoleMode() {
   return selectMode({ probe: async () => ({ ok: true, status: 200, body: document }) });
 }
 
-async function legacyMode() {
-  resetMode();
-  return selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-}
-
 /** A Restore body over a plan THIS PAGE prepared -- the client refuses any
  *  other bytes before the network. */
 async function restoreBody() {
@@ -286,19 +281,6 @@ test("a_console_approval_record_goes_to_the_restores_own_route_byte_for_byte", a
     assert.deepEqual(JSON.parse(post.init.body), documents, "byte-for-byte, nothing else");
     assert.equal(wire.seen.filter((x) => x.url.endsWith("/approvals")).length, 0,
       "no top-level Approval create is attempted");
-  } finally {
-    wire.restore();
-  }
-});
-
-test("legacy_mode_knows_no_policy_and_has_no_countersign_route", async () => {
-  await legacyMode();
-  const wire = transport(() => undefined);
-  try {
-    const api = apiClient();
-    assert.equal(await api.approvalPolicy("team-a"), null);
-    await assert.rejects(api.submitGovernedApproval("team-a", "restore-x", "{}"));
-    assert.equal(wire.seen.length, 0, "nothing was sent");
   } finally {
     wire.restore();
   }

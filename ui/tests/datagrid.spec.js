@@ -7,8 +7,8 @@
 // buttons and pager around a parsed table (`enhanceDatagrids`). Node has no
 // DOM, so the first half, the strings every list page emits, and the focus
 // bookkeeping of `replace` (driven through a small fake document) are
-// asserted here; the enhancement itself is driven in Chromium by
-// `scripts/plat18-2-ui-e2e.mjs`, keyboard only, against the live API.
+// asserted here; the enhancement itself was driven in Chromium by a one-off
+// harness (now in git history), keyboard only, against the live API.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

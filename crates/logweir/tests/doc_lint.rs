@@ -737,7 +737,7 @@ fn contributing_requires_a_dco_signoff_and_no_cla() {
 /// They are residuals, not bugs: the surface a stranger reads first has to
 /// carry them, because none of the four is discoverable from the code.
 #[test]
-fn the_readme_states_the_four_threat_model_residuals() {
+fn the_readme_states_its_threat_model_residuals() {
     let readme = read("README.md");
 
     assert!(
@@ -753,12 +753,6 @@ fn the_readme_states_the_four_threat_model_residuals() {
         readme.contains("A cluster-admin defeats every control described here"),
         "README.md must state that a cluster-admin defeats every control described \
          here (O0, default (a))"
-    );
-    assert!(
-        readme.contains("RBAC bounds the viewer, not the page"),
-        "README.md must carry the sentence `RBAC bounds the viewer, not the page` \
-         (Global Constraint 28): the four shipped ClusterRoles bind the user, and \
-         under the `kubectl proxy` serving path they bind nothing about the page"
     );
     assert!(
         readme.contains("`self_attested: false` means only \"two different keys\""),
@@ -782,8 +776,7 @@ fn the_readme_states_the_four_threat_model_residuals() {
         readme.contains("listed by\ndigest in the release notes")
             || readme.contains("listed by digest in the release notes"),
         "README.md must record that the `ui/` bundle's contents are listed by digest \
-         in the release notes — the page runs with the viewer's authority, so which \
-         bytes it is has to be checkable"
+         in the release notes, so which bytes the page is has to be checkable"
     );
 }
 
@@ -823,32 +816,22 @@ fn copy_instructions(dockerfile: &str) -> Vec<Vec<String>> {
 /// `/usr/share/licenses/logweir/`; each carries the third-party notices it owes
 /// and none it does not.**
 ///
-/// RENAMED FROM `both_images_copy_the_licence_and_the_notice` (Task 39,
-/// STANDING RULE 19): there are three images now — the runner, the controller
-/// and `logweir-ui` — and "both" was the half of the name that had gone stale.
-/// The three occurrences of the old name in the tree
-/// (`crates/logweir/tests/manifest_lint.rs`, `docs/tag1-checklist.md`, the
-/// definition) move with it.
+/// The runner and the controller are read here; the console image's three
+/// licence files are `manifest_lint.rs`'s and `scripts/check-image-api.sh`'s.
+/// (The `logweir-ui` image's arm went with that image, PROD-17.1 C4.)
 ///
 /// WHAT EACH IMAGE OWES, AND ONLY WHAT IT OWES. A licence notice is a statement
 /// about what is inside, not decoration, so a notice for something an image
 /// does not carry is a FALSE ATTRIBUTION:
 ///
-/// * all three redistribute Logweir's own Apache-2.0 code, so all three carry
-///   `LICENSE` and `NOTICE`;
-/// * the runner and the controller each ship a statically linked Rust binary,
-///   so both carry `THIRD_PARTY_NOTICES.md`, the inventory of that graph. The
-///   UI image ships fourteen static files over a kubectl and links no Rust at
-///   all, so it must NOT — asserted below, and by
-///   `scripts/check-image-ui.sh` check 2;
+/// * both redistribute Logweir's own Apache-2.0 code, so both carry `LICENSE`
+///   and `NOTICE`;
+/// * both ship a statically linked Rust binary, so both carry
+///   `THIRD_PARTY_NOTICES.md`, the inventory of that graph;
 /// * only the runner redistributes the MIT-licensed `kafka-backup`, so only it
 ///   carries `/usr/share/licenses/kafka-backup/`. Asserted absent from the
-///   other two here, and from the built images by
-///   `scripts/check-image-weirkeeper.sh` check 3 and `check-image-ui.sh`
-///   check 2;
-/// * only the UI image redistributes kubectl, so only it carries
-///   `/usr/share/licenses/kubectl/` — its Apache-2.0 text and an inventory
-///   naming the base digest.
+///   controller here, and from the built image by
+///   `scripts/check-image-weirkeeper.sh` check 3.
 ///
 /// This parses `COPY` instructions rather than grepping the file, because the
 /// Dockerfiles' comments explain the absences at length and a grep for
@@ -860,7 +843,6 @@ fn every_image_copies_the_licence_and_the_notice() {
     for (name, path) in [
         ("runner", "Dockerfile"),
         ("controller", "Dockerfile.weirkeeper"),
-        ("UI", "Dockerfile.ui"),
     ] {
         let dockerfile = read(path);
         let copies = copy_instructions(&dockerfile);
@@ -869,14 +851,8 @@ fn every_image_copies_the_licence_and_the_notice() {
             "{path} has no COPY instruction; the parse is wrong, not the file"
         );
 
-        // THE RUST INVENTORY IS OWED BY THE TWO IMAGES THAT SHIP A RUST
-        // BINARY, and by neither the third nor anything else.
-        let required: &[&str] = if path == "Dockerfile.ui" {
-            &["LICENSE", "NOTICE"]
-        } else {
-            &["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
-        };
-        for required in required.iter().copied() {
+        // THE RUST INVENTORY IS OWED BY BOTH: each ships a Rust binary.
+        for required in ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"] {
             let carried = copies.iter().any(|operands| {
                 operands.last().is_some_and(|dest| {
                     dest == LOGWEIR_LICENCES || dest == LOGWEIR_LICENCES.trim_end_matches('/')
@@ -911,61 +887,16 @@ fn every_image_copies_the_licence_and_the_notice() {
          it. COPY instructions found: {runner:?}"
     );
 
-    // The other two redistribute none of it, and must not claim to.
-    for (name, path, gate) in [
-        (
-            "controller",
-            "Dockerfile.weirkeeper",
-            "scripts/check-image-weirkeeper.sh check 3",
-        ),
-        ("UI", "Dockerfile.ui", "scripts/check-image-ui.sh check 2"),
-    ] {
-        for operands in &copy_instructions(&read(path)) {
-            for token in operands {
-                assert!(
-                    !token.contains("kafka-backup"),
-                    "{path} COPYs a `kafka-backup` path (`{token}`). The {name} image links no \
-                     OSO code and redistributes no MIT-licensed binary, so that notice would be \
-                     a FALSE ATTRIBUTION — a claim to redistribute something the image does not \
-                     contain. `{gate}` asserts the same absence from the built image."
-                );
-            }
-        }
-    }
-
-    // AND THE UI IMAGE CARRIES KUBECTL'S, because it redistributes the whole
-    // kubectl base — the same obligation, the same shape, a different upstream.
-    let ui = copy_instructions(&read("Dockerfile.ui"));
-    for (dest, what) in [
-        (
-            "/usr/share/licenses/kubectl/INVENTORY",
-            "the inventory naming the base image by digest and its licence",
-        ),
-        (
-            "/usr/share/licenses/kubectl/LICENSE",
-            "the Apache-2.0 text kubectl is licensed under",
-        ),
-    ] {
-        assert!(
-            ui.iter()
-                .any(|operands| operands.last().is_some_and(|d| d == dest)),
-            "Dockerfile.ui must COPY {what} to {dest}: this image redistributes the whole \
-             registry.k8s.io/kubectl base, binary included, exactly as the runner image \
-             redistributes kafka-backup. COPY instructions found: {ui:?}"
-        );
-    }
-    // AND NOT THE RUST GRAPH'S INVENTORY, which would claim a redistribution it
-    // does not make. The loop above requires it of the other two and skips it
-    // here; this asserts the skip is an ABSENCE rather than an omission.
-    for operands in &ui {
+    // The controller redistributes none of it, and must not claim to.
+    for operands in &copy_instructions(&read("Dockerfile.weirkeeper")) {
         for token in operands {
             assert!(
-                !token.contains("THIRD_PARTY_NOTICES.md"),
-                "Dockerfile.ui COPYs `{token}`. THIRD_PARTY_NOTICES.md is the inventory of \
-                 Logweir's RUST dependency graph, generated from Cargo.lock; this image links no \
-                 Rust binary and redistributes no crate, so shipping it would claim a \
-                 redistribution that does not happen. `scripts/check-image-ui.sh` check 2 \
-                 asserts the same absence from the built image."
+                !token.contains("kafka-backup"),
+                "Dockerfile.weirkeeper COPYs a `kafka-backup` path (`{token}`). The controller \
+                 image links no OSO code and redistributes no MIT-licensed binary, so that \
+                 notice would be a FALSE ATTRIBUTION — a claim to redistribute something the \
+                 image does not contain. `scripts/check-image-weirkeeper.sh` check 3 asserts \
+                 the same absence from the built image."
             );
         }
     }
@@ -2279,6 +2210,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // PROD-17.1 (2026-10-11, item 74): parts v1 does not use are
         // withdrawn; the owner decision that withdrew them.
         ("four unused parts are withdrawn for v1", "OD-12"),
+        // PROD-17.1 (2026-10-11, item 75): the v1 cut's withdrawals; the
+        // route an API client may still call.
+        (
+            "surfaces withdrawn for the v1 cut",
+            "destinations:from-legacy",
+        ),
     ];
     assert_eq!(
         items.len(),

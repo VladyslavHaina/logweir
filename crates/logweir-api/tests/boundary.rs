@@ -466,11 +466,9 @@ fn shipped_ui_files() -> Vec<String> {
     out
 }
 
-/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE LEGACY FILE DOES NOT
-/// (console-ux-1 review L1). The page reads `window.LOGWEIR_CONSOLE` to decide
-/// that a failed session probe is "the service could not be reached" and never
-/// legacy `kubectl proxy` mode; the marker must come from this service and
-/// only from it.
+/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE FILE DOES NOT
+/// (console-ux-1 review L1): the marker must come from this service and only
+/// from it.
 #[tokio::test]
 async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
     let app = TestApp::new();
@@ -510,8 +508,7 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
     let files = shipped_ui_files();
     // TWENTY-SIX SINCE D3 W12, which added `operation-watch.js` and the three
     // pages `#/operations`, `#/protection` and `#/catalog` are rendered by.
-    // The number is asserted rather than taken from the tree for the reason
-    // `scripts/check-image-ui.sh` states beside its own copy: a count read from
+    // The number is asserted rather than taken from the tree: a count read from
     // the same directory the server serves from stays green when files are
     // deleted from both sides at once.
     assert_eq!(

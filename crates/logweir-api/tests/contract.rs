@@ -70,7 +70,6 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/approvals/{name}",
             "/api/v1/namespaces/{ns}/approvals/{name}/packet",
             "/api/v1/namespaces/{ns}/destinations",
-            "/api/v1/namespaces/{ns}/destinations:from-legacy",
             "/api/v1/namespaces/{ns}/destinations/{name}",
             "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
             "/api/v1/namespaces/{ns}/destinations/{name}:test",
@@ -114,8 +113,9 @@ fn the_document_names_every_route_and_every_route_answers() {
     }
     // 56 + PLAT-19.2's two (submitGovernedApproval, getApprovalPolicy) +
     // PROD-16.2's two (getApprovalRequest, approveInConsole), less the two
-    // rehearsal-schedule reads withdrawn in v1.
-    assert_eq!(operation_ids.len(), 58);
+    // rehearsal-schedule reads withdrawn in v1 and PROD-17.1 A4's one
+    // (createDestinationFromLegacy).
+    assert_eq!(operation_ids.len(), 57);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -268,8 +268,8 @@ fn request_schemas_are_strict_all_the_way_down() {
 ///
 /// A REQUEST MAY CARRY A CREDENTIAL; A RESPONSE MAY NOT. Write-only entry
 /// exists precisely so a value can be typed once into a request body
-/// (`CreateDestinationRequest`, `UpdateDestinationAccessRequest`,
-/// `DestinationFromLegacyRequest`), and the property scan below would refuse
+/// (`CreateDestinationRequest`, `UpdateDestinationAccessRequest`), and the
+/// property scan below would refuse
 /// every one of them by name. So the scan is applied to what a response can
 /// reach, and `a_response_envelope_never_reaches_the_write_only_credential`
 /// asserts the other half: no response schema in the document can contain the

@@ -433,8 +433,8 @@ pub fn desired_execution_inputs_for(
 /// legacy path deliberately: those four variables are how every existing
 /// install points its runners at a non-AWS store, and removing them would
 /// break every upgrade at the moment of the upgrade. What closes the defect
-/// there is moving OFF the legacy path — `destinations:from-legacy` (D2 §3.12)
-/// — and until an operator does, `docs/kubernetes.md` §20 names the
+/// there is moving OFF the legacy path to an explicitly created
+/// `BackupDestination`, and until an operator does, `docs/kubernetes.md` §20 names the
 /// forwarding as the reason a controller-level `AWS_ALLOW_HTTP=true` is a
 /// cluster-wide setting.
 ///

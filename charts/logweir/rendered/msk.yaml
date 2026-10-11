@@ -6753,22 +6753,6 @@ metadata:
 imagePullSecrets:
 - name: regcred
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-imagePullSecrets:
-- name: regcred
----
 # Source: logweir/templates/minio/minio.yaml
 apiVersion: v1
 kind: Secret
@@ -6853,24 +6837,6 @@ data:
       },
       "version": 1
     }
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: logweir-ui-runtime-043d1333bd
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-immutable: true
-data:
-  runtime.js: |
-    window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({"allowed": ["logweir-system","kafka"], "selected": ""});
 ---
 # Source: logweir/templates/minio/minio.yaml
 apiVersion: v1
@@ -7167,79 +7133,6 @@ rules:
     resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["get", "list"]
-  # D2 §7.4: the three kinds Amendment F added, READ ONLY. Summaries; no
-  # create, no patch. See this file's header.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["get", "list"]
-  # D1 §8.5/§8.6 (PLAT-06.2) — `backups` JOINS THE CREATE SET, AND NOTHING
-  # ELSE DOES. "Back up now" is the one flow the legacy page could render and
-  # not perform: it held `get`/`list` on `backups` and no `create`, so the
-  # button either had to be hidden or had to send a request this identity was
-  # refused. A manual `Backup` is an ORDINARY object (D1 §8.1) — the same one
-  # `kubectl create -f config/samples/backup-manual.yaml` makes — so the grant
-  # is the ordinary `create` verb and the object the page builds is the object
-  # the product API builds, down to the deterministic name.
-  #
-  # STILL NO `patch` AND NO `delete` ON `backups`. A run is immutable once it
-  # exists (PLAT-06.1 freezes its inputs) and "do not mutate an existing
-  # execution to retry it" is the task's own migration rule; a second run is a
-  # second object. `chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one`
-  # pins the verb set for `backups` to exactly {get, list, create} and fails on
-  # a planted extra verb.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["backupschedules"]
-    verbs: ["patch"]
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustrosters"]
-    verbs: ["list"]
----
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7259,27 +7152,6 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
-    namespace: logweir-system
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui-trustrosters
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
     namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
@@ -7335,50 +7207,6 @@ subjects:
     name: logweir-identity-bootstrap
     namespace: logweir-system
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
-    namespace: logweir-system
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: logweir-ui
-  namespace: kafka
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
-    namespace: logweir-system
----
 # Source: logweir/templates/minio/minio.yaml
 apiVersion: v1
 kind: Service
@@ -7405,30 +7233,6 @@ spec:
     - name: console
       port: 9001
       targetPort: console
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: ui
-  ports:
-    - name: http
-      port: 8001
-      targetPort: http
 ---
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1
@@ -7614,112 +7418,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: logweir-minio
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    logweir.dev/environment: "dev"
-    app.kubernetes.io/component: ui
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: logweir
-      app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: ui
-  template:
-    metadata:
-      annotations:
-        # The immutable, content-addressed context changes name on upgrade;
-        # this rolls the pod to the newly selected namespace set.
-        checksum/logweir-ui-runtime: 043d1333bdc10f12e63e35c5aeafc7df1602f8c7d0d28260fae45a99c3da9aa8
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: ui
-    spec:
-      serviceAccountName: logweir-ui
-      nodeSelector:
-        nodepool: kafka
-        workload: kafka
-      tolerations:
-      - effect: NoSchedule
-        key: kafka
-        value: "true"
-      # THE ONE POD OF THE OPTIONAL COMPONENTS THAT NEEDS ITS TOKEN: it is the
-      # credential `kubectl proxy` attaches to every request it forwards.
-      automountServiceAccountToken: true
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: proxy
-          image: docker.io/vladyslavhaina/logweir-ui:latest
-          imagePullPolicy: Always
-          args:
-            - proxy
-            - --www=/ui
-            - --www-prefix=/ui/
-            - --address=0.0.0.0
-            - --port=8001
-            - '--accept-hosts=.*'
-            - '--accept-paths=^/(ui/|apis/logweir\.dev/v1alpha1/)'
-          env:
-            - name: HOME
-              value: /tmp
-            - name: KUBECACHEDIR
-              value: /tmp/kube-cache
-          ports:
-            - name: http
-              containerPort: 8001
-          readinessProbe:
-            httpGet:
-              path: /ui/
-              port: http
-            periodSeconds: 5
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 128Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          # `/ui` remains the image's read-only page. This single mounted file
-          # replaces its empty standalone context with Helm's non-secret one;
-          # it is not a page copy.
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            - name: runtime
-              mountPath: /ui/runtime.js
-              subPath: runtime.js
-              readOnly: true
-      volumes:
-        # `tmp` is the only writable volume. `runtime` is a read-only
-        # ConfigMap containing only the namespace context, never page assets.
-        - name: tmp
-          emptyDir: {}
-        - name: runtime
-          configMap:
-            name: logweir-ui-runtime-043d1333bd
-            items:
-              - key: runtime.js
-                path: runtime.js
 ---
 # Source: logweir/templates/kafka/kafkacluster.yaml
 apiVersion: logweir.dev/v1alpha1

@@ -112,7 +112,7 @@ if grep -rn -E 'kubectl[^|]*[[:space:]]patch[[:space:]]' deploy/poc/README.md de
   grep -rn -E 'kubectl[^|]*[[:space:]]patch[[:space:]]' deploy/poc/README.md deploy/poc/*.sh deploy/poc/*.yaml >&2
   fail=1
 fi
-# A RELEASE PIN (PROD-14.0): a `v<semver>` LOGWEIR_TAG names its four images by
+# A RELEASE PIN (PROD-14.0): a `v<semver>` LOGWEIR_TAG names its three images by
 # digest, from versions.env's LOGWEIR_IMAGE_DIGESTS (the release's release.json
 # `.images.refs[*].digest`); a `sha-` publication keeps its tags and sets none.
 # `image_ref <image>` is the reference the published chart carries for it.
@@ -120,12 +120,12 @@ image_digests=""
 case "$LOGWEIR_TAG" in
   v*)
     if [ -z "${LOGWEIR_IMAGE_DIGESTS:-}" ]; then
-      echo "FAIL: LOGWEIR_TAG $LOGWEIR_TAG is a release; versions.env must name its four digests (LOGWEIR_IMAGE_DIGESTS)" >&2
+      echo "FAIL: LOGWEIR_TAG $LOGWEIR_TAG is a release; versions.env must name its three digests (LOGWEIR_IMAGE_DIGESTS)" >&2
       fail=1
     else
       image_digests="$work/image-digests.json"
       printf '%s\n' "$LOGWEIR_IMAGE_DIGESTS" > "$image_digests"
-      for image in weirkeeper logweir logweir-console logweir-ui; do
+      for image in weirkeeper logweir logweir-console; do
         jq -er --arg i "$image" '.[$i] | select(test("^sha256:[0-9a-f]{64}$"))' "$image_digests" > /dev/null 2>&1 \
           || { echo "FAIL: LOGWEIR_IMAGE_DIGESTS has no sha256 digest for $image" >&2; fail=1; }
       done
@@ -158,8 +158,7 @@ fi
 RELEASE=logweir render logweir-checkout charts/logweir "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
   --set "controllerImage=$(image_ref weirkeeper)" \
   --set "runnerImage=$(image_ref logweir)" \
-  --set "api.console.image=$(image_ref logweir-console)" \
-  --set "ui.image=$(image_ref logweir-ui)"
+  --set "api.console.image=$(image_ref logweir-console)"
 if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
   # The two paths must install the same objects; only the chart's own label
   # (`helm.sh/chart: logweir-chart-…` against `logweir-0.1.0`) may differ.
@@ -194,11 +193,11 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
   fi
 fi
 
-# THE PUBLISHED CHART NAMES EXACTLY THESE FOUR IMAGES. The package above is
+# THE PUBLISHED CHART NAMES EXACTLY THESE THREE IMAGES. The package above is
 # built here, so a wrong digest or tag in versions.env would render the same
 # wrong reference on both paths and agree with itself. The chart the profile
 # installs is the one in the registry: pull it (anonymously, as README.md does;
-# `charts-dir` may hold it) and require each of its four image defaults to be
+# `charts-dir` may hold it) and require each of its three image defaults to be
 # versions.env's reference, digest included for a release.
 published="$charts/logweir-chart-$LOGWEIR_CHART_VERSION.tgz"
 if [ -f "$published" ] || bounded 120 helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" -d "$charts" > "$work/published-pull.log" 2>&1; then
@@ -206,7 +205,7 @@ if [ -f "$published" ] || bounded 120 helm pull "$LOGWEIR_CHART" --version "$LOG
     | grep -E '^[[:space:]]*(controllerImage|runnerImage|image):' \
     | sed -E 's/^[^:]*:[[:space:]]*//; s/"//g; s/[[:space:]]+#.*$//; s/[[:space:]]*$//' > "$work/published-images.txt"
   published_ok=1
-  for image in weirkeeper logweir logweir-console logweir-ui; do
+  for image in weirkeeper logweir logweir-console; do
     want="$(image_ref "$image")"
     if ! grep -F -x -q -- "$want" "$work/published-images.txt"; then
       echo "FAIL: the published $LOGWEIR_CHART $LOGWEIR_CHART_VERSION does not name $want (versions.env); it names:" >&2
@@ -214,7 +213,7 @@ if [ -f "$published" ] || bounded 120 helm pull "$LOGWEIR_CHART" --version "$LOG
       fail=1; published_ok=0
     fi
   done
-  [ "$published_ok" -eq 1 ] && echo "   ok: the published chart $LOGWEIR_CHART_VERSION names versions.env's four images"
+  [ "$published_ok" -eq 1 ] && echo "   ok: the published chart $LOGWEIR_CHART_VERSION names versions.env's three images"
 else
   echo "FAIL: could not obtain $LOGWEIR_CHART $LOGWEIR_CHART_VERSION:" >&2; cat "$work/published-pull.log" >&2; fail=1
 fi

@@ -1,25 +1,22 @@
 # The `logweir-console` image — D0 stage 7. THE PRODUCT API, WITH THE PAGE IT SERVES.
 #
-# IT IS THE FOURTH IMAGE IN THIS TREE AND IT IS NOT A VARIANT OF ANY OF THEM:
+# IT IS THE THIRD IMAGE IN THIS TREE AND IT IS NOT A VARIANT OF EITHER OTHER:
 #
 #   `Dockerfile`             the runner: two binaries, Logweir's build of the OSO
 #                            engine, librdkafka and its SASL/TLS libraries.
 #   `Dockerfile.weirkeeper`  the controller: one binary, `ca-certificates`, nothing else.
-#   `Dockerfile.ui`          the LEGACY LOCAL ADMIN PROXY's page: a `COPY` of twenty-six
-#                            static files over a kubectl the Kubernetes project publishes.
-#                            IT COMPILES NOTHING and this file does not replace it.
-#   this file                `logweir-api` — a Rust binary — PLUS the same twenty-six
+#   this file                `logweir-api` — a Rust binary — PLUS the page's static
 #                            files, served by that binary out of its own process.
 #
-# WHY THE PAGE IS IN THIS IMAGE TOO, AND WHY THAT IS NOT A SECOND COPY OF IT.
-# `crates/logweir-api/src/assets.rs` reads the configured `uiDirectory` ONCE at
-# startup into memory and serves an allowlist keyed by exact path — the same
-# selection `Dockerfile.ui` makes (`ui/*.html`, `ui/*.js`, `ui/*.css` and
-# `ui/pages/`), for the same reason, with `README.md`, `tests/` and its throwaway
-# keypair excluded on both sides. There is ONE copy in the repository, `ui/`, and
-# two images copy from it; `scripts/check-image-api.sh` check 1 and
-# `scripts/check-image-ui.sh` check 1 each hash what their image will serve
-# against that one tree directory, so the two can never drift apart silently.
+# (A fourth, `Dockerfile.ui` — the legacy `kubectl proxy` page — was withdrawn
+# in v1, PROD-17.1 C4.)
+#
+# THE PAGE. `crates/logweir-api/src/assets.rs` reads the configured
+# `uiDirectory` ONCE at startup into memory and serves an allowlist keyed by
+# exact path (`ui/*.html`, `ui/*.js`, `ui/*.css` and `ui/pages/`), with
+# `README.md`, `tests/` and its throwaway keypair excluded. There is ONE copy in
+# the repository, `ui/`; `scripts/check-image-api.sh` check 1 hashes what this
+# image will serve against it.
 #
 # NAMING, STATED ONCE HERE BECAUSE TWO NAMES ARE IN USE.
 # `docs/to-do/decisions/D0-product-api-and-identity.md` calls the deliverable the
@@ -52,8 +49,7 @@
 # versus `shared` — the listen address, the granted namespaces and the role
 # bindings are all readable from `helm template` and from `kubectl get cm`. A
 # baked default config here would be a second place a shared console's identity
-# settings could come from, in a layer no chart test can see. Same argument
-# `Dockerfile.ui` makes about `kubectl proxy`'s `--accept-paths`.
+# settings could come from, in a layer no chart test can see.
 #
 # NO `CMD`, FOR THE SAME REASON: the argument vector is the chart's.
 #
@@ -177,18 +173,14 @@ COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api
 # ---------------------------------------------------------------------------
 # THE TWENTY-TWO FILES, AND NOTHING ELSE
 # ---------------------------------------------------------------------------
-# TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`, and the globs are `Dockerfile.ui`'s
-# character for character. A whole-directory copy would take `ui/README.md` and
-# `ui/tests/` with it — the second of which carries a throwaway keypair — and
-# would keep taking whatever lands under `ui/` next.
+# TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`. A whole-directory copy would take
+# `ui/README.md` and `ui/tests/` with it — the second of which carries a
+# throwaway keypair — and would keep taking whatever lands under `ui/` next.
 #
 # Docker's `*` does not cross a `/`, so `ui/*.js` is the eleven top-level
 # scripts and never `ui/tests/*.js`.
 #
-# `/ui` IS THE SAME PATH BOTH IMAGES USE, which is not decoration: it is what
-# lets `scripts/check-image-api.sh` reuse `check-image-ui.sh`'s comparison
-# verbatim, and what lets `docs/api.md` name one directory for both deployments.
-# The chart's ConfigMap names it as `uiDirectory: /ui`.
+# The chart's ConfigMap names the directory as `uiDirectory: /ui`.
 COPY ui/*.html ui/*.js ui/*.css /ui/
 COPY ui/pages /ui/pages
 
@@ -201,12 +193,10 @@ COPY ui/pages /ui/pages
 # Apache-2.0 each require those copyright notices to travel with it.
 # `THIRD_PARTY_NOTICES.md` is that inventory, generated from the resolved graph
 # by `scripts/gen-third-party-notices.sh`.
-#
-# `Dockerfile.ui` deliberately does NOT carry the third file, because it links
-# no Rust binary and redistributes no crate. This image does both, so it does.
+
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
 
-# THE SAME NON-ROOT UID AS ALL THREE OTHER IMAGES AND AS the chart's PodSpec
+# THE SAME NON-ROOT UID AS BOTH OTHER IMAGES AND AS the chart's PodSpec
 # (`runAsUser: 65532`, `runAsNonRoot: true`). The kubelet enforces
 # `runAsNonRoot` by REFUSING to start a container whose image declares
 # `USER root`, so this line and that PodSpec have to agree or the console never

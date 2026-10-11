@@ -14,9 +14,7 @@
 // what comes back, because "every badge carries words" is a claim about what
 // is rendered and not about how it is coloured.
 //
-// NOTHING HERE REACHES THE NETWORK. `preview-server.js` is read as TEXT and
-// never imported: it is a development tool, and this row only asserts what
-// its source says about the address it binds and the writes it refuses.
+// NOTHING HERE REACHES THE NETWORK.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -462,30 +460,3 @@ test("the_wizard_stepper_says_which_step_is_current", async () => {
   }
 });
 
-test("the_preview_server_binds_loopback_and_refuses_writes", () => {
-  // Read as text, never imported: the tool opens a socket on purpose and the
-  // suite must not.
-  const source = readFileSync(TESTS + "preview-server.js", "utf8");
-  assert.ok(source.includes('const HOST = "127.0.0.1";'), "the bind address is the loopback literal");
-  assert.ok(source.includes(".listen(PORT, HOST"), "and listen is handed it by name");
-  for (const token of ["0.0.0.0", '"::"', "[::]"]) {
-    assert.equal(source.indexOf(token), -1, "no wildcard address anywhere: " + token);
-  }
-  assert.ok(source.includes("const METHOD_NOT_ALLOWED = 405;"), "every write is a 405");
-  assert.ok(
-    source.includes('method !== "GET" && method !== "HEAD"'),
-    "refused before anything is looked up",
-  );
-  for (const token of ["writeFileSync", "appendFileSync", "createWriteStream"]) {
-    assert.equal(source.indexOf(token), -1, "the preview writes nothing, not even a file: " + token);
-  }
-
-  // It is a tool: the gate's glob never runs it and the gate never names it.
-  const gate = readFileSync(REPO + "scripts/check-ui-behaviour.sh", "utf8");
-  assert.equal(gate.indexOf("preview-server"), -1, "check-ui-behaviour.sh does not run the preview");
-
-  // And ui/README.md documents it under its own heading, with the command.
-  const readme = readFileSync(UI + "README.md", "utf8");
-  assert.ok(readme.includes("## Previewing with fixtures"), "the README heading");
-  assert.ok(readme.includes("node ui/tests/preview-server.js"), "the command");
-});

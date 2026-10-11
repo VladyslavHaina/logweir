@@ -1,6 +1,6 @@
 // pages/destinations.js -- saved destinations (PLAT-08.1, PLAT-08.2): the
-// list, the create form, the access rotation, the access test, what uses one,
-// and adopting a legacy inline archive.
+// list, the create form, the access rotation, the access test and what uses
+// one.
 //
 // WHY THIS PAGE EXISTS. Before it, every schedule and every restore spelled
 // its own archive URL, its own endpoint, its own region and its own Secret
@@ -117,7 +117,6 @@ const HTTP = "http" + ":" + "//";
 
 const CREATE_FORM = "destination-create";
 const ROTATE_FORM = "destination-rotate";
-const LEGACY_FORM = "destination-from-legacy";
 const TEST_FORM = "destination-test";
 
 /** The four grants a destination carries, in the order the form shows them and
@@ -242,12 +241,6 @@ export const WRITE_PROBE_SENTENCE =
   "never deleted and nothing else is ever written by a test. A destination created with kubectl " +
   "and no opinion gets `disabled` instead: a form that discloses the choice may default to the " +
   "useful answer, and an object created without one may not.";
-
-/** What `:from-legacy` does, and what it refuses to do. */
-export const FROM_LEGACY_SENTENCE =
-  "Derives the location from FACTS about an existing schedule or backup -- the frozen execution " +
-  "inputs of its newest succeeded run, or its own spec -- and never from a guess. When neither " +
-  "can be read the answer is a refusal, not a destination pointed at a bucket nobody named.";
 
 // ---------------------------------------------------------------- the reads
 
@@ -1064,69 +1057,6 @@ export function renderRotateForm(item, view) {
   );
 }
 
-/** The "adopt a legacy archive" form. */
-export function renderLegacyForm(view) {
-  const v = view || {};
-  const d = v.draft || {};
-  const state = v.state || {};
-  const pending = state.phase === "pending";
-  return (
-    "<section class=\"from-legacy\" id=\"destination-from-legacy\">" +
-    "<h3>Adopt an existing archive location</h3>" +
-    "<p class=\"note\">" + esc(FROM_LEGACY_SENTENCE) + "</p>" +
-    "<form id=\"destination-legacy-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
-    "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
-    "<div class=\"field-row\">" +
-    "<div class=\"field\"><label for=\"legacy-name\">new destination name</label>" +
-    "<input id=\"legacy-name\" name=\"name\" required value=\"" + esc(String(d.name || "")) +
-    "\"></div>" +
-    "<div class=\"field\"><label for=\"legacy-schedule\">derive from BackupSchedule</label>" +
-    "<input id=\"legacy-schedule\" name=\"sourceSchedule\" value=\"" +
-    esc(String(d.sourceSchedule || "")) + "\"></div>" +
-    "<div class=\"field\"><label for=\"legacy-backup\">or from Backup</label>" +
-    "<input id=\"legacy-backup\" name=\"sourceBackup\" value=\"" +
-    esc(String(d.sourceBackup || "")) + "\"></div>" +
-    "</div>" +
-    "<div class=\"field\"><label for=\"legacy-secret\">archiveWrite: existing Secret name</label>" +
-    "<input id=\"legacy-secret\" name=\"archiveWriteSecret\" value=\"" +
-    esc(String(d.archiveWriteSecret || "")) + "\">" +
-    "<p class=\"help\">Adoption derives the LOCATION from facts. Leave this blank: a " +
-    "destination never names an existing Secret (it would be a Secret written for something " +
-    "else, and the service refuses it). The credential is entered when the destination is " +
-    "created with the form above, and becomes a Secret bound to it.</p></div>" +
-    "<div class=\"actions\"><button type=\"submit\">Adopt</button></div>" +
-    "</fieldset>" +
-    "<div class=\"form-status\" id=\"destination-legacy-status\" tabindex=\"-1\">" +
-    (state.phase === "failed" ? renderLegacyRefusal(state.error) : "") +
-    mutationStatus(state, { kind: "BackupDestination", name: String(d.name || "") }, null) +
-    "</div></form></section>"
-  );
-}
-
-/** A `:from-legacy` refusal, rendered as WHAT IT IS.
- *
- *  `legacy_location_unknown` is a 404, and a 404 rendered as "not found" would
- *  read as "that schedule does not exist" -- which is a different fact and
- *  usually a false one. The schedule exists; what could not be read is a
- *  LOCATION for it, and the service refuses to guess one. So the code is named
- *  and the server's own sentence is rendered verbatim beneath it. */
-export function renderLegacyRefusal(error) {
-  const e = error || {};
-  if (e.code !== "legacy_location_unknown") {
-    return "";
-  }
-  return (
-    "<div class=\"refusal\" id=\"legacy-location-unknown\" role=\"status\">" +
-    badge("unverified", "legacy_location_unknown") +
-    "<p class=\"note\">The object was found. What could not be read is an archive LOCATION for " +
-    "it -- no frozen execution input from a succeeded run, and no usable archive URL on the " +
-    "spec. This service refuses to derive a destination from a guess, so nothing was created. " +
-    "Create the destination explicitly with the form above.</p>" +
-    "<p class=\"detail\">" + cell(e.message) + "</p>" +
-    "</div>"
-  );
-}
-
 // ---------------------------------------------------------------- the DOM half
 
 /** Reads the create form's values. The credential inputs ARE read here --
@@ -1217,7 +1147,6 @@ export async function mountDestinations(node, ns, parse, lifecycle, deps) {
           (may
             ? "<div class=\"form-slot\" id=\"destination-form-slot\">" +
               renderDestinationForm(viewFor(ns, CREATE_FORM)) +
-              renderLegacyForm(viewFor(ns, LEGACY_FORM)) +
               "</div>"
             : "<p class=\"note\" id=\"destinations-read-only\">This login may read " +
               "destinations in this namespace and not create them.</p>"),
@@ -1225,7 +1154,6 @@ export async function mountDestinations(node, ns, parse, lifecycle, deps) {
     );
     if (may) {
       wireCreate(node, ns, parse, lifecycle, api);
-      wireLegacy(node, ns, parse, lifecycle, api);
     }
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
@@ -1383,11 +1311,8 @@ function wireCreate(node, ns, parse, lifecycle, api) {
     if (slot === null) {
       return;
     }
-    replace(slot, parse(
-      renderDestinationForm(viewFor(ns, CREATE_FORM)) + renderLegacyForm(viewFor(ns, LEGACY_FORM)),
-    ));
+    replace(slot, parse(renderDestinationForm(viewFor(ns, CREATE_FORM))));
     wireCreate(node, ns, parse, lifecycle, api);
-    wireLegacy(node, ns, parse, lifecycle, api);
     if (state.phase === "failed") {
       focusFirstProblem(node, "#destination-form-status");
     }
@@ -1400,57 +1325,6 @@ function wireCreate(node, ns, parse, lifecycle, api) {
     const values = readDestinationValues(form);
     keepDraft(key, values, DESTINATION_DRAFT_FIELDS);
     mutation.run(() => submitDestination(ns, values, api));
-  }, lifecycle);
-}
-
-function wireLegacy(node, ns, parse, lifecycle, api) {
-  const form = node.querySelector("#destination-legacy-form");
-  if (form === null) {
-    return;
-  }
-  const key = formKey(ns, LEGACY_FORM);
-  const mutation = mutationFor(key);
-  listen(form, "input", () => {
-    if (active(lifecycle)) {
-      keepDraft(key, readDestinationValues(form),
-        ["name", "sourceSchedule", "sourceBackup", "archiveWriteSecret"]);
-    }
-  }, lifecycle);
-  watchMutation(node, key, mutation, (state) => {
-    if (state.phase === "succeeded") {
-      dropDraft(key);
-      mountDestinations(node, ns, parse, lifecycle, api);
-      return;
-    }
-    const slot = node.querySelector("#destination-form-slot");
-    if (slot !== null) {
-      replace(slot, parse(
-        renderDestinationForm(viewFor(ns, CREATE_FORM)) + renderLegacyForm(viewFor(ns, LEGACY_FORM)),
-      ));
-      wireCreate(node, ns, parse, lifecycle, api);
-      wireLegacy(node, ns, parse, lifecycle, api);
-    }
-  }, lifecycle);
-  listen(form, "submit", (event) => {
-    event.preventDefault();
-    if (!active(lifecycle) || mutation.pending()) {
-      return;
-    }
-    const values = readDestinationValues(form);
-    const body = { name: String(values.name || "").trim(), access: {} };
-    const secret = String(values.archiveWriteSecret || "").trim();
-    body.access.archiveWrite = secret.length > 0
-      ? { mode: "secretKeys", secret: { existing: { name: secret } } }
-      : { mode: "workloadIdentity" };
-    const schedule = String(values.sourceSchedule || "").trim();
-    const backup = String(values.sourceBackup || "").trim();
-    if (schedule.length > 0) {
-      body.sourceSchedule = schedule;
-    }
-    if (backup.length > 0) {
-      body.sourceBackup = backup;
-    }
-    mutation.run(() => api.destinationFromLegacy(ns, body));
   }, lifecycle);
 }
 

@@ -6769,19 +6769,6 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: api
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
----
 # Source: logweir/templates/minio/minio.yaml
 apiVersion: v1
 kind: Secret
@@ -6864,22 +6851,38 @@ data:
       "version": 1
     }
 ---
-# Source: logweir/templates/ui/ui.yaml
+# Source: logweir/templates/ui/api-config.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-ui-runtime-050a1aeb70
+  name: logweir-api-config-962a992eca
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
+    app.kubernetes.io/component: api
 immutable: true
 data:
-  runtime.js: |
-    window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({"allowed": ["logweir-system"], "selected": "logweir-system"});
+  config.yaml: |
+    mode: localAdmin
+    listen: "127.0.0.1:8484"
+    publicOrigin: "http://127.0.0.1:8484"
+    uiDirectory: /ui
+    localAdmin:
+      subject: "admin"
+    namespaces:
+      - logweir-system
+    kubernetes:
+      source: inCluster
+      principal: "system:serviceaccount:logweir-system:logweir-api"
+    cursorKeyFile: /var/run/logweir/keys/cursor.key
+    confirmationKeyFile: /var/run/logweir/confirmation/confirmation.key
+    confirmationKeyManaged: true
+    installationIdentity:
+      namespace: logweir-system
+      publicConfigMap: logweir-signing-trust
 ---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7258,77 +7261,6 @@ rules:
     resourceNames: ["default"]
     verbs: ["get"]
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["get", "list"]
-  # D2 §7.4: the three kinds Amendment F added, READ ONLY. Summaries; no
-  # create, no patch. See this file's header.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["get", "list"]
-  # D1 §8.5/§8.6 (PLAT-06.2) — `backups` JOINS THE CREATE SET, AND NOTHING
-  # ELSE DOES. "Back up now" is the one flow the legacy page could render and
-  # not perform: it held `get`/`list` on `backups` and no `create`, so the
-  # button either had to be hidden or had to send a request this identity was
-  # refused. A manual `Backup` is an ORDINARY object (D1 §8.1) — the same one
-  # `kubectl create -f config/samples/backup-manual.yaml` makes — so the grant
-  # is the ordinary `create` verb and the object the page builds is the object
-  # the product API builds, down to the deterministic name.
-  #
-  # STILL NO `patch` AND NO `delete` ON `backups`. A run is immutable once it
-  # exists (PLAT-06.1 freezes its inputs) and "do not mutate an existing
-  # execution to retry it" is the task's own migration rule; a second run is a
-  # second object. `chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one`
-  # pins the verb set for `backups` to exactly {get, list, create} and fails on
-  # a planted extra verb.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["backupschedules"]
-    verbs: ["patch"]
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustrosters"]
-    verbs: ["list"]
----
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7389,26 +7321,6 @@ subjects:
     name: logweir-api
     namespace: logweir-system
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui-trustrosters
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
-    namespace: logweir-system
----
 # Source: logweir/templates/identity.yaml
 # The bootstrap account cannot list Secrets and cannot read arbitrary names.
 # The external source, when configured, is get-only; only the fixed managed
@@ -7438,6 +7350,33 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["logweir-signing-trust"]
     verbs: ["get", "patch"]
+  # PROD-16.1: the console key's two retained objects, by name, and nothing else.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["logweir-console-confirmation"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["logweir-console-trust"]
+    verbs: ["get", "patch"]
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: logweir-api-installation
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["logweir-signing-trust"]
+    verbs: ["get"]
 ---
 # Source: logweir/templates/identity.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7481,25 +7420,25 @@ subjects:
     name: logweir-api
     namespace: logweir-system
 ---
-# Source: logweir/templates/ui/ui.yaml
+# Source: logweir/templates/ui/api-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: logweir-ui
+  name: logweir-api-installation
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
+    app.kubernetes.io/component: api
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui
+  kind: Role
+  name: logweir-api-installation
 subjects:
   - kind: ServiceAccount
-    name: logweir-ui
+    name: logweir-api
     namespace: logweir-system
 ---
 # Source: logweir/templates/demo-kafka/kafka.yaml
@@ -7628,29 +7567,6 @@ spec:
       port: 9001
       targetPort: console
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: ui
-  ports:
-    - name: http
-      port: 8001
-      targetPort: http
----
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -7714,6 +7630,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP
+              value: "logweir-signing-trust"
             - name: AWS_ENDPOINT_URL
               value: "http://logweir-minio.logweir-system.svc:9000"
             - name: AWS_ALLOW_HTTP
@@ -7827,108 +7745,102 @@ spec:
         - name: data
           emptyDir: {}
 ---
-# Source: logweir/templates/ui/ui.yaml
+# Source: logweir/templates/ui/api-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: logweir-ui
+  name: logweir-api
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
+    app.kubernetes.io/component: api
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: logweir
       app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: ui
+      app.kubernetes.io/component: api
   template:
     metadata:
       annotations:
-        # The immutable, content-addressed context changes name on upgrade;
-        # this rolls the pod to the newly selected namespace set.
-        checksum/logweir-ui-runtime: 050a1aeb7038b79f657802c45a372907bcb497df81faf539555b045c0ddff911
+        checksum/logweir-api-config: 962a992eca6f01b17cd50666cb89180a521d8b69e25b00acc476b2b8d55ad265
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: ui
+        app.kubernetes.io/component: api
     spec:
-      serviceAccountName: logweir-ui
+      serviceAccountName: logweir-api
       nodeSelector:
         kubernetes.io/os: linux
       tolerations:
       - key: demo.logweir.dev/example
         operator: Exists
-      # THE ONE POD OF THE OPTIONAL COMPONENTS THAT NEEDS ITS TOKEN: it is the
-      # credential `kubectl proxy` attaches to every request it forwards.
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: proxy
-          image: docker.io/vladyslavhaina/logweir-ui:latest
+        - name: api
+          image: docker.io/vladyslavhaina/logweir-console:latest
           imagePullPolicy: Always
           args:
-            - proxy
-            - --www=/ui
-            - --www-prefix=/ui/
-            - --address=0.0.0.0
-            - --port=8001
-            - '--accept-hosts=.*'
-            - '--accept-paths=^/(ui/|apis/logweir\.dev/v1alpha1/)'
-          env:
-            - name: HOME
-              value: /tmp
-            - name: KUBECACHEDIR
-              value: /tmp/kube-cache
+            - --config
+            - /etc/logweir/api/config.yaml
           ports:
             - name: http
-              containerPort: 8001
-          readinessProbe:
-            httpGet:
-              path: /ui/
-              port: http
-            periodSeconds: 5
+              containerPort: 8484
           resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
             limits:
-              memory: 128Mi
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          # `/ui` remains the image's read-only page. This single mounted file
-          # replaces its empty standalone context with Helm's non-secret one;
-          # it is not a page copy.
           volumeMounts:
+            - name: config
+              mountPath: /etc/logweir/api
+              readOnly: true
+            - name: keys
+              mountPath: /var/run/logweir/keys
+              readOnly: true
             - name: tmp
               mountPath: /tmp
-            - name: runtime
-              mountPath: /ui/runtime.js
-              subPath: runtime.js
+            - name: confirmation
+              mountPath: /var/run/logweir/confirmation
               readOnly: true
       volumes:
-        # `tmp` is the only writable volume. `runtime` is a read-only
-        # ConfigMap containing only the namespace context, never page assets.
+        - name: config
+          configMap:
+            name: logweir-api-config-962a992eca
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: keys
+          secret:
+            secretName: logweir-console-keys
+            defaultMode: 0440
         - name: tmp
           emptyDir: {}
-        - name: runtime
-          configMap:
-            name: logweir-ui-runtime-050a1aeb70
+        - name: confirmation
+          secret:
+            secretName: logweir-console-confirmation
+            defaultMode: 0440
+            optional: true
             items:
-              - key: runtime.js
-                path: runtime.js
+              - key: confirmation.key
+                path: confirmation.key
 ---
 # Source: logweir/templates/demo-kafka/kafka.yaml
 apiVersion: apps/v1
@@ -8181,6 +8093,30 @@ type: Opaque
 data: {}
 ---
 # Source: logweir/templates/identity.yaml
+# PROD-16.1: the console's ConsoleConfirmation key, rendered EMPTY like the
+# signing key above; the hook generates an Ed25519 key into it once (or adopts
+# the key a hand-made Secret of this name already holds), and `keep` makes it
+# survive uninstall and reinstall like the installation identity.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logweir-console-confirmation
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: console-confirmation
+type: Opaque
+data: {}
+---
+# Source: logweir/templates/identity.yaml
 # Public verification material only: key-id, algorithm, SPKI PEM and the exact
 # current TrustRoster field that consumes it. Retained with the private object
 # so an absent private key is detected as loss, never treated as a fresh install.
@@ -8203,6 +8139,27 @@ metadata:
 data: {}
 ---
 # Source: logweir/templates/identity.yaml
+# PROD-16.1: the console key's PUBLIC half — key-id, algorithm, PEM and the one
+# usage it may be trusted for. A publication record, not authorization.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-console-trust
+  namespace: logweir-system
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/resource-policy: keep
+    logweir.dev/identity-state: uninitialized
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: console-confirmation-trust
+data: {}
+---
+# Source: logweir/templates/identity.yaml
 # A fixed, authority-free cluster-scoped marker makes the current singleton
 # contract explicit. It contains no key material and grants no permissions.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -8222,6 +8179,79 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: signing-identity
 rules: []
+---
+# Source: logweir/templates/identity.yaml
+# PROD-16.1: THE FRESH INSTALL'S TRUST, AND ONLY FOR THE INSTALL. In the one run
+# that GENERATES the installation identity and the console key, the hook reads
+# which trust the cluster already has (`list` TrustPolicy, `get` the one roster
+# name) and, when it has none at all, creates ONE default TrustPolicy trusting
+# the installation signer and that console key. `create` cannot be narrowed by
+# resourceName in RBAC, so this grant must not outlive the install (security
+# review of 428a481a; fix round of 2026-10-08): it is rendered only under
+# `$freshTrust`, only on Helm 3.19+ (the `fail` above), as a `post-install` hook
+# — never upgrade or rollback — weighted before the Job that spends it, and
+# deleted by Helm when the install's post-install hooks have run, succeeded or
+# failed (`hook-succeeded`, `hook-failed`; Helm 3.19.0 and v4.0.1
+# `pkg/action/hooks.go` `execHook` delete every earlier `hook-succeeded` hook
+# when a later one fails; 3.12–3.18 do not, hence the floor). The hook ALSO
+# deletes this binding itself after its trust step, on every exit path the
+# binary controls (`delete` on this one binding name). What neither covers: a
+# failed `Create` of a later hook, or a Helm client killed mid-hook — the next
+# hook run, or the recovery command in docs/install.md, removes it. The
+# installer already holds cluster-admin for the CRDs and ClusterRoles of this
+# chart; for those seconds, whoever can run a pod as
+# `<release>-identity-bootstrap` in the release namespace could create a
+# TrustPolicy — the residual docs/kubernetes.md §8 states.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-identity-trust
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "create"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    resourceNames: ["default"]
+    verbs: ["get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    resourceNames: ["logweir-identity-trust"]
+    verbs: ["delete"]
+---
+# Source: logweir/templates/identity.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-identity-trust
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "-15"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: identity-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-identity-trust
+subjects:
+  - kind: ServiceAccount
+    name: logweir-identity-bootstrap
+    namespace: logweir-system
 ---
 # Source: logweir/templates/demo-kafka/kafka.yaml
 apiVersion: batch/v1
@@ -8366,6 +8396,15 @@ spec:
             - logweir-system
             - --public-configmap-name
             - logweir-signing-trust
+            - --console-secret-name
+            - logweir-console-confirmation
+            - --console-public-configmap-name
+            - logweir-console-trust
+            - --installation-trust-policy
+            - logweir-installation
+            - --allowed-target-cluster-id
+            - "tQmDMMCERvy6yIB-vuOZCQ"
+            - --mark-fresh-install-confirm
             - --revoke-trust-binding
             - logweir-identity-trust
           resources:

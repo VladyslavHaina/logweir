@@ -71,11 +71,6 @@ async function consoleMode() {
   await selectMode({ probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }) });
 }
 
-async function legacyMode() {
-  resetMode();
-  await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
-}
-
 /** What a page must say for a `Valid` verdict on `basis`. Throws when it does
  *  not -- which is what the negative controls below rely on. */
 function judge(html, basis, what) {
@@ -117,15 +112,6 @@ async function consoleDetail(plural, name, objectFixture, operation) {
   const restore = transport((url) => (url.indexOf("/operations/") !== -1
     ? { status: 200, body: operation }
     : { status: 200, body: fixture(objectFixture) }));
-  try {
-    return await apiClient().get("team-a", plural, name);
-  } finally {
-    restore();
-  }
-}
-
-async function legacyDetail(plural, name, cr) {
-  const restore = transport(() => ({ status: 200, body: cr }));
   try {
     return await apiClient().get("team-a", plural, name);
   } finally {
@@ -189,28 +175,6 @@ test("the_basis_is_not_written_where_no_result_was_recorded", async () => {
   assert.equal(((object.status.evidence || {}).verification || {}).trust, undefined);
 });
 
-// ------------------------------------------------------------- legacy mode
-
-test("a_legacy_backup_detail_judges_the_verdict_by_its_trust_basis", async () => {
-  await legacyMode();
-  for (const basis of BASES) {
-    const object = await legacyDetail("backups", "orders-hourly-20260911-124000",
-      crWithBasis("backup-valid-exit0.json", basis));
-    judge(renderBackupDetail(object), basis, "legacy backup detail, " + basis);
-  }
-});
-
-test("a_legacy_restore_detail_judges_the_verdict_and_the_scorecard_facts_by_the_basis", async () => {
-  await legacyMode();
-  for (const basis of BASES) {
-    const object = await legacyDetail("restores", "orders-drill",
-      crWithBasis("restore-valid-pass.json", basis));
-    const html = renderRestoreDetail(object);
-    judge(html, basis, "legacy restore detail, " + basis);
-    judgeClaim(html, basis, "legacy restore detail, " + basis);
-  }
-});
-
 // ----------------------------------------------------------- operation view
 
 test("the_operation_view_judges_the_verdict_by_the_basis_in_both_modes", () => {
@@ -265,13 +229,6 @@ test("the_controllers_untrusted_result_folds_as_untrusted_in_a_console_detail", 
   assert.equal(object.status.evidence.verification.result, "Untrusted");
   assert.equal(object.status.evidence.verification.trust.basis, "RecordedBeforeRevocation");
   judge(renderBackupDetail(object), "RecordedBeforeRevocation", "console detail, result Untrusted");
-
-  // The same object read as a custom resource names the same case.
-  await legacyMode();
-  const cr = crWithBasis("backup-valid-exit0.json", "RecordedBeforeRevocation");
-  cr.status.evidence.verification.result = "Untrusted";
-  judge(renderBackupDetail(await legacyDetail("backups", "orders-hourly-20260911-124000", cr)),
-    "RecordedBeforeRevocation", "legacy detail, result Untrusted");
 
   // And the operation view, over the API's word and over the resource.
   const consoleView = operationFacts(decodeD3Operation(untrustedBody(

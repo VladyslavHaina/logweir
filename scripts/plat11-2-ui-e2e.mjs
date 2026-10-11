@@ -1,12 +1,12 @@
 // PLAT-11.2 live UI acceptance harness: the topic subset, the exact mapping
 // preview, the recovery limits, the readiness gate and the fresh-target retry.
 //
-// THE LAUNCHER IS `scripts/d2w13-ui-e2e.mjs`'s, and for its reason: the
+// THE LAUNCHER IS the one-off D2 W13 harness's, and for its reason: the
 // surfaces under test are served by `logweir-api` and by nothing else, so this
 // starts the product API in localAdmin mode on a loopback port, pointed at this
 // worktree's own `ui/` directory and at one namespace it created, and drives a
-// real Chromium against it. The `Backup` seeding is
-// `scripts/plat12-13-ui-e2e.mjs`'s: two recovery points with deliberately
+// real Chromium against it. The `Backup` seeding is the withdrawn legacy
+// plat12-13 harness's: two recovery points with deliberately
 // different completion times, patched onto the status subresource until they
 // stick.
 //
@@ -307,8 +307,7 @@ function stopApi() {
 // it), so no fixture here ever produces a runner Job and its status is then
 // this harness's to set. The first cut of this file used short names, the
 // controller started a real runner Job against a non-existent archive, and it
-// overwrote the seeded status within a second. (The same trick, and the same
-// reason, as `scripts/plat12-13-ui-e2e.mjs`.)
+// overwrote the seeded status within a second.
 const LONG = "fixture-backup-deliberately-longer-than-sixty-three-characters-";
 
 const sourceCluster = "source-" + suffix;

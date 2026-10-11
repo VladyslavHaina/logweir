@@ -789,7 +789,7 @@ export function table(columns, rows, empty, rowAttributes, grid) {
 // function the suites drive directly.
 //
 // WHY NOT VIRTUALISATION. Measured before this was written
-// (`scripts/plat18-2-measure.mjs`, `scripts/plat18-2-ui-e2e.mjs`): the strings
+// (`scripts/plat18-2-measure.mjs`, and a one-off Chromium run): the strings
 // for 1,000 history rows render in under 5 ms; what a large list costs is
 // the browser laying out every row. Pagination keeps one page of rows in the
 // layout -- the others are detached (a read-only table) or hidden (a table

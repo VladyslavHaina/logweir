@@ -53,12 +53,6 @@ them; a report that one of them is true is not a vulnerability report.
   signing Secret and sign, edit the `TrustRoster`, or delete an admission
   policy. Nothing in this design constrains that subject, and nothing claims
   to.
-- **RBAC bounds the viewer, not the page.** The UI is served by
-  `kubectl proxy` under the viewer's own kubeconfig, so the four shipped
-  ClusterRoles bind the *user* and bind nothing at all about the page. A
-  cluster-admin kubeconfig gives the page cluster-admin. The optional Helm UI
-  proxy uses its ServiceAccount instead; everyone able to reach that proxy
-  receives that account's API authority.
 - **`self_attested: false` means only "two different keys".** One person
   holding both keypairs satisfies it. It is not evidence of an independent
   auditor, and a scorecard that carries it should not be read as one.

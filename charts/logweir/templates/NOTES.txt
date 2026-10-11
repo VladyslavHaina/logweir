@@ -20,24 +20,12 @@ OPTIONAL COMPONENTS:
   * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in namespace {{ include "logweir.connectionsNamespace" . }} (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
   * demoKafka.enabled={{ .Values.demoKafka.enabled }}{{ if .Values.demoKafka.enabled }} — brokers {{ .Release.Name }}-kafka-source and {{ .Release.Name }}-kafka-target on 9092 (PLAINTEXT; the demo's transport, not a recommendation), orders and payments seeded on the source, logweir.scratch on the target{{ else }} — off{{ end }}
   * api.console.enabled={{ .Values.api.console.enabled }}{{ if .Values.api.console.enabled }} — the product console "{{ .Release.Name }}-api", mode {{ .Values.api.console.mode }}{{ if and .Values.api.console.ingress.enabled .Values.api.console.ingress.host }}, at https://{{ .Values.api.console.ingress.host }}/ (sign in at /auth/login){{ end }}{{ else }} — off{{ end }}
-  * ui.enabled={{ .Values.ui.enabled }}{{ if .Values.ui.enabled }} — see below{{ else }} — off (the UI can also be served from a laptop: docs/install.md, "Serving the UI"){{ end }}
-{{- if .Values.ui.enabled }}
+{{- if and .Values.api.console.enabled (eq .Values.api.console.mode "localAdmin") }}
 
-THE UI, AND WHOSE AUTHORITY IT ACTS WITH:
-  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ .Release.Name }}-ui 8001:8001
-  then open http://127.0.0.1:8001/ui/
-
-  The page is served by kubectl proxy from a pod whose ServiceAccount is
-  "{{ .Release.Name }}-ui", and the proxy attaches THAT ServiceAccount's
-  credential to every request it forwards: anyone who can reach the Service
-  acts with that ServiceAccount's authority. The page holds no credential of
-  its own. The proxy admits only /ui/ and /apis/logweir.dev/v1alpha1/, the
-  ServiceAccount holds only the verbs the page issues (get/list on the five
-  namespaced kinds, create on approvals/kafkaclusters/backupschedules/restores,
-  patch on backupschedules, list on trustrosters), and there is no Ingress.
-  It is bound in {{ include "logweir.ui.namespaces" . | fromJsonArray | join ", " }};
-  to let the page see another namespace's objects:
-      kubectl create rolebinding {{ .Release.Name }}-ui --clusterrole={{ .Release.Name }}-ui --serviceaccount={{ .Release.Namespace }}:{{ .Release.Name }}-ui -n <namespace>
+THE CONSOLE (localAdmin), reached through the API server:
+  kubectl port-forward -n {{ .Release.Namespace }} deploy/{{ .Release.Name }}-api {{ .Values.api.console.port }}:{{ .Values.api.console.port }}
+  then open http://127.0.0.1:{{ .Values.api.console.port }}/ui/
+  Whoever may port-forward to that Deployment acts as its one administrator.
 {{- end }}
 
 {{- if .Values.identity.enabled }}

@@ -321,8 +321,9 @@ fn destination_backed() -> Backup {
 /// The legacy arm asserts the forwarding STILL HAPPENS. Those four variables
 /// are how every existing installation points its runners at MinIO or Ceph;
 /// removing them would break every upgrade at the moment of the upgrade. The
-/// route out is `destinations:from-legacy` (D2 §3.12), not a silent behaviour
-/// change — so the legacy decision is pinned here rather than left implicit.
+/// route out is an explicitly created `BackupDestination`, not a silent
+/// behaviour change — so the legacy decision is pinned here rather than left
+/// implicit.
 ///
 /// KILLS: `resolve_inputs` forwarding `addressing_env` for a destination-backed
 /// run (the planted endpoint then reaches the Job beside the destination's own

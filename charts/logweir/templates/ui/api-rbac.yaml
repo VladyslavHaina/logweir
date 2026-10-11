@@ -1,27 +1,15 @@
 {{/*
 `api.enabled` — THE CONSOLE/API PRINCIPAL'S GRANTS, AND ONLY ITS GRANTS.
 
-READ `ui.yaml`'s HEADER FIRST. The `<release>-ui` account beside this one is
-the LEGACY LOCAL ADMIN PROXY (D0's `legacyLocalAdminProxy`): a `kubectl proxy`
-that attaches its own token to every request a BROWSER makes, whose authority
-is therefore anyone who can reach its Service, and whose role is measured from
-`ui/api.js` and `ui/pages/*.js`. This file is a different principal with a
-different argument, and the two must not be confused:
-
-  * `<release>-ui` acts for whoever reached the Service. It is bounded by
-    `--accept-paths`, it holds `get`/`list` on the kinds the page renders plus
-    the four `create`s and the one `patch` the page issues, and it deliberately
-    holds NO verb on `configmaps` and NO verb on `secrets`.
-  * `<release>-api` acts for the console SERVICE, which authenticates and
-    authorizes every request itself (`crates/logweir-api/src/authz.rs`: roles
-    are a table, bindings are exact strings, and a capability is advertised
-    only when the route exists AND the actor's role allows it). Its Kubernetes
-    grants are the UNION of what every route may ever need; the per-actor
-    narrowing is the service's job and is not expressible in RBAC at all.
-
-So this role is WIDER than the proxy's, and that is not a widening of anybody's
-access: it is the floor under a service that does its own authorization, and
-the grant is bounded by a seal in the code rather than by a page's forms.
+`<release>-api` acts for the console SERVICE, which authenticates and
+authorizes every request itself (`crates/logweir-api/src/authz.rs`: roles are a
+table, bindings are exact strings, and a capability is advertised only when the
+route exists AND the actor's role allows it). Its Kubernetes grants are the
+UNION of what every route may ever need; the per-actor narrowing is the
+service's job and is not expressible in RBAC at all. The grant is the floor
+under a service that does its own authorization, bounded by a seal in the code.
+(The legacy `kubectl proxy` page and its `<release>-ui` account were withdrawn
+in v1, PROD-17.1 C4.)
 
 ---------------------------------------------------------------------------
 WHY THE GRANT CAN BE CHECKED AND NOT JUST ASSERTED
@@ -288,9 +276,8 @@ ONE RoleBinding PER NAMESPACE, AND NEVER A ClusterRoleBinding OF THE
 NAMESPACED ROLE. The console's own authorizer refuses an ungranted namespace
 before any Kubernetes call, but a ClusterRoleBinding would mean a defect in
 that check reaches every namespace in the cluster instead of the configured
-ones. The namespace list is the chart's, and it is the SAME shape
-`logweir.ui.namespaces` has: the release namespace, plus `api.namespaces`, or
-`kubernetes.namespace` when that list is empty.
+ones. The namespace list is the chart's: the release namespace, plus
+`api.namespaces`, or `kubernetes.namespace` when that list is empty.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

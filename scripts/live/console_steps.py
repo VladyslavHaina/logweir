@@ -12,7 +12,7 @@ in the same function, names that step.
 
   step-setting calls   wizardStep(p, N), wizardAt(p, N), wizardStepByKeyboard(p, N, ...)
                        (scripts/console-steps.mjs), and openWizard(p, route) -- step N when
-                       the route says `step=N`, else 1 (scripts/live/poc/console.mjs)
+                       the route says `step=N`, else 1 (the PoC console helper's spelling)
   step-clearing calls  a navigation: goto(, gotoHash(, open(, openRoute(, freshPage(,
                        `location.hash =`, waitForURL( -- the wizard is not known to be on
                        screen until a step-setting call says so

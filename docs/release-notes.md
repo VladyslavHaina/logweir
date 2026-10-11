@@ -69,8 +69,9 @@ when ticked), 71 (FX-50, a catalog's `viewLimit` window holds the newest
 points), 72 (PROD-01.5a
 and FX-41, CI tests on Kafka 4.3.1 in four shards; nothing in the product
 changes), 73 (PROD-17.1 C1, scheduled rehearsals and standing
-authorizations withdrawn) and 74 (PROD-17.1, four parts v1 does not use are
-withdrawn) so far. Items continue the next entry's
+authorizations withdrawn), 74 (PROD-17.1, four parts v1 does not use are
+withdrawn) and 75 (PROD-17.1, surfaces withdrawn for the v1 cut) so far.
+Items continue the next entry's
 numbering. No candidate is cut from this entry yet, so it carries no candidate
 record; when one is, its record follows [the release checklist](tag1-checklist.md)
 as the next entry's does.
@@ -3432,6 +3433,42 @@ together. The older CRD types `spec.notifications` again, but the API server
 already dropped what was inside it, so each route must be written again; an
 older runner posts a plan's notifications and logs phase 7's warning again.
 
+#### 75. Surfaces withdrawn for the v1 cut (PROD-17.1, OD-12)
+
+**Changed.** The v1 cut withdraws what v1 does not need (OD-12).
+`POST /api/v1/namespaces/{ns}/destinations:from-legacy` and the console's
+*Adopt an existing archive location* form are gone: the route could only
+refuse (`legacy_location_unknown`), because no source it could read records a
+legacy archive's endpoint, region and addressing. The route now answers `404
+not_found`, and the problem codes `legacy_location_unknown` and
+`legacy_location_mismatch` are no longer published. A legacy schedule's
+archive keeps working as before.
+The legacy `kubectl proxy` page is withdrawn too (C4): the chart's `ui.*`
+values and the objects they rendered, the `logweir-ui` image (main CI now
+publishes three images, and the chart names three), the laptop `just ui`
+path, and the page's legacy mode in `ui/`. The page is served by the console
+(`api.console.*`) only. The chart refuses any `ui` block by name, `ui.* is
+withdrawn`, pointing at the console. An upgraded install that set
+`ui.enabled` loses that page: `helm upgrade` refuses until the block is
+removed, and then Helm deletes the `<release>-ui` Deployment, Service,
+ServiceAccount, ClusterRoles and RoleBindings it rendered. `scripts/helm-demo.sh`
+step 9 now fetches the console's page and session through a port-forward.
+**Do:** create a destination explicitly with `POST .../destinations` (or the
+console's *Create a destination* form), naming the bucket, prefix and endpoint
+your runs used. Remove `ui:` from every values file; for a page, enable the
+console (`api.console.enabled`, [install.md](install.md) §5e). Delete any
+`<release>-ui` RoleBinding created by hand in another namespace (NOTES.txt
+printed the command): `kubectl delete rolebinding <release>-ui -n <namespace>`.
+**Scope:** product API rows (the route table, the role matrix and the
+published document, one operation fewer), console contract rows, the chart
+gate's named refusal of `ui.*` with its control (`scripts/check-chart.sh`), and
+the console UI suite, where two console-mode rows replace legacy-mode ones
+(every mount half through the console client; the standalone approvals page).
+[UNVERIFIED — no install has been upgraded across this item yet; PROD-14.1's clean install walks helm-demo step 9.]
+**Rollback:** the product API and console images, and the previous chart for
+the page; an older API serves the route and refuses as before, and the
+`logweir-ui` images already published stay pullable.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order:
@@ -3443,6 +3480,8 @@ In addition to the next entry's six, in its order:
   the field when convenient. **Before the runner image rolls, remove the
   sinks from every restore plan that names one** (item 74) and approve it
   again: a plan whose `notifications` block names a sink is refused.
+- **Before `helm upgrade`, remove any `ui` block from the values file**
+  (item 75): the chart refuses `ui.*` by name. Use the console for the page.
 
 - **Before the controller rolls, read `status.lastEvaluation.viewIncomplete`
   of every `Enforce` `RetentionPolicy`** (item 64): where it is `true`, the
@@ -3551,7 +3590,7 @@ In addition to the next entry's six, in its order:
 ### Migration and rollback after `v0.2.0-rc.1`
 
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
-31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73 and 74, in the order of the next entry's upgrade path. Item 28 moves the engine in
+31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74 and 75, in the order of the next entry's upgrade path. Item 28 moves the engine in
 the controller and runner images together; item 29 adds console and chart
 values (`identity.bootstrapFeatures.consoleKey`, `approvalPolicy.default`) that
 change nothing until set; items 30 and 31 change the runner (item 31 also the
@@ -3634,7 +3673,9 @@ transaction markers; items 69 and 71 change the runner and the controller and
 need nothing, in either order; item 70 changes the console only; item 72
 changes only how the repository is tested and needs nothing; item 73
 removes a kind, a route and a flag, and leaves the `RehearsalSchedule` CRD for
-the operator to delete; item 74 withdraws what its own section lists. To roll back to
+the operator to delete; item 74 withdraws what its own section lists; item 75
+changes the product API, the console, the chart and the published image set,
+and needs any `ui` block removed from values files first. To roll back to
 `v0.2.0-rc.1`, in this order, on top of the next entry's rollback steps:
 
 0. **Remove every `two-person` policy** (item 66) before rolling an image

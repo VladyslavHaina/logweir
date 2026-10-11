@@ -110,13 +110,10 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 const IGNORED_MEMBERS = Object.freeze({});
 
 /** The shapes that describe a Kubernetes custom resource and not a document of
- *  the product API. Listed, so "not published" cannot become a hiding place:
- *  any other shape the document does not name fails. */
-const CUSTOM_RESOURCE_SHAPES = Object.freeze([
-  "ObjectMeta", "KafkaCluster.spec", "BackupSchedule.spec", "Backup.spec", "Restore.spec",
-  "Approval.spec", "TrustRoster.spec", "ProtectionPolicy.spec", "RecoveryCatalog.spec",
-  "RetentionPolicy.spec", "TrustPolicy.spec",
-]);
+ *  the product API. EMPTY since the legacy decoders went (PROD-17.1 C4): every
+ *  declared shape is now a published one, and "not published" is no hiding
+ *  place. */
+const CUSTOM_RESOURCE_SHAPES = Object.freeze([]);
 
 function declaredMembers(shape) {
   return Object.keys(shape.required).concat(Object.keys(shape.optional));
@@ -410,8 +407,8 @@ test("every_console_fixture_is_listed_is_an_instance_and_survives_its_decoder", 
   }
   // AN EQUALITY, NOT A FLOOR: a fixture deleted with the row that used it is
   // exactly the change this arm exists to notice.
-  assert.equal(documents, 89, "the console fixture set");
-  assert.equal(files.length, 90);
+  assert.equal(documents, 88, "the console fixture set");
+  assert.equal(files.length, 89);
 });
 
 test("a_document_of_the_first_sixteen_members_alone_is_refused_by_the_operation_page", () => {
@@ -597,7 +594,6 @@ const ANSWERS = Object.freeze({
   "GET /api/v1/namespaces/{ns}/approvals/{name}/packet": "approval-packet.json",
   "GET /api/v1/namespaces/{ns}/destinations": "destinations-list.json",
   "POST /api/v1/namespaces/{ns}/destinations": "destination.json",
-  "POST /api/v1/namespaces/{ns}/destinations:from-legacy": "destination.json",
   "GET /api/v1/namespaces/{ns}/destinations/{name}": "destination.json",
   "POST /api/v1/namespaces/{ns}/destinations/{name}:update-access": "destination.json",
   "POST /api/v1/namespaces/{ns}/destinations/{name}:test": "preflight-pending.json",
@@ -718,7 +714,6 @@ async function everyRead() {
       storage: { provider: "s3", bucket: "kafka-backups", addressing: "pathStyle" },
       transport: { security: "tls" }, access: ACCESS,
     }),
-    () => api.destinationFromLegacy(NS, { name: "primary", access: ACCESS }),
     () => api.updateDestinationAccess(NS, "primary", { expectedGeneration: 1, access: ACCESS }),
     () => api.testDestination(NS, "primary", {}),
     () => api.destinationUsage(NS, "primary"),
@@ -821,7 +816,7 @@ test("every_route_is_decoded_with_the_shape_the_document_publishes_and_drops_not
   assert.deepEqual(badRequests, [],
     "a body the console builds must be an instance of the request schema the document " +
       "publishes for the route it is sent to:\n" + badRequests.join("\n"));
-  assert.equal(requests, 15, "the row held every create and update body the console builds");
+  assert.equal(requests, 14, "the row held every create and update body the console builds");
 
   // EACH ANSWER, AND THE DECODE THAT READ IT. An answer is matched to its
   // decode by the document itself: the transport served these exact bytes and
@@ -1485,4 +1480,152 @@ test("the_lint_refuses_each_spelling_and_ignores_a_whole_document", () => {
   for (const line of allowed) {
     assert.deepEqual(rawMemberLines(line), [], line);
   }
+});
+
+// ===========================================================================
+// 4. the mount halves, through the console client (PROD-17.1 C4)
+// ===========================================================================
+
+/** A transport answering every published route from [`ANSWERS`] (or from
+ *  `overrides`, by the same key), recording each request; a route this row has
+ *  no answer for is a rejection, named. */
+function consoleTransport(overrides) {
+  const seen = [];
+  const missing = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (url, init) => {
+    const method = String((init || {}).method || "GET").toUpperCase();
+    seen.push({ method: method, url: String(url) });
+    const operation = operationFor(method, url);
+    const key = operation === null ? null : answerKey(operation, url);
+    const answer = key === null ? undefined : ((overrides || {})[key] || ANSWERS[key]);
+    if (answer === undefined) {
+      missing.push(method + " " + String(url));
+      return Promise.reject(new Error("no answer for " + method + " " + String(url)));
+    }
+    const text = JSON.stringify(typeof answer === "string" ? wire(answer) : answer.body());
+    return Promise.resolve({ ok: true, status: operation.status, text: () => Promise.resolve(text) });
+  };
+  return { seen: seen, missing: missing, restore: () => { globalThis.fetch = original; } };
+}
+
+/** The surface a mount half touches: what `render.replace` needs, plus the two
+ *  lookups a form's wiring makes. */
+function mountNode() {
+  return {
+    children: [],
+    get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
+    removeChild() { return this.children.shift(); },
+    appendChild(child) { this.children.push(child); return child; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+}
+
+const mountedHtml = (node) => (node.children[node.children.length - 1] || {}).html || "";
+
+test("every_page_s_mount_half_reads_through_the_console_client_and_renders", async () => {
+  // THE MUTANT THIS EXISTS FOR ACTUALLY HAPPENED: two mount halves kept
+  // calling bare `list`/`get` identifiers that were no longer defined, every
+  // render row stayed green (they call the render halves), and the page showed
+  // `list is not defined` in an error box. This drives the MOUNT halves through
+  // the default client. It replaced a row that did the same through the
+  // withdrawn `kubectl proxy` mode.
+  const wire_ = consoleTransport();
+  const [clusters, schedules, backups, history, keys] = await Promise.all([
+    import("../pages/clusters.js"),
+    import("../pages/schedules.js"),
+    import("../pages/backups.js"),
+    import("../pages/history.js"),
+    import("../pages/keys.js"),
+  ]);
+  const parse = (html) => [{ html: html }];
+  const lifecycle = { signal: undefined, isCurrent: () => true };
+  const mounts = [
+    ["clusters", (n) => clusters.mountClusters(n, NS, parse, lifecycle)],
+    ["cluster detail", (n) => clusters.mountClusterDetail(n, NS, "orders-prod", parse, lifecycle)],
+    ["schedules", (n) => schedules.mountSchedules(n, NS, parse, lifecycle)],
+    ["backups", (n) => backups.mountBackups(n, NS, parse, lifecycle)],
+    ["backup detail", (n) =>
+      backups.mountBackupDetail(n, NS, "orders-hourly-20260912-080000", parse, lifecycle)],
+    ["history", (n) => history.mountHistory(n, NS, parse, lifecycle)],
+    ["keys", (n) => keys.mountKeys(n, parse, undefined, lifecycle)],
+  ];
+  try {
+    resetMode();
+    await selectMode();
+    assert.equal(mode(), CONSOLE, "the page is behind the product API");
+    for (const [name, mount] of mounts) {
+      const target = mountNode();
+      await mount(target);
+      const html = mountedHtml(target);
+      assert.ok(html.indexOf("class=\"error\"") === -1,
+        name + " rendered an error box instead of its view: " + html.slice(0, 300));
+      assert.ok(html.length > 200, name + " rendered nothing worth looking at");
+    }
+  } finally {
+    wire_.restore();
+    resetMode();
+  }
+  assert.deepEqual(wire_.missing, [], "every request was a published route this row answers");
+  assert.ok(wire_.seen.length > mounts.length, "each mount reached the transport");
+  for (const request of wire_.seen) {
+    assert.ok(request.url.indexOf("/api/v1/") === 0,
+      "and every one addressed the product API: " + request.url);
+  }
+});
+
+test("a_standalone_approvals_visit_in_the_console_offers_the_waiting_restore_and_no_form", async () => {
+  // THE JOURNEY `scripts/plat12-13-ui-e2e.mjs` PROVED BEHIND `kubectl proxy`
+  // ("standalone approvals page offers selection and no assumed subject"),
+  // here through the console client: `#/approvals` with no subject lists the
+  // Restore waiting for an approval as a link to its own page, and offers no
+  // form, because a form would have to assume which Restore it approves.
+  // The list's one Restore, still waiting: no controller has moved it on.
+  const restores = wire("restores-list.json");
+  restores.items[0].operation = {
+    state: "pending", stateReason: "AwaitingApproval", terminal: false,
+    verificationState: "pending", verifiedSuccess: false,
+  };
+  const waiting = restores.items[0].name;
+  const wire_ = consoleTransport({
+    "GET /api/v1/namespaces/{ns}/restores": { body: () => structuredClone(restores) },
+  });
+  const { mountApprovals } = await import("../pages/approvals.js");
+  try {
+    resetMode();
+    await selectMode();
+    const target = mountNode();
+    await mountApprovals(target, NS, { ns: NS, subject: "", hash: "", name: "" },
+      (html) => [{ html: html }], undefined, { signal: undefined, isCurrent: () => true });
+    const html = mountedHtml(target);
+    assert.ok(html.indexOf("class=\"error\"") === -1, html.slice(0, 300));
+    assert.ok(
+      html.includes("<a href=\"#/approvals?subject=" + waiting + "&amp;ns=" + NS + "\">" +
+        waiting + "</a>"),
+      "the waiting Restore is offered as a choice: " + html.slice(0, 600),
+    );
+    assert.equal(html.indexOf("id=\"approval-form\""), -1,
+      "the choice is made before any form appears");
+  } finally {
+    wire_.restore();
+    resetMode();
+  }
+  // NEGATIVE CONTROL: the same Restore, finished, is not offered.
+  const done = consoleTransport();
+  try {
+    resetMode();
+    await selectMode();
+    const target = mountNode();
+    await mountApprovals(target, NS, { ns: NS, subject: "", hash: "", name: "" },
+      (html) => [{ html: html }], undefined, { signal: undefined, isCurrent: () => true });
+    assert.equal(mountedHtml(target).indexOf("#/approvals?subject=" + waiting), -1,
+      "a Restore that is not waiting is not offered");
+  } finally {
+    done.restore();
+    resetMode();
+  }
+  assert.deepEqual(wire_.missing, []);
+  assert.ok(wire_.seen.some((r) => r.url.indexOf("/api/v1/namespaces/" + NS + "/restores") === 0),
+    "the waiting Restores were read from the product API");
 });

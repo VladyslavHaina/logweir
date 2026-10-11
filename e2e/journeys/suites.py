@@ -198,16 +198,6 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
                    "LOGWEIR_D3_OUT": str(c.out("d3")), "LOGWEIR_BIN": c.cli},
         _d3_adapter, lambda c: [f"{c.owner}-d3-{c.stamp}"]),
     Suite(
-        "plat12-13", "scripts/plat12-13-ui-e2e.mjs", "node", ("run",), (), frozenset({"run"}),
-        lambda c: _ui_env(c, "plat12-13", "lw-plat20-p1213-"),
-        lambda c, r: ui_adapter("live-result-*.json")(c, r, "plat12-13"),
-        lambda c: [f"lw-plat20-p1213-{c.stamp}"], timeout=900,
-        accept_rcs=frozenset({0, 1}),
-        why_rcs="plat12-13 records a journey only after every check in it held and stops at the first "
-                "journey that throws (record() at scripts/plat12-13-ui-e2e.mjs:106), so rows recorded before a later "
-                "journey's failure are fully asserted; exit 1 is accepted only with a result "
-                "document that records its namespace cleanup, and the failure is kept as a note"),
-    Suite(
         "plat11-2", "scripts/plat11-2-ui-e2e.mjs", "node", ("run",), (), frozenset({"run"}),
         lambda c: _ui_env(c, "plat11-2", "lw-plat20-p112-"),
         lambda c, r: ui_adapter("result.json")(c, r, "plat11-2"),
@@ -256,7 +246,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
 R = Row
 P06, P07 = "scripts/test-plat06-live.py", "scripts/test-plat07-live.py"
 D1, D2, D3 = "scripts/live/d1/run.py", "e2e/k8s/d2/d2_live.py", "e2e/k8s/d3/d3_live.py"
-U1213, U112, U10 = "scripts/plat12-13-ui-e2e.mjs", "scripts/plat11-2-ui-e2e.mjs", "scripts/plat10-ui-e2e.mjs"
+U112, U10 = "scripts/plat11-2-ui-e2e.mjs", "scripts/plat10-ui-e2e.mjs"
 U192 = "scripts/plat19-2-ui-e2e.mjs"
 NAT, CON = "e2e/journeys/native.py", "e2e/journeys/console.mjs"
 
@@ -351,20 +341,16 @@ JOURNEYS: tuple[Journey, ...] = (
          R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:384"),
          R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:390"))),
     Journey(
-        "duplicate-submit", "a double click, a lost response, a resubmitted restore, a duplicate create "
-        "and a replayed API create each leave exactly one durable object", ("duplicate submit",),
-        (R("plat12-13", "double click creates exactly one object", (RESOURCE,), f"{U1213}:454"),
-         R("plat12-13", "lost response, retried, resolves to the same object", (RESOURCE,), f"{U1213}:512"),
-         R("plat12-13", "restore submission routes to Awaiting approval, and a resubmission creates nothing",
-           (RESOURCE,), f"{U1213}:643"),
-         R("plat06", "case-g", (RESOURCE, EVIDENCE), f"{P06}:1274"),
+        # The console's double click and lost-response retry are node rows in
+        # ui/tests since the legacy plat12-13 harness went (PROD-17.1 C4).
+        "duplicate-submit", "a duplicate create and a replayed API create each leave exactly one durable "
+        "object", ("duplicate submit",),
+        (R("plat06", "case-g", (RESOURCE, EVIDENCE), f"{P06}:1274"),
          R("native", "api-restore-replay-is-one-object", (RESOURCE,), f"{NAT}:391"))),
     Journey(
         "old-point-selection", "an older point chosen in the console and through the API is the point the "
         "durable Restore names, and the point that is restored", ("old-point selection",),
-        (R("plat12-13", "an older point stays selected when a newer Backup completes mid-wizard",
-           (TEXT,), f"{U1213}:1078"),
-         R("plat11-2", "the wizard submits, and the created Restore is the preview byte for byte",
+        (R("plat11-2", "the wizard submits, and the created Restore is the preview byte for byte",
            (RESOURCE,), f"{U112}:1036"),
          R("native", "restore-cr-carries-the-selected-older-point", (RESOURCE,), f"{NAT}:401"),
          R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:459")),
@@ -390,7 +376,7 @@ def suites_for(journeys: tuple[Journey, ...] | list[Journey], opened: set[str]) 
     namespace (the `mc` pod that removes this run's archive prefix, and the
     Kafka client that created the topic the console discovery must find)."""
     wanted = {r.suite for j in journeys if j.requires is None or j.requires in opened for r in j.rows}
-    order = ["native", "console", "plat12-13", "plat11-2", "plat10", "plat19-2", "plat06", "plat07", "d1", "d2",
+    order = ["native", "console", "plat11-2", "plat10", "plat19-2", "plat06", "plat07", "d1", "d2",
              "d3"]
     if wanted:
         wanted.add("native")

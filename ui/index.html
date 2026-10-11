@@ -15,16 +15,14 @@
       The icon is the console server's own (`logweir-api` compiles it in and
       serves it beside these files), so it is fetched from this origin and the
       server's Content-Security-Policy, which admits no `data:` image, has
-      nothing to refuse. The legacy `kubectl proxy` serves no such file and
-      answers 404 for it. The one graphic on the page -- the mark beside the
+      nothing to refuse. The one graphic on the page -- the mark beside the
       product name -- is inline SVG below, decorative and hidden from
       assistive technology.
     -->
     <link rel="icon" href="./favicon.svg">
     <link rel="stylesheet" href="./style.css">
-    <!-- Helm mounts this non-secret, same-origin runtime context when it serves
-         the UI. A standalone kubectl proxy has no such mount and app.js then
-         requires an explicit selection rather than inventing a namespace. -->
+    <!-- logweir-api serves its own runtime.js here (the console marker); the
+         file in this directory starts with no namespace. -->
     <script src="./runtime.js"></script>
     <script type="module" src="./app.js"></script>
   </head>
@@ -39,22 +37,18 @@
           </svg>
           <div class="brand-text">
             <h1>Logweir</h1>
-            <!-- WHOSE AUTHORITY THIS PAGE CARRIES DEPENDS ON WHAT SERVES IT
-                 (POC-P1). Behind `kubectl proxy` it is the kubeconfig that
-                 started the proxy; behind `logweir-api` it is the signed-in
-                 session's grants. The page cannot know which until its one
-                 mode probe answers, so the copy below is true of both, and
-                 app.js (`applyModeCopy`) replaces it with the decided mode's
-                 own sentence. -->
+            <!-- WHOSE AUTHORITY THIS PAGE CARRIES (POC-P1): the signed-in
+                 session's grants. The copy below is neutral until the session
+                 probe answers, and app.js (`applyModeCopy`) replaces it with
+                 the console's own sentence. -->
             <p class="tagline" id="masthead-tagline">
               Kafka backup and restore on Kubernetes. This page holds no credential
               of its own.
             </p>
           </div>
-          <!-- WHO IS SIGNED IN, AND SIGN OUT (MCP-5). Empty until the mode
-               probe answers, and empty behind `kubectl proxy`, whose identity
-               is the kubeconfig the tagline names; app.js
-               (`renderIdentity`) fills it from `/api/v1/session`. -->
+          <!-- WHO IS SIGNED IN, AND SIGN OUT (MCP-5). Empty until the session
+               probe answers; app.js (`renderIdentity`) fills it from
+               `/api/v1/session`. -->
           <div class="session" id="session-slot"></div>
         </div>
       </div>

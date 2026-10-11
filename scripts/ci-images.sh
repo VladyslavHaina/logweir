@@ -6,17 +6,17 @@ cd "$(dirname "$0")/.."
 
 : "${GITHUB_SHA:?}" "${NS:?}"
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$NS" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || exit 1
-# All four images on both architectures. The runner joined arm64 with PROD-00.2:
+# All three images on both architectures. The runner joined arm64 with PROD-00.2:
 # its engine is Logweir's build of the vendored source, compiled for each
-# platform, where OSO's own binary existed for linux/amd64 only.
-products=(weirkeeper logweir-ui logweir-console logweir)
+# platform, where OSO's own binary existed for linux/amd64 only. (The fourth,
+# logweir-ui, was withdrawn in v1: PROD-17.1 C4.)
+products=(weirkeeper logweir-console logweir)
 
 check_image() {
   local product="$1" ref="$2"
   case "$product" in
     logweir) bash scripts/check-image.sh "$ref" ;;
     weirkeeper) bash scripts/check-image-weirkeeper.sh "$ref" ;;
-    logweir-ui) bash scripts/check-image-ui.sh "$ref" ;;
     logweir-console) bash scripts/check-image-api.sh "$ref" ;;
   esac
   local revision
@@ -35,7 +35,7 @@ check_image() {
 #   TAG sha-<commit> (a main push)  version <Chart.yaml version>-sha-<commit>
 #   TAG v<semver>    (a release)    version <semver>
 #
-# and in both cases appVersion = TAG and the four Logweir image defaults are
+# and in both cases appVersion = TAG and the three Logweir image defaults are
 # rewritten from `:latest` to `docker.io/$NS/<image>:$TAG`, so
 # `helm install oci://registry-1.docker.io/$NS/logweir-chart --version <v>`
 # installs exactly the images this run published — no `--set` needed. The
@@ -45,7 +45,7 @@ check_image() {
 #
 # A RELEASE CHART PINS ITS IMAGES BY DIGEST (PROD-14.0). With IMAGE_DIGESTS
 # naming a JSON object {"weirkeeper": "sha256:…", "logweir": "sha256:…",
-# "logweir-console": "sha256:…", "logweir-ui": "sha256:…"}, each rewritten
+# "logweir-console": "sha256:…"}, each rewritten
 # default reads `docker.io/$NS/<image>:$TAG@sha256:…`: the tag says which
 # release, the digest decides which bytes, and moving the tag later changes
 # nothing an installed release pulls. A `v<semver>` TAG without IMAGE_DIGESTS is
@@ -74,7 +74,7 @@ chart_package() {
   local out="$1" version work line from to digest rewritten=0
   version=$(chart_version) || return 1
   if [[ "$TAG" == v* && -z "${IMAGE_DIGESTS:-}" ]]; then
-    echo "a release chart ($TAG) pins its four images by digest: set IMAGE_DIGESTS" >&2
+    echo "a release chart ($TAG) pins its three images by digest: set IMAGE_DIGESTS" >&2
     return 1
   fi
   work=$(mktemp -d "${TMPDIR:-/tmp}/logweir-chart.XXXXXX")
@@ -85,7 +85,7 @@ chart_package() {
     "$CHART_SRC/Chart.yaml" > "$work/$CHART_NAME/Chart.yaml"
   : > "$work/values.yaml"
   while IFS= read -r line || [[ -n "$line" ]]; do
-    for image in weirkeeper logweir logweir-console logweir-ui; do
+    for image in weirkeeper logweir logweir-console; do
       from="docker.io/vladyslavhaina/$image:latest"
       if [[ "$line" == *"$from"* ]]; then
         to="docker.io/$NS/$image:$TAG"
@@ -103,10 +103,10 @@ chart_package() {
     done
     printf '%s\n' "$line" >> "$work/values.yaml"
   done < "$CHART_SRC/values.yaml"
-  # FOUR, EXACTLY: controllerImage, runnerImage, api.console.image, ui.image.
-  # A fifth would be an image this chart does not own; three would be one left
-  # at `:latest`, which the published chart must never install.
-  [[ "$rewritten" -eq 4 ]] || { echo "rewrote $rewritten image defaults, expected 4" >&2; rm -rf "$work"; return 1; }
+  # THREE, EXACTLY: controllerImage, runnerImage, api.console.image. A fourth
+  # would be an image this chart does not own; two would be one left at
+  # `:latest`, which the published chart must never install.
+  [[ "$rewritten" -eq 3 ]] || { echo "rewrote $rewritten image defaults, expected 3" >&2; rm -rf "$work"; return 1; }
   if grep -q ':latest' "$work/values.yaml"; then
     echo "the packaged values.yaml still names a :latest image" >&2; rm -rf "$work"; return 1
   fi
@@ -146,7 +146,7 @@ chart_publish() {
   # empty Docker config, not the credentials the login step left behind --
   # so "exists for the publisher" cannot pass for "pullable by anyone".
   anonymous_docker="$(mktemp -d)"
-  for product in logweir weirkeeper logweir-ui logweir-console; do
+  for product in logweir weirkeeper logweir-console; do
     DOCKER_CONFIG="$anonymous_docker" docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
   done
   dir=$(mktemp -d)
@@ -221,7 +221,7 @@ case "${1:-}" in
     # same job), unless the caller named them already.
     if [[ "$TAG" == v* && -z "${IMAGE_DIGESTS:-}" ]]; then
       digests='{}'
-      for product in weirkeeper logweir logweir-console logweir-ui; do
+      for product in weirkeeper logweir logweir-console; do
         digest=$(cat "image-digests/$product.published")
         digests=$(jq -c --arg product "$product" --arg digest "$digest" '. + {($product): $digest}' <<< "$digests")
       done
@@ -277,7 +277,7 @@ case "${1:-}" in
     if [[ "${PROMOTE_LATEST:-false}" == true ]]; then
       [[ "${GITHUB_REF:-}" == refs/heads/main && "$TAG" == "sha-$GITHUB_SHA" ]] || exit 1
     fi
-    products=(logweir weirkeeper logweir-ui logweir-console)
+    products=(logweir weirkeeper logweir-console)
     # Validate the complete candidate set before moving any public tag.
     for product in "${products[@]}"; do
       for arch in amd64 arm64; do
@@ -299,7 +299,6 @@ case "${1:-}" in
       case "$product" in
         logweir) output=runner_digest ;;
         weirkeeper) output=controller_digest ;;
-        logweir-ui) output=ui_digest ;;
         logweir-console) output=console_digest ;;
       esac
       echo "$output=$digest" >> "$GITHUB_OUTPUT"
@@ -322,7 +321,7 @@ case "${1:-}" in
           [[ "$actual" == "$digest" ]] || { echo "Tag verification failed: $repo:$rolling" >&2; exit 1; }
         done
       done
-      echo 'Verified main and latest tags for all four images.' >> "$GITHUB_STEP_SUMMARY"
+      echo 'Verified main and latest tags for all three images.' >> "$GITHUB_STEP_SUMMARY"
     fi
     ;;
   sbom)
@@ -349,13 +348,13 @@ case "${1:-}" in
     ;;
   sign)
     # PROD-00.2: keyless signatures (cosign, GitHub OIDC -> Fulcio, logged in
-    # Rekor) for the four published indexes and every platform manifest in
+    # Rekor) for the three published indexes and every platform manifest in
     # them, and the runner's SBOM attested to each platform's candidate digest.
     # Only from this repository's main, on a push: images.yml is a reusable
     # workflow, and a run another repository starts by calling it must not
     # sign under its identity (the verification pins refuse such a signature
     # anyway; this keeps one from being made).
-    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
+    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${CONSOLE_DIGEST:?}"
     if [[ "${GITHUB_REPOSITORY:-}" != VladyslavHaina/logweir || "${GITHUB_REF:-}" != refs/heads/main \
           || "${GITHUB_EVENT_NAME:-}" != push ]]; then
       echo "sign: refusing outside VladyslavHaina/logweir main on a push" \
@@ -363,7 +362,7 @@ case "${1:-}" in
       exit 1
     fi
     for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
-                "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
+                "logweir-console=$CONSOLE_DIGEST"; do
       product=${pair%%=*} digest=${pair#*=}
       [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest for $product" >&2; exit 1; }
       cosign sign --yes --recursive "docker.io/$NS/$product@$digest"
@@ -395,9 +394,9 @@ case "${1:-}" in
     # (https://github.com/sigstore/cosign/blob/v2.5.2/doc/cosign_verify.md,
     # .../doc/cosign_verify-attestation.md). scripts/check-cosign-verify.py
     # refuses any cosign verification in the repository without them.
-    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${UI_DIGEST:?}" "${CONSOLE_DIGEST:?}"
+    : "${RUNNER_DIGEST:?}" "${CONTROLLER_DIGEST:?}" "${CONSOLE_DIGEST:?}"
     for pair in "logweir=$RUNNER_DIGEST" "weirkeeper=$CONTROLLER_DIGEST" \
-                "logweir-ui=$UI_DIGEST" "logweir-console=$CONSOLE_DIGEST"; do
+                "logweir-console=$CONSOLE_DIGEST"; do
       product=${pair%%=*} digest=${pair#*=}
       cosign verify \
         --certificate-identity "https://github.com/VladyslavHaina/logweir/.github/workflows/images.yml@refs/heads/main" \

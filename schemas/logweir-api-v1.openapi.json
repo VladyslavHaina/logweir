@@ -2324,113 +2324,6 @@
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations:from-legacy": {
-      "post": {
-        "operationId": "createDestinationFromLegacy",
-        "summary": "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination. THIS BUILD ALWAYS REFUSES with legacy_location_unknown: a legacy archive.url carries the bucket and the prefix and nothing else, and the two sources that record the endpoint, region, addressing and transport — the frozen execution inputs of a succeeded Backup and the installation policy ConfigMap — are not readable here. Guessing them would move the location, and locationDigest is computed over exactly those fields. Create the destination explicitly until W11 lands. Existing objects are never mutated.",
-        "parameters": [
-          {
-            "name": "ns",
-            "in": "path",
-            "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
-            "schema": {
-              "type": "string",
-              "minLength": 8,
-              "maxLength": 128
-            }
-          },
-          {
-            "name": "Origin",
-            "in": "header",
-            "required": true,
-            "description": "Must equal the configured public origin exactly.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DestinationFromLegacyRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Created. No source this build can read produces one yet; see the summary.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DestinationResponse"
-                }
-              }
-            }
-          },
-          "200": {
-            "description": "Replayed an identical earlier request.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DestinationResponse"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "x-logweir-problem-codes": [
-          "destination_invalid",
-          "destination_location_immutable",
-          "forbidden",
-          "header_not_allowed",
-          "idempotency_conflict",
-          "idempotency_key_invalid",
-          "idempotency_key_required",
-          "internal_error",
-          "kubernetes_unavailable",
-          "legacy_location_mismatch",
-          "legacy_location_unknown",
-          "malformed_request",
-          "method_not_allowed",
-          "misdirected_request",
-          "namespace_forbidden",
-          "not_found",
-          "origin_mismatch",
-          "payload_too_large",
-          "rate_limited",
-          "session_expired",
-          "state_conflict",
-          "transport_downgrade_forbidden",
-          "unauthenticated",
-          "unsupported_media_type",
-          "upstream_timeout",
-          "validation_failed"
-        ]
-      }
-    },
     "/api/v1/namespaces/{ns}/destinations/{name}": {
       "get": {
         "operationId": "getDestination",
@@ -8369,43 +8262,6 @@
         },
         "additionalProperties": false
       },
-      "DestinationFromLegacyRequest": {
-        "description": "`POST .../destinations:from-legacy`.",
-        "type": "object",
-        "required": [
-          "access",
-          "name"
-        ],
-        "properties": {
-          "access": {
-            "description": "The four credential grants for the derived location.",
-            "$ref": "#/components/schemas/AccessRequest"
-          },
-          "description": {
-            "description": "What this destination is.",
-            "default": null,
-            "type": "string",
-            "nullable": true
-          },
-          "name": {
-            "description": "The new destination's name.",
-            "type": "string"
-          },
-          "sourceBackup": {
-            "description": "Or the legacy `Backup`.",
-            "default": null,
-            "type": "string",
-            "nullable": true
-          },
-          "sourceSchedule": {
-            "description": "The legacy `BackupSchedule` to derive the location from.",
-            "default": null,
-            "type": "string",
-            "nullable": true
-          }
-        },
-        "additionalProperties": false
-      },
       "DestinationList": {
         "description": "`GET .../destinations` — one page of rows.",
         "type": "object",
@@ -11424,13 +11280,6 @@
             ]
           },
           {
-            "description": "404 — a legacy object carries no frozen execution and the installation publishes no legacy addressing, so no destination can be derived from facts (D2 §3.12 step 2c).",
-            "type": "string",
-            "enum": [
-              "legacy_location_unknown"
-            ]
-          },
-          {
             "description": "405 — the route exists and does not accept this method.",
             "type": "string",
             "enum": [
@@ -11470,13 +11319,6 @@
             "type": "string",
             "enum": [
               "transport_downgrade_forbidden"
-            ]
-          },
-          {
-            "description": "409 — a legacy adoption named a destination whose `locationDigest` differs from the one derived from the legacy object (D2 §3.12).",
-            "type": "string",
-            "enum": [
-              "legacy_location_mismatch"
             ]
           },
           {

@@ -1,6 +1,5 @@
-// api.spec.js -- the behaviour arm of the UI's two mechanical claims:
-// that every identifier `api.js` builds is relative, and that the write path
-// refuses a kind the page may not write BEFORE it reaches the network.
+// api.spec.js -- the behaviour arm of the UI's mechanical claim that every
+// identifier `api.js` builds is relative.
 //
 // Run with `node --test 'ui/tests/*.spec.js'` from `logweir/`. Node is a test runner here
 // and nothing else: it builds no asset, it fetches no package, and there is no
@@ -12,23 +11,15 @@
 // gate that forbade the string here would make the test unwritable. The
 // release artefact excludes this directory, so nothing here is ever served.
 //
-// NOTHING HERE REACHES THE NETWORK. The two write rows replace the global
-// fetch binding with a stub -- one that records what it was handed, one that
-// throws if it is entered at all -- and restore the original afterwards. No
-// Kubernetes object is created by this file; `logweir-t25` is a string.
+// NOTHING HERE REACHES THE NETWORK.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { GROUP, VERSION, WRITABLE_PLURALS, create, list, path } from "../api.js";
+import { path } from "../api.js";
 
 test("path builds a relative identifier from its segments", () => {
   assert.equal(path("apis", "logweir.dev", "v1alpha1"), "/apis/logweir.dev/v1alpha1");
-  assert.equal(path("apis", GROUP, VERSION), "/apis/logweir.dev/v1alpha1");
-  assert.equal(
-    path("apis", GROUP, VERSION, "namespaces", "logweir-t25", "backups"),
-    "/apis/logweir.dev/v1alpha1/namespaces/logweir-t25/backups",
-  );
 });
 
 test("path refuses anything that is not a relative segment", () => {
@@ -42,112 +33,4 @@ test("path refuses anything that is not a relative segment", () => {
 test("path names the offending segment in its refusal", () => {
   assert.throws(() => path("https://evil"), /evil/);
   assert.throws(() => path("/apis"), /apis/);
-});
-
-test("the writable set is frozen and does not carry trustrosters", () => {
-  assert.ok(Object.isFrozen(WRITABLE_PLURALS), "WRITABLE_PLURALS is frozen");
-  assert.deepEqual(WRITABLE_PLURALS, [
-    "kafkaclusters",
-    "backupschedules",
-    "backups",
-    "restores",
-    "approvals",
-  ]);
-  assert.equal(WRITABLE_PLURALS.includes("trustrosters"), false);
-});
-
-test("create carries the ui field manager", async () => {
-  const seen = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = function (u, init) {
-    seen.push({ u: u, init: init });
-    return Promise.resolve({
-      ok: true,
-      status: 201,
-      text: function () {
-        return Promise.resolve("{}");
-      },
-    });
-  };
-  try {
-    await create("logweir-t25", "restores", {});
-  } finally {
-    globalThis.fetch = original;
-  }
-  assert.equal(seen.length, 1, "exactly one request was issued");
-  assert.equal(
-    seen[0].u,
-    "/apis/logweir.dev/v1alpha1/namespaces/logweir-t25/restores?fieldManager=logweir-ui",
-  );
-  assert.equal(seen[0].init.method, "POST");
-  assert.equal(seen[0].init.headers["Content-Type"], "application/json");
-});
-
-test("create refuses a plural outside the allowlist", async () => {
-  const original = globalThis.fetch;
-  globalThis.fetch = function () {
-    throw new Error(
-      "the network was entered; the allowlist check did not run before the request",
-    );
-  };
-  try {
-    await assert.rejects(
-      function () {
-        return create("logweir-t25", "trustrosters", {});
-      },
-      function (error) {
-        assert.ok(
-          error instanceof RangeError,
-          "a plural outside the allowlist is a RangeError, not a network failure",
-        );
-        assert.match(error.message, /trustrosters/);
-        return true;
-      },
-    );
-  } finally {
-    globalThis.fetch = original;
-  }
-});
-
-test("patchSuspend and create reach the network only through path()", async () => {
-  const seen = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = function (u) {
-    seen.push(u);
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      text: function () {
-        return Promise.resolve("{}");
-      },
-    });
-  };
-  try {
-    await create("logweir-t25", "backups", {});
-  } finally {
-    globalThis.fetch = original;
-  }
-  for (const u of seen) {
-    assert.equal(u.charAt(0), "/", "every identifier issued is relative to the serving origin");
-  }
-});
-
-test("route reads receive an abort signal while durable creates do not", async () => {
-  const seen = [];
-  const original = globalThis.fetch;
-  const controller = new AbortController();
-  globalThis.fetch = function (u, init) {
-    seen.push({ u: u, init: init });
-    return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("{}") });
-  };
-  try {
-    await list("logweir-t25", "backups", { signal: controller.signal });
-    // A fourth argument is intentionally ignored: an accepted POST is a
-    // durable operation, not a route-owned read that navigation may cancel.
-    await create("logweir-t25", "backups", {}, { signal: controller.signal });
-  } finally {
-    globalThis.fetch = original;
-  }
-  assert.equal(seen[0].init.signal, controller.signal, "the read is cancellable");
-  assert.equal(seen[1].init.signal, undefined, "the create is never route-cancelled");
 });

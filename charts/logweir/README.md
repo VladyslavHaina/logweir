@@ -42,11 +42,11 @@ file.
 
 One chart that installs Logweir's control plane — the same objects
 [`logweir.yaml`](../../logweir.yaml) ships — and, optionally, its own
-object-store backend, two throwaway Kafka clusters and the UI. It is
+object-store backend, two throwaway Kafka clusters and the console. It is
 **derived from `config/`**, never the other way round: `scripts/check-chart.sh`
 holds the chart's CRDs byte-identical to the tree (and the page's bytes are
-held to it by `scripts/check-image-ui.sh`, against the image that serves
-them), and
+held to it by `scripts/check-image-api.sh`, against the console image that
+serves them), and
 `crates/logweir/tests/chart_lint.rs` holds the rendered control plane to the
 install file. [`docs/install.md`](../../docs/install.md) is still the single
 install document; this README is the chart's own.
@@ -66,7 +66,6 @@ install document; this README is the chart's own.
 | `NetworkPolicy` `logweir-identity-kubernetes-api-egress` | every identity-enabled runner namespace | excludes bootstrap from runner arbitrary-443 egress; permits DNS plus discovered/configured Kubernetes API destinations only |
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
-| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-six UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 | `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
 | `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
 | `ConfigMap` `<release>-api-config-<digest>` + `Deployment` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. `api.console.mode` is **required** — see *`api.console.mode`* below |
@@ -300,8 +299,9 @@ it does and does not prove, including the live check that has **not** been run.
 * **`demoKafka.enabled`** — *bring two clusters to back up from and restore
   into.* PLAINTEXT, emptyDir, one broker each. The demo's transport, not a
   recommendation.
-* **`ui.enabled`** — *serve the page from the cluster.* Read *The UI's
-  authority* before turning it on.
+* **`ui.*`** — withdrawn in v1 (release-notes item 75): the legacy
+  `kubectl proxy` page and its `logweir-ui` image. The chart refuses the block
+  by name; the console is `api.console.*`.
 
 Two more flags render RBAC and nothing else, so neither starts a pod and
 neither is in the list above:
@@ -377,13 +377,9 @@ installation running the product API has a reviewed identity to run it as
 instead of inventing one, and so that the admission policy below has a subject
 that really exists.
 
-**It is wider than `<release>-ui`, and the two are not comparable.** The proxy
-acts for *whoever reaches its Service*, so its role is measured from the page's
-own request sites and is as small as the page. This account acts for a
-*service* that authenticates every request and resolves the actor's roles
-itself, so its role is the union of what every route may need and the per-actor
-narrowing happens above it. Copying either argument onto the other is how a
-console ends up with a page's authority or a page ends up with a console's.
+This account acts for a *service* that authenticates every request and
+resolves the actor's roles itself, so its role is the union of what every route
+may need and the per-actor narrowing happens above it.
 
 What it holds: `get`/`list` on the eight product kinds; `create` on all eight
 (`approvals` since PLAT-19.2 — the console's signed ordinary confirmation, a
@@ -483,10 +479,8 @@ expose Ordinary confirmation and it is **not** a shared console.
 **`shared` is the only mode that may be exposed through a Service or an
 Ingress.**
 
-That is the difference between this component and the legacy proxy below.
-`ui.enabled` renders a `kubectl proxy` where **anyone who can reach that Service
-acts with that ServiceAccount's authority**. Turning `api.console.enabled` on
-cannot produce that in either mode: the administrator mode has no Service to
+Turning `api.console.enabled` on cannot produce a Service anyone may drive
+unauthenticated, in either mode: the administrator mode has no Service to
 reach, and `shared` mode authenticates and authorizes every request before it
 reaches a route.
 
@@ -585,7 +579,7 @@ not let you install, each refused at render time with the field named:
 | `ingress.host` that is not `publicBaseUrl`'s authority | the redirect URI is `publicBaseUrl` + `/auth/callback` and the service answers `421 misdirected_request` to any other `Host`, so a mismatch publishes a console every browser is refused by |
 | `shared` without `controller.watchNamespaces` | D0 stage 5: with the cluster-wide binding the controller may create a Job in the release namespace that mounts the console's keys (O1) |
 | `controller.watchNamespaces` containing the release namespace | the same authority, put back by name |
-| `shared` with `ui.enabled` | the legacy `kubectl proxy` Service is a second, unauthenticated way to the same objects (PLAT-17.2: remove or isolate the legacy proxy) |
+| any `ui.*` value | withdrawn in v1 (release-notes item 75); the console is `api.console.*` |
 | a `roles.bindings` namespace outside `controller.watchNamespaces` | the console would create objects no controller reconciles |
 | `requireTrustedProxy` with neither `trustedProxyService` nor `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
 | `trustedProxyService` with only one of `namespace`/`name`, or in `localAdmin` mode | half a Service names nothing; a loopback listener has no proxy, and no Role in the ingress namespace should be granted for one |
@@ -869,7 +863,7 @@ change: the default is `[]` and renders byte-identically. **An existing
 `api.console.mode: shared` release does not render any more until it is scoped**
 — `helm upgrade` refuses at render time, naming the field, and applies nothing
 (the running console keeps serving). It meets, in order: no
-`controller.watchNamespaces`; the release namespace in that list; `ui.enabled`;
+`controller.watchNamespaces`; the release namespace in that list; any `ui.*`;
 a `roles.bindings` namespace outside the list; and, with `requireTrustedProxy`,
 a `trustedProxyCidrs` range wider than `/16`. The why is residual O1 above, and
 `docs/install.md` §5e *Upgrading a shared console installed before this release*
@@ -1008,23 +1002,27 @@ instead, build/load all three local images and add the explicit development
 override:
 
 ```bash
-just image && just image-weirkeeper && just image-ui
-helm install logweir charts/logweir -n logweir-system --create-namespace \
+just image && just image-weirkeeper && just image-console
+kubectl create namespace logweir-system
+head -c 32 /dev/urandom > cursor.key  # the console's cursor key (localAdmin: raw bytes)
+kubectl -n logweir-system create secret generic logweir-console-keys --from-file=cursor.key
+rm cursor.key
+helm install logweir charts/logweir -n logweir-system \
   -f charts/logweir/examples/demo.values.yaml \
   -f charts/logweir/examples/author-only.values.yaml --wait --timeout 10m
 cargo build -p logweir                # the walk mints the approval with the shipped CLI
 bash scripts/helm-demo.sh             # or: just helm-demo
 ```
 
-`--wait` returns when both brokers, MinIO, the UI and the controller are
+`--wait` returns when both brokers, MinIO, the console and the controller are
 Ready and the identity/seed Jobs have succeeded (they are Helm hooks; a
 succeeded one is deleted, a failed one stays for `kubectl logs`). The walk uses
 the chart-managed installation signer, mints only an approver key, creates the
 remaining demo credentials, applies the
 `TrustRoster`, probes two `KafkaCluster`s to `reachable: true`, fires a
 `BackupSchedule`, restores from its `Backup` with an approval minted on the
-host, verifies the scorecard with both readers, fetches the page through a
-port-forward, and tears everything down — the cluster ends with no
+host, verifies the scorecard with both readers, fetches the console's page and
+session through a port-forward, and tears everything down — the cluster ends with no
 `logweir-*` namespace. Every step prints its exit codes.
 
 On a cluster that holds images you built yourself (`just image && just
@@ -1074,8 +1072,8 @@ TAG, not by a digest. That is the owner's decision of 2026-09-12**, taken after
 the trade-off below was put to them, and it is this chart's ruling alone:
 `config/manager/deployment.yaml`, `logweir.yaml` and
 `weirkeeper::job::RUNNER_IMAGE` still pin digests under Global Constraint 7, and
-so do the four third-party images this chart can bring (MinIO, `mc`,
-`apache/kafka`, `kubectl`). The two repositories are the tree's own — the gate
+so do the three third-party images this chart can bring (MinIO, `mc`,
+`apache/kafka`). The two repositories are the tree's own — the gate
 derives them from those two files rather than spelling them — so a namespace
 change propagates here on its own.
 
@@ -1136,14 +1134,14 @@ default the controller falls back to when that variable is unset is still
 `IfNotPresent` / `Always` makes the controller refuse to start, because the API
 server would otherwise reject every runner Job it created.
 
-Main CI publishes the four images under `sha-<commit>`, `main` and `latest`
+Main CI publishes the three images under `sha-<commit>`, `main` and `latest`
 after quality, backup/restore and image checks pass. A version release gives
 the tagged commit's `sha-<commit>` images the version tag (the same digests,
-not a rebuild) and publishes a chart whose four images are pinned by digest.
+not a rebuild) and publishes a chart whose three images are pinned by digest.
 See [the workflow guide](../../docs/gates.md) and the exact
 [Actions run](https://github.com/VladyslavHaina/logweir/actions) for digests.
-The UI also defaults to `ui.imagePullPolicy: Always`; use `Never` for an image
-loaded locally. Publishing a tag does not restart an existing Deployment.
+The console also defaults to `api.console.imagePullPolicy: Always`; use
+`Never` for an image loaded locally. Publishing a tag does not restart an existing Deployment.
 
 **How to pin them back.** Resolve each tag to the bytes it names — a manifest
 read, not a pull:
@@ -1250,21 +1248,6 @@ provenance of each, so nobody has to trust a bare hash.
   ```bash
   docker buildx imagetools inspect apache/kafka:3.7.1
   ```
-
-* **`ui.image`** — a kubectl image at the cluster's minor version, also a
-  manifest-list digest, resolved once on 2026-09-12 with:
-
-  ```bash
-  docker buildx imagetools inspect registry.k8s.io/kubectl:v1.34.1
-  ```
-
-  `registry.k8s.io` is the Kubernetes project's own registry. The brief named
-  `bitnami/kubectl`; on 2026-09-12 `docker buildx imagetools inspect
-  bitnami/kubectl:1.34.1` (and `:1.34`) answered `not found` — Bitnami's Docker
-  Hub catalogue no longer publishes versioned tags, and `:latest` is a tag,
-  which Global Constraint 7 forbids. `kubectl proxy` is a reverse proxy and a
-  file server, so the client/server skew rules do not touch it; that is why the
-  same digest serves a 1.29 `kind` node in CI.
 
 `demoKafka.clusterIds` are not images but were minted the same way and on the
 same day: the image's own `kafka-storage.sh random-uuid`, twice, because the
@@ -1386,8 +1369,9 @@ named rather than silent:
 
 `kubernetes.namespace` does **not** move the install. `helm -n` / `--namespace`
 decides that, and every object carries `Release.Namespace`; the key exists for
-the one place the chart needs a namespace *name* it cannot derive — the UI's
-`RoleBinding` list, where it supplies `ui.namespaces` when that is empty.
+the one place the chart needs a namespace *name* it cannot derive — the
+console's `RoleBinding` list, where it supplies `api.namespaces` when that is
+empty.
 
 ## `imagePullSecrets`, and what Docker Hub does differently
 
@@ -1478,286 +1462,12 @@ and the ACL list as what a compose broker required:
 
 ## The UI's authority
 
-With `ui.enabled`, one pod runs `kubectl proxy --www=/ui --www-prefix=/ui/
---address=0.0.0.0 --port=8001 --accept-hosts='.*'
---accept-paths='^/(ui/|apis/logweir\.dev/v1alpha1/)'` from **`ui.image`**. The
-proxy attaches the pod's ServiceAccount credential — `<release>-ui` — to every
-request it forwards, so **anyone who can reach that Service acts with that
-ServiceAccount's authority.** The page holds no credential and asks for none
-(Global Constraint 28: no key material in the page, none in the image that
-serves it).
-
-### The page is an image, not a ConfigMap
-
-`ui.image` defaults to `docker.io/vladyslavhaina/logweir-ui:latest`. **What is
-in it:** the pinned `registry.k8s.io/kubectl` (v1.34.1, resolved by digest on
-2026-09-12 — the command is below) with the **twenty-six shipped UI files copied
-in at `/ui`** and nothing else: no `README.md`, no `ui/tests/` (which carries a
-throwaway keypair), no key material of any kind. It also carries Logweir's
-`LICENSE` and `NOTICE` and, under `/usr/share/licenses/kubectl/`, kubectl's
-Apache-2.0 licence and an inventory naming the base digest.
-
-**The arguments are NOT in the image.** Its entrypoint is `kubectl` and it
-declares no `CMD`; every flag above — `--accept-paths` above all, which is the
-authorisation boundary — is the chart's, where `helm template` shows it to you
-and three tests assert it.
-
-**Until Task 39 the page arrived as a ConfigMap** the chart built from its own
-byte-identical copy of `ui/`. Both the copy and the ConfigMap are gone. An
-image is pinned, immutable once pushed and resolvable by digest; a ConfigMap is
-a mutable API object, so the page a browser loaded was whatever the last holder
-of `patch configmaps` had written. The guarantee got stronger, not weaker:
-`scripts/check-image-ui.sh` (`just smoke-ui`) computes the sha256 of every file
-the image serves and of every file under `ui/` and compares them, which is a
-statement about the bytes your browser receives; the chart's old `cmp` loop
-could only compare two directories in the Logweir repository.
-
-**To override it** — an air-gapped cluster, or your own registry:
-
-```bash
-helm install logweir charts/logweir -n logweir-system \
-  --set ui.enabled=true \
-  --set ui.image=registry.example.com/logweir-ui@sha256:<digest>
-```
-
-Mirror it the same way you mirror the other two Logweir images
-(`docs/install.md`). Its own `docker pull` is the only network access the UI
-pod needs.
-The ServiceAccount is bound to a ClusterRole carrying exactly the verbs the
-page issues, measured from `ui/api.js` and `ui/pages/*.js`: `get`/`list` on
-the five namespaced kinds, `create` on approvals, kafkaclusters,
-backupschedules and restores, `patch` on backupschedules, and `list` on the
-cluster-scoped trustrosters — never `watch`, never `delete`, never the shipped
-`logweir-operator`'s `update`. The path filter admits only `/ui/` and
-`/apis/logweir.dev/v1alpha1/`; the core API, pod exec and attach are refused
-by the proxy before RBAC is consulted. There is no Ingress. Reach it with
-
-```bash
-kubectl port-forward -n logweir-system svc/logweir-ui 8001:8001
-```
-
-and open `http://127.0.0.1:8001/ui/`. The chart binds the page's role in the
-release namespace and in each namespace listed under `ui.namespaces`. It also
-mounts that exact, explicit set into the served page's runtime namespace picker;
-the page does not list namespaces and cannot select a namespace the chart did
-not bind. A single permitted namespace is selected automatically; with more
-than one, select it in the picker. For any other namespace, add it to
-`ui.namespaces` and upgrade the release (rather than only creating a binding):
-
-The runtime context is an immutable, content-addressed ConfigMap, so an
-upgrade rolls the UI to the new set and a later ConfigMap patch cannot change
-the JavaScript the proxy serves.
-
-```bash
-kubectl create rolebinding logweir-ui --clusterrole=logweir-ui \
-  --serviceaccount=logweir-system:logweir-ui -n <namespace>
-```
-
-The laptop path — `kubectl proxy --www=./ui` under your own kubeconfig, with
-the page holding *your* authority — is unchanged and documented in
-`docs/install.md`, *Serving the UI*.
-
-### Reproducing the PLAT-13 live UI harness
-
-This maintainer check needs Docker Desktop, `kubectl`, Helm, Node.js, and
-Playwright with Chromium installed. It deploys only the UI/proxy template; it
-does not deploy the controller or runner and is not a full-stack recovery test.
-The temporary chart is rebuilt from the current, unmodified UI template and
-helpers, so it does not depend on a pre-existing `/tmp` directory:
-
-```bash
-set -euo pipefail
-image="logweir-ui:plat13-e2e-local-$$"
-wrapper=
-port_forward_pid=
-port_forward_log=$(mktemp "${TMPDIR:-/tmp}/plat13-ui-forward.XXXXXX")
-release_attempted=false
-owned_namespaces=()
-
-stop_port_forward() {
-  if test -n "${port_forward_pid:-}"; then
-    if kill -0 "$port_forward_pid" 2>/dev/null; then
-      kill "$port_forward_pid" 2>/dev/null || true
-    fi
-    wait "$port_forward_pid" 2>/dev/null || true
-    port_forward_pid=
-  fi
-}
-
-cleanup_plat13() {
-  original_status=$?
-  trap - EXIT
-  set +e
-  cleanup_status=0
-  stop_port_forward
-  if test "$release_attempted" = true; then
-    helm uninstall plat13-ui-e2e --kube-context docker-desktop \
-      --namespace plat13-ui-e2e --ignore-not-found --wait --timeout=120s || cleanup_status=1
-  fi
-  # Bash 3.2 with `set -u` treats a declared-but-empty array expansion as an
-  # unbound variable. The `+` guard makes zero owned namespaces a zero-iteration
-  # loop without weakening nounset for the rest of the recipe.
-  for namespace in ${owned_namespaces[@]+"${owned_namespaces[@]}"}; do
-    label=$(kubectl --context docker-desktop get namespace "$namespace" \
-      --ignore-not-found=true \
-      -o jsonpath='{.metadata.labels.plat13\.logweir\.dev/environment}')
-    label_status=$?
-    if test "$label_status" -ne 0; then
-      cleanup_status=1
-    elif test -z "$label"; then
-      :
-    elif test "$label" != ui-e2e; then
-      echo "refusing to delete namespace $namespace with ownership label $label" >&2
-      cleanup_status=1
-    else
-      kubectl --context docker-desktop delete namespace "$namespace" \
-        --wait=true --timeout=120s || cleanup_status=1
-    fi
-  done
-  if docker --context desktop-linux image inspect "$image" >/dev/null 2>&1; then
-    docker --context desktop-linux image rm "$image" >/dev/null 2>&1 || cleanup_status=1
-  fi
-  if test -n "${wrapper:-}"; then
-    rm -rf "$wrapper" || cleanup_status=1
-  fi
-  rm -f "$port_forward_log" || cleanup_status=1
-  if test "$original_status" -ne 0; then
-    exit "$original_status"
-  fi
-  exit "$cleanup_status"
-}
-
-start_port_forward() {
-  : > "$port_forward_log"
-  kubectl --context docker-desktop -n plat13-ui-e2e port-forward \
-    svc/plat13-ui-e2e-ui 18132:8001 > "$port_forward_log" 2>&1 &
-  port_forward_pid=$!
-}
-
-wait_for_ui() {
-  for attempt in $(seq 1 30); do
-    if ! kill -0 "$port_forward_pid" 2>/dev/null; then
-      echo "PLAT-13 port-forward exited before readiness" >&2
-      tail -n 20 "$port_forward_log" >&2
-      return 1
-    fi
-    if curl --fail --silent --show-error \
-      http://127.0.0.1:18132/ui/ > "$wrapper/ui-readiness.html"; then
-      if ! kill -0 "$port_forward_pid" 2>/dev/null; then
-        echo "PLAT-13 port-forward exited during readiness probe" >&2
-        tail -n 20 "$port_forward_log" >&2
-        return 1
-      fi
-      if grep -Fq 'Forwarding from 127.0.0.1:18132 -> 8001' "$port_forward_log" \
-        && grep -Fq '<title>Logweir</title>' "$wrapper/ui-readiness.html" \
-        && grep -Fq 'id="view-slot"' "$wrapper/ui-readiness.html"; then
-        return 0
-      fi
-    fi
-    sleep 1
-  done
-  echo "PLAT-13 UI did not become ready within 30 seconds" >&2
-  tail -n 20 "$port_forward_log" >&2
-  return 1
-}
-
-trap cleanup_plat13 EXIT
-wrapper=$(mktemp -d "${TMPDIR:-/tmp}/plat13-ui-chart.XXXXXX")
-mkdir -p "$wrapper/templates"
-cp charts/logweir/templates/ui/ui.yaml "$wrapper/templates/ui.yaml"
-cp charts/logweir/templates/_helpers.tpl "$wrapper/templates/_helpers.tpl"
-printf '%s\n' 'apiVersion: v2' 'name: logweir-ui-e2e' 'type: application' \
-  'version: 0.0.0' 'appVersion: test' > "$wrapper/Chart.yaml"
-printf '%s\n' 'environment: ""' 'kubernetes:' '  namespace: ""' \
-  '  nodeSelector: {}' '  tolerations: []' '  affinity: {}' \
-  'imagePullSecrets: []' 'ui:' '  enabled: false' '  image: ""' \
-  '  imagePullPolicy: Never' '  namespaces: []' '  nodeSelector: {}' \
-  '  tolerations: []' '  affinity: {}' > "$wrapper/values.yaml"
-
-docker --context desktop-linux build --platform linux/arm64 \
-  -f Dockerfile.ui -t "$image" .
-bash scripts/check-image-ui.sh "$image"
-
-kubectl --context docker-desktop create namespace plat13-ui-e2e
-owned_namespaces+=(plat13-ui-e2e)
-kubectl --context docker-desktop label namespace plat13-ui-e2e \
-  plat13.logweir.dev/environment=ui-e2e
-kubectl --context docker-desktop create namespace plat13-ui-e2e-second
-owned_namespaces+=(plat13-ui-e2e-second)
-kubectl --context docker-desktop label namespace plat13-ui-e2e-second \
-  plat13.logweir.dev/environment=ui-e2e
-kubectl --context docker-desktop create namespace plat13-ui-e2e-missing
-owned_namespaces+=(plat13-ui-e2e-missing)
-kubectl --context docker-desktop label namespace plat13-ui-e2e-missing \
-  plat13.logweir.dev/environment=ui-e2e
-
-release_attempted=true
-helm upgrade --install plat13-ui-e2e "$wrapper" \
-  --kube-context docker-desktop --namespace plat13-ui-e2e \
-  --set ui.enabled=true --set "ui.image=$image" \
-  --set ui.imagePullPolicy=Never
-kubectl --context docker-desktop -n plat13-ui-e2e rollout status \
-  deployment/plat13-ui-e2e-ui --timeout=120s
-start_port_forward
-wait_for_ui
-
-NODE_PATH="$(npm root -g)" PLAT13_STAGE=single \
-  PLAT13_BASE_URL=http://127.0.0.1:18132/ui/ \
-  PLAT13_PRIMARY_NAMESPACE=plat13-ui-e2e \
-  PLAT13_UI_SERVICE_ACCOUNT=plat13-ui-e2e/plat13-ui-e2e-ui \
-  node scripts/plat13-ui-e2e.mjs > /tmp/plat13-ui-e2e-single.json
-
-stop_port_forward
-helm upgrade plat13-ui-e2e "$wrapper" --kube-context docker-desktop \
-  --namespace plat13-ui-e2e --set ui.enabled=true --set "ui.image=$image" \
-  --set ui.imagePullPolicy=Never \
-  --set-string 'ui.namespaces[0]=plat13-ui-e2e-second' \
-  --set-string 'ui.namespaces[1]=plat13-ui-e2e-missing'
-kubectl --context docker-desktop -n plat13-ui-e2e rollout status \
-  deployment/plat13-ui-e2e-ui --timeout=120s
-kubectl --context docker-desktop delete namespace plat13-ui-e2e-missing \
-  --wait=true --timeout=120s
-start_port_forward
-wait_for_ui
-
-NODE_PATH="$(npm root -g)" PLAT13_STAGE=multi \
-  PLAT13_BASE_URL=http://127.0.0.1:18132/ui/ \
-  PLAT13_PRIMARY_NAMESPACE=plat13-ui-e2e \
-  PLAT13_SECOND_NAMESPACE=plat13-ui-e2e-second \
-  PLAT13_MISSING_NAMESPACE=plat13-ui-e2e-missing \
-  PLAT13_UI_SERVICE_ACCOUNT=plat13-ui-e2e/plat13-ui-e2e-ui \
-  node scripts/plat13-ui-e2e.mjs > /tmp/plat13-ui-e2e-multi.json
-
-fake_kubectl=$(mktemp -d "${TMPDIR:-/tmp}/plat13-fake-kubectl.XXXXXX")/kubectl
-printf '%s\n' '#!/bin/sh' \
-  'case " $* " in *" --context docker-desktop "*) ;; *) exit 96 ;; esac' \
-  'case " $* " in *" --ignore-not-found=true "*) ;; *) exit 95 ;; esac' \
-  'echo "Error from server (Forbidden): controlled cleanup denial" >&2' \
-  'exit 1' > "$fake_kubectl"
-chmod +x "$fake_kubectl"
-set +e
-NODE_PATH="$(npm root -g)" PLAT13_STAGE=single \
-  PLAT13_BASE_URL=http://127.0.0.1:18132/ui/ \
-  PLAT13_PRIMARY_NAMESPACE=plat13-ui-e2e \
-  PLAT13_UI_SERVICE_ACCOUNT=plat13-ui-e2e/plat13-ui-e2e-ui \
-  PLAT13_KUBECTL="$fake_kubectl" PLAT13_CLEANUP_NEGATIVE_CONTROL=forbidden \
-  node scripts/plat13-ui-e2e.mjs > /tmp/plat13-ui-e2e-cleanup-negative.json
-negative_status=$?
-set -e
-test "$negative_status" -eq 1
-node -e 'const r=require("/tmp/plat13-ui-e2e-cleanup-negative.json");
-  if (r.ok || !r.cleanupFailure || !r.cleanupFailure.includes("Forbidden")) process.exit(1)'
-rm -rf "$(dirname "$fake_kubectl")"
-```
-
-The direct redirections preserve Node's exit code. The harness emits every
-created object name and UID to stderr as soon as it has them, then verifies
-exact-object cleanup in `finally`. The bounded fake-kubectl control uses that
-same cleanup path and proves a Forbidden lookup sets `cleanupFailure` and exits
-1. The `EXIT` trap safely stops or reaps the current forward, preserves an
-earlier failing status, and removes only the release and explicitly labeled
-namespaces created by this recipe. It leaves every other release, including
-`scram-local`, untouched.
+The page is served by the console, `api.console.*`, under its own
+`<release>-api` identity (above). The legacy `kubectl proxy` page — `ui.*`, the
+`logweir-ui` image, and the laptop `kubectl proxy --www=./ui` path — was
+withdrawn in v1 (release-notes item 75), and the chart refuses `ui.*` by name.
+An upgrade that set `ui.enabled` loses that page; remove the `ui` block and use
+the console.
 
 ## Upgrading the CRDs by hand
 
@@ -1814,13 +1524,12 @@ Logweir — Global Constraint 6.
   `<repository>:latest` (and `:latest` on any other image is still refused),
   with the author-only render exempt by name — its whole premise is a locally
   built tag; the schema refusing `--set demoKafka.enabled=yes`; `values.yaml`
-  naming the tree's own repositories at `:latest` — `ui.image` among them, its
-  namespace derived from the runner pin.
-* `scripts/check-image-ui.sh` (`just smoke-ui`; needs a Docker daemon, so it is
-  in `docs/gates.md`'s stack/cluster table rather than in `just gate`): the
-  twenty-six files the `logweir-ui` image serves, sha256 for sha256 against
-  `ui/`, and nothing else under `/ui`. This is what replaced the chart's
-  byte-copy arm.
+  naming the tree's own repositories at `:latest` — `api.console.image` among
+  them, its namespace derived from the runner pin; and `ui.*` refused by name.
+* `scripts/check-image-api.sh` (`just smoke-console`; needs a Docker daemon, so
+  it is in `docs/gates.md`'s stack/cluster table rather than in `just gate`):
+  the twenty-six files the console image serves, sha256 for sha256 against
+  `ui/`, and nothing else under `/ui`.
 * The existing image publication path runs `scripts/check-image.sh` against the
   exact pulled candidate digest and requires `identity bootstrap --help` before
   any public tag moves. The emitted compatible runner digest is what
@@ -1828,9 +1537,8 @@ Logweir — Global Constraint 6.
   exists.
 * `crates/logweir/tests/chart_lint.rs`: the rendered defaults agree with
   `logweir.yaml`; nothing optional renders under defaults; each flag renders
-  its named objects; the chart carries no copy of `ui/` and mounts no ConfigMap
-  into the proxy — the page's bytes are asserted against the image instead, by
-  `scripts/check-image-ui.sh`.
+  its named objects; the chart carries no copy of `ui/` — the page's bytes are
+  asserted against the console image instead, by `scripts/check-image-api.sh`.
 * `scripts/helm-demo.sh` (`just helm-demo`; `.github/workflows/helm-demo.yml`
   on `kind`): the walk above, on a real cluster.
 

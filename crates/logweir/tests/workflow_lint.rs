@@ -81,11 +81,12 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
             assert_ne!(step["with"]["push"].as_bool(), Some(true));
         }
     }
-    // FOUR SINCE D0 STAGE 7: the controller and the console on both
-    // architectures, the UI on both, the runner on amd64 only. The number is
-    // asserted rather than derived because a build step that stopped running is
-    // an image that stops being tested while every other row here stays green.
-    assert_eq!(builds, 4);
+    // THREE: the controller, the console and the runner, each built per
+    // matrix architecture (the `logweir-ui` image was withdrawn in v1,
+    // PROD-17.1 C4). The number is asserted rather than derived because a
+    // build step that stopped running is an image that stops being tested
+    // while every other row here stays green.
+    assert_eq!(builds, 3);
     // AND EACH COMPILING IMAGE HAS ITS FAST-FAILING IDENTITY CHECK BEFORE THE
     // LOGIN STEP. `scripts/ci-images.sh check` runs the full gates a moment
     // later; these two exist because they fail in seconds and NAME the defect —
@@ -281,7 +282,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "CHART_REPOSITORY=\"oci://registry-1.docker.io/$NS\"",
         "echo \"$base-sha-$GITHUB_SHA\"",
         "--app-version \"$TAG\"",
-        "[[ \"$rewritten\" -eq 4 ]]",
+        "[[ \"$rewritten\" -eq 3 ]]",
         "helm registry login registry-1.docker.io",
         "--password-stdin",
         "helm push \"$package\" \"$CHART_REPOSITORY\"",
@@ -294,7 +295,7 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "HELM_REGISTRY_CONFIG=\"$dir/login/config.json\" helm push",
         // PROD-14.0: a release chart pins digests, and a published release
         // version is never replaced.
-        "a release chart ($TAG) pins its four images by digest",
+        "a release chart ($TAG) pins its three images by digest",
         "  chart-push)",
         "chart_publish \"$package\" \"$version\" replace",
         "chart_publish \"$package\" \"$version\" immutable",

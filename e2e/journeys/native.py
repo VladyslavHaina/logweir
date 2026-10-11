@@ -4,8 +4,8 @@ The audit (`README.md`, "Audit map") found these gaps and nothing else:
 
 1. No row drives a restore of an OLDER recovery point to completion and reads
    the restored records back; the nearest rows stop at admission (d3
-   `trust-old-archive-still-restores`) or render the wizard's text (plat11-2,
-   plat12-13). No row reads the selected point back off the created Restore.
+   `trust-old-archive-still-restores`) or render the wizard's text (plat11-2).
+   No row reads the selected point back off the created Restore.
 2. No row backs up from an unreachable source. The only source-offline rows are
    a discovery (d2 S11), a preflight (d2 S14f), and a restore in the lab's own
    INSTALLER (`scripts/test-k8s-scram.py`), which swaps the shared broker's
