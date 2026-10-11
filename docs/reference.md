@@ -113,7 +113,7 @@ the mandatory ones. Stderr carries JSON tracing and nothing a controller parses.
 | Line | When | Read into |
 |---|---|---|
 | `progress-contract=<n>` then `progress-phase=<0..9>:<name>` | While running; optional | `status.progress.runnerPhase` |
-| `topic-preflight=<json>` | Phase 0's observation of the target: `timestampType`, `retentionMs`, `timestampBound` | `status.topicPreflight` |
+| `topic-preflight=<json>` | Exit 0 only: phase 0's observation of the target: `timestampType`, `retentionMs`, `timestampBound` | `status.topicPreflight` |
 | `teardown-failed=[{"topic":…,"error":…}]` | When a teardown left a topic; at most 256 entries | `status.teardown.failed` |
 | `teardown-key=logweir/drills/<run_id>.teardown.json` | When phase 9's signed teardown attestation was written | `status.teardown` |
 | `scorecard-key=logweir/drills/<run_id>.json` | Exit 0 and exit 2 | `status.evidence` |

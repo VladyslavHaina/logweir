@@ -1116,7 +1116,8 @@ written; `Verified` is never `True` over a non-zero `exitCode`.
 the scorecard was not read, each is omitted (absent means nobody looked).
 `newTopics` and `oldTopics` come from the plan's prefix rule. `topicPreflight`
 (`timestampType`, `retentionMs`, `timestampBound`) is copied from the runner's
-`topic-preflight=` line, and absent when the target reported nothing.
+`topic-preflight=` line, printed at exit 0 only; absent on every other run. A
+field the target did not report is omitted.
 `status.completion` (`newTopics`, `recordsExpected`,
 `recordsRestored`, `recordsSampled`, `recordsSampledMatching`, `integrityLevel`,
 `sampleWindow`) is written only for a run whose verdict is `Valid` (basis
