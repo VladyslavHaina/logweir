@@ -1,12 +1,12 @@
-//! `Backup` — one archive run, as an object.
+//! `Backup`: one archive run, as an object.
 //!
 //! Object identity is a pure function of the trigger (guard **G-SLOT**). A
 //! scheduled `Backup` is named `<schedule>-<slot as yyyymmdd-hhmmss, UTC,
-//! lowercase>` — a DNS-1123 subdomain, because uppercase `T`/`Z` are rejected
-//! as Kubernetes object names; the `YYYYmmddTHHMMSSZ` form is kept only for
-//! Kafka topic names. `status.backupId` derives from the object UID plus that
-//! slot, and the cron reconciler's only write for a due slot is a `create`, so
-//! an `AlreadyExists` after a crash **is** the idempotence key.
+//! lowercase>`, a DNS-1123 subdomain (uppercase `T`/`Z` are rejected in
+//! object names; the `YYYYmmddTHHMMSSZ` form is only for Kafka topic names).
+//! `status.backupId` derives from the object UID plus that slot, and the cron
+//! reconciler's only write for a due slot is a `create`, so an
+//! `AlreadyExists` after a crash **is** the idempotence key.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -1,34 +1,31 @@
-//! The namespaces this controller watches and acts in — D0 stage 5.
+//! The namespaces this controller watches and acts in (D0 stage 5).
 //!
-//! WHY THIS EXISTS. `weirkeeper` creates Jobs, and a Job can mount any Secret
-//! in its namespace. Holding Job-create authority in a namespace is therefore
-//! holding every Secret there, which is residual O1 (`docs/kubernetes.md`
-//! §15.4). With one cluster-wide `ClusterRoleBinding` that authority covers
-//! EVERY namespace, including the one that holds the shared console's session
-//! and cursor keys, and D0 says shared mode must not be declared secure until
-//! the controller's namespaced authority is scoped away from it. Scoping is two
-//! halves that must agree: the chart binds the namespaced rules with one
-//! `RoleBinding` per execution namespace instead of the cluster-wide binding,
-//! and this process watches, lists and acts in exactly those namespaces —
-//! because a controller whose `Api::all` watch the API server refuses is not a
-//! narrower controller, it is a stopped one.
+//! `weirkeeper` creates Jobs, and a Job can mount any Secret in its namespace,
+//! so Job-create authority in a namespace is every Secret there (residual O1,
+//! `docs/kubernetes.md` §15.4). One cluster-wide `ClusterRoleBinding` extends
+//! that to every namespace, including the one holding the shared console's
+//! session and cursor keys, and D0 says shared mode is not secure until the
+//! controller's namespaced authority is scoped away from it. The two halves
+//! must agree: the chart binds the namespaced rules with one `RoleBinding` per
+//! execution namespace, and this process watches, lists and acts in exactly
+//! those namespaces, because a controller whose `Api::all` watch is refused is
+//! not narrower, it is stopped.
 //!
-//! THE SWITCH. `LOGWEIR_WATCH_NAMESPACES` — a comma- or whitespace-separated
-//! list of namespace names. Unset or empty is TODAY'S BEHAVIOUR, the whole
-//! cluster through `Api::all`, so an existing installation upgrades without a
-//! change it did not ask for. Set, each namespaced reconciler runs one watch
-//! per listed namespace (`Api::namespaced`), and every cross-object read that
-//! used to be cluster-wide ([`list_everywhere`]) reads the listed namespaces
-//! and nothing else. The two cluster-scoped kinds, `TrustRoster` and
-//! `TrustPolicy`, stay `Api::all` in both shapes: they have no namespace to be
-//! bound to, and reading them is the only cluster-scoped authority the scoped
-//! chart grants.
+//! # The switch
 //!
-//! A MALFORMED LIST REFUSES TO START. An entry that is not a DNS label cannot
-//! name a namespace, and silently dropping it would leave a namespace the
-//! operator meant to protect unreconciled with no sign of why.
-//! [`configured`] is the pure predicate; `main` reads the variable once and
-//! exits on the error.
+//! `LOGWEIR_WATCH_NAMESPACES`, a comma- or whitespace-separated list of
+//! namespace names. Unset or empty is the whole cluster through `Api::all`, so
+//! an existing installation upgrades without a change it did not ask for. Set,
+//! each namespaced reconciler runs one `Api::namespaced` watch per listed
+//! namespace, and every cross-object read ([`list_everywhere`]) reads only the
+//! listed namespaces. The cluster-scoped kinds, `TrustRoster` and
+//! `TrustPolicy`, stay `Api::all` in both shapes: reading them is the only
+//! cluster-scoped authority the scoped chart grants.
+//!
+//! A malformed list refuses to start: an entry that is not a DNS label cannot
+//! name a namespace, and dropping it would leave a namespace the operator meant
+//! to protect unreconciled with no sign of why. [`configured`] is the pure
+//! predicate; `main` reads the variable once and exits on the error.
 
 use std::sync::OnceLock;
 
@@ -44,8 +41,7 @@ pub const WATCH_NAMESPACES_ENV: &str = "LOGWEIR_WATCH_NAMESPACES";
 /// Where the namespaced reconcilers watch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WatchScope {
-    /// Every namespace, through `Api::all` — the default, and the behaviour of
-    /// every release before D0 stage 5.
+    /// Every namespace, through `Api::all` (the default).
     Cluster,
     /// Exactly these namespaces, sorted and deduplicated.
     Namespaces(Vec<String>),
@@ -124,7 +120,7 @@ pub fn init(scope: WatchScope) -> bool {
 }
 
 /// The scope in force. A process (or a test) that never called [`init`]
-/// watches the whole cluster, which is the pre-stage-5 behaviour.
+/// watches the whole cluster.
 #[must_use]
 pub fn current() -> &'static WatchScope {
     SCOPE.get_or_init(|| WatchScope::Cluster)
@@ -147,10 +143,9 @@ where
 /// Run one copy of a namespaced reconciler per watch in [`current`], until
 /// the process ends.
 ///
-/// Each copy is independent: its own watch, its own store, its own queue. A
-/// reconciler that used `Controller::store()` as "every object of this kind"
-/// now sees every object of this kind IN ITS NAMESPACE, which is exactly the
-/// set it may act on.
+/// Each copy has its own watch, store and queue, so a reconciler's
+/// `Controller::store()` holds every object of its kind in its namespace,
+/// exactly the set it may act on.
 pub async fn run_everywhere<F, Fut>(make: F)
 where
     F: Fn(Option<String>) -> Fut,
@@ -165,9 +160,8 @@ where
 /// For the cross-object reads that must not miss an object (the retention
 /// protection set, the installation-wide check ceiling). Call it with the kind
 /// named, `list_everywhere::<Restore>(…)`, so the RBAC lint sees the `list`.
-/// The list parameters
-/// apply to each call; there is no pagination across namespaces, exactly as
-/// there was none across the cluster.
+/// The list parameters apply to each call; there is no pagination across
+/// namespaces.
 ///
 /// # Errors
 ///
@@ -179,10 +173,9 @@ where
 {
     let mut out = Vec::new();
     for namespace in current().watches() {
-        // NO `let x: Api<K>` BINDING HERE, deliberately: `manifest_lint.rs`
-        // maps every typed `Api<T>` binding in this crate to an RBAC resource,
-        // and a generic `K` has none. Callers name the kind with a turbofish —
-        // `list_everywhere::<Restore>(…)` — which is what that lint reads as a
+        // No `let x: Api<K>` binding here: `manifest_lint.rs` maps every typed
+        // `Api<T>` binding to an RBAC resource and a generic `K` has none, so
+        // callers name the kind with a turbofish, which the lint reads as a
         // `list` on the kind.
         out.extend(
             api::<K>(client, namespace.as_deref())
@@ -226,7 +219,7 @@ mod tests {
             ]
         );
         assert!(scope.covers("team-a"));
-        // EXACT: no prefix, no pattern, and the release namespace is not
+        // Exact: no prefix, no pattern, and the release namespace is not
         // implied.
         assert!(!scope.covers("team"));
         assert!(!scope.covers("logweir-system"));

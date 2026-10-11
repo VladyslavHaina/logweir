@@ -1,63 +1,47 @@
-//! `runnerResources` — what a runner pod asks for and is capped at (FX-2).
+//! `runnerResources`: what a runner pod asks for and is capped at.
 //!
-//! # The defect this module closes
+//! # Applied, and refused rather than clamped
 //!
-//! `Restore.spec.runnerResources` was accepted by the schema, documented as
-//! "what the runner pod asks for and is capped at" — and then [`crate::job::build`]
-//! rendered a container with no `resources` at all. An operator who set
-//! `limits.memory: 2Gi` got a `BestEffort` pod with no cap.
-//!
-//! # The decision: APPLY, and REFUSE rather than clamp
-//!
-//! The field is applied, not withdrawn. D3 §4.5 designed it, the CRD documents
-//! it, and the alternative is worse on every axis an operator can see: a pod
-//! that states no requests is `BestEffort`, the first thing the kubelet evicts
-//! under node pressure, and a restore evicted mid-write is a half-written
-//! target; a namespace whose `ResourceQuota` covers compute refuses every pod
-//! that states no limits, so without the field a restore cannot run there at
-//! all. PROD-10.1's bounded controls start from this lever.
-//!
-//! What is applied is validated first, by [`validate`], and a value that fails
-//! is REFUSED with a reason naming the field. Nothing is ever clamped: a
-//! clamped limit is a Job nobody asked for, and a run OOM-killed at a limit the
-//! controller chose would read as a runner defect.
+//! A pod that states no requests is `BestEffort`, the first thing the kubelet
+//! evicts under node pressure (and a restore evicted mid-write is a
+//! half-written target), and a namespace whose `ResourceQuota` covers compute
+//! refuses every pod that states no limits. So the field is applied, after
+//! [`validate`]; a value that fails is refused with a reason naming the field
+//! and never clamped: a clamped limit is a Job nobody asked for, and a run
+//! OOM-killed at a limit the controller chose would read as a runner defect.
 //!
 //! # The rules, in the order they are checked
 //!
 //! 1. **The quantity parses** in the grammar
-//!    [`crate::crds::restore::QUANTITY_PATTERN`] admits. The
-//!    schema already enforces the pattern; the controller re-checks because
-//!    it never trusts a field it projects into a pod, and because a pattern
-//!    alone cannot say anything about the VALUE.
-//! 2. **The unit fits the resource.** Memory is a whole number of bytes, so
-//!    `memory: 100m` — a tenth of a byte, the classic slip for `100Mi` — is
-//!    refused. CPU is a whole number of millicores, the finest amount the
-//!    scheduler honours.
+//!    [`crate::crds::restore::QUANTITY_PATTERN`] admits. The schema enforces
+//!    the pattern; the controller re-checks because it never trusts a field it
+//!    projects into a pod, and a pattern says nothing about the value.
+//! 2. **The unit fits the resource.** Memory is whole bytes, so `memory: 100m`
+//!    (a tenth of a byte, the classic slip for `100Mi`) is refused. CPU is
+//!    whole millicores, the finest amount the scheduler honours.
 //! 3. **Nothing is above its ceiling**, requests and limits alike: CPU
-//!    [`CPU_CEILING`], memory [`MEMORY_CEILING`] — D3 §4.1's numbers. They are
-//!    compiled in because no chart value configures them (none exists), and
-//!    they are the controller's because comparing quantities in CEL needs the
-//!    `quantity` library, whose presence cannot be proved on the 1.29 floor.
-//! 4. **A limit is a cap.** A zero limit is refused — to a container runtime
-//!    zero reads as "no limit", the opposite of what was written — and a
-//!    memory limit below [`MEMORY_LIMIT_FLOOR`] is refused: no runner starts
-//!    in less, and a bare number there (`512`, which is 512 bytes) is almost
-//!    always a missing unit.
-//! 5. **A request is at most its limit**, per resource, when both are set —
-//!    the API server's own rule, checked here so a Restore is refused on its
-//!    own object rather than failing as a rejected Job.
+//!    [`CPU_CEILING`], memory [`MEMORY_CEILING`] (D3 §4.1). Compiled in because
+//!    no chart value configures them, and the controller's because comparing
+//!    quantities in CEL needs the `quantity` library, whose presence cannot be
+//!    proved on the 1.29 floor.
+//! 4. **A limit is a cap.** A zero limit is refused (a container runtime reads
+//!    zero as "no limit"), and so is a memory limit below
+//!    [`MEMORY_LIMIT_FLOOR`]: no runner starts in less, and a bare number there
+//!    (`512`, which is 512 bytes) is almost always a missing unit.
+//! 5. **A request is at most its limit**, per resource, when both are set: the
+//!    API server's own rule, checked here so a Restore is refused on its own
+//!    object rather than failing as a rejected Job.
 //!
 //! Every failing rule is reported, not only the first: the objects are
-//! immutable, and an operator who fixes one field per re-created object would
-//! need as many attempts as there are mistakes.
+//! immutable, and fixing one field per re-created object would take as many
+//! attempts as there are mistakes.
 //!
 //! # What reaches the container
 //!
-//! The quantities are copied VERBATIM, in the spelling the object carries; the
-//! API server canonicalises them on the Job (`0.5` is stored as `500m`). An
-//! ABSENT block — or one with no quantity in it — renders no `resources` key
-//! at all, which is byte-for-byte the Job shape before FX-2: the namespace's
-//! `LimitRange` defaults apply exactly as they did.
+//! The quantities are copied verbatim; the API server canonicalises them on the
+//! Job (`0.5` is stored as `500m`). An absent block, or one with no quantity in
+//! it, renders no `resources` key at all, so the namespace's `LimitRange`
+//! defaults apply.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -66,20 +50,17 @@ use std::fmt;
 use crate::crds::restore::{ResourceQuantities, RunnerResources};
 use crate::job::ContainerResources;
 
-/// The resource name `cpu`.
 pub const CPU: &str = "cpu";
-/// The resource name `memory`.
 pub const MEMORY: &str = "memory";
 
-/// The CPU ceiling, requests and limits alike — D3 §4.1's "cpu limit <= 4".
+/// The CPU ceiling, requests and limits alike (D3 §4.1's "cpu limit <= 4").
 pub const CPU_CEILING: &str = "4";
-/// The memory ceiling, requests and limits alike — D3 §4.1's "memory limit
-/// <= 8Gi".
+/// The memory ceiling, requests and limits alike (D3 §4.1's "memory limit
+/// <= 8Gi").
 pub const MEMORY_CEILING: &str = "8Gi";
-/// The smallest memory LIMIT accepted. Not a measured minimum for a working
-/// run — PROD-10.1 measures that — but a floor below which no runner process
-/// starts, set to catch a missing unit before it becomes a pod that cannot be
-/// created.
+/// The smallest memory limit accepted: not a measured minimum for a working
+/// run, but a floor below which no runner process starts, to catch a missing
+/// unit before it becomes a pod that cannot be created.
 pub const MEMORY_LIMIT_FLOOR: &str = "32Mi";
 
 /// The field path of `Restore.spec.runnerResources`.
@@ -88,7 +69,7 @@ pub const RESTORE_PATH: &str = "spec.runnerResources";
 /// One refused quantity: the field it is in, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
-    /// The full field path — `spec.runnerResources.limits.memory`.
+    /// The full field path (`spec.runnerResources.limits.memory`).
     pub field: String,
     /// One sentence naming the value and the rule it breaks.
     pub detail: String,
@@ -100,7 +81,7 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// Every refused quantity in one block — never empty.
+/// Every refused quantity in one block (never empty).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refused(pub Vec<Refusal>);
 
@@ -116,15 +97,14 @@ impl std::error::Error for Refused {}
 /// Validate a `runnerResources` block and render what the runner container
 /// carries.
 ///
-/// `Ok(None)` for an absent block, and for a block that names no quantity at
-/// all: the container then carries no `resources`, exactly as before FX-2.
-/// `path` is the block's own field path ([`RESTORE_PATH`]); every refusal
-/// names the full path of the field it is about.
+/// `Ok(None)` for an absent block or one that names no quantity: the container
+/// then carries no `resources`. `path` is the block's own field path
+/// ([`RESTORE_PATH`]); every refusal names the full path of its field.
 ///
 /// # Errors
 ///
-/// [`Refused`], carrying every rule every quantity breaks — see the module
-/// documentation for the rules and their order.
+/// [`Refused`], carrying every rule every quantity breaks (see the module
+/// documentation).
 pub fn validate(
     resources: Option<&RunnerResources>,
     path: &str,
@@ -146,8 +126,8 @@ pub fn validate(
         &mut refusals,
     );
 
-    // RULE 5, over the values that survived rules 1-4 — which are exact whole
-    // bytes and whole millicores, so the comparison is exact too.
+    // Rule 5, over the values that survived rules 1-4: exact whole bytes and
+    // whole millicores, so the comparison is exact.
     for name in [CPU, MEMORY] {
         if let (Some((request_text, request)), Some((limit_text, limit))) =
             (requests.get(name), limits.get(name))
@@ -274,32 +254,25 @@ fn check_one(name: &str, text: &str, is_limit: bool) -> Result<Amount, String> {
     Ok(amount)
 }
 
-// ===========================================================================
-// An exact Kubernetes quantity
-// ===========================================================================
-
-/// Nano-units in one unit.
 const NANOS_PER_UNIT: u128 = 1_000_000_000;
-/// Nano-units in one milli-unit.
 const NANOS_PER_MILLI: u128 = 1_000_000;
 
-/// The most significant digits [`parse`] evaluates. Twenty is the CRD's own
-/// `maxLength`, so every stored value fits; the bound is what keeps the
-/// arithmetic below inside a `u128` with no approximation anywhere.
+/// The most significant digits [`parse`] evaluates: the CRD's own `maxLength`,
+/// so every stored value fits, and the bound keeps the arithmetic inside a
+/// `u128` with no approximation.
 const MAX_SIGNIFICANT_DIGITS: usize = 20;
 
 /// A quantity's value, exactly, in nano-units (10⁻⁹ of the resource's unit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Amount {
-    /// The value in nano-units, ROUNDED UP when it has a finer part; `None`
-    /// when it does not fit a `u128`, which is larger than any ceiling.
+    /// The value in nano-units, rounded up when it has a finer part; `None`
+    /// when it does not fit a `u128` (larger than any ceiling).
     nanos: Option<u128>,
     /// Whether the value has a part finer than one nano-unit.
     sub_nano: bool,
 }
 
 impl Amount {
-    /// Whether this is exactly zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {
         self.nanos == Some(0)
@@ -307,9 +280,8 @@ impl Amount {
 
     /// Whether the value is an exact multiple of `nanos` nano-units.
     ///
-    /// A value too large for a `u128` of nano-units answers `true`: it is
-    /// some 10²⁹ units at least, so far above every ceiling that rule 3 is the
-    /// refusal worth reporting, not a question about its last digit.
+    /// A value too large for a `u128` of nano-units answers `true`: it is so
+    /// far above every ceiling that rule 3 is the refusal worth reporting.
     fn is_multiple_of(&self, nanos: u128) -> bool {
         !self.sub_nano && self.nanos.is_none_or(|n| n % nanos == 0)
     }
@@ -436,9 +408,9 @@ fn suffix(text: &str) -> Option<(i64, u32)> {
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return None;
             }
-            // SATURATED, NOT REFUSED: an exponent past ±10000 decides the value
-            // as surely as the exact one would — far above every ceiling, or
-            // far below every unit.
+            // Saturated, not refused: an exponent past ±10000 decides the value
+            // as surely as the exact one would (far above every ceiling, or far
+            // below every unit).
             let magnitude = digits
                 .trim_start_matches('0')
                 .parse::<i64>()

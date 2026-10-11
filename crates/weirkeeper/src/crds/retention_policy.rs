@@ -1,4 +1,4 @@
-//! `RetentionPolicy` — what may be removed from one destination, and under
+//! `RetentionPolicy`: what may be removed from one destination, and under
 //! whose authority.
 //!
 //! # Why deletion is its own kind (ADR 0008 Amendment G, and Amendment H)
@@ -10,17 +10,15 @@
 //!
 //! # `mode` is the boundary, and `Report` is the default
 //!
-//! Tag 1's statement — *no Logweir component holds any delete capability
-//! against object storage* — becomes version-scoped by Amendment H: it is true
-//! wherever `mode != Enforce`. In `Report` (the default) and
-//! `ExternalLifecycle` nothing is deleted by Logweir at all; `Enforce` opts in
-//! to a separately linked, separately credentialed worker that may delete under
-//! an explicitly configured archive prefix, **never under `logweir/`**, only
-//! from an administrator-approved plan, and only with an attributable record —
-//! create-only under `logweir/`, written by a credential that cannot delete
-//! there, and **unsigned in this build** (`docs/stability.md`).
-//! `logweir-store` stays delete-free and the control plane stays delete-free
-//! either way.
+//! *No Logweir component holds any delete capability against object storage*
+//! holds wherever `mode != Enforce` (Amendment H). In `Report` (the default)
+//! and `ExternalLifecycle` Logweir deletes nothing; `Enforce` opts in to a
+//! separately linked, separately credentialed worker that may delete under an
+//! explicitly configured archive prefix, **never under `logweir/`**, only from
+//! an administrator-approved plan, and only with an attributable record
+//! (create-only under `logweir/`, written by a credential that cannot delete
+//! there, and **unsigned in this build**, `docs/stability.md`).
+//! `logweir-store` and the control plane stay delete-free either way.
 //!
 //! `ExternalLifecycle` is a **declaration**, not an enforcement: it records
 //! that a bucket lifecycle rule exists so the console can stop claiming
@@ -30,11 +28,10 @@
 //!
 //! # What is immutable, and why those three
 //!
-//! `destinationRef`, `catalogRef` and `scope` are sealed. A policy that could
-//! be re-pointed is a policy whose approved plan — a list of point ids with a
-//! digest — could be applied to a different bucket. The mutable half is the
-//! part an administrator is expected to change: the rules, the holds, the mode
-//! and the approved plan digest.
+//! `destinationRef`, `catalogRef` and `scope` are sealed: a policy that could
+//! be re-pointed is one whose approved plan (point ids with a digest) could be
+//! applied to a different bucket. The rules, holds, mode and approved plan
+//! digest are what an administrator is expected to change.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -68,12 +65,11 @@ pub const K3_EXTERNAL_IFF_EXTERNAL_RULE: &str =
 pub const K3_EXTERNAL_IFF_EXTERNAL_MESSAGE: &str =
     "spec.externalLifecycle is required for mode ExternalLifecycle and forbidden otherwise";
 
-/// K4 — the enforcement scope may never be Logweir's own evidence root.
+/// K4: the enforcement scope may never be Logweir's own evidence root.
 ///
-/// The LAST rail, not the only one: the runner refuses it too, and
-/// `logweir-store` cannot delete at all. It is stated here so the refusal
-/// happens at admission, where an operator sees it, rather than at 04:17 in a
-/// Job log.
+/// The last rail, not the only one: the runner refuses it too, and
+/// `logweir-store` cannot delete at all. Stated here so the refusal happens at
+/// admission, where an operator sees it, rather than in a Job log.
 pub const K4_SCOPE_IS_NOT_EVIDENCE_RULE: &str =
     "!self.prefix.matches('(^|/)logweir(/|$)') && self.prefix != ''";
 /// K4's message.
@@ -445,51 +441,47 @@ pub struct RetentionAccounting {
     pub skipped: i64,
 }
 
-/// The CRD's `maxItems` on each `status.lastEvaluation` list (FX-39). The
-/// controller writes the first this many entries of each list and the full
-/// number beside it, so the API server never refuses the status write.
+/// The CRD's `maxItems` on each `status.lastEvaluation` list. The controller
+/// writes the first this many entries of each list and the full number beside
+/// it, so the API server never refuses the status write.
 pub const EVALUATION_LIST_BOUND: usize = 500;
 
 impl RetentionEvaluation {
-    /// The four counts every surface reads (FX-22), **or `None` when this
-    /// block does not carry an accounting that closes.**
+    /// The four counts every surface reads, **or `None` when this block does
+    /// not carry an accounting that closes.**
     ///
     /// `None` when `pointsEvaluated`, `keptCount`, `candidateCount` or
-    /// `truncatedByCap` is absent — an evaluation written before the
-    /// controller recorded what the per-run ceiling held back, whose `kept`
-    /// list may include such points — and `None` when
+    /// `truncatedByCap` is absent (an evaluation written before the controller
+    /// recorded what the per-run ceiling held back, whose `kept` list may
+    /// include such points), and `None` when
     ///
     /// ```text
     /// pointsEvaluated = keptCount + candidateCount + truncatedByCap + skippedCount
     /// ```
     ///
     /// (`skippedCount` absent: the length of `skipped`, which a controller
-    /// that wrote no count wrote whole, or the API server refused the write).
+    /// that wrote no count wrote whole, or the API server refused the write)
     ///
     /// does not hold. Every evaluation this controller writes satisfies it, so
     /// one that does not is two writers' numbers in one block: a merge patch
-    /// from an OLDER controller (after a rollback of the image alone) rewrites
+    /// from an older controller (an image-only rollback) rewrites
     /// `pointsEvaluated`, `candidateCount` and the lists and cannot remove the
-    /// two counts it does not know, which then describe an earlier archive.
-    /// Absent means not recorded, and a stale count is not a count: a reader
-    /// that gets `None` says so, and never derives "kept" from the list.
+    /// two counts it does not know, which then describe an earlier archive. A
+    /// reader that gets `None` says so, and never derives "kept" from the list.
     ///
-    /// **And `None` when the `kept` list is not as long as `keptCount`**
-    /// (FX-22 review M2). The sum alone does not catch that rollback while
-    /// the archive stands still: the older controller writes its own `kept`
-    /// list — the kept points AND the ones the ceiling held back, 321 ids for
-    /// `keepLast: 10` over 371 points — beside `keptCount: 10` and
-    /// `truncatedByCap: 311`, which it cannot remove and which still add up
-    /// to an unchanged `pointsEvaluated`. A reader that trusted the sum
-    /// published 311 due points under the name `kept` until the next point
-    /// landed or left. This controller writes the list whole and the count
-    /// from the same vector in one patch, so a list of another length is two
-    /// writers', whatever the sum says.
+    /// **And `None` when the `kept` list is not as long as `keptCount`.** The
+    /// sum alone misses that rollback while the archive stands still: the older
+    /// controller writes its own `kept` list (the kept points and the ones the
+    /// ceiling held back, 321 ids for `keepLast: 10` over 371 points) beside
+    /// `keptCount: 10` and `truncatedByCap: 311`, which still add up to an
+    /// unchanged `pointsEvaluated`, and a reader trusting the sum would publish
+    /// 311 due points as `kept`. This controller writes the list and the count
+    /// from one vector in one patch, so a list of another length is two
+    /// writers'.
     ///
-    /// THE LISTS ARE CUT AT [`EVALUATION_LIST_BOUND`] (FX-39), so the sum
-    /// reads the counts, and the `kept` and `skipped` lists are held to
-    /// `min(count, 500)`: an older controller rewrites a list and cannot
-    /// remove the count beside it (review S1).
+    /// The lists are cut at [`EVALUATION_LIST_BOUND`], so the sum reads the
+    /// counts, and the `kept` and `skipped` lists are held to
+    /// `min(count, 500)`.
     #[must_use]
     pub fn accounting(&self) -> Option<RetentionAccounting> {
         let list_len = |len: usize| i64::try_from(len).ok();
@@ -512,9 +504,8 @@ impl RetentionEvaluation {
         if parts.iter().any(|n| *n < 0) {
             return None;
         }
-        // THE LIST THAT IS CALLED `kept` IS THE RECORDED COUNT LONG, UP TO THE
-        // BOUND (review M2) — see the doc comment for the rollback this
-        // refuses.
+        // The list called `kept` is the recorded count long, up to the bound:
+        // see the doc comment for the rollback this refuses.
         let bound = list_len(EVALUATION_LIST_BOUND)?;
         let listed = list_len(self.kept.as_ref().map_or(0, Vec::len))?;
         if listed != accounting.kept.min(bound) {

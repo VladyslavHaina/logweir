@@ -1,80 +1,54 @@
 //! Cadence: the time zone a cron expression is read in, the policy inputs that
-//! decide whether a due slot may still run, and the preview the console shows.
+//! decide whether a due slot may still run, and the preview the console shows
+//! (decision D1 §4).
 //!
-//! Decision **D1 §4** (PLAT-04.2). Everything here is a pure function of its
-//! arguments, for the same reason [`crate::slot`] is: `Utc::now()` appears
-//! nowhere in this file, so a duplicate reconcile after a crash computes the
-//! same slot, the same name and the same preview. Guard **G-SLOT** covers this
-//! module too.
+//! Everything here is a pure function of its arguments, as in [`crate::slot`]:
+//! no clock is read, so a duplicate reconcile after a crash computes the same
+//! slot, name and preview (guard **G-SLOT**).
 //!
-//! # The three properties this module holds
+//! # Three properties
 //!
-//! **1. An absent time zone is today's behaviour, byte for byte.** Not
-//! "equivalent", not "the same modulo rounding" — the SAME CODE. [`Zone::Utc`]
+//! **1. An absent time zone is the UTC evaluator itself.** [`Zone::Utc`]
 //! delegates straight to [`Cron::last_fire_at_or_before`] and
-//! [`Cron::next_fire_after`], so there is no second evaluator that could drift
-//! from the one every existing `BackupSchedule` has been scheduled by.
+//! [`Cron::next_fire_after`], so there is no second evaluator to drift.
 //! `absent_timezone_is_byte_identical_to_legacy_utc` measures it over 10 000
-//! random `(expression, instant)` pairs, and the zoned path is compared against
-//! it separately for an explicit `timeZone: UTC`.
+//! random `(expression, instant)` pairs.
 //!
-//! **2. A local wall time that is not a single instant still fires.** The rule
-//! is D1 §4.3, and it is stated as a rule about INSTANTS rather than about
-//! clocks:
+//! **2. A local wall time that is not a single instant still fires** (D1 §4.3):
 //!
 //! > every real instant whose local wall time matches fires once; a matching
 //! > local time that does not exist fires once at the end of the gap
 //! > (deduplicated).
 //!
-//! Two consequences follow and both are intended. A fixed local time inside a
-//! repeated (fall-back) hour fires at BOTH occurrences, because both are real
-//! instants whose local wall time matches. A fixed local time inside a
-//! spring-forward gap fires ONCE, at the transition instant, because that is
-//! the first real instant at or after the time the user asked for. An interval
-//! schedule such as `*/15 * * * *` keeps its UTC cadence through both
-//! transitions without a burst and without a hole: in the gap every matching
-//! local minute maps to the same transition instant and the duplicates
-//! collapse, and in the repeated hour the two occurrences interleave into the
-//! same 15-minute grid.
+//! So a fixed local time in a repeated (fall-back) hour fires at both
+//! occurrences, and one in a spring-forward gap fires once at the transition.
+//! An interval schedule such as `*/15 * * * *` keeps its UTC cadence through
+//! both without a burst or a hole. Skipping the gap would silently lose a
+//! nightly backup once a year, and firing once in the repeated hour would make
+//! the run's local time disagree with the preview. The cost is at most one
+//! extra run per fall-back for a fixed-time schedule, which `status.nextRuns`
+//! shows in advance ([`Adjustment::RepeatedLocalTimeFirst`] /
+//! [`Adjustment::RepeatedLocalTimeSecond`]); `concurrencyPolicy: Forbid` still
+//! prevents overlap.
 //!
-//! The rejected readings, named so they are not re-derived. *Skip the gap*
-//! loses a whole day for a fixed-time schedule — a nightly backup that does not
-//! run on the night the clocks go forward, silently, once a year. *Fire once in
-//! the repeated hour* has to choose which occurrence, and either choice makes
-//! the run's local time disagree with the one the preview showed. The cost of
-//! the rule as written is at most one extra run per fall-back for a fixed-time
-//! schedule; `status.nextRuns` shows both instants with
-//! [`Adjustment::RepeatedLocalTimeFirst`] / [`Adjustment::RepeatedLocalTimeSecond`]
-//! beside them, so it is a predicted outcome rather than a surprise, and
-//! `concurrencyPolicy: Forbid` still prevents overlap.
+//! **3. Slot identity stays the UTC instant** (`yyyymmdd-hhmmss`, as
+//! [`crate::slot::slot_name`] produces it). A slot named in local time would
+//! collide across a fall-back and would not be monotonic. The zone is recorded
+//! beside the slot, never inside it.
 //!
-//! **3. Slot identity stays the UTC instant.** `yyyymmdd-hhmmss` of the UTC
-//! instant, exactly as [`crate::slot::slot_name`] has always produced it. A
-//! slot named in local time would not be unique across a fall-back (two
-//! instants, one name, one object — the colliding-`backup_id` false pass
-//! [`crate::slot`]'s header is about) and would not be monotonic. The zone is
-//! recorded BESIDE the slot, never inside it.
+//! # The time-zone database
 //!
-//! # Where the time-zone database comes from
+//! [`TZDB_SOURCE`]: `chrono-tz`, compiled in and pinned by `Cargo.lock`. The
+//! host's `/usr/share/zoneinfo` was rejected (D1 §4.3): the controller, the API
+//! and the test runner could otherwise compute different UTC instants for the
+//! same `spec.timeZone`. A tz rule amendment therefore needs a release, and
+//! `status.policy.tzdb` shows which rules were used.
 //!
-//! [`TZDB_SOURCE`] names it: `chrono-tz`, compiled into the binary, pinned by
-//! `Cargo.lock` and asserted against this constant by a test. The host's
-//! `/usr/share/zoneinfo` was rejected in D1 §4.3 — the controller image, the
-//! API image and the test runner would each carry whatever tzdata their base
-//! shipped and could compute different UTC instants for the same
-//! `spec.timeZone`, which is a scheduled backup that fires at two different
-//! times depending on which process evaluated it. The price is that a tz rule
-//! amendment needs a release, and that price is paid where it can be seen:
-//! `status.policy.tzdb` carries this string.
+//! # One evaluator
 //!
-//! # Why the preview is computed HERE and nowhere else
-//!
-//! D1 §4.4 puts one cadence evaluator in the product. The controller writes
-//! `status.nextRuns` from [`Cadence::next_runs`]; the API answers
-//! `GET /api/v1/cadence-previews` from the same function; the browser renders
-//! what one of those two returns and evaluates no cron at all. A second
-//! implementation in JavaScript is a second answer to "when does my backup
-//! run", and the one the user reads would be the one that is not authoritative.
+//! The controller writes `status.nextRuns` from [`Cadence::next_runs`] and the
+//! API answers `GET /api/v1/cadence-previews` from the same function; the
+//! browser evaluates no cron at all (D1 §4.4).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -85,21 +59,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::slot::{slot_name, Cron, CronError, WALK_DAYS};
 
-/// The time-zone database this binary evaluates `spec.timeZone` against.
-///
-/// WRITTEN INTO `status.policy.tzdb` (D1 §4.8) so an operator reading a
-/// schedule can tell which rule set produced its slots, and PINNED TO
-/// `Cargo.lock` by `tests/cadence.rs::the_tzdb_source_is_the_version_cargo_lock_resolves`.
-/// The pin is the point: a tz amendment that moves a transition changes when
-/// backups run, and a string that says `chrono-tz 0.10.4` while the binary
-/// links 0.11 is worse than no string at all.
+/// The time-zone database this binary evaluates `spec.timeZone` against,
+/// written into `status.policy.tzdb` (D1 §4.8) and pinned to `Cargo.lock` by
+/// `tests/cadence.rs::the_tzdb_source_is_the_version_cargo_lock_resolves`: a tz
+/// amendment changes when backups run, so a wrong version string is worse than
+/// none.
 pub const TZDB_SOURCE: &str = "chrono-tz 0.10.4";
 
-/// `spec.startingDeadlineSeconds` when the field is absent (D1 §4.1).
-///
-/// 3600, WHICH IS TODAY'S HORIZON AND NOT A NEW DEFAULT. Every schedule that
-/// exists before this task was scheduled with a one-hour missed-slot horizon
-/// (`docs/kubernetes.md` §9), so absence has to keep meaning exactly that.
+/// `spec.startingDeadlineSeconds` when the field is absent (D1 §4.1): the
+/// one-hour missed-slot horizon schedules always had, so absence keeps meaning
+/// exactly that.
 pub const DEFAULT_STARTING_DEADLINE_SECONDS: i64 = 3600;
 
 /// The narrowest `spec.startingDeadlineSeconds` the CRD accepts (D1 §4.1).
@@ -136,96 +105,59 @@ pub const DEFAULT_PREVIEW_COUNT: usize = 10;
 /// The API's maximum `count` for `GET /api/v1/cadence-previews` (D1 §4.4).
 pub const MAX_PREVIEW_COUNT: usize = 20;
 
-/// The cap on the skipped-slot enumeration of D1 §4.5 step 5.
-///
-/// A CAP AND NOT A LIMIT ON THE ANSWER. A controller that was down for a year
-/// with `*/1 * * * *` has half a million skipped slots; counting them exactly
-/// buys nothing and walking them costs a reconcile. [`SkippedSlots::capped`]
-/// says the count stopped here, so `status.missedSlots.countCapped` can say
-/// "at least" rather than a number that is quietly wrong.
+/// The cap on the skipped-slot enumeration of D1 §4.5 step 5. A controller down
+/// for a year under `*/1 * * * *` has half a million skipped slots; counting
+/// them costs a reconcile, so [`SkippedSlots::capped`] lets
+/// `status.missedSlots.countCapped` say "at least".
 pub const MAX_SKIPPED_SLOT_ENUMERATION: usize = 1000;
 
 /// The widest UTC offset this walk allows any zone to have, in hours.
 ///
-/// TWENTY-SIX, WHICH IS WIDER THAN ANY ZONE AND DELIBERATELY SO. Live offsets
-/// run from −12:00 to +14:00; historical LMT entries in the database reach a
-/// little past both. This number is not a claim about tzdb — it is the slack
+/// Wider than any zone on purpose (live offsets run from −12:00 to +14:00, and
+/// historical LMT entries a little past both): it is the slack
 /// [`Cadence::fire_after`] and [`Cadence::last_fire_at_or_before`] use to know
-/// when they may STOP walking local dates, and being generous costs a handful
-/// of extra date probes while being tight would cost a missed slot.
-///
-/// AND IT IS LOAD-BEARING, MEASURED RATHER THAN ASSUMED. Narrowed to 12, the
-/// walk stops one local date early for `0 0 * * *` in `Pacific/Apia` and
-/// reports [`Adjustment::NonexistentLocalTimeShifted`] against
-/// 2011-12-30T10:00Z — an instant whose local time, 2011-12-31T00:00+14:00,
-/// exists and is matched. The INSTANT is unchanged, which is why only a marker
-/// assertion sees it;
-/// `tests/cadence.rs::apia_skipped_day_maps_all_matches_to_one_instant` makes
-/// that assertion at every preview length from 1 to 4, because the walk may
-/// stop as soon as it holds `count` firings.
+/// when they may stop walking local dates, and being tight would cost a missed
+/// slot. Narrowed to 12, `0 0 * * *` in `Pacific/Apia` reports a false
+/// [`Adjustment::NonexistentLocalTimeShifted`] against 2011-12-30T10:00Z;
+/// `tests/cadence.rs::apia_skipped_day_maps_all_matches_to_one_instant` holds
+/// it.
 const MAX_OFFSET_HOURS: i64 = 26;
 
 /// How far past a nonexistent local time the end of its gap is searched, in
-/// minutes (D1 §4.3: "search forward ≤ 48 h").
-///
-/// FORTY-EIGHT HOURS BECAUSE A GAP IS NOT ALWAYS AN HOUR. `Pacific/Apia`
-/// skipped the whole of 2011-12-30 when it crossed the date line, so every
-/// local time on that date is nonexistent and the first real instant after it
-/// is a day and a bit later. An hour-shaped search would have returned `None`
-/// for a schedule that must still fire.
+/// minutes (D1 §4.3: "search forward ≤ 48 h"). A gap is not always an hour:
+/// `Pacific/Apia` skipped the whole of 2011-12-30 crossing the date line.
 const GAP_SEARCH_MINUTES: i64 = 48 * 60;
 
 /// How many local dates either side of the walk are probed before the answer
 /// can be trusted to be the extreme one.
 ///
-/// FOUR, AND IT IS [`MAX_OFFSET_HOURS`] PLUS [`GAP_SEARCH_MINUTES`] ROUNDED UP
-/// TO WHOLE DAYS. A local date's instants can land up to 26 h either side of
-/// it, and a gap shift can push one a further 48 h into the future; 26 + 48 is
-/// 74 h, under four days. Starting the walk that far out and stopping that far
-/// past the first hit is what makes "the first hit is the earliest hit" true
-/// rather than merely usual.
+/// [`MAX_OFFSET_HOURS`] plus [`GAP_SEARCH_MINUTES`] rounded up to whole days: a
+/// local date's instants land up to 26 h either side of it and a gap shift can
+/// push one 48 h further, 74 h in all. Starting the walk that far out and
+/// stopping that far past the first hit makes "the first hit is the earliest"
+/// true.
 ///
-/// IT IS LOAD-BEARING, AND SETTING IT TO ZERO LOSES A WHOLE FIRING. The case is
-/// `America/Sitka` on 1867-10-18 — the Alaska purchase, when the territory
-/// moved from the Russian calendar at +14:59 to the American one at −09:01 and
-/// lived the same local day TWICE, a 24-hour repeated day. For `0 0 * * *`,
+/// Zero would lose a firing: `America/Sitka` lived 1867-10-18 twice (a 24-hour
+/// repeated day, the Alaska purchase, +14:59 to −09:01). For `0 0 * * *`,
 /// [`Cadence::fire_at_or_before`]`(1867-10-19T01:00Z)` is 1867-10-18T09:01:13Z,
-/// and that instant comes from local date 1867-10-**19** — one local date
-/// AFTER the local date of the argument, because at +14:59 a local midnight
-/// lands most of a day earlier in UTC. A walk that started at the argument's
-/// own local date would never visit it and would answer 1867-10-17T09:01:13Z,
-/// a whole slot too early. `America/Juneau`, `America/Metlakatla` and
-/// `America/Anchorage` carry the same day.
-///
-/// An earlier round of this module recorded the opposite — "no measured effect"
-/// — on the strength of a sweep that covered only the eastward, gap-shaped
-/// direction (`Pacific/Apia` 2011, `Pacific/Kiritimati`) and no 24-hour fall
-/// back, which is precisely where the walk's START date decides the answer.
-/// The claim was false and the review that found it is why this paragraph
-/// exists: `tests/cadence.rs::a_twenty_four_hour_repeated_day_needs_the_edge_slack`
-/// now holds the case, so the constant cannot be inlined away as dead slack.
+/// which comes from local date 1867-10-19, one date after the argument's own;
+/// a walk starting at the argument's date answers a whole slot too early.
+/// `tests/cadence.rs::a_twenty_four_hour_repeated_day_needs_the_edge_slack`
+/// holds the case.
 const EDGE_DAYS: i64 = 4;
 
-/// The bound on how many local dates either direction of a zoned walk visits.
-///
-/// [`WALK_DAYS`] IS THE FIGURE `slot.rs` ALREADY ARGUED — ten years, because
-/// `0 0 29 2 *` can go eight of them without firing — and the edges are
-/// [`EDGE_DAYS`] at each end. Reproducing the bound rather than inventing one
-/// is what makes "a zoned cadence answers for exactly the expressions a UTC one
-/// answers for" true.
+/// The bound on how many local dates either direction of a zoned walk visits:
+/// [`WALK_DAYS`] (ten years, because `0 0 29 2 *` can go eight without firing)
+/// plus [`EDGE_DAYS`] at each end, so a zoned cadence answers for exactly the
+/// expressions a UTC one answers for.
 const MAX_DATE_STEPS: u64 = WALK_DAYS as u64 + 2 * EDGE_DAYS.unsigned_abs();
-
-// ---------------------------------------------------------------------------
-// The zone
-// ---------------------------------------------------------------------------
 
 /// The zone a cadence's cron fields are read in.
 ///
-/// TWO VARIANTS AND NOT `Option<Tz>`, because the two are not the same claim.
-/// [`Zone::Utc`] is *the absent field*, and it takes a code path that IS the
-/// pre-D1 evaluator; [`Zone::Named`] is a user's explicit choice and takes the
-/// local-date walk. They agree for `Tz::UTC` — `explicit_utc_agrees_with_the_absent_field`
-/// asserts it — and that agreement is a test rather than an assumption.
+/// Two variants rather than `Option<Tz>`, because they are different claims:
+/// [`Zone::Utc`] is the absent field and takes the UTC evaluator's own path;
+/// [`Zone::Named`] is an explicit choice and takes the local-date walk. They
+/// agree for `Tz::UTC` (`explicit_utc_agrees_with_the_absent_field`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zone {
     /// `spec.timeZone` absent: UTC, evaluated by [`crate::slot`] itself.
@@ -235,19 +167,15 @@ pub enum Zone {
 }
 
 impl Zone {
-    /// Resolve `spec.timeZone` — `None` for the absent field.
+    /// Resolve `spec.timeZone`, `None` for the absent field.
     ///
     /// # Errors
     ///
     /// [`CadenceError::UnknownTimeZone`], naming the string, when the database
-    /// has no such zone. D1 §4.3 makes this `Ready=False`
-    /// `reason=UnknownTimeZone` with NO admissions and running work
-    /// untouched: a typo in a zone name must not fire a backup at the wrong
-    /// hour, and must not stop one that is already running.
-    ///
-    /// AN EMPTY STRING IS REFUSED RATHER THAN READ AS UTC. `timeZone: ""` is a
-    /// field the user set, and reading a set field as "absent" is how a
-    /// schedule ends up running in a zone nobody chose.
+    /// has no such zone: `Ready=False` with no admissions and running work
+    /// untouched (D1 §4.3), so a typo neither fires a backup at the wrong hour
+    /// nor stops one that is running. An empty string is refused rather than
+    /// read as UTC: it is a field the user set.
     pub fn resolve(name: Option<&str>) -> Result<Zone, CadenceError> {
         match name {
             None => Ok(Zone::Utc),
@@ -272,12 +200,8 @@ impl Zone {
     }
 
     /// `t` rendered as a local wall time with its offset, e.g.
-    /// `2026-10-25T02:30:00+02:00`.
-    ///
-    /// THE OFFSET IS PART OF THE RENDERING AND NOT DECORATION. It is the only
-    /// thing that distinguishes the two occurrences of a repeated hour when a
-    /// user reads the preview: `02:30:00+02:00` and `02:30:00+01:00` are the
-    /// same clock face and two different instants.
+    /// `2026-10-25T02:30:00+02:00`. The offset is what tells the two
+    /// occurrences of a repeated hour apart.
     #[must_use]
     pub fn render_local(&self, t: DateTime<Utc>) -> String {
         match self {
@@ -289,10 +213,6 @@ impl Zone {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
 
 /// Why a cadence could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,16 +247,9 @@ impl From<CronError> for CadenceError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fires and previews
-// ---------------------------------------------------------------------------
-
-/// What the local clock did to a slot, when it did anything (D1 §4.4).
-///
-/// ABSENT MEANS "NOTHING HAPPENED", which is every slot of every UTC schedule
-/// and all but a handful of any zoned one. A marker is written only where the
-/// local wall time and the UTC instant tell different stories, so a preview row
-/// carrying one is a row the user should read twice.
+/// What the local clock did to a slot, when it did anything (D1 §4.4). Absent
+/// for every slot of every UTC schedule and nearly every zoned one; a marker
+/// flags a row whose local wall time and UTC instant tell different stories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Adjustment {
     /// The matched local time does not exist (spring forward); this instant is
@@ -350,16 +263,11 @@ pub enum Adjustment {
 }
 
 impl Adjustment {
-    /// How truthful this marker is about the instant it is attached to; lower
-    /// wins when two matched local times map to ONE instant.
-    ///
-    /// THE COLLISION IS REAL AND HAS A RIGHT ANSWER. In `Europe/Berlin` on
-    /// 2027-03-28 a `*/15` schedule matches 02:00, 02:15, 02:30 and 02:45 —
-    /// all nonexistent, all shifted to 01:00 UTC — and ALSO matches 03:00
-    /// local, which IS 01:00 UTC and exists. One instant, five reasons. The
-    /// instant fires once (the rule says "deduplicated") and the marker it
-    /// carries should be the one a reader can verify: there is a real local
-    /// 03:00 here, so `None` outranks the shift.
+    /// How truthful this marker is about its instant; lower wins when several
+    /// matched local times map to one instant. In `Europe/Berlin` on 2027-03-28
+    /// a `*/15` schedule matches 02:00 to 02:45 (all nonexistent, shifted to
+    /// 01:00 UTC) and also 03:00 local, which is 01:00 UTC and exists, so `None`
+    /// outranks the shift.
     fn rank(this: Option<Adjustment>) -> u8 {
         match this {
             None => 0,
@@ -369,24 +277,15 @@ impl Adjustment {
     }
 }
 
-/// Whether a firing at the SAME instant replaces the one already held.
+/// Whether a firing at the same instant replaces the one already held.
 ///
-/// ONE TIE-BREAK, THREE CALLERS, AND THAT IS THE WHOLE POINT OF THIS FUNCTION.
-/// [`Cadence::fire_at_or_before`], [`Cadence::fire_after`] and [`record`] all
-/// reduce several matched local times to one firing, and they reach the same
-/// instant from three different directions — backwards through local dates,
-/// forwards through them, and collected into a map. Each of them once had its
-/// own spelling of "which of these is the answer", and only the map's applied
-/// [`Adjustment::rank`]. The consequence was measurable and reached the wire:
-/// `Pacific/Apia`, `0 0 * * *`, `fire_after(2011-12-29T10:00Z)` reported
-/// 2011-12-30T10:00Z as [`Adjustment::NonexistentLocalTimeShifted`] while
-/// `next_runs` reported the SAME instant as unadjusted — so a
-/// `BackupSchedule.status` written from both could contradict itself about one
-/// slot, in the one module D1 §4.4 exists to make single-valued.
+/// The one tie-break for [`Cadence::fire_at_or_before`], [`Cadence::fire_after`]
+/// and [`record`], which reach the same instant backwards, forwards and through
+/// a map; with separate rules a `BackupSchedule.status` could contradict itself
+/// about one slot (`Pacific/Apia`, `0 0 * * *`, 2011-12-30T10:00Z).
 ///
-/// STRICTLY LESS, NOT LESS-OR-EQUAL: an equal rank means the two markers are
-/// equally truthful, and keeping the one already held makes the answer
-/// independent of the order the walk happened to visit the local dates in.
+/// Strictly less: equal ranks are equally truthful, and keeping the one held
+/// makes the answer independent of the walk's visiting order.
 fn marker_supersedes(candidate: Option<Adjustment>, held: Option<Adjustment>) -> bool {
     Adjustment::rank(candidate) < Adjustment::rank(held)
 }
@@ -421,10 +320,6 @@ pub struct NextRun {
     pub adjustment: Option<Adjustment>,
 }
 
-// ---------------------------------------------------------------------------
-// Policy inputs
-// ---------------------------------------------------------------------------
-
 /// `spec.catchUpPolicy` (D1 §4.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CatchUpPolicy {
@@ -432,13 +327,10 @@ pub enum CatchUpPolicy {
     /// behaviour, and what an absent field means.
     #[default]
     None,
-    /// The LATEST due slot, and only that one, may still run after its
-    /// deadline. At most one catch-up run, ever.
-    ///
-    /// BOUNDED(N) WAS REJECTED (D1 §4.10): `logweir backup run` captures what
-    /// the broker retains WHEN IT RUNS, so N catch-up runs executed
-    /// back-to-back produce near-identical archives at N times the broker and
-    /// storage load, with no recovery-point benefit.
+    /// The latest due slot, and only that one, may still run after its
+    /// deadline: at most one catch-up run. Bounded(N) was rejected (D1 §4.10):
+    /// a backup captures what the broker retains when it runs, so N runs back
+    /// to back produce near-identical archives at N times the load.
     Latest,
 }
 
@@ -500,13 +392,10 @@ impl fmt::Display for RetryPolicyProblem {
 }
 
 impl RetryPolicy {
-    /// Whether this policy is inside the ranges D1 §4.1 states.
-    ///
-    /// THE CRD'S OpenAPI RANGES ARE THE FIRST GATE AND NOT THE ONLY ONE. An
-    /// object created against an older CRD, or by a controller reading a
-    /// pruned field, reaches the scheduler without having passed them; D1 §4.5
-    /// step 0 validates the policy again and fails closed. Two gates, one
-    /// table — this function is the table.
+    /// Whether this policy is inside the ranges D1 §4.1 states. The CRD's
+    /// OpenAPI ranges are not the only gate: an object created against an older
+    /// CRD reaches the scheduler without them, so D1 §4.5 step 0 validates again
+    /// and fails closed.
     ///
     /// # Errors
     ///
@@ -573,20 +462,11 @@ impl fmt::Display for DeadlineProblem {
 
 impl std::error::Error for DeadlineProblem {}
 
-/// Whether the two deadline fields are inside the ranges D1 §4.1 states.
-///
-/// THE SAME "TWO GATES, ONE TABLE" ARGUMENT [`RetryPolicy::validate`] MAKES,
-/// AND IT HAS TO HOLD FOR THESE TWO AS WELL. D1 §4.5 step 0 re-validates the
-/// whole policy fail-closed precisely because an object created against an
-/// older CRD, or read after the API server pruned a field it does not declare,
-/// reaches the scheduler without having passed the OpenAPI ranges. Exporting
-/// [`MIN_STARTING_DEADLINE_SECONDS`] and friends but leaving the comparison to
-/// the controller is how the CRD and the scheduler come to disagree about what
-/// "one week" means.
-///
-/// `None` IS ALWAYS VALID: an absent field is the documented default
-/// ([`DEFAULT_STARTING_DEADLINE_SECONDS`], [`DEFAULT_ACTIVE_DEADLINE_SECONDS`]),
-/// and a default this module chose cannot be out of a range this module states.
+/// Whether the two deadline fields are inside the ranges D1 §4.1 states: the
+/// same second gate as [`RetryPolicy::validate`], so the CRD and the scheduler
+/// cannot disagree about a range. `None` is always valid; it is the documented
+/// default ([`DEFAULT_STARTING_DEADLINE_SECONDS`],
+/// [`DEFAULT_ACTIVE_DEADLINE_SECONDS`]).
 ///
 /// # Errors
 ///
@@ -645,37 +525,25 @@ pub enum MissedReason {
 
 /// Whether the latest due slot may still be admitted, and as what.
 ///
-/// THE ORDER OF THE ARMS IS THE TRUTH TABLE'S ORDER AND IS LOAD-BEARING. The
-/// deadline is tested FIRST, so a slot inside the horizon is `Scheduled`
-/// whatever `catchUpPolicy` says and whatever `effective_since` is — that is
-/// today's behaviour, and D1 §4.7 keeps it for a slot that came due before an
-/// EDIT. A slot that came due before the schedule was CREATED is never
-/// admitted: the schedule controllers bound the latest due slot by
-/// `metadata.creationTimestamp` before asking this function
-/// (`backup_schedule::bound_by_creation`, decided 2026-09-22 and superseding
-/// D1 §4.7's "admitted by row 17" note).
+/// The order of the arms is the truth table's. The deadline is tested first, so
+/// a slot inside the horizon is `Scheduled` whatever `catchUpPolicy` and
+/// `effective_since` say (D1 §4.7 keeps that for a slot that came due before an
+/// edit). A slot that came due before the schedule was created is never
+/// admitted: the callers bound the latest due slot by
+/// `metadata.creationTimestamp` first (`backup_schedule::bound_by_creation`).
 ///
-/// THE BOUNDARY IS INCLUSIVE. `now - slot == starting_deadline` is INSIDE the
-/// horizon, which is what `<=` means and what
-/// `the_starting_deadline_boundary_is_inclusive` pins to the second. An
-/// exclusive boundary would make a slot that arrives exactly on the horizon
-/// depend on which side of a millisecond the reconcile woke up.
-///
-/// `starting_deadline_seconds` is the resolved value — the caller supplies
-/// [`DEFAULT_STARTING_DEADLINE_SECONDS`] for an absent field.
+/// The boundary is inclusive: `now - slot == starting_deadline` is inside the
+/// horizon (`the_starting_deadline_boundary_is_inclusive`), so the answer does
+/// not depend on which side of a millisecond the reconcile woke.
+/// `starting_deadline_seconds` is the resolved value.
 ///
 /// # Precondition
 ///
-/// **`slot <= now`.** This function answers "may the slot that came due still
-/// run", and D1 §4.5 step 5 produces its only correct argument —
-/// [`Cadence::latest_due_slot`], which is `last_fire_at_or_before(now)` and so
-/// never returns a future instant. A `slot` AFTER `now` has a negative age,
-/// falls into the first arm and comes back [`SlotAdmission::Scheduled`]: this
-/// function would tell a caller to run a backup before its slot. It is stated
-/// here rather than guarded because a guard would need a fifth outcome that D1
-/// §4.7's table has no row for, and because the value belongs to the caller's
-/// step 5 — `admit_slot_is_documented_for_a_future_slot` pins the answer so it
-/// is a contract and not an accident.
+/// `slot <= now`. Its only correct argument is [`Cadence::latest_due_slot`],
+/// which never returns a future instant; a future `slot` would come back
+/// [`SlotAdmission::Scheduled`]. It is stated rather than guarded because D1
+/// §4.7's table has no row for a fifth outcome;
+/// `admit_slot_is_documented_for_a_future_slot` pins the answer.
 #[must_use]
 pub fn admit_slot(
     slot: DateTime<Utc>,
@@ -702,13 +570,8 @@ pub fn admit_slot(
 }
 
 /// One attempt's terminal record, reduced to the two observations D1 §4.6
-/// classifies.
-///
-/// A SHAPE OF ITS OWN AND NOT `&Backup`. The classification is the input the
-/// schedule controller feeds [`admit_retry`], and it has to be answerable by
-/// the API and by a test without a Kubernetes object in hand; taking the two
-/// fields it actually reads is also what keeps this module off the CRD types
-/// D1 §11.1 gives another worker.
+/// classifies, so the API and a test can answer without a Kubernetes object and
+/// this module stays off the CRD types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalOutcome<'a> {
     /// `status.exitCode`, absent when no container ever reported one — a
@@ -721,28 +584,17 @@ pub struct TerminalOutcome<'a> {
     pub terminal_state: Option<&'a str>,
 }
 
-/// The terminal states that ARE retried when there is no exit code (D1 §4.6).
+/// The terminal states that are retried when there is no exit code (D1 §4.6).
 ///
-/// AN ALLOWLIST, AND THAT IS THE "UNKNOWN ⇒ NOT RETRYABLE" RULE ITSELF. D1
-/// §4.6 calls for a closed `match`; a list of what to retry closes it in the
-/// safe direction, because a terminal state added by a later task — or written
-/// by a newer controller and read by an older one — falls to `false` rather
-/// than into an automatic re-run of work whose failure nobody has classified.
-/// The opposite spelling, a list of what NOT to retry, fails open on exactly
-/// the same input.
-///
-/// WHAT UNITES THE FOUR: the work never started, or started and was
-/// interrupted by something outside the run's own control — so running it
-/// again is a fresh attempt at the same job rather than a repeat of a decision
-/// the product already made. A guard refusal, a not-a-pass drill and a signing
-/// failure are all decisions, and D1 §4.6 never retries a decision.
-///
-/// `DiscoveryFailed` WAS A LITERAL HERE and is now
-/// [`crate::conditions::TERMINAL_STATE_DISCOVERY_FAILED`]: D1 §3.4 assigns the
-/// constant to `conditions.rs`, D1 §11.1 assigned that file to W3a, and W3a
-/// has landed it. The VALUE is unchanged, which is what
-/// `retry_classification_is_a_closed_match_and_unknown_is_not_retryable`
-/// asserts by naming the exact list.
+/// An allowlist, which is the "unknown ⇒ not retryable" rule itself: a terminal
+/// state added later, or written by a newer controller and read by an older
+/// one, falls to `false` rather than into an automatic re-run of an
+/// unclassified failure. What unites the four: the work never started, or was
+/// interrupted by something outside the run's control. A guard refusal, a
+/// not-a-pass drill and a signing failure are decisions, and D1 §4.6 never
+/// retries a decision.
+/// `retry_classification_is_a_closed_match_and_unknown_is_not_retryable` names
+/// the exact list.
 pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
     crate::conditions::TERMINAL_STATE_DISRUPTED_MID_DRILL,
     crate::conditions::TERMINAL_STATE_POD_UNSCHEDULABLE,
@@ -751,8 +603,6 @@ pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
 ];
 
 /// Whether D1 §4.6 retries this terminal record.
-///
-/// # The table, and why each row is the way round it is
 ///
 /// | Record | Retried | Because |
 /// |---|---|---|
@@ -764,10 +614,9 @@ pub const RETRYABLE_TERMINAL_STATES: &[&str] = &[
 /// | exit **3** (`GuardRefused`), **4** (`SigningOrLock`) | no | a decision, and a decision repeated is the same decision |
 /// | no exit code, any other state | no | the controller refused before any `POST` (a missing referent, an unrenderable credential, a name that does not fit) — nothing about waiting changes it — or the state is one this build has never heard of |
 ///
-/// THE UNRECOGNISED ARM IS THE ONE THAT MATTERS. A retry loop that fires on a
-/// state nobody classified is a run that repeats every `delaySeconds` until
-/// `maxRetries` — three extra full backups of a cluster for a refusal that was
-/// never going to change. `false` costs one missed retry and says so in
+/// The unrecognised arm matters most: a retry on a state nobody classified
+/// would re-run a full backup every `delaySeconds` until `maxRetries` for a
+/// refusal that will not change; `false` costs one missed retry and says so in
 /// `status.lastSlot.reason`.
 #[must_use]
 pub fn is_retryable(outcome: TerminalOutcome<'_>) -> bool {
@@ -808,14 +657,10 @@ pub enum RetryAdmission {
         /// exists.
         max_retries: u32,
         /// Whether `spec.retry` was set at all.
-        ///
-        /// THE DECISION IS THE SAME AND THE REASON IS NOT (D1 §4.7 row 10).
-        /// A schedule that configured retries and used them up reports
-        /// `RetryExhausted`; a schedule that never asked for retries reports
-        /// `RunFailed`, because "exhausted" would name a budget it never had.
-        /// `max_retries: 0` alone cannot tell the two apart, so a caller
-        /// reading only this variant would have to go back to the spec — which
-        /// is how the two reasons come to drift.
+        /// Whether `spec.retry` was set at all: the decision is the same, but a
+        /// schedule that used up configured retries reports `RetryExhausted`
+        /// and one that never asked for retries reports `RunFailed` (D1 §4.7
+        /// row 10), and `max_retries: 0` alone cannot tell them apart.
         retry_configured: bool,
     },
     /// Retryable and under the cap, but the delay has not elapsed (row 11).
@@ -833,26 +678,16 @@ pub enum RetryAdmission {
 
 /// Whether the failed attempt chain of `slot` may be retried at `now`.
 ///
-/// # The "never past the next due slot" rule, and where it lives
+/// A retry never outlives its slot: the moment a newer slot comes due, the
+/// older chain is superseded. D1 §4.5 gets that from its step order (latest due
+/// slot first, then its attempt chain); it is the first arm here so a test can
+/// hold it (`a_retry_is_superseded_by_the_next_due_slot`). Dropping a long
+/// delayed retry for a fresh run is the right trade: a backup captures what the
+/// broker retains when it runs, so the newer slot's run is more useful.
 ///
-/// D1 §4.5 chooses the latest due slot FIRST (step 5) and only then observes
-/// that slot's attempt chain (step 6), so a retry can never outlive the slot it
-/// belongs to: the moment a newer slot comes due, the older one is superseded
-/// and its pending retry is simply not what this reconcile is deciding. That
-/// ordering is reproduced here as the FIRST arm rather than left implicit,
-/// because "the scheduler happens to call this in the right order" is not a
-/// property a test can hold — `a_retry_is_superseded_by_the_next_due_slot`
-/// holds this one.
-///
-/// A retry that has waited out a long delay across a slot boundary is
-/// therefore dropped in favour of a fresh run of the newer slot, which is the
-/// right trade: a backup captures what the broker retains when it runs, so the
-/// newer slot's run is strictly more useful than a re-run of the older one.
-///
-/// `retryable` is the caller's classification of the terminal record (D1 §4.6:
-/// a closed `match` whose unknown arm is NOT retryable). It is an argument
-/// rather than a computation here because the terminal record's shape is the
-/// `Backup` status type, which this module deliberately does not know.
+/// `retryable` is the caller's classification of the terminal record
+/// ([`is_retryable`]), passed in because this module does not know the `Backup`
+/// status type.
 #[must_use]
 pub fn admit_retry(
     slot: DateTime<Utc>,
@@ -900,24 +735,14 @@ pub struct SkippedSlots {
     /// Whether the walk stopped at the ten-year [`horizon_date`] instead of
     /// reaching `before`, so `count` is a floor for a SECOND reason.
     ///
-    /// THE UNDERCOUNT THIS FIELD EXISTS TO STOP BEING SILENT. A downtime longer
-    /// than [`WALK_DAYS`] under an expression too sparse to reach `cap` first —
-    /// `0 0 1 1 *` and twelve years, say — runs out of window before it runs
-    /// out of slots, and without this flag `capped: false` would present that
-    /// floor as an exact total. `status.missedSlots.count` would then read as
-    /// "twelve slots were skipped" for a schedule that skipped more.
-    ///
-    /// It is a separate flag from [`SkippedSlots::capped`] because the two are
-    /// different facts about the answer and an operator acts on them
-    /// differently: `capped` means "stop counting, there are thousands", and
-    /// this one means "this product cannot name a slot that far out at all" —
-    /// the same ten-year blindness [`Cron`] has had since PLAT-04.1.
+    /// A downtime longer than [`WALK_DAYS`] under a sparse expression
+    /// (`0 0 1 1 *` and twelve years) runs out of window before it reaches the
+    /// cap, and without this flag `capped: false` would present a floor as an
+    /// exact total. Separate from [`SkippedSlots::capped`] because an operator
+    /// acts on them differently: "there are thousands" versus "this product
+    /// cannot name a slot that far out".
     pub horizon_reached: bool,
 }
-
-// ---------------------------------------------------------------------------
-// The cadence
-// ---------------------------------------------------------------------------
 
 /// A cron expression and the zone its fields are read in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -961,10 +786,7 @@ impl Cadence {
     }
 
     /// The most recent instant at or before `t` at which this cadence fires.
-    ///
-    /// For [`Zone::Utc`] this IS [`Cron::last_fire_at_or_before`] — the same
-    /// call, not an equivalent one, which is what makes the absent field
-    /// byte-for-byte today's behaviour.
+    /// For [`Zone::Utc`] this is [`Cron::last_fire_at_or_before`] itself.
     #[must_use]
     pub fn last_fire_at_or_before(&self, t: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.fire_at_or_before(t).map(|f| f.at)
@@ -978,25 +800,18 @@ impl Cadence {
         self.fire_after(t).map(|f| f.at)
     }
 
-    /// The one slot a reconcile at `now` may act on (D1 §4.5 step 5).
-    ///
-    /// ONLY THE LATEST DUE SLOT IS EVER ELIGIBLE, which is the whole backlog
-    /// bound: a controller that was down for a week finds one slot here, not
-    /// a queue of them, so `catchUpPolicy: Latest` can create at most one
-    /// catch-up run however long the downtime was.
+    /// The one slot a reconcile at `now` may act on (D1 §4.5 step 5). Only the
+    /// latest due slot is ever eligible, which bounds the backlog: after a week
+    /// of downtime `catchUpPolicy: Latest` can create at most one catch-up run.
     #[must_use]
     pub fn latest_due_slot(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         self.last_fire_at_or_before(now)
     }
 
-    /// The most recent firing at or before `t`, with its DST marker.
-    ///
-    /// THE MARKER IS THE ONE [`Cadence::next_runs`] GIVES THE SAME INSTANT.
-    /// Several matched local times can collapse onto one instant, and the
-    /// answer must not depend on which of this module's three walks a caller
-    /// happened to use — see [`marker_supersedes`], and
-    /// `tests/cadence.rs::every_walk_agrees_on_the_marker_for_an_instant`,
-    /// which measures it over a corpus rather than asserting it.
+    /// The most recent firing at or before `t`, with the DST marker
+    /// [`Cadence::next_runs`] gives the same instant, whichever walk a caller
+    /// uses ([`marker_supersedes`];
+    /// `tests/cadence.rs::every_walk_agrees_on_the_marker_for_an_instant`).
     #[must_use]
     pub fn fire_at_or_before(&self, t: DateTime<Utc>) -> Option<Fire> {
         let Zone::Named(tz) = self.zone else {
@@ -1023,15 +838,10 @@ impl Cadence {
         best
     }
 
-    /// The earliest firing strictly after `t`, with its DST marker.
-    ///
-    /// STRICTLY AFTER, which is what makes [`Cadence::next_runs`] terminate and
-    /// produce no duplicates: each entry is the argument for the next call, and
-    /// the sequence is strictly increasing even where several matched local
-    /// times collapsed onto one instant.
-    ///
-    /// The marker is the one [`Cadence::next_runs`] gives the same instant; see
-    /// [`Cadence::fire_at_or_before`].
+    /// The earliest firing strictly after `t`, with its DST marker (as in
+    /// [`Cadence::fire_at_or_before`]). Strictly after, so
+    /// [`Cadence::next_runs`] terminates and the sequence strictly increases
+    /// even where matched local times collapsed onto one instant.
     #[must_use]
     pub fn fire_after(&self, t: DateTime<Utc>) -> Option<Fire> {
         let Zone::Named(tz) = self.zone else {
@@ -1060,14 +870,9 @@ impl Cadence {
 
     /// The next `count` runs after `after`, in ascending order (D1 §4.4).
     ///
-    /// SHORTER THAN `count` IS A REAL ANSWER, not a failure: an expression such
-    /// as `0 0 29 2 *` runs out of firings inside [`WALK_DAYS`], and an empty
-    /// vector is what a schedule that never fires again should show.
-    ///
-    /// `count` is NOT clamped here. The API clamps to [`MAX_PREVIEW_COUNT`] and
-    /// the controller asks for [`STATUS_NEXT_RUNS`]; a clamp in this function
-    /// would silently return fewer rows than a caller that had already
-    /// validated its own bound.
+    /// Fewer than `count` is a real answer: `0 0 29 2 *` can run out of firings
+    /// inside [`WALK_DAYS`]. `count` is not clamped here: the API clamps to
+    /// [`MAX_PREVIEW_COUNT`] and the controller asks for [`STATUS_NEXT_RUNS`].
     #[must_use]
     pub fn next_runs(&self, after: DateTime<Utc>, count: usize) -> Vec<NextRun> {
         self.fires_after(after, count)
@@ -1080,29 +885,19 @@ impl Cadence {
             .collect()
     }
 
-    /// The next `count` firings strictly after `after`, ascending.
-    ///
-    /// ONE WALK OF THE LOCAL DATES, NOT `count` OF THEM. Calling
-    /// [`Cadence::fire_after`] in a loop is the obvious spelling and is
-    /// quadratic in the wrong variable: each call re-scans the same
-    /// [`EDGE_DAYS`]-wide window of local dates, and a 20-entry preview of a
-    /// minutely expression re-converted the same 1440 local minutes twenty
-    /// times. Measured on the release build before this was one pass:
-    /// 3.15 ms per `fire_after` for `* * * * *`, so 63 ms for one preview
-    /// request and 3.1 s for a capped [`Cadence::skipped_slots`] walk.
+    /// The next `count` firings strictly after `after`, ascending, in one walk of
+    /// the local dates: calling [`Cadence::fire_after`] in a loop re-scans the
+    /// same [`EDGE_DAYS`]-wide window each time, quadratic for a minutely
+    /// expression.
     fn fires_after(&self, after: DateTime<Utc>, count: usize) -> Vec<Fire> {
         self.fires_after_bounded(after, count, None).fires
     }
 
     /// [`Cadence::fires_after`], additionally stopping once the walk has passed
-    /// `until`.
-    ///
-    /// THE TIME BOUND IS NOT AN OPTIMISATION, IT IS THE DIFFERENCE BETWEEN A
-    /// 1-SLOT WALK AND A 1000-SLOT ONE. [`Cadence::skipped_slots`] asks for
-    /// [`MAX_SKIPPED_SLOT_ENUMERATION`]` + 1` firings, and the ordinary
-    /// reconcile it runs in has ZERO skipped slots; without the bound every
-    /// healthy reconcile would walk a thousand slots into the future to
-    /// discover that none of them is inside its window.
+    /// `until`. [`Cadence::skipped_slots`] asks for
+    /// [`MAX_SKIPPED_SLOT_ENUMERATION`]` + 1` firings, and an ordinary reconcile
+    /// has no skipped slots, so without the bound every healthy reconcile would
+    /// walk a thousand slots ahead.
     fn fires_after_bounded(
         &self,
         after: DateTime<Utc>,
@@ -1184,12 +979,9 @@ impl Cadence {
     }
 
     /// How many slots fall strictly between `after` and `before`, up to `cap`
-    /// (D1 §4.5 step 5).
-    ///
-    /// BOTH ENDS EXCLUSIVE, because the interval it counts is
-    /// `(lastEvaluatedSlot, S)`: the slot already accounted for and the slot
-    /// being decided are both outside it, so a slot is counted exactly once
-    /// across reconciles.
+    /// (D1 §4.5 step 5). Both ends are exclusive, because the interval is
+    /// `(lastEvaluatedSlot, S)`, so a slot is counted exactly once across
+    /// reconciles.
     #[must_use]
     pub fn skipped_slots(
         &self,
@@ -1197,11 +989,8 @@ impl Cadence {
         before: DateTime<Utc>,
         cap: usize,
     ) -> SkippedSlots {
-        // ONE MORE THAN THE CAP IS ASKED FOR, AND THAT EXTRA ONE IS THE WHOLE
-        // POINT of `capped`. `count == cap` alone cannot say whether the walk
-        // ran out of slots or ran out of budget, and
-        // `status.missedSlots.countCapped` is exactly the field an operator
-        // reads to tell "1000 slots were skipped" from "at least 1000 were".
+        // One more than the cap, so `capped` can tell "ran out of slots" from
+        // "ran out of budget" (`status.missedSlots.countCapped`).
         let walk = self.fires_after_bounded(after, cap.saturating_add(1), Some(before));
         let mut count = 0usize;
         for fire in walk.fires {
@@ -1231,20 +1020,14 @@ impl Cadence {
     }
 
     /// Every instant this cadence fires at for the matched local minutes of one
-    /// LOCAL calendar date, ascending and deduplicated.
+    /// local calendar date, ascending and deduplicated.
     ///
-    /// THE WHOLE DST RULE IS THE `match` IN THIS FUNCTION, and it is three
-    /// arms because `from_local_datetime` has three answers:
-    ///
-    /// * `Single` — one real instant. The ordinary case, and every case in a
-    ///   zone with no DST.
-    /// * `Ambiguous` — the local time happens twice, so BOTH instants fire.
-    ///   They are distinct slots with distinct names, and `Forbid` still keeps
-    ///   them from overlapping.
-    /// * `None` — the local time does not exist, so the firing moves to the end
-    ///   of the gap. Several matched local minutes inside one gap collapse onto
-    ///   that single instant, which is what the `BTreeMap` deduplicates and
-    ///   what keeps an interval schedule from bursting.
+    /// The whole DST rule is the `match` on `from_local_datetime`'s three
+    /// answers: `Single` fires once; `Ambiguous` (the local time happens twice)
+    /// fires both instants, as distinct slots; `None` (the local time does not
+    /// exist) moves to the end of the gap, where several matched minutes
+    /// collapse onto one instant through the `BTreeMap`, so an interval schedule
+    /// does not burst.
     fn fires_on_local_date(&self, tz: Tz, date: NaiveDate) -> Vec<Fire> {
         if !self.cron.matches_date(date) {
             return Vec::new();
@@ -1292,13 +1075,9 @@ impl Cadence {
 }
 
 /// One pass of [`Cadence::fires_after_bounded`]: the firings it found, and
-/// whether [`horizon_date`] is what stopped it.
-///
-/// A STRUCT RATHER THAN A `Vec` BECAUSE "I RAN OUT OF SLOTS" AND "I RAN OUT OF
-/// WINDOW" ARE DIFFERENT ANSWERS and only the caller can tell which one matters
-/// to it. [`Cadence::next_runs`] does not care — a preview that stops at ten
-/// years is a preview that stops — but [`Cadence::skipped_slots`] reports a
-/// COUNT, and a count truncated by the window is a floor presented as a total.
+/// whether [`horizon_date`] stopped it. A preview may ignore the difference;
+/// [`Cadence::skipped_slots`] reports a count, and a count cut by the window is
+/// a floor, not a total.
 #[derive(Clone, Debug, Default)]
 struct Walk {
     /// The firings, ascending, at most the `count` asked for.
@@ -1337,18 +1116,12 @@ fn earlier_or_better(candidate: Fire, held: Fire) -> bool {
 }
 
 /// The UTC instant of the first real local minute at or after `local`, when
-/// `local` itself does not exist.
-///
-/// THE END OF THE GAP IS THE TRANSITION INSTANT, and searching minute by minute
-/// is what makes that true for a 30-minute gap (`Australia/Lord_Howe`), a
-/// 60-minute one (most zones) and a 24-hour one (`Pacific/Apia`, 2011-12-30)
-/// without three cases. `Ambiguous` is answered with its EARLIEST instant for
-/// the same reason the gap is answered with its end: the firing moves forward
-/// to the first real instant and no further.
-///
-/// `None` only when the whole [`GAP_SEARCH_MINUTES`] window is nonexistent,
-/// which no entry in the database is; returning it rather than looping is what
-/// keeps a corrupt or future database from hanging a reconcile.
+/// `local` itself does not exist: the transition instant, found minute by
+/// minute so a 30-minute gap (`Australia/Lord_Howe`), a 60-minute one and a
+/// 24-hour one (`Pacific/Apia`, 2011-12-30) need no cases. `Ambiguous` answers
+/// with its earliest instant for the same reason. `None` only when the whole
+/// [`GAP_SEARCH_MINUTES`] window is nonexistent, so a corrupt database cannot
+/// hang a reconcile.
 fn gap_end(tz: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
     for step in 1..=GAP_SEARCH_MINUTES {
         let candidate = local + Duration::minutes(step);
@@ -1363,27 +1136,16 @@ fn gap_end(tz: Tz, local: NaiveDateTime) -> Option<DateTime<Utc>> {
 
 /// The last local date a multi-entry walk visits: [`WALK_DAYS`] past `from`.
 ///
-/// ONE HORIZON FOR BOTH BRANCHES OF [`Cadence::fires_after_bounded`], AND IT IS
-/// THE BOUND `slot.rs` ALREADY ANSWERS WITHIN. Without it the two paths gave
-/// different answers to the same question: the UTC branch iterates
-/// [`Cron::next_fire_after`], which restarts its own [`WALK_DAYS`] walk from
-/// each firing, so `0 0 29 2 *` yielded twenty February 29ths stretching to
-/// 2168, while the zoned branch makes ONE pass over local dates and yielded the
-/// one inside the next ten years. A preview that depends on whether
-/// `spec.timeZone` was written is the one thing D1 §4.4's "one cadence
-/// evaluator" rules out, and `explicit_utc_agrees_with_the_absent_field` now
-/// compares whole previews rather than single firings.
+/// One horizon for both branches of [`Cadence::fires_after_bounded`], the bound
+/// `slot.rs` already answers within. Iterating [`Cron::next_fire_after`]
+/// restarts its walk from each firing, so without it the UTC branch would show
+/// `0 0 29 2 *` firings out to 2168 while the zoned branch stopped at ten
+/// years: a preview that depended on whether `spec.timeZone` was written
+/// (`explicit_utc_agrees_with_the_absent_field` compares whole previews).
 ///
-/// TEN YEARS IS THEREFORE ALSO THE LIMIT OF [`Cadence::skipped_slots`]: a
-/// downtime longer than [`WALK_DAYS`] under an expression sparse enough not to
-/// reach [`MAX_SKIPPED_SLOT_ENUMERATION`] first would under-count. That is the
-/// blindness [`Cron`] itself has had since PLAT-04.1 — it cannot name a slot
-/// further out than this either — and inventing a wider bound here would be a
-/// count of slots this product could not have scheduled.
-///
-/// [`NaiveDate::MAX`] rather than a panic at the end of the calendar: the walk
-/// stops at [`MAX_DATE_STEPS`] regardless, and a date arithmetic overflow is
-/// not a reason to answer a preview differently.
+/// Ten years is therefore also the limit of [`Cadence::skipped_slots`], the
+/// same blindness [`Cron`] has. [`NaiveDate::MAX`] rather than a panic at the
+/// end of the calendar: the walk stops at [`MAX_DATE_STEPS`] regardless.
 fn horizon_date(from: NaiveDate) -> NaiveDate {
     from.checked_add_days(chrono::Days::new(u64::from(WALK_DAYS)))
         .unwrap_or(NaiveDate::MAX)
@@ -1405,36 +1167,23 @@ fn latest_possible_utc(date: NaiveDate) -> DateTime<Utc> {
         + Duration::minutes(GAP_SEARCH_MINUTES)
 }
 
-// ---------------------------------------------------------------------------
-// Presets
-// ---------------------------------------------------------------------------
-
 /// The preset catalogue (D1 §4.2): the five cadences the console offers as a
 /// form, and the canonical cron string each one compiles to.
 ///
-/// **NO PRESET IS STORED IN ANY SPEC.** `spec.schedule` stays the single source
-/// of truth and a preset is a rendering of it. D1 §4.10 rejects a stored preset
-/// field for the reason a reader can check on any object: two representations
-/// of one cadence have a state in which they disagree, and nothing can say
-/// which of them the controller obeyed.
-///
-/// [`match_preset`] is therefore the other half of [`compile`], not an
-/// afterthought: the form shows a preset when the saved expression IS one, and
+/// No preset is stored in any spec: `spec.schedule` stays the single source of
+/// truth, since two representations of one cadence can disagree with nothing to
+/// say which one the controller obeyed. [`match_preset`] is the other half of
+/// [`compile`]: the form shows a preset when the saved expression is one, and
 /// "Advanced cron" when it is not. `every_preset_round_trips_through_its_cron`
-/// asserts `match_preset(compile(p)) == Some(p)` for every preset in range —
-/// 60 + 6×60 + 24×60 + 7×24×60 + 28×24×60 of them.
+/// asserts `match_preset(compile(p)) == Some(p)` for every preset in range.
 pub mod presets {
     use serde::{Deserialize, Serialize};
 
     use crate::slot::{expand_alias, Cron, CronError};
 
-    /// The `n` values `everyNHours` accepts (D1 §4.2).
-    ///
-    /// DIVISORS OF 24, AND THAT IS THE POINT. `*/n` in the hour field matches
-    /// local wall-clock hours divisible by `n`, so `*/5` would fire at 00:00,
-    /// 05:00, 10:00, 15:00, 20:00 and then again at 00:00 — a four-hour gap
-    /// once a day that nobody chooses on purpose. The five that divide 24
-    /// evenly, plus 12, are the set that means what the form says it means.
+    /// The `n` values `everyNHours` accepts (D1 §4.2): divisors of 24. `*/n` in
+    /// the hour field matches local hours divisible by `n`, so `*/5` would leave
+    /// a four-hour gap once a day.
     pub const EVERY_N_HOURS_VALUES: [u32; 6] = [2, 3, 4, 6, 8, 12];
 
     /// One of the five preset cadences, with its parameters.
@@ -1535,13 +1284,9 @@ pub mod presets {
         pub values: Option<&'static [u32]>,
     }
 
-    /// One preset kind, as DATA — which is the form the API serves and the
-    /// console renders.
-    ///
-    /// D1 §4.2 requires the catalogue to be exposed as data precisely so the
-    /// browser needs no evaluator: `cron_template` is a STRING TEMPLATE with
-    /// `{parameter}` holes, so a page can show "Every day at 02:00" and the
-    /// expression it will save without parsing anything.
+    /// One preset kind, as data: the form the API serves and the console
+    /// renders, so the browser needs no evaluator (D1 §4.2). `cron_template` is
+    /// a string template with `{parameter}` holes.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct PresetSpec {
@@ -1598,12 +1343,9 @@ pub mod presets {
         values: None,
     };
 
-    /// The `dayOfMonth` parameter of `monthly`.
-    ///
-    /// 28 AND NOT 31: a `0 3 31 * *` schedule does not run in February, April,
-    /// June, September or November, which is a monthly backup that silently
-    /// happens seven times a year. The ADVANCED CRON field still accepts 29, 30
-    /// and 31 — the form just does not hand an adopter that hole by default.
+    /// The `dayOfMonth` parameter of `monthly`: 28, not 31, because
+    /// `0 3 31 * *` silently skips five months a year. Advanced cron still
+    /// accepts 29 to 31.
     const DAY_OF_MONTH: PresetParameter = PresetParameter {
         name: "dayOfMonth",
         min: 1,
@@ -1632,18 +1374,11 @@ pub mod presets {
     /// # Errors
     ///
     /// [`PresetError::OutOfRange`], naming the preset, the parameter and what
-    /// the catalogue accepts. A preset is a DTO an API accepts from a browser,
-    /// so its ranges are checked here rather than trusted: `daily{hour: 25}`
-    /// would otherwise compile to `0 25 * * *`, which [`Cron::parse`] refuses
-    /// at a point where the error names the cron field instead of the form
-    /// field the user filled in.
-    ///
-    /// EACH CHECK NAMES ITS PARAMETER CONSTANT, NEVER `CATALOGUE[i]`. An
-    /// earlier spelling reached in by index — `CATALOGUE[1].parameters[0]` for
-    /// `n`, `[3]` for `dayOfWeek`, `[4]` for `dayOfMonth` — so reordering the
-    /// catalogue would have validated `everyNHours` against `weekly`'s range,
-    /// and the generated fixture, regenerated in the same commit as the
-    /// documented workflow says, would have agreed with the mistake.
+    /// the catalogue accepts. A preset is a DTO from a browser, so its ranges
+    /// are checked here, where the error names the form field rather than the
+    /// cron field. Each check names its parameter constant, never
+    /// `CATALOGUE[i]`, so reordering the catalogue cannot validate one preset
+    /// against another's range.
     pub fn compile(preset: &Preset) -> Result<String, PresetError> {
         match *preset {
             Preset::Hourly { minute } => {
@@ -1708,18 +1443,13 @@ pub mod presets {
         })
     }
 
-    /// The preset a saved `spec.schedule` IS, or `None` for "Advanced cron".
+    /// The preset a saved `spec.schedule` is, or `None` for "Advanced cron".
     ///
-    /// EXACT MATCH OF THE CANONICAL INTEGER FIELDS, and nothing looser. A
-    /// comma list in the minute field, a weekday RANGE in the day-of-week
-    /// field and a day-of-month past 28 are all legal cadences, and none of
-    /// them is a preset; showing a form that cannot express what is saved is
-    /// worse than showing the expression.
-    ///
-    /// THE THREE `@` ALIASES ARE PRESETS (D1 §4.2). `@hourly`, `@daily` and
-    /// `@weekly` expand — through [`expand_alias`], the one table — to `0 * * *
-    /// *`, `0 0 * * *` and `0 0 * * 0`, which this matcher then reads as
-    /// `hourly{0}`, `daily{0,0}` and `weekly{0,0,0}`.
+    /// Exact match of the canonical integer fields: a comma list, a weekday
+    /// range or a day-of-month past 28 are legal cadences but not presets, and a
+    /// form that cannot express what is saved is worse than the expression.
+    /// `@hourly`, `@daily` and `@weekly` are presets: [`expand_alias`] expands
+    /// them to `hourly{0}`, `daily{0,0}` and `weekly{0,0,0}`.
     #[must_use]
     pub fn match_preset(schedule: &str) -> Option<Preset> {
         // The expression must be one this product would actually run. A string
@@ -1774,12 +1504,9 @@ pub mod presets {
     /// A field that is exactly one decimal integer with no sign, no leading
     /// zero beyond `0` itself, and nothing else.
     ///
-    /// THE LEADING-ZERO REFUSAL IS WHAT MAKES THE ROUND TRIP AN EQUALITY.
-    /// `Cron::parse` accepts `03` as hour 3, so `0 03 * * *` is a legal
-    /// expression — but [`compile`] emits `0 3 * * *`, and a matcher that read
-    /// both as `daily{3,0}` would claim a preset whose own compilation is a
-    /// DIFFERENT string from the one saved. The form would then silently
-    /// rewrite the user's expression on the next save.
+    /// The leading-zero refusal makes the round trip an equality: `Cron::parse`
+    /// reads `0 03 * * *` as hour 3, but [`compile`] emits `0 3 * * *`, and the
+    /// form would silently rewrite the saved expression on the next save.
     fn literal(term: &str) -> Option<u32> {
         if term.len() > 1 && term.starts_with('0') {
             return None;

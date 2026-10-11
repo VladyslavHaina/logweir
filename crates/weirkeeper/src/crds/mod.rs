@@ -1,40 +1,32 @@
-//! The six kinds of `logweir.dev/v1alpha1`, the CEL immutability seals, and
-//! the deterministic emitter the drift gate diffs against.
+//! The kinds of `logweir.dev/v1alpha1`, the CEL immutability seals, and the
+//! deterministic emitter the drift gate diffs against.
 //!
-//! SIX KINDS, AND `Drill` IS NOT ONE OF THEM. A drill is a [`Restore`] whose
-//! `spec.target.mode` is `scratch` (spec §3.1; Global Constraint 34). A
-//! `Restore` only ever writes a *new* topic, so restoring into production is
-//! non-destructive by construction, and the drill's only distinguishing
-//! behaviour is a scratch target plus phase-9 teardown — a field, not a
-//! lifecycle. Two kinds would duplicate the whole exit-code-to-condition
-//! table for one boolean. `MetadataSnapshot` stays reserved and unbuilt;
-//! `Switchover` is tag 2 and appears nowhere in this crate, not even in the
-//! [`approval::SubjectKind`] enum.
+//! There is no `Drill` kind: a drill is a [`Restore`] whose `spec.target.mode`
+//! is `scratch` (spec §3.1; Global Constraint 34). A `Restore` only ever writes
+//! a new topic, so a drill's only distinguishing behaviour is a scratch target
+//! plus phase-9 teardown, a field rather than a lifecycle. `MetadataSnapshot`
+//! stays reserved and unbuilt; `Switchover` appears nowhere in this crate, not
+//! even in [`approval::SubjectKind`].
 //!
-//! THE GROUP IS OURS AND ONLY OURS. [`GROUP`] is `logweir.dev` (Global
-//! Constraints 5 and 14): `weirkeeper` reads no vendor custom resource and
-//! creates none. `crates/weirkeeper/tests/crd_shape.rs`'s
-//! `no_vendor_crd_group_is_named_anywhere` reads this directory, the examples
-//! directory and `config/crd/` and asserts the vendor group strings appear in
-//! none of them, so the property is a test and not an intention.
+//! The group is ours alone: [`GROUP`] is `logweir.dev` (Global Constraints 5
+//! and 14), and `weirkeeper` reads and creates no vendor custom resource.
+//! `crates/weirkeeper/tests/crd_shape.rs`'s
+//! `no_vendor_crd_group_is_named_anywhere` checks this crate's sources and
+//! examples and `charts/logweir/crds/`.
 //!
-//! WHY THE CRD YAML IS CHECKED IN AND DIFFED. Same reason the scorecard schema
-//! is (`.github/workflows/ci.yml`'s schema arm): a CRD change is a FORMAT
-//! change, and a format change that appears as a diff in a pull request is one
-//! a reviewer sees. [`render_all`] is the single renderer; the
-//! `emit_crds` example writes its output to files, the drift arm diffs those
-//! files, and `the_checked_in_crds_are_what_the_emitter_renders` compares them
-//! in-process so the gate also holds in `cargo test` with no subprocess.
+//! The CRD YAML is checked in and diffed because a CRD change is a format
+//! change, and a format change should appear as a reviewable diff.
+//! [`render_all`] is the single renderer: the `emit_crds` example writes its
+//! output, the drift arm diffs the files, and
+//! `the_checked_in_crds_are_what_the_emitter_renders` compares them in-process.
 //!
-//! WHY `seal_spec` EXISTS. `kube`'s `CustomResource` derive emits no
+//! `seal_spec` exists because `kube`'s `CustomResource` derive emits no
 //! `x-kubernetes-validations`, so the immutability rules are injected into the
-//! generated [`CustomResourceDefinition`] after the fact. kube 0.99 does ship
-//! a separate `CELSchema` derive with a `#[cel_validate]` attribute; it is
-//! deliberately not used here, because the rules this task lands are attached
-//! to `.spec` as a whole (see [`backup_schedule::SOURCE_REF_IMMUTABLE_RULE`] for why
-//! that placement is load-bearing) and one helper that all six kinds pass
-//! through is what makes `every_spec_is_sealed_and_only_suspend_is_mutable`
-//! checkable at one place.
+//! generated [`CustomResourceDefinition`] afterwards. `CELSchema`'s
+//! `#[cel_validate]` is not used because the rules attach to `.spec` as a
+//! whole (see [`backup_schedule::SOURCE_REF_IMMUTABLE_RULE`]), and one helper
+//! every kind passes through makes
+//! `every_spec_is_sealed_and_only_suspend_is_mutable` checkable in one place.
 
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
     CustomResourceDefinition, CustomResourceDefinitionVersion, JSONSchemaProps,
@@ -68,18 +60,15 @@ pub const VERSION: &str = "v1alpha1";
 
 /// Every kind, in the order [`render_all`] emits them.
 ///
-/// THE LIST IS THE DECISION RECORD'S, NOT A CONVENIENCE. ADR 0008 Amendment A
-/// fixes the kind list and requires a recorded architectural decision for each
-/// addition: the first six are Amendment A's, `BackupDestination`,
-/// `TopicDiscovery` and `Preflight` are **Amendment F**'s, and `TrustPolicy`,
-/// `ProtectionPolicy`, `RecoveryCatalog` and `RetentionPolicy` are
-/// **Amendment G**'s (its `RehearsalSchedule` is withdrawn in v1, OD-12). `TrustRoster` is NOT removed: it
-/// stays served and reconciled, deprecated in its own description, so a
-/// cluster that has one keeps working while `TrustPolicy` is adopted.
+/// The list is the decision record's: ADR 0008 Amendment A fixes it and
+/// requires a recorded decision for each addition (Amendment F added
+/// `BackupDestination`, `TopicDiscovery` and `Preflight`; Amendment G added
+/// `TrustPolicy`, `ProtectionPolicy`, `RecoveryCatalog` and
+/// `RetentionPolicy`). `TrustRoster` stays served and reconciled, deprecated in
+/// its own description, while `TrustPolicy` is adopted.
 /// `the_kind_list_is_exactly_the_adr` asserts the emitted set against this
-/// list and additionally asserts that no kind is named `Drill`,
-/// `RestoreDrill`, `Switchover` or `MetadataSnapshot`, and that no kind
-/// contains `Kafka` other than `KafkaCluster`.
+/// list, and that no kind is named `Drill`, `RestoreDrill`, `Switchover` or
+/// `MetadataSnapshot` or contains `Kafka` other than `KafkaCluster`.
 pub const KINDS: [&str; 13] = [
     "KafkaCluster",
     "BackupSchedule",
@@ -96,21 +85,15 @@ pub const KINDS: [&str; 13] = [
     "RetentionPolicy",
 ];
 
-/// The CRD spelling of a Kubernetes `metav1.Time`: an RFC 3339 string, which
-/// is what `type: string, format: date-time` means in a structural schema.
+/// The CRD spelling of a Kubernetes `metav1.Time`: an RFC 3339 string
+/// (`type: string, format: date-time`).
 ///
-/// WHY NOT `k8s_openapi::apimachinery::pkg::apis::meta::v1::Time`. That type's
-/// `JsonSchema` implementation sits behind `k8s-openapi`'s optional `schemars`
-/// feature, and this crate's `k8s-openapi` feature list is fixed at exactly
-/// `["v1_29"]` by Global Constraint 25 and asserted by
-/// `tests/linkage.rs::kube_is_declared_without_default_features`. Taking a
-/// second feature to reach a `JsonSchema` impl would reopen a landed decision
-/// for a schema that is byte-identical either way: `metav1.Time` renders as
-/// `{type: string, format: date-time}` and so does
-/// `chrono::DateTime<Utc>` under `schemars`'s `chrono` feature, which this
-/// workspace already enables (`Cargo.toml`'s `schemars = { version = "0.8",
-/// features = ["chrono"] }`). The wire value is an RFC 3339 timestamp on both
-/// sides of that choice.
+/// Not `k8s_openapi`'s `Time`, whose `JsonSchema` impl sits behind the
+/// `k8s-openapi` `schemars` feature, and this crate's feature list is fixed at
+/// `["v1_29"]` (Global Constraint 25,
+/// `tests/linkage.rs::kube_is_declared_without_default_features`).
+/// `chrono::DateTime<Utc>` under `schemars`'s `chrono` feature renders the same
+/// schema.
 pub type Time = chrono::DateTime<chrono::Utc>;
 
 /// A reference to another Logweir object in the SAME namespace.
@@ -174,13 +157,9 @@ pub struct ArchiveRef {
 
 /// A `metav1.Condition`: the standard six fields with their standard
 /// meanings.
-// Declared here rather than taken from
-// `k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition`, which has the
-// same `JsonSchema`-behind-a-feature problem `Time` documents and the same
-// resolution. The fields below are `metav1.Condition`'s, so a client reading
-// `.status.conditions` sees the shape it expects. Kept out of the doc comment
-// because `schemars` publishes doc comments as `description` in the shipped
-// CRD, and this belongs in the code and not in the wire format.
+// Not `k8s_openapi`'s `Condition`, for the reason `Time` gives; the fields are
+// `metav1.Condition`'s. Kept out of the doc comment, which `schemars` publishes
+// as the CRD's `description`.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Condition {
@@ -570,11 +549,9 @@ pub const SPEC_IMMUTABLE_MESSAGE: &str = "spec is immutable; create a new object
 
 /// One CEL rule and the message that travels with it.
 ///
-/// A PAIR, AND NOT TWO PARALLEL LISTS. Before this type there were exactly two
-/// rules in this crate and [`seal_spec`] looked the message up from the rule
-/// text; with fourteen rules on five `.spec`s a lookup is a table that can go
-/// out of step with itself, and a message that belongs to a different rule is
-/// the worst kind of admission error — legible, confident and wrong.
+/// A pair rather than two parallel lists: a lookup table of messages can go out
+/// of step with its rules, and a message belonging to a different rule is the
+/// worst admission error, legible, confident and wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpecRule {
     /// The CEL expression, exactly as the API server compiles it.
@@ -885,27 +862,19 @@ const NUMERIC_BOUND_KEYS: [&str; 5] = [
 /// Write an integral numeric bound as an integer: `maximum: 600.0` becomes
 /// `maximum: 600`.
 ///
-/// # Why this exists, and why it is not cosmetic
-///
-/// `JSONSchemaProps::maximum` is an `f64`, so `serde_yaml` writes `600.0`.
-/// `kubectl kustomize` — which rendered the static bundle until v1 withdrew it
-/// (release-notes item 76) — round-trips the same document through its own
-/// YAML library and writes `600`, so two renderers would carry BYTE-DIFFERENT
-/// CRDs for the same kind. Normalising here means every renderer sees the same
-/// text, so none has anything left to normalise.
+/// `JSONSchemaProps::maximum` is an `f64`, so `serde_yaml` writes `600.0`,
+/// while other YAML renderers (`kubectl kustomize`, for one) write `600`;
+/// normalising here keeps every renderer's CRDs byte-identical.
 ///
 /// JSON has one number type, so `600` and `600.0` are the same value to the
 /// API server; this changes the spelling and never the schema. A bound with a
 /// real fraction is left exactly as it is.
 fn integral_bounds_as_integers(yaml: &str) -> String {
     let mut out = String::with_capacity(yaml.len());
-    // BLOCK SCALARS ARE SKIPPED WHOLE (review finding F7). The emitted CRDs
-    // carry block-scalar `description`s — thirteen in `backups.yaml` alone —
-    // and their content is PROSE, written by whoever wrote a doc comment. A
-    // line-based rewrite that did not track them would silently edit a
-    // sentence that happened to read `maximum: 600.0` at the start of a line.
-    // Cosmetic and deterministic, but a text rewrite reaching into text it
-    // does not own is exactly the kind of thing no gate would catch.
+    // Block scalars are skipped whole: the emitted CRDs carry block-scalar
+    // `description`s written from doc comments, and a line-based rewrite that
+    // did not track them would silently edit a sentence that happened to read
+    // `maximum: 600.0` at the start of a line.
     let mut block: Option<usize> = None;
     for line in yaml.lines() {
         let indent = line.len() - line.trim_start().len();

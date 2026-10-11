@@ -1,111 +1,45 @@
-//! The runner image, and nothing else yet.
-//!
-//! Task 17 grows `job::build` around [`RUNNER_IMAGE`] — the `Job` with
-//! `restartPolicy: Never`, `backoffLimit: 0`, `activeDeadlineSeconds` from
-//! `spec.deadlineSeconds` and a `podFailurePolicy` of `FailJob` on exit codes
-//! `[2, 3, 4]`. None of that is here. What is here is the one string that must
-//! exist in exactly one place before anything builds a Job at all.
+//! The runner Job: [`build`] and the constants that shape it, the runner image
+//! and its overrides, and the per-Job line token.
 
-/// The image the runner Jobs use — **interface I15**.
+/// The image the runner Jobs use (interface **I15**).
 ///
-/// THE ONLY PLACE UNDER `crates/` THE RUNNER IMAGE IS NAMED. Task 17's
-/// `job::build` reads this constant, and
+/// The only place under `crates/` the runner image is named:
 /// `tests/crd_shape.rs::the_runner_image_is_named_once` asserts the registry
-/// path appears exactly once in this file and nowhere else under `crates/`.
-/// The property is defended from the task that first states it, rather than
-/// from the task that finally pins the digest: a second occurrence is how a
-/// digest bump comes to update one call site and miss another.
+/// path appears exactly once, here, so a digest bump cannot update one call
+/// site and miss another. The namespace is the literal
+/// `docker.io/vladyslavhaina/…`, not a placeholder (Global Constraint 24): a
+/// manifest carrying `docker.io/<namespace>/…` is not applyable.
 ///
-/// THE NAMESPACE IS THE LITERAL `docker.io/vladyslavhaina/…`, NOT A PLACEHOLDER
-/// (Global Constraint 24). A shipped manifest carrying
-/// `docker.io/<namespace>/…` is not applyable, which would make spec §16's
-/// first clause unsatisfiable. A trademark answer changes one string, here.
-///
-/// IT IS DOCKER HUB, AND IT IS THE OWNER'S PERSONAL NAMESPACE — measured
-/// 2026-09-12: the GitHub organisation `logweir` does not exist and the Docker
-/// Hub user `logweir` is unclaimed, so neither is a namespace any workflow can
-/// push to. `docker.io/vladyslavhaina/…` is one the release workflow's
-/// credentials reach. It is still `blocked: images not published`: the rename
-/// makes a push possible and does not perform one.
-///
-/// A DIGEST, NOT A TAG — Global Constraint 7, pinned by Task 23. The value below
-/// is the manifest-list digest `docker inspect --format
-/// '{{index .RepoDigests 0}}' logweir:check` reported for the image `just image`
-/// built on 2026-09-11. A tag under `imagePullPolicy: Never` on a single node
-/// can be replaced by a local `docker build -t <tag>` **without touching a
-/// single Kubernetes object**, which defeats the org-root anchor baked into
-/// that image (`/etc/logweir/org-root.fingerprint`, stage-2 Task 16's T1); a
-/// digest names bytes.
-///
-/// AND IT IS STILL `blocked: images not published` (Global Constraint 37). "Published"
-/// means a PULL from a registry the author does not control, and this digest
-/// names bytes that exist on exactly one laptop. Two things were MEASURED on
-/// docker-desktop v1.34.1 rather than assumed (the command is in
-/// `docs/install.md`):
-///
-///   * a pod referencing this exact string with `imagePullPolicy: Never`
-///     **does start**, once `docker tag logweir:check <this repository>:v0.1.0`
-///     has put the image under that repository name locally — the kubelet keys
-///     on the WHOLE reference, and a matching digest alone does not make the
-///     repository name resolve. The exact command is in `docs/install.md`,
-///     which is not under `crates/` and may therefore spell the name out;
-///     this file may not, because the registry path appears here EXACTLY ONCE
-///     by construction (`crd_shape.rs::the_runner_image_is_named_once`);
-///   * the digest a locally built image reports **changes on every build**,
-///     including a fully cached no-op rebuild, because BuildKit re-generates
-///     the provenance attestation each time. So this value is not reproducible
-///     even on the machine that produced it, and the install file's digest rows
-///     keep reading `blocked: images not published` until `release.yml` has
-///     pushed to a real registry and the digest comes back from there
-///     (Task 30b). No tag has been pushed, so that workflow has never run.
+/// A digest, not a tag (Global Constraint 7): under `imagePullPolicy: Never` a
+/// tag can be replaced by a local `docker build -t <tag>` without touching a
+/// Kubernetes object, which defeats the org-root anchor baked into the image
+/// (`/etc/logweir/org-root.fingerprint`); a digest names bytes. It is the
+/// digest of a local build, and a locally built image's digest changes on every
+/// build (BuildKit regenerates the provenance attestation), so it resolves only
+/// where that image was tagged under this repository (`docs/install.md`). The
+/// chart always overrides it through [`RUNNER_IMAGE_ENV`].
 pub const RUNNER_IMAGE: &str =
     "docker.io/vladyslavhaina/logweir@sha256:6440a4a06d6f4a0ecbef71fa7d8ad11b5a87f3670298c585d5cd0073ae2e1229";
 
 /// The environment variable that overrides [`RUNNER_IMAGE`] for the Jobs one
-/// running controller creates — Task 33.
+/// running controller creates.
 ///
-/// # Why an override exists at all
-///
-/// [`RUNNER_IMAGE`] is a COMPILE-TIME digest, measured on the machine that
-/// built it, and plan erratum E19(a) says a local digest changes on every
-/// build. On the laptop that is survivable: the operator's own build IS the
-/// pinned bytes and one `docker tag` puts them under the pinned repository
-/// name (E19b). **On a cluster that did not build the pins it is not.** A
-/// GitHub runner builds both images minutes before the demo, at digests
-/// nothing in the tree names, and the shipped repository is not pullable
-/// (Global Constraint 37, `blocked: images not published`), so a controller that could
-/// only ever name the compile-time pin would create Jobs no such node can
-/// start. This variable is how the operator hands the controller the image
-/// the node actually holds.
-///
-/// # It overrides the image, and NOTHING ELSE
-///
-/// [`IMAGE_PULL_POLICY`] is not overridable and stays `Never` — see its own
-/// doc. The override's whole purpose is an image that was LOADED onto the
-/// node, which is exactly the case `Never` is right for.
-///
-/// THE NAME IS A NAME, NOT A REFERENCE. This string carries no registry path,
-/// so `tests/crd_shape.rs::the_runner_image_is_named_once` still finds the
-/// runner image named exactly once under `crates/` — in [`RUNNER_IMAGE`]
-/// above. The literal default is spelt out only outside `crates/`
-/// (`docs/install.md`, `scripts/demo-steps.sh`).
+/// [`RUNNER_IMAGE`] is a compile-time digest of a local build, and a cluster
+/// that did not build it cannot start a Job naming it; this is how the operator
+/// (or the chart's `runnerImage`) hands the controller the image its nodes can
+/// run. It overrides the image only; the pull policy has its own
+/// [`RUNNER_PULL_POLICY_ENV`]. The name carries no registry path, so
+/// `tests/crd_shape.rs::the_runner_image_is_named_once` still finds the image
+/// named once.
 pub const RUNNER_IMAGE_ENV: &str = "LOGWEIR_RUNNER_IMAGE";
 
-/// [`RUNNER_IMAGE_ENV`]'s value as a decision: `Some(image)` or "unset".
+/// [`RUNNER_IMAGE_ENV`]'s value as a decision: `Some(image)` or unset.
 ///
-/// **AN EMPTY VALUE IS UNSET, AND THAT IS PLAN ERRATUM E19(e)** — the same
-/// ruling `retention::configured_archive_url` carries, for the same reason: a
-/// Kubernetes `env:` entry with an empty `value:` makes `env::var` return
-/// `Ok("")`, not `Err(NotPresent)`, so a controller that treated the empty
-/// string as a configured value would create Jobs with `image: ""`. Whitespace
-/// is trimmed and trims to the same answer.
-///
-/// # Why it takes the `Result` instead of reading the variable itself
-///
-/// So a test can hand it `Ok(String::new())` — the exact value the defect is
-/// about — without mutating process-global state the rest of the binary
-/// shares. The predicate is the whole of the decision; `main` supplies the
-/// read, exactly once, and logs which of the two answers it got
+/// An empty value is unset: a Kubernetes `env:` entry with an empty `value:`
+/// makes `env::var` return `Ok("")`, and treating it as configured would create
+/// Jobs with `image: ""`. Whitespace trims to the same answer. It takes the
+/// `Result` so a test can pass `Ok(String::new())` without mutating process
+/// state; `main` supplies the read, once
 /// (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_image_override_once`).
 #[must_use]
 pub fn configured_runner_image(raw: Result<String, std::env::VarError>) -> Option<String> {
@@ -131,70 +65,43 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::ObjectMeta;
 use std::collections::BTreeMap;
 
-/// The one container in every runner Job, **always named this**.
-///
-/// THE CONTAINER IS SELECTED BY NAME AND NEVER BY INDEX, everywhere in this
-/// crate. `pod.status.containerStatuses` is not ordered by anything a
-/// controller may rely on, and a future init container or logging sidecar
-/// would put an unrelated `exitCode: 0` at index 0 — which is the mutant
-/// `the_container_is_selected_by_name` kills.
+/// The one container in every runner Job, always named this. Containers are
+/// selected by name, never by index: `pod.status.containerStatuses` has no
+/// order a controller may rely on, and a sidecar would put an unrelated
+/// `exitCode: 0` at index 0 (`the_container_is_selected_by_name`).
 pub const CONTAINER_NAME: &str = "runner";
 
-/// `spec.template.spec.restartPolicy`. **`Never`, and the value is the whole
-/// point.**
-///
-/// `OnFailure` is not a milder choice, it is a destructive one: the job
-/// controller restarts the container in place and then DELETES the pod
-/// (measured live; `docs/kubernetes.md`, *Running the CLI as a CronJob*),
-/// and since the exit code lives only on the pod object it is not buried in
-/// `lastState` — it is gone. A
-/// drill that found a real problem would leave behind no evidence of which
-/// problem it was.
+/// `spec.template.spec.restartPolicy`: `Never`. `OnFailure` restarts the
+/// container in place and then deletes the pod (measured live), and the exit
+/// code lives only on the pod, so a drill that found a real problem would leave
+/// no evidence of which.
 pub const RESTART_POLICY: &str = "Never";
 
-/// `spec.backoffLimit`. **Zero**, so one Job yields exactly one pod.
-///
-/// Verified live: `kubectl --context docker-desktop get pods -l job-name=… |
-/// wc -l` returned 1, the Job reached a `Failed` condition immediately, and
-/// the code was readable at
-/// `status.containerStatuses[].state.terminated.exitCode`.
+/// `spec.backoffLimit`: zero, so one Job yields exactly one pod and fails at
+/// once with the code readable at
+/// `status.containerStatuses[].state.terminated.exitCode` (verified live).
 pub const BACKOFF_LIMIT: i32 = 0;
 
-/// The GID that makes a projected signing key readable, and the mode the
-/// Secret is projected at.
+/// The GID that makes a projected signing key readable.
 ///
-/// WITHOUT `fsGroup` EVERY SCHEDULED RUN DIES OPENING ITS OWN SIGNING KEY.
-/// Kubelet writes Secret files `root:root`, so a container running as 65532
-/// reads nothing through the owner bits and the runner now exits 4 at its
-/// signing-readiness gate, before any data operation. `fsGroup` chowns the
-/// volume's group AND ORs group-read into the
-/// mode, so it is sufficient on its own; widening the mode without it is not.
-/// All four combinations were run live on docker-desktop —
-/// `docs/kubernetes.md` §3, and `examples/cronjob-drill.yaml:47-101` carries
-/// the same four values for the same reason.
+/// Kubelet writes Secret files `root:root`, so without `fsGroup` a container
+/// running as 65532 cannot open its signing key and the runner exits 4 at its
+/// signing-readiness gate. `fsGroup` chowns the volume's group and ORs
+/// group-read into the mode, so it is sufficient alone; widening the mode
+/// without it is not (all four combinations were run live).
 pub const FS_GROUP: i64 = 65532;
 
 /// The UID and GID the runner container runs as.
 pub const RUN_AS: i64 = 65532;
 
-/// `defaultMode` on a projected Secret: `0440`, stated as the octal literal.
-///
-/// `0440` AND NOT `0400`: with [`FS_GROUP`] set, kubelet writes the file
-/// `root:65532` and ORs group-read in anyway, so `0400` lands on disk as
-/// `0440` regardless. Saying `0440` means the manifest states the permission
-/// that actually exists rather than one kubelet silently widens.
+/// `defaultMode` on a projected Secret: `0440`. With [`FS_GROUP`] set, kubelet
+/// ORs group-read in anyway, so `0400` would land as `0440`; the manifest states
+/// the permission that actually exists.
 pub const SECRET_DEFAULT_MODE: i32 = 0o440;
 
-/// The writable scratch volume every runner needs, and where it is mounted.
-///
-/// WHY `build` ALWAYS ADDS IT. The container runs with
-/// `readOnlyRootFilesystem: true`, and `logweir backup run` writes its
-/// document and its receipt under
-/// [`crate::backup_execution::OUT_PATH`] /
-/// `RECEIPT_OUT_PATH` — both under `/work`. A Job with no writable `/work`
-/// fails at the first write with a read-only filesystem error, which looks
-/// nothing like the contract it breaks. The volume is `build`'s because the
-/// mount path is `build`'s.
+/// The writable scratch volume every runner needs. The container runs with
+/// `readOnlyRootFilesystem: true` and `logweir backup run` writes under `/work`
+/// ([`crate::backup_execution::OUT_PATH`]), so [`build`] always adds it.
 pub const WORK_VOLUME: &str = "work";
 /// Where [`WORK_VOLUME`] is mounted.
 pub const WORK_MOUNT_PATH: &str = "/work";
@@ -206,122 +113,55 @@ pub const PLAN_MOUNT_PATH: &str = "/plan";
 
 /// The volume name the per-Restore approval bundle ConfigMap is projected as.
 ///
-/// WHY THE NAME AND THE PATH LIVE HERE AND THE CONFIGMAP'S NAME DOES NOT. This
-/// module owns the Job's SHAPE: a volume name has to be unique within the pod
-/// spec [`build`] renders, and a mount path has to agree with the argv the
-/// caller writes. WHICH ConfigMap is projected is the Restore controller's
-/// decision; this shared renderer only enforces the mount shape.
-///
-/// The ConfigMap is immutable, create-only and owned by the Restore. The
-/// controller compares every byte on an `AlreadyExists` response before a Job
-/// may use it. The private runner signing key remains a Secret and is never a
-/// member of this volume.
+/// The name and path live here because this module owns the Job's shape (a
+/// volume name unique in the pod, a mount path the caller's argv agrees with);
+/// which ConfigMap is projected is the Restore controller's decision. The
+/// ConfigMap is immutable, create-only, owned by the Restore and compared byte
+/// for byte on `AlreadyExists`. The runner signing key stays a Secret and is
+/// never in this volume.
 pub const APPROVAL_VOLUME: &str = "approval";
 /// Where [`APPROVAL_VOLUME`] is mounted, read-only. The directory half of
 /// every `--approval` / `--approver-key` / `--allowed-clusters` path in
 /// [`crate::controllers::restore::runner_argv`].
 pub const APPROVAL_MOUNT_PATH: &str = "/approval";
 
-/// `imagePullPolicy` on the runner container. **`Never`.**
+/// `imagePullPolicy` on the runner container when nothing overrides it:
+/// `Never`.
 ///
-/// GLOBAL CONSTRAINT 17 AND GC37, TOGETHER. Zero cloud spend means every
-/// demo, test and CI job runs against a locally built image, and GC37 records
-/// that the images are not published, so [`RUNNER_IMAGE`] names a repository
-/// nothing can pull from. `Never` makes a missing local image fail legibly as
-/// `ErrImageNeverPull` instead of as an opaque pull error against a registry
-/// path that resolves to nothing. **Task 23 pinned the digest and the policy
-/// did not change**, which is the point: the two are separate decisions.
-/// Measured with the digest in place — `ErrImageNeverPull`, with the message
-/// naming the whole reference, until the image is tagged into that repository
-/// name locally; then the pod starts (`docs/install.md`).
-///
-/// **TASK 33 MADE THE IMAGE OVERRIDABLE AND DELIBERATELY LEFT THIS ALONE —
-/// AND TASK 37 CHANGED THAT. This is the history and the reason.** Task 33's
-/// argument was that [`RUNNER_IMAGE_ENV`] exists for images LOADED onto the
-/// node, which is the one case `Never` is exactly right for, so an overridable
-/// policy would only ever buy a pull against a registry namespace that
-/// resolves to nothing. What broke that argument is not a defect in it: **the
-/// owner decided, on 2026-09-12, that `charts/logweir`'s defaults name the two
-/// Logweir images by the `latest` TAG rather than by a digest.** A chart whose
-/// default reference is a mutable tag under a policy that never pulls is a
-/// chart that cannot work — the kubelet would refuse a tag no node holds — so
-/// the policy had to become configurable alongside the image. It is configured
-/// by [`RUNNER_PULL_POLICY_ENV`], which the chart renders from its own
-/// `runnerImagePullPolicy` value (default `Always`, matching Kubernetes' own
-/// default for a `:latest` tag).
-///
-/// **AN UNSET VARIABLE STILL MEANS `Never`, AND THAT IS THE POINT OF LEAVING
-/// THE CONSTANT WHERE IT IS.** Nothing outside the chart sets the variable:
-/// the laptop walk, `scripts/demo-steps.sh`'s kind path and every unit test
-/// create Jobs for images that were BUILT or `kind load`ed onto the node, and
-/// for those `Never` is still exactly right — a wrong reference fails as
-/// `ErrImageNeverPull` naming the whole reference instead of as a pull error
-/// naming a registry. Only an install that asked for another policy gets one.
-/// `the_runner_image_override_does_not_touch_the_pull_policy` still holds:
-/// the IMAGE override does not move the policy. The policy has its own
-/// override now, and `a_runner_pull_policy_override_does_not_touch_the_image`
-/// holds the other half.
+/// For an image built or `kind load`ed onto the node (the laptop walk, the
+/// demo's kind path, every unit test) `Never` is right: a wrong reference fails
+/// as `ErrImageNeverPull` naming the whole reference instead of as a pull error
+/// against a registry. The chart names images by the `latest` tag, which no
+/// node holds under a policy that never pulls, so it sets
+/// [`RUNNER_PULL_POLICY_ENV`] from `runnerImagePullPolicy` (default `Always`).
+/// The image and policy overrides are independent
+/// (`the_runner_image_override_does_not_touch_the_pull_policy`,
+/// `a_runner_pull_policy_override_does_not_touch_the_image`).
 pub const IMAGE_PULL_POLICY: &str = "Never";
 
 /// The environment variable that overrides [`IMAGE_PULL_POLICY`] for the Jobs
-/// one running controller creates — **Task 37**, the twin of
-/// [`RUNNER_IMAGE_ENV`].
-///
-/// # Why it exists
-///
-/// See [`IMAGE_PULL_POLICY`]'s doc: the chart's defaults now name the two
-/// Logweir images by the `latest` tag (the owner's decision of 2026-09-12), and
-/// a mutable tag under a policy that never pulls is a reference no node can
-/// resolve. The chart renders this variable from its `runnerImagePullPolicy`
-/// value beside [`RUNNER_IMAGE_ENV`], so the two halves of one decision travel
-/// together.
-///
-/// THE NAME IS A NAME, NOT A REFERENCE, exactly as [`RUNNER_IMAGE_ENV`] is,
-/// and it carries no registry path — so
-/// `tests/crd_shape.rs::the_runner_image_is_named_once` is untouched by it.
+/// one running controller creates, the twin of [`RUNNER_IMAGE_ENV`]. The chart
+/// renders both together, since a mutable tag under a policy that never pulls
+/// resolves on no node. The name carries no registry path.
 pub const RUNNER_PULL_POLICY_ENV: &str = "LOGWEIR_RUNNER_PULL_POLICY";
 
-/// The three values Kubernetes accepts for `imagePullPolicy`, and the whole of
-/// what [`configured_runner_pull_policy`] admits.
-///
-/// SPELT HERE AND NOWHERE ELSE. The API server refuses anything else with a
-/// validation error on the Job, at CREATE time — which is to say, at every
-/// `Backup` and every `Restore`, forever, from a controller that started
-/// happily. Refusing the value once at startup is the difference between one
-/// legible failure and an unbounded stream of illegible ones.
+/// The three values Kubernetes accepts for `imagePullPolicy`, and all that
+/// [`configured_runner_pull_policy`] admits. The API server would refuse any
+/// other at every Job create; refusing it once at startup is one legible
+/// failure instead of an unbounded stream.
 pub const PULL_POLICIES: [&str; 3] = ["Never", "IfNotPresent", "Always"];
 
-/// [`RUNNER_PULL_POLICY_ENV`]'s value as a decision: `Ok(None)` for "unset"
-/// (the compiled-in [`IMAGE_PULL_POLICY`]), `Ok(Some(policy))` for one of
+/// [`RUNNER_PULL_POLICY_ENV`]'s value as a decision: `Ok(None)` for unset (the
+/// compiled-in [`IMAGE_PULL_POLICY`]), `Ok(Some(policy))` for one of
 /// [`PULL_POLICIES`], and `Err(message)` for anything else.
 ///
-/// **AN EMPTY VALUE IS UNSET — PLAN ERRATUM E19(e)**, the same ruling
-/// [`configured_runner_image`] and `retention::configured_archive_url` carry,
-/// for the same reason: a Kubernetes `env:` entry with an empty `value:` makes
-/// `env::var` return `Ok("")`, not `Err(NotPresent)`. Whitespace trims to the
-/// same answer.
-///
-/// # Why a wrong value is an `Err` and not a fallback
-///
-/// [`configured_runner_image`] validates nothing, because only a kubelet can
-/// say whether a reference resolves on a node. A pull POLICY is the opposite:
-/// the set of legal values is closed, it is known here, and a Job carrying
-/// `imagePullPolicy: always` is rejected by the API server's own validation at
-/// CREATE. A controller that silently fell back to [`IMAGE_PULL_POLICY`] would
-/// run an entire install under a policy the operator did not ask for; one that
-/// passed the value through would turn every `Backup` into a rejected Job with
-/// no `Backup` to show for it. `main` refuses to start and says which value it
-/// refused (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_pull_policy_once`).
-///
-/// The message names the variable and the value, because an operator reading a
-/// crashed controller's last log line has nothing else to go on.
-///
-/// # Why it takes the `Result`
-///
-/// So a test can hand it `Ok(String::new())` — the exact value the E19(e)
-/// defect is about — without mutating process-global state the rest of the
-/// binary shares. The predicate is the whole of the decision; `main` supplies
-/// the read, exactly once.
+/// An empty value is unset, as for [`configured_runner_image`]. A wrong value
+/// is an `Err`, not a fallback: the legal set is closed and known here, a
+/// silent fallback would run the install under a policy nobody asked for, and
+/// passing it through would make every Job a rejected create. `main` refuses to
+/// start and names the variable and value
+/// (`crates/weirkeeper/tests/crd_shape.rs::main_reads_the_runner_pull_policy_once`).
+/// It takes the `Result` so a test can pass `Ok(String::new())`.
 ///
 /// # Errors
 ///
@@ -347,18 +187,10 @@ pub fn configured_runner_pull_policy(
     ))
 }
 
-/// The image AND the pull policy one running controller puts in every runner
-/// Job it creates — **Task 37**, the pair Task 33's single `Option<String>`
-/// grew into.
-///
-/// ONE STRUCT AND NOT TWO PARALLEL `Option`s. Task 33 threaded the image
-/// through `Context::runner_image` and a `reconcile_*_with_runner_image`
-/// sibling per reconciler; the policy travels the same path, for the same
-/// reason, and a second parallel parameter beside the first is how the two
-/// halves of one decision come to disagree. Both fields are `None` by default
-/// and `None` means the compiled-in constant — [`RUNNER_IMAGE`] and
-/// [`IMAGE_PULL_POLICY`] — so a controller handed nothing creates exactly the
-/// Jobs it created before either override existed.
+/// The image and the pull policy one running controller puts in every runner
+/// Job it creates: one struct, not two parallel `Option`s, so the two halves of
+/// one decision travel together. `None` means the compiled-in constant
+/// ([`RUNNER_IMAGE`], [`IMAGE_PULL_POLICY`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunnerImage {
     /// [`RunnerJobSpec::image`]: the reference, or `None` for [`RUNNER_IMAGE`].
@@ -369,23 +201,16 @@ pub struct RunnerImage {
 }
 
 /// The two variables a runner reads its engine identity from where its image
-/// declares none: **this controller never sets them** (PROD-00.2 review L3).
+/// declares none. This controller never sets them, and [`build`] drops either
+/// from a caller's `env_literal`.
 ///
-/// Until PROD-00.2 every Job carried them, stamped from constants compiled into
-/// the controller, and the runner signed them into every receipt and
-/// scorecard. That made the controller a source of the engine identity, and a
-/// controller paired with a runner image other than the one it was built with
-/// signed the wrong engine: an older, pre-PROD-00.2 runner (OSO's binary) under
-/// a newer controller would sign Logweir's build. Now the identity travels
-/// with the engine: the runner image declares it in
-/// `/etc/logweir/engine-identity`, copied from the same build stage as the
-/// binary, and the runner refuses to sign a version the binary does not print
-/// (`logweir::engine_identity::verify_engine_reports`). A runner image that
-/// declares no engine — one published before PROD-00.2 — gets NO identity from
-/// this controller, so it refuses its run (exit 1, before the engine spawns,
-/// nothing signed) instead of mislabelling it. [`build`] also drops either
-/// variable from a caller's `env_literal`. `tests/backup_controller.rs`
-/// `no_job_states_the_engine_identity` holds both.
+/// The identity travels with the engine: the runner image declares it in
+/// `/etc/logweir/engine-identity`, and the runner refuses to sign a version the
+/// binary does not print (`logweir::engine_identity::verify_engine_reports`). A
+/// controller stamping it would sign the wrong engine for a runner image it was
+/// not built with; an image that declares none gets no identity here and
+/// refuses its run (exit 1, nothing signed) rather than mislabel it.
+/// `tests/backup_controller.rs::no_job_states_the_engine_identity` holds both.
 pub const ENGINE_VERSION_ENV: &str = "LOGWEIR_ENGINE_VERSION";
 /// See [`ENGINE_VERSION_ENV`].
 pub const ENGINE_DIGEST_ENV: &str = "LOGWEIR_ENGINE_DIGEST";
@@ -434,26 +259,18 @@ pub struct EnvFromSecret {
     pub secret_name: String,
     /// The key within that Secret.
     pub key: String,
-    /// `secretKeyRef.optional: true` — the variable is simply unset when the
-    /// Secret lacks the key, instead of the container failing to start.
-    /// `false` (rendered as an ABSENT `optional`, so every Job built before the
-    /// field existed is byte-identical) for every credential; `true` only for
-    /// the credential BINDING (PROD-01.3 security follow-up), whose absence the
-    /// RUNNER must see so it can refuse it by name.
+    /// `secretKeyRef.optional: true`: the variable is unset when the Secret
+    /// lacks the key, instead of the container failing to start. `false`
+    /// (rendered as an absent `optional`, so older Jobs are byte-identical) for
+    /// every credential; `true` only for the credential binding, whose absence
+    /// the runner must see to refuse it by name.
     pub optional: bool,
 }
 
-/// The runner container's requests and limits — FX-2.
-///
-/// ALREADY VALIDATED WHEN IT GETS HERE, by
-/// [`crate::runner_resources::validate`]: every quantity parses, fits its
-/// resource's unit, is inside its ceiling, and no request is above its limit.
-/// This type only carries the result to [`build`], resource name to quantity,
-/// in the spelling the object carried.
-///
-/// A TYPE OF THIS CRATE'S AND NOT `ResourceRequirements` ITSELF, because
-/// [`RunnerJobSpec`] is `Eq` and the generated Kubernetes type is only
-/// `PartialEq`.
+/// The runner container's requests and limits, already validated by
+/// [`crate::runner_resources::validate`]. A type of this crate rather than
+/// `ResourceRequirements`, because [`RunnerJobSpec`] is `Eq` and the generated
+/// type is only `PartialEq`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContainerResources {
     /// `resources.requests`, resource name → quantity.
@@ -482,13 +299,10 @@ impl ContainerResources {
     }
 }
 
-/// The owning custom resource, as the four fields an `ownerReference` needs.
-///
-/// A DEDICATED TYPE RATHER THAN `OwnerReference` ITSELF, so `controller: true`
-/// and `blockOwnerDeletion: true` are [`build`]'s decision and not a caller's
-/// to forget. A Job with no controller owner is a Job the garbage collector
-/// will not remove with its `Backup`, and a Job with `controller: false` can
-/// be adopted by something else.
+/// The owning custom resource, as the four fields an `ownerReference` needs. A
+/// dedicated type so `controller: true` and `blockOwnerDeletion: true` are
+/// [`build`]'s decision: a Job with no controller owner is not removed with its
+/// `Backup`, and one with `controller: false` can be adopted by something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunnerOwner {
     /// `apiVersion` of the owning object — take it from the derive's
@@ -503,40 +317,23 @@ pub struct RunnerOwner {
 }
 
 /// Everything [`build`] needs to produce one runner Job.
-///
-/// WHY THIS CARRIES `namespace`, `owner` AND `service_account_name` BEYOND THE
-/// SIX FIELDS THE INTERFACE REGISTER SKETCHES. The same interface entry
-/// requires `build` to emit `ownerReferences` with `controller: true` and a
-/// namespaced Job, and neither is derivable from a name plus an argv. They are
-/// additions to the struct, not renames: `name`, `args`, `deadline_seconds`,
-/// `secret_mounts`, `env_from_secret` and `env_literal` keep the register's
-/// spellings, which is what Tasks 20, 21, 22, 23, 24 and 26 name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunnerJobSpec {
-    /// `metadata.name`.
-    ///
-    /// **NAMED AFTER THE CUSTOM RESOURCE VERBATIM** —
-    /// `backup.name_any()`, never `logweir-backup-<cr name>`. A scheduled
-    /// `Backup` is ALREADY called `logweir-backup-<schedule>-<slot>`
-    /// (`slot::scheduled_backup_name`), so re-prefixing would pass the 63
-    /// character cap on the `batch.kubernetes.io/job-name` label at any
-    /// schedule name of 18 characters or more — and that label is how the pod
-    /// carrying the exit code is found. Task 18's review made this ruling; the
-    /// caller passes the CR's own name and `the_job_name_is_the_cr_name`
-    /// asserts it.
+    /// `metadata.name`: the custom resource's own name, never
+    /// `logweir-backup-<cr name>`. A scheduled `Backup` is already called
+    /// `logweir-backup-<schedule>-<slot>`, so a prefix would pass the 63-char
+    /// cap on the `batch.kubernetes.io/job-name` label (how the pod carrying the
+    /// exit code is found) for schedule names of 18 characters or more
+    /// (`the_job_name_is_the_cr_name`).
     pub name: String,
     /// `metadata.namespace`. The Job lives with its `Backup`.
     pub namespace: String,
     /// The owning custom resource — see [`RunnerOwner`].
     pub owner: RunnerOwner,
-    /// The container argv, **passed through unchanged**.
-    ///
-    /// NEVER REBUILT HERE. For a `Backup` this is the argv
-    /// `crate::backup_execution::runner_argv` derived from the typed spec and
-    /// the server-generated run identity and froze in the plan ConfigMap —
-    /// never an annotation's content. A `job::build` that composed its own
-    /// argv would drop the backup id override that makes a re-created Job
-    /// reuse its run's backup id rather than mint a second one.
+    /// The container argv, passed through unchanged. For a `Backup` it is the
+    /// argv `crate::backup_execution::runner_argv` derived and froze in the plan
+    /// ConfigMap; a `build` that composed its own would drop the backup id
+    /// override that makes a re-created Job reuse its run's backup id.
     pub args: Vec<String>,
     /// `spec.activeDeadlineSeconds`, from `Backup.spec.deadlineSeconds`.
     pub deadline_seconds: i64,
@@ -554,85 +351,40 @@ pub struct RunnerJobSpec {
     /// are dropped by it (the controller never states the engine identity).
     pub env_literal: Vec<(String, String)>,
     /// The ConfigMap carrying the rendered plan, mounted read-only at
-    /// [`PLAN_MOUNT_PATH`].
-    ///
-    /// A `Option` BECAUSE THE THREE RUNNERS DIFFER. `logweir backup run` and
-    /// `logweir restore run` both read `--spec <path>` out of `/plan`; Task
-    /// 15c's probe reads no plan at all. The mount is therefore a property of
-    /// the caller, and `None` produces a Job with no `/plan` volume rather
-    /// than an empty one.
-    ///
-    /// **THIS TASK NAMES THE ConfigMap AND DOES NOT RENDER IT.** See
-    /// `crate::controllers::backup::plan_config_map_name` for the declared
-    /// late binding: no task in this plan's Files blocks renders a
-    /// `backup.yaml` ConfigMap for the `Backup` path, and fixing the NAME here
-    /// is what stops the renderer and the mount choosing separately.
+    /// [`PLAN_MOUNT_PATH`]. An `Option` because the probe reads no plan; `None`
+    /// produces a Job with no `/plan` volume rather than an empty one.
     pub plan_config_map: Option<String>,
-    /// The image this Job's one container runs, or **`None` for the shipped
-    /// pin** [`RUNNER_IMAGE`] — Task 33.
-    ///
-    /// `None` IS THE DEFAULT AND THE DEFAULT IS THE PIN. Every
-    /// `runner_job_spec` in `crate::controllers` builds this `None`, so a
-    /// controller handed nothing creates exactly the Jobs it created before
-    /// this field existed; the three reconcilers overwrite it, in one line
-    /// each, with the value `main` read out of [`RUNNER_IMAGE_ENV`]. That is
-    /// why the interface I15 assertions in `tests/backup_controller.rs` and
-    /// `tests/kafka_cluster_controller.rs` needed no edit.
-    ///
-    /// A FIELD AND NOT A PARAMETER OF [`build`]. `build(&spec)` is called from
-    /// six places in the test suite and three in this crate; a second argument
-    /// would have rewritten all nine to say `None`, which is a diff that hides
-    /// the one call site where the answer is not `None`. The field puts the
-    /// decision where the Job's other per-run values already are.
+    /// The image this Job's one container runs, or `None` for the shipped pin
+    /// [`RUNNER_IMAGE`]. Every `runner_job_spec` builds `None` and each
+    /// reconciler overwrites it with the value `main` read from
+    /// [`RUNNER_IMAGE_ENV`]. A field rather than a parameter of [`build`], so the
+    /// per-run decision sits with the Job's other per-run values.
     pub image: Option<String>,
-    /// This Job's `imagePullPolicy`, or **`None` for the compiled-in**
-    /// [`IMAGE_PULL_POLICY`] — Task 37.
-    ///
-    /// `None` IS THE DEFAULT AND THE DEFAULT IS `Never`, exactly as before this
-    /// field existed. It is a sibling of [`RunnerJobSpec::image`] and not a
-    /// consequence of it: an image override alone does NOT move the policy
-    /// (`the_runner_image_override_does_not_touch_the_pull_policy`), because
-    /// the two are separate decisions that the operator makes separately —
-    /// [`RUNNER_IMAGE_ENV`] and [`RUNNER_PULL_POLICY_ENV`], rendered from the
-    /// chart's `runnerImage` and `runnerImagePullPolicy`.
+    /// This Job's `imagePullPolicy`, or `None` for the compiled-in
+    /// [`IMAGE_PULL_POLICY`]: a sibling of [`RunnerJobSpec::image`], not a
+    /// consequence of it (`the_runner_image_override_does_not_touch_the_pull_policy`).
     pub image_pull_policy: Option<String>,
-    /// The runner container's requests and limits, or **`None` for no
-    /// `resources` key at all** — FX-2.
-    ///
-    /// `None` IS EVERY JOB'S SHAPE BEFORE FX-2, and it is still the answer
-    /// for every Job no custom resource states resources for: the namespace's
-    /// `LimitRange` defaults apply to it exactly as they did. Only a `Restore`
-    /// sets it, from `spec.runnerResources`, and only after
-    /// [`crate::runner_resources::validate`] accepted every quantity.
+    /// The runner container's requests and limits, or `None` for no `resources`
+    /// key at all, so the namespace's `LimitRange` defaults apply. Only a
+    /// `Restore` sets it, from `spec.runnerResources`, after
+    /// [`crate::runner_resources::validate`].
     pub resources: Option<ContainerResources>,
 }
 
-/// The `podFailurePolicy` every runner Job carries, **in this exact order**.
+/// The `podFailurePolicy` every runner Job carries, in this exact order.
 ///
-/// # It is inert today, and this task claims nothing more
+/// Inert today: [`BACKOFF_LIMIT`] is `0`, both rules are `FailJob`, and one pod
+/// failure already fails the Job. It declares that exit `1` is never retried
+/// and that a disruption is a failure, so a future `backoffLimit > 0` cannot
+/// quietly change either; the tests pin a declaration, not a behaviour.
 ///
-/// [`BACKOFF_LIMIT`] is `0`, both rules are `FailJob`, and a single pod
-/// failure already fails the Job — so this field changes no behaviour at all
-/// right now. It ships anyway because it is the **declaration** that exit `1`
-/// is never retried and that a disruption is a failure, so a future
-/// `backoffLimit > 0` cannot quietly change either. The tests below pin a
-/// declaration, not a behaviour, and say so.
+/// No `Ignore` rule on `[1]`: retrying needs `backoffLimit > 0`, which yields
+/// several pods for one `Backup.status.exitCode` (spec §3.2 M15,
+/// `the_failure_policy_has_no_ignore_on_one`).
 ///
-/// # There is no `Ignore` rule on `[1]`
-///
-/// The obvious-looking third rule — "code 1 was operational, retry it" —
-/// requires `backoffLimit > 0`, which yields SEVERAL pods, while
-/// `Backup.status.exitCode` is a single value. Two pods with two codes and one
-/// field is a status that is either wrong or arbitrary. Spec §3.2 M15 drops
-/// the rule, and `the_failure_policy_has_no_ignore_on_one` keeps it dropped.
-///
-/// # Order
-///
-/// Rule 0 is the disruption pattern and rule 1 is the exit-code set. Order is
-/// asserted rather than left to a `Vec` literal's accident because
-/// `podFailurePolicy` rules are evaluated in order and the first match wins:
-/// a pod that was disrupted AND happened to report a code must be classified
-/// as disrupted.
+/// Rule 0 is the disruption pattern and rule 1 the exit-code set. Rules are
+/// evaluated in order and the first match wins, so a disrupted pod that also
+/// reported a code is classified as disrupted.
 #[must_use]
 pub fn failure_policy() -> PodFailurePolicy {
     PodFailurePolicy {
@@ -660,47 +412,31 @@ pub fn failure_policy() -> PodFailurePolicy {
 
 /// Build the runner Job for `spec`.
 ///
-/// # The four things a reader should check first
+/// What to check first:
 ///
-/// 1. **`restartPolicy: Never` + `backoffLimit: 0`** — [`RESTART_POLICY`] and
-///    [`BACKOFF_LIMIT`] carry the measured reason. Exactly one pod, and the
-///    exit code survives.
-/// 2. **Exactly one container, named [`CONTAINER_NAME`]** — the container the
-///    exit code is read from is found by that name.
-/// 3. **`automountServiceAccountToken: false`** — a runner pod makes ZERO
-///    Kubernetes API calls, and the key-holder is deliberately the component
-///    with no cluster credential (`design-operator.md:355-359`). A
-///    ServiceAccount is still named, because Task 21's RBAC and any
-///    image-pull or PSA binding attach to a name; what is refused is the
-///    TOKEN.
-/// 4. **No `ttlSecondsAfterFinished` at creation time** — pod garbage
-///    collection must never race the exit-code read. The field is `PATCH`ed on
-///    only after the status write that carries the code has returned 200; see
-///    `controllers::backup::reconcile_backup` and
-///    `controllers::backup::TTL_SECONDS_AFTER_FINISHED`.
-///
-/// Task 23 replaced [`RUNNER_IMAGE`] with a digest reference and nothing else
-/// here changed, exactly as this note predicted.
-///
-/// Task 33 added a fifth thing to check: **the container's image is
-/// [`RunnerJobSpec::image`] when that is `Some`, and [`RUNNER_IMAGE`]
-/// otherwise**. The signature did not change, because the override is a
-/// property of the spec and not of the builder.
-///
-/// Task 37 added the SIXTH, in the same shape: **`imagePullPolicy` is
-/// [`RunnerJobSpec::image_pull_policy`] when that is `Some`, and
-/// [`IMAGE_PULL_POLICY`] otherwise**. The two are independent — an image
-/// override leaves the policy alone and a policy override leaves the image
-/// alone — and nothing else in the Job moved.
-///
-/// FX-2 added the SEVENTH: **the container's `resources` is
-/// [`RunnerJobSpec::resources`] when that is `Some`, and absent otherwise.**
-/// Before FX-2 no Job carried any, whatever its object asked for.
+/// 1. **`restartPolicy: Never` + `backoffLimit: 0`** ([`RESTART_POLICY`],
+///    [`BACKOFF_LIMIT`]): exactly one pod, and the exit code survives.
+/// 2. **Exactly one container, named [`CONTAINER_NAME`]**, the one the exit
+///    code is read from.
+/// 3. **`automountServiceAccountToken: false`**: a runner pod makes no
+///    Kubernetes API calls, and the key holder is deliberately the component
+///    with no cluster credential. A ServiceAccount is still named, because RBAC
+///    and image-pull or PSA bindings attach to a name; the token is refused.
+/// 4. **No `ttlSecondsAfterFinished` at creation**: pod garbage collection must
+///    never race the exit-code read. It is patched on only after the status
+///    write carrying the code returned (see
+///    `controllers::backup::TTL_SECONDS_AFTER_FINISHED`).
+/// 5. **The image** is [`RunnerJobSpec::image`] when `Some`, else
+///    [`RUNNER_IMAGE`], and **`imagePullPolicy`** is
+///    [`RunnerJobSpec::image_pull_policy`] when `Some`, else
+///    [`IMAGE_PULL_POLICY`]; the two are independent.
+/// 6. **`resources`** is [`RunnerJobSpec::resources`] when `Some`, and absent
+///    otherwise.
 #[must_use]
 pub fn build(spec: &RunnerJobSpec) -> Job {
     let mut env: Vec<EnvVar> = Vec::new();
-    // NO ENGINE IDENTITY (PROD-00.2 review L3): the runner image states its own
-    // engine; see [`ENGINE_VERSION_ENV`].
+    // No engine identity: the runner image states its own (see
+    // [`ENGINE_VERSION_ENV`]).
     env.push(EnvVar {
         name: TMPDIR_ENV.to_string(),
         value: Some(WORK_MOUNT_PATH.to_string()),
@@ -716,12 +452,10 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
             value_from: None,
         });
     }
-    // FX-20: THE BACKSTOP. A credential projected from a Secret with no
-    // binding expectation beside it would reach the runner as a "hand-run"
-    // credential, which nothing checks. Every builder in this crate projects
-    // the pair itself; one that forgets gets the never-satisfied expectation
-    // here, and its runner refuses the credential (fail closed) instead of
-    // presenting it unchecked.
+    // The backstop: a credential projected from a Secret with no binding
+    // expectation beside it would reach the runner unchecked. Every builder
+    // projects the pair itself; one that forgets gets a never-satisfied
+    // expectation here, and its runner refuses the credential (fail closed).
     for (credential, _, expected) in logweir_core::credential_binding::GUARDED_CREDENTIALS {
         let projected = spec.env_from_secret.iter().any(|e| e.name == credential);
         let has_expectation = spec.env_literal.iter().any(|(n, _)| n == expected);
@@ -846,13 +580,10 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
 
     let container = Container {
         name: CONTAINER_NAME.to_string(),
-        // THE SHIPPED PIN UNLESS THE OPERATOR HANDED THIS PROCESS ANOTHER
-        // IMAGE — Task 33, `RunnerJobSpec::image` and [`RUNNER_IMAGE_ENV`].
+        // The shipped pin unless this process was handed another image.
         image: Some(spec.image.as_deref().unwrap_or(RUNNER_IMAGE).to_string()),
-        // AND THE COMPILED-IN POLICY UNLESS IT HANDED THIS PROCESS ANOTHER
-        // ONE — Task 37, `RunnerJobSpec::image_pull_policy` and
-        // [`RUNNER_PULL_POLICY_ENV`]. A SEPARATE decision from the image
-        // above: neither override moves the other.
+        // And the compiled-in policy unless it was handed another; neither
+        // override moves the other.
         image_pull_policy: Some(
             spec.image_pull_policy
                 .as_deref()
@@ -861,9 +592,7 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
         ),
         args: Some(spec.args.clone()),
         env: Some(env),
-        // WHAT THE OBJECT ASKED FOR, OR NOTHING — FX-2. A `Restore`'s
-        // validated `spec.runnerResources`; `None` renders no key, which is
-        // the pre-FX-2 shape every other Job keeps.
+        // What the object asked for, or no key at all.
         resources: spec
             .resources
             .as_ref()
@@ -929,10 +658,6 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
     }
 }
 
-// ---------------------------------------------------------------------------
-// FX-34: the Job's line token
-// ---------------------------------------------------------------------------
-
 use logweir_core::refusal_detail::{LineToken, LINE_TOKEN_ARG};
 
 /// How many random bytes a line token is made of: 20, which is 160 bits and
@@ -948,26 +673,17 @@ pub const LINE_TOKEN_BYTES: usize = 20;
 
 /// A fresh line token, from the operating system's random source.
 ///
-/// # What it is for
+/// A pod log merges stdout and stderr, and whoever wrote a plan can start a
+/// line of their own in it, so the controller honours a runner's
+/// `refusal-detail=` line only when it carries a value the plan's author could
+/// not have had: this one, made when the Job is built and given to the runner
+/// as an argument ([`add_line_token`]). A plan is older than its Job.
 ///
-/// A pod log is stdout and stderr merged, and whoever wrote a plan can start
-/// a line of their own in it. The controller therefore honours a runner's
-/// `refusal-detail=` line only when the line carries a value the plan's
-/// author could not have had: this one, made HERE, when the Job is built, and
-/// given to the runner as an argument ([`add_line_token`]). A plan is older
-/// than its Job.
-///
-/// # Where the bytes come from
-///
-/// `rustls`'s `ring` provider, which is `ring::rand::SystemRandom`: the
-/// kernel's generator, with no seed this process holds and no state it could
-/// be made to repeat. NEVER derived from a name, a UID, a hash or a clock,
-/// each of which the plan's author can know or guess. It is the provider this
-/// crate already links for TLS, so no dependency is added for it.
-///
-/// `None` when the random source fails. The caller then builds the Job with
-/// no token, and a refused run of that Job says what it said before the line
-/// existed.
+/// The bytes come from `rustls`'s `ring` provider (`ring::rand::SystemRandom`,
+/// the kernel's generator, with no seed this process holds), never from a
+/// name, a UID, a hash or a clock, each of which a plan's author can know or
+/// guess. `None` when the random source fails; the Job is then built without a
+/// token.
 #[must_use]
 pub fn new_line_token() -> Option<LineToken> {
     let mut bytes = [0u8; LINE_TOKEN_BYTES];

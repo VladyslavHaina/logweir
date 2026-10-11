@@ -1,10 +1,10 @@
-//! `Approval` — four spec fields, and a create form that must supply all four.
+//! `Approval`: four spec fields, and a create form that must supply all four.
 //!
 //! A page that posts only `approvalBytes` and `sidecarBytes` posts an object
-//! the CRD schema REJECTS (critique C H3). `subjectRef` and `planHash` come
-//! from the route the wizard navigated to; the controller recomputes the hash
-//! from the referent's own bytes regardless, so a wrong `planHash` is a
-//! refusal and never a silent acceptance.
+//! the CRD schema rejects. `subjectRef` and `planHash` come from the route the
+//! wizard navigated to; the controller recomputes the hash from the referent's
+//! own bytes regardless, so a wrong `planHash` is a refusal, never a silent
+//! acceptance.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

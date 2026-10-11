@@ -1,20 +1,16 @@
-//! Finding a check's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
+//! Finding a check's pod (seam **S6**).
 //!
-//! # A LABEL IS NOT AN IDENTITY
+//! # A label is not an identity
 //!
-//! `batch.kubernetes.io/job-name` is set by the Job controller, and it is also
-//! settable by anything that can create a pod in the namespace. A controller
-//! that reads the exit code and the stdout of "the pod with this label" will
-//! read whichever pod a namespace tenant put that label on — and a check's
-//! stdout is a document this controller then writes into a custom resource's
-//! status and, through it, into the API and the UI.
+//! `batch.kubernetes.io/job-name` is set by the Job controller and also by
+//! anything that can create a pod in the namespace, and a check's stdout is a
+//! document this controller writes into a status and, through it, into the API
+//! and the UI. So the label is a **selector** and never a **decision**: it
+//! narrows the list (a Job's pod name cannot be known in advance), and every
+//! candidate is then checked against the Job's own `metadata.uid` through its
+//! controller `ownerReference`.
 //!
-//! So the label is a **selector** and never a **decision**: the list is
-//! narrowed with it, because a Job's pod name is generated and cannot be known
-//! in advance, and then every candidate is checked against the Job's own
-//! `metadata.uid` through its controller `ownerReference`.
-//!
-//! # WHAT THE OWNER CHECK ACTUALLY ESTABLISHES, SAID EXACTLY
+//! # What the owner check establishes
 //!
 //! `ownerReferences` is **ordinary metadata written by whoever creates the
 //! pod**. The API server does not check that the named owner exists, that the
@@ -23,42 +19,34 @@
 //! chain, and where it is enabled it checks `delete` on the owner, never the
 //! UID. `pod.metadata.uid` is unforgeable; `ownerReferences[].uid` is not.
 //!
-//! What the check buys is therefore a **raised bar, not a proof**: from
-//! "anybody who can create a pod in this namespace" to "anybody who can create
-//! a pod **and** read the Job's `metadata.uid`". That is a real reduction —
-//! the label is guessable from the object's name, the UID is not — and it is
-//! the whole of it.
+//! The check is therefore a **raised bar, not a proof**: from "anybody who can
+//! create a pod in this namespace" to "anybody who can create a pod **and**
+//! read the Job's `metadata.uid`" (the label is guessable from the name, the
+//! UID is not).
 //!
-//! Which is why ambiguity is refused rather than ranked. `backoffLimit: 0`
-//! plus `restartPolicy: Never` ([`crate::job`]) means the job controller
-//! CANNOT produce two pods for one Job, so a second claimant is illegitimate
-//! by construction — and a forged one is by construction the newer, so a
-//! newest-wins tie-break would decide every contest in the planter's favour.
-//! [`claimants`] therefore reads NOTHING when more than one pod claims the
-//! Job, and the reconcilers turn that into a named terminal state. The
-//! operator-side control that closes the residual is in `docs/kubernetes.md`
+//! So ambiguity is refused rather than ranked. `backoffLimit: 0` plus
+//! `restartPolicy: Never` ([`crate::job`]) means the job controller cannot
+//! produce two pods for one Job, so a second claimant is illegitimate, and a
+//! forged one is by construction the newer: a newest-wins tie-break would hand
+//! every contest to the planter. [`claimants`] reads nothing when more than one
+//! pod claims the Job, and the reconcilers turn that into a named terminal
+//! state. The operator-side control for the residual is in `docs/kubernetes.md`
 //! §10: do not grant pod-create in a namespace where runs execute.
 //!
-//! **There is no legacy-label fallback here.** The execution paths try
-//! `batch.kubernetes.io/job-name` and then the unprefixed `job-name`, because
-//! they must work on a 1.29 cluster that has not backfilled the prefixed one
-//! ([`crate::controllers::backup::pod_selectors`]). New code does not need
-//! that: `batch.kubernetes.io/job-name` has been set since 1.27, which is below
-//! this project's floor, and a second selector is a second chance for a foreign
-//! pod to be considered at all.
+//! **No legacy-label fallback here.** The execution paths also try the
+//! unprefixed `job-name` for a 1.29 cluster that has not backfilled the
+//! prefixed one ([`crate::controllers::backup::pod_selectors`]). The check
+//! framework does not need it (`batch.kubernetes.io/job-name` is set since
+//! 1.27, below this project's floor), and a second selector is a second chance
+//! for a foreign pod to be considered.
 //!
-//! # ONE IMPLEMENTATION, FOUR CALLERS (defect `SEC-PODLOG`)
+//! # One selection rule
 //!
-//! The three execution controllers — `Backup`, `Restore` and `KafkaCluster` —
-//! used to select their run's pod by label alone and take the first result, or
-//! (on the `Backup` side) fall back to the first pod with no Job owner at all.
-//! Both shapes read a stranger's log. They now call
-//! [`find_owned_pod_by_selectors`], which is this module's [`find_owned_pod`]
-//! with the selector list as a parameter, so the *selection rule* lives in
-//! exactly one function and only the *selectors* differ between the check
-//! framework (one, prefixed) and the execution paths (two, prefixed then
-//! legacy). A fifth caller that wants a different narrowing passes a different
-//! selector list; it does not get a different notion of ownership.
+//! The execution controllers (`Backup`, `Restore`, `KafkaCluster`) and the
+//! check framework all call [`find_owned_pod_by_selectors`], so the selection
+//! rule lives in one function and only the selectors differ. A caller that
+//! wants a different narrowing passes a different selector list; it does not
+//! get a different notion of ownership.
 
 use std::collections::BTreeSet;
 
@@ -72,7 +60,7 @@ use logweir_core::check_contract::CheckCode;
 
 use crate::controllers::backup::JOB_NAME_LABEL;
 
-/// The ONE selector a check's pod is listed with.
+/// The one selector a check's pod is listed with.
 #[must_use]
 pub fn pod_selector(job_name: &str) -> String {
     format!("{JOB_NAME_LABEL}={job_name}")
@@ -80,31 +68,27 @@ pub fn pod_selector(job_name: &str) -> String {
 
 /// The `apiVersion` a `batch/v1` Job's owner reference carries.
 ///
-/// `Job` IS NOT A `batch/v1`-EXCLUSIVE KIND. `volcano.sh/v1alpha1`,
-/// `kubeflow.org/v1` and others ship a `Job` too, and a bare `kind == "Job"`
-/// test would adopt a pod controlled by one of them on a UID collision. The
-/// group costs one string comparison, so there is no reason to leave the
-/// `kind` half of the check narrower than the object it names.
+/// `Job` is not a `batch/v1`-exclusive kind (`volcano.sh/v1alpha1`,
+/// `kubeflow.org/v1` and others ship one), and a bare `kind == "Job"` test
+/// would adopt a pod controlled by one of them on a UID collision.
 pub const JOB_API_VERSION: &str = "batch/v1";
 
 /// Whether this pod's **controller** owner reference is the Job with this UID.
 ///
-/// All four conditions, and each one matters:
+/// All four conditions matter:
 ///
-/// * `api_version == "batch/v1"` — see [`JOB_API_VERSION`];
-/// * `kind == "Job"` — a pod owned by a `ReplicaSet` that happens to share a
+/// * `api_version == "batch/v1"`: see [`JOB_API_VERSION`];
+/// * `kind == "Job"`: a pod owned by a `ReplicaSet` that happens to share a
 ///   UID string is not this Job's pod;
-/// * `uid == job_uid` — the API-server-minted identity of the JOB, not the
-///   name, which a deleted-and-recreated Job reuses;
-/// * `controller == Some(true)` — a pod may carry several owner references and
-///   only one of them is the controller. A non-controller reference is an
-///   association somebody else made, and adopting on it is how a pod with an
-///   added `ownerReferences` entry gets its stdout read.
+/// * `uid == job_uid`: the Job's API-server-minted identity, not the name,
+///   which a deleted-and-recreated Job reuses;
+/// * `controller == Some(true)`: a non-controller reference is an association
+///   somebody else made, and adopting on it is how a pod with an added
+///   `ownerReferences` entry gets its stdout read.
 ///
-/// **This is a narrowing, not a proof.** The whole reference is written by
-/// whoever created the pod; see the module header for what the check does and
-/// does not establish, and [`claimants`] for why a second claimant is refused
-/// rather than ranked.
+/// **A narrowing, not a proof**: the whole reference is written by whoever
+/// created the pod (see the module header, and [`claimants`] for why a second
+/// claimant is refused rather than ranked).
 #[must_use]
 pub fn is_owned_by_job(pod: &Pod, job_uid: &str) -> bool {
     pod.meta()
@@ -122,11 +106,8 @@ pub fn is_owned_by_job(pod: &Pod, job_uid: &str) -> bool {
 
 /// Split a listing into the pods this Job owns and the pods it does not.
 ///
-/// PURE, and returning BOTH halves rather than filtering: a foreign pod that
-/// carries the Job's label is a fact worth logging as
-/// [`CheckCode::ForeignPodIgnored`], and a function that silently dropped it
-/// would leave the operator of a namespace where that happened with nothing to
-/// look at.
+/// Pure, and returning both halves rather than filtering: a foreign pod that
+/// carries the Job's label is worth logging as [`CheckCode::ForeignPodIgnored`].
 #[must_use]
 pub fn partition_by_owner<'a>(pods: &'a [Pod], job_uid: &str) -> (Vec<&'a Pod>, Vec<&'a Pod>) {
     pods.iter().partition(|p| is_owned_by_job(p, job_uid))
@@ -134,29 +115,18 @@ pub fn partition_by_owner<'a>(pods: &'a [Pod], job_uid: &str) -> (Vec<&'a Pod>, 
 
 /// The newest of a set of pods, by a **total** order.
 ///
-/// # THIS IS NOT HOW A CONTESTED JOB IS RESOLVED, AND IT USED TO BE
+/// **Not how a contested Job is resolved.** An `ownerReference` is
+/// author-written, so a forged second claimant is by construction the newer,
+/// and newest-wins would hand it the contest silently; [`claimants`] refuses
+/// instead. This stays for a caller whose Job can own several pods
+/// (`parallelism > 1` or `backoffLimit > 0`, which this repository does not
+/// create), so that its answer does not depend on the listing order: two
+/// reconciles over one cluster state must not write two exit codes.
 ///
-/// An earlier version of this module handed a multi-claimant listing to this
-/// function. That is a security bug and the review found it (**R1**): an
-/// `ownerReference` is author-written, so a tenant who can read the Job's UID
-/// can mint a second "owned" pod, and the forged one is **by construction the
-/// newer** — newest-wins decides every contest for the planter, silently, with
-/// no `ForeignPodIgnored` line because the pod passed the check. With
-/// `backoffLimit: 0` a second claimant cannot be legitimate, so [`claimants`]
-/// refuses instead of ranking.
-///
-/// It stays, exercised and documented, for a caller whose Job genuinely can
-/// own several pods (a `parallelism > 1` or `backoffLimit > 0` Job this
-/// repository does not create today). Such a caller gets an answer that does
-/// not depend on the order the API server returned the listing in — a
-/// selection that varied between two reconciles over one cluster state would
-/// write two different exit codes onto one object.
-///
-/// The order: **newest by `metadata.creationTimestamp`**, then the lexically
-/// greatest `metadata.name`, because a `Time` is second-granular and a tie is
-/// therefore not exotic. A pod with no creation timestamp sorts below every
-/// pod that has one — the API server always sets it, so its absence means a
-/// fabricated object, and a fabricated object does not win a tie-break.
+/// The order: newest `metadata.creationTimestamp`, then the lexically greatest
+/// `metadata.name` (a `Time` is second-granular, so ties happen). A pod with no
+/// creation timestamp sorts below every pod that has one: the API server always
+/// sets it, so its absence means a fabricated object.
 #[must_use]
 pub fn newest<'a>(pods: &[&'a Pod]) -> Option<&'a Pod> {
     pods.iter().copied().max_by(|a, b| {
@@ -168,10 +138,9 @@ pub fn newest<'a>(pods: &[&'a Pod]) -> Option<&'a Pod> {
 
 /// What one listing said about a Job's pod.
 ///
-/// Three outcomes, and they are NOT two: "nobody claims this Job" and "several
-/// do" are different facts about a namespace and the reconcilers report them
-/// differently — the first is an ordinary `NoExitCode`, the second is
-/// `PodOwnershipContested` and something an operator has to look at.
+/// "Nobody claims this Job" and "several do" are different facts: the first is
+/// an ordinary `NoExitCode`, the second is `PodOwnershipContested` and needs an
+/// operator.
 #[derive(Debug, Default)]
 pub struct Claimants<'a> {
     /// The pod to read: `Some` **only** when exactly one pod claimed the Job.
@@ -185,24 +154,19 @@ pub struct Claimants<'a> {
 
 /// Split one listing into the Job's pod, the rival claimants, and the rest.
 ///
-/// PURE, and returning all three groups rather than an `Option`: every pod
-/// that wore the label and was not read is a fact worth logging as
-/// [`CheckCode::ForeignPodIgnored`], and a function that silently dropped them
-/// would leave the operator of the namespace where it happened with nothing to
-/// look at — which is how `SEC-PODLOG` stayed invisible.
+/// Pure, and returning all three groups: every pod that wore the label and was
+/// not read is worth logging as [`CheckCode::ForeignPodIgnored`].
 ///
-/// # FAIL CLOSED ON AMBIGUITY
+/// # Fail closed on ambiguity
 ///
-/// `> 1` claimant ⇒ `owned: None`. A Job built by [`crate::job::build`] pins
-/// `backoffLimit: 0` and `restartPolicy: Never`, so the job controller cannot
-/// produce a second pod for it; a second claimant is therefore either a forged
-/// `ownerReferences` entry or a cluster state this code has never been
-/// designed against, and neither is something to read a run's exit code out
-/// of. See [`newest`] for the ranking this deliberately does not do.
+/// More than one claimant means `owned: None`. A Job built by
+/// [`crate::job::build`] pins `backoffLimit: 0` and `restartPolicy: Never`, so
+/// a second claimant is a forged `ownerReferences` entry or a state this code
+/// was not designed for, and neither is something to read an exit code out of.
 ///
-/// A pod that FAILS [`is_owned_by_job`] is not a claimant and cannot contest
-/// the Job — otherwise anyone able to set the label could shut every run in
-/// the namespace down.
+/// A pod that fails [`is_owned_by_job`] is not a claimant and cannot contest
+/// the Job; otherwise anyone able to set the label could stop every run in the
+/// namespace.
 #[must_use]
 pub fn claimants<'a>(pods: &'a [Pod], job_uid: &str) -> Claimants<'a> {
     let (owned, foreign) = partition_by_owner(pods, job_uid);
@@ -227,18 +191,16 @@ pub fn claimants<'a>(pods: &'a [Pod], job_uid: &str) -> Claimants<'a> {
 
 /// The pod a check Job produced, or `None`.
 ///
-/// The check framework has no per-kind terminal-state vocabulary to put a
-/// contested Job into, so it collapses [`FoundPod::contested`] into `None` —
-/// the same fail-closed answer, minus the named condition the three execution
-/// reconcilers write. The claimants are still logged.
+/// The check framework has no per-kind terminal state for a contested Job, so
+/// it collapses [`FoundPod::contested`] into `None` (still fail-closed) and
+/// logs the claimants.
 ///
 /// # Errors
 ///
-/// [`kube::Error`] from the `list`. A pod that is present but not owned is not
-/// an error: it is `Ok(None)` plus a logged [`CheckCode::ForeignPodIgnored`],
-/// because "the Job has not produced its pod yet", "somebody else's pod wears
-/// this label" and "two pods claim this Job" are all states a reconciler
-/// continues from.
+/// [`kube::Error`] from the `list`. A present but unowned pod is `Ok(None)`
+/// plus a logged [`CheckCode::ForeignPodIgnored`]: "not produced yet",
+/// "somebody else's pod wears this label" and "two pods claim this Job" are
+/// all states a reconciler continues from.
 pub async fn find_owned_pod(
     client: &kube::Client,
     namespace: &str,
@@ -258,42 +220,34 @@ pub async fn find_owned_pod(
 
 /// What [`find_owned_pod_by_selectors`] found.
 ///
-/// A struct rather than an enum so `Pod`'s size does not have to be boxed, and
-/// so a caller that only wants the pod can take `.pod` without a `match` that
-/// would silently keep compiling after a new variant was added.
+/// A struct rather than an enum so `Pod` need not be boxed and a caller can
+/// take `.pod` without a `match`.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct FoundPod {
     /// The pod to read, `Some` only when exactly one pod claimed the Job.
     pub pod: Option<Pod>,
-    /// The NAMES of the pods that claimed the Job when more than one did,
-    /// in listing order. Non-empty means **refuse**: `pod` is `None`, nothing
-    /// may be read, and the caller writes a named terminal state rather than
-    /// the ordinary "no pod yet".
+    /// The names of the pods that claimed the Job when more than one did, in
+    /// listing order. Non-empty means **refuse**: `pod` is `None`, nothing may
+    /// be read, and the caller writes a named terminal state.
     pub contested: Vec<String>,
 }
 
 /// [`find_owned_pod`] with the narrowing selectors as a parameter.
 ///
-/// The selectors are tried **in order and only until one of them settles the
-/// question**: a listing that answers with nothing, or with nothing owned,
-/// falls through to the next; a listing with one claimant or several stops
-/// there, because a second selector over the same namespace cannot un-contest
-/// a contested Job. That is what lets the execution controllers pass
-/// `[batch.kubernetes.io/job-name=<job>, job-name=<job>]` and the check
-/// framework pass the prefixed one alone, off one selection rule.
+/// The selectors are tried in order until one settles the question: a listing
+/// with nothing owned falls through to the next; one with one claimant or
+/// several stops there, because a second selector cannot un-contest a Job.
 ///
-/// `job_uid` is an `Option` because a caller holds a `Job` it read from the API
-/// server and `metadata.uid` is optional in the type. `None` is **not** a
-/// licence to fall back to the label: nothing can be proved to belong to a Job
-/// with no identity, so nothing is adopted and nothing is even listed.
+/// `job_uid` is an `Option` because `metadata.uid` is optional in the type.
+/// `None` is **not** a licence to fall back to the label: nothing can be proved
+/// to belong to a Job with no identity, so nothing is listed or adopted.
 ///
 /// # Errors
 ///
-/// [`kube::Error`] from any of the `list` calls. Unowned candidates are not an
-/// error — they are an empty `pod` and a logged [`CheckCode::ForeignPodIgnored`]
-/// per distinct pod name, once across all selectors rather than once per
-/// listing, because on a 1.29 cluster both labels are set and the same
-/// impostor would otherwise be reported twice.
+/// [`kube::Error`] from any `list`. Unowned candidates are an empty `pod` and
+/// one logged [`CheckCode::ForeignPodIgnored`] per distinct pod name across all
+/// selectors (on a 1.29 cluster both labels are set, and one impostor would
+/// otherwise be reported twice).
 pub async fn find_owned_pod_by_selectors(
     client: &kube::Client,
     namespace: &str,
@@ -302,9 +256,8 @@ pub async fn find_owned_pod_by_selectors(
     selectors: &[String],
 ) -> Result<FoundPod, kube::Error> {
     let Some(job_uid) = job_uid else {
-        // A Job with no UID did not come from the API server. Nothing can be
-        // proved to belong to it, so nothing is adopted — and the pod list is
-        // not even read, because there is no question a listing could answer.
+        // A Job with no UID did not come from the API server: nothing can be
+        // proved to belong to it, so the pod list is not even read.
         warn!(
             job = %job_name,
             namespace = %namespace,
@@ -325,10 +278,8 @@ pub async fn find_owned_pod_by_selectors(
         ignored.extend(seen.foreign.iter().map(|p| p.name_any()));
         if !seen.contested.is_empty() {
             let names: Vec<String> = seen.contested.iter().map(|p| p.name_any()).collect();
-            // EVERY CLAIMANT IS REPORTED, including the one a newest-wins
-            // tie-break would have chosen: which of them is the real runner
-            // pod is exactly what this controller cannot tell, and naming one
-            // would suggest otherwise.
+            // Every claimant is reported: which one is the real runner pod is
+            // exactly what this controller cannot tell.
             ignored.extend(names.iter().cloned());
             warn!(
                 job = %job_name,

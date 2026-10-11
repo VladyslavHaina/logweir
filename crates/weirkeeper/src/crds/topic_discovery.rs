@@ -1,4 +1,4 @@
-//! `TopicDiscovery` — one bounded, time-limited observation of the topics a
+//! `TopicDiscovery`: one bounded, time-limited observation of the topics a
 //! saved connection can see.
 //!
 //! # A request, not a cache (ADR 0008 Amendment F)
@@ -11,13 +11,13 @@
 //!
 //! # Why the spec is split into `request` and `cancelRequested`
 //!
-//! `spec.request` is a REQUIRED object, so a transition rule attached to it is
-//! evaluated on every update. That is what closes the absent → present hole
-//! [`super::backup_schedule`]'s module header measures: a per-field
-//! `self == oldSelf` on an OPTIONAL field never fires, and `optionalOldSelf`
-//! is 1.30+, above the 1.29 floor. One rule on the required sub-object
-//! therefore seals the whole request, and `cancelRequested` — the one thing an
-//! operator may change — sits outside it with a monotonic rule of its own.
+//! `spec.request` is a required object, so a transition rule on it is
+//! evaluated on every update, closing the absent → present hole
+//! [`super::backup_schedule`]'s module header describes (a per-field
+//! `self == oldSelf` on an optional field never fires, and `optionalOldSelf`
+//! is 1.30+, above the 1.29 floor). One rule seals the whole request, and
+//! `cancelRequested`, the one thing an operator may change, sits outside it
+//! with a monotonic rule of its own.
 //!
 //! # The name is unconstrained, deliberately
 //!
