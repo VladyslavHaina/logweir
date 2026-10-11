@@ -185,10 +185,6 @@ impl ApprovalSubject {
     /// legal present value is `originalName`. Anything else is refused rather
     /// than read as either: a subject this build does not know is a subject
     /// whose meaning it cannot enforce.
-    ///
-    /// # Errors
-    ///
-    /// A sentence naming the value.
     pub fn from_wire(value: Option<&str>) -> Result<Self, String> {
         match value {
             None => Ok(Self::Ordinary),

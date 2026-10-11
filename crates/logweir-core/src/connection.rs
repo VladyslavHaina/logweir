@@ -408,10 +408,6 @@ impl std::error::Error for CredentialBindingRefusal {}
 /// the evidence location of an inline restore, or two destinations, without a
 /// copy. A single binding — everything the console writes — reads exactly as
 /// before.
-///
-/// # Errors
-///
-/// [`CredentialBindingRefusal`].
 pub fn check_credential_binding(
     binding_env: &'static str,
     expected: Option<&str>,

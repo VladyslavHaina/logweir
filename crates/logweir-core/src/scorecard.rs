@@ -3980,7 +3980,6 @@ mod tests {
         // `matching != sampled` under a `pass`). `records_expected` moves with
         // `records_sampled` so the coverage arm cannot be the reason the
         // document is refused. Python sibling:
-        // document is refused. Python sibling:
         // `docs/test_verify_scorecard.py::test_more_matching_records_than_sampled_is_refused`.
         let mut sc = valid_scorecard();
         sc.integrity.records_sampled = 50;

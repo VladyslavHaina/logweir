@@ -3500,7 +3500,6 @@ mod version_read_tests {
     /// MinIO's `404 NoSuchKey` for `key` in `bucket`, in the words
     /// `object_store` 0.14.1 hands over: the retry error's request line with
     /// the URL, the status line, and MinIO's body with its `<Key>`,
-    /// `<BucketName>` and `<Resource>` (captured on the compose stack by
     /// `<BucketName>` and `<Resource>` (captured on the compose stack; the ids
     /// are placeholders).
     fn minio_no_such_key(bucket: &str, key: &str) -> object_store::Error {

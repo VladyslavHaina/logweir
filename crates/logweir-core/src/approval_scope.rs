@@ -724,10 +724,6 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
 /// held them to the Restore and the policy
 /// ([`crate::approval_policy::check_request_binding`]); this function does
 /// not, and reads nothing else.
-///
-/// # Errors
-///
-/// [`ScopeIncomplete`].
 pub fn approval_scope(
     request: &RestoreAuthorization,
     plan_bytes: &[u8],

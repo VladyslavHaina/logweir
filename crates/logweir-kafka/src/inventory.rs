@@ -378,15 +378,9 @@ pub struct TopicCreateOutcome {
 /// what [`KafkaInventory`] is built with.
 pub trait InventoryProbe {
     /// `rd_kafka_clusterid`. `None` when the broker named none.
-    ///
-    /// # Errors
-    /// [`CheckFailure`] with a Kafka code.
     fn cluster_id(&self) -> Result<Option<String>, CheckFailure>;
 
     /// All-topics metadata, plus the broker count off the same response.
-    ///
-    /// # Errors
-    /// [`CheckFailure`] with a Kafka code.
     fn list_topics(&self) -> Result<Listing, CheckFailure>;
 
     /// Metadata for ONE name: the probe that can distinguish
@@ -399,16 +393,10 @@ pub trait InventoryProbe {
     fn describe_topic(&self, name: &str) -> Result<TopicPresence, CheckFailure>;
 
     /// `DescribeConfigs` on a topic resource.
-    ///
-    /// # Errors
-    /// [`CheckFailure`] with a Kafka code.
     fn topic_configs(&self, name: &str) -> Result<BTreeMap<String, String>, CheckFailure>;
 
     /// `DescribeConfigs` on the first broker metadata names, for
     /// `target.timestampBound`, whose unknown code is `BrokerConfigsNotReadable`.
-    ///
-    /// # Errors
-    /// [`CheckFailure`] with a Kafka code.
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, CheckFailure>;
 
     /// `CreateTopics` with `validate_only = true`.
@@ -1086,9 +1074,6 @@ mod client {
         }
 
         /// Run one `topicInventory` against this connection.
-        ///
-        /// # Errors
-        /// As [`super::collect`].
         pub fn inventory(
             &self,
             request: &InventoryRequest,

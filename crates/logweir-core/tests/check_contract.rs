@@ -1,4 +1,4 @@
-//! The pure check contract (decision D2 §4.1): plan, frames, codes, redaction,
+//! The pure check contract: plan, frames, codes, redaction,
 //! visibility and the binding digest.
 //!
 //! The redaction section is written as a MUTANT HARNESS rather than as a list
@@ -32,8 +32,6 @@ use std::collections::BTreeMap;
 fn t(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
-
-// ------------------------------------------------------------- vocabularies
 
 /// Every code must be usable verbatim as a `metav1.Condition.reason`, which
 /// Kubernetes validates against `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`
@@ -81,14 +79,13 @@ fn the_code_table_is_closed_and_round_trips() {
     assert!(serde_json::from_str::<CheckCode>("\"NotACode\"").is_err());
 }
 
-/// **FX-47 (PROD-01.2's P15): an older controller is never sent a code it
-/// cannot read.** The vocabulary is closed on the reading side, so one unknown
-/// code makes a controller refuse the whole result (`ResultUnreadable`). The
-/// only sign a runner has that the controller is newer is a plan that lists
-/// `capabilityChecks`. So every code added since the last controller that
-/// sends none (main before PROD-01.2's merge, 168 codes) is either answered
-/// only on a capability row, which such a plan never asks for, or has a code
-/// from those 168 that a plan without the list gets instead
+/// **An older controller is never sent a code it cannot read.** The vocabulary
+/// is closed on the reading side, so one unknown code makes a controller refuse
+/// the whole result (`ResultUnreadable`), and the only sign a runner has that
+/// the controller is newer is a plan that lists `capabilityChecks`. So every
+/// code added since the oldest controller that sends none (168 codes) is either
+/// answered only on a capability row, which such a plan never asks for, or has
+/// a code from those 168 that a plan without the list gets instead
 /// (`TimestampBoundNotReported` → `BrokerConfigsNotReadable`, pinned by
 /// `crates/logweir/tests/check_cli.rs::a_broker_answer_without_the_timestamp_bound_is_unknown_never_no_bound`).
 /// A new code fails here until it is listed below as one or the other.
@@ -203,7 +200,7 @@ fn every_check_id_has_a_category_and_round_trips() {
     assert_eq!(CheckId::parse("connection.nope"), None);
 }
 
-/// D2 §4.3 derives the check Job name from these; two kinds sharing a
+/// The check Job name derives from these; two kinds sharing a
 /// discriminator would collide two Jobs onto one name.
 #[test]
 fn plan_kind_discriminators_are_distinct() {
@@ -218,8 +215,6 @@ fn plan_kind_discriminators_are_distinct() {
     assert_eq!(CheckPlanKind::SourceConnection.job_discriminator(), "sc");
     assert_eq!(CheckPlanKind::SourceConnection.as_str(), "sourceConnection");
 }
-
-// ---------------------------------------------------------------- the plan
 
 fn connection() -> ConnectionPlan {
     ConnectionPlan {
@@ -281,7 +276,7 @@ fn plan_bytes(p: &CheckPlan) -> Vec<u8> {
     serde_json::to_vec(p).unwrap()
 }
 
-/// D2 §4.2's startup order, steps 3 and 4, as one function: a plan whose
+/// The runner's startup order, steps 3 and 4, as one function: a plan whose
 /// bytes, contract, version or subject UID do not match what the Job env pins
 /// is refused BEFORE any client is built. The refusal carries
 /// `CheckContractMismatch` and nothing else.
@@ -484,7 +479,7 @@ fn access_plan_with(
     }
 }
 
-/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL: the `evidenceWrite` grant rides
+/// The `evidenceWrite` grant rides
 /// ONLY on a plan that will use it, names exactly one reference, and names it
 /// as a Kubernetes object name. Every refusal here is a controller bug the
 /// runner refuses in step 4 (exit 3) rather than acts on.
@@ -573,9 +568,9 @@ fn an_evidence_write_grant_rides_only_on_a_plan_that_writes_the_marker() {
     assert!(readiness(false, Some(secret)).validate().is_err());
 }
 
-/// The class sweep's contract half: an `evidenceRead` grant rides only on a
-/// plan that requests `EvidenceRead`, a grant no pod holds names nothing, and
-/// an `evidenceWrite` grant can never be one no pod holds.
+/// An `evidenceRead` grant rides only on a plan that requests `EvidenceRead`, a
+/// grant no pod holds names nothing, and an `evidenceWrite` grant can never be
+/// one no pod holds.
 ///
 /// MUTANT RP-9 (`check_contract.rs`): drop the `EvidenceRead` role clause
 /// from `validate_evidence_read`. The first refusal below starts validating.
@@ -676,7 +671,7 @@ fn an_absent_evidence_write_grant_is_not_serialised_and_an_unknown_one_is_refuse
     );
 }
 
-/// FX-20c: `grantBindings` is absent from a plan that lists none (so every
+/// `grantBindings` is absent from a plan that lists none (so every
 /// such plan is byte-identical to an earlier controller's), names a role and a
 /// Secret and nothing else, rides only on the three readiness kinds, and names
 /// each role once per request. `compares_grant_bindings` — the predicate the
@@ -788,7 +783,7 @@ fn grant_bindings_are_references_on_readiness_plans_only_and_one_per_role() {
     assert!(!fetch.request.compares_grant_bindings());
 }
 
-/// **PROD-01.2: `capabilityChecks` lists capability rows of its own
+/// **`capabilityChecks` lists capability rows of its own
 /// operation, once each, never a skipped one, and is absent when empty.**
 ///
 /// * The vocabulary: the four capability ids are exactly the union of what
@@ -807,7 +802,7 @@ fn grant_bindings_are_references_on_readiness_plans_only_and_one_per_role() {
 #[test]
 fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped() {
     use logweir_core::check_contract::{capability_checks_for, CAPABILITY_CHECKS};
-    // --- the vocabulary ----------------------------------------------------
+    // The vocabulary.
     let union: std::collections::BTreeSet<CheckId> = [
         CheckOperation::Backup,
         CheckOperation::Restore,
@@ -838,7 +833,7 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
     assert!(capability_checks_for(CheckOperation::SourceConnection).is_empty());
     assert!(capability_checks_for(CheckOperation::DestinationAccess).is_empty());
 
-    // --- the readiness kind --------------------------------------------------
+    // The readiness kind.
     let readiness =
         |operation: CheckOperation, listed: Vec<CheckId>, skipped: Vec<CheckId>| CheckPlan {
             request: CheckRequest::OperationReadiness(Box::new(OperationReadinessRequest {
@@ -944,7 +939,7 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
     .validate()
     .expect("the restore operation's own row");
 
-    // --- the restore preflight ----------------------------------------------
+    // The restore preflight.
     let restore = |listed: Vec<CheckId>| CheckPlan {
         request: CheckRequest::RestorePreflight(Box::new(
             logweir_core::check_contract::RestorePreflightRequest {
@@ -1036,8 +1031,6 @@ fn a_source_connection_plan_carries_a_connection_and_nothing_else() {
     plan.timeout_seconds = 600;
     assert!(plan.validate().is_ok());
 }
-
-// ------------------------------------------------------------------ frames
 
 fn expectations(plan_sha: &str, uid: &str) -> FrameExpectations {
     FrameExpectations {
@@ -1132,7 +1125,7 @@ fn frames_round_trip_topics_and_streams() {
     );
 }
 
-/// The framework tests D2 §12 names: a missing end line, a wrong plan digest
+/// The framework cases: a missing end line, a wrong plan digest
 /// and a part-digest mismatch are all `ResultUnreadable`, WITHOUT log content.
 #[test]
 fn a_broken_relay_is_result_unreadable() {
@@ -1197,10 +1190,8 @@ fn a_broken_relay_is_result_unreadable() {
 }
 
 /// The count and the digest are TWO guards, and each catches a case the other
-/// cannot. Asserted separately so neither can be deleted as "redundant": the
-/// first mutant round for this file found that disabling the count check alone
-/// left every other test green, because every case they shared was also a
-/// digest change.
+/// cannot. Asserted separately so neither can be deleted as "redundant":
+/// disabling the count check alone otherwise leaves every other test green.
 #[test]
 fn the_topic_count_and_the_topic_digest_are_separate_guards() {
     let topics = vec![TopicEntry::new("orders", 3)];
@@ -1246,7 +1237,7 @@ fn the_topic_count_and_the_topic_digest_are_separate_guards() {
 }
 
 /// Non-frame lines are IGNORED, so the same decoder serves the `KafkaCluster`
-/// probe, which prints its own I14 lines on the same stdout (D2 §4.5).
+/// probe, which prints its own I14 lines on the same stdout.
 #[test]
 fn non_frame_lines_are_ignored() {
     let topics = vec![TopicEntry::new("orders", 3)];
@@ -1301,7 +1292,7 @@ fn an_empty_stream_is_not_an_absent_stream() {
     assert!(relay.end.topic_lines.is_none());
 }
 
-/// PLAT-09.1's "large catalog", at the frame layer: 50,000 entries round-trip
+/// A large catalog at the frame layer: 50,000 entries round-trip
 /// and the digest is over the canonical TSV.
 #[test]
 fn topic_lines_roundtrip_50000() {
@@ -1369,9 +1360,7 @@ fn a_part_that_is_not_base64_is_refused() {
     assert!(relay_of(&lines, &expectations("sha256:plan", "uid-1")).is_err());
 }
 
-// ------------------------------------------------------------- internal rule
-
-/// D2 §5.3: `__` and nothing else. `_schemas` and `_confluent-*` have
+/// `__` and nothing else. `_schemas` and `_confluent-*` have
 /// CONFIGURABLE names, and guessing them would silently drop user data from a
 /// backup — the single most expensive wrong answer this module can give.
 #[test]
@@ -1393,8 +1382,6 @@ fn double_underscore_is_internal() {
         assert!(!TopicEntry::name_is_internal(name), "{name}");
     }
 }
-
-// --------------------------------------------------------------- aggregation
 
 fn outcome(id: CheckId, state: CheckState, gating: Gating) -> CheckOutcome {
     CheckOutcome::new(id, state, gating, Authority::CheckJob, CheckCode::Resolved)
@@ -1463,7 +1450,7 @@ fn aggregation_follows_the_blocking_rules() {
     );
 }
 
-/// D2 §6.3: an execution-only check is ALWAYS `unknown`, whatever a caller
+/// An execution-only check is ALWAYS `unknown`, whatever a caller
 /// asks for. The constructor is the enforcement point, so no call site can
 /// publish a green execution-only check.
 #[test]
@@ -1522,8 +1509,6 @@ fn an_outcome_redacts_its_own_strings() {
     assert!(c.facts["endpoint"].contains("minio.storage.svc"));
 }
 
-// ---------------------------------------------------------------- redaction
-
 /// Each rule, with the mutants that deleting it plants. The harness is the
 /// point: `apply_rules` with the rule REMOVED must leak, and with every rule
 /// present must not. A test that only asserted the second half is satisfied by
@@ -1531,8 +1516,7 @@ fn an_outcome_redacts_its_own_strings() {
 /// asserted the first is satisfied by a redactor that does nothing.
 ///
 /// Several fixtures per rule, so a rule that still fires on ONE shape but has
-/// lost another is caught too — which is how F1 (the JSON form) and F5 (the
-/// second `<Error>` block) got past the first version of this harness.
+/// lost another is caught too.
 #[test]
 fn every_redaction_rule_has_a_mutant_that_leaks() {
     // (rule, [(input, the witness the rule removes)])
@@ -1551,7 +1535,7 @@ fn every_redaction_rule_has_a_mutant_that_leaks() {
                     "<Error><Code>AccessDenied</Code><Message>arn:aws:iam::12345:user/backup is not authorized</Message><RequestId>17C3</RequestId></Error>",
                     "not authorized",
                 ),
-                // F5: the SECOND block. A rule that handles only the first
+                // The SECOND block. A rule that handles only the first
                 // still passes the row above.
                 (
                     "<Error><Code>AccessDenied</Code></Error><Error><Code>NoSuchKey</Code><Message>and the second body survives</Message></Error>",
@@ -1570,7 +1554,7 @@ fn every_redaction_rule_has_a_mutant_that_leaks() {
             "secret-key-value",
             &[
                 ("sasl.password=sw0rdf1sh and the broker refused", "sw0rdf1sh"),
-                // F1: the JSON form, with a value short enough that the
+                // The JSON form, with a value short enough that the
                 // long-run rule cannot stand in for this one.
                 (r#"admission webhook denied: {"password":"sw0rdf1sh"}"#, "sw0rdf1sh"),
                 (r#"{"aws_secret_access_key": "sw0rdf1sh"}"#, "sw0rdf1sh"),
@@ -1654,12 +1638,10 @@ fn redaction_caps_at_512_characters_without_splitting_a_character() {
     assert_eq!(redact(short), short);
 }
 
-/// **F1.** Every value form of D2 §4.1, in every quoting and spacing shape a
-/// real error uses. The JSON and quoted-key rows are the finding: the first
-/// version of the scanner skipped only spaces and tabs after the keyword and
-/// then required a separator, so the `"` between the two abandoned the match
-/// and the value was copied verbatim. W5 relays an admission-webhook or
-/// API-server body — JSON — through `redact` into a status message.
+/// Every value form, in every quoting and spacing shape a real error uses. The
+/// JSON and quoted-key rows matter most: a relayed admission-webhook or
+/// API-server body is JSON, and a scanner that skipped only spaces after the
+/// keyword would copy the value verbatim.
 #[test]
 fn the_secret_keyword_forms_are_all_caught() {
     let cases = [
@@ -1677,7 +1659,7 @@ fn the_secret_keyword_forms_are_all_caught() {
         // whitespace-only separator (argv)
         "--token hunter2",
         "token=hunter2,region=us",
-        // JSON and quoted-key YAML — the F1 rows
+        // JSON and quoted-key YAML.
         r#"broker config rejected: {"password":"hunter2","user":"alice"}"#,
         r#"{"aws_secret_access_key": "hunter2"}"#,
         r#"{"sasl.password" : "hunter2"}"#,
@@ -1709,16 +1691,15 @@ fn the_secret_keyword_forms_are_all_caught() {
     assert_eq!(redact("the tokenizer failed"), "the tokenizer failed");
     assert_eq!(redact("password_file=/etc/x"), "password_file=/etc/x");
 
-    // D2 §6.5: a Secret NAME and a key name are public references and must
+    // A Secret NAME and a key name are public references and must
     // survive. `secret` is the bare keyword, so this is the case that decides
     // its form must be quoted-key only.
     let remedy = "secret `logweir-s3` key `access-key-id` not found";
     assert_eq!(redact(remedy), remedy);
 }
 
-/// **F5.** S3 and MinIO return several `<Error>` elements in one body for
-/// `DeleteObjects` and multipart completion, and the first version replaced
-/// only the first and re-emitted the rest untouched.
+/// S3 and MinIO return several `<Error>` elements in one body for
+/// `DeleteObjects` and multipart completion; every one is reduced to its code.
 #[test]
 fn every_s3_error_block_is_reduced_to_its_code() {
     let body = "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code>\
@@ -1754,11 +1735,10 @@ fn redaction_is_idempotent_and_total() {
         "password=",
         "AKIA",
         "AKIAIOSFODNN7EXAMPL",
-        // D2-REDACT-OVERBROAD, the bracket half. Every published row is
-        // redacted at least twice — `with_message` and again when the
-        // controller renders the entry — and the value scanner used to stop at
-        // the marker's own `]`, rewrite `[redacted` and leave the bracket
-        // behind. Live statuses read `key password [redacted]]] Secret`.
+        // Every published row is redacted at least twice (`with_message`, and
+        // again when the controller renders the entry), so a value that is
+        // already the marker must stay exactly the marker: no extra `]` per
+        // pass.
         "password=hunter2",
         "sasl.password: hunter2",
         r#"{"password":"hunter2"}"#,
@@ -1772,13 +1752,9 @@ fn redaction_is_idempotent_and_total() {
     }
 }
 
-/// **D2-SIGNERID-REDACTED and D2-REDACT-OVERBROAD, the keeping half.**
-///
-/// Each row is a sentence the live D2 run published with the acting part blank
-/// (`d2w14.result.md` §5.3, §5.4; `objects/s14/notready-rows.json`,
-/// `objects/s16/details.jsonl`). The witness is what an operator has to read in
-/// order to do the thing the remedy asks: roster THIS key, recover THIS object,
-/// add THIS key to THAT Secret.
+/// **A public identifier survives redaction.** Each row is a sentence whose
+/// acting part an operator has to read to do what the remedy asks: roster THIS
+/// key, recover THIS object, add THIS key to THAT Secret.
 #[test]
 fn a_public_identifier_survives_redaction() {
     // A SHA-256 of a SubjectPublicKeyInfo DER — a `signerKeyId`, and what the
@@ -1831,13 +1807,9 @@ fn a_public_identifier_survives_redaction() {
             r#"secret "missing-secret" not found"#.to_string(),
             "missing-secret".to_string(),
         ),
-        // **F5**, the exact string the re-verification reported. The set id is
-        // a timestamp, not a UUID, so nothing anchored the run and
-        // `archive.backupSet`'s refusal read `the backup manifest
-        // `[redacted].json``. That is D2-REDACT-OVERBROAD's own symptom in the
-        // one place the tracker names it. THE FIXTURE RUN IS 43 CHARACTERS —
-        // `an_unreadable_manifest_names_the_prefixed_key`'s is 39, one under
-        // the threshold, which is why it could not fail.
+        // The set id is a timestamp, not a UUID, so nothing else anchors the
+        // run, and the run is 43 characters, over the threshold (a 39-character
+        // fixture could not fail).
         (
             "the backup manifest `team/prod/archives/20260915T030000Z/manifest.json` on \
              destination `dest-a` could not be read: AccessDenied"
@@ -1940,13 +1912,13 @@ fn unkeyed_secret_material_is_still_removed() {
         ),
         // … nor a key half longer than a fact name, even when the value half IS
         // a digest. This is the only shape `FACT_KEY_MAX` still guards once the
-        // value half is digests and UUIDs alone (review F2), and without it the
+        // value half is digests and UUIDs alone, and without it the
         // cap has no mutant: M10 lifts it to 4096 and dies here.
         (
             "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b refused",
             "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
         ),
-        // **F5's other half.** The archive structure that makes a run an object
+        // The archive structure that makes a run an object
         // key is not a licence for what sits beside it: a 40-character
         // credential in the adopter-chosen slot is over the free-component cap,
         // and one whose own `/` splits it is two free components.
@@ -1964,11 +1936,11 @@ fn unkeyed_secret_material_is_still_removed() {
             "manifest team/prod/ZZfakefakefakefakefake012/manifest.json refused",
             "ZZfakefakefakefakefake012",
         ),
-        // **F2.** An unkeyed `k=v` whose key name is not on `SECRET_KEYWORDS`.
-        // The fact clause exists for what `entry_of` folds into a message, and
-        // every one of those values is a digest or a UUID; accepting a
-        // lower-case run as the value half let a 32-hex API key ride out under
-        // any name an adopter's tool happens to print.
+        // An unkeyed `k=v` whose key name is not on `SECRET_KEYWORDS`. The fact
+        // clause exists for what `entry_of` folds into a message, and every one
+        // of those values is a digest or a UUID; a lower-case value half would
+        // let a 32-hex API key ride out under any name an adopter's tool
+        // prints.
         (
             "connect datadogapikey=deadbeefcafebabe0123456789abcdef ok",
             "deadbeefcafebabe0123456789abcdef",
@@ -1985,17 +1957,12 @@ fn unkeyed_secret_material_is_still_removed() {
     }
 }
 
-/// **F1, the review's critical finding.** An anchored run is an object key, and
-/// an object key is NOT a licence to carry a credential alongside the anchor.
+/// **An anchored run is an object key, and an object key is NOT a licence to
+/// carry a credential alongside the anchor.**
 ///
-/// `is_public_identifier`'s anchored branch exists so that a segment path whose
-/// topic name carries upper case survives. Its first spelling asked only that
-/// every component be short and `[A-Za-z0-9._=-]`, which the canonical AWS
-/// secret access key satisfies component-by-component: its own `/` characters
-/// split its 40 into 13, 7 and 18. So the moment a backup set id shared the
-/// token run — and a set id immediately precedes archive keys everywhere in
-/// this product's prose — the key was "an object key" and survived whole. That
-/// is a REGRESSION against `b7b7ac6`, which replaced both runs entire.
+/// The canonical AWS secret access key is short and `[A-Za-z0-9._=-]` component
+/// by component (its own `/` characters split its 40 into 13, 7 and 18), so a
+/// set id sharing the token run must not make it "an object key".
 ///
 /// Every probe is checked, and the failures are collected rather than asserted
 /// one at a time, so a mutant that lifts the cap is reported as leaking all
@@ -2009,15 +1976,13 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
     /// The same 40 characters with exactly ONE internal `/`, which is the
     /// densest case: two components, so a cap of two would pass it. The
     /// three-component probes above die at any cap below three and cannot pin
-    /// the number — mutant M23 lifted the cap to two and survived until this
-    /// row existed.
+    /// the number.
     const AWS_ONE_SLASH: &str = "wJalrXUtnFEMIK7MDENGb/PxRfiCYEXAMPLEKEY0";
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
     const DIGEST: &str = "6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b";
 
     let probes: Vec<(&str, String)> = vec![
-        // The reviewer's own probe, verbatim: a set id and the key, nothing
-        // else.
+        // A set id and the key, nothing else.
         ("a set id shares the run", format!("{SET}/{AWS}")),
         // A content digest in the anchor position instead.
         ("a digest shares the run", format!("{DIGEST}/{AWS}")),
@@ -2072,9 +2037,8 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
         leaked.join("\n  ")
     );
 
-    // AND THE SHAPE THE BRANCH EXISTS FOR IS STILL GREEN. A rule that redacted
-    // this too would be `b7b7ac6` again and would take D2-REDACT-OVERBROAD with
-    // it, so the negative half is only half the guard.
+    // AND THE SHAPE THE BRANCH EXISTS FOR IS STILL GREEN, so the negative half
+    // is only half the guard.
     let segment = format!(
         "team/prod/{SET}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
     );
@@ -2085,32 +2049,25 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
     );
 }
 
-/// **CATALOG-RECEIPTKEY-REDACTED.** A run id is an IDENTITY, and the
-/// free-component budget is for adopter free TEXT.
+/// **A run id is an IDENTITY, and the free-component budget is for adopter free
+/// TEXT.**
 ///
-/// REGRESSION REASON. A receipt key is
-/// `<prefix>/<backup_id>/<run_id>.receipt.json`; `.` is not a run character, so
-/// the run the scanner sees is `<prefix>/<backup_id>/<run_id>` — anchored by
-/// the backup set's UUID, with the run id as its one free component. A run id
-/// is a 26-character ULID and `FREE_COMPONENT_MAX` is 24, so the whole run went
-/// and the console read `receiptKey` as `[redacted].receipt.json` while
-/// `receiptSha256` and the location beside it survived. D3 §5.5 step 4 builds
-/// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, so
-/// the redacted key is a plan binding the runner refuses with exit 3
-/// `PointBindingMismatch` — a published field that cannot be used for the one
-/// thing it is published for.
+/// A receipt key is `<prefix>/<backup_id>/<run_id>.receipt.json`; `.` is not a
+/// run character, so the scanner sees `<prefix>/<backup_id>/<run_id>`, anchored
+/// by the set's UUID, with a 26-character ULID run id as its one free
+/// component, two over `FREE_COMPONENT_MAX`. The key is the plan binding
+/// `source.point` carries, so a redacted one is unusable.
 ///
-/// The fix is a SHAPE exemption, not a bigger budget, and the three negative
-/// rows are what pins that: 27 characters still goes, and 26 characters that is
-/// not a ULID still goes. Raising the budget to 26 would pass the first row and
-/// fail the other three.
+/// The fix is a SHAPE exemption, not a bigger budget, and the negative rows pin
+/// that: 27 characters still goes, and 26 characters that is not a ULID still
+/// goes.
 #[test]
 fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
     /// A real run id, as `logweir_core::ids::format_run_id` mints one.
     const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
 
-    // --- the minter's own output is what the exemption is defined against ---
+    // The minter's own output is what the exemption is defined against.
     // A hand-written constant could drift from the encoder; these cannot. The
     // timestamps span the whole 48-bit range the leading character encodes.
     let minted: Vec<String> = [
@@ -2142,7 +2099,7 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
         assert_eq!(redact(&redact(&prose)), prose, "not idempotent");
     }
 
-    // --- and NOTHING the budget refuses became acceptable ------------------
+    // And NOTHING the budget refuses became acceptable.
     // Each of these is the ONE free component of an otherwise perfect archive
     // key, so only the budget and the shape clause can answer for it.
     let refused: Vec<(&str, String)> = vec![
@@ -2188,7 +2145,7 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
         survived.join("\n  ")
     );
 
-    // --- the exemption spends the ONE free slot and does not add one -------
+    // The exemption spends the ONE free slot and does not add one.
     // A ULID is exempt from the LENGTH, never from the count. Anything free
     // beside it is still two free components and the run still goes.
     for beside in ["MyBackupSet01", "payments-EU", "ZZfakefakefakefake"] {
@@ -2205,8 +2162,8 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
         );
     }
 
-    // --- the exemption needs the ANCHOR, not just the shape ----------------
-    // REVIEW MED-1. `is_object_key_shaped` is this clause with the anchor
+    // The exemption needs the ANCHOR, not just the shape.
+    // `is_object_key_shaped` is this clause with the anchor
     // requirement DROPPED, so an exemption that rode on shape alone would make
     // any `<adopter bucket name>/<26 Crockford characters>` a key. The alphabet
     // that mints 26-character tokens is base32, not base64: an unpadded RFC
@@ -2248,7 +2205,7 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
         );
     }
 
-    // --- what did NOT change, so the rows say what they mean ---------------
+    // What did NOT change, so the rows say what they mean.
     // A 26-character all-lower-case component (a hex stem, for instance) was
     // never over the budget: it is a public NAME, and it survived before this
     // exemption and survives after it. The exemption is upper-case only, so it
@@ -2263,24 +2220,16 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
     }
 }
 
-/// **FX-17.** A SCHEDULED run's backup set id is an identity this product
-/// minted, exactly as a UUID is, and it survives — bare and in every key built
-/// from it.
+/// **A SCHEDULED run's backup set id is an identity this product minted,
+/// exactly as a UUID is, and it survives**, bare and in every key built from
+/// it.
 ///
-/// REGRESSION REASON. `weirkeeper::slot::backup_id_for_attempt` mints a
-/// scheduled run's set id as `<schedule uid>-<yyyymmdd>-<hhmmss>`, plus `-r<k>`
-/// for retry `k`: 52 to 55 lower-case characters. The redactor knew a bare UUID
-/// as a public form and a lower-case NAME only under 40 characters, so this id
-/// was neither: the catalog sync published every scheduled point's `backupId`
-/// as `[redacted]`, its `receiptKey` as `[redacted].receipt.json` and its
-/// `manifestKey` as `[redacted].json`. On the PoC that was 84 of 370 points —
-/// every nightly run, the whole first page of the console's Catalog view —
-/// each "not offered" because the plan binding was the redactor's output. The
-/// manual runs beside them (a UUID set id) were offered, which is why the
-/// earlier rounds saw one or two links rather than none. Every fixture above
-/// spells the set id as a UUID, so the suite was green throughout.
-///
-/// The values are the PoC's own (`logweir-poc`, nightly and every-5 schedules).
+/// `weirkeeper::slot::backup_id_for_attempt` mints it as
+/// `<schedule uid>-<yyyymmdd>-<hhmmss>`, plus `-r<k>` for retry `k`: 52 to 55
+/// lower-case characters, neither a bare UUID nor a NAME under 40 characters,
+/// so without the rule every scheduled point's `backupId`, `receiptKey` and
+/// `manifestKey` would be published as `[redacted]`. The values are the PoC's
+/// own (`logweir-poc`, nightly and every-5 schedules).
 #[test]
 fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
     const SCHEDULE_UID: &str = "89b585c5-5498-48dc-ae32-090809457ec8";
@@ -2320,8 +2269,8 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
                 "and as a key: {prefix}/{set}/manifest"
             );
         }
-        // A segment path an operator has to go and recover (F7 /
-        // D2-REDACT-OVERBROAD), its one free component a topic name.
+        // A segment path an operator has to go and recover, its one free
+        // component a topic name.
         let segment = format!(
             "poc/{set}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
         );
@@ -2350,7 +2299,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
         assert_eq!(redact(&redact(&prose)), prose, "not idempotent");
     }
 
-    // --- DIE: nothing a schedule did not mint rides on the shape -------------
+    // DIE: nothing a schedule did not mint rides on the shape.
     let not_minted: Vec<(&str, String)> = vec![
         // A date that does not exist: the slot is an instant, and a run is
         // never named after one that never occurs.
@@ -2414,7 +2363,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
         survived.join("\n  ")
     );
 
-    // --- the set id spends no free slot, and buys none ----------------------
+    // The set id spends no free slot, and buys none.
     // It is a public form, as a UUID is, so the ULID beside it is still the
     // key's ONE free component: a second free component still sinks the run.
     let set = &minted[0];
@@ -2429,7 +2378,8 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
             "…and in prose"
         );
     }
-    // And it anchors no credential: F1's probes with the scheduled set id in
+    // And it anchors no credential: the anchored-run probes with the scheduled
+    // set id in
     // the anchor position, exactly as they run with a UUID.
     for input in [
         format!("{set}/{AWS}"),
@@ -2445,7 +2395,7 @@ fn a_scheduled_runs_set_id_is_an_identity_and_the_keys_built_from_it_survive() {
     }
 }
 
-/// **FX-17, the fixture both sides read.** `ui/tests/fixtures/set-ids.json`
+/// **The fixture both sides read.** `ui/tests/fixtures/set-ids.json`
 /// lists the set ids the controller mints and near misses it never mints; the
 /// console's `isMintedSetId` (`ui/tests/restore-catalog.spec.js`) reads the
 /// same file. Here: every minted id survives the redactor bare and as the
@@ -2498,8 +2448,6 @@ fn the_shared_set_id_fixture_is_what_the_redactor_keeps_and_withholds() {
     }
 }
 
-// --------------------------------------------------------------- visibility
-
 fn signals() -> VisibilitySignals {
     VisibilitySignals {
         namespace: "team-a".into(),
@@ -2526,7 +2474,7 @@ fn attestation() -> Attestation {
     }
 }
 
-/// D2 §5.4 and PLAT-09.1's acceptance: a SUCCESSFUL listing alone is
+/// A SUCCESSFUL listing alone is
 /// `unknown`, including for an empty cluster. This is the whole point of the
 /// vocabulary — Kafka omits topics the principal cannot describe, so "I saw
 /// none" is not "there are none".
@@ -2538,7 +2486,7 @@ fn empty_listing_is_unknown() {
     assert!(v.attestation.is_none());
 }
 
-/// Both detection paths of D2 §5.4.
+/// Both detection paths.
 #[test]
 fn expected_not_authorized_is_limited() {
     let mut s = signals();
@@ -2662,8 +2610,6 @@ fn expected_topics_all_visible_is_recorded_but_is_not_completeness() {
     assert!(v.basis.contains(&VisibilityBasis::ExpectedTopicsAllVisible));
 }
 
-// ----------------------------------------------------------- binding digest
-
 fn referent(kind: &str, name: &str, uid: &str, generation: i64) -> Referent {
     Referent {
         kind: kind.into(),
@@ -2722,15 +2668,10 @@ fn the_binding_digest_is_order_independent() {
     assert!(inputs_digest(&a).starts_with("sha256:"));
 }
 
-/// **F4.** `inputs_digest` sorts `ca_bundles` and documents that callers must
-/// not pre-sort; `stale_reasons` compared them POSITIONALLY, so two bindings
-/// with an identical digest reported `caBundleChanged`.
-///
-/// The case is a two-destination restore preflight: the controller records the
-/// CA bundles in the order it resolved source and evidence, the API recomputes
-/// them from a map and gets the other order, and every GET of that `Preflight`
-/// answers `stale` — so the restore can never be approved from the UI. It
-/// fails safe and is undiagnosable, which is the worst combination.
+/// `inputs_digest` sorts `ca_bundles`, so `stale_reasons` must compare them
+/// sorted too: compared positionally, a two-destination restore preflight whose
+/// controller and API resolved the bundles in different orders would be stale
+/// on every GET, and the restore could never be approved from the UI.
 ///
 /// MUTANT: dropping either `sorted(...)` call in `stale_reasons` turns the
 /// second assertion red.
@@ -2781,7 +2722,7 @@ fn the_two_ca_bundle_orderings_agree() {
     );
 }
 
-/// Every consequence D2 §6.6 lists, one assertion each.
+/// Every consequence of a binding input, one assertion each.
 #[test]
 fn every_binding_input_changes_the_digest() {
     let base = inputs_digest(&binding());
@@ -2817,7 +2758,7 @@ fn every_binding_input_changes_the_digest() {
     }
 }
 
-/// PLAT-08.2's "destination edit during a draft": the plan bytes are
+/// A destination edit during a draft: the plan bytes are
 /// unchanged, so the plan hash is unchanged, and the result is stale anyway
 /// because the destination's generation moved.
 #[test]
@@ -2846,7 +2787,7 @@ fn destination_generation_change_changes_digest_but_not_plan_hash() {
     );
 }
 
-/// PLAT-03.2's "plan edits": editing the target, recovery point, point in
+/// Plan edits: editing the target, recovery point, point in
 /// time, topic subset or mapping prefix changes the plan bytes and therefore
 /// the hash, and a green preview cannot survive it.
 #[test]
@@ -2863,7 +2804,7 @@ fn plan_hash_change_invalidates() {
     assert_eq!(reasons, vec![StaleReason::PlanHashChanged]);
 }
 
-/// PLAT-09.1's "credential rotation": the connection's generation or the
+/// Credential rotation: the connection's generation or the
 /// principal moved, so a stored inventory is stale.
 #[test]
 fn principal_or_generation_change_marks_stale() {
@@ -2882,7 +2823,7 @@ fn principal_or_generation_change_marks_stale() {
     );
 }
 
-/// Applicability needs ALL of D2 §6.6's conditions, so expiry alone is enough
+/// Applicability needs ALL of its conditions, so expiry alone is enough
 /// to make an otherwise identical binding stale, and a matching, unexpired
 /// binding is applicable.
 #[test]
@@ -2928,8 +2869,6 @@ fn a_digest_difference_no_named_reason_explains_is_still_reported() {
     );
     assert_eq!(reasons, vec![StaleReason::InputsDigestChanged]);
 }
-
-// ---------------------------------------------------------------- documents
 
 /// The `result` stream is canonical JSON, so the digest the end frame declares
 /// is reproducible by anyone holding the document.
@@ -2985,10 +2924,8 @@ fn an_inventory_result_carries_signals_and_not_a_verdict() {
     assert!(!serde_json::to_string(&inv).unwrap().contains("visibility"));
 }
 
-/// **F6.** D2 §6.4's "≤ 64 entries", enforced rather than declared.
-/// `MAX_CHECK_ENTRIES` had no reader anywhere in the workspace, so a W4 or W9
-/// bug emitting 400 outcomes would have written a half-megabyte status and
-/// nothing would have refused it.
+/// The "≤ 64 entries" bound, enforced rather than declared: a runner bug
+/// emitting 400 outcomes would otherwise write a half-megabyte status.
 #[test]
 fn a_result_document_over_the_entry_cap_is_refused() {
     let mut r = CheckResult::new(CheckPlanKind::OperationReadiness);
@@ -3019,12 +2956,10 @@ fn a_result_document_over_the_entry_cap_is_refused() {
     assert_eq!(err.code(), CheckCode::ResultUnreadable);
 }
 
-/// **F11.** The decoded document carries whatever the runner wrote:
-/// `CheckOutcome`'s fields are public and `Deserialize`d directly, and
-/// `redact`/`cap` run only inside the constructors. D2 §4.1 applies redaction
-/// to every RELAYED status message too, so `CheckRelay::result` sanitises
-/// before it hands the document over — the controller gets one call instead of
-/// a hand-rolled walk it could forget.
+/// The decoded document carries whatever the runner wrote (`CheckOutcome`'s
+/// fields are public and `Deserialize`d directly, and `redact`/`cap` run only
+/// inside the constructors), so `CheckRelay::result` sanitises before it hands
+/// the document over.
 #[test]
 fn a_relayed_result_is_sanitised_before_the_controller_sees_it() {
     // A document built the way a COMPROMISED or buggy runner would: fields

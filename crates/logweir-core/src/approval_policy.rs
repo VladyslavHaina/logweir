@@ -894,10 +894,6 @@ impl ApprovalPolicy {
     /// Read a snapshot back — the runner's direction. The snapshot must be the
     /// CANONICAL rendering of what it parses to, so a reader cannot be handed
     /// equivalent-but-different bytes that hash to another digest.
-    ///
-    /// # Errors
-    ///
-    /// A message naming what is wrong with the bytes.
     pub fn from_snapshot_bytes(bytes: &[u8]) -> Result<Self, String> {
         let snapshot: Snapshot = serde_json::from_slice(bytes)
             .map_err(|e| format!("the approval-policy snapshot does not parse: {e}"))?;
@@ -1125,10 +1121,6 @@ impl ApprovalPolicySet {
     /// * `maxAgeSeconds` outside [`MIN_MAX_AGE_SECONDS`]..=[`MAX_MAX_AGE_SECONDS`];
     /// * a binding naming an invalid namespace or an undeclared policy;
     /// * more than [`MAX_POLICIES`] policies or [`MAX_BINDINGS`] bindings.
-    ///
-    /// # Errors
-    ///
-    /// [`PolicyConfigError`] naming the field.
     pub fn parse(text: &str) -> Result<Self, PolicyConfigError> {
         if text.trim().is_empty() {
             return Ok(Self::default());
@@ -1576,10 +1568,6 @@ impl RestoreAuthorization {
     }
 
     /// Parse signed bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`AuthorizationRefusal::DocumentInvalid`] naming the parse error.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, AuthorizationRefusal> {
         let doc: Self = serde_json::from_slice(bytes).map_err(|e| {
             AuthorizationRefusal::DocumentInvalid(format!(
@@ -1965,10 +1953,6 @@ fn check_document_binding(
 /// another policy or digest, an expired or malformed window. And a request is
 /// not an approval: one that already names an approver is refused, so a
 /// stored approval can never be presented for a second one.
-///
-/// # Errors
-///
-/// The first [`AuthorizationRefusal`].
 pub fn check_request_binding(
     doc: &RestoreAuthorization,
     expected: &ExpectedSubject,
@@ -2169,10 +2153,6 @@ pub fn principal_fault(party: Party, issuer: &str, subject: &str) -> Option<Sepa
 
 /// [`principal_fault`] as the sentence a refusal carries: the principal,
 /// bounded and cleaned ([`shown`]), then the fault's fixed clause.
-///
-/// # Errors
-///
-/// The sentence.
 pub fn console_principal(party: Party, issuer: &str, subject: &str) -> Result<(), String> {
     match principal_fault(party, issuer, subject) {
         None => Ok(()),
@@ -2406,10 +2386,6 @@ pub fn check_console_approval(
 
 /// The change ticket's rule: under `Governed` a non-blank ticket of at most
 /// [`MAX_TICKET_LEN`] characters; under `Ordinary` absent or the same shape.
-///
-/// # Errors
-///
-/// A sentence naming what is wrong.
 pub fn check_ticket(mode: ApprovalMode, ticket: Option<&str>) -> Result<(), String> {
     match ticket {
         None if mode == ApprovalMode::Governed => Err(
@@ -2457,10 +2433,6 @@ pub fn check_window_shape(
 /// [`check_window_shape`], then the clock, then — under a policy whose
 /// approval the console signs — the second person and the instant they
 /// approved ([`check_console_approval`]).
-///
-/// # Errors
-///
-/// The first [`AuthorizationRefusal`].
 pub fn check_restore_authorization(
     doc: &RestoreAuthorization,
     expected: &ExpectedSubject,

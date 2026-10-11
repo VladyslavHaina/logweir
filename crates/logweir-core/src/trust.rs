@@ -1,5 +1,4 @@
-//! The trust lifecycle, as pure arithmetic over a key's declared history
-//! (PLAT-19.1, decision D3 §7.4).
+//! The trust lifecycle, as pure arithmetic over a key's declared history.
 //!
 //! # Two questions, and they are not the same question
 //!
@@ -8,9 +7,8 @@
 //! was on it or it was not, and a `notAfter` in the past meant "refuse". That
 //! answer is wrong for half of what an operator does. Rotation without a
 //! blanket trust gap needs a key that may no longer sign and whose old
-//! signatures still verify — [`may_sign_new`] answers the first question and
-//! [`decide`] answers the second, and the whole point of PLAT-19.1 is that
-//! they are allowed to disagree.
+//! signatures still verify: [`may_sign_new`] answers the first question and
+//! [`decide`] the second, and they are allowed to disagree.
 //!
 //! # Retirement is not revocation, and compromise is not supersession
 //!
@@ -37,8 +35,8 @@
 //! instant this module reasons about is passed in: `now`, the claimed signing
 //! time, the independent observation. A clock read here would make the verdict
 //! for a stored document depend on when it was asked about rather than on what
-//! the policy says, and would make every row of §7.4's table untestable
-//! without sleeping.
+//! the policy says, and would make the verdict table untestable without
+//! sleeping.
 //!
 //! It holds no key material either. [`TrustedKey`] carries a key's IDENTITY and
 //! its HISTORY, never its PEM: whether a signature verifies is
@@ -60,7 +58,7 @@ use serde_json::Value;
 
 /// What a key is allowed to be used for.
 ///
-/// SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs
+/// SEPARATED: one key that both signs
 /// evidence and authorises restores is a key whose holder can approve their
 /// own work, and the usage set is what turns "the same operator holds both"
 /// from a labelled risk into a refusal.
@@ -77,7 +75,7 @@ pub enum KeyUsage {
     /// Governed approval and standing-authorization documents, signed by
     /// humans on their own machines.
     GovernedApproval,
-    /// The console confirmation signature of PLAT-19.2's ordinary mode.
+    /// The console confirmation signature of the ordinary approval mode.
     ///
     /// NEVER SYNTHESISED FROM THE LEGACY ROSTER: an old controller
     /// reached by rollback must not be able to mistake an ordinary
@@ -120,11 +118,9 @@ pub enum RevocationReason {
     KeyCompromise,
     /// Replaced by a newer key, with no suspicion.
     Superseded,
-    /// No reason recorded. Read as [`Self::Superseded`] — the CONSERVATIVE
-    /// reading is the other one, but a policy that treated every unexplained
-    /// revocation as a compromise would make routine supersession invalidate
-    /// every archive an operator forgot to annotate. D3 §7.4's table names
-    /// `Superseded`/`Unspecified` together for exactly that reason.
+    /// No reason recorded. Read as [`Self::Superseded`]: a policy that treated
+    /// every unexplained revocation as a compromise would make routine
+    /// supersession invalidate every archive an operator forgot to annotate.
     Unspecified,
 }
 
@@ -206,8 +202,8 @@ impl TrustedKey {
     }
 }
 
-/// A key as resolved against a clock — the `status.keys[].effectiveState`
-/// vocabulary of D3 §7.1.
+/// A key as resolved against a clock: the `status.keys[].effectiveState`
+/// vocabulary.
 ///
 /// SIX VALUES, AND `Unparseable` IS NOT PRODUCED HERE. Whether a `spkiPem` is
 /// a key this build can read is a question about key material, which this
@@ -329,10 +325,10 @@ pub enum TrustBasis {
     ///
     /// [`TrustBasis::None`] means *this key's lifecycle does not support this
     /// document*, which is a conclusion. This one means *nothing has been
-    /// compared*. The distinction is the whole of `TRUST-UPGRADE-SIGNEDAT`:
-    /// flipping a terminal object to `Untrusted` on the strength of a status
-    /// field that did not exist when it was written is a verdict about the
-    /// controller's own history, dressed as a verdict about an archive.
+    /// compared*: flipping a terminal object to `Untrusted` on the strength of
+    /// a status field that did not exist when it was written would be a verdict
+    /// about the controller's own history, dressed as a verdict about an
+    /// archive.
     ///
     /// **Never green** — [`Verdict::may_render_green`] admits only
     /// [`Self::Current`] and [`Self::Historical`], so this basis cannot be
@@ -358,7 +354,7 @@ impl TrustBasis {
 }
 
 /// Why a stored document is not trusted. **The set is closed**; every variant
-/// is a row of D3 §7.4's table.
+/// is a row of [`decide`]'s table.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UntrustReason {
     /// The policy carries no key with this id.
@@ -438,8 +434,7 @@ impl Verdict {
     ///
     /// [`TrustBasis::RecordedBeforeRevocation`] is deliberately excluded here
     /// AND is already an `Untrusted`: two independent reasons it cannot be
-    /// green, because D3 §7.4 says it is "rendered with the recorded instant,
-    /// never green" and one of those reasons could be edited away by accident.
+    /// green, so that one edited away by accident leaves the other.
     #[must_use]
     pub fn may_render_green(&self) -> bool {
         matches!(self.result, TrustResult::Valid)
@@ -453,7 +448,7 @@ impl Verdict {
     ///
     /// The undecided verdict carries `result: Untrusted` on purpose: a caller
     /// that never learns about this method FAILS CLOSED, which is the same
-    /// direction every other row of D3 §7.4 fails in. A caller that CAN
+    /// direction every other row of [`decide`] fails in. A caller that CAN
     /// perform the re-read — `weirkeeper::verification::retrust`, which holds
     /// the object's stored result and the archive handle — asks this question
     /// and keeps the previous verdict while the read is outstanding, instead
@@ -542,25 +537,14 @@ pub enum ClaimAbsence {
     /// STORED STATUS written by a controller that predates the `signedAt`
     /// field, so the absence is a fact about this installation's own history
     /// and not about the document's bytes.
-    ///
-    /// # Why this is a different fact from [`Self::FieldAbsent`], and the
-    /// upgrade that proved it
-    ///
-    /// Defect `TRUST-UPGRADE-SIGNEDAT`. On the 2026-09-18 lab upgrade, five
-    /// objects written on 2026-09-14 moved `Valid` -> `Untrusted` with
-    /// [`Self::FieldAbsent`]'s sentence — *"the document carries no
-    /// signing-time field"* — although no document had been read and no
-    /// signature re-checked. The receipts were fine; only the *status* shape
-    /// was old. Reporting a fact about a status as a fact about a document is
-    /// how a routine upgrade comes to look like five corrupt archives.
-    ///
-    /// [`decide`] therefore refuses to *conclude* on this variant: it returns
-    /// an UNDECIDED verdict ([`TrustBasis::Unverified`]) whose contract is
-    /// that the caller performs one bounded re-read of the document and asks
-    /// again with a real claim. It is never produced by
-    /// [`read_claimed_signing_time`] — a document cannot claim to have been
-    /// written before a Kubernetes status field existed — and
-    /// `no_document_ever_claims_notrecorded` keeps it that way.
+    /// Reported as [`Self::FieldAbsent`], a routine upgrade would make every
+    /// older object look like a corrupt archive. [`decide`] therefore refuses
+    /// to *conclude* on this variant: it returns an UNDECIDED verdict
+    /// ([`TrustBasis::Unverified`]) whose contract is that the caller performs
+    /// one bounded re-read of the document and asks again with a real claim. It
+    /// is never produced by [`read_claimed_signing_time`] (a document cannot
+    /// claim to have been written before a Kubernetes status field existed),
+    /// and `no_document_ever_claims_notrecorded` keeps it that way.
     NotRecorded,
     /// A scorecard whose `phases` list is empty. **Schema-valid**: the
     /// scorecard schema puts no `minItems` on `phases`, so a run that recorded
@@ -694,8 +678,8 @@ impl IndependentObservation {
     }
 
     /// No local history. A compromise-revoked signer then fails closed
-    /// (D3 §16: "there is no independent timestamp for evidence this
-    /// installation never observed").
+    /// (there is no independent timestamp for evidence this installation never
+    /// observed).
     #[must_use]
     pub const fn none() -> Self {
         Self { observed_at: None }
@@ -826,7 +810,7 @@ pub fn may_sign_new(
     Ok(())
 }
 
-/// **Does this existing evidence still verify?** — D3 §7.4's table, every row.
+/// **Does this existing evidence still verify?**
 ///
 /// `key` is the policy entry the signature matched, `None` when the policy
 /// carries no such key id. `claim` is what the DOCUMENT says about when it was
@@ -871,11 +855,10 @@ pub fn may_sign_new(
 /// retired key.
 ///
 /// **[`ClaimAbsence::NotRecorded`] is the one absence that is not the
-/// document's.** Refusing it the same way reports this installation's own
-/// upgrade history as a finding about somebody's archive, which is the defect
-/// `TRUST-UPGRADE-SIGNEDAT` records; it still never renders green, and it
-/// still never says `Valid` under a policy that has not been applied to the
-/// document.
+/// document's.** Refusing it the same way would report this installation's own
+/// upgrade history as a finding about somebody's archive; it still never
+/// renders green, and it still never says `Valid` under a policy that has not
+/// been applied to the document.
 #[must_use]
 pub fn decide(
     key: Option<&TrustedKey>,
@@ -884,7 +867,7 @@ pub fn decide(
     observation: &IndependentObservation,
     now: DateTime<Utc>,
 ) -> Verdict {
-    // ---- row: the policy does not carry this key -------------------------
+    // Row: the policy does not carry this key.
     let Some(key) = key else {
         return Verdict::untrusted(
             UntrustReason::UntrustedSigner,
@@ -905,12 +888,12 @@ pub fn decide(
         EffectiveState::Unparseable => TrustKeyState::Unknown,
     };
 
-    // ---- row: the usage does not match -----------------------------------
+    // Row: the usage does not match.
     if !key.has_usage(usage) {
         return Verdict::untrusted(UntrustReason::KeyUsageMismatch, TrustBasis::None, key_state);
     }
 
-    // ---- the two compromise rows, and the ONLY reads of `observation` ----
+    // The two compromise rows, and the ONLY reads of `observation`.
     if key.state == KeyState::Revoked && key.reason() == RevocationReason::KeyCompromise {
         // `revocationEffectiveFrom` is what an observation is compared
         // against. Absent (impossible on a live object, G5) means there is no
@@ -931,29 +914,21 @@ pub fn decide(
         };
     }
 
-    // ---- row: THE STATUS PREDATES `signedAt`, so nothing was compared ----
+    // Row: THE STATUS PREDATES `signedAt`, so nothing was compared.
     //
-    // `TRUST-UPGRADE-SIGNEDAT`. This arm is deliberately the LAST one before
-    // the window question and deliberately AFTER the three rows above, and the
-    // order is the ratchet:
-    //
-    //  * no key, and wrong usage, are facts about the KEY. No re-read of any
-    //    document can make an unlisted signer listed, so those still flip a
-    //    pre-`signedAt` object immediately.
-    //  * the two compromise rows never read the claim AT ALL (that is the
-    //    whole content of the compromise rule), so a `KeyCompromise`
-    //    revocation still flips a terminal object immediately, with or without
-    //    a recorded signing time. `a_compromise_revocation_flips_a_pre_signedat_object`
-    //    is the guard, and moving this arm above them is the mutation it kills.
-    //
-    // What is left is exactly the window question — and the window cannot be
-    // asked of a status that never recorded the instant to ask about. The
-    // honest answer is not "outside the window", it is "not yet asked".
+    // Deliberately the LAST arm before the window question and AFTER the three
+    // rows above: no key and wrong usage are facts about the KEY, which no
+    // re-read can change, and the compromise rows never read the claim, so all
+    // three still flip a pre-`signedAt` object immediately
+    // (`a_compromise_revocation_flips_a_pre_signedat_object` kills moving this
+    // arm above them). What is left is the window question, which cannot be
+    // asked of a status that never recorded the instant: the answer is "not yet
+    // asked", not "outside the window".
     if claim.absence == Some(ClaimAbsence::NotRecorded) {
         return Verdict::undecided(key_state);
     }
 
-    // ---- every remaining row is a window question ------------------------
+    // Every remaining row is a window question.
     let refuse = || {
         Verdict::untrusted(
             UntrustReason::SignedOutsideValidity,
@@ -970,31 +945,20 @@ pub fn decide(
     // A CLAIM IN THE FUTURE IS NOT A CLAIM. A document cannot have been signed
     // after the instant it is being asked about, and `signed_at` is a field the
     // DOCUMENT controls: without this bound a signer may claim any instant up
-    // to `notAfter` and be trusted as `Current` today. Review finding F4.
+    // to `notAfter` and be trusted as `Current` today.
     if signed_at > now {
         return refuse();
     }
     // A KEY WHOSE WINDOW HAS NOT OPENED VERIFIES NOTHING.
     //
-    // SUBSUMED TODAY BY THE BOUND ABOVE, AND KEPT ANYWAY — measured, not
-    // assumed. `NotYetValid` means `now < notBefore`, and the window test
-    // already required `signed_at >= notBefore`, so any claim that reaches
-    // here against such a key is necessarily after `now` and the F4 bound
-    // refuses it first. Planting "drop this arm" as a mutant therefore does
-    // NOT kill: the recorded mutant is the realistic pair — relax the F4 bound
-    // for clock skew AND drop this arm — which is exactly how the hole would
-    // come back. Defence in depth on a fail-open that shipped once is worth
-    // more than a tidy mutation table.
-    //
-    // Review finding F3:
-    // §7.6 step 1 stages the successor key before the cutover, and staging it
-    // with a future `notBefore` is the natural way to do that — without this
-    // arm a document claiming a time inside the unopened window rendered
-    // `Valid`/`Current` and GREEN, while `status.keys[]` reported
-    // `usableForVerification: None` for the same key at the same instant. The
-    // badge and the console disagreed and the badge was the permissive one.
-    // `usable_for_verification` is the oracle the test compares against, so
-    // the two surfaces cannot drift apart again.
+    // Subsumed today by the bound above (`NotYetValid` means `now < notBefore`,
+    // and the window already requires `signed_at >= notBefore`), and kept
+    // anyway: relaxing that bound for clock skew would otherwise reopen the
+    // hole. A successor key staged with a future `notBefore` must not verify a
+    // document claiming a time inside its unopened window while `status.keys[]`
+    // reports `usableForVerification: None` for it; `usable_for_verification`
+    // is the oracle the test compares against, so the two surfaces cannot drift
+    // apart.
     if matches!(effective_state(key, now), EffectiveState::NotYetValid) {
         return refuse();
     }
@@ -1005,8 +969,8 @@ pub fn decide(
         return Verdict::valid(TrustBasis::Current, key_state);
     }
     match key.accepted_through() {
-        // Inclusive at the boundary: D3 §7.4 says "signed AT OR BEFORE
-        // `notAfter`/`retiredAt`".
+        // Inclusive at the boundary: signed AT OR BEFORE
+        // `notAfter`/`retiredAt`.
         Some(boundary) if signed_at <= boundary => {
             Verdict::valid(TrustBasis::Historical, key_state)
         }
@@ -1017,10 +981,6 @@ pub fn decide(
         ),
     }
 }
-
-// ---------------------------------------------------------------------------
-// The claimed signing time
-// ---------------------------------------------------------------------------
 
 /// The `payloadType` media types whose claimed signing time this module can
 /// read, WITHOUT their `;version=` parameter.
@@ -1090,7 +1050,7 @@ pub fn claimed_signing_time(payload_type: &str, json: &Value) -> Option<DateTime
     read_claimed_signing_time(payload_type, json).ok()
 }
 
-/// [`claimed_signing_time`], with the absence NAMED — review finding F7.
+/// [`claimed_signing_time`], with the absence NAMED.
 ///
 /// # Errors
 ///

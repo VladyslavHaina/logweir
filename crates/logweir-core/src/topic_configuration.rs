@@ -496,10 +496,6 @@ pub fn reference_fits(reference: &str) -> bool {
 /// empty documents are skipped. ONE parser for every command that takes the
 /// file (`backup run`, PROD-05.1; `restore run`, PROD-15.1), so the two cannot
 /// read one file two ways.
-///
-/// # Errors
-///
-/// The YAML error, naming the document's failure.
 pub fn parse_resource_documents(text: &str) -> Result<Vec<serde_yaml::Value>, String> {
     let mut docs = Vec::new();
     for doc in serde_yaml::Deserializer::from_str(text) {

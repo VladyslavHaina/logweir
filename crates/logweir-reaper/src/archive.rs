@@ -130,10 +130,6 @@ impl ArchiveReaper {
     /// would silently relocate a deletion to a destination the plan does not
     /// name. Every addressing decision here comes from the `StorageUrl` the
     /// controller froze into the Job's environment.
-    ///
-    /// # Errors
-    ///
-    /// [`BuildError`].
     pub fn new(
         location: &StorageUrl,
         credentials: Option<&Credentials>,

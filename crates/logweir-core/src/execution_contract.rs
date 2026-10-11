@@ -59,7 +59,7 @@ pub const ALLOWED_CLUSTERS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_ALLOWED_CLUSTER
 /// opposite of additive — the v2 additions live in [`V2_ENV`] and are
 /// conditional by block.
 ///
-/// **PLAT-14.3b: two of the thirteen are the per-run approval's.**
+/// **Two of the thirteen are the per-run approval's.**
 /// [`APPROVAL_SHA256_ENV`] and [`APPROVAL_SIDECAR_SHA256_ENV`] pin a bundle
 /// member a standing rehearsal has no slot for, so a `standing` contract omits
 /// them and a `standing` contract that pins them is refused. The eleven a run
@@ -103,10 +103,6 @@ pub const STANDING_MANDATORY_ENV: [&str; 11] = [
     ALLOWED_CLUSTERS_SHA256_ENV,
 ];
 
-// ---------------------------------------------------------------------------
-// v2 additions (D0 "bundle contract v2", D3 §4.3 and §5.5)
-// ---------------------------------------------------------------------------
-
 /// Which authorization this run was created under: [`AUTHORIZATION_KIND_APPROVAL`]
 /// (the per-run `Approval`, tag 1's only shape) or [`AUTHORIZATION_KIND_STANDING`].
 ///
@@ -120,34 +116,30 @@ pub const AUTHORIZATION_KIND_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_KIND";
 /// document** — the envelope the approver signed, from which the scope is
 /// derived. Same shape and same reason as `PLAN_SHA256_ENV`.
 ///
-/// It replaced a bare `LOGWEIR_EXECUTION_SCOPE_SHA256` over a raw
-/// [`RehearsalScope`], and the replacement is the whole point: a scope whose
-/// only provenance is a digest the CONTROLLER set is a scope the controller
-/// could mint, and D3 §4.3's own first sentence names "a controller that could
-/// mint its own authorization" as the bypass PLAT-19.2 exists to prevent.
+/// A digest over the SIGNED document and not over a raw [`RehearsalScope`]: a
+/// scope whose only provenance is a digest the CONTROLLER set is a scope the
+/// controller could mint.
 pub const AUTHORIZATION_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_SHA256";
 /// `sha256:<hex>` over the DSSE sidecar carrying the approver's signature over
 /// those exact envelope bytes.
 pub const AUTHORIZATION_SIDECAR_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_SIDECAR_SHA256";
-/// `sha256:<hex>` over the mounted [`AuthorizationKeyring`] — D3 §4.3(e)'s
-/// "the trusted public keys", the anchor the signature is checked against.
+/// `sha256:<hex>` over the mounted [`AuthorizationKeyring`]: the trusted
+/// public keys, the anchor the signature is checked against.
 pub const AUTHORIZATION_KEYS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_KEYS_SHA256";
 /// The `RehearsalSchedule` UID the standing authorization names as its
 /// subject. Carried so the runner's refusal can say WHICH schedule's
 /// authorization it was executing under without parsing the document.
 pub const REHEARSAL_SCHEDULE_UID_ENV: &str = "LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID";
-/// `sha256:<hex>` over the mounted approval-policy snapshot (D0: "policy
-/// snapshot/digest"). **PLAT-19.2 fills this half**; this contract only has to
-/// be able to carry it, and to refuse a v1 invocation that tries to.
+/// `sha256:<hex>` over the mounted approval-policy snapshot. This contract
+/// carries it, and refuses a v1 invocation that tries to.
 pub const POLICY_SNAPSHOT_SHA256_ENV: &str = "LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256";
 /// `sha256:<hex>` over the mounted confirmation-issuer public key — the second
 /// of D0's "both public keys". `APPROVER_KEY_SHA256_ENV` is the first.
 pub const CONFIRMATION_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256";
 
-/// `sha256:<hex>` over the mounted [`EvidenceKeyring`] — the anchor the
-/// runner verifies a bound recovery point's receipt signature against (D3
-/// §5.5 step 6, RUNNER-POINT-BINDING-SKIPS-SIGNATURE). Pinned exactly when
-/// the plan carries `source.point`.
+/// `sha256:<hex>` over the mounted [`EvidenceKeyring`]: the anchor the runner
+/// verifies a bound recovery point's receipt signature against. Pinned exactly
+/// when the plan carries `source.point`.
 pub const EVIDENCE_KEYS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256";
 
 /// Every v2-only variable. **Each is optional**, in the blocks
@@ -211,8 +203,8 @@ pub const ALL_ENV_ANY: [&str; 21] = [
 /// # The shape
 ///
 /// `rehearsal/<schedule name>/<slot>`, as a rehearsal's signed scorecard
-/// records it. Standing authorizations are withdrawn (PROD-17.1 C1); this
-/// reader stays for the documents already signed.
+/// records it. Standing authorizations are withdrawn; this reader stays for
+/// the documents already signed.
 pub const TRIGGERED_BY_REHEARSAL_PREFIX: &str = "rehearsal/";
 
 /// The `(schedule, slot)` inside a rehearsal trigger, or `None` when the value
@@ -243,7 +235,7 @@ pub enum AuthorizationKind {
     /// what an absent [`AUTHORIZATION_KIND_ENV`] means.
     #[default]
     Approval,
-    /// D3 §4.3's standing rehearsal authorization: one signed scope, proven to
+    /// The standing rehearsal authorization: one signed scope, proven to
     /// contain each slot's rendered plan, twice — once by the controller
     /// before the `Restore` exists, once by the runner against the mounted
     /// bundle before any data-plane client is constructed.
@@ -274,9 +266,8 @@ impl AuthorizationKind {
 ///
 /// # What v1 still buys, and what it does not
 ///
-/// D0: "existing bundle v1 remains accepted only for already-created legacy
-/// governed Restores under the documented transition", and D3 §8 Amendment I
-/// repeats it. A runner cannot read a `Restore`'s creation timestamp — it
+/// A v1 bundle is accepted only for an already-created legacy governed
+/// Restore. A runner cannot read a `Restore`'s creation timestamp — it
 /// holds no cluster credential at all — so "already-created legacy" is decided
 /// from the only thing the runner can see: **a v1 invocation may carry no v2
 /// material.** No point binding in the plan, no standing authorization, no
@@ -347,17 +338,13 @@ impl std::fmt::Display for ContractVersion {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The recovery point bound into plan bytes
-// ---------------------------------------------------------------------------
-
 /// `source.point` — the recovery point a v2 restore plan is bound to.
 ///
 /// # Why it is in the PLAN and not in the environment
 ///
 /// The environment is the controller's word for it; the plan is what the
 /// approver signed. Binding the point into plan bytes means the approval
-/// covers *which archive object this restore recovers from*, and PLAT-15.2's
+/// covers *which archive object this restore recovers from*, and the
 /// disaster path — a fresh installation with no `Backup` CR anywhere — has
 /// nothing else to bind to. The runner re-derives the identity from the bytes
 /// it actually read, so a point that was swapped underneath an approved plan
@@ -393,11 +380,6 @@ pub struct PointBinding {
     pub manifest_sha256: String,
 }
 
-// ---------------------------------------------------------------------------
-// The SIGNED standing rehearsal authorization (D3 §4.3(e), D0 authorization
-// document v2)
-// ---------------------------------------------------------------------------
-
 /// The DSSE payload type the standing rehearsal authorization is signed under.
 ///
 /// Its own type, not the drill approval's: a payload type is part of what
@@ -431,7 +413,7 @@ pub const STANDING_AUTHORIZATION_KIND: &str = "StandingRehearsalAuthorization";
 pub const REHEARSAL_SCHEDULE_KIND: &str = "RehearsalSchedule";
 /// The API group/version every subject of this document belongs to.
 pub const SUBJECT_API_VERSION: &str = "logweir.dev/v1alpha1";
-/// D3 §4.3: `expiresAt - issuedAt <= 90 days`. Re-checked at the runner
+/// `expiresAt - issuedAt <= 90 days`. Re-checked at the runner
 /// because it is a property of the SIGNED bytes: a document minted with a
 /// ten-year life is one the decision does not permit, whoever minted it.
 pub const MAX_STANDING_AUTHORIZATION_DAYS: i64 = 90;
@@ -454,29 +436,24 @@ pub struct AuthorizationSubject {
 }
 
 /// **The document a human signs once so an unattended rehearsal can run many
-/// times** (D3 §4.3(e)).
+/// times.**
 ///
 /// # Why the runner reads THIS and not a bare scope
 ///
-/// The first shape of this contract mounted a raw [`RehearsalScope`] pinned by
-/// a digest in the pod template. That digest is set by the controller, so
-/// against the adversary §4.3 actually names — "a controller that could mint
-/// its own authorization" — the runner's half of "checked twice" proved
-/// nothing at all. §4.3(e) says the bundle carries "the authorization
-/// document, its signatures, the trusted public keys, the scope and the
-/// rendered plan"; this is that document, the scope is INSIDE it, and the
-/// runner derives the scope only after the signature over these exact bytes
-/// verifies under a pinned key that is allowed to authorise.
+/// A raw [`RehearsalScope`] pinned by a digest in the pod template is pinned by
+/// the controller, so against "a controller that could mint its own
+/// authorization" the runner's half of "checked twice" would prove nothing. The
+/// bundle carries the authorization document, its signatures, the trusted
+/// public keys, the scope and the rendered plan; the scope is INSIDE this
+/// document, and the runner derives it only after the signature over these
+/// exact bytes verifies under a pinned key that is allowed to authorise.
 ///
-/// # The shape, and who owns it
+/// # The shape
 ///
-/// D0's authorization document v2 fixes the family (`formatVersion`, a
-/// `subject` block with a UID, `issuedAt`/`expiresAt`, a DSSE sidecar over the
-/// exact bytes). PLAT-19.2 has not fixed the standing variant, so this is the
-/// minimal document D3 §4.3/§4.5 requires, and it is the contract W7 and
-/// PLAT-19.2 must PRODUCE. Fields PLAT-19.2 adds later (`policy`, `requester`,
-/// `ticket`, a second signature) are additive: unknown keys are ignored on
-/// read, so a document carrying them still verifies here.
+/// The authorization document v2 family (`formatVersion`, a `subject` block
+/// with a UID, `issuedAt`/`expiresAt`, a DSSE sidecar over the exact bytes).
+/// Unknown keys are ignored on read, so fields added later (`policy`,
+/// `requester`, `ticket`, a second signature) still verify here.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StandingAuthorization {
@@ -517,9 +494,9 @@ pub struct AuthorizationKey {
 impl AuthorizationKey {
     /// Whether this key may authorise a rehearsal at all.
     ///
-    /// The standing document/bundle format carries no approval-policy mode —
-    /// PLAT-19.2 carries one end to end for per-run Restores only
-    /// (`crate::approval_policy`) — so only
+    /// The standing document/bundle format carries no approval-policy mode (the
+    /// policy is carried end to end for per-run Restores only,
+    /// `crate::approval_policy`), so only
     /// [`crate::trust::KeyUsage::GovernedApproval`] may authorize a rehearsal,
     /// under every policy. `ConsoleConfirmation` fails closed here;
     /// `EvidenceSigning` never authorizes.
@@ -530,7 +507,7 @@ impl AuthorizationKey {
     }
 }
 
-/// D3 §4.3(e)'s "the trusted public keys", as a mounted bundle member.
+/// The trusted public keys, as a mounted bundle member.
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorizationKeyring {
@@ -539,8 +516,7 @@ pub struct AuthorizationKeyring {
 }
 
 /// The evidence-signing keys a restore Job verifies a bound recovery point's
-/// receipt against — D3 §5.5 step 6's "the mounted trust bundle for
-/// `EvidenceSigning`", as a mounted bundle member.
+/// receipt against, as a mounted bundle member.
 ///
 /// # Public material and LIFECYCLE, because the runner decides
 ///
@@ -579,7 +555,7 @@ pub const EVIDENCE_KEYRING_FORMAT_VERSION: &str = "1.0.0";
 
 /// The token a standing-authorization refusal opens with.
 ///
-/// The two spellings are D3 §4.3's own controller skip reasons, reused so the
+/// The two spellings are the controller's skip reasons, reused so the
 /// controller's `status.lastSkipped.reason` and the runner's refusal say the
 /// same word about the same fault.
 pub const AUTHORIZATION_INVALID: &str = "AuthorizationInvalid";
@@ -625,7 +601,7 @@ impl std::fmt::Display for AuthorizationRefusal {
 /// # What it does NOT check, and who does
 ///
 /// `scope.template_digest` — whether the scope matches the schedule's sealed
-/// spec — is the CONTROLLER's each-slot check (D3 §4.3(a)). It is recomputed
+/// spec — is the CONTROLLER's each-slot check. It is recomputed
 /// from the `RehearsalSchedule`'s own spec, which a runner holding no cluster
 /// credential cannot read at all. The runner's half is the subject UID, which
 /// it can compare because both sides are in hand.
@@ -683,7 +659,7 @@ pub fn admit_standing_authorization(
         }
         _ => {}
     }
-    // PROD-08.1a review M1: A SCOPE THAT AUTHORISES COMPLETE COVERAGE SIGNS
+    // A SCOPE THAT AUTHORISES COMPLETE COVERAGE SIGNS
     // `maxPartitions: 0`, and only that. A complete plan samples no
     // partitions, so this build never reads the bound for one; a reader built
     // before format 1.1.0 ignores `coverage`, reads a sampled scope, and under
@@ -774,18 +750,13 @@ pub fn admit_standing_authorization(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// The progress channel, contract-versioned and bounded
-// ---------------------------------------------------------------------------
-
 /// `progress-contract=<version>` — the ONE line that says which grammar the
 /// `progress-phase=` lines that follow are written in.
 ///
-/// D3 §2.4 calls the channel "contract-versioned" and does not put a version
-/// inside the per-phase line, because the per-phase line is read by prefix out
-/// of a bounded tail and every byte of it is budget. So the version is
-/// announced once, at the top of the run, and the per-phase grammar stays
-/// exactly `<n>:<name>`.
+/// The channel is contract-versioned, but the per-phase line carries no
+/// version: it is read by prefix out of a bounded tail and every byte of it is
+/// budget. So the version is announced once, at the top of the run, and the
+/// per-phase grammar stays exactly `<n>:<name>`.
 pub const PROGRESS_CONTRACT_PREFIX: &str = "progress-contract=";
 /// `progress-phase=<n>:<name>`.
 pub const PROGRESS_PHASE_PREFIX: &str = "progress-phase=";
@@ -803,8 +774,7 @@ pub const PROGRESS_NAME_MAX_BYTES: usize = 32;
 /// **The restore runner's ten phases, by number and name — the CLOSED
 /// vocabulary of the progress channel.**
 ///
-/// D3 §2.4: "`logweir restore run`: existing phases `0..9` with their existing
-/// names". They are listed here, in the pure layer, because the channel is a
+/// They are listed here, in the pure layer, because the channel is a
 /// filter (see [`progress_phase_line`]) and a filter needs something to filter
 /// against. A charset rule alone would not do: `hunter2` is lowercase
 /// alphanumeric, and a channel that could render it could render a projected
@@ -828,7 +798,7 @@ pub const RESTORE_PHASE_NAMES: [(i8, &str); 10] = [
 
 /// **The backup runner's five named steps, all at phase `-1`.**
 ///
-/// D3 §2.4: the backup path "has no numbered phases after admission", so it
+/// The backup path has no numbered phases after admission, so it
 /// announces `-1:admit` and then `engine`, `readback`, `sign`, `upload`.
 /// Inventing `0..4` here would put two unrelated numbering schemes on one
 /// channel and leave a controller unable to tell which runner a
@@ -857,8 +827,8 @@ pub fn progress_contract_line(version: ContractVersion) -> String {
 /// A caller that hands this function a credential, a URL with userinfo, a
 /// broker error, a record's bytes or a newline that would forge a second line
 /// gets `None`, and its caller prints nothing. Silence is the right failure:
-/// D3 §2.4 says in as many words that "absence is not an error", so a reader
-/// already has to treat a missing line as normal.
+/// absence is not an error, and a reader already treats a missing line as
+/// normal.
 #[must_use]
 pub fn progress_phase_line(phase: i8, name: &str) -> Option<String> {
     let known = match phase {
@@ -960,14 +930,10 @@ pub fn parse_teardown_failed(value: &str) -> Option<Vec<TeardownFailed>> {
     (!kept.is_empty()).then_some(kept)
 }
 
-// ---------------------------------------------------------------------------
-// plan ∈ scope (D3 §4.3(d)), the runner's half and the controller's
-// ---------------------------------------------------------------------------
-
 /// Everything a rendered plan says that a signed rehearsal scope constrains.
 ///
 /// A struct rather than `&DrillSpec` directly so the SAME predicate serves
-/// both halves of D3 §4.3's "checked twice": the controller builds these facts
+/// both halves of the "checked twice" rule: the controller builds these facts
 /// from the plan it is about to render and freeze, the runner builds them from
 /// the plan bytes it actually mounted ([`plan_scope_facts`]). One predicate,
 /// two producers — which is the only arrangement in which "the controller
@@ -995,7 +961,7 @@ pub struct PlanScopeFacts {
     /// compared against a signed ceiling. See [`plan_within_scope`] for why
     /// absent is a MISMATCH here rather than a pass.
     pub max_partitions: Option<u32>,
-    /// **PROD-11.1 (review M1).** The replay-selection keys the plan states,
+    /// The replay-selection keys the plan states,
     /// in words (`restore.point_in_time` with a start, `restore.partitions`);
     /// empty for a plan that restores everything from the archive's floor.
     /// A standing rehearsal restores everything, and no approver saw a
@@ -1009,7 +975,7 @@ pub struct PlanScopeFacts {
     /// `sample.complete_max_records`, held to the signed
     /// scope's `completeMaxRecords` when it states one.
     pub complete_max_records: Option<u64>,
-    /// **PROD-01.1a (review OE-1).** `restore.allow_transaction_markers`. The
+    /// `restore.allow_transaction_markers`. The
     /// plan bytes are not hash-bound to a standing authorization, so
     /// [`plan_within_scope`] refuses it: only a per-run approval binds it.
     pub allows_transaction_markers: bool,
@@ -1076,56 +1042,36 @@ impl std::fmt::Display for ScopeRefusal {
     }
 }
 
-/// D3 §4.3(d): prove `plan ∈ scope`.
+/// Prove `plan ∈ scope`.
 ///
 /// # What it can prove here, and what it delegates
 ///
 /// * mode, prefix, source topics, mapped names and records-per-partition are
 ///   all functions of the plan's own bytes, so they are proven outright;
-/// * the **target cluster id** is not a plan field — a cluster id is read from
-///   the broker, and this check runs before any broker exists. So it is proven
-///   through the rail that already enforces it: the mounted allowlist must be
-///   exactly the signed `target_cluster_id`, and phase 0 then refuses any
-///   observed id outside that set. Narrowing the allowlist is what turns
-///   "the signed scope names cluster X" into "this run cannot reach anything
-///   but X" without a second broker round trip;
-/// * **`max_partitions` IS a plan field** (`sample.max_partitions`,
-///   `spec.rs`), and it is compared — with absent read as UNBOUNDED and
-///   therefore as a mismatch, which is the fail-closed direction. An earlier
-///   revision of this comment claimed it was "not a plan field at all"; that
-///   was simply wrong, and the review that caught it was right that the
-///   asymmetry against `records_per_partition` was invisible to W7.
-///
-///   The honest caveat is about MEANING, not about existence: the scope's
-///   `maxPartitions` is D3 §4.1's bound on the point ("partition total `<=`
-///   maxPartitions when the catalog supplies counts"), i.e. a ceiling on how
-///   big a point the rehearsal may select, while `sample.max_partitions`
-///   TRUNCATES the candidate list phase 4 built (`phase4_sample.rs`). A plan
-///   that satisfies the second has not thereby satisfied the first — the
-///   controller still owes the point-selection check — so this comparison is
-///   necessary and not sufficient, and W7 keeps §4.2's filter.
-/// * **`coverage` is SIGNED, and the plan's must be exactly it**.
-///   A scope that states no `coverage` — every scope signed before document
-///   format 1.1.0 — authorises `sampled` and nothing else: a `complete` plan
-///   under it is refused by name, so an approver who signed sampled
-///   rehearsals never finds a complete one run in their name, and a
-///   controller cannot choose one for them. A scope that says `complete`
-///   refuses a sampled plan just as plainly: a weaker check than the one
-///   signed is not the one authorised.
-/// * **A complete plan states no `max_partitions`, and under a scope that
-///   authorises complete coverage that is admitted.** It verifies every
-///   partition of every restored topic, and phase 0 refuses it beside a
-///   `max_partitions` (which would keep only the first N), so its absence is
-///   not "sample every candidate partition, unbounded": nothing is sampled. A
-///   complete plan that ALSO states one is refused here, naming both. What
-///   the signer bounded is what bounds its work: the Job's `deadlineSeconds`
-///   (the controller's half, below) and, when the scope states
-///   `completeMaxRecords`, the plan's `sample.complete_max_records`, which
-///   must then be present and no larger. A complete verification reads every
-///   archived record of the restored topics and the whole restored output.
-/// * `deadline_seconds` genuinely is NOT a plan field — it is the Job's
-///   `activeDeadlineSeconds`. It stays the controller's half of §4.3(d) and
-///   this predicate does not pretend to check it.
+/// * the **target cluster id** is not a plan field (it is read from the broker,
+///   and this check runs before any broker exists), so it is proven through the
+///   rail that already enforces it: the mounted allowlist must be exactly the
+///   signed `target_cluster_id`, and phase 0 then refuses any observed id
+///   outside that set;
+/// * **`max_partitions` IS a plan field** (`sample.max_partitions`), compared
+///   with absent read as UNBOUNDED and therefore as a mismatch, the fail-closed
+///   direction. It is necessary and not sufficient: the scope's `maxPartitions`
+///   bounds the point a rehearsal may select, while `sample.max_partitions`
+///   TRUNCATES phase 4's candidate list, so the controller still owes the
+///   point-selection check;
+/// * **`coverage` is SIGNED, and the plan's must be exactly it.** A scope that
+///   states no `coverage` (every scope signed before document format 1.1.0)
+///   authorises `sampled` and nothing else, and a scope that says `complete`
+///   refuses a sampled plan: a weaker check than the one signed is not the one
+///   authorised;
+/// * **a complete plan states no `max_partitions`**, and under a scope that
+///   authorises complete coverage that is admitted: it samples nothing, and
+///   phase 0 refuses it beside one. Its work is bounded by the Job's
+///   `deadlineSeconds` and, when the scope states `completeMaxRecords`, by the
+///   plan's `sample.complete_max_records`, which must then be present and no
+///   larger;
+/// * `deadline_seconds` is NOT a plan field (it is the Job's
+///   `activeDeadlineSeconds`) and stays the controller's half.
 pub fn plan_within_scope(
     facts: &PlanScopeFacts,
     scope: &RehearsalScope,
@@ -1201,7 +1147,7 @@ pub fn plan_within_scope(
     // any finite ceiling a human signed. Reading absent as "fine" would make
     // the one way to evade this check the easiest thing to write.
     //
-    // PROD-08.1a: THE COVERAGE IS SIGNED. A scope that names none (every
+    // THE COVERAGE IS SIGNED. A scope that names none (every
     // 1.0.0 scope) authorises `sampled` only; the plan's must be exactly the
     // signed one, in both directions.
     let signed = scope.signed_coverage();
@@ -1370,10 +1316,9 @@ mod tests {
 
     /// The mutant this channel exists to survive: a caller that hands the
     /// formatter a projected password, a URL with userinfo, or anything that
-    /// could forge a second line gets NOTHING on stdout.
-    /// THE MUTANT this channel exists to survive. Note `hunter2` and
-    /// `s3cr3t`: both pass every charset rule anyone would write, which is
-    /// exactly why the vocabulary is a closed TABLE and not a character class.
+    /// could forge a second line gets NOTHING on stdout. `hunter2` and `s3cr3t`
+    /// pass every charset rule anyone would write, which is exactly why the
+    /// vocabulary is a closed TABLE and not a character class.
     #[test]
     fn a_progress_line_refuses_to_carry_a_credential_or_forge_a_line() {
         for hostile in [
@@ -1438,9 +1383,9 @@ mod tests {
         }
     }
 
-    /// A 1.1.0 scope that authorises complete coverage, with no record bound.
-    /// A scope that authorises complete coverage, as it is signed: with
-    /// `maxPartitions: 0` (review M1, [`crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS`]).
+    /// A 1.1.0 scope that authorises complete coverage, as it is signed: no
+    /// record bound, and `maxPartitions: 0`
+    /// ([`crate::rehearsal_scope::COMPLETE_SCOPE_MAX_PARTITIONS`]).
     fn complete_scope() -> RehearsalScope {
         RehearsalScope {
             coverage: Some(crate::spec::Coverage::Complete),
@@ -1474,7 +1419,7 @@ mod tests {
         }
     }
 
-    /// **PROD-11.1 (review M1).** A standing rehearsal authorization admits no
+    /// **A standing rehearsal authorization admits no
     /// replay selection: a plan stating a window start (the interval form of
     /// `restore.point_in_time`) or `restore.partitions` is outside every
     /// signed scope, named, whatever else it matches. The control is the same
@@ -1530,7 +1475,7 @@ mod tests {
         );
     }
 
-    /// **PROD-01.1a (review OE-1).** A standing rehearsal authorization never
+    /// **A standing rehearsal authorization never
     /// admits `restore.allow_transaction_markers: true`: no approver signed the
     /// plan bytes. The control is the same plan stating `false`, which is
     /// inside. KILLS: the mismatch deleted, `plan_scope_facts` not reading the
@@ -1567,7 +1512,7 @@ mod tests {
         );
     }
 
-    /// **PROD-08.1a, the orchestrator's four rows.** The coverage is SIGNED:
+    /// **The coverage is SIGNED**:
     ///
     /// 1. a complete plan under a scope that states no `coverage` (every 1.0.0
     ///    scope) or says `sampled` is REFUSED, by name;
@@ -1642,7 +1587,7 @@ mod tests {
     /// A scope that signed complete coverage refuses a SAMPLED plan: a weaker
     /// check than the signer chose is not the one they authorised.
     ///
-    /// The complete scope signs `maxPartitions: 0` (review M1), so an ordinary
+    /// The complete scope signs `maxPartitions: 0`, so an ordinary
     /// sampled plan is ALSO past its partition bound (two mismatches). The
     /// plan whose `max_partitions` is 0 — the one sampled plan a reader older
     /// than format 1.1.0 admits under this scope (it samples nothing, and
@@ -1743,7 +1688,7 @@ mod tests {
             .expect("1.1.0 carries it");
         admit_standing_authorization(&doc("1.0.0", scope()), Some("u-1"), now)
             .expect("a 1.0.0 scope without it, as before");
-        // A version with NO numeric minor (review RM2) is not "1.1.0 or
+        // A version with NO numeric minor is not "1.1.0 or
         // later": the fields are refused under it. The control: the same
         // versions are admitted for a scope that does not carry them (the
         // major is 1), so the refusal is the minor's, and a later minor
@@ -1775,7 +1720,7 @@ mod tests {
         let refused = admit_standing_authorization(&doc("1.1.0", zero), Some("u-1"), now)
             .expect_err("a bound of 0");
         assert!(refused.detail.contains("is 0"), "{refused}");
-        // A COMPLETE SCOPE SIGNS `maxPartitions: 0` (review M1): any other
+        // A COMPLETE SCOPE SIGNS `maxPartitions: 0`: any other
         // value is a document an older reader would read as a sampled scope
         // with a usable partition bound, so it is refused. The control is
         // `complete_scope()` itself, admitted above, and a sampled scope with
@@ -1913,8 +1858,6 @@ mod tests {
         );
     }
 
-    // ---- the signed standing authorization (D3 §4.3(e)) -------------------
-
     fn authorization(uid: &str, issued_days_ago: i64, life_days: i64) -> StandingAuthorization {
         let issued = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
             .expect("a fixed instant")
@@ -2011,7 +1954,7 @@ mod tests {
         assert!(refusal.to_string().contains("not valid until"), "{refusal}");
     }
 
-    /// D3 §4.3 caps a standing authorization at 90 days, and the cap is a
+    /// A standing authorization is capped at 90 days, and the cap is a
     /// property of the SIGNED bytes — so the runner re-checks it rather than
     /// trusting whoever minted the document to have applied it.
     #[test]
@@ -2098,8 +2041,8 @@ mod tests {
         }
         let back: StandingAuthorization = serde_json::from_str(&json).expect("parses");
         assert_eq!(back, doc);
-        // Unknown fields are IGNORED, so a document PLAT-19.2 later enriches
-        // with `policy`/`requester`/`ticket` still verifies against this build.
+        // Unknown fields are IGNORED, so a document later enriched with
+        // `policy`/`requester`/`ticket` still verifies against this build.
         let enriched = json.replace(
             "{\"formatVersion\"",
             "{\"requester\":{\"issuer\":\"https://idp\"},\"formatVersion\"",
@@ -2109,7 +2052,7 @@ mod tests {
         assert_eq!(with_extras.scope, doc.scope);
     }
 
-    /// F4: `sample.max_partitions` IS a plan field, and absent is UNBOUNDED,
+    /// `sample.max_partitions` IS a plan field, and absent is UNBOUNDED,
     /// which is not inside any finite ceiling a human signed.
     #[test]
     fn an_unbounded_partition_count_is_outside_every_signed_ceiling() {
@@ -2149,7 +2092,7 @@ mod tests {
         assert_eq!(back, binding);
     }
 
-    /// **LOW-2: `STANDING_MANDATORY_ENV` is a hand-written list, and this is
+    /// **`STANDING_MANDATORY_ENV` is a hand-written list, and this is
     /// what binds it to [`ALL_ENV`].**
     ///
     /// Without this row a fourteenth mandatory name added to `ALL_ENV` would
