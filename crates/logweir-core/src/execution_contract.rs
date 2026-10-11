@@ -209,22 +209,12 @@ pub const ALL_ENV_ANY: [&str; 21] = [
 /// would read identically, and neither the schedule nor the slot would appear
 /// anywhere in the signed evidence.
 ///
-/// # The shape, and who checks which half
+/// # The shape
 ///
-/// `rehearsal/<schedule name>/<slot>`. The runner checks the SHAPE in
-/// `validate_execution_contract` (before anything is parsed) and binds the
-/// `<schedule name>` segment to the standing document's own
-/// `subjectRef.name` only after that document's signature verifies — so the
-/// schedule this run claims to be is pinned by SIGNED bytes, not by an
-/// environment variable the controller sets.
+/// `rehearsal/<schedule name>/<slot>`, as a rehearsal's signed scorecard
+/// records it. Standing authorizations are withdrawn (PROD-17.1 C1); this
+/// reader stays for the documents already signed.
 pub const TRIGGERED_BY_REHEARSAL_PREFIX: &str = "rehearsal/";
-
-/// `--triggered-by` for one rehearsal slot, built in exactly one place so the
-/// controller that emits it and the runner that parses it cannot disagree.
-#[must_use]
-pub fn rehearsal_triggered_by(schedule: &str, slot: &str) -> String {
-    format!("{TRIGGERED_BY_REHEARSAL_PREFIX}{schedule}/{slot}")
-}
 
 /// The `(schedule, slot)` inside a rehearsal trigger, or `None` when the value
 /// is not one.
@@ -422,9 +412,8 @@ pub const PAYLOAD_TYPE_STANDING_AUTHORIZATION: &str =
 /// adds optional fields only (GC12's rule, applied to this document).
 ///
 /// It is also the version a document whose scope carries no field newer than
-/// 1.0.0 is minted at, so every such document is byte-for-byte what it was;
-/// [`standing_format_version_for`] picks
-/// [`STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE`] for one that does.
+/// 1.0.0 was minted at; one that does was minted at
+/// [`STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE`].
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION: &str = "1.0.0";
 
 /// **PROD-08.1a.** The minor that defines `scope.coverage` and
@@ -437,16 +426,6 @@ pub const STANDING_AUTHORIZATION_COVERAGE_SINCE_MINOR: u64 = 1;
 /// `coverage` or `completeMaxRecords` is minted at.
 pub const STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE: &str = "1.1.0";
 
-/// The `formatVersion` a standing authorization over `scope` is minted at:
-/// 1.1.0 when the scope carries a PROD-08.1a field, 1.0.0 otherwise.
-#[must_use]
-pub fn standing_format_version_for(scope: &RehearsalScope) -> &'static str {
-    if scope.needs_coverage_format() {
-        STANDING_AUTHORIZATION_FORMAT_VERSION_COVERAGE
-    } else {
-        STANDING_AUTHORIZATION_FORMAT_VERSION
-    }
-}
 /// `kind` — inside the signed bytes, so it cannot be relabelled.
 pub const STANDING_AUTHORIZATION_KIND: &str = "StandingRehearsalAuthorization";
 /// The only subject kind a standing rehearsal authorization may name.
@@ -1731,8 +1710,7 @@ mod tests {
     /// coherent: `coverage`/`completeMaxRecords` under formatVersion 1.0.0 is
     /// refused; a record bound beside a sampled-only scope is refused; a bound
     /// of 0 is refused; the same scope at 1.1.0 is admitted, and a 1.0.0
-    /// document without them is admitted as before. The minting version is
-    /// 1.1.0 exactly when the scope carries one.
+    /// document without them is admitted as before.
     ///
     /// KILLS: the minor check removed (the first refusal); `<` turned `<=`
     /// (the 1.1.0 admission); each arm of the coherence match.
@@ -1822,8 +1800,6 @@ mod tests {
         admit_standing_authorization(&doc("1.0.0", scope()), Some("u-1"), now)
             .expect("a sampled scope keeps its positive bound");
 
-        assert_eq!(standing_format_version_for(&scope()), "1.0.0");
-        assert_eq!(standing_format_version_for(&complete_scope()), "1.1.0");
         let json = serde_json::to_string(&scope()).expect("serialises");
         assert!(
             !json.contains("coverage") && !json.contains("completeMaxRecords"),

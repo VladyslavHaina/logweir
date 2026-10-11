@@ -585,15 +585,8 @@ pub struct RestoreRunArgs {
     pub store_contract_version: Option<String>,
     #[arg(long)]
     pub spec: PathBuf,
-    /// The per-run `Approval` document. MANDATORY for every ordinary Restore
-    /// — approval is unconditional (spec §9.3 phase 1).
-    ///
-    /// **Omitted only for a standing-authorized rehearsal** (PLAT-14.3b): the
-    /// signed standing document given by `--standing-authorization` REPLACES
-    /// it, and the run's execution contract must say so
-    /// (`LOGWEIR_EXECUTION_AUTHORIZATION_KIND=standing`). Omitting it under
-    /// any other shape is exit 3 by name, and giving it under a standing
-    /// contract is exit 3 too: a rehearsal bundle has no approval slot.
+    /// The per-run `Approval` document. MANDATORY — approval is unconditional
+    /// (spec §9.3 phase 1); omitting it is exit 3 by name.
     #[arg(long)]
     pub approval: Option<PathBuf>,
     /// MANDATORY: the approver's public key, which SHOULD differ from the
@@ -644,23 +637,16 @@ pub struct RestoreRunArgs {
     /// offset on any cluster.
     #[arg(long)]
     pub offset_report_out: Option<PathBuf>,
-    /// **Execution contract v2** (decision D3 §4.3(e)): the SIGNED standing
-    /// rehearsal authorization document, projected into the bundle. Its DSSE
-    /// sidecar is read from the same path with the extension replaced by
-    /// `.sig`, exactly as `--approval`'s is.
-    ///
-    /// Omit it for every ordinary Restore — omitting it changes nothing. When
-    /// it IS given, `--authorization-keys` is required too, its bytes must
-    /// match `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, the signature must
-    /// verify under a pinned key allowed to authorise, and the rendered plan
-    /// must fall inside the scope the signed document carries — or the run is
-    /// refused with exit 3 before any client is constructed.
-    #[arg(long)]
-    pub standing_authorization: Option<PathBuf>,
-    /// **Execution contract v2**: the trusted public keys the standing
-    /// authorization's signature is checked against (D3 §4.3(e)).
-    #[arg(long)]
-    pub authorization_keys: Option<PathBuf>,
+    /// WITHDRAWN with standing rehearsal authorizations (PROD-17.1 C1). Kept
+    /// only as a name: a Job an older controller built for a
+    /// `RehearsalSchedule` passes it, and with a mutable runner tag such a Job
+    /// can start this image, so it is refused by name here (exit 1) rather
+    /// than as an unknown flag.
+    #[arg(long, hide = true, value_name = "PATH", value_parser = withdrawn_standing_flag)]
+    pub standing_authorization: Option<std::convert::Infallible>,
+    /// Withdrawn with `--standing-authorization`, refused the same way.
+    #[arg(long, hide = true, value_name = "PATH", value_parser = withdrawn_standing_flag)]
+    pub authorization_keys: Option<std::convert::Infallible>,
     /// **Bundle contract v2**: the frozen approval-policy snapshot
     /// (PLAT-19.2). Given together with `--confirmation-key`, its digest must
     /// match `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256`, and `--approval` is
@@ -732,8 +718,6 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             out: a.out,
             metrics_file: a.metrics_file,
             offset_report_out: a.offset_report_out,
-            standing_authorization: a.standing_authorization,
-            authorization_keys: a.authorization_keys,
             policy_snapshot: a.policy_snapshot,
             confirmation_key: a.confirmation_key,
             evidence_keys: a.evidence_keys,
@@ -852,6 +836,17 @@ fn parse_line_token(value: &str) -> Result<logweir_core::refusal_detail::LineTok
          a run started by hand needs none"
             .to_string()
     })
+}
+
+/// `--standing-authorization` and `--authorization-keys`: every value is
+/// refused, naming the withdrawal.
+fn withdrawn_standing_flag(_: &str) -> Result<std::convert::Infallible, String> {
+    Err(
+        "standing rehearsal authorizations are withdrawn: a Restore runs only under its per-run \
+         Approval, so a Job built for a RehearsalSchedule by an older controller cannot run \
+         here; no data operation was started"
+            .to_string(),
+    )
 }
 
 /// `--subject-kind`'s two values, spelled as they are spelled on the wire.

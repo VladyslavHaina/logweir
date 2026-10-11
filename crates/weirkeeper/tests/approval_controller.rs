@@ -3330,3 +3330,71 @@ fn a_trust_policy_event_enqueues_the_approvals_it_could_govern() {
         "and the mapping is the shared one, not a second copy of the rule"
     );
 }
+
+/// **The `Verified` condition's message, byte for byte, for every shape the
+/// evaluators produce** (PROD-17.1, s1-c1 R7): a v1 approval document (no
+/// expiry, no provenance) names the plan hash; an authorization document v2
+/// names its policy; a consumed v1 verdict re-established at its admission
+/// quotes the v1 sentence. KILLS: the v1 sentence naming anything but the
+/// plan hash; the v2 arm losing its provenance.
+#[test]
+fn the_verified_message_is_pinned_for_every_shape_the_evaluators_produce() {
+    use weirkeeper::controllers::approval::{Consumption, Standing};
+    use weirkeeper::crds::approval::AuthorizationProvenance;
+    let v1 = Verified {
+        key_window: None,
+        matched_key_id: "alice-2026".to_string(),
+        authorization_usage: logweir_core::trust::KeyUsage::GovernedApproval,
+        document_expires_at: None,
+        approver: "alice".to_string(),
+        ticket: "CHG-1".to_string(),
+        self_attested_risk: false,
+        trust_source: "legacy-roster-v1".to_string(),
+        authorization: None,
+        verified_subject_ref: None,
+    };
+    let v1_message = "the DSSE signature over spec.approvalBytes verified under GovernedApproval \
+                      key alice-2026 (trustSource=legacy-roster-v1), and the recomputed plan hash \
+                      matched";
+    assert_eq!(ApprovalOutcome::Verified(v1.clone()).message(), v1_message);
+
+    let mut v2 = v1.clone();
+    v2.authorization_usage = logweir_core::trust::KeyUsage::ConsoleConfirmation;
+    v2.document_expires_at = Some(DateTime::<Utc>::UNIX_EPOCH);
+    v2.trust_source = "team-a-trust".to_string();
+    v2.authorization = Some(Box::new(AuthorizationProvenance {
+        mode: "Ordinary".to_string(),
+        policy_name: "team-ordinary".to_string(),
+        policy_digest: format!("sha256:{}", "c".repeat(64)),
+        requester: "https://idp.example#alice".to_string(),
+        confirmation_key_id: "console-1".to_string(),
+    }));
+    assert_eq!(
+        ApprovalOutcome::Verified(v2).message(),
+        "authorization document v2 verified: the console's ConsoleConfirmation signature \
+         attests requester https://idp.example#alice and the ConsoleConfirmation key alice-2026 \
+         authorised it (trustSource=team-a-trust, approvalPolicy=team-ordinary mode Ordinary); \
+         subject, UID, plan hash, policy digest and validity window all matched"
+    );
+
+    let consumed = ApprovalOutcome::Consumed(Consumption {
+        subject: VerifiedSubjectRef {
+            api_version: "logweir.dev/v1alpha1".to_string(),
+            kind: SubjectKind::Restore,
+            name: "restore-x".to_string(),
+            namespace: "team-a".to_string(),
+            uid: "uid-x".to_string(),
+        },
+        admitted_at: None,
+        reverified: Some(Box::new(v1)),
+        standing: Standing::Clean,
+    });
+    assert_eq!(
+        consumed.message(),
+        format!(
+            "{v1_message} — verified as of the admission at an unrecorded instant, the instant \
+             the Restore controller recorded Admitted=True (an earlier build had withdrawn this \
+             verdict after the admission)"
+        )
+    );
+}

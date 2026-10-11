@@ -3344,7 +3344,9 @@ Job exists, and an `Approval` whose `spec.subjectRef.kind` is
 `RehearsalSchedule` is refused `StandingAuthorizationRefused` and is never
 `Verified`. Both fields stay in the CRDs, so objects written before v1 still
 parse. `drill approve --standing` and `--subject-kind RehearsalSchedule` are
-usage errors. Every standing authorization already signed (formats 1.0.0 and
+usage errors, and so are `restore run --standing-authorization` and
+`--authorization-keys`, refused by name; a Job whose execution contract names
+the `standing` kind is refused, exit 3 (PROD-17.1 wave 2). Every standing authorization already signed (formats 1.0.0 and
 1.1.0) and every scorecard a rehearsal signed still verify as before.
 **What an upgraded install sees.** `helm upgrade` leaves the
 `rehearsalschedules.logweir.dev` CRD in the cluster (Helm never deletes

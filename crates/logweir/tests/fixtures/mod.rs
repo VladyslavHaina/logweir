@@ -2043,8 +2043,6 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             approver_key_ids: Vec::new(),
             // Execution contract v2's optional bundle members; absent is
             // every existing caller's shape (D3 §4.3, D0 bundle v2).
-            standing_authorization: None,
-            authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,

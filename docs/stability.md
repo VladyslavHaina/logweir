@@ -2125,16 +2125,15 @@ exactly the things a Restore created after the rollout has. Let the in-flight le
 |---|---|---|
 | `source.point` | the plan document | the archive set comes from `source.backup`; no binding is checked. Under a **v1** contract a plan carrying it is refused by name, exit 3 — it is v2 material like the rest |
 | `LOGWEIR_EXECUTION_AUTHORIZATION_KIND` | Job environment | `approval` — the per-run `Approval`, tag 1's shape |
-| `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization; mounted material with no pinned digest is **refused**, never ignored |
+| `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization. Standing authorizations are withdrawn (PROD-17.1): a complete contract naming the `standing` kind is refused by name, exit 3 |
 | `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | Job environment | the synthesized `legacy-governed-v1` policy |
 | `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | Job environment | the legacy single-key bundle |
 | `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256` | Job environment | no evidence keyring is mounted — which the controller renders exactly when the plan carries `source.point`, so a point-bound plan without it is refused `PointUntrusted` (below) |
 
-The six optional bundle members (`--standing-authorization` and its derived `.sig` sidecar,
-`--authorization-keys`, `--policy-snapshot`, `--confirmation-key`, `--evidence-keys`) are
+The optional bundle members (`--policy-snapshot`, `--confirmation-key`, `--evidence-keys`) are
 digest-pinned in **both** directions: a pinned digest with nothing mounted is a lost bundle member,
 and a mounted member with no pinned digest is material the controller never committed to. Both are
-refused. Supplying any of the first four to a standalone invocation — one with no execution
+refused. Supplying either of the first two to a standalone invocation — one with no execution
 contract at all — is refused too, because nothing could make unpinned material trustworthy and
 silently ignoring it would let an operator believe an authorization was enforced when nothing bound
 it to the run. `--evidence-keys` is the exception, because it only ever NARROWS: it is the anchor a
@@ -2429,6 +2428,12 @@ or evidence object changes in either direction.
 
 ### The standing rehearsal authorization is SIGNED, and the runner checks the signature
 
+**Withdrawn (PROD-17.1).** The runner no longer reads a standing authorization: it refuses
+`--standing-authorization` and `--authorization-keys` by name (exit 1) and a contract naming the
+`standing` kind (exit 3). `logweir-core` still reads the documents already signed, and the
+verifiers still verify the scorecards they authorised. The rest of this section is the format as
+it was signed.
+
 D3 §4.3(e) says the bundle carries "the authorization document, its signatures, the trusted public
 keys, the scope and the rendered plan". All five are mounted, and the runner verifies them before
 any data-plane work — because §4.3's own first sentence names the adversary this exists for: *a
@@ -2568,9 +2573,7 @@ controller pinned, and that the key may authorise.
 
 | situation | code | `refusal-reason=` |
 |---|---|---|
-| a rendered plan outside the signed rehearsal scope | 3 | `GuardRefused`, message opens `RehearsalScopeViolation` |
-| a standing authorization that is unsigned, signed by an unpinned key, signed by a wrong-usage key, for another schedule, or malformed | 3 | `GuardRefused`, message opens `AuthorizationInvalid` |
-| a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
+| a contract naming a standing rehearsal authorization (withdrawn, PROD-17.1) | 3 | `GuardRefused`, the message says it is withdrawn; `--standing-authorization` and `--authorization-keys` themselves are usage errors, exit 1 |
 | a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
 | a bound point that verifies, in a plan whose `source.backup` is not the point's set (`latestCompleted` included), under whose storage the engine would read another manifest than the receipt's, or whose restored set's id, manifest digest or manifest version is not the one the binding verified (FX-16) | 3 | `GuardRefused`, message opens `PointBindingSetMismatch` |

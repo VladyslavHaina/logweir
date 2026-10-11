@@ -302,22 +302,6 @@ pub struct RunArgs {
     /// in roster order), which is how the one source of truth reaches a pod
     /// that holds no cluster credential.
     pub approver_key_ids: Vec<String>,
-    /// `--standing-authorization`. The **signed** standing rehearsal
-    /// authorization document (D3 §4.3(e)), projected into the bundle beside
-    /// the plan. Its DSSE sidecar is read from the same path with the
-    /// extension replaced by `.sig` — the exact convention `--approval`
-    /// already uses, so an operator learns one rule for both.
-    ///
-    /// **Optional, and absent is the only legal state for an ordinary
-    /// approval-authorized Restore.** Its bytes are pinned by
-    /// `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256` (and the sidecar's by
-    /// `…_SIDECAR_SHA256`), and the pairing is enforced in both directions by
-    /// [`validate_execution_contract`].
-    pub standing_authorization: Option<PathBuf>,
-    /// `--authorization-keys`. D3 §4.3(e)'s "the trusted public keys" — the
-    /// anchor the standing authorization's signature is checked against.
-    /// Mandatory whenever `--standing-authorization` is given.
-    pub authorization_keys: Option<PathBuf>,
     /// `--policy-snapshot`. PLAT-19.2's approval-policy snapshot. This build
     /// pins its digest and carries it no further; the contract exists so the
     /// worker who interprets it does not also have to change the bundle.
@@ -727,30 +711,21 @@ pub fn execution_contract_for_invocation(
 
 /// Exact projected bytes captured once at process startup.
 ///
-/// The five mandatory members are v1's bundle. The three `Option`s are D0's
-/// **bundle contract v2** additions — D3 §4.3(e)'s three-part standing
-/// authorization (the signed document, its signature and the trusted public
-/// keys), plus D0's approval-policy snapshot and confirmation-issuer public
-/// key (the second of "both public keys"). Each is `None` for a bundle that
-/// does not carry it, and each is pinned by its own digest in the environment
-/// contract exactly as the mandatory five are.
+/// The five mandatory members are v1's bundle. The `Option`s are D0's
+/// **bundle contract v2** additions — the approval-policy snapshot and the
+/// confirmation-issuer public key (the second of "both public keys") — and
+/// the evidence keyring. Each is `None` for a bundle that does not carry it,
+/// and each is pinned by its own digest in the environment contract exactly
+/// as the mandatory five are.
 #[derive(Clone, Debug, Default)]
 pub struct ApprovalBundleBytes {
     pub plan: Vec<u8>,
-    /// The per-run approval document, absent for a standing-authorized
-    /// rehearsal — PLAT-14.3b. See [`RunArgs::approval`].
+    /// The per-run approval document. See [`RunArgs::approval`].
     pub approval: Option<Vec<u8>>,
     /// Its DSSE sidecar, absent under exactly the same condition.
     pub approval_sidecar: Option<Vec<u8>>,
     pub approver_key: Vec<u8>,
     pub allowed_clusters: Vec<u8>,
-    /// The signed standing rehearsal authorization envelope. The scope lives
-    /// INSIDE it — there is deliberately no bare-scope member, because a scope
-    /// separable from the signature over it is a scope the controller could
-    /// mint (D3 §4.3's own stated adversary).
-    pub authorization: Option<Vec<u8>>,
-    pub authorization_sidecar: Option<Vec<u8>>,
-    pub authorization_keys: Option<Vec<u8>>,
     pub policy_snapshot: Option<Vec<u8>>,
     pub confirmation_key: Option<Vec<u8>>,
     /// The evidence-signing keyring, for a point-bound plan.
@@ -773,42 +748,16 @@ pub fn validate_execution_contract(
         )
         .into());
     }
-    // **`--triggered-by` is bound to the authorization this template names,
-    // and the two kinds are bound differently** — PLAT-14.3b.
-    //
-    // Under `approval` it is `approval/<name>` and nothing else, unchanged.
-    // Under `standing` the run's reason is a SLOT of a schedule, so the value
-    // is `rehearsal/<schedule>/<slot>`; only its SHAPE can be checked here,
-    // because the name it must agree with lives inside a document whose
-    // signature has not been verified yet. `check_v2_bindings` closes that gap
-    // against the SIGNED `subjectRef.name` — deliberately a stronger binding
-    // than an equality against an environment variable the controller set,
-    // which would only prove the controller agreed with itself.
-    if contract.authorization_kind == logweir_core::execution_contract::AuthorizationKind::Standing
-    {
-        if triggered_by
-            .and_then(logweir_core::execution_contract::parse_rehearsal_triggered_by)
-            .is_none()
-        {
-            return Err(GuardRefusal(format!(
-                "this run is authorized by a standing rehearsal authorization, so --triggered-by \
-                 must name the schedule and slot as `{}<schedule>/<slot>`; it is {:?}; no data \
-                 operation was started",
-                logweir_core::execution_contract::TRIGGERED_BY_REHEARSAL_PREFIX,
-                triggered_by
-            ))
-            .into());
-        }
-    } else {
-        let expected_trigger = format!("approval/{}", contract.approval_name);
-        if triggered_by != Some(expected_trigger.as_str()) {
-            return Err(GuardRefusal(format!(
-                "the execution contract names Approval {} but --triggered-by is {:?}; no data \
-                 operation was started",
-                contract.approval_name, triggered_by
-            ))
-            .into());
-        }
+    // **`--triggered-by` is bound to the authorization this template names**:
+    // `approval/<name>` and nothing else.
+    let expected_trigger = format!("approval/{}", contract.approval_name);
+    if triggered_by != Some(expected_trigger.as_str()) {
+        return Err(GuardRefusal(format!(
+            "the execution contract names Approval {} but --triggered-by is {:?}; no data \
+             operation was started",
+            contract.approval_name, triggered_by
+        ))
+        .into());
     }
     let checks = [
         ("plan", &contract.plan_sha256, bundle.plan.as_slice()),
@@ -833,26 +782,21 @@ pub fn validate_execution_contract(
             .into());
         }
     }
-    // **Bundle contract v2's three optional members, and BOTH directions.**
+    // **Bundle contract v2's optional members, and BOTH directions.**
     //
     // A pinned digest with nothing mounted is a bundle that lost a member —
     // PLAT-01.2's "lost bundle" case, which must fail before any client. A
     // mounted member with no pinned digest is worse: it is material this run
     // would act on that the controller never committed to, so it is refused
-    // rather than ignored. Ignoring it is exactly how a scope nobody signed
-    // would end up authorising a rehearsal.
+    // rather than ignored.
     /// One optional bundle-v2 member: its label, the digest the contract pins
     /// for it, and the bytes that were mounted.
     type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
-    let optional_members: [OptionalMember; 8] = [
-        // **The per-run approval slot is now one of these** — PLAT-14.3b. It
-        // is present-and-pinned under `approval` and absent-and-unpinned under
-        // `standing`, and BOTH directions are already refused here: a pinned
+    let optional_members: [OptionalMember; 5] = [
+        // The per-run approval slot is one of these — PLAT-14.3b: a pinned
         // digest with nothing mounted is a bundle that lost its approval, and
         // a mounted approval the contract never committed to is material this
-        // run would otherwise verify and act on. `execution_contract_from` has
-        // already refused the two kind/presence combinations that would make
-        // either case reachable, so these two rows are the second line.
+        // run would otherwise verify and act on.
         (
             "approval",
             contract.approval_sha256.as_ref(),
@@ -862,21 +806,6 @@ pub fn validate_execution_contract(
             "approval sidecar",
             contract.approval_sidecar_sha256.as_ref(),
             bundle.approval_sidecar.as_ref(),
-        ),
-        (
-            "standing rehearsal authorization",
-            contract.authorization_sha256.as_ref(),
-            bundle.authorization.as_ref(),
-        ),
-        (
-            "standing rehearsal authorization signature",
-            contract.authorization_sidecar_sha256.as_ref(),
-            bundle.authorization_sidecar.as_ref(),
-        ),
-        (
-            "trusted authorization keyring",
-            contract.authorization_keys_sha256.as_ref(),
-            bundle.authorization_keys.as_ref(),
         ),
         (
             "approval-policy snapshot",
@@ -2080,30 +2009,11 @@ pub fn naming_the_password_var(
 struct StartupInputs {
     spec_text: String,
     allowed_text: String,
-    /// The VERIFIED per-run approval, or `None` for a standing-authorized
-    /// rehearsal whose authorization is proved in `check_v2_bindings` instead
-    /// — PLAT-14.3b. Exactly one of the two paths produces the run's
-    /// `Approved`, and `execute_for_reporting` refuses both and neither.
-    approved: Option<phase1_approval::Approved>,
-    /// The three bytes-streams of D3 §4.3(e)'s standing authorization, when
-    /// this run carries one. Already digest-checked against the execution
-    /// contract by the time this exists — the SIGNATURE is checked later, in
-    /// `check_v2_bindings`, because it needs the clock.
-    authorization: Option<StandingAuthorizationBytes>,
+    /// The VERIFIED per-run approval.
+    approved: phase1_approval::Approved,
     /// The evidence-signing keyring (`--evidence-keys`), digest-checked
     /// against the contract when there is one. Read by the point binding.
     evidence_keys: Option<Vec<u8>>,
-}
-
-/// The signed standing authorization as three mounted byte-streams.
-///
-/// One struct rather than three `Option`s threaded separately, because they
-/// are only ever meaningful together: a document with no signature proves
-/// nothing, and a signature with no keyring anchors in nothing.
-struct StandingAuthorizationBytes {
-    document: Vec<u8>,
-    sidecar: Vec<u8>,
-    keys: Vec<u8>,
 }
 
 fn read_startup_file(path: &std::path::Path, label: &str) -> Result<Vec<u8>, DrillError> {
@@ -2116,53 +2026,35 @@ fn load_startup_inputs(
     signing_key: &logweir_evidence::keys::VerifyingKey,
     contract: Option<&ExecutionContract>,
 ) -> Result<StartupInputs, DrillError> {
-    // **Is this run's authorization the per-run approval, or the standing
-    // document?** — PLAT-14.3b. The CONTRACT decides, never the presence of a
-    // flag: a run whose contract says `approval` must present an approval
-    // whatever else is mounted, and a run with no contract at all has nothing
-    // that could make a standing document trustworthy (the arm below already
-    // refuses unpinned v2 material for exactly that reason).
-    let standing = contract.is_some_and(|c| {
+    // **A standing rehearsal authorization is withdrawn** (PROD-17.1 C1): a
+    // contract that names one is refused by name, whatever is mounted, before
+    // any file is read.
+    if contract.is_some_and(|c| {
         c.authorization_kind == logweir_core::execution_contract::AuthorizationKind::Standing
-    });
-    let approval_path = match (args.approval.as_ref(), standing) {
-        (Some(path), false) => Some(path.clone()),
-        (None, true) => None,
-        // A standing rehearsal has no per-run approval to verify. Accepting
-        // one anyway would be the "sits BESIDE" shape this task exists to
-        // remove, and the file would be material no digest in the immutable
-        // template covers.
-        (Some(path), true) => {
-            return Err(GuardRefusal(format!(
-                "--approval {} was given for a run authorized by a standing rehearsal \
-                 authorization; the standing document REPLACES the per-run approval and the \
-                 bundle carries no approval slot; no data operation was started",
-                path.display()
-            ))
-            .into())
-        }
-        // FAIL CLOSED, and by name. An ordinary Restore that lost its approval
-        // must never fall through to "nothing to verify".
-        (None, false) => {
-            return Err(GuardRefusal(
-                "--approval is required: this run is not authorized by a standing rehearsal \
-                 authorization, and a Restore is never unauthorized; no data operation was \
-                 started"
-                    .to_string(),
-            )
-            .into())
-        }
-    };
+    }) {
+        return Err(GuardRefusal(format!(
+            "the execution contract names a standing rehearsal authorization ({} {:?}), which is \
+             withdrawn: a Restore runs only under its per-run Approval; no data operation was \
+             started",
+            logweir_core::execution_contract::AUTHORIZATION_KIND_ENV,
+            logweir_core::execution_contract::AUTHORIZATION_KIND_STANDING
+        ))
+        .into());
+    }
+    // FAIL CLOSED, and by name. A Restore that lost its approval must never
+    // fall through to "nothing to verify".
+    let approval_path = args.approval.clone();
+    if approval_path.is_none() {
+        return Err(GuardRefusal(
+            "--approval is required: this run is not authorized by a standing rehearsal \
+             authorization, and a Restore is never unauthorized; no data operation was \
+             started"
+                .to_string(),
+        )
+        .into());
+    }
     let sidecar_path = approval_path.as_ref().map(|p| p.with_extension("sig"));
-    // The standing authorization's sidecar is DERIVED from the document's own
-    // path, exactly as the approval's is from `--approval`. One flag fewer to
-    // get wrong, and the two files cannot be mismatched by an operator who
-    // pointed them at different runs.
-    let authorization_sidecar_path = args
-        .standing_authorization
-        .as_ref()
-        .map(|p| p.with_extension("sig"));
-    // The five v2 members are read the same way the five mandatory ones are —
+    // The v2 members are read the same way the five mandatory ones are —
     // once, at startup, before anything is parsed — so the bytes the digest
     // check covers are the bytes every later step uses. A member the operator
     // named but that is not there is an operational failure with the path in
@@ -2180,18 +2072,6 @@ fn load_startup_inputs(
         approval_sidecar: optional_member(&sidecar_path, "approval sidecar")?,
         approver_key: read_startup_file(&args.approver_key, "approver public key")?,
         allowed_clusters: read_startup_file(&args.allowed_clusters, "allowed-clusters")?,
-        authorization: optional_member(
-            &args.standing_authorization,
-            "standing rehearsal authorization",
-        )?,
-        authorization_sidecar: optional_member(
-            &authorization_sidecar_path,
-            "standing rehearsal authorization signature",
-        )?,
-        authorization_keys: optional_member(
-            &args.authorization_keys,
-            "trusted authorization keyring",
-        )?,
         policy_snapshot: optional_member(&args.policy_snapshot, "approval-policy snapshot")?,
         confirmation_key: optional_member(
             &args.confirmation_key,
@@ -2201,17 +2081,10 @@ fn load_startup_inputs(
     };
     if let Some(contract) = contract {
         validate_execution_contract(contract, args.triggered_by.as_deref(), &bundle)?;
-    } else if bundle.authorization.is_some()
-        || bundle.authorization_sidecar.is_some()
-        || bundle.authorization_keys.is_some()
-        || bundle.policy_snapshot.is_some()
-        || bundle.confirmation_key.is_some()
-    {
+    } else if bundle.policy_snapshot.is_some() || bundle.confirmation_key.is_some() {
         // A standalone invocation has no controller to pin anything, so there
         // is nothing that could make bundle-v2 material trustworthy. Refusing
-        // is the only honest answer: silently ignoring a
-        // `--standing-authorization` would let an operator believe a scope was
-        // enforced when no digest and no controller ever bound it to this run.
+        // is the only honest answer.
         return Err(GuardRefusal(
             "bundle contract v2 material was supplied without a Restore execution contract; \
              an unpinned standing authorization, policy snapshot or confirmation key is never \
@@ -2226,18 +2099,6 @@ fn load_startup_inputs(
     let allowed_text = String::from_utf8(bundle.allowed_clusters.clone()).map_err(|error| {
         DrillError::Operational(format!("allowed-clusters is not UTF-8: {error}"))
     })?;
-    // **The per-run approval is verified ONLY when this run has one** —
-    // PLAT-14.3b, and this is the line the 2026-09-17 record names as the
-    // reason a rehearsal could not execute. It used to run unconditionally, so
-    // a standing bundle had to carry a placeholder in the approval slot that
-    // `verify_bytes` then rejected under `PAYLOAD_TYPE_APPROVAL`.
-    //
-    // The standing path's equivalent is `binding::verify_standing_authorization`
-    // in `check_v2_bindings`, which is a STRICTLY LARGER check: the DSSE
-    // signature under a pinned trusted key, that key's usage, the document's
-    // kind, subject, UID binding and validity window, and `plan ∈ scope`.
-    // Neither path can be skipped — `execute_for_reporting` refuses a run that
-    // produced no `Approved` at all.
     // **PLAT-19.2: WHICH verifier is the BUNDLE's decision, never the
     // document's.** A v2 bundle — one the controller pinned a policy snapshot
     // and a confirmation key into — is verified as authorization document v2;
@@ -2257,7 +2118,7 @@ fn load_startup_inputs(
         };
     let approved =
         match (&bundle.approval, &bundle.approval_sidecar) {
-            (Some(approval), Some(approval_sidecar)) => Some(match (v2, contract) {
+            (Some(approval), Some(approval_sidecar)) => match (v2, contract) {
                 (Some((snapshot, confirmation)), Some(contract)) => {
                     phase1_approval::verify_authorization_v2_bytes(
                         &spec_text,
@@ -2291,9 +2152,7 @@ fn load_startup_inputs(
                     &bundle.approver_key,
                     signing_key,
                 )?,
-            }),
-            // Both absent: the standing path, already pinned above.
-            (None, None) => None,
+            },
             // Unreachable — both come from one `Option<PathBuf>` — and named
             // rather than unwrapped so a future edit that splits them cannot
             // silently produce "no approval to verify".
@@ -2304,40 +2163,11 @@ fn load_startup_inputs(
             )
             .into()),
         };
-    // All three, or none. `validate_execution_contract` has already refused a
-    // pinned digest with nothing mounted and a mounted member with no pinned
-    // digest, so a partial set can only arrive on the contract-free path — and
-    // that path refuses the material outright above. The explicit `else` is
-    // still here because "two of the three arrived" must never silently become
-    // "no standing authorization to check".
-    let evidence_keys = bundle.evidence_keys;
-    let authorization = match (
-        bundle.authorization,
-        bundle.authorization_sidecar,
-        bundle.authorization_keys,
-    ) {
-        (None, None, None) => None,
-        (Some(document), Some(sidecar), Some(keys)) => Some(StandingAuthorizationBytes {
-            document,
-            sidecar,
-            keys,
-        }),
-        _ => {
-            return Err(GuardRefusal(
-                "an incomplete standing rehearsal authorization was mounted: D3 §4.3(e) needs \
-                 the signed document, its signature and the trusted public keys together, and a \
-                 partial set proves nothing; no data operation was started"
-                    .to_string(),
-            )
-            .into())
-        }
-    };
     Ok(StartupInputs {
         spec_text,
         allowed_text,
         approved,
-        authorization,
-        evidence_keys,
+        evidence_keys: bundle.evidence_keys,
     })
 }
 
@@ -2453,13 +2283,12 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     }
     // **PROD-15.1: the approval SUBJECT, over the authenticated plan and
     // BEFORE anything is read or dialled.** An original-name plan needs its
-    // own approval subject, which an ordinary approval cannot satisfy and a
-    // standing authorization never carries (`startup.approved` is `None` on
-    // the standing path); an `originalName` approval authorises nothing else.
-    // The controller made the same comparison before the Job existed; this is
-    // the runner's own half.
-    check_original_name_subject(&authenticated_spec, startup.approved.as_ref())?;
-    // **Execution contract v2's two bindings, and they go HERE.**
+    // own approval subject, which an ordinary approval cannot satisfy; an
+    // `originalName` approval authorises nothing else. The controller made
+    // the same comparison before the Job existed; this is the runner's own
+    // half.
+    check_original_name_subject(&authenticated_spec, Some(&startup.approved))?;
+    // **Execution contract v2's point binding, and it goes HERE.**
     //
     // After `load_startup_inputs`, so the plan bytes they read are the bytes
     // the contract digests and the approval signature already covered — a
@@ -2470,44 +2299,12 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     // what makes "refused before any data-plane work" true at the socket
     // layer, which is the claim D3 §4.3 and §5.5 both make.
     let bindings = check_v2_bindings(
-        args,
-        &startup,
         &authenticated_spec,
+        startup.evidence_keys.as_deref(),
         contract.as_ref(),
         store_contract,
-        &signer.verifying_key(),
     )?;
-    let standing_approved = bindings.standing_approved;
-    // **EXACTLY ONE authorization produced this run's `Approved`** —
-    // PLAT-14.3b. The per-run approval path fills `startup.approved` in
-    // `load_startup_inputs`; the standing path fills the value above, after the
-    // signed document verified and the plan was proved inside its scope.
-    //
-    // Both and neither are refused here rather than resolved by precedence.
-    // "Neither" is the mutant this guard exists for: every individual check
-    // could be removed and a run would still need SOMETHING to have minted an
-    // `Approved`, so a rehearsal that skipped its authorization entirely
-    // cannot reach phase 0 by falling through.
-    let approved = match (startup.approved, standing_approved) {
-        (Some(approved), None) | (None, Some(approved)) => approved,
-        (Some(_), Some(_)) => {
-            return Err(GuardRefusal(
-                "this run presented both a verified per-run approval and a standing \
-                     rehearsal authorization; exactly one authorizes a Restore; no data \
-                     operation was started"
-                    .to_string(),
-            )
-            .into())
-        }
-        (None, None) => {
-            return Err(GuardRefusal(
-                "this run is authorized by nothing: no per-run approval was verified and no \
-                     standing rehearsal authorization was proved; no data operation was started"
-                    .to_string(),
-            )
-            .into())
-        }
-    };
+    let approved = startup.approved;
     // FX-4: the context is built WITH what the VERIFIED point binding
     // established about each source topic's configuration capture (unknown for
     // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
@@ -2528,11 +2325,8 @@ fn execute_for_reporting(args: &RunArgs, run_id: &str) -> Result<RestoreOutcome,
     }
 }
 
-/// What the two execution-contract-v2 bindings established.
+/// What the execution-contract-v2 point binding established.
 struct V2Bindings {
-    /// The `Approved` minted from a verified standing authorization, when one
-    /// authorized this run.
-    standing_approved: Option<phase1_approval::Approved>,
     /// **FX-4.** The verified recovery point's configuration capture coverage;
     /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
     source_config_coverage: SourceConfigCoverage,
@@ -2545,66 +2339,13 @@ struct V2Bindings {
     point_source: Option<(String, logweir_core::original_name::ReceiptOwners)>,
 }
 
-/// The standing-authorization scope check and the recovery-point binding
-/// check, in that order, over the authenticated plan.
-///
-/// **Scope first.** The scope decides whether this plan may run at all; the
-/// point binding decides whether the archive holds what it was approved
-/// against. Running the archive read first would touch a bucket on behalf of a
-/// plan the authorization does not cover, which is a small thing to get wrong
-/// and an easy one to get right.
+/// The recovery-point binding check, over the authenticated plan.
 fn check_v2_bindings(
-    args: &RunArgs,
-    startup: &StartupInputs,
     plan: &DrillSpec,
+    evidence_keys: Option<&[u8]>,
     contract: Option<&ExecutionContract>,
     store_contract: bool,
-    signing_key: &logweir_evidence::keys::VerifyingKey,
 ) -> Result<V2Bindings, DrillError> {
-    use logweir_core::execution_contract::AuthorizationKind;
-
-    let mut standing_approved = None;
-    if let Some(authorization) = startup.authorization.as_ref() {
-        let allowed: AllowedClusters =
-            serde_json::from_str(&startup.allowed_text).map_err(|error| {
-                DrillError::Operational(format!("allowed-clusters does not parse: {error}"))
-            })?;
-        // **Global Constraint 1: the clock is read HERE**, in
-        // `crates/logweir`, and passed down. `logweir-core` takes `now` as an
-        // argument everywhere for exactly this reason.
-        let now = chrono::Utc::now();
-        let verified = binding::verify_standing_authorization(
-            plan,
-            &allowed,
-            &authorization.document,
-            &authorization.sidecar,
-            &authorization.keys,
-            contract.and_then(|c| c.rehearsal_schedule_uid.as_deref()),
-            now,
-        )?;
-        standing_approved = Some(standing_approved_from(
-            args,
-            &verified,
-            &startup.spec_text,
-            signing_key,
-            now,
-        )?);
-    } else if contract.is_some_and(|c| c.authorization_kind == AuthorizationKind::Standing) {
-        // Unreachable through `execution_contract_from`, which refuses a
-        // `Standing` contract with no pinned authorization digests, and
-        // through `validate_execution_contract`, which refuses a pinned digest
-        // with no mounted member. Kept because the failure it would otherwise
-        // cause is silent: a rehearsal running with no authorization check at
-        // all, which is the exact mutant D3 §4.3 exists to make impossible.
-        return Err(GuardRefusal(
-            "the execution contract names a standing rehearsal authorization but no signed \
-             authorization document is mounted; the runner's half of the authorization cannot \
-             be performed; no data operation was started"
-                .to_string(),
-        )
-        .into());
-    }
-
     // **F3 / D3 §8: `source.point` is v2 material, so a v1 invocation may not
     // carry it either.** The five environment items are refused in
     // `execution_contract_from`; this is the sixth, and it is HERE rather than
@@ -2642,13 +2383,10 @@ fn check_v2_bindings(
         };
         let archive = archive_read_handle(&plan.source.storage, contract_options.as_ref())?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
-        // and passed down, like the standing authorization's.
-        if let Some(verified) = binding::verify_point_binding(
-            plan,
-            &archive,
-            startup.evidence_keys.as_deref(),
-            chrono::Utc::now(),
-        )? {
+        // and passed down.
+        if let Some(verified) =
+            binding::verify_point_binding(plan, &archive, evidence_keys, chrono::Utc::now())?
+        {
             tracing::info!(point_id = %verified.point_id, "recovery point binding verified");
             // FX-7: the receipt's pin could not be checked in this bucket (a
             // copy, an unversioned bucket, an expired or deleted version), so
@@ -2662,96 +2400,9 @@ fn check_v2_bindings(
         }
     }
     Ok(V2Bindings {
-        standing_approved,
         source_config_coverage,
         bound_set,
         point_source,
-    })
-}
-
-/// The run's [`phase1_approval::Approved`], minted from the SIGNED standing
-/// authorization — PLAT-14.3b.
-///
-/// # Why a rehearsal produces one at all
-///
-/// `Approved` is what phase 1 records and what phase 8 copies into the signed
-/// scorecard, and `measured.rto_seconds` is taken from `validated_at`. A
-/// rehearsal that produced none would either have to skip phase 1 — leaving
-/// the signed evidence silent about what authorized the run — or carry a
-/// fabricated one. This mints it from bytes a human signed, and from nothing
-/// else.
-///
-/// # Every field, and where it comes from
-///
-/// * `approver` — `standing-authorization/<schedule>` from the document's own
-///   `subjectRef.name`. **Never a person's name**: v1 of this document carries
-///   none (PLAT-19.2 adds `requester`/`ticket`), and inventing one would tell a
-///   scorecard reader that a human approved THIS run when what a human approved
-///   was a schedule.
-/// * `ticket` — empty, for the same reason, rather than the slot: `triggered_by`
-///   is already the scorecard's field for why this run happened.
-/// * `plan_hash` — recomputed from the exact plan bytes. The standing document
-///   binds a SCOPE, not one plan's hash; `plan_within_scope` has already proved
-///   this plan falls inside it.
-/// * `approved_at` — the document's `issuedAt`: when the human signed.
-/// * `key_id` — the key the signature actually verified under, returned by
-///   `verify_standing_authorization` rather than re-derived here.
-/// * `self_attested` — computed, though `may_authorize` has already refused an
-///   `EvidenceSigning` key, so a true value is unreachable today and is
-///   labelled rather than assumed false.
-///
-/// # The trigger binding
-///
-/// `--triggered-by`'s `<schedule>` segment must equal the SIGNED
-/// `subjectRef.name`. `validate_execution_contract` checked only the shape,
-/// because at that point no signature had been verified; this is where the
-/// value the auditor reads is bound to the document the human signed.
-fn standing_approved_from(
-    args: &RunArgs,
-    verified: &binding::VerifiedStandingAuthorization,
-    spec_text: &str,
-    signing_key: &logweir_evidence::keys::VerifyingKey,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<phase1_approval::Approved, DrillError> {
-    let doc = &verified.document;
-    let Some((schedule, slot)) = args
-        .triggered_by
-        .as_deref()
-        .and_then(logweir_core::execution_contract::parse_rehearsal_triggered_by)
-    else {
-        return Err(GuardRefusal(format!(
-            "this run is authorized by a standing rehearsal authorization, so --triggered-by \
-             must name the schedule and slot as `{}<schedule>/<slot>`; it is {:?}; no data \
-             operation was started",
-            logweir_core::execution_contract::TRIGGERED_BY_REHEARSAL_PREFIX,
-            args.triggered_by
-        ))
-        .into());
-    };
-    if schedule != doc.subject_ref.name {
-        return Err(GuardRefusal(format!(
-            "--triggered-by names RehearsalSchedule `{schedule}` (slot {slot}) and the signed \
-             standing authorization was issued for `{}`; the run's recorded reason must be the \
-             schedule a human signed for; no data operation was started",
-            doc.subject_ref.name
-        ))
-        .into());
-    }
-    Ok(phase1_approval::Approved {
-        validated_at: now,
-        // PROD-15.1: a standing scope is never the original-name subject.
-        approval_subject: logweir_core::original_name::ApprovalSubject::Ordinary,
-        approval_mode: phase1_approval::APPROVAL_MODE_STANDING,
-        original_name_confirmation: None,
-        approval: logweir_core::scorecard::ApprovalInfo {
-            approver: format!("standing-authorization/{}", doc.subject_ref.name),
-            ticket: String::new(),
-            plan_hash: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
-            approved_at: doc.issued_at,
-            key_id: verified.key_id.clone(),
-            self_attested: verified.key_id == signing_key.key_id(),
-            console: None,
-        },
     })
 }
 
@@ -4889,8 +4540,8 @@ mod tests {
         );
         assert!(
             body.contains(
-                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n        \
-                 bound_set,\n        point_source,\n    })"
+                "Ok(V2Bindings {\n        source_config_coverage,\n        bound_set,\n        \
+                 point_source,\n    })"
             ),
             "check_v2_bindings must return the coverage it kept"
         );
@@ -4990,22 +4641,8 @@ mod tests {
             "this row is about a noted point: {verified:?}"
         );
 
-        let startup = StartupInputs {
-            spec_text: String::new(),
-            allowed_text: String::new(),
-            approved: None,
-            authorization: None,
-            evidence_keys: Some(keys),
-        };
-        let bindings = check_v2_bindings(
-            &args_with(None),
-            &startup,
-            &plan,
-            None,
-            false,
-            &SigningKey::generate_ed25519().verifying_key(),
-        )
-        .expect("the noted point is bound, not refused");
+        let bindings = check_v2_bindings(&plan, Some(&keys), None, false)
+            .expect("the noted point is bound, not refused");
         assert_eq!(
             bindings.source_config_coverage.of("orders"),
             ConfigCoverage::CaptureDenied,
@@ -5298,8 +4935,6 @@ mod tests {
             approver_key_ids: Vec::new(),
             // Execution contract v2's optional bundle members; absent is
             // every existing caller's shape (D3 §4.3, D0 bundle v2).
-            standing_authorization: None,
-            authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
             evidence_keys: None,
@@ -6266,241 +5901,6 @@ mod tests {
         assert!(
             wire.get("marker_topic").is_none(),
             "an absent marker topic is an absent KEY, not a null one: {wire}"
-        );
-    }
-}
-
-// =======================================================================
-// PLAT-14.3b — the run's `Approved` when a STANDING document authorized it
-// =======================================================================
-
-#[cfg(test)]
-mod standing_approved_tests {
-    use super::*;
-    use chrono::{DateTime, Utc};
-
-    fn document(schedule: &str, issued: DateTime<Utc>) -> binding::VerifiedStandingAuthorization {
-        binding::VerifiedStandingAuthorization {
-            key_id: "kkkk".to_string(),
-            document: serde_json::from_value(serde_json::json!({
-                "formatVersion": "1.0.0",
-                "kind": "StandingRehearsalAuthorization",
-                "subjectRef": {
-                    "apiVersion": "logweir.dev/v1alpha1",
-                    "kind": "RehearsalSchedule",
-                    "namespace": "team-a",
-                    "name": schedule,
-                    "uid": "uid-1",
-                },
-                "scope": {
-                    "templateDigest": "sha256:aa",
-                    "targetClusterId": "TARGET00000000000000000",
-                    "topicPrefix": "rehearsal-",
-                    "topics": ["orders"],
-                    "maxPartitions": 200,
-                    "recordsPerPartition": 25,
-                    "deadlineSeconds": 3600,
-                    "modes": ["scratch"],
-                },
-                "issuedAt": issued.to_rfc3339(),
-                "expiresAt": (issued + chrono::Duration::days(30)).to_rfc3339(),
-            }))
-            .expect("the fixture document parses"),
-        }
-    }
-
-    fn args_triggered(triggered_by: Option<&str>) -> RunArgs {
-        RunArgs {
-            execution_contract_version: None,
-            store_contract_version: None,
-            spec: PathBuf::from("restore.yaml"),
-            approval: None,
-            approver_key: PathBuf::from("approver.pem"),
-            approver_key_ids: Vec::new(),
-            allowed_clusters: PathBuf::from("allowed.json"),
-            signing_key: PathBuf::from("signing.pem"),
-            triggered_by: triggered_by.map(str::to_string),
-            out: None,
-            metrics_file: None,
-            offset_report_out: None,
-            standing_authorization: Some(PathBuf::from("standing-authorization.json")),
-            authorization_keys: Some(PathBuf::from("authorization-keys.json")),
-            policy_snapshot: None,
-            confirmation_key: None,
-            evidence_keys: None,
-            kafka_topic_resources: None,
-            strimzi_cluster: None,
-        }
-    }
-
-    fn signing_key() -> logweir_evidence::keys::VerifyingKey {
-        logweir_evidence::keys::SigningKey::generate_ed25519().verifying_key()
-    }
-
-    /// **The run's `Approved` comes from the SIGNED document and from nothing
-    /// else**, and it never claims a person approved this run.
-    ///
-    /// MUTANT: reading `approver` from a caller-supplied string, or defaulting
-    /// it to the operator who created the schedule, makes the signed scorecard
-    /// say a human authorized THIS run. What a human authorized was a
-    /// schedule, and the value says so.
-    #[test]
-    fn the_standing_approved_is_minted_from_the_signed_document() {
-        let issued = Utc::now() - chrono::Duration::days(2);
-        let verified = document("weekly-orders", issued);
-        let args = args_triggered(Some("rehearsal/weekly-orders/20260920T030000"));
-        let key = signing_key();
-        let approved =
-            standing_approved_from(&args, &verified, "name: plan\n", &key, Utc::now()).unwrap();
-
-        assert_eq!(
-            approved.approval.approver, "standing-authorization/weekly-orders",
-            "the approver names the SCHEDULE a human signed for, never a person"
-        );
-        assert!(
-            approved.approval.ticket.is_empty(),
-            "v1 of the document carries no ticket, and one is never invented"
-        );
-        assert_eq!(
-            approved.approval.plan_hash,
-            logweir_core::ids::sha256_prefixed(b"name: plan\n"),
-            "the plan hash is recomputed from the exact plan bytes"
-        );
-        assert_eq!(
-            approved.approval.approved_at, issued,
-            "approved_at is when the human signed the standing document"
-        );
-        assert_eq!(
-            approved.approval.key_id, "kkkk",
-            "the key id is the one the signature VERIFIED under"
-        );
-        assert!(
-            !approved.approval.self_attested,
-            "an approver key that is not the signing key is not self-attested"
-        );
-    }
-
-    /// **The trigger's schedule segment is bound to the SIGNED subject name.**
-    ///
-    /// MUTANT: dropping this comparison lets a rehearsal record itself in the
-    /// signed scorecard as a run of a schedule the standing document says
-    /// nothing about — which is precisely the field an auditor reads to find
-    /// out why the run happened.
-    #[test]
-    fn a_trigger_naming_another_schedule_is_refused() {
-        let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
-        let args = args_triggered(Some("rehearsal/some-other-schedule/20260920T030000"));
-        let error =
-            standing_approved_from(&args, &verified, "name: plan\n", &signing_key(), Utc::now())
-                .expect_err("a trigger naming another schedule is refused");
-        assert!(matches!(error, DrillError::Guard(_)), "{error}");
-        let text = error.to_string();
-        assert!(
-            text.contains("some-other-schedule") && text.contains("weekly-orders"),
-            "{text}"
-        );
-        assert!(text.contains("no data operation was started"), "{text}");
-    }
-
-    /// A trigger that is not a rehearsal trigger at all is refused by name,
-    /// and so is a malformed one: `rehearsal//x` names no schedule.
-    #[test]
-    fn a_missing_or_malformed_rehearsal_trigger_is_refused() {
-        let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
-        for trigger in [
-            None,
-            Some("approval/weekly-orders-standing"),
-            Some("rehearsal//x"),
-            Some("rehearsal/weekly-orders/"),
-        ] {
-            let args = args_triggered(trigger);
-            let error = standing_approved_from(
-                &args,
-                &verified,
-                "name: plan\n",
-                &signing_key(),
-                Utc::now(),
-            )
-            .expect_err("a run authorized by a standing document must name its slot");
-            assert!(
-                matches!(error, DrillError::Guard(_)),
-                "{trigger:?}: {error}"
-            );
-            assert!(
-                error.to_string().contains("rehearsal/"),
-                "{trigger:?}: the refusal names the shape it wanted: {error}"
-            );
-        }
-    }
-
-    /// **FX-23: the writer's version follows the lane.** `sample_info` signs
-    /// the topics phase 4 left unsampled (absent when none), and
-    /// `execute_with_validated_approval` raises every SAMPLED document to 1.6.0
-    /// right after setting the block, from the plan's coverage, so the version
-    /// marks a build with FX-23's checks and a document naming an unsampled
-    /// topic is never written under a version arm US-1 refuses. KILLS:
-    /// dropping the field in `sample_info`; writing `Some(vec![])`; deleting or
-    /// moving the version step, or handing it anything but the plan's
-    /// coverage.
-    #[test]
-    fn a_sampled_document_is_written_as_1_6_0() {
-        let t = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
-        let spec = logweir_core::spec::SampleSpec {
-            window_start: t("2026-08-29T00:00:00Z"),
-            window_end: t("2026-08-30T02:00:00Z"),
-            records_per_partition: 25,
-            anchor: logweir_core::spec::Anchor::Head,
-            max_partitions: Some(1),
-            coverage: logweir_core::spec::Coverage::Sampled,
-            complete_max_records: None,
-        };
-        let sel = |unsampled: Vec<String>| phase4_sample::Selection {
-            window: (spec.window_start, spec.window_end),
-            per_partition: Vec::new(),
-            records_expected: 0,
-            topics: 1,
-            partitions: 1,
-            notes: Vec::new(),
-            unsampled_topics: unsampled,
-        };
-        let named = sample_info(&spec, &sel(vec!["orders".into()]));
-        assert_eq!(named.unsampled_topics, Some(vec!["orders".to_string()]));
-        assert_eq!(
-            logweir_core::scorecard::format_version_with_sample("1.4.0", &named, spec.coverage),
-            "1.6.0"
-        );
-        let none = sample_info(&spec, &sel(Vec::new()));
-        assert_eq!(none.unsampled_topics, None, "none is ABSENT, never []");
-        assert_eq!(
-            logweir_core::scorecard::format_version_with_sample("1.4.0", &none, spec.coverage),
-            "1.6.0",
-            "every sampled document is 1.6.0, named topics or not"
-        );
-
-        let src = include_str!("mod.rs");
-        let start = src
-            .find("\nfn execute_with_validated_approval(")
-            .expect("drill/mod.rs has `fn execute_with_validated_approval(`");
-        let body = &src[start..];
-        let body = &body[..body.find("\n}\n").expect("the function closes at column 0")];
-        let set = body
-            .find("sc.sample = sample_info(&c.spec.sample, &sel);")
-            .expect("phase 4's sample block is set in this function");
-        let step = body[set..]
-            .find("format_version_with_sample(")
-            .expect("the version step follows the sample block");
-        assert!(
-            step < 400,
-            "the version step must follow the sample block at once, before anything signs"
-        );
-        let call = &body[set + step..];
-        let call = &call[..call.find(';').expect("the call ends")];
-        assert!(
-            call.contains("&sc.format_version")
-                && call.contains("&sc.sample")
-                && call.contains("c.spec.sample.coverage"),
-            "the version step reads the document's version, its sample block and the plan's \
-             coverage: {call}"
         );
     }
 }

@@ -23,7 +23,7 @@
 //! | v2 blocks are all-or-nothing | `a_standing_authorization_without_its_scope_is_refused`, `a_scope_without_the_standing_kind_is_refused` |
 //! | bundle v2 members are digest-pinned both ways | `every_optional_bundle_member_is_pinned_in_both_directions` |
 //! | unpinned material is never acted on | `bundle_v2_material_without_a_contract_is_refused_by_the_real_binary` |
-//! | the scope check is the runner's, before any client | `a_plan_outside_the_signed_scope_is_refused_by_the_real_binary` |
+//! | a standing authorization is withdrawn (PROD-17.1) | `the_standing_flags_are_refused_by_name`, `a_standing_contract_is_refused_by_name` |
 
 use chrono::Utc;
 use logweir::drill::phase1_approval;
@@ -183,77 +183,6 @@ fn signed_authorization_with(
         sidecar,
         keys,
     }
-}
-
-/// A standing authorization over `scope`, for `uid`, at the `formatVersion`
-/// this build's writer rule picks for that scope
-/// (`wire::standing_format_version_for`: 1.1.0 for a coverage scope).
-///
-/// PROD-17.1 C1 (OD-12) withdrew `logweir drill approve --standing`, which
-/// these rows used to mint the document with; the runner's reading of a
-/// signed standing document is unchanged, so the bytes are built here.
-fn minted_authorization(uid: &str, scope: &serde_json::Value) -> SignedAuthorization {
-    let typed: logweir_core::rehearsal_scope::RehearsalScope =
-        serde_json::from_value(scope.clone()).expect("the fixture is a RehearsalScope");
-    signed_authorization_with(
-        uid,
-        scope.clone(),
-        wire::standing_format_version_for(&typed),
-    )
-}
-
-/// The scope a complete-only standing authorization signs (review M1):
-/// `coverage: complete` and `maxPartitions: 0`.
-fn complete_only_scope() -> serde_json::Value {
-    let mut scope = scope_value("rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    scope["coverage"] = serde_json::json!("complete");
-    scope["maxPartitions"] = serde_json::json!(0);
-    scope
-}
-
-/// The three plans a complete-only scope is judged against: an ordinary
-/// sampled rehearsal plan, a sampled plan whose partition bound is 0 (the one
-/// sampled plan a 0 bound does not exclude by itself), and a complete plan.
-fn complete_only_cases() -> [(&'static str, String); 3] {
-    [
-        ("sampled, max_partitions 200", REHEARSAL_PLAN.to_string()),
-        (
-            "sampled, max_partitions 0",
-            REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  max_partitions: 0\n"),
-        ),
-        (
-            "complete",
-            REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  coverage: complete\n"),
-        ),
-    ]
-}
-
-/// One standing run of `bin` over `plan` under `signed`.
-fn run_standing(bin: &std::path::Path, plan: &str, signed: &SignedAuthorization) -> (i32, String) {
-    let fixture = fixture_with_plan(plan.as_bytes().to_vec());
-    let m = mount(&fixture, signed);
-    let contract = standing_contract(&fixture, signed, "uid-1");
-    let argv = standing_argv(&m);
-    invoke_bin(
-        bin,
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-}
-
-/// Whether a run got past every authorization check: none of the three
-/// refusals is named, and it failed later (no broker listens on 19099).
-fn past_authorization(code: i32, transcript: &str) -> bool {
-    code != 0
-        && ![
-            "RehearsalScopeViolation",
-            "AuthorizationInvalid",
-            "AuthorizationExpired",
-        ]
-        .iter()
-        .any(|t| transcript.contains(t))
 }
 
 fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) -> ExecutionContract {
@@ -664,8 +593,7 @@ fn a_job_carrying_only_v2_variables_is_incomplete_and_not_standalone() {
 #[test]
 fn every_optional_bundle_member_is_pinned_in_both_directions() {
     let fixture = fixture();
-    let scope =
-        signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000").document;
+    let scope = b"an optional bundle member".to_vec();
     /// One optional bundle member: its label in the refusal, how to mount it,
     /// and how to pin (or unpin) its digest on the contract.
     type OptionalMember = (
@@ -673,28 +601,7 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
         fn(&mut ApprovalBundleBytes, Vec<u8>),
         fn(&mut ExecutionContract, Option<String>),
     );
-    let members: [OptionalMember; 5] = [
-        (
-            "standing rehearsal authorization",
-            |b, v| b.authorization = Some(v),
-            |c, d| {
-                c.authorization_sha256 = d;
-                if c.authorization_sha256.is_some() {
-                    c.authorization_kind = wire::AuthorizationKind::Standing;
-                    c.rehearsal_schedule_uid = Some("schedule-uid-1".to_string());
-                }
-            },
-        ),
-        (
-            "standing rehearsal authorization signature",
-            |b, v| b.authorization_sidecar = Some(v),
-            |c, d| c.authorization_sidecar_sha256 = d,
-        ),
-        (
-            "trusted authorization keyring",
-            |b, v| b.authorization_keys = Some(v),
-            |c, d| c.authorization_keys_sha256 = d,
-        ),
+    let members: [OptionalMember; 2] = [
         (
             "approval-policy snapshot",
             |b, v| b.policy_snapshot = Some(v),
@@ -706,15 +613,8 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
             |c, d| c.confirmation_key_sha256 = d,
         ),
     ];
-    /// `validate_execution_contract` binds `--triggered-by` to the
-    /// authorization kind since PLAT-14.3b, so a row that flips the contract
-    /// to `Standing` must present the rehearsal trigger.
-    fn trigger_for(contract: &ExecutionContract) -> &'static str {
-        if contract.authorization_kind == wire::AuthorizationKind::Standing {
-            STANDING_TRIGGER
-        } else {
-            "approval/approval-a"
-        }
+    fn trigger_for(_: &ExecutionContract) -> &'static str {
+        "approval/approval-a"
     }
     for (label, put_member, pin_digest) in members {
         // (a) Both present and agreeing: accepted.
@@ -829,22 +729,6 @@ fn mount(fixture: &Fixture, signed: &SignedAuthorization) -> Mounted {
     m
 }
 
-/// `--triggered-by` for every standing case here: the schedule
-/// `signed_authorization` names, and one slot.
-const STANDING_TRIGGER: &str = "rehearsal/weekly-orders/20260921T000000";
-
-/// The argv a standing-authorized run carries, beyond the ordinary flags.
-fn standing_argv(m: &Mounted) -> Vec<String> {
-    vec![
-        wire::VERSION_ARG.to_string(),
-        wire::VERSION.to_string(),
-        "--standing-authorization".to_string(),
-        m.authorization.to_str().unwrap().to_string(),
-        "--authorization-keys".to_string(),
-        m.authorization_keys.to_str().unwrap().to_string(),
-    ]
-}
-
 /// A complete v2 contract over a mounted signed authorization.
 fn standing_contract(
     fixture: &Fixture,
@@ -867,72 +751,15 @@ fn standing_contract(
     contract
 }
 
+/// `logweir restore run` over the mounted bundle, with exactly the contract
+/// variables `env` names, and stdout and stderr together.
 fn invoke(
     m: &Mounted,
     fixture: &Fixture,
     env: &BTreeMap<String, String>,
     extra: &[&str],
 ) -> (i32, String) {
-    invoke_bin(
-        std::path::Path::new(env!("CARGO_BIN_EXE_logweir")),
-        m,
-        fixture,
-        env,
-        extra,
-    )
-}
-
-/// [`invoke`] with another `logweir` binary — an OLDER build's, for the rows
-/// that prove what a reader built before a format change does with a document
-/// this build mints.
-fn invoke_bin(
-    bin: &std::path::Path,
-    m: &Mounted,
-    fixture: &Fixture,
-    env: &BTreeMap<String, String>,
-    extra: &[&str],
-) -> (i32, String) {
-    // **A standing-authorized run carries NO `--approval` and its trigger
-    // names the schedule and slot** — PLAT-14.3b. Decided by the CONTRACT the
-    // environment carries, exactly as `load_startup_inputs` decides it: a run
-    // with stray standing material and no contract is an ORDINARY invocation
-    // that must still present its approval, and it is refused for the
-    // unpinned material rather than for a missing flag.
-    let standing = env.get(wire::AUTHORIZATION_KIND_ENV).map(String::as_str)
-        == Some(wire::AUTHORIZATION_KIND_STANDING);
-    let mut command = Command::new(bin);
-    command.args(["restore", "run", "--spec"]).arg(&m.plan);
-    if !standing {
-        command.arg("--approval").arg(&m.approval);
-    }
-    command
-        .arg("--approver-key")
-        .arg(&m.approver_key)
-        .arg("--approver-key-ids")
-        .arg(fixture.approver.key_id())
-        .arg("--allowed-clusters")
-        .arg(&m.allowed)
-        .arg("--signing-key")
-        .arg(&m.signing)
-        .args([
-            "--triggered-by",
-            if standing {
-                STANDING_TRIGGER
-            } else {
-                "approval/approval-a"
-            },
-        ])
-        .args(extra);
-    // The runner must see ONLY the variables this case names: the parent test
-    // process inherits whatever the developer's shell has, and a stray
-    // `LOGWEIR_EXECUTION_*` would silently change which contract is under test.
-    for name in wire::ALL_ENV_ANY {
-        command.env_remove(name);
-    }
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    let output = command.output().unwrap();
+    let output = command(m, fixture, env, extra).output().unwrap();
     let transcript = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -950,20 +777,25 @@ fn invoke_stdout(
     env: &BTreeMap<String, String>,
     extra: &[&str],
 ) -> (i32, String) {
-    // **A standing-authorized run carries NO `--approval` and its trigger
-    // names the schedule and slot** — PLAT-14.3b. Decided by the CONTRACT the
-    // environment carries, exactly as `load_startup_inputs` decides it: a run
-    // with stray standing material and no contract is an ORDINARY invocation
-    // that must still present its approval, and it is refused for the
-    // unpinned material rather than for a missing flag.
-    let standing = env.get(wire::AUTHORIZATION_KIND_ENV).map(String::as_str)
-        == Some(wire::AUTHORIZATION_KIND_STANDING);
+    let output = command(m, fixture, env, extra).output().unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).to_string(),
+    )
+}
+
+fn command(
+    m: &Mounted,
+    fixture: &Fixture,
+    env: &BTreeMap<String, String>,
+    extra: &[&str],
+) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
-    command.args(["restore", "run", "--spec"]).arg(&m.plan);
-    if !standing {
-        command.arg("--approval").arg(&m.approval);
-    }
     command
+        .args(["restore", "run", "--spec"])
+        .arg(&m.plan)
+        .arg("--approval")
+        .arg(&m.approval)
         .arg("--approver-key")
         .arg(&m.approver_key)
         .arg("--approver-key-ids")
@@ -972,26 +804,18 @@ fn invoke_stdout(
         .arg(&m.allowed)
         .arg("--signing-key")
         .arg(&m.signing)
-        .args([
-            "--triggered-by",
-            if standing {
-                STANDING_TRIGGER
-            } else {
-                "approval/approval-a"
-            },
-        ])
+        .args(["--triggered-by", "approval/approval-a"])
         .args(extra);
+    // The runner must see ONLY the variables this case names: the parent test
+    // process inherits whatever the developer's shell has, and a stray
+    // `LOGWEIR_EXECUTION_*` would silently change which contract is under test.
     for name in wire::ALL_ENV_ANY {
         command.env_remove(name);
     }
     for (name, value) in env {
         command.env(name, value);
     }
-    let output = command.output().unwrap();
-    (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).to_string(),
-    )
+    command
 }
 
 /// **F6: interface I9's "`refusal-reason=` is the process's FINAL stdout line
@@ -1008,12 +832,11 @@ fn a_guard_refusal_ends_stdout_with_the_refusal_reason_line() {
     let signed = signed_authorization("uid-1", "rehearsal-deadbeef-", "TARGET00000000000000000");
     let m = mount(&fixture, &signed);
     let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
     let (code, stdout) = invoke_stdout(
         &m,
         &fixture,
         &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+        &[wire::VERSION_ARG, wire::VERSION],
     );
     assert_eq!(code, 3, "{stdout}");
     let last = stdout.lines().last().unwrap_or_default();
@@ -1029,9 +852,10 @@ fn a_guard_refusal_ends_stdout_with_the_refusal_reason_line() {
 }
 
 /// Unpinned bundle-v2 material is never acted on. A standalone invocation has
-/// no controller to pin anything, so a `--standing-authorization` handed to
-/// one is refused rather than silently enforced — which would let an operator
-/// believe an authorization was checked when nothing bound it to this run.
+/// no controller to pin anything, so a policy snapshot and confirmation key
+/// handed to one are refused rather than silently enforced — which would let
+/// an operator believe an authorization was checked when nothing bound it to
+/// this run.
 #[test]
 fn bundle_v2_material_without_a_contract_is_refused_by_the_real_binary() {
     let fixture = fixture();
@@ -1042,9 +866,9 @@ fn bundle_v2_material_without_a_contract_is_refused_by_the_real_binary() {
         &fixture,
         &BTreeMap::new(),
         &[
-            "--standing-authorization",
+            "--policy-snapshot",
             m.authorization.to_str().unwrap(),
-            "--authorization-keys",
+            "--confirmation-key",
             m.authorization_keys.to_str().unwrap(),
         ],
     );
@@ -1060,397 +884,64 @@ fn bundle_v2_material_without_a_contract_is_refused_by_the_real_binary() {
     assert!(!transcript.contains("Connection refused"), "{transcript}");
 }
 
-/// **The runner's half of D3 §4.3, end to end.** A rendered plan outside the
-/// SIGNED scope is refused with exit 3, the refusal names the mismatch and the
-/// schedule, and the bootstrap in the plan is never dialled.
+// ===========================================================================
+// Standing rehearsal authorizations are withdrawn (PROD-17.1 C1)
+// ===========================================================================
+
+/// **The two standing flags are refused by name** (PROD-17.1, s1-c1 R8): a
+/// Job an older controller built for a `RehearsalSchedule` passes them, and
+/// with a mutable runner tag it can start this image. Exit 1, the withdrawal
+/// named, nothing read. CONTROL: the same invocation without the flag is not
+/// refused for it. KILLS: the flag accepted and ignored; the flag removed
+/// silently (clap's generic "unexpected argument").
 #[test]
-fn a_plan_outside_the_signed_scope_is_refused_by_the_real_binary() {
-    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    let signed = signed_authorization("uid-1", "rehearsal-deadbeef-", "TARGET00000000000000000");
+fn the_standing_flags_are_refused_by_name() {
+    let fixture = fixture();
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
     let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
+    for (flag, path) in [
+        ("--standing-authorization", &m.authorization),
+        ("--authorization-keys", &m.authorization_keys),
+    ] {
+        let (code, transcript) = invoke(
+            &m,
+            &fixture,
+            &BTreeMap::new(),
+            &[flag, path.to_str().unwrap()],
+        );
+        assert_eq!(code, 1, "{flag}: {transcript}");
+        assert!(
+            transcript.contains(flag)
+                && transcript.contains("standing rehearsal authorizations are withdrawn"),
+            "{flag}: {transcript}"
+        );
+    }
+    let (_, control) = invoke(&m, &fixture, &BTreeMap::new(), &[]);
+    assert!(!control.contains("withdrawn"), "{control}");
+}
+
+/// **A contract naming the standing kind is refused by name** before any file
+/// is read, exit 3, whatever is mounted (PROD-17.1, s1-c1 R8). CONTROL: the
+/// same run under the approval contract is not refused for it.
+#[test]
+fn a_standing_contract_is_refused_by_name() {
+    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &signed);
+    let version = [wire::VERSION_ARG, wire::VERSION];
+    let standing = standing_contract(&fixture, &signed, "uid-1");
+    let (code, transcript) = invoke(&m, &fixture, &env_map(&standing), &version);
     assert_eq!(code, 3, "{transcript}");
     assert!(
-        transcript.contains("RehearsalScopeViolation"),
-        "{transcript}"
-    );
-    assert!(transcript.contains("rehearsal-deadbeef-"), "{transcript}");
-    assert!(transcript.contains("weekly-orders"), "{transcript}");
-    assert!(
-        transcript.contains("refusal-reason="),
-        "every guard refusal prints interface I9's line: {transcript}"
-    );
-    // The plan's bootstrap is 127.0.0.1:19099 and nothing listens there; a run
-    // that had constructed the reader would say so on the transcript.
-    assert!(
-        !transcript.contains("BrokerTransportFailure"),
+        transcript.contains("standing rehearsal authorization")
+            && transcript.contains("which is withdrawn")
+            && transcript.contains("no data operation was started"),
         "{transcript}"
     );
     assert!(!transcript.contains("Connection refused"), "{transcript}");
-    assert!(!transcript.contains("19099"), "{transcript}");
-}
-
-/// **F10: the allowlist comparison is EQUALITY, proven through the binary.**
-///
-/// The `logweir-core` row kills a widening mutant inside the predicate; this
-/// one kills a change that bypassed the predicate at the
-/// `verify_standing_authorization` seam instead. The allowlist contains the
-/// signed cluster id AND one more, so a `contains` reading passes and an
-/// equality reading refuses.
-#[test]
-fn a_widened_allowlist_is_refused_by_the_real_binary_even_though_it_names_the_signed_cluster() {
-    let mut fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    fixture.bundle.allowed_clusters =
-        br#"{"allowed_cluster_ids":["TARGET00000000000000000","SECOND00000000000000000"]}"#
-            .to_vec();
-    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    assert_eq!(code, 3, "{transcript}");
-    assert!(
-        transcript.contains("exactly the signed target cluster id"),
-        "a standing rehearsal may reach the signed cluster and nothing else: {transcript}"
-    );
-    assert!(
-        transcript.contains("SECOND00000000000000000"),
-        "{transcript}"
-    );
-    assert!(!transcript.contains("19099"), "{transcript}");
-}
-
-/// **The F1 mutant, end to end: a document nobody with an approver key
-/// signed.** The controller mints a scope that fits the plan and signs it with
-/// a key of its own; the keyring pins the human approver. Refused before any
-/// client.
-#[test]
-fn a_minted_authorization_is_refused_by_the_real_binary() {
-    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    let honest = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let minted = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    // The document and signature the CONTROLLER produced, against the keyring
-    // the human's approval pinned.
-    let forged = SignedAuthorization {
-        document: minted.document,
-        sidecar: minted.sidecar,
-        keys: honest.keys,
-    };
-    let m = mount(&fixture, &forged);
-    let contract = standing_contract(&fixture, &forged, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    assert_eq!(code, 3, "{transcript}");
-    assert!(transcript.contains("AuthorizationInvalid"), "{transcript}");
-    assert!(
-        transcript.contains("does not verify under any"),
-        "{transcript}"
-    );
-    assert!(!transcript.contains("19099"), "{transcript}");
-}
-
-/// **PROD-08.1a: the runner's half of "the coverage is signed", through the
-/// real binary.** The rehearsal plan asks for `sample.coverage: complete`
-/// (and so states no `max_partitions`). Under a 1.0.0 scope — every scope
-/// signed before the field existed, which authorises sampled rehearsals only —
-/// it is refused before any client, naming the coverage. Under a 1.1.0 scope
-/// that signed `coverage: complete` the SAME plan gets past every
-/// authorization check and fails later for a reason that is not the
-/// authorization (no broker listens).
-///
-/// KILLS: the runner reading the plan's coverage as admissible under any
-/// scope (the first half admits); the coverage arm refusing a complete plan
-/// whatever the scope says (the second half refuses).
-#[test]
-fn a_complete_plan_runs_only_under_a_scope_that_signed_complete_coverage() {
-    let complete_plan = REHEARSAL_PLAN.replace("  max_partitions: 200\n", "  coverage: complete\n");
-    assert!(
-        complete_plan.contains("coverage: complete"),
-        "{complete_plan}"
-    );
-    let fixture = fixture_with_plan(complete_plan.as_bytes().to_vec());
-
-    let old = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let m = mount(&fixture, &old);
-    let contract = standing_contract(&fixture, &old, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    assert_eq!(code, 3, "{transcript}");
-    assert!(
-        transcript.contains("RehearsalScopeViolation"),
-        "{transcript}"
-    );
-    assert!(
-        transcript.contains("`sample.coverage: complete`")
-            && transcript.contains("authorises `sampled` coverage"),
-        "{transcript}"
-    );
-    assert!(!transcript.contains("19099"), "{transcript}");
-
-    let mut scope = scope_value("rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    scope["coverage"] = serde_json::json!("complete");
-    scope["maxPartitions"] = serde_json::json!(0);
-    let signed = signed_authorization_with("uid-1", scope, "1.1.0");
-    let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    for not_expected in [
-        "RehearsalScopeViolation",
-        "AuthorizationInvalid",
-        "AuthorizationExpired",
-    ] {
-        assert!(
-            !transcript.contains(not_expected),
-            "a scope that signed complete coverage covers this plan; not {not_expected} (exit \
-             {code}):\n{transcript}"
-        );
-    }
-    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
-}
-
-/// **PROD-08.1a review M1, this build's half.** A complete-only scope MINTED
-/// by this build (`coverage: complete`, `maxPartitions: 0`, formatVersion
-/// 1.1.0) admits the complete plan and refuses both sampled plans by their
-/// coverage, before any client.
-///
-/// KILLS: the minter writing another version or dropping a field (the
-/// format assertion); the coverage equality removed (the zero-bound sampled
-/// plan gets past the authorization).
-#[test]
-fn a_complete_only_scope_this_build_mints_admits_only_the_complete_plan() {
-    let signed = minted_authorization("uid-1", &complete_only_scope());
-    let doc: serde_json::Value = serde_json::from_slice(&signed.document).unwrap();
-    assert_eq!(doc["formatVersion"], "1.1.0", "{doc}");
-    assert_eq!(doc["scope"]["coverage"], "complete", "{doc}");
-    assert_eq!(doc["scope"]["maxPartitions"], 0, "{doc}");
-    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_logweir"));
-    for (label, plan) in complete_only_cases() {
-        let (code, transcript) = run_standing(bin, &plan, &signed);
-        if label == "complete" {
-            assert!(
-                past_authorization(code, &transcript),
-                "{label} (exit {code}):\n{transcript}"
-            );
-        } else {
-            assert_eq!(code, 3, "{label}: {transcript}");
-            assert!(
-                transcript.contains("RehearsalScopeViolation")
-                    && transcript.contains("authorises `complete`"),
-                "{label}: {transcript}"
-            );
-            assert!(
-                !transcript.contains("19099"),
-                "{label}: refused before any client"
-            );
-        }
-    }
-}
-
-/// **PROD-08.1a review M1, the OLDER reader's half — the reason the complete
-/// scope signs `maxPartitions: 0`.** `LOGWEIR_OLDER_RUNNER` names a `logweir`
-/// binary built before format 1.1.0 (main before this row). It ignores
-/// `coverage` and reads the document this build mints as a SAMPLED scope with
-/// a partition bound of 0, so it refuses the ordinary sampled plan (past the
-/// bound) and the complete plan (no bound: unbounded), before any client —
-/// where, with a positive bound, it would have run the sampled one.
-///
-/// The zero-bound sampled plan is inside a 0 bound, so the older runner's
-/// authorization checks pass it and the run fails later (here: no broker).
-/// It samples no partition, and every build's phase 7 refuses an empty
-/// selection before any verdict (`phase7_verify.rs`, "zero sample
-/// selections"; exit 1, no scorecard), so it can never be signed a pass —
-/// and an older controller never starts it, because its Approval controller
-/// refuses the scope (a bound of 0 is not a positive bound). The row asserts
-/// what the older binary does with it, so a change in that is seen.
-///
-/// `#[ignore]`d: it needs the older binary. When `LOGWEIR_COMPLETE_SCOPE_OUT`
-/// names a directory, the minted document, sidecar and keyring are written
-/// there for the older CONTROLLER's checks (run from that build's tree).
-///
-/// ```text
-/// LOGWEIR_OLDER_RUNNER=<main>/target/debug/logweir \
-///   cargo test -p logweir --test execution_contract_v2 -- --ignored older_runner
-/// ```
-#[test]
-#[ignore = "needs LOGWEIR_OLDER_RUNNER, a logweir binary built before standing format 1.1.0"]
-fn an_older_runner_refuses_every_plan_under_a_complete_only_scope_this_build_mints() {
-    let older = std::path::PathBuf::from(
-        std::env::var("LOGWEIR_OLDER_RUNNER").expect("LOGWEIR_OLDER_RUNNER names a binary"),
-    );
-    let signed = minted_authorization("uid-1", &complete_only_scope());
-    if let Some(out) = std::env::var_os("LOGWEIR_COMPLETE_SCOPE_OUT") {
-        let out = std::path::PathBuf::from(out);
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::write(out.join("standing-authorization.json"), &signed.document).unwrap();
-        std::fs::write(out.join("standing-authorization.sig"), &signed.sidecar).unwrap();
-        std::fs::write(out.join("authorization-keys.json"), &signed.keys).unwrap();
-    }
-    for (label, plan) in complete_only_cases() {
-        let (code, transcript) = run_standing(&older, &plan, &signed);
-        eprintln!("[older runner] {label}: exit {code}");
-        match label {
-            "sampled, max_partitions 200" => {
-                assert_eq!(code, 3, "{label}: {transcript}");
-                assert!(
-                    transcript.contains("RehearsalScopeViolation")
-                        && transcript
-                            .contains("samples up to 200 partitions; the signed scope permits 0"),
-                    "{label}: {transcript}"
-                );
-                assert!(
-                    !transcript.contains("19099"),
-                    "{label}: refused before any client"
-                );
-            }
-            "complete" => {
-                assert_eq!(code, 3, "{label}: {transcript}");
-                assert!(
-                    transcript.contains("RehearsalScopeViolation")
-                        && transcript
-                            .contains("so it is unbounded; the signed scope permits at most 0"),
-                    "{label}: {transcript}"
-                );
-                assert!(
-                    !transcript.contains("19099"),
-                    "{label}: refused before any client"
-                );
-            }
-            _ => {
-                // The documented corner: inside a 0 bound, so past the older
-                // runner's authorization; it fails later, never a pass.
-                assert!(
-                    past_authorization(code, &transcript),
-                    "{label} (exit {code}):\n{transcript}"
-                );
-            }
-        }
-    }
-    // The control: the SAME older binary runs an ordinary sampled plan under a
-    // sampled scope with a positive bound — so the refusals above are the 0
-    // bound's, not an older binary that refuses every standing run.
-    let sampled = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let (code, transcript) = run_standing(&older, REHEARSAL_PLAN, &sampled);
-    assert!(
-        past_authorization(code, &transcript),
-        "the control (exit {code}):\n{transcript}"
-    );
-    // The hole the 0 closes: a complete scope signed with a POSITIVE bound
-    // (which this build's minter and readers now refuse) is read by the older
-    // binary as a sampled scope, and it runs the ordinary sampled plan.
-    let mut wide = complete_only_scope();
-    wide["maxPartitions"] = serde_json::json!(200);
-    let wide = signed_authorization_with("uid-1", wide, "1.1.0");
-    let (code, transcript) = run_standing(&older, REHEARSAL_PLAN, &wide);
-    assert!(
-        past_authorization(code, &transcript),
-        "without the 0, the older runner admits a sampled plan under a complete-only scope \
-         (exit {code}):\n{transcript}"
-    );
-}
-
-/// The control: the SAME plan under an authorization that covers it gets past
-/// every authorization check and fails later, for a reason that is not the
-/// authorization. Without this row the three above would pass for a build that
-/// refused every standing run.
-#[test]
-fn a_plan_inside_the_signed_scope_passes_the_authorization_checks() {
-    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    for not_expected in [
-        "RehearsalScopeViolation",
-        "AuthorizationInvalid",
-        "AuthorizationExpired",
-    ] {
-        assert!(
-            !transcript.contains(not_expected),
-            "the authorization is valid and covers this plan; the run must fail for some LATER \
-             reason, not {not_expected} (exit {code}):\n{transcript}"
-        );
-    }
-    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
-}
-
-// ===========================================================================
-// PLAT-14.3b — the standing path REPLACES the per-run approval
-// ===========================================================================
-
-/// **THE ROW THIS TASK EXISTS FOR.** A standing-authorized run carries NO
-/// `--approval` at all and still gets past the authorization checks.
-///
-/// Before PLAT-14.3b this was impossible: `load_startup_inputs` called
-/// `phase1_approval::verify_bytes` unconditionally, so the bundle had to carry
-/// a placeholder in the approval slot, and that placeholder is signed under
-/// `PAYLOAD_TYPE_STANDING_AUTHORIZATION` — a correctly signed rehearsal was
-/// reported to the operator as a TAMPERED APPROVAL.
-///
-/// MUTANT: restoring the unconditional `verify_bytes` call makes this exit 3
-/// with a `payload_type mismatch`.
-#[test]
-fn a_standing_run_needs_no_per_run_approval() {
-    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let argv = standing_argv(&m);
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    for not_expected in [
-        "payload_type",
-        "approval signature does not verify",
-        "--approval is required",
-        "plan_hash mismatch",
-        "RehearsalScopeViolation",
-        "AuthorizationInvalid",
-        "AuthorizationExpired",
-    ] {
-        assert!(
-            !transcript.contains(not_expected),
-            "a standing run needs no per-run approval; it must not fail with {not_expected} \
-             (exit {code}):\n{transcript}"
-        );
-    }
-    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
+    let ordinary = contract_for(&fixture.bundle, wire::ContractVersion::V2);
+    let (_, control) = invoke(&m, &fixture, &env_map(&ordinary), &version);
+    assert!(!control.contains("withdrawn"), "{control}");
 }
 
 /// **And an ORDINARY Restore still needs its Approval.** The flag becoming
@@ -1508,31 +999,6 @@ fn an_ordinary_run_without_its_approval_is_refused_by_name() {
     );
 }
 
-/// A standing run that ALSO presents a per-run approval is refused: that is
-/// the pre-14.3b "sits beside" shape, and the file would be material no digest
-/// in the immutable template covers.
-#[test]
-fn a_standing_run_that_also_presents_an_approval_is_refused() {
-    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
-    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let m = mount(&fixture, &signed);
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let mut argv = standing_argv(&m);
-    argv.push("--approval".to_string());
-    argv.push(m.approval.to_str().unwrap().to_string());
-    let (code, transcript) = invoke(
-        &m,
-        &fixture,
-        &env_map(&contract),
-        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
-    );
-    assert_eq!(code, 3, "{transcript}");
-    assert!(
-        transcript.contains("REPLACES the per-run approval"),
-        "the refusal says which shape it refused: {transcript}"
-    );
-}
-
 /// The two per-run approval digests are REFUSED under `standing` and REQUIRED
 /// under `approval` — both directions, at the contract reader.
 #[test]
@@ -1564,32 +1030,6 @@ fn the_approval_slot_is_pinned_by_the_authorization_kind() {
             .contains(wire::APPROVAL_SIDECAR_SHA256_ENV),
         "{error}"
     );
-}
-
-/// `--triggered-by` is bound to the AUTHORIZATION KIND: `approval/<name>` for
-/// an ordinary Restore, `rehearsal/<schedule>/<slot>` for a rehearsal. A
-/// standing run whose trigger is the old approval shape is refused before
-/// anything is parsed.
-#[test]
-fn a_standing_contract_requires_a_rehearsal_trigger() {
-    let fixture = fixture();
-    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
-    let contract = standing_contract(&fixture, &signed, "uid-1");
-    let mut bundle = fixture.bundle.clone();
-    bundle.approval = None;
-    bundle.approval_sidecar = None;
-    bundle.authorization = Some(signed.document.clone());
-    bundle.authorization_sidecar = Some(signed.sidecar.clone());
-    bundle.authorization_keys = Some(signed.keys.clone());
-
-    let error = validate_execution_contract(&contract, Some("approval/approval-a"), &bundle)
-        .unwrap_err_or_panic("a rehearsal's trigger names its schedule and slot");
-    assert!(
-        error.to_string().contains("rehearsal/"),
-        "the refusal names the shape it wanted: {error}"
-    );
-    validate_execution_contract(&contract, Some(STANDING_TRIGGER), &bundle)
-        .expect("the rehearsal trigger is accepted");
 }
 
 /// **D3 §5.5 step 6's keyring is pinned in BOTH directions** -- the rule every
