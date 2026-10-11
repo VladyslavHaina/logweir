@@ -68,7 +68,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
-use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
@@ -112,6 +112,7 @@ use crate::destination::{
 use crate::diagnostics;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
 use crate::policy::SelectionShape;
+use crate::runner_log;
 use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerificationResult, VerificationVerdict, VerifyOracle,
@@ -285,6 +286,8 @@ pub const FAILURE_REASON_PREFIX: &str = logweir_core::guard::FAILURE_REASON_PREF
 /// `tests/backup_controller.rs` is what fails when the two disagree — mirrored
 /// from the runner-side row, which is where a runner-side change is caught.
 pub const KEY_SCAN_TAIL_LINES: usize = 16;
+
+pub use crate::runner_log::tail_lines;
 
 /// How many trailing lines a passing restore actually prints in production —
 /// the number [`KEY_SCAN_TAIL_LINES`] is a budget over.
@@ -2751,33 +2754,27 @@ pub fn capture_from_receipt(receipt: &Value) -> Option<(DateTime<Utc>, DateTime<
 /// key would have the final one be the one that was written.
 #[must_use]
 pub fn evidence_keys(log: &str) -> EvidenceKeys {
-    let mut keys = EvidenceKeys::default();
-    let mut digest_lines = 0usize;
-    for line in tail_lines(log) {
-        if let Some(v) = line.strip_prefix(RECEIPT_KEY_PREFIX) {
-            keys.receipt = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(SIDECAR_KEY_PREFIX) {
-            keys.sidecar = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(RECEIPT_SHA256_PREFIX) {
-            digest_lines += 1;
-            let canonical = v.strip_prefix("sha256:").is_some_and(|hex| {
+    let last = |key| runner_log::key_values(log, key).pop().map(str::to_string);
+    // The grammar has one digest fact. Two lines are ambiguous even when they
+    // happen to agree, so an old/noisy runner degrades to the backward-
+    // compatible absence instead of choosing one.
+    let receipt_sha256 = match runner_log::key_values(log, RECEIPT_SHA256_PREFIX)[..] {
+        [v] => v
+            .strip_prefix("sha256:")
+            .is_some_and(|hex| {
                 hex.len() == 64
                     && hex
                         .bytes()
                         .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            });
-            keys.receipt_sha256 = canonical.then(|| v.to_string());
-        }
+            })
+            .then(|| v.to_string()),
+        _ => None,
+    };
+    EvidenceKeys {
+        receipt: last(RECEIPT_KEY_PREFIX),
+        sidecar: last(SIDECAR_KEY_PREFIX),
+        receipt_sha256,
     }
-    // The grammar has one digest fact. Two lines are ambiguous even when they
-    // happen to agree, so an old/noisy runner degrades to the backward-
-    // compatible absence instead of choosing one.
-    if digest_lines != 1 {
-        keys.receipt_sha256 = None;
-    }
-    keys
 }
 
 /// The terminal state a guard refusal named, from the log's final
@@ -2802,36 +2799,10 @@ pub fn evidence_keys(log: &str) -> EvidenceKeys {
 /// deliberately NOT closed here, so a newer runner's state still arrives.
 #[must_use]
 pub fn refusal_state(log: &str) -> Option<String> {
-    let mut found = None;
-    for line in tail_lines(log) {
-        if let Some(v) = line.strip_prefix(REFUSAL_REASON_PREFIX) {
-            found = Some(v);
-        }
-    }
-    found
+    runner_log::key_values(log, REFUSAL_REASON_PREFIX)
+        .pop()
         .filter(|v| logweir_core::refusal_detail::is_reason_code(v))
         .map(str::to_string)
-}
-
-/// The final [`KEY_SCAN_TAIL_LINES`] non-empty lines, trimmed of `\r`.
-///
-/// **PUBLIC, AND SHARED WITH [`super::restore`] (Task 20).** Interface I7's
-/// two keys and interface I8's three come off the same bounded tail under the
-/// same rule — plan erratum **E4**'s "scan a bounded tail and match by key
-/// name" — and the two reconcilers must not disagree about what "the tail" is.
-/// Sharing the ONE implementation rather than copying three lines is what
-/// makes a change to [`KEY_SCAN_TAIL_LINES`] reach both scanners; the key
-/// scans themselves stay separate, because the prefix sets differ and one of
-/// interface I8's three lines is conditional.
-#[must_use]
-pub fn tail_lines(log: &str) -> Vec<&str> {
-    let all: Vec<&str> = log
-        .lines()
-        .map(|l| l.trim_end_matches('\r'))
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    let start = all.len().saturating_sub(KEY_SCAN_TAIL_LINES);
-    all[start..].to_vec()
 }
 
 /// The exit code of the container named `runner`, if it terminated.
@@ -2921,19 +2892,15 @@ pub fn crash_terminal_state(pod: Option<&Pod>) -> &'static str {
 /// place.
 #[must_use]
 pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
-    let mut found = None;
-    for line in tail_lines(log) {
-        if let Some(v) = line.strip_prefix(FAILURE_REASON_PREFIX) {
-            found = Some(v);
-        }
-    }
-    found.and_then(|v| {
-        logweir_core::guard::failure_reason_for_exit(
-            logweir_core::guard::FailureReasonKind::Backup,
-            exit_code,
-            v.trim(),
-        )
-    })
+    runner_log::key_values(log, FAILURE_REASON_PREFIX)
+        .pop()
+        .and_then(|v| {
+            logweir_core::guard::failure_reason_for_exit(
+                logweir_core::guard::FailureReasonKind::Backup,
+                exit_code,
+                v.trim(),
+            )
+        })
 }
 
 /// Whether an exit-4 run left a payload without its sidecar.
@@ -5599,8 +5566,7 @@ async fn reconcile_backup_inner(
         .await;
         (read.body, Some(read.reason))
     } else {
-        let log = pods
-            .logs(&pod_name, &LogParams::default())
+        let log = runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL)
             .await
             .map_err(BackupError::Api)?;
         (log, None)
@@ -5752,18 +5718,12 @@ async fn reconcile_backup_inner(
     // than a comment: a status patch that did not return 200 leaves this
     // function before any TTL exists, so pod GC cannot start on a run whose
     // code was never recorded.
-    jobs.patch(
-        &job_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({
-            // D3 §2.7, chart value `controller.jobTtlSeconds`. The default IS
-            // `TTL_SECONDS_AFTER_FINISHED`, so an installation that configures
-            // nothing keeps exactly the behaviour it had.
-            "spec": { "ttlSecondsAfterFinished": diagnostics::job_ttl_seconds() }
-        })),
-    )
-    .await
-    .map_err(BackupError::Api)?;
+    // D3 §2.7, chart value `controller.jobTtlSeconds`. The default IS
+    // `TTL_SECONDS_AFTER_FINISHED`, so an installation that configures
+    // nothing keeps exactly the behaviour it had.
+    runner_log::set_ttl(&jobs, &job_name, diagnostics::job_ttl_seconds(), None)
+        .await
+        .map_err(BackupError::Api)?;
 
     // ===================================================================
     // THE SECOND PATCH — Task 24, interface I21's `Backup` half.

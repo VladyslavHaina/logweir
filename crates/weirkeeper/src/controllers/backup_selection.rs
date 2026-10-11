@@ -81,7 +81,7 @@ use logweir_core::check_contract::{
 use crate::backup_execution::{
     DiscoveryInputs, DiscoveryNames, ExclusionsInputs, ResolvedSelection, SelectionInputs,
 };
-use crate::check::{self, job as cjob, plan, policy, relay};
+use crate::check::{self, job as cjob, plan, policy};
 use crate::conditions::{
     current_condition, merge_condition, status_unchanged, StatusVersion, CONDITION_TOPICS_RESOLVED,
     REASON_DISCOVERY_RUNNING, REASON_RESOLVED, TERMINAL_STATE_DISCOVERY_FAILED,
@@ -100,6 +100,7 @@ use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::selection::{AllUserTopics, Coverage, IncompleteDiscovery, SelectionMode};
 use crate::crds::Condition;
 use crate::job::{RunnerImage, RunnerOwner};
+use crate::runner_log;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1103,7 +1104,9 @@ pub async fn resolve(
             // read the relay again and the pod must outlive this one.
             if committed {
                 if let Some(job_name) = finished_job.as_deref() {
-                    set_discovery_ttl(client, namespace, job_name).await?;
+                    check::set_ttl(client, namespace, job_name)
+                        .await
+                        .map_err(BackupError::Api)?;
                 }
             }
             Ok(Resolution::Refused { state })
@@ -1442,7 +1445,7 @@ async fn observe(
             // bounds what the API server sends and the decoder's own budget
             // bounds what it will accumulate; a body over the relay budget is
             // refused rather than parsed.
-            match pods.logs(&p.name_any(), &relay::log_params()).await {
+            match runner_log::read_text(&pods, &p.name_any(), &runner_log::RELAY).await {
                 Ok(log) => Some(log),
                 Err(e) if check::is_log_absent(&e) => None,
                 Err(e) => return Err(BackupError::Api(e)),
@@ -1888,28 +1891,6 @@ pub fn recorded_finish(job: &Job, pod: Option<&Pod>) -> Option<DateTime<Utc>> {
     (found != sentinel).then_some(found)
 }
 
-/// Patch the finished discovery Job's TTL — **only ever after the freeze's
-/// status write landed**, D1 §7.2 R9 and D-SEAMS **S7**.
-///
-/// The TTL controller deletes a Job and its pods together and the relay lives
-/// on the pod, so a TTL patched before the commit lets garbage collection race
-/// a read a later pass might still have to make. The ordering is a guarantee
-/// because the status write is `?`-propagated at the call site: a patch that
-/// did not return 200 leaves the reconcile before this line.
-///
-/// # Errors
-///
-/// [`BackupError::Api`].
-pub async fn set_discovery_ttl(
-    client: &kube::Client,
-    namespace: &str,
-    job_name: &str,
-) -> Result<(), BackupError> {
-    check::set_ttl(client, namespace, job_name)
-        .await
-        .map_err(BackupError::Api)
-}
-
 /// D1 §7.2 R9's last two steps, in order: record `TopicsResolved=True` and then
 /// arm the discovery Job's TTL — **the one call `controllers::backup` makes
 /// after the freeze**.
@@ -1943,7 +1924,9 @@ pub async fn record_resolved(
     let patch = resolved_status_patch(backup, now);
     let (committed, at) = write_status(&api, backup, patch.clone()).await?;
     if committed {
-        set_discovery_ttl(client, namespace, job_name).await?;
+        check::set_ttl(client, namespace, job_name)
+            .await
+            .map_err(BackupError::Api)?;
     }
     Ok((patch, at))
 }

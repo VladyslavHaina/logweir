@@ -101,6 +101,7 @@ use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError, ResolvedDestination};
 use crate::job::RunnerOwner;
 use crate::retention_plan::{self as plan, PointFacts};
+use crate::runner_log;
 
 use super::Context;
 
@@ -1097,10 +1098,7 @@ impl Pass<'_> {
         let exit_code = super::backup::terminated_exit_code(&pod);
         let pods: Api<k8s_openapi::api::core::v1::Pod> =
             Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        let log = match pods
-            .logs(&pod.name_any(), &check::relay::log_params())
-            .await
-        {
+        let log = match runner_log::read_text(&pods, &pod.name_any(), &runner_log::RELAY).await {
             Ok(log) => log,
             // A pod whose log is gone is a run whose durable answer is the
             // record in object storage; it is not a reconcile failure.
@@ -1423,16 +1421,8 @@ impl Pass<'_> {
             return Ok(());
         }
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        let patch = json!({"spec": {"ttlSecondsAfterFinished": check::job::TTL_SECONDS}});
-        match jobs
-            .patch(
-                &job.name_any(),
-                &PatchParams::default(),
-                &Patch::Merge(patch),
-            )
-            .await
-        {
-            Ok(_) => Ok(()),
+        match runner_log::set_ttl(&jobs, &job.name_any(), check::job::TTL_SECONDS, None).await {
+            Ok(()) => Ok(()),
             Err(kube::Error::Api(e)) if e.code == 404 || e.code == 422 => Ok(()),
             Err(e) => Err(ReconcileError::Api(e)),
         }

@@ -101,7 +101,7 @@ use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
@@ -140,6 +140,7 @@ use crate::job::{
     self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount,
     APPROVAL_MOUNT_PATH, APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
 };
+use crate::runner_log;
 use crate::verification::{
     conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
@@ -2995,7 +2996,7 @@ impl RestoreEvidenceKeys {
 /// Plan erratum **E4**, measured: a pod log is stdout and stderr merged in
 /// nondeterministic order, so "the last three lines" is not a rule in either
 /// direction. This scans the final [`super::backup::KEY_SCAN_TAIL_LINES`]
-/// non-empty lines through [`super::backup::tail_lines`] — the SAME tail the
+/// non-empty lines through [`runner_log::key_values`] — the SAME scan the
 /// `Backup` path uses, shared rather than reimplemented — and matches each
 /// line's own prefix. The second arm of
 /// `the_three_evidence_keys_are_read_from_the_final_three_stdout_lines`
@@ -3014,19 +3015,12 @@ impl RestoreEvidenceKeys {
 /// wrote.
 #[must_use]
 pub fn restore_evidence_keys(log: &str) -> RestoreEvidenceKeys {
-    let mut keys = RestoreEvidenceKeys::default();
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(SCORECARD_KEY_PREFIX) {
-            keys.scorecard = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(SIDECAR_KEY_PREFIX) {
-            keys.sidecar = Some(v.to_string());
-        }
-        if let Some(v) = line.strip_prefix(OFFSET_REPORT_KEY_PREFIX) {
-            keys.offset_report = Some(v.to_string());
-        }
+    let last = |key| runner_log::key_values(log, key).pop().map(str::to_string);
+    RestoreEvidenceKeys {
+        scorecard: last(SCORECARD_KEY_PREFIX),
+        sidecar: last(SIDECAR_KEY_PREFIX),
+        offset_report: last(OFFSET_REPORT_KEY_PREFIX),
     }
-    keys
 }
 
 // ---------------------------------------------------------------------------
@@ -3375,10 +3369,7 @@ pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 #[must_use]
 pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
     use logweir_core::execution_contract::{parse_teardown_failed, TEARDOWN_FAILED_PREFIX};
-    let raw = backup::tail_lines(log)
-        .into_iter()
-        .rev()
-        .find_map(|line| line.strip_prefix(TEARDOWN_FAILED_PREFIX))?;
+    let raw = runner_log::key_values(log, TEARDOWN_FAILED_PREFIX).pop()?;
     let kept: Vec<Value> = parse_teardown_failed(raw)?
         .into_iter()
         .filter(|f| mapped.iter().any(|m| m == &f.topic))
@@ -3401,12 +3392,7 @@ pub fn teardown_failed(log: &str, mapped: &[String]) -> Option<Value> {
 /// `status.topicPreflight` absent rather than writing an empty block.
 #[must_use]
 pub fn topic_preflight(log: &str) -> Option<Value> {
-    let mut raw: Option<&str> = None;
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(TOPIC_PREFLIGHT_KEY_PREFIX) {
-            raw = Some(v);
-        }
-    }
+    let raw = runner_log::key_values(log, TOPIC_PREFLIGHT_KEY_PREFIX).pop();
     let doc: Value = serde_json::from_str(raw?).ok()?;
     let doc = doc.as_object()?;
     let mut out = serde_json::Map::new();
@@ -5498,16 +5484,6 @@ pub fn finished_status_patch_with_reason(
     json!({ "status": Value::Object(status) })
 }
 
-/// The terminal read's `pods/log` parameters: the last
-/// [`TERMINAL_LOG_TAIL_LINES`] lines, and nothing else changed.
-#[must_use]
-pub fn terminal_log_params() -> LogParams {
-    LogParams {
-        tail_lines: Some(TERMINAL_LOG_TAIL_LINES),
-        ..LogParams::default()
-    }
-}
-
 /// **PROD-15.1: the closed state of a stopped creation step**, read off a
 /// Restore runner's log: `TargetTopicAppeared` or `CreatedTopicsLeft`, beside
 /// exit 1.
@@ -5534,7 +5510,7 @@ pub fn terminal_log_params() -> LogParams {
 /// image the names are shown as its log gives them (`docs/kubernetes.md`).
 #[must_use]
 pub fn creation_stop_state(exit_code: i32, log: &str) -> Option<&'static str> {
-    let tail = backup::tail_lines(log);
+    let tail = runner_log::tail_lines(log);
     let value = tail
         .last()?
         .strip_prefix(logweir_core::guard::FAILURE_REASON_PREFIX)?;
@@ -5571,7 +5547,7 @@ pub fn creation_stop_lists(
 ) -> Option<logweir_core::creation_stop::CreationStopLists> {
     use logweir_core::creation_stop::CreationStopLists;
     creation_stop_state(exit_code, log)?;
-    let tail = backup::tail_lines(log);
+    let tail = runner_log::tail_lines(log);
     let line = tail.len().checked_sub(2).and_then(|i| tail.get(i))?;
     let lists =
         CreationStopLists::parse_value(line.strip_prefix(TARGET_TOPICS_APPEARED_KEY_PREFIX)?)?;
@@ -7424,7 +7400,7 @@ async fn reconcile_restore_inner(
     // FX-34: A REFUSED RUN'S LOG IS READ BOUNDED, AND ITS FAILURE IS AN ANSWER
     // — the `Backup` twin carries the reasoning. THIS `if` IS THE ONLY GATE:
     // every other exit code takes the read it always took (PROD-15.1's
-    // `terminal_log_params`, whose failure is still a reconcile error) and
+    // `runner_log::TERMINAL`, whose failure is still a reconcile error) and
     // carries no runner reason at all.
     let (log, runner_reason) = if exit_code == 3 {
         // THE JOB'S OWN LINE TOKEN, READ OFF THE JOB. A `refusal-detail=` line
@@ -7441,8 +7417,7 @@ async fn reconcile_restore_inner(
         .await;
         (read.body, Some(read.reason))
     } else {
-        let log = pods
-            .logs(&pod_name, &terminal_log_params())
+        let log = runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL)
             .await
             .map_err(RestoreError::Api)?;
         (log, None)
@@ -7612,17 +7587,11 @@ async fn reconcile_restore_inner(
     // than a comment: a status patch that did not return 200 leaves this
     // function before any TTL exists, so pod GC cannot start on a run whose
     // code was never recorded.
-    jobs.patch(
-        &job_name,
-        &PatchParams::default(),
-        &Patch::Merge(json!({
-            // D3 §2.7, chart value `controller.jobTtlSeconds`; the default
-            // is `TTL_SECONDS_AFTER_FINISHED`.
-            "spec": { "ttlSecondsAfterFinished": diagnostics::job_ttl_seconds() }
-        })),
-    )
-    .await
-    .map_err(RestoreError::Api)?;
+    // D3 §2.7, chart value `controller.jobTtlSeconds`; the default is
+    // `TTL_SECONDS_AFTER_FINISHED`.
+    runner_log::set_ttl(&jobs, &job_name, diagnostics::job_ttl_seconds(), None)
+        .await
+        .map_err(RestoreError::Api)?;
 
     // ===================================================================
     // THE SECOND PATCH — Task 24, interface I21's `Restore` half.

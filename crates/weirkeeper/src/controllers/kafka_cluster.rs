@@ -30,7 +30,7 @@
 //! **nondeterministic order**, measured twice on the same refusal with the
 //! discriminator arriving last in one run and second-to-last in the other. No
 //! reader here may take "the last line of the pod log". [`probe_report`] scans
-//! [`backup::tail_lines`] — the ONE tail implementation, shared rather than
+//! through [`runner_log::key_values`] — the ONE key scan, shared rather than
 //! copied, so a change to [`backup::KEY_SCAN_TAIL_LINES`] reaches every scanner
 //! — and matches on the key name.
 //!
@@ -102,7 +102,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
@@ -120,6 +120,7 @@ use crate::conditions::{
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
 use crate::job::{self, RunnerJobSpec, RunnerOwner};
+use crate::runner_log;
 
 /// WARN on the pass whose status write first recorded a crash or a refusal,
 /// debug on every later pass that finds it already recorded — FX-19's "once
@@ -320,9 +321,9 @@ pub struct ProbeReport {
 /// Read the two contract lines out of a pod log, **by key name, from a bounded
 /// tail**.
 ///
-/// [`backup::tail_lines`] is the ONE tail implementation in this crate
-/// (erratum **E4**), shared and not forked: the prefix sets differ between the
-/// three reconcilers, the definition of "the tail" must not.
+/// [`runner_log::key_values`] is the ONE key scan in this crate (erratum
+/// **E4**), shared and not forked: the prefix sets differ between the three
+/// reconcilers, the definition of "the tail" must not.
 ///
 /// The LAST occurrence of each key wins within that tail, matching
 /// [`backup::evidence_keys`]: a runner that printed a draft line would have the
@@ -338,32 +339,27 @@ pub struct ProbeReport {
 /// passes.
 #[must_use]
 pub fn probe_report(log: &str) -> ProbeReport {
-    let mut report = ProbeReport::default();
-    for line in backup::tail_lines(log) {
-        if let Some(v) = line.strip_prefix(CLUSTER_ID_PREFIX) {
-            report.cluster_id = if v.trim().is_empty() {
-                None
-            } else {
-                Some(v.trim().to_string())
-            };
-        }
-        if let Some(v) = line.strip_prefix(REACHABLE_PREFIX) {
-            report.reachable = match v.trim() {
+    let refused = format!(
+        "refusal-reason={}",
+        crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH
+    );
+    ProbeReport {
+        cluster_id: runner_log::key_values(log, CLUSTER_ID_PREFIX)
+            .pop()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+        reachable: runner_log::key_values(log, REACHABLE_PREFIX)
+            .pop()
+            .and_then(|v| match v.trim() {
                 "true" => Some(true),
                 "false" => Some(false),
                 _ => None,
-            };
-        }
-        if line.trim()
-            == format!(
-                "refusal-reason={}",
-                crate::conditions::TERMINAL_STATE_CREDENTIAL_BINDING_MISMATCH
-            )
-        {
-            report.credential_binding_refused = true;
-        }
+            }),
+        credential_binding_refused: runner_log::tail_lines(log)
+            .iter()
+            .any(|line| line.trim() == refused),
     }
-    report
 }
 
 /// What one reading of a probe's log decided.
@@ -1284,20 +1280,6 @@ impl From<kube::Error> for KafkaClusterError {
 // The reconcile
 // ---------------------------------------------------------------------------
 
-/// The merge patch [`set_probe_ttl`] sends: the re-probe TTL and this
-/// reconciler's own verdict marker, together — FX-19.
-#[must_use]
-pub fn ttl_patch(job: &Job) -> Value {
-    json!({
-        "metadata": {
-            "annotations": {
-                VERDICT_RECORDED_ANNOTATION: job.metadata.uid.clone().unwrap_or_default()
-            }
-        },
-        "spec": { "ttlSecondsAfterFinished": PROBE_TTL_SECONDS }
-    })
-}
-
 /// Patch a FINISHED probe Job's `ttlSecondsAfterFinished` — which is also the
 /// re-probe timer ([`PROBE_TTL_SECONDS`]).
 ///
@@ -1312,22 +1294,17 @@ pub fn ttl_patch(job: &Job) -> Value {
 ///
 /// # The TTL and this reconciler's marker travel in ONE patch (FX-19 fix round)
 ///
-/// [`ttl_patch`] carries [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID beside
+/// The patch carries [`VERDICT_RECORDED_ANNOTATION`] = the Job's UID beside
 /// [`PROBE_TTL_SECONDS`], so the Job reads "verdict recorded"
 /// ([`verdict_recorded`]) exactly when this reconciler gave it its TTL — and
 /// a TTL some admission policy put on the Job at creation is overwritten with
 /// the re-probe timer rather than trusted.
 async fn set_probe_ttl(jobs: &Api<Job>, job: &Job) -> Result<bool, KafkaClusterError> {
     let job_name = job.name_any();
-    match jobs
-        .patch(
-            &job_name,
-            &PatchParams::default(),
-            &Patch::Merge(ttl_patch(job)),
-        )
-        .await
-    {
-        Ok(_) => Ok(true),
+    let uid = job.metadata.uid.clone().unwrap_or_default();
+    let marker = Some((VERDICT_RECORDED_ANNOTATION, uid.as_str()));
+    match runner_log::set_ttl(jobs, &job_name, PROBE_TTL_SECONDS, marker).await {
+        Ok(()) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 404 => {
             debug!(
                 job = %job_name,
@@ -1960,7 +1937,7 @@ async fn reconcile_cluster_inner(
     // (interface I28, a declared late binding).
     let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
-    let log = match pods.logs(&pod_name, &LogParams::default()).await {
+    let log = match runner_log::read_text(&pods, &pod_name, &runner_log::TERMINAL).await {
         Ok(log) => log,
         // FX-19: THE POD WENT BETWEEN THE LIST AND THE READ — collected with
         // its Job, or removed by hand. Nothing was read, so nothing is

@@ -60,9 +60,8 @@
 //! the read it always took and builds the message it always built.
 
 use futures::io::AsyncRead;
-use futures::AsyncReadExt as _;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, LogParams};
+use kube::api::Api;
 use tracing::{debug, warn};
 
 use logweir_core::refusal_detail::{
@@ -70,6 +69,7 @@ use logweir_core::refusal_detail::{
 };
 
 use crate::controllers::backup::REFUSAL_REASON_PREFIX;
+use crate::runner_log;
 
 /// How many trailing log lines the exit-3 read asks for.
 ///
@@ -102,28 +102,6 @@ pub const REFUSAL_LOG_TAIL_LINES: i64 = 32;
 /// can, and then nothing is read from the tail at all
 /// ([`RunnerReason::TailOverBound`]).
 pub const REFUSAL_LOG_LIMIT_BYTES: i64 = 512 * 1024;
-
-/// How many bytes [`read`] takes off the stream before it stops, whatever the
-/// server sends: the bound, plus one byte to see that the bound was passed.
-/// The API documents that a server "may return slightly more" than
-/// `limitBytes`; a body that reaches the bound is treated as cut either way.
-const READ_CAP_BYTES: u64 = REFUSAL_LOG_LIMIT_BYTES as u64 + 1;
-
-/// The `pods/log` parameters of the exit-3 read.
-///
-/// `container: Some("runner")`, as [`crate::check::relay::log_params`] names
-/// it and for its reason: the exit code was read from the container of that
-/// name, and `None` would read whatever container a pod with two happened to
-/// default to.
-#[must_use]
-pub fn log_params() -> LogParams {
-    LogParams {
-        container: Some(crate::job::CONTAINER_NAME.to_string()),
-        tail_lines: Some(REFUSAL_LOG_TAIL_LINES),
-        limit_bytes: Some(REFUSAL_LOG_LIMIT_BYTES),
-        ..LogParams::default()
-    }
-}
 
 /// What an exit-3 run's pod log said about why, or why it said nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -302,21 +280,14 @@ pub fn interpret(run: RefusingRun, token: Option<&LineToken>, bytes: &[u8]) -> R
     RefusalLog { body, reason }
 }
 
-/// At most [`READ_CAP_BYTES`] bytes off `reader`, and not one more is asked
-/// of it.
-///
-/// THE SECOND BOUND, AND THE ONE THIS PROCESS ENFORCES ITSELF. `limitBytes` is
-/// a request; this is what stops a server that ignored it, or a stream that
-/// never ends, from growing a buffer in a controller that serves every
-/// namespace. The rest of the stream is dropped unread.
+/// [`runner_log::read_capped`] at the exit-3 bound: at most
+/// [`REFUSAL_LOG_LIMIT_BYTES`] plus one bytes off `reader`.
 ///
 /// # Errors
 ///
 /// The reader's own error.
 pub async fn read_capped<R: AsyncRead + Unpin>(reader: R) -> std::io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(READ_CAP_BYTES).read_to_end(&mut bytes).await?;
-    Ok(bytes)
+    runner_log::read_capped(reader, &runner_log::REFUSAL).await
 }
 
 /// Read a finished exit-3 run's bounded log tail and say what it means. `run`
@@ -348,8 +319,8 @@ pub async fn read(
     run: RefusingRun,
     token: Option<&LineToken>,
 ) -> RefusalLog {
-    let stream = match pods.log_stream(pod_name, &log_params()).await {
-        Ok(stream) => stream,
+    let bytes = match runner_log::read(pods, pod_name, &runner_log::REFUSAL).await {
+        Ok(bytes) => bytes,
         Err(kube::Error::Api(response)) if response.code == 404 => {
             debug!(
                 namespace,
@@ -371,6 +342,16 @@ pub async fn read(
                 status: Some(response.code),
             });
         }
+        Err(kube::Error::ReadEvents(error)) => {
+            warn!(
+                namespace,
+                pod = pod_name,
+                %error,
+                "the refused run's pod log stream broke; the exit code is recorded and the \
+                 condition says the reason could not be read. It is not read again"
+            );
+            return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
+        }
         Err(error) => {
             warn!(
                 namespace,
@@ -379,19 +360,6 @@ pub async fn read(
                 "the refused run's pod log read failed before an HTTP status; the exit code is \
                  recorded and the condition says the reason could not be read. It is not read \
                  again"
-            );
-            return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
-        }
-    };
-    let bytes = match read_capped(Box::pin(stream)).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            warn!(
-                namespace,
-                pod = pod_name,
-                %error,
-                "the refused run's pod log stream broke; the exit code is recorded and the \
-                 condition says the reason could not be read. It is not read again"
             );
             return RefusalLog::without_body(RunnerReason::LogUnreadable { status: None });
         }
@@ -417,6 +385,7 @@ pub async fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::AsyncReadExt as _;
     use RefusingRun::{Backup, Restore};
 
     /// This Job's token and another Job's, assembled so that no source line
