@@ -882,7 +882,9 @@ the page is built so that there is nowhere to do any of that:
   scope** (`renderApprovalScope`): the source archive and backup set, the
   recovery point, the target cluster's bootstrap servers, **every topic and the
   name it is restored under** (original names marked, partition subsets listed
-  number by number), the verification and where the evidence goes. Every one of
+  number by number), the verification and where the evidence goes, and one
+  sentence when the plan restores transaction markers as data
+  (`restore.allow_transaction_markers: true`). Every one of
   those is the server's, taken from bytes the console verified its own
   signature on and the plan they name by hash, and every one is rendered as
   text. The topic list is never sliced: it scrolls inside the panel
