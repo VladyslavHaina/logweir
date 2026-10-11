@@ -3350,8 +3350,9 @@ OD-12); each part below did nothing v1 uses.
   `notify` is refused at render, naming it; `scripts/bind-credential.py`
   refuses `--kind ProtectionPolicy`. A delivery Job an older controller left
   running finishes and then stays, because nothing patches its TTL any more:
-  `kubectl delete jobs -n <ns> -l logweir.dev/component=notification`
-  removes them and their event ConfigMaps.
+  `kubectl delete jobs,configmaps -n <ns> -l app.kubernetes.io/component=notification,app.kubernetes.io/managed-by=weirkeeper`
+  removes them and their event ConfigMaps, including a ConfigMap the policy
+  owned rather than the Job.
 - **The drill's own notification post is withdrawn.** A run no longer posts
   to a webhook, Slack or PagerDuty, after a drill or on a failure. The plan's
   `notifications` block still parses, because it sits inside signed plan
