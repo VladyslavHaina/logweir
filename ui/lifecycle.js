@@ -45,8 +45,6 @@ import {
   transitionError,
 } from "./workflow.js";
 
-// ============================================================== route half
-
 export function active(lifecycle) {
   return lifecycle === undefined || lifecycle === null || lifecycle.isCurrent();
 }
@@ -76,19 +74,15 @@ export function listen(target, type, handler, lifecycle) {
   target.addEventListener(type, handler);
 }
 
-/** Whether a followed `Preflight` still owes a READ -- defect P8 (poc-install,
- *  2026-09-24), and the one rule every page that starts a check follows it by.
+/** Whether a followed `Preflight` still owes a READ: the rule every page that
+ *  starts a check follows it by.
  *
  *  A CREATE ANSWER IS NEVER THE VERDICT. The product API answers a create --
- *  and a REPLAY of one, which is already terminal -- with the stored object
- *  projected WITHOUT recomputing staleness: `applicable: false` and one
- *  `unverifiable` reason, "this response did not recompute staleness; read the
- *  preflight itself for a current verdict". A follower that stopped at a
- *  terminal create answer therefore painted "ready / does not apply to your
- *  current inputs / could not be checked" for a replayed check, and a page with
- *  no follower at all (Destinations -> Test access) painted `pending` for a
- *  check that had been `ready` for minutes. So the first read is owed whatever
- *  the create said, and after it a follower stops at the first TERMINAL read.
+ *  and a REPLAY of one, which is already terminal -- WITHOUT recomputing
+ *  staleness: `applicable: false` and one `unverifiable` reason ("read the
+ *  preflight itself for a current verdict"). So the first read is owed
+ *  whatever the create said, and after it a follower stops at the first
+ *  TERMINAL read.
  *
  *  @param {object|null|undefined} preflight what the follower holds now
  *  @param {number} reads how many GETs it has already made for it
@@ -115,8 +109,6 @@ export function whenLeft(lifecycle, release) {
   lifecycle.signal.addEventListener("abort", release, { once: true });
 }
 
-// ============================================================ durable half
-
 /** How long a mutation waits for the API server before its outcome is
  *  reported as UNKNOWN. The request is not aborted -- an accepted create
  *  cannot be un-sent -- and a late answer still settles the record. */
@@ -128,9 +120,8 @@ export const MUTATION_TIMEOUT_MS = 30000;
  *  words -- `PRIVATE KEY` (PKCS#8), `RSA`/`EC`/`DSA PRIVATE KEY` (PKCS#1 and
  *  SEC1), `ENCRYPTED PRIVATE KEY`, `OPENSSH PRIVATE KEY` -- so the two words
  *  are the first alternative, IN ANY CASE and across any run of whitespace
- *  including a line break. The earlier `indexOf("PRIVATE KEY")` matched
- *  neither a lower-case paste nor a reflowed header, and a guard either of
- *  those walks past is not a guard.
+ *  including a line break: a lower-case paste or a reflowed header must not
+ *  walk past it.
  *
  *  The second alternative is a PEM `BEGIN` line whose label joins the words
  *  with a dash or an underscore. It is deliberately NOT the first
@@ -567,12 +558,12 @@ export function createMutation(options) {
   const clearTimer = typeof opts.clearTimer === "function"
     ? opts.clearTimer
     : (id) => globalThis.clearTimeout(id);
-  // THE RECORD'S MOVES ARE NAMED (PLAT-18.1). Every publish below goes through
+  // THE RECORD'S MOVES ARE NAMED. Every publish below goes through
   // `workflow.js`'s mutation machine, which refuses an event the current state
   // does not accept -- so "settle an attempt that is not in flight" and
   // "start a second attempt over a pending one" are transition ERRORS with a
   // name, not expressions repeated beside each call site. The published shape
-  // is unchanged: `phase` and `timedOut` come from the machine's own table.
+  // is `phase` and `timedOut`, from the machine's own table.
   const run = startMachine(MUTATION_MACHINE);
   let state = IDLE;
   const listeners = [];
@@ -776,30 +767,20 @@ export function watchMutation(owner, key, mutation, listener, lifecycle) {
   return release;
 }
 
-// ============================================================ asking a check again
-
-// ASKING A CHECK AGAIN IS NOT REPLAYING THE LAST ANSWER (P14, poc-upgrade-2).
-//
-// A check -- a `Preflight`, a `TopicDiscovery` -- answers a question about a
-// moment. The product API names the object it creates from the request's
-// `Idempotency-Key` (D0: one key, one object, for ever), so a key composed
-// from the question alone is the SAME key every time the same inputs are
-// asked about: the schedule form's "Check readiness", clicked with unchanged
-// inputs after its check had expired, came back `200 replayed: true` with that
-// expired check -- "does not apply to your current inputs" -- and no click
-// could make a fresh one until the controller garbage-collected the old
-// object an hour later. D0 does not allow the API to answer that key with a
-// second object, and it says what a client does instead: "a later deliberate
-// operation uses a new key".
+// ASKING A CHECK AGAIN IS NOT REPLAYING THE LAST ANSWER. A check -- a
+// `Preflight`, a `TopicDiscovery` -- answers a question about a moment, and
+// the product API names the object it creates from the request's
+// `Idempotency-Key` (one key, one object), so a key composed from the
+// question alone would replay an expired check for as long as the
+// controller keeps it. A later deliberate operation uses a new key.
 //
 // SO THE KEY CARRIES AN INTENT TOKEN, kept exactly as long as the check it
 // named can still be the answer. Asking again while that check is pending,
-// running or current -- a retry after a lost response, a second click inside
-// its validity -- sends the same token and replays, which is what an
-// idempotent retry is for. Once the check is SPENT (the page read it expired,
-// inapplicable, failed or cancelled; or a replay answers with it already
-// spent), the token is renewed and the next ask is a new check. The page load
-// mints its own tokens, so a reload asks afresh rather than inheriting a key.
+// running or current (a retry after a lost response, a second click inside
+// its validity) sends the same token and replays. Once the check is SPENT
+// (read expired, inapplicable, failed or cancelled, or a replay answers
+// with it already spent), the token is renewed and the next ask is a new
+// check. The page load mints its own tokens, so a reload asks afresh.
 //
 // The token lives in this module's memory with the drafts, and like them it
 // holds nothing but a random string.
@@ -855,10 +836,10 @@ export async function askCheck(ask) {
   if (answer && answer.replayed === true && item !== null && typeof a.spent === "function" &&
     a.spent(item)) {
     const spentId = item.id;
-    // COMPARE-AND-SWAP (review L4): renew only while the intent is still the
-    // entry this ask used. An overlapping ask that renewed first has already
-    // started the new check, and this one asks under ITS key -- a replay of
-    // that check, not a second one.
+    // COMPARE-AND-SWAP: renew only while the intent is still the entry this
+    // ask used. An overlapping ask that renewed first has already started the
+    // new check, and this one asks under ITS key -- a replay of that check,
+    // not a second one.
     if (checkIntents.get(a.intent) === entry) {
       checkIntents.delete(a.intent);
     }
@@ -910,60 +891,39 @@ export function discoverySpent(discovery) {
   return d.terminal === true && (d.state !== "succeeded" || d.stale === true);
 }
 
-// ============================================================ following a check
-
-// A CHECK IS FOLLOWED UNTIL IT ANSWERS OR UNTIL IT CAN NO LONGER ANSWER
-// (poc-upgrade-3's P15). Every page that starts a check used to read it back a
-// fixed number of times -- Test connection 30 s, the schedule form and the
-// list page's Backup readiness panel 40 s, Test access 60 s, restore step 5
-// 90 s -- while a `Preflight` may run for its own `timeoutSeconds`, 120 by
-// default and up to 600, plus the 90 s its Job is given to start. A check that
-// took 64 s was left on the panel as "this page reads it again until then" for
-// as long as the page stayed open, and nothing read it again.
+// A CHECK IS FOLLOWED UNTIL IT ANSWERS OR UNTIL IT CAN NO LONGER ANSWER.
 //
 // THE DEADLINE IS THE LONGEST A CHECK MAY TAKE, NOT A GUESS AT A TYPICAL ONE.
-// The product API publishes no deadline for a check in flight: `expiresAt` is
-// its RESULT's validity and exists only once there is a result (by which
-// time the check is terminal and the follow is over), and neither the check's
-// `timeoutSeconds` nor its Job's `activeDeadlineSeconds` is in the view. So a
-// follow reads for the product's documented maximum -- the largest
-// `timeoutSeconds` the product API accepts, plus the Job's start margin
-// (`DEADLINE_MARGIN_SECONDS`, weirkeeper `check/job.rs`), plus a grace for the
-// controller's status write -- measured from when THIS PAGE began to follow,
-// on this page's own clock. A follow starts after its check was created, so
-// it never gives up before the check's own deadline; and no server timestamp
-// is compared with a browser clock that may be minutes off. A check the
-// controller settles (a `DeadlineExceeded` Job included) ends the follow at
-// its first terminal read, long before that bound.
+// The product API publishes no deadline for a check in flight (`expiresAt`
+// is its RESULT's validity, and the check's `timeoutSeconds` is not in the
+// view), so a follow reads for the documented maximum -- the largest
+// `timeoutSeconds` the API accepts, plus the Job's start margin, plus a grace
+// for the controller's status write -- measured from when THIS PAGE began to
+// follow, on this page's own clock. A follow starts after its check was
+// created, so it never gives up before the check's own deadline, and no
+// server timestamp is compared with a browser clock. A check the controller
+// settles ends the follow at its first terminal read.
 //
-// POLITELY. For the first twenty seconds the page reads every two seconds, as
-// every follower always did, so the checks that settle in that time -- most
-// of them -- are seen exactly as fast as before. After that the gap grows by
+// POLITELY. Every two seconds for the first twenty, then the gap grows by
 // half each read, to ten seconds at most: a check the controller never
-// settles costs about eighty reads over twelve minutes -- never a hot loop.
-// A read that fails for a reason that passes (the network, `408`, `429`, a
-// `5xx`) is tried again on the same schedule, inside the same deadline -- up
-// to five times in a row; a sixth is no longer a blip, and the page says it
-// could not read the check. A read the server never answers is abandoned at
-// the deadline, and a follow whose LAST read failed says it could not read
-// the check, not that the check did not finish: it does not know that.
+// settles costs about eighty reads over twelve minutes. A read that fails
+// for a reason that passes (the network, `408`, `429`, a `5xx`) is tried
+// again on the same schedule, up to five times in a row. A read the server
+// never answers is abandoned at the deadline, and a follow whose LAST read
+// failed says it could not read the check, not that the check did not
+// finish.
 //
-// ONE FOLLOW PER CHECK. Asking again while a check runs replays it (that is
-// what the intent token is for), and every page follows what its ask
-// answered; a follow already reading that check IS the follow, so a second
-// one is never started (`isFollowed`). The deadline is measured on a
-// monotonic clock (`performance.now`), so a wall-clock step -- NTP, a laptop
-// waking -- neither ends a follow early nor stretches it. And a follow ends
-// with its route: the wait between reads is cut short and its timer cleared
+// ONE FOLLOW PER CHECK: a follow already reading a check IS the follow
+// (`isFollowed`). The deadline is on a monotonic clock (`performance.now`),
+// so a wall-clock step neither ends a follow early nor stretches it, and a
+// follow ends with its route: the wait is cut short and its timer cleared
 // when the route's signal aborts, and each read carries that signal.
 //
-// AND IT ENDS IN WORDS, NEVER ON THE CHECKING SENTENCE. When the deadline
-// passes without a result, or a read is refused outright, the page is handed
-// the check marked `followStopped` (`deadline` or `unreadable`). The shared
-// renderer then says the check did not finish -- or could not be read -- and
-// offers "Run the check again", and `preflightSpent`/`discoverySpent` count
-// that check as spent, so the next ask is a NEW check and not a replay of
-// the one that did not finish.
+// AND IT ENDS IN WORDS. When the deadline passes without a result, or a read
+// is refused outright, the page is handed the check marked `followStopped`
+// (`deadline` or `unreadable`); the shared renderer says so and offers "Run
+// the check again", and `preflightSpent`/`discoverySpent` count that check
+// as spent, so the next ask is a NEW check.
 
 /** The largest `timeoutSeconds` a `Preflight` may ask for: the product API
  *  refuses anything outside 30..600 (`routes/preflights.rs`) and the CRD's
@@ -976,7 +936,7 @@ export const DISCOVERY_TIMEOUT_CEILING_SECONDS = 300;
 
 /** What a check Job is given beyond its own budget to be scheduled, pulled
  *  and started: `activeDeadlineSeconds = timeoutSeconds + 90` (weirkeeper
- *  `check/job.rs`'s `DEADLINE_MARGIN_SECONDS`, D2 section 4.3). */
+ *  `check/job.rs`'s `DEADLINE_MARGIN_SECONDS`). */
 export const CHECK_JOB_MARGIN_SECONDS = 90;
 
 /** The controller's time to notice a finished or expired Job and write the
@@ -1000,8 +960,8 @@ export const FOLLOW_FAILURES_TOLERATED = 5;
 export const FOLLOW_FIRST_GAP_MS = 2000;
 export const FOLLOW_MAX_GAP_MS = 10000;
 
-/** How long the first gap is kept before the follow backs off: the old
- *  cadence, for the first twenty seconds. */
+/** How long the first gap is kept before the follow backs off: twenty
+ *  seconds. */
 export const FOLLOW_STEADY_MS = 20000;
 
 /** The wait before read `attempt` (0-based): 2 s for the first twenty
