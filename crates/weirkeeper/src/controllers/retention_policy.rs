@@ -197,9 +197,36 @@ pub const REASON_RUN_FAILED: &str = "RunFailed";
 pub const REASON_CREDENTIAL_BINDING_MISMATCH: &str =
     logweir_core::credential_binding::CREDENTIAL_BINDING_MISMATCH;
 
-/// FX-20: every `retention-refusal=` code this build publishes — a CLOSED
-/// table, so no byte of a pod log reaches the status except one of these.
-pub const RETENTION_REFUSALS: [&str; 1] = [REASON_CREDENTIAL_BINDING_MISMATCH];
+/// FX-20, FX-15: every `retention-refusal=` code this build publishes — a
+/// CLOSED table, so no byte of a pod log reaches the status except one of
+/// these. It is the worker's `logweir_retention::REFUSAL_CODES`, which
+/// `tests/retention_policy_controller.rs` reads to hold the two equal. Only
+/// [`REASON_CREDENTIAL_BINDING_MISMATCH`] is also a condition reason; the
+/// others are named in `Enforced`'s and `Degraded`'s messages.
+pub const RETENTION_REFUSALS: [&str; 22] = [
+    "NotRun",
+    "UnknownArgument",
+    "ContractVersion",
+    "NoPlanPath",
+    "PlanUnreadable",
+    "BindingIncomplete",
+    "GenerationNotANumber",
+    "CapUnreadable",
+    "LocationUnreadable",
+    "NoRecordCredential",
+    REASON_CREDENTIAL_BINDING_MISMATCH,
+    "PortUnavailable",
+    "PlanUnparseable",
+    "PlanWrongFormat",
+    "PlanDigestMismatch",
+    "PlanPolicyMismatch",
+    "RetentionScopeViolation",
+    "PlanManifestNotFirst",
+    "PlanOverCap",
+    "PlanEmptyLine",
+    "PlanDuplicatePoint",
+    "PlanDuplicateKey",
+];
 /// `Enforced=False`: the last run never started, because the namespace refused
 /// its pod at creation — a `ResourceQuota`, a `LimitRange`, an admission
 /// webhook or a missing ServiceAccount (FX-11). The shared terminal state a
@@ -370,6 +397,19 @@ pub mod env {
     pub const MAX_OBJECTS: &str = "LOGWEIR_RETENTION_MAX_OBJECTS";
     /// The destination's `DestinationLocation`, as JSON.
     pub const LOCATION: &str = "LOGWEIR_RETENTION_LOCATION";
+
+    /// All nine: the only variable names a refusal line may put on a status.
+    pub const BINDING: [&str; 9] = [
+        PLAN_SHA256,
+        POLICY_UID,
+        POLICY_GENERATION,
+        SCOPE_PREFIX,
+        RUN_ID,
+        APPROVER,
+        MAX_DELETIONS,
+        MAX_OBJECTS,
+        LOCATION,
+    ];
 }
 
 /// What the write guard says when a status PATCH cannot be preconditioned.
@@ -1259,10 +1299,16 @@ impl Pass<'_> {
                 logweir_core::credential_binding::BINDING_REMEDY
             ),
             Some(0) => format!("retention run {run_id} completed"),
-            Some(3) => format!(
-                "retention run {run_id} REFUSED its plan before deleting anything (exit 3); the \
-                 archive is untouched"
-            ),
+            Some(3) => match named_refusal(report) {
+                Some(refusal) => format!(
+                    "retention run {run_id} was REFUSED before deleting anything (exit 3, \
+                     {refusal}); the archive is untouched"
+                ),
+                None => format!(
+                    "retention run {run_id} REFUSED its plan before deleting anything (exit 3); \
+                     the archive is untouched"
+                ),
+            },
             Some(code) if bounded => format!(
                 "retention run {run_id} exited {code} having reached its own \
                  maxObjectsPerRun; the leftovers are named and the next run completes them. \
@@ -1285,7 +1331,12 @@ impl Pass<'_> {
                 "the last run never started, because its pod was refused at creation \
                  ({REASON_POD_CREATION_FORBIDDEN}): {admission}"
             ),
-            None => failure_detail(exit_code, &codes),
+            None => match named_refusal(report) {
+                Some(refusal) if exit_code == Some(3) => {
+                    format!("the last run exited 3, refused {refusal}")
+                }
+                _ => failure_detail(exit_code, &codes),
+            },
         };
         let stop = scheduling_stop(&codes);
         let conditions = self.conditions(&[
@@ -3998,6 +4049,19 @@ pub struct RunReport {
     /// [`RETENTION_REFUSALS`] table — `Some` only for a run that exited 3 on a
     /// refusal the status names.
     pub refusal_code: Option<&'static str>,
+    /// FX-15: the binding variable that refusal names (`variable=`), one of
+    /// the nine [`env`] names this controller projects, or `None`.
+    pub refusal_variable: Option<&'static str>,
+}
+
+/// FX-15: the refusal as `Enforced` and `Degraded` name it — the code, and
+/// the variable in parentheses — or `None` for a run that named none.
+fn named_refusal(report: &RunReport) -> Option<String> {
+    let code = report.refusal_code?;
+    Some(match report.refusal_variable {
+        Some(variable) => format!("{code} ({variable})"),
+        None => code.to_string(),
+    })
 }
 
 impl RunReport {
@@ -4056,11 +4120,19 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
             }
         } else if let Some(rest) = line.strip_prefix("retention-refusal=") {
             // A CLOSED TABLE: the code is one this build knows, as a
-            // `'static`, or nothing at all is read from the line.
+            // `'static`, or nothing at all is read from the line — and so is
+            // the variable (FX-15), from the nine names this controller
+            // projects.
+            let mut fields = rest.split_whitespace();
+            let code = fields.next().unwrap_or_default();
             report.refusal_code = RETENTION_REFUSALS
                 .iter()
                 .copied()
-                .find(|known| *known == rest.trim());
+                .find(|known| *known == code);
+            report.refusal_variable = report.refusal_code.and_then(|_| {
+                let named = fields.find_map(|f| f.strip_prefix("variable="))?;
+                env::BINDING.iter().copied().find(|known| *known == named)
+            });
         } else if let Some(rest) = line.strip_prefix("retention-record=") {
             let mut fields = rest.split_whitespace();
             report.record_key = fields.next().map(str::to_string);

@@ -34,53 +34,12 @@ fn main() -> std::process::ExitCode {
         }
     };
     let code = match args.command {
-        cli::Command::Identity(cli::IdentityCmd::Bootstrap {
-            namespace,
-            secret_name,
-            secret_key,
-            public_configmap_name,
-            external_secret_name,
-            external_secret_key,
-            mark_fresh_install_confirm,
-            console_secret_name,
-            console_secret_key,
-            console_public_configmap_name,
-            installation_trust_policy,
-            allowed_target_cluster_ids,
-            revoke_trust_binding,
-        }) => logweir::identity::run(&logweir::identity::BootstrapArgs {
-            namespace,
-            secret_name,
-            secret_key,
-            public_configmap_name,
-            external_secret: external_secret_name.zip(external_secret_key),
-            mark_fresh_install_confirm,
-            console: console_secret_name.zip(console_public_configmap_name).map(
-                |(secret_name, public_configmap_name)| logweir::identity::ConsoleKeyArgs {
-                    secret_name,
-                    secret_key: console_secret_key,
-                    public_configmap_name,
-                },
-            ),
-            installation_trust: installation_trust_policy.map(|policy_name| {
-                logweir::identity::InstallationTrustArgs {
-                    policy_name,
-                    allowed_target_cluster_ids,
-                }
-            }),
-            revoke_trust_binding,
-        }),
-        cli::Command::Identity(cli::IdentityCmd::Distribute {
-            source_namespace,
-            target_namespace,
-            secret_name,
-            secret_key,
-        }) => logweir::identity::run_distribution(&logweir::identity::DistributeArgs {
-            source_namespace,
-            target_namespace,
-            secret_name,
-            secret_key,
-        }),
+        cli::Command::Identity(cmd) => match logweir::identity::Invocation::from(cmd) {
+            logweir::identity::Invocation::Bootstrap(args) => logweir::identity::run(&args),
+            logweir::identity::Invocation::Distribute(args) => {
+                logweir::identity::run_distribution(&args)
+            }
+        },
         cli::Command::Schema { which } => schema::run(&which),
         // PLAT-15.1 / decision D3 §5. Dispatched here for the structural
         // reason the comment at the end of this match records: the arm list is

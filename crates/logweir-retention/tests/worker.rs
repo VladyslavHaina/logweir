@@ -24,8 +24,8 @@ use logweir_reaper::{
     DeleteError, Deleter, Lister, PlanLine, SinkError, Sleeper, TombstoneSink, Versioning,
 };
 use logweir_retention::{
-    admit, env_map, execute, parse_args, result_line, Refusal, EXIT_INCOMPLETE, EXIT_OK,
-    EXIT_REFUSED,
+    admit, env, env_map, execute, parse_args, result_line, Refusal, EXIT_INCOMPLETE, EXIT_OK,
+    EXIT_REFUSED, REFUSAL_CODES,
 };
 
 const SCOPE: &str = "kafka-backups/team-a";
@@ -1175,7 +1175,7 @@ fn fx20_an_unbound_or_foreign_credential_is_refused_before_anything_is_read() {
             "{row}: {err:?}"
         );
         assert_eq!(err.exit_code(), EXIT_REFUSED, "{row}");
-        assert_eq!(err.code(), Some("CredentialBindingMismatch"), "{row}");
+        assert_eq!(err.code(), "CredentialBindingMismatch", "{row}");
         let message = err.to_string();
         assert!(
             message.starts_with("CredentialBindingMismatch: ") && message.contains(variable),
@@ -1197,11 +1197,9 @@ fn fx20_an_unbound_or_foreign_credential_is_refused_before_anything_is_read() {
     assert!(admitted.archive_keys.is_some() && admitted.evidence_keys.is_some());
 }
 
-/// **The shipped binary prints the closed `retention-refusal=` code its
-/// controller publishes, exits 3, and deletes nothing.** A process row, with a
-/// deadline, because the line is written by `main` and not by the library.
-#[test]
-fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
+/// Run the shipped binary once over `full_env` plus `extra`, with a deadline:
+/// its exit code, stdout and stderr.
+fn run_shipped(extra: &[(&str, &str)]) -> (Option<i32>, String, String) {
     // No `tempfile` dev-dependency in this crate: a unique scratch directory
     // under the system temp dir, removed at the end.
     let dir = std::env::temp_dir().join(format!(
@@ -1231,11 +1229,9 @@ fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
     for (k, v) in full_env(&digest) {
         cmd.env(k, v);
     }
-    cmd.env(
-        "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
-        "v1:mine:sha256:00",
-    )
-    .env("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", "v1:theirs:sha256:11");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
     let mut child = cmd.spawn().expect("the worker spawns");
     let started = std::time::Instant::now();
     let status = loop {
@@ -1250,9 +1246,27 @@ fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
         std::thread::sleep(Duration::from_millis(20));
     };
     let output = child.wait_with_output().expect("output");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(status.code(), Some(EXIT_REFUSED), "stderr: {stderr}");
+    let _ = std::fs::remove_dir_all(&dir);
+    (
+        status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// **The shipped binary prints the closed `retention-refusal=` code its
+/// controller publishes, exits 3, and deletes nothing.** A process row, with a
+/// deadline, because the line is written by `main` and not by the library.
+#[test]
+fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
+    let (status, stdout, stderr) = run_shipped(&[
+        (
+            "LOGWEIR_ARCHIVE_CREDENTIAL_BINDING_EXPECTED",
+            "v1:mine:sha256:00",
+        ),
+        ("LOGWEIR_ARCHIVE_CREDENTIAL_BINDING", "v1:theirs:sha256:11"),
+    ]);
+    assert_eq!(status, Some(EXIT_REFUSED), "stderr: {stderr}");
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec!["retention-refusal=CredentialBindingMismatch"],
@@ -1260,5 +1274,174 @@ fn fx20_the_shipped_worker_names_a_binding_refusal_on_stdout() {
     );
     assert!(stderr.contains("nothing is deleted"), "{stderr}");
     assert!(!stderr.contains("delete-secret") && !stdout.contains("delete-secret"));
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **FX-15: every refusal is named, by a code from the closed set the
+/// controller reads, and a refusal about one binding variable names it.**
+/// One case per variant (the reaper's plan refusals each by its own), so the
+/// 22 codes are each reached once and no two variants share a code except the
+/// two scope violations, which are one refusal to an operator.
+///
+/// KILLS: a variant mapped to a code outside [`REFUSAL_CODES`]; a variable
+/// dropped from the line (CONTROL: a refusal without one prints none).
+#[test]
+fn fx15_every_refusal_has_a_closed_code_and_names_its_variable() {
+    use logweir_reaper::Refusal as Plan;
+    let s = String::new;
+    let cases: Vec<(Refusal, &str, Option<&str>)> = vec![
+        (Refusal::NotRun(s()), "NotRun", None),
+        (Refusal::UnknownArgument(s()), "UnknownArgument", None),
+        (Refusal::ContractVersion(s()), "ContractVersion", None),
+        (Refusal::NoPlanPath, "NoPlanPath", None),
+        (
+            Refusal::PlanUnreadable {
+                path: s(),
+                error: s(),
+            },
+            "PlanUnreadable",
+            None,
+        ),
+        (
+            Refusal::BindingIncomplete("LOGWEIR_RETENTION_RUN_ID"),
+            "BindingIncomplete",
+            Some("LOGWEIR_RETENTION_RUN_ID"),
+        ),
+        (
+            Refusal::GenerationNotANumber(s()),
+            "GenerationNotANumber",
+            Some("LOGWEIR_RETENTION_POLICY_GENERATION"),
+        ),
+        (
+            Refusal::CapUnreadable {
+                name: "LOGWEIR_RETENTION_MAX_DELETIONS",
+                value: "0".to_string(),
+            },
+            "CapUnreadable",
+            Some("LOGWEIR_RETENTION_MAX_DELETIONS"),
+        ),
+        (
+            Refusal::LocationUnreadable(s()),
+            "LocationUnreadable",
+            Some("LOGWEIR_RETENTION_LOCATION"),
+        ),
+        (Refusal::NoRecordCredential, "NoRecordCredential", None),
+        (
+            Refusal::CredentialBinding(s()),
+            "CredentialBindingMismatch",
+            None,
+        ),
+        (Refusal::Port(s()), "PortUnavailable", None),
+        (Plan::Unreadable(s()).into(), "PlanUnparseable", None),
+        (Plan::WrongFormat(s()).into(), "PlanWrongFormat", None),
+        (
+            Plan::DigestMismatch {
+                found: s(),
+                approved: s(),
+            }
+            .into(),
+            "PlanDigestMismatch",
+            None,
+        ),
+        (
+            Plan::PolicyMismatch {
+                found: s(),
+                expected: s(),
+            }
+            .into(),
+            "PlanPolicyMismatch",
+            None,
+        ),
+        (
+            Plan::ScopeViolation {
+                key: s(),
+                point_id: s(),
+                expected: s(),
+            }
+            .into(),
+            "RetentionScopeViolation",
+            None,
+        ),
+        (
+            Plan::EvidenceRoot {
+                key: s(),
+                point_id: s(),
+            }
+            .into(),
+            "RetentionScopeViolation",
+            None,
+        ),
+        (
+            Plan::ManifestNotFirst {
+                point_id: s(),
+                first: s(),
+                manifest_key: s(),
+            }
+            .into(),
+            "PlanManifestNotFirst",
+            None,
+        ),
+        (
+            Plan::OverCap {
+                what: "points",
+                found: 2,
+                cap: 1,
+            }
+            .into(),
+            "PlanOverCap",
+            None,
+        ),
+        (Plan::EmptyLine(s()).into(), "PlanEmptyLine", None),
+        (Plan::DuplicatePoint(s()).into(), "PlanDuplicatePoint", None),
+        (
+            Plan::DuplicateKey {
+                key: s(),
+                first: s(),
+                second: s(),
+            }
+            .into(),
+            "PlanDuplicateKey",
+            None,
+        ),
+    ];
+    let mut reached = std::collections::BTreeSet::new();
+    for (refusal, code, variable) in &cases {
+        assert_eq!(refusal.code(), *code, "{refusal:?}");
+        assert!(
+            REFUSAL_CODES.contains(code),
+            "{code} is not in REFUSAL_CODES"
+        );
+        assert_eq!(refusal.variable(), *variable, "{refusal:?}");
+        if let Some(name) = variable {
+            assert!(env::BINDING.contains(name), "{name} is a binding name");
+        }
+        let want = match variable {
+            Some(name) => format!("retention-refusal={code} variable={name}"),
+            None => format!("retention-refusal={code}"),
+        };
+        assert_eq!(refusal.refusal_line(), want);
+        reached.insert(*code);
+    }
+    let all: std::collections::BTreeSet<&str> = REFUSAL_CODES.iter().copied().collect();
+    assert_eq!(
+        reached, all,
+        "every code is some refusal's, and no code is spare"
+    );
+    assert_eq!(all.len(), REFUSAL_CODES.len(), "the codes are distinct");
+}
+
+/// **FX-15: the shipped binary names a ceiling it cannot read, by code and
+/// variable, on stdout.** The process half of the row above: the line is
+/// written by `main`, through the one exit-3 helper every refusal takes.
+///
+/// KILLS: `main` printing the code without the variable, or nothing.
+#[test]
+fn fx15_the_shipped_worker_names_an_unreadable_ceiling_and_its_variable() {
+    let (status, stdout, stderr) = run_shipped(&[("LOGWEIR_RETENTION_MAX_OBJECTS", "0")]);
+    assert_eq!(status, Some(EXIT_REFUSED), "stderr: {stderr}");
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["retention-refusal=CapUnreadable variable=LOGWEIR_RETENTION_MAX_OBJECTS"],
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("nothing is deleted"), "{stderr}");
 }

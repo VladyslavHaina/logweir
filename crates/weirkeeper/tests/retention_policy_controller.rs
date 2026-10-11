@@ -7429,6 +7429,137 @@ async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
     );
 }
 
+/// **FX-15: a refused run names its refusal on the policy's status, one row
+/// per refusal class** — the invocation (an older or newer worker), the
+/// binding the controller projects (with the variable), the plan, the record
+/// credential, and the store handle. `Enforced=False/RunFailed` and
+/// `EnforcementDegraded` carry the code; only the binding refusal of FX-20 is a reason of
+/// its own and is held, so nothing a pass decides changes.
+///
+/// CONTROL: the same exit 3 without the line is the generic sentence and names
+/// nothing; a variable outside the nine binding names, or after an unknown
+/// code, is not read.
+///
+/// KILLS: the line's code not put on the message (the reason dropped); the
+/// variable not read; a free-text variable echoed into the status.
+#[tokio::test]
+async fn fx15_a_refused_run_names_its_refusal_on_the_status() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let at = now();
+    let harvest = |log: &'static str| {
+        let spec = spec.clone();
+        let digest = digest.clone();
+        async move {
+            let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+            let status = harvest_pass_logging(
+                &spec,
+                &started,
+                at + chrono::Duration::minutes(1),
+                &run_id,
+                3,
+                &digest,
+                log,
+            )
+            .await;
+            (status, run_id)
+        }
+    };
+    let message = |status: &Value, r#type: &str| -> String {
+        condition_of(status, r#type).expect(r#type)["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    for (class, log, named) in [
+        (
+            "invocation",
+            "logweir-retention: x\nretention-refusal=ContractVersion\n",
+            "ContractVersion",
+        ),
+        (
+            "binding",
+            "retention-refusal=CapUnreadable variable=LOGWEIR_RETENTION_MAX_OBJECTS\n",
+            "CapUnreadable (LOGWEIR_RETENTION_MAX_OBJECTS)",
+        ),
+        (
+            "plan",
+            "retention-refusal=PlanDigestMismatch\n",
+            "PlanDigestMismatch",
+        ),
+        (
+            "credential",
+            "retention-refusal=NoRecordCredential\n",
+            "NoRecordCredential",
+        ),
+        (
+            "port",
+            "retention-refusal=PortUnavailable\n",
+            "PortUnavailable",
+        ),
+    ] {
+        let (status, run_id) = harvest(log).await;
+        let enforced = condition_of(&status, "Enforced").expect("Enforced");
+        assert_eq!(enforced["status"], "False", "{class}");
+        assert_eq!(enforced["reason"], "RunFailed", "{class}: {enforced}");
+        let said = message(&status, "Enforced");
+        assert!(
+            said.contains(&format!("(exit 3, {named})")) && said.contains(&run_id),
+            "{class}: {said}"
+        );
+        assert!(
+            message(&status, "EnforcementDegraded").contains(&format!("exited 3, refused {named}")),
+            "{class}: {status}"
+        );
+        assert_eq!(status["enforcement"], "LogweirWorker", "{class}: not held");
+    }
+
+    // CONTROL: the line dropped.
+    let (generic, _) = harvest("logweir-retention: x\n").await;
+    let said = message(&generic, "Enforced");
+    assert!(
+        said.contains("REFUSED its plan") && !said.contains("(exit 3, "),
+        "{said}"
+    );
+    assert!(message(&generic, "EnforcementDegraded").contains("named no per-point code"));
+
+    // A variable that is not a binding name is not read; nor is one after an
+    // unknown code.
+    let report = ctrl::parse_run_lines("retention-refusal=CapUnreadable variable=PATH\n", Some(3));
+    assert_eq!(
+        (report.refusal_code, report.refusal_variable),
+        (Some("CapUnreadable"), None)
+    );
+    let report = ctrl::parse_run_lines(
+        "retention-refusal=Unknown variable=LOGWEIR_RETENTION_MAX_OBJECTS\n",
+        Some(3),
+    );
+    assert_eq!((report.refusal_code, report.refusal_variable), (None, None));
+}
+
+/// **FX-15: the codes this controller reads are the ones the worker prints.**
+/// The two crates share no edge (the worker is the deletion boundary), so this
+/// reads the worker's `REFUSAL_CODES` from its source; the worker's own row
+/// holds every refusal to that array.
+///
+/// MUTANT: add or rename a code on either side.
+#[test]
+fn fx15_the_refusal_codes_are_the_ones_the_worker_prints() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../logweir-retention/src/lib.rs");
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let start = source
+        .find("pub const REFUSAL_CODES")
+        .expect("the worker lists its codes in `REFUSAL_CODES`");
+    let block = &source[start..];
+    let block = &block[..block.find("];").expect("the array closes")];
+    let printed: std::collections::BTreeSet<&str> = block.split('"').skip(1).step_by(2).collect();
+    let read: std::collections::BTreeSet<&str> = ctrl::RETENTION_REFUSALS.iter().copied().collect();
+    assert_eq!(printed, read);
+    assert_eq!(read.len(), ctrl::RETENTION_REFUSALS.len(), "distinct");
+}
+
 // ===========================================================================
 // FX-19 CLASS SWEEP — the reaping of a finished run Job flaps nothing here
 // ===========================================================================
