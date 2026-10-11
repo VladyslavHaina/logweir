@@ -18,6 +18,9 @@
 //! a real object; the worker's own behaviour is
 //! `crates/logweir-reaper/tests/reaper.rs`.
 
+mod support;
+use support::{fixture, route, Fixture};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -32,7 +35,7 @@ use weirkeeper::crds::retention_policy::{
 };
 use weirkeeper::job::RunnerImage;
 use weirkeeper::retention_plan as plan;
-use weirkeeper::testing::{mock_client_recording_bodies, Recorder, Route, SeenBody};
+use weirkeeper::testing::{Route, SeenBody};
 
 // ===========================================================================
 // Fixtures
@@ -1391,12 +1394,6 @@ fn policy(spec_extra: Value, status: Value) -> RetentionPolicy {
     serde_json::from_value(policy_value(spec_extra, status)).expect("the fixture is a policy")
 }
 
-struct Fixture {
-    client: kube::Client,
-    recorder: Recorder,
-    bodies: std::sync::Arc<std::sync::Mutex<Vec<SeenBody>>>,
-}
-
 impl Fixture {
     fn seen(&self) -> Vec<(String, String)> {
         self.recorder
@@ -1454,15 +1451,6 @@ impl Fixture {
                     self.status()
                 )
             })
-    }
-}
-
-fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
-    Route {
-        method,
-        path_suffix,
-        status: 200,
-        body,
     }
 }
 
@@ -1631,15 +1619,6 @@ fn whole_catalog_body(destination: Option<&str>, pages: Value) -> String {
     // instant a row runs at.
     catalog["status"]["viewExpiresAt"] = json!(now() + chrono::Duration::days(60));
     catalog.to_string()
-}
-
-fn fixture(routes: Vec<Route>) -> Fixture {
-    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-    Fixture {
-        client,
-        recorder,
-        bodies,
-    }
 }
 
 async fn run(fixture: &Fixture, policy: &RetentionPolicy) -> ctrl::Outcome {

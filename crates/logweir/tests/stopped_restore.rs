@@ -27,19 +27,20 @@
 //! - **(c)** the engine's offset report (a HEALTHY target whose report lacks
 //!   `orders`: the report is the only finding).
 mod fixtures;
+mod support;
 
 use logweir::drill::phase4_sample;
 use logweir::drill::phase6_restore::assert_post_condition;
 use logweir::drill::phase7_verify::{run_after_restore, VerifyOutcome};
 use logweir_core::engine::{
-    BackupSetFacts, BackupSetRef, DataEngine, EngineError, EngineId, EngineReport, PartitionFacts,
-    PhaseObserver, PreflightReport, RecordFingerprint, RestoreFacts, RestorePlan, SampleSelection,
-    SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
+    BackupSetFacts, BackupSetRef, EngineError, EngineReport, PartitionFacts, RecordFingerprint,
+    RestorePlan, SegmentFacts, StorageUrl, TopicFacts, WindowFloorSource,
 };
 use logweir_core::outcome::IntegrityResult;
 use logweir_core::spec::{Anchor, Coverage, SampleSpec};
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::{ClusterReader, ConsumedRecord};
 use std::collections::{BTreeMap, BTreeSet};
+use support::doubles::{Engine, Reader, TopicData};
 
 /// `2026-08-29T00:00:00Z` and `2026-08-30T02:00:00Z`, in epoch milliseconds.
 const WINDOW: (i64, i64) = (1_787_961_600_000, 1_788_055_200_000);
@@ -47,103 +48,24 @@ const WINDOW: (i64, i64) = (1_787_961_600_000, 1_788_055_200_000);
 /// segments that straddle it.
 const PIT: i64 = WINDOW.1 - 1;
 
-#[derive(Default, Clone)]
-struct TopicData {
-    end_offsets: Vec<(i32, i64)>,
-    records: Vec<ConsumedRecord>,
-}
-
-/// A target cluster keyed strictly by topic name.
-struct MapReader {
-    topics: BTreeMap<String, TopicData>,
-}
-
-impl ClusterReader for MapReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("TARGET0000000000000000".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(self
-            .topics
-            .iter()
-            .map(|(n, d)| TopicMeta::new(n.clone(), d.end_offsets.len() as i32))
-            .collect())
-    }
-    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        self.topics
-            .get(topic)
-            .map(|d| d.end_offsets.clone())
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        self.topics
-            .get(topic)
-            .map(|_| BTreeMap::new())
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        topic: &str,
-        partition: i32,
-        from: i64,
-        max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        let d = self
-            .topics
-            .get(topic)
-            .ok_or_else(|| KafkaError::TopicNotFound(topic.to_string()))?;
-        Ok(d.records
-            .iter()
-            .filter(|r| r.partition == partition && r.offset >= from)
-            .take(max)
-            .cloned()
-            .collect())
-    }
-}
-
 /// An engine double answering `fingerprints` per `(topic, partition)`.
-struct ArchiveEngine {
+fn archive_engine(
     facts: BackupSetFacts,
     archive: BTreeMap<(String, i32), Vec<RecordFingerprint>>,
-}
-
-impl DataEngine for ArchiveEngine {
-    fn id(&self) -> EngineId {
-        EngineId {
-            id: "fake".into(),
-            version: "v0.0.0".into(),
-            digest: format!("sha256:{}", "0".repeat(64)),
-        }
-    }
-    fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
-        Ok(vec![])
-    }
-    fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
-        Ok(self.facts.clone())
-    }
-    fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
-        Err(EngineError::Operational("unused".into()))
-    }
-    fn restore(
-        &self,
-        _: &RestorePlan,
-        _: &mut dyn PhaseObserver,
-    ) -> Result<RestoreFacts, EngineError> {
-        Err(EngineError::Operational("unused".into()))
-    }
-    fn fingerprints(&self, s: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
-        Ok(self
-            .archive
-            .get(&(s.topic.clone(), s.partition))
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .take(s.count)
-            .collect())
-    }
+) -> Engine<'static> {
+    Engine::new()
+        .describing(facts)
+        .on_preflight(|_| Err(EngineError::Operational("unused".into())))
+        .on_restore(|_, _| Err(EngineError::Operational("unused".into())))
+        .on_fingerprints(move |s| {
+            Ok(archive
+                .get(&(s.topic.clone(), s.partition))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .take(s.count)
+                .collect())
+        })
 }
 
 /// `n` records of `topic/partition` at offsets `0..n` and timestamps from
@@ -238,8 +160,8 @@ fn build(
 ) -> (
     BackupSetFacts,
     logweir_engine_oso::storage::Store,
-    MapReader,
-    ArchiveEngine,
+    Reader,
+    Engine<'static>,
     RestorePlan,
     BTreeMap<String, String>,
 ) {
@@ -291,6 +213,7 @@ fn build(
         TopicData {
             end_offsets: pay_ends,
             records: pay_records,
+            ..Default::default()
         },
     );
 
@@ -319,11 +242,13 @@ fn build(
             TopicData {
                 end_offsets: vec![(0, in_window as i64)],
                 records: cons,
+                ..Default::default()
             }
         } else {
             TopicData {
                 end_offsets: vec![(0, 0)],
                 records: vec![],
+                ..Default::default()
             }
         },
     );
@@ -372,11 +297,8 @@ fn build(
         checkpoint_interval_secs: 30,
         offset_report: "/tmp/fx23/offsets.json".into(),
     };
-    let engine = ArchiveEngine {
-        facts: facts.clone(),
-        archive,
-    };
-    (facts, store, MapReader { topics }, engine, plan, mapping)
+    let engine = archive_engine(facts.clone(), archive);
+    (facts, store, Reader::target(topics), engine, plan, mapping)
 }
 
 /// Phase 6's post-condition, phase 4's selection and phase 7's sampled lane
@@ -388,11 +310,7 @@ fn drive(c: &Case, selection: Option<&[(&str, i32)]>) -> Run {
 
 /// [`drive`], with the target cluster moved by `tweak` before any phase reads
 /// it.
-fn drive_with(
-    c: &Case,
-    selection: Option<&[(&str, i32)]>,
-    tweak: impl FnOnce(&mut MapReader),
-) -> Run {
+fn drive_with(c: &Case, selection: Option<&[(&str, i32)]>, tweak: impl FnOnce(&mut Reader)) -> Run {
     let (facts, store, mut reader, engine, plan, mapping) = build(c);
     tweak(&mut reader);
 

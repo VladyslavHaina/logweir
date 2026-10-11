@@ -30,20 +30,15 @@
 //!   role and never `cluster-admin`, the Service — and no Ingress anywhere.
 //! * `values.schema.json` types the three flags as booleans.
 
+mod support;
+use support::{is_digest_reference, repo};
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_yaml::Value;
 
 // ---------------------------------------------------------------- plumbing
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the workspace root is two levels above crates/logweir")
-}
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
@@ -245,17 +240,6 @@ fn repository_of(reference: &str) -> String {
 /// before it. `weirkeeper::job::RUNNER_IMAGE` is untouched by that ruling and
 /// still pins a digest (Global Constraint 7).
 const LOGWEIR_TAG: &str = "latest";
-
-fn is_digest_reference(reference: &str) -> bool {
-    let Some((name, digest)) = reference.split_once("@sha256:") else {
-        return false;
-    };
-    !name.is_empty()
-        && digest.len() == 64
-        && digest
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-}
 
 /// The twenty-six shipped UI files: everything under `ui/` except `*.md` and
 /// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.

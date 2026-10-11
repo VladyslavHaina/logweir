@@ -31,9 +31,10 @@
 //! memory and calls plan construction or the phase-5 check directly. No
 //! socket, no subprocess, no archive read.
 
-use logweir::drill::{
-    build_plan, build_plan_with_floor, phase5_preflight, DrillError, WindowFloor,
-};
+mod support;
+use support::{exit_of, guard_message};
+
+use logweir::drill::{build_plan, build_plan_with_floor, phase5_preflight, WindowFloor};
 use logweir::exit::ExitCode;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, PartitionFacts, SegmentFacts, TopicFacts, WindowFloorSource,
@@ -195,23 +196,6 @@ fn facts_with_an_unnamed_topic() -> BackupSetFacts {
     unnamed.name = "payments".into();
     facts.topics.push(unnamed);
     facts
-}
-
-/// The exit code the SHIPPED mapping (`DrillError::exit_code`, Global
-/// Constraint 11) gives this result. `Ok` is exit 0 by that contract; nothing
-/// here invents a code.
-fn exit_of<T>(r: &Result<T, DrillError>) -> ExitCode {
-    match r {
-        Ok(_) => ExitCode::Ok,
-        Err(e) => e.exit_code(),
-    }
-}
-
-fn guard_message(e: &DrillError) -> String {
-    match e {
-        DrillError::Guard(g) => g.0.clone(),
-        other => panic!("expected a guard refusal, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------

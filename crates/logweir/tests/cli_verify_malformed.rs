@@ -7,11 +7,8 @@
 //! a real tamper detection. This is asserted against the actual process
 //! exit status, not merely against `logweir_evidence::Error`'s variant.
 
-use std::process::Command;
-
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+mod support;
+use support::bin;
 
 /// A truncated/corrupt `.sig` file — the `sig` field is not valid base64 —
 /// must exit 1 (operational), never 4 ("tampered").

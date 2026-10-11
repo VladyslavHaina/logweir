@@ -33,6 +33,9 @@
 //! | M5 | the marker is not create-only | `the_only_write_in_the_check_runner_is_create_only`, `a_marker_that_is_already_present_is_write_authorised` |
 //! | M6 | the relay budget is ignored | `the_writer_stops_at_the_relay_budget` |
 
+mod support;
+use support::repo_root;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -77,14 +80,6 @@ const PLANTED_KEY_ID: &str = "AKIAFAKEFAKEFAKEFAKE";
 const PLANTED_SECRET: &str = "aws_secret_access_key=ZZfakefakefakefakefakefakefakefake01";
 /// A URL whose userinfo is the credential.
 const PLANTED_USERINFO: &str = "https://root:hunter2@minio.example:9000";
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap()

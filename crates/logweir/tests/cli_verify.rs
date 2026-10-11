@@ -1,8 +1,5 @@
-use std::process::Command;
-
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+mod support;
+use support::bin;
 
 #[test]
 fn schema_scorecard_prints_the_schema() {

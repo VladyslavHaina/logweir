@@ -29,6 +29,9 @@
 //! No socket: the in-memory backend, the misreporting double and a scratch
 //! filesystem tree (STANDING RULE 18's allow-list names this file).
 
+mod support;
+use support::{put, repo_root, self_peak_rss};
+
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone as _, Utc};
@@ -49,14 +52,6 @@ const SIDECAR_KEY: &str = "logweir/drills/r1.sig";
 /// `VerifyingKey::key_id()` over the fixture's public key.
 const FIXTURE_KEY_ID: &str = "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd";
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf()
-}
-
 fn fixture(rel: &str) -> Vec<u8> {
     std::fs::read(repo_root().join(rel)).expect("the signed fixture is readable")
 }
@@ -75,11 +70,6 @@ fn trust() -> ResolvedTrust {
         }],
         allowed_cluster_ids: Vec::new(),
     })
-}
-
-fn put(s: &Store, key: &str, bytes: &[u8]) {
-    s.put_create_only(key, bytes)
-        .expect("the fixture object is written");
 }
 
 /// What every controller refusal says after the cap's byte count, for a cap.
@@ -308,38 +298,6 @@ const ROOT_ENV: &str = "FX31_MEM_ROOT";
 const PEAK_LINE: &str = "FX31_PEAK_RSS=";
 /// What a capped child prints about each path's answer; the parent relays it.
 const CHILD_LINE: &str = "[fx31-child]";
-
-/// This process's own peak resident set, in bytes (`ru_maxrss` is kilobytes on
-/// Linux and bytes on macOS). Read by the CHILD at its end, so each child
-/// reports only its own peak and no ordering between children matters.
-fn self_peak_rss() -> u64 {
-    // Linux keeps `ru_maxrss` across `execve`, so a child reports its parent's
-    // peak when that was higher, and a difference between two children is
-    // noise (main `dff411ad`'s CI: the parsed-tree control "added" less than
-    // the document). The child's own address space has its own high-water
-    // mark, `VmHWM`, reset at exec.
-    if cfg!(target_os = "linux") {
-        if let Some(kib) = std::fs::read_to_string("/proc/self/status")
-            .ok()
-            .and_then(|status| {
-                status.lines().find_map(|l| {
-                    l.strip_prefix("VmHWM:")
-                        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
-                })
-            })
-        {
-            return kib * 1024;
-        }
-    }
-    let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
-        .expect("getrusage(RUSAGE_SELF)");
-    let max = u64::try_from(usage.max_rss()).unwrap_or(0);
-    if cfg!(target_os = "macos") {
-        max
-    } else {
-        max * 1024
-    }
-}
 
 /// A filesystem evidence tree: each object at `size` bytes, SPARSE (no disk
 /// is spent on the zeros).

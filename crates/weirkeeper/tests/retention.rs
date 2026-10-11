@@ -19,6 +19,9 @@
 //! closes the workspace graph, and `std::env::temp_dir()` plus a removal
 //! guard is the same test.
 
+mod support;
+use support::repo_root;
+
 use std::path::{Path, PathBuf};
 
 use logweir_core::engine::StorageUrl;
@@ -28,14 +31,6 @@ use weirkeeper::retention::ARCHIVE_URL_ENV;
 // ---------------------------------------------------------------------------
 // The fixture archive
 // ---------------------------------------------------------------------------
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/weirkeeper sits two levels under the workspace root")
-        .to_path_buf()
-}
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retention-archive")

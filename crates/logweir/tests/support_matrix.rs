@@ -31,9 +31,11 @@
 //!
 //! Costs nothing and reaches nothing: it reads checked-in files.
 
+mod support;
+use support::repo_root;
+
 use logweir_core::check_contract::CheckId;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
 const PAGE: &str = "docs/support-matrix.md";
 const BEGIN: &str = "<!-- compatibility:begin -->";
@@ -44,14 +46,6 @@ const STATUSES: [&str; 4] = ["supported", "limited", "untested", "unsupported"];
 
 /// The statuses that are a claim something works, and so need a row.
 const NEEDS_EVIDENCE: [&str; 2] = ["supported", "limited"];
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the repository root resolves from CARGO_MANIFEST_DIR")
-}
 
 fn page() -> String {
     let path = repo_root().join(PAGE);

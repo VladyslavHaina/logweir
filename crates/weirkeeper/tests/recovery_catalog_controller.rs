@@ -43,6 +43,9 @@
 //! mean *the reconciler did not ask*. The live proof of the fixed behaviour is
 //! owed to the next lab run and is not claimed here.
 
+mod support;
+use support::{empty_config_map, fixture, leak, no_trust_policies, route, spki, Fixture};
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeZone as _, Utc};
@@ -57,7 +60,7 @@ use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::recovery_catalog as ctrl;
 use weirkeeper::crds::recovery_catalog::{LastSyncJob, RecoveryCatalog};
 use weirkeeper::job::RunnerImage;
-use weirkeeper::testing::{mock_client_recording_bodies, Recorder, Route, SeenBody};
+use weirkeeper::testing::Route;
 
 // ===========================================================================
 // Fixtures
@@ -93,13 +96,6 @@ fn at(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTime<Utc> {
 
 fn stamp(when: DateTime<Utc>) -> String {
     when.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-}
-
-fn spki(marker: u8) -> String {
-    format!(
-        "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE{marker:02x}\n\
-         -----END PUBLIC KEY-----\n"
-    )
 }
 
 fn roster_body() -> String {
@@ -185,11 +181,6 @@ fn request_stem(token: &str) -> String {
 fn slot_stem(when: DateTime<Utc>) -> String {
     let slot = view::periodic_slot(when, INTERVAL).expect("an hourly catalog has slots");
     view::sync_stem(UID, &SyncTrigger::Periodic(slot).token())
-}
-
-/// A route path that outlives the fixture, which `Route::path_suffix` requires.
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
 }
 
 fn job_path(stem: &str) -> &'static str {
@@ -348,12 +339,6 @@ fn framed(plan_sha: &str, body: &str) -> String {
 // The route table
 // ---------------------------------------------------------------------------
 
-struct Fixture {
-    client: kube::Client,
-    recorder: Recorder,
-    bodies: std::sync::Arc<std::sync::Mutex<Vec<SeenBody>>>,
-}
-
 impl Fixture {
     fn seen(&self) -> Vec<(String, String)> {
         self.recorder
@@ -416,30 +401,6 @@ impl Fixture {
     }
 }
 
-fn fixture(routes: Vec<Route>) -> Fixture {
-    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-    Fixture {
-        client,
-        recorder,
-        bodies,
-    }
-}
-
-/// An empty `TrustPolicy` list: no policy governs the namespace, so the
-/// catalog resolves the synthesised `legacy-roster-v1` from the roster route.
-fn no_trust_policies() -> String {
-    json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
-}
-
-fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
-    Route {
-        method,
-        path_suffix,
-        status: 200,
-        body,
-    }
-}
-
 async fn run_at(
     fixture: &Fixture,
     catalog: &RecoveryCatalog,
@@ -460,10 +421,6 @@ async fn run_at(
     )
     .await
     .expect("the reconcile reaches a verdict")
-}
-
-fn empty_config_map() -> String {
-    json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {}}).to_string()
 }
 
 /// What the API server answers a `POST /jobs` with: the object it created,

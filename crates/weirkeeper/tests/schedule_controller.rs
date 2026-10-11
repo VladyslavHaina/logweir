@@ -24,6 +24,9 @@
 //! the name is not computed from a clock or a status) or to make the horizon
 //! and `suspend` arms checkable.
 
+mod support;
+use support::{utc, workspace_root};
+
 use chrono::{DateTime, TimeZone, Utc};
 use kube::CustomResourceExt as _;
 use weirkeeper::backup_execution::{
@@ -154,13 +157,6 @@ fn backup_list_body(items: Vec<serde_json::Value>) -> String {
         "items": items
     })
     .to_string()
-}
-
-/// A UTC instant, spelled as five integers so a test reads like a calendar.
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
 }
 
 /// The body a successful `POST …/backups` is answered with — the API server
@@ -460,15 +456,6 @@ fn source_of(relative: &str) -> String {
 fn workspace_source(relative: &str) -> String {
     let path = workspace_root().join(relative);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
-}
-
-/// The workspace root: two levels above this crate's manifest directory.
-fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("the workspace root is two levels above this crate")
-        .to_path_buf()
 }
 
 /// Every `.rs` file under `crates/weirkeeper/src/`, as `(path relative to

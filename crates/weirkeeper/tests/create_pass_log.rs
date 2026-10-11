@@ -26,10 +26,13 @@
 //! request the pass makes. The recording double panics on an unrouted
 //! request, so a fixture that drifted from the reconciler fails loudly here.
 
+mod support;
+use support::{not_found_body, path, utc};
+
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use k8s_openapi::api::batch::v1::Job;
 use logweir_core::ids::sha256_prefixed;
 use serde_json::Value;
@@ -131,10 +134,6 @@ fn ours_at(events: &[Value], level: &str) -> Vec<String> {
         .collect()
 }
 
-fn path(uri: &str) -> &str {
-    uri.split('?').next().unwrap_or(uri)
-}
-
 /// The line token of the one Job the pass POSTed, read the way the controller
 /// reads it back: off the Job (`weirkeeper::job::line_token`).
 fn posted_jobs_token(seen: &[SeenBody]) -> String {
@@ -208,19 +207,6 @@ fn assert_the_pass_logged_and_never_the_token(capture: &Capture, token: &str, cr
         capture.text().contains(token),
         "the search would have seen a logged token"
     );
-}
-
-fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(y, m, d, h, min, 0)
-        .single()
-        .expect("the fixture instant exists")
-}
-
-fn not_found_body(kind: &str, name: &str) -> String {
-    format!(
-        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
-  "message":"{kind} \"{name}\" not found","reason":"NotFound","code":404}}"#
-    )
 }
 
 // ---------------------------------------------------------------------------

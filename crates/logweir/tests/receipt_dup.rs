@@ -33,16 +33,18 @@
 //! its own unconditional store client, and both of Logweir's handles are built
 //! over that tempdir. No endpoint, no network (see this file's entry in
 //! `no_network_in_unit_tests.rs`).
+mod support;
+
 use logweir::backup::{execute_with, run_with, BackupError, BackupOutcome, BackupRunArgs};
 use logweir::exit::ExitCode;
 use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::engine::*;
 use logweir_engine_oso::storage::Store;
 use logweir_evidence::keys::{SigningKey, VerifyingKey};
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use support::doubles::Reader;
 
 /// The execution id both runs share — what the controller passes as
 /// `--backup-id-override` on the original Job and on its re-creation.
@@ -141,7 +143,7 @@ impl Fixture {
         execute_with(
             &self.args,
             run_id,
-            &StubReader,
+            &stub_reader(),
             engine,
             &self.archive(),
             &self.evidence(),
@@ -219,33 +221,8 @@ fn verdict(evidence: &Store, archive: &Store, receipt_key: &str, key: &Verifying
 // Doubles
 // ---------------------------------------------------------------------------
 
-struct StubReader;
-
-impl ClusterReader for StubReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("SOURCE-CLUSTER-01".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _: &str,
-        _: i32,
-        _: i64,
-        _: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
+fn stub_reader() -> Reader {
+    Reader::new("SOURCE-CLUSTER-01")
 }
 
 /// An engine over a topic that ADVANCES between runs: run `n` captures
@@ -514,7 +491,7 @@ fn a_claimed_execution_is_exit_1_and_starts_no_engine() {
         .put_create_only(&logweir::backup::phase_run::claim_key(EXECUTION_ID), b"{}")
         .unwrap();
     assert_eq!(
-        run_with(&f.args, &StubReader, &engine, &store),
+        run_with(&f.args, &stub_reader(), &engine, &store),
         ExitCode::Operational
     );
     assert_eq!(
@@ -543,7 +520,7 @@ fn a_claim_the_store_cannot_enforce_fails_closed() {
     let err = execute_with(
         &f.args,
         "01K5RUN0000000000000000001",
-        &StubReader,
+        &stub_reader(),
         &engine,
         &store,
         &store,
@@ -570,7 +547,7 @@ fn a_store_that_ignores_if_none_match_fails_closed() {
     let err = execute_with(
         &f.args,
         "01K5RUN0000000000000000001",
-        &StubReader,
+        &stub_reader(),
         &engine,
         &store,
         &store,
@@ -598,7 +575,7 @@ fn an_error_on_the_exclusivity_probe_is_not_proof() {
     let err = execute_with(
         &f.args,
         "01K5RUN0000000000000000001",
-        &StubReader,
+        &stub_reader(),
         &engine,
         &store,
         &store,
@@ -625,7 +602,7 @@ fn a_refused_claim_put_is_exit_4_not_retryable() {
     let err = execute_with(
         &f.args,
         "01K5RUN0000000000000000001",
-        &StubReader,
+        &stub_reader(),
         &engine,
         &f.archive(),
         &refusing,

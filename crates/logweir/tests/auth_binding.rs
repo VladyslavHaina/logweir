@@ -23,6 +23,8 @@
 //! `localhost:9092` and is DATA handed to a `ClusterReader` double — the
 //! reason recorded for this path in
 //! `crates/logweir/tests/no_network_in_unit_tests.rs`'s `ALLOWED`.
+mod support;
+
 use logweir::backup::{execute_with, BackupError, BackupRunArgs};
 use logweir_core::backup_receipt::ReceiptAuth;
 use logweir_core::engine::{
@@ -33,9 +35,10 @@ use logweir_core::spec::{AuthSpec, DrillSpec};
 use logweir_engine_oso::storage::Store;
 use logweir_engine_oso::{render_restore, render_validation};
 use logweir_evidence::keys::SigningKey;
-use logweir_kafka::reader::{AuthConfig, ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::{AuthConfig, KafkaError};
 use std::collections::BTreeMap;
 use std::path::Path;
+use support::doubles::Reader;
 
 /// The principal the approver signed off on.
 const APPROVED: &str = "approved-principal";
@@ -270,7 +273,7 @@ fn rendered_sasl_username_comes_from_plan_bytes_not_from_the_cluster_object() {
 fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     // ---- the receipt's source: a real run, over doubles ----
     let f = backup_fixture("  auth:\n    mode: scramSha512\n    username: logweir\n");
-    let reader = StubReader;
+    let reader = Reader::new("SOURCE-0000001");
     // EMPTY: the engine double writes the manifest when it runs, as the real
     // engine does — a run refuses an execution whose backup set already
     // exists (FX-7, `phase_run::refuse_an_existing_set`).
@@ -830,41 +833,6 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
             strimzi_cluster: None,
             consumer_groups: Vec::new(),
         },
-    }
-}
-
-struct StubReader;
-
-impl ClusterReader for StubReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok("SOURCE-0000001".into())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        Ok(vec![])
-    }
-    fn end_offsets(&self, _t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, _t: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    /// Task 8 (guard **G-TS**) added this to `ClusterReader`. An empty map is
-    /// a broker that surfaces neither `log.message.timestamp.type` nor a
-    /// timestamp bound, which is the harmless case: phase 0's preflight then
-    /// treats the broker as the Apache default (`CreateTime`) and refuses
-    /// nothing. G-TS's own arms live in
-    /// `crates/logweir/tests/topic_preflight.rs`.
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::new())
-    }
-    fn consume_range(
-        &self,
-        _t: &str,
-        _p: i32,
-        _f: i64,
-        _m: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
     }
 }
 

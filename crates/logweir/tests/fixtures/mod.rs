@@ -812,7 +812,7 @@ pub enum Drill {
     ///
     /// This is the T0-11 shape: a drill that verified correctly and could not
     /// clean up. It is the PARTIAL failure (`phase9_teardown::run`'s per-topic
-    /// branch), deliberately not `score.rs`'s `RefusingDeleter`, whose whole
+    /// branch), deliberately not `score.rs`'s `refusing_deleter()`, whose whole
     /// call fails and exercises the other branch. The deleter a drill uses
     /// comes from the target client (`c.client.as_deleter()`), not from a
     /// parameter of `execute_with`, so there is no way to run a WHOLE drill

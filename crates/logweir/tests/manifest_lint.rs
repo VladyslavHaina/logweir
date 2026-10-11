@@ -24,6 +24,9 @@
 //! <ns>` shells out to `kubectl`; [`check_secrets_refuses_a_missing_secret`]
 //! parses the recipe instead.
 
+mod support;
+use support::{is_digest_reference, repo};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -32,15 +35,6 @@ use serde_yaml::Value;
 // ---------------------------------------------------------------------------
 // Locating the tree
 // ---------------------------------------------------------------------------
-
-/// `logweir/` — the crate root's grandparent, which is Global Constraint 36's
-/// CWD for every acceptance line in this plan.
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("the workspace root is two levels above crates/logweir")
-}
 
 fn read(rel: &str) -> String {
     let p = repo().join(rel);
@@ -2535,19 +2529,6 @@ fn images_in(m: &Manifest) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-/// `@sha256:` followed by exactly 64 lowercase hex characters, and nothing
-/// after it.
-fn is_digest_reference(reference: &str) -> bool {
-    let Some((name, digest)) = reference.split_once("@sha256:") else {
-        return false;
-    };
-    !name.is_empty()
-        && digest.len() == 64
-        && digest
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 /// **Global Constraint 7: pinning is by digest, never by tag** — in every

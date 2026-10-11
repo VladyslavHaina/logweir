@@ -17,6 +17,10 @@
 //! `no_network_in_unit_tests.rs`'s `ALLOWED` (chain N, STANDING RULE 18): they
 //! are DATA in a `DrillSpec`, handed to `ClusterReader`/`TopicCreator`/
 //! `TopicDeleter` doubles, and no client is ever constructed from them.
+mod support;
+use support::doubles::{Creator, Deleter, Reader};
+use support::exit_of;
+
 mod fixtures;
 
 use logweir::drill::{self, phase0_admit, DrillError};
@@ -26,12 +30,9 @@ use logweir_core::spec::{
     ObjectivesSpec, RestoreSpec, RestoreSpecBlock, SampleSpec, SourceSpec, TargetMode, TargetSpec,
     TopicNaming,
 };
-use logweir_kafka::reader::{
-    ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator, TopicDeleter, TopicMeta,
-};
+use logweir_kafka::reader::ClusterReader;
 use std::collections::BTreeMap;
 use std::process::Command;
-use std::sync::Mutex;
 
 /// The target cluster this file's doubles report. **Deliberately absent from
 /// `allowed()`** and simultaneously equal to its `source_cluster_id`, so a
@@ -126,88 +127,29 @@ fn allowed() -> AllowedClusters {
 /// timestamp-bound key, so guard G-TS's two refusing arms and its
 /// `LogAppendTime` probe are all silent — this file is about the MODE branch,
 /// and a fixture that tripped G-TS would prove nothing about it.
-struct NoMarkerBroker {
-    already_there: Vec<TopicMeta>,
+/// Its listing is NOT the marker (that absence is the whole fixture) but only
+/// what `.lists(…)` adds.
+fn no_marker_broker() -> Reader {
+    Reader::new(CLUSTER)
+        .on_topic_configs(|topic| {
+            panic!(
+                "phase 0 read topic_configs({topic:?}); the mapped target topics do not exist at \
+                 phase 0 by construction, and this fixture arms no LogAppendTime probe"
+            )
+        })
+        .on_broker_configs(|| {
+            Ok(BTreeMap::from([
+                (
+                    "log.message.timestamp.type".to_string(),
+                    "CreateTime".to_string(),
+                ),
+                ("log.retention.ms".to_string(), "-1".to_string()),
+            ]))
+        })
 }
 
-impl NoMarkerBroker {
-    fn new() -> Self {
-        Self {
-            already_there: Vec::new(),
-        }
-    }
-    fn already_has(mut self, topic: &str, partitions: i32) -> Self {
-        self.already_there.push(TopicMeta::new(topic, partitions));
-        self
-    }
-}
-
-impl ClusterReader for NoMarkerBroker {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        Ok(CLUSTER.to_string())
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        // NOT the marker. That absence is the whole fixture.
-        Ok(self.already_there.clone())
-    }
-    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        Ok(vec![])
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        panic!(
-            "phase 0 read topic_configs({topic:?}); the mapped target topics do not exist at \
-             phase 0 by construction, and this fixture arms no LogAppendTime probe"
-        )
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        Ok(BTreeMap::from([
-            (
-                "log.message.timestamp.type".to_string(),
-                "CreateTime".to_string(),
-            ),
-            ("log.retention.ms".to_string(), "-1".to_string()),
-        ]))
-    }
-    fn consume_range(
-        &self,
-        _t: &str,
-        _p: i32,
-        _from: i64,
-        _max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        Ok(vec![])
-    }
-}
-
-#[derive(Default)]
-struct RecordingCreator {
-    calls: Mutex<Vec<NewTopicSpec>>,
-}
-
-impl TopicCreator for RecordingCreator {
-    fn create_topics(
-        &self,
-        topics: &[NewTopicSpec],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(topics);
-        Ok(topics.iter().map(|t| (t.name.clone(), Ok(()))).collect())
-    }
-}
-
-#[derive(Default)]
-struct RecordingDeleter {
-    calls: Mutex<Vec<String>>,
-}
-
-impl TopicDeleter for RecordingDeleter {
-    fn delete_topics(
-        &self,
-        names: &[String],
-    ) -> Result<Vec<(String, Result<(), String>)>, KafkaError> {
-        self.calls.lock().unwrap().extend_from_slice(names);
-        Ok(names.iter().map(|n| (n.clone(), Ok(()))).collect())
-    }
-}
+type RecordingCreator = Creator;
+type RecordingDeleter = Deleter;
 
 /// Phase 0 over this file's doubles. Returns the whole `Result` so a row can
 /// assert the EXIT CODE first and the message second.
@@ -225,13 +167,6 @@ fn phase0(
         &creator,
         &deleter,
     )
-}
-
-fn exit_of<T>(r: &Result<T, DrillError>) -> ExitCode {
-    match r {
-        Ok(_) => ExitCode::Ok,
-        Err(e) => e.exit_code(),
-    }
 }
 
 fn message_of<T: std::fmt::Debug>(r: Result<T, DrillError>) -> String {
@@ -255,7 +190,7 @@ fn message_of<T: std::fmt::Debug>(r: Result<T, DrillError>) -> String {
 #[test]
 fn a_new_topic_restore_skips_the_marker_and_allowlist_checks() {
     let spec = spec_in(TargetMode::NewTopic, None);
-    let admitted = phase0(&spec, &NoMarkerBroker::new());
+    let admitted = phase0(&spec, &no_marker_broker());
     assert_eq!(
         exit_of(&admitted),
         ExitCode::Ok,
@@ -284,7 +219,7 @@ fn a_new_topic_restore_skips_the_marker_and_allowlist_checks() {
 fn a_scratch_restore_still_requires_them() {
     let spec = spec_in(TargetMode::Scratch, None);
     // 1 — the cluster allowlist refuses FIRST, because it runs first.
-    let r = phase0(&spec, &NoMarkerBroker::new());
+    let r = phase0(&spec, &no_marker_broker());
     assert_eq!(exit_of(&r), ExitCode::GuardRefused);
     let m = message_of(r);
     assert!(
@@ -304,7 +239,7 @@ fn a_scratch_restore_still_requires_them() {
             allowed_cluster_ids: vec![CLUSTER.into()],
             source_cluster_id: Some(CLUSTER.into()),
         },
-        &NoMarkerBroker::new(),
+        &no_marker_broker(),
         &creator,
         &deleter,
     );
@@ -326,7 +261,7 @@ fn a_scratch_restore_still_requires_them() {
             allowed_cluster_ids: vec![CLUSTER.into()],
             source_cluster_id: None,
         },
-        &NoMarkerBroker::new(),
+        &no_marker_broker(),
         &creator,
         &deleter,
     );
@@ -365,7 +300,7 @@ fn a_scratch_restore_still_requires_them() {
 fn a_restore_refuses_a_target_topic_that_already_exists() {
     // `newTopic`: the mapped name is the default point-in-time one.
     let spec = spec_in(TargetMode::NewTopic, None);
-    let broker = NoMarkerBroker::new().already_has("restore-20260907T140500Z-payments", 3);
+    let broker = no_marker_broker().lists("restore-20260907T140500Z-payments", 3);
     let r = phase0(&spec, &broker);
     assert_eq!(
         exit_of(&r),
@@ -393,10 +328,10 @@ fn a_restore_refuses_a_target_topic_that_already_exists() {
     // prefix. ONE refusal, not two — a second code path is a second place for
     // the two to drift.
     let spec = spec_in(TargetMode::Scratch, None);
-    let broker = NoMarkerBroker::new()
-        .already_has(MARKER, 1)
-        .already_has("drill-orders", 3)
-        .already_has("drill-payments", 3);
+    let broker = no_marker_broker()
+        .lists(MARKER, 1)
+        .lists("drill-orders", 3)
+        .lists("drill-payments", 3);
     let r = phase0_admit::run(
         &spec,
         &serde_yaml::to_string(&spec).unwrap(),
@@ -455,7 +390,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
             original_name: None,
         }),
     );
-    let r = phase0(&spec, &NoMarkerBroker::new());
+    let r = phase0(&spec, &no_marker_broker());
     assert_eq!(
         exit_of(&r),
         ExitCode::GuardRefused,
@@ -480,7 +415,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
             original_name: None,
         }),
     );
-    let r = phase0(&spec, &NoMarkerBroker::new());
+    let r = phase0(&spec, &no_marker_broker());
     assert_eq!(exit_of(&r), ExitCode::GuardRefused);
     let m = message_of(r);
     assert!(
@@ -501,7 +436,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
             original_name: None,
         }),
     );
-    let r = phase0(&spec, &NoMarkerBroker::new());
+    let r = phase0(&spec, &no_marker_broker());
     assert_eq!(exit_of(&r), ExitCode::GuardRefused);
     let m = message_of(r);
     assert!(
@@ -520,7 +455,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
             original_name: None,
         }),
     );
-    let r = phase0(&spec, &NoMarkerBroker::new());
+    let r = phase0(&spec, &no_marker_broker());
     assert_eq!(
         exit_of(&r),
         ExitCode::Ok,
@@ -529,7 +464,7 @@ fn a_mapped_target_name_kafka_would_refuse_is_refused_at_phase_0() {
 
     // (e) …and the arm does not fire on the DEFAULT prefix, which is what
     //     every `newTopic` run that names no `topic_naming` uses.
-    let r = phase0(&spec_in(TargetMode::NewTopic, None), &NoMarkerBroker::new());
+    let r = phase0(&spec_in(TargetMode::NewTopic, None), &no_marker_broker());
     assert_eq!(exit_of(&r), ExitCode::Ok);
 }
 
@@ -552,7 +487,7 @@ fn the_default_new_topic_prefix_carries_the_point_in_time() {
     // phase 0 uses.
     let spec = spec_in(TargetMode::NewTopic, None);
     assert_eq!(target_topic_prefix(&spec), "restore-20260907T140500Z-");
-    let admitted = phase0(&spec, &NoMarkerBroker::new()).expect("admitted");
+    let admitted = phase0(&spec, &no_marker_broker()).expect("admitted");
     assert_eq!(
         admitted.topic_mapping,
         BTreeMap::from([
@@ -581,7 +516,7 @@ fn the_default_new_topic_prefix_carries_the_point_in_time() {
         }),
     );
     assert_eq!(target_topic_prefix(&spec), "incident-4471-");
-    let admitted = phase0(&spec, &NoMarkerBroker::new()).expect("admitted");
+    let admitted = phase0(&spec, &no_marker_broker()).expect("admitted");
     assert_eq!(
         admitted.topic_mapping.get("orders").map(String::as_str),
         Some("incident-4471-orders")

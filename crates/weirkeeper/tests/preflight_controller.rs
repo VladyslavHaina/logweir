@@ -22,6 +22,9 @@
 //! source, measured, and reverted; the rows that die are named beside it in the
 //! worker report.
 
+mod support;
+use support::{backup_request, leak, route};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -92,18 +95,6 @@ fn preflight(request: Value) -> Preflight {
         "spec": { "request": request }
     }))
     .expect("the Preflight fixture parses")
-}
-
-fn backup_request() -> Value {
-    json!({
-        "operation": "Backup",
-        "backup": {
-            "sourceRef": {"name": "source"},
-            "destinationRef": {"name": "primary"},
-            "topics": ["orders"]
-        },
-        "timeoutSeconds": 120
-    })
 }
 
 fn restore_request(extra: Value) -> Value {
@@ -2595,15 +2586,6 @@ fn no_trust_policies() -> String {
     json!({"apiVersion": "v1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
 }
 
-fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
-    Route {
-        method,
-        path_suffix,
-        status: 200,
-        body,
-    }
-}
-
 /// One terminal `Preflight` in the LIST the collector issues — D2 §4.3's
 /// `gc.rs`. `basis` is the instant retention counts from: `result.expiresAt`
 /// when the check produced a verdict, else `observedAt`.
@@ -3564,11 +3546,6 @@ async fn a_cancel_request_collapses_the_job_deadline_and_nothing_else() {
 /// assertions it guarded could never fail.
 fn is_pod_log(request: &weirkeeper::testing::SeenRequest) -> bool {
     request.uri.contains("/pods/") && request.uri.contains("/log")
-}
-
-/// Leak a `String` so a [`Route`]'s `&'static str` suffix can be computed.
-fn leak(s: String) -> &'static str {
-    Box::leak(s.into_boxed_str())
 }
 
 // ===========================================================================

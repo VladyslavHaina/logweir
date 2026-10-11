@@ -30,13 +30,11 @@
 //! reads the spec. No broker, no engine binary, no cluster, no Docker, no
 //! network (GC17, GR2).
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+mod support;
+use support::bin;
 
-/// Consumed verbatim from `crates/logweir/tests/cli_exit_codes.rs`.
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
 /// A `drill run` invocation that fails operationally (exit 1) before it can
 /// reach a broker, the engine binary or a cluster. Startup validates the

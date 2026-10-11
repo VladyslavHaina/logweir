@@ -3,14 +3,15 @@
 //! NOTHING HERE DIALS. The two lines and the exit code are a pure function of a
 //! `Result<String, KafkaError>` ([`probe::outcome`]), and the one call the probe
 //! makes on a cluster goes through a `&dyn ClusterReader` ([`probe::probe`]), so
-//! every arm of the contract is asserted over a [`StubReader`] with no socket,
+//! every arm of the contract is asserted over a reader double with no socket,
 //! no 20-second metadata timeout and nothing approaching Global Constraint 22's
 //! 15 s per-test bound. `crates/logweir/src/probe.rs` is on
 //! `tests/no_network_in_unit_tests.rs`'s allow-list because its `run`/`dial`
 //! pair really does construct a client — that is the subcommand — and this file
 //! is what makes the allow-list affordable.
 
-use std::collections::BTreeMap;
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -21,7 +22,8 @@ use logweir::probe::{
     AUTH_MODE_PLAINTEXT, AUTH_MODE_SCRAM_SHA_512, CLUSTER_ID_LINE, DIAL_TIMEOUT, REACHABLE_LINE,
     SOURCE_PASSWORD_ENV,
 };
-use logweir_kafka::reader::{ClusterReader, ConsumedRecord, KafkaError, TopicMeta};
+use logweir_kafka::reader::KafkaError;
+use support::doubles::Reader;
 
 /// The cluster id every reachable arm expects. The same 22-character shape a
 /// real Kafka `ClusterId` has, so a test cannot pass by accident on a
@@ -40,60 +42,38 @@ const CLUSTER_ID: &str = "ALLOWED0000000000000000";
 /// refuse; one that does not check is byte-identical with the flag and without
 /// it. Every other trait method panics: reaching one is a probe doing more than
 /// reading a cluster id, and a panic names which call it was.
-struct StubReader {
-    id: Result<String, KafkaError>,
+fn stub_reader(id: Result<String, KafkaError>) -> Reader {
+    Reader::answering(id)
+        .on_end_offsets(|topic| {
+            panic!(
+                "cluster-probe called end_offsets({topic}); it reads a cluster id and nothing else"
+            )
+        })
+        .on_topic_configs(|topic| {
+            panic!(
+                "cluster-probe called topic_configs({topic}); the target-topic config guard is \
+                 phase 0's, not a liveness probe's"
+            )
+        })
+        .on_broker_configs(|| {
+            panic!("cluster-probe called broker_configs(); it reads a cluster id and nothing else")
+        })
+        .on_consume_range(|topic, partition, from, max| {
+            panic!(
+                "cluster-probe called consume_range({topic}, {partition}, {from}, {max}); it reads \
+                 no records"
+            )
+        })
 }
 
-impl StubReader {
-    fn reachable() -> Self {
-        Self {
-            id: Ok(CLUSTER_ID.to_string()),
-        }
-    }
-    fn unreachable() -> Self {
-        Self {
-            id: Err(KafkaError::Unreachable(
-                "no broker returned a ClusterId within 20s".to_string(),
-            )),
-        }
-    }
+fn reachable() -> Reader {
+    stub_reader(Ok(CLUSTER_ID.to_string()))
 }
 
-impl ClusterReader for StubReader {
-    fn cluster_id(&self) -> Result<String, KafkaError> {
-        self.id.clone()
-    }
-    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
-        // EMPTY, AND ANSWERED RATHER THAN PANICKED. `list_topics` is the call a
-        // marker-topic check would make, so the marker-topic row needs it to
-        // succeed-and-say-nothing: a panic here would make that row pass for
-        // the wrong reason (the mutant would abort instead of refusing).
-        Ok(Vec::new())
-    }
-    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
-        panic!("cluster-probe called end_offsets({topic}); it reads a cluster id and nothing else")
-    }
-    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
-        panic!(
-            "cluster-probe called topic_configs({topic}); the target-topic config guard is phase \
-             0's, not a liveness probe's"
-        )
-    }
-    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
-        panic!("cluster-probe called broker_configs(); it reads a cluster id and nothing else")
-    }
-    fn consume_range(
-        &self,
-        topic: &str,
-        partition: i32,
-        from: i64,
-        max: usize,
-    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
-        panic!(
-            "cluster-probe called consume_range({topic}, {partition}, {from}, {max}); it reads no \
-             records"
-        )
-    }
+fn unreachable() -> Reader {
+    stub_reader(Err(KafkaError::Unreachable(
+        "no broker returned a ClusterId within 20s".to_string(),
+    )))
 }
 
 /// `write_outcome` into two byte sinks, so a row can assert the EXACT bytes on
@@ -148,7 +128,7 @@ fn code_only(src: &str) -> String {
 /// a `&dyn ClusterReader` double.
 #[test]
 fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
-    let o = probe(&StubReader::reachable(), None);
+    let o = probe(&reachable(), None);
     let (out, err) = streams(&o);
     assert_eq!(
         out,
@@ -164,7 +144,7 @@ fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
     // ARM 2 — unreachable. `KafkaError::Unreachable` is what
     // `rdkafka_reader`'s `cluster_id()` returns when no broker answered inside
     // its own budget.
-    let o = probe(&StubReader::unreachable(), None);
+    let o = probe(&unreachable(), None);
     let (out, err) = streams(&o);
     assert_eq!(
         out,
@@ -196,10 +176,7 @@ fn cluster_probe_prints_the_cluster_id_and_exits_zero() {
 /// "nothing else on stdout" is proved against a run that had something to say.
 #[test]
 fn the_probe_prints_exactly_two_stdout_lines() {
-    for o in [
-        probe(&StubReader::reachable(), None),
-        probe(&StubReader::unreachable(), None),
-    ] {
+    for o in [probe(&reachable(), None), probe(&unreachable(), None)] {
         let (out, err) = streams(&o);
         assert_eq!(
             out.matches('\n').count(),
@@ -243,8 +220,8 @@ fn the_probe_prints_exactly_two_stdout_lines() {
 /// fleet** — a liveness probe whose answer is decided by a drill precondition.
 #[test]
 fn the_probe_never_refuses_on_a_marker_topic() {
-    let without = probe(&StubReader::reachable(), None);
-    let with = probe(&StubReader::reachable(), Some("absent-topic"));
+    let without = probe(&reachable(), None);
+    let with = probe(&reachable(), Some("absent-topic"));
     assert_eq!(
         streams(&with).0,
         streams(&without).0,
@@ -260,8 +237,8 @@ fn the_probe_never_refuses_on_a_marker_topic() {
     // And the unreachable arm too, so the flag cannot flip an answer in either
     // direction.
     assert_eq!(
-        probe(&StubReader::unreachable(), Some("absent-topic")),
-        probe(&StubReader::unreachable(), None),
+        probe(&unreachable(), Some("absent-topic")),
+        probe(&unreachable(), None),
         "nor on the unreachable arm"
     );
 }

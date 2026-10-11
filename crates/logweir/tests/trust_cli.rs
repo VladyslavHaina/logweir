@@ -25,8 +25,11 @@
 //! keeps that true for the crate; these tests would hang rather than pass if
 //! it stopped being.
 
+mod support;
+use support::bin;
+
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use logweir::trust::{
     export, migrate_roster, refuse_private_material, ExportArgs, Input, MigrateArgs,
@@ -484,11 +487,6 @@ fn every_private_pem_spelling_is_refused_including_ones_the_list_does_not_name()
 // ---------------------------------------------------------------------------
 // The argv surface, against the COMPILED BINARY
 // ---------------------------------------------------------------------------
-
-/// The binary under test.
-fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_logweir"))
-}
 
 /// Run the binary with `stdin_body` on standard input.
 fn run(args: &[&str], stdin_body: &str) -> (Option<i32>, String, String) {

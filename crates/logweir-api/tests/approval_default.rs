@@ -28,7 +28,7 @@ use logweir_core::approval_policy::{
 use logweir_evidence::keys::{SigningKey, VerifyingKey};
 use logweir_evidence::Sidecar;
 use serde_json::{json, Value};
-use support::{FakeKube, Options, TestApp, LOCAL_ADMIN_ACTOR, NS_A, NS_B};
+use support::{approvals_posted, FakeKube, Options, TestApp, LOCAL_ADMIN_ACTOR, NS_A, NS_B};
 
 const RELEASE_NS: &str = "logweir-system";
 const IDENTITY_CM: &str = "logweir-signing-trust";
@@ -159,14 +159,6 @@ async fn create(app: &TestApp, ns: &str, key: &str) -> support::TestResponse {
         &support::restore_body(&support::golden_plan()).to_string(),
     )
     .await
-}
-
-fn approvals_posted(fake: &FakeKube) -> Vec<Value> {
-    fake.requests()
-        .into_iter()
-        .filter(|r| r.method == "POST" && r.path.ends_with("/approvals"))
-        .map(|r| serde_json::from_str(&r.body).expect("json"))
-        .collect()
 }
 
 fn posted(fake: &FakeKube) -> usize {
