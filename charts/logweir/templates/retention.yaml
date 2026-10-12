@@ -26,7 +26,7 @@ token.
 SO WHY A SEPARATE ACCOUNT AT ALL, IF IT IS GRANTED NOTHING? Because a
 ServiceAccount is what an audit trail, a NetworkPolicy podSelector and a
 `kubectl get pods -o wide` can name. `logweir-runner` runs backups, restores,
-checks, catalog syncs and notification deliveries; `logweir-retention` runs the
+checks and catalog syncs; `logweir-retention` runs the
 one thing that removes data, and keeping the names apart is what lets an
 operator ask "what has run as the deleter" and get an answer. It also carries
 its own `imagePullSecrets`, so a private registry does not have to widen the

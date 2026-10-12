@@ -1,3 +1,4 @@
+{{- include "logweir.validate" . -}}
 {{/*
 `api.enabled` — THE CONSOLE/API PRINCIPAL'S GRANTS, AND ONLY ITS GRANTS.
 
@@ -8,8 +9,6 @@ route exists AND the actor's role allows it). Its Kubernetes grants are the
 UNION of what every route may ever need; the per-actor narrowing is the
 service's job and is not expressible in RBAC at all. The grant is the floor
 under a service that does its own authorization, bounded by a seal in the code.
-(The legacy `kubectl proxy` page and its `<release>-ui` account were withdrawn
-in v1, PROD-17.1 C4.)
 
 ---------------------------------------------------------------------------
 WHY THE GRANT CAN BE CHECKED AND NOT JUST ASSERTED
@@ -59,7 +58,7 @@ a namespace is an inventory of somebody else's configuration.
 D3 W11's FIVE NEW ACTIONS, AND WHAT THEY COST IN VERBS
 ---------------------------------------------------------------------------
 `protection.read`, `catalog.read`, `catalog.connect`, `retention.read` and
-`trustPolicy.read` (`rehearsal.read` was withdrawn in v1). Four of the five are
+`trustPolicy.read`. Four of the five are
 reads, so the D3 rules below are `get`/`list` on the three namespaced kinds plus the
 cluster-scoped `TrustPolicy`, and there is exactly ONE D3 write: `create` on
 `recoverycatalogs`, which is PLAT-15.2's "connect existing archive".

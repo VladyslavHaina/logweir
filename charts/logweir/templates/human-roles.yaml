@@ -32,8 +32,8 @@ roster, which is a widening dressed as a cleanup.
 
 D3 W13 added the operator's D3 kinds (`create` on `protectionpolicies` and
 `recoverycatalogs`; `update`/`patch` on the first, whose spec is not sealed,
-and `patch` on the second, whose CRD leaves exactly one field mutable;
-`rehearsalschedules` is withdrawn in v1) and a FIFTH role.
+and `patch` on the second, whose CRD leaves exactly one field mutable) and a
+FIFTH role.
 
 `logweir-retention-admin` IS NAMESPACED and needs a RoleBinding per namespace.
 It is the only holder of a write verb on `RetentionPolicy` — the one kind whose

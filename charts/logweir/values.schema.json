@@ -419,7 +419,7 @@
       }
     },
     "ui": {
-      "description": "WITHDRAWN (PROD-17.1 C4, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image. Accepted here only so templates/ui/ui.yaml can refuse it by name, pointing at the console (api.console.*)."
+      "description": "WITHDRAWN (PROD-17.1 C4, release-notes item 75): the legacy kubectl proxy page and the logweir-ui image. Accepted here only so templates/_validate.tpl can refuse it by name, pointing at the console (api.console.*)."
     },
     "retention": {
       "type": "object",

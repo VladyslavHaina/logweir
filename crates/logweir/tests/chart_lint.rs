@@ -4732,7 +4732,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         .collect();
     // A WITHDRAWN key is typed and not shown: the schema accepts it only so a
     // template can refuse it BY NAME (`ui`, refused by
-    // templates/ui/ui.yaml pointing at the console).
+    // templates/_validate.tpl pointing at the console).
     written.insert("ui".to_string());
     assert_eq!(
         written, typed,

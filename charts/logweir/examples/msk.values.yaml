@@ -6,7 +6,7 @@
 #     helm upgrade --install logweir charts/logweir -n kafka -f my-values.yaml
 environment: dev
 kubernetes:
-  namespace: kafka              # only feeds ui.namespaces; `-n kafka` decides the install
+  namespace: kafka              # only feeds api.namespaces; `-n kafka` decides the install
   nodeSelector: { workload: kafka, nodepool: kafka }
   tolerations:
     - { key: kafka, value: "true", effect: NoSchedule }
