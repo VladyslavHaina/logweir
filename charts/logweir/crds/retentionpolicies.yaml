@@ -381,6 +381,14 @@ spec:
                     description: That record's digest.
                     nullable: true
                     type: string
+                  refusalCode:
+                    description: 'The worker''s `retention-refusal=` code, when the run exited 3 on a refusal it named: one of the closed codes. `Enforced` names it until the next run starts.'
+                    nullable: true
+                    type: string
+                  refusalVariable:
+                    description: 'The binding variable that refusal names: a variable name, never its value. Absent when the refusal names none.'
+                    nullable: true
+                    type: string
                   runId:
                     description: The run id.
                     nullable: true

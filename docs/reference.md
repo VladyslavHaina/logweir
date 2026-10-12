@@ -513,7 +513,10 @@ message names the refusal, for example `retention run <id> was REFUSED before
 deleting anything (exit 3, CapUnreadable (LOGWEIR_RETENTION_MAX_OBJECTS)); the
 archive is untouched`; `EnforcementDegraded`'s message says `the last run
 exited 3, refused <code>`. Only `CredentialBindingMismatch` is a reason of its
-own, and it is held (FX-15).
+own (FX-15). `status.lastEnforcement.refusalCode` and `refusalVariable` record
+the refusal, and `Enforced` keeps naming it until the next run starts, unless
+the mode, the schedule, the view, the ceiling or the approval has to change
+first (D-R1).
 
 `status.enforcement`: `RecommendationOnly`, `LogweirWorker`,
 `ExternalLifecycleDeclared`. Each of `status.guarantees` (`ageExpiry`,

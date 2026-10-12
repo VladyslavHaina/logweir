@@ -680,8 +680,22 @@ console_refuses() {
 # Release-notes item 74: `notify` is withdrawn with the alert sinks, and a
 # values file that still sets it is refused by name. CONTROL: `notify=null`,
 # which an upgrade with --reuse-values passes to clear it, renders.
-console_refuses "a values file that still sets notify.allowInsecureSinks" "notify is withdrawn" \
+console_refuses "a values file that still sets notify.allowInsecureSinks" "notify.* is withdrawn" \
   --set notify.allowInsecureSinks=false
+# D-C1 (poc-14-1b): the refusal names no sub-key, so a values file that sets
+# another one is not told about `allowInsecureSinks`, a key it never set.
+# CONTROL: the message before D-C1 named it, and this row fails on it.
+console_refuses "a values file that sets another notify key" "notify.* is withdrawn" \
+  --set notify.webhookUrl=https://example.invalid/hook
+grep -F -q "allowInsecureSinks" "$tmp/console-refusal.err"
+grc=$?
+if [ "$grc" -eq 0 ]; then
+  echo "FAIL: the notify refusal names notify.allowInsecureSinks, which this values file never set:" >&2
+  sed 's/^/      /' "$tmp/console-refusal.err" >&2
+  fail=1
+else
+  echo "   rc=$grc  (the refusal names no notify sub-key the values did not set)"
+fi
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
   --set notify=null > /dev/null 2> "$tmp/notify-null.err"
 rc=$?

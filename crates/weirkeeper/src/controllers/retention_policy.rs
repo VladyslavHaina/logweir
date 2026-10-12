@@ -73,9 +73,7 @@ use crate::conditions::{keep_instant_unless_changed, merge_condition, status_unc
 use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
-use crate::crds::retention_policy::{
-    RetentionEnforcementRun, RetentionMode, RetentionPolicy, EVALUATION_LIST_BOUND,
-};
+use crate::crds::retention_policy::{RetentionMode, RetentionPolicy, EVALUATION_LIST_BOUND};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError, ResolvedDestination};
 use crate::job::RunnerOwner;
@@ -674,15 +672,56 @@ impl Pass<'_> {
     }
 
     /// The last run's outcome in words, for the `EnforcementDegraded` message:
-    /// the exit code and the closed per-point codes, which is what the object
-    /// knows.
+    /// the refusal it named, or else the exit code and the closed per-point
+    /// codes, which is what the object knows.
     fn last_failure_detail(&self) -> String {
+        if let Some((code, variable)) = self.last_refusal() {
+            return refused_detail(code, variable);
+        }
         let record = self
             .policy
             .status
             .as_ref()
             .and_then(|s| s.last_enforcement.as_ref());
         failure_detail(record.and_then(|r| r.exit_code), &self.last_failure_codes())
+    }
+
+    /// The refusal `status.lastEnforcement` records for the last run, when it
+    /// finished with exit 3 and no run has started since (`start_run` clears
+    /// the two fields with the rest of a finished run's). Read back through the
+    /// harvest's closed tables, so only a known code and a binding variable's
+    /// name reach a message.
+    fn last_refusal(&self) -> Option<(&'static str, Option<&'static str>)> {
+        let run = self.policy.status.as_ref()?.last_enforcement.as_ref()?;
+        if run.finished_at.is_none() || run.exit_code != Some(3) {
+            return None;
+        }
+        let recorded = run.refusal_code.as_deref()?;
+        let code = RETENTION_REFUSALS
+            .iter()
+            .copied()
+            .find(|known| *known == recorded)?;
+        let variable = run
+            .refusal_variable
+            .as_deref()
+            .and_then(|named| env::BINDING.iter().copied().find(|known| *known == named));
+        Some((code, variable))
+    }
+
+    /// The last run's refusal as `Enforced` publishes it, `(reason, message)`:
+    /// what the harvest wrote, re-published from the record until the next run
+    /// starts (D-R1).
+    fn held_refusal(&self) -> Option<(&'static str, String)> {
+        let (code, variable) = self.last_refusal()?;
+        let run_id = self
+            .policy
+            .status
+            .as_ref()?
+            .last_enforcement
+            .as_ref()?
+            .run_id
+            .as_deref()?;
+        Some(refused_run_enforced(run_id, code, variable))
     }
 
     /// The closed per-point codes the last run left on the object.
@@ -1135,8 +1174,14 @@ impl Pass<'_> {
             0
         };
         let degraded = failures >= DEGRADED_AFTER_FAILURES;
+        // The refusal the run named, read only off an exit 3: it is published
+        // on the conditions and recorded in `lastEnforcement`.
+        let refusal = report
+            .refusal_code
+            .filter(|_| exit_code == Some(3))
+            .map(|code| (code, report.refusal_variable));
         let binding_refused =
-            exit_code == Some(3) && report.refusal_code == Some(REASON_CREDENTIAL_BINDING_MISMATCH);
+            refusal.is_some_and(|(code, _)| code == REASON_CREDENTIAL_BINDING_MISMATCH);
         let reason = if report.refused.is_some() {
             REASON_POD_CREATION_FORBIDDEN
         } else if binding_refused {
@@ -1152,20 +1197,9 @@ impl Pass<'_> {
                  nothing was deleted: {}",
                 report.refused.as_deref().unwrap_or_default()
             ),
-            Some(3) if binding_refused => format!(
-                "retention run {run_id} REFUSED a credential before building any handle \
-                 ({REASON_CREDENTIAL_BINDING_MISMATCH}): the Secret \
-                 spec.enforcement.credentialSecretRef names, or the destination's \
-                 evidenceWrite Secret, carries no `logweir-binding` or one written for another \
-                 policy, destination route or scope. Nothing was deleted. {}",
-                logweir_core::credential_binding::BINDING_REMEDY
-            ),
             Some(0) => format!("retention run {run_id} completed"),
-            Some(3) => match named_refusal(report) {
-                Some(refusal) => format!(
-                    "retention run {run_id} was REFUSED before deleting anything (exit 3, \
-                     {refusal}); the archive is untouched"
-                ),
+            Some(3) => match refusal {
+                Some((code, variable)) => refused_run_enforced(run_id, code, variable).1,
                 None => format!(
                     "retention run {run_id} REFUSED its plan before deleting anything (exit 3); \
                      the archive is untouched"
@@ -1193,11 +1227,9 @@ impl Pass<'_> {
                 "the last run never started, because its pod was refused at creation \
                  ({REASON_POD_CREATION_FORBIDDEN}): {admission}"
             ),
-            None => match named_refusal(report) {
-                Some(refusal) if exit_code == Some(3) => {
-                    format!("the last run exited 3, refused {refusal}")
-                }
-                _ => failure_detail(exit_code, &codes),
+            None => match refusal {
+                Some((code, variable)) => refused_detail(code, variable),
+                None => failure_detail(exit_code, &codes),
             },
         };
         let stop = scheduling_stop(&codes);
@@ -1244,9 +1276,10 @@ impl Pass<'_> {
                 } else {
                     ENFORCEMENT_LOGWEIR_WORKER
                 },
-                // The five fields the CRD declares; `failed[]` is what
+                // The terminal fields the CRD declares; `failed[]` is what
                 // `previously_refused()` reads to keep a provider-refused point
-                // out of the next plan.
+                // out of the next plan, and the refusal is what `Enforced` and
+                // `EnforcementDegraded` keep naming until the next run.
                 "lastEnforcement": {
                     "runId": run_id,
                     "finishedAt": self.ctx.now,
@@ -1260,6 +1293,8 @@ impl Pass<'_> {
                     "objectsDeleted": report.objects_deleted,
                     "recordKey": report.record_key,
                     "recordSha256": report.record_sha256,
+                    "refusalCode": refusal.map(|(code, _)| code),
+                    "refusalVariable": refusal.and_then(|(_, variable)| variable),
                 },
                 // RFC 7386: `null` deletes the key. The lease exists only while
                 // a run holds it; one left behind would hold restore admission
@@ -2057,7 +2092,7 @@ impl Pass<'_> {
         // on `jobs`, by design), and writing first fails better: a record with
         // no Job is a run that never ran, which the next pass supersedes.
         //
-        // `runId`, `startedAt` and `planSha256` are this run's own; the seven
+        // `runId`, `startedAt` and `planSha256` are this run's own; the nine
         // terminal fields below describe a finished run and are deleted by
         // explicit RFC 7386 `null`, so the previous run's outcome cannot be
         // read as this one's (`previously_refused()` reads `failed[]`).
@@ -2078,6 +2113,8 @@ impl Pass<'_> {
             "objectsDeleted": Value::Null,
             "recordKey": Value::Null,
             "recordSha256": Value::Null,
+            "refusalCode": Value::Null,
+            "refusalVariable": Value::Null,
         });
         let recorded = self
             .patch_status(json!({ "lastEnforcement": record }))
@@ -2711,16 +2748,28 @@ impl Pass<'_> {
         // is a manifest naming a segment in another set's directory. The
         // Evaluated message says exactly which half is in force.
         let segments_visible = bounds.segments_visible;
-        // A binding refusal the newest run reached stands while the decision
-        // would enforce again, on the condition and on the two fields the
-        // console reads: only a human rebinding the Secret clears it
+        // The refusal the newest run named stands on `Enforced` until the next
+        // run starts (D-R1): over a decision to run again, and over one that
+        // only waits for the cadence or a spec edit (`NothingToDo`, the spent
+        // budget's `RunFailed`), which would otherwise un-say it within seconds
+        // of the harvest. A decision naming something to change first (the
+        // mode, the schedule, the view, the ceiling, the approval) takes
+        // `Enforced`; `lastEnforcement` and `EnforcementDegraded` still name
+        // the refusal. A binding refusal also holds the two fields the console
+        // reads: only a human rebinding the Secret clears it
         // ([`Self::publish_standing_refusal`]).
-        let held = if decision.start {
-            self.held_binding_refusal()
+        let held = if decision.start
+            || decision.reason == REASON_NOTHING_TO_DO
+            || decision.reason == REASON_RUN_FAILED
+        {
+            self.held_refusal()
         } else {
             None
         };
-        let enforcement = if held.is_some() {
+        let enforcement = if held
+            .as_ref()
+            .is_some_and(|(reason, _)| *reason == REASON_CREDENTIAL_BINDING_MISMATCH)
+        {
             ENFORCEMENT_RECOMMENDATION_ONLY
         } else {
             decision.enforcement
@@ -2800,17 +2849,13 @@ impl Pass<'_> {
                     }
                 ),
             ),
-            // A binding refusal is not un-said by the next decision: the
-            // controller reads no Secret, so only a later run can see a
-            // rebound one, and until one is harvested the refusal stands
-            // rather than `Enforced=True` over runs that are all refused.
+            // A refusal is not un-said by the next decision: only a later run
+            // can show that its cause is gone (for a binding refusal, the
+            // controller reads no Secret at all), so until one starts the
+            // refusal stands rather than `NothingToDo` or `Enforced=True`
+            // over a run that was refused.
             match held {
-                Some(message) => (
-                    CONDITION_ENFORCED,
-                    "False",
-                    REASON_CREDENTIAL_BINDING_MISMATCH,
-                    message,
-                ),
+                Some((reason, message)) => (CONDITION_ENFORCED, "False", reason, message),
                 None => (
                     CONDITION_ENFORCED,
                     if decision.start { "True" } else { "False" },
@@ -2850,7 +2895,14 @@ impl Pass<'_> {
                      status.consecutiveRunFailures is reset to 0"
                         .to_string()
                 } else {
-                    format!("{} consecutive run failures", self.budget_before())
+                    match self.last_refusal() {
+                        Some((code, variable)) => format!(
+                            "{} consecutive run failures; {}",
+                            self.budget_before(),
+                            refused_detail(code, variable)
+                        ),
+                        None => format!("{} consecutive run failures", self.budget_before()),
+                    }
                 },
             ),
         ]);
@@ -3132,34 +3184,6 @@ impl Pass<'_> {
         out.into_iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect()
-    }
-
-    /// The stored `Enforced=False/CredentialBindingMismatch` message, when the
-    /// newest run is finished, exited 3, and is the run that condition was
-    /// written for: the refusal an evaluation pass must not overwrite with a
-    /// decision to enforce. `None` once a later run has started (its
-    /// `finishedAt` is cleared) or finished otherwise.
-    fn held_binding_refusal(&self) -> Option<String> {
-        let refused = self.existing_conditions().into_iter().find(|c| {
-            c.r#type == CONDITION_ENFORCED
-                && c.status == "False"
-                && c.reason.as_deref() == Some(REASON_CREDENTIAL_BINDING_MISMATCH)
-        })?;
-        let message = refused.message?;
-        let observed = self.observed();
-        let last = observed
-            .as_ref()
-            .and_then(|status| status.get("lastEnforcement").cloned())
-            .and_then(|r| serde_json::from_value::<RetentionEnforcementRun>(r).ok())
-            .or_else(|| {
-                self.policy
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.last_enforcement.clone())
-            })?;
-        let run = last.run_id.as_deref()?;
-        (last.finished_at.is_some() && last.exit_code == Some(3) && message.contains(run))
-            .then_some(message)
     }
 
     /// The conditions as this pass believes they now stand.
@@ -3640,14 +3664,52 @@ pub struct RunReport {
     pub refusal_variable: Option<&'static str>,
 }
 
-/// The refusal as `Enforced` and `Degraded` name it (the code, and the variable
-/// in parentheses), or `None` for a run that named none.
-fn named_refusal(report: &RunReport) -> Option<String> {
-    let code = report.refusal_code?;
-    Some(match report.refusal_variable {
+/// A refusal as `Enforced` and `Degraded` name it: the code, and the variable
+/// in parentheses.
+fn refusal_words(code: &str, variable: Option<&str>) -> String {
+    match variable {
         Some(variable) => format!("{code} ({variable})"),
         None => code.to_string(),
-    })
+    }
+}
+
+/// `EnforcementDegraded`'s detail for a run that exited 3 on a named refusal.
+fn refused_detail(code: &str, variable: Option<&str>) -> String {
+    format!(
+        "the last run exited 3, refused {}",
+        refusal_words(code, variable)
+    )
+}
+
+/// `Enforced`'s reason and message for run `run_id`, which exited 3 on the
+/// named refusal `code`. Only `CredentialBindingMismatch` is a reason of its
+/// own; every other refusal is `RunFailed`, named in the message.
+fn refused_run_enforced(
+    run_id: &str,
+    code: &str,
+    variable: Option<&str>,
+) -> (&'static str, String) {
+    if code == REASON_CREDENTIAL_BINDING_MISMATCH {
+        return (
+            REASON_CREDENTIAL_BINDING_MISMATCH,
+            format!(
+                "retention run {run_id} REFUSED a credential before building any handle \
+                 ({REASON_CREDENTIAL_BINDING_MISMATCH}): the Secret \
+                 spec.enforcement.credentialSecretRef names, or the destination's \
+                 evidenceWrite Secret, carries no `logweir-binding` or one written for another \
+                 policy, destination route or scope. Nothing was deleted. {}",
+                logweir_core::credential_binding::BINDING_REMEDY
+            ),
+        );
+    }
+    (
+        REASON_RUN_FAILED,
+        format!(
+            "retention run {run_id} was REFUSED before deleting anything (exit 3, {}); the \
+             archive is untouched",
+            refusal_words(code, variable)
+        ),
+    )
 }
 
 impl RunReport {

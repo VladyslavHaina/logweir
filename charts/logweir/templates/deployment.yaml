@@ -83,7 +83,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             {{- if .Values.notify }}
-            {{- fail "notify is withdrawn: Logweir no longer delivers ProtectionPolicy alerts, so notify.allowInsecureSinks configures nothing (release notes, item 74). Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
+            {{- fail "notify.* is withdrawn (release notes, item 74): Logweir no longer delivers ProtectionPolicy alerts, so no key under notify configures anything. Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
             {{- end }}
             {{- /*
             D3 §2.3 and §2.7's two controller-wide windows, RENDERED ONLY WHEN
