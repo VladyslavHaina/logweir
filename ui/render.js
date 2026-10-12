@@ -628,6 +628,38 @@ export function cell(value) {
   return esc(inert(value));
 }
 
+/** A LONG IDENTIFIER IN A TABLE CELL -- a key id, a point id, a backup set, a
+ *  principal -- on one line, cut with an ellipsis between `--lw-ident-min-width`
+ *  and `--lw-ident-width` (`.ident-text`), so it cannot take the table's width,
+ *  wrap over ten lines or push a column out of sight. It is never hidden: the
+ *  full value is the hover title, the text a filter, a sort and a screen reader
+ *  read, and what a click copies -- the identifier IS its copy button, because
+ *  a button beside every id cost a table its last column at 1024 px. `shown`,
+ *  when given, is a short form drawn instead of the value's head (the full
+ *  value stays in the text, visually hidden): a string, or the parts left
+ *  between the places it was cut, each cut drawn as an ellipsis whose hover
+ *  title is `cutNote`. `app.js` wires every `.ident` once. */
+export function ident(value, shown, cutNote) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const full = String(value);
+  const parts = Array.isArray(shown) ? shown.map(String)
+    : (typeof shown === "string" && shown.length > 0 ? [shown] : []);
+  const short = parts.length > 0 && !(parts.length === 1 && parts[0] === full);
+  return (
+    "<button type=\"button\" class=\"ident\" data-copy=\"" + esc(full) + "\" title=\"" +
+    esc(inert(full)) + " -- click to copy\"><code class=\"ident-text" +
+    (short ? " ident-shown" : "") + "\">" +
+    (short
+      ? "<span aria-hidden=\"true\">" + parts.map((part) => esc(inert(part))).join(
+        "<span class=\"ident-cut\" title=\"" + esc(String(cutNote || "")) + "\">\u2026</span>") +
+        "</span><span class=\"visually-hidden\">" + esc(inert(full)) + "</span>"
+      : esc(inert(full))) +
+    "</code></button>"
+  );
+}
+
 /** WHAT A CELL SAYS FOR A VALUE THE PRODUCT API SERVING THIS CONSOLE DOES NOT
  *  PUBLISH. Not [`ABSENT`]: "-" says the object carries none, and a page that
  *  is never sent a member cannot say that of it. */
@@ -2148,6 +2180,23 @@ export function planEvidenceBucket(planBytes) {
   return bucket !== null && isBucketName(bucket) ? bucket : "";
 }
 
+/** How the store a restore plan writes its evidence to is reached: the
+ *  `endpoint`, `region` and `path_style` of the same `evidence:` block
+ *  [`planEvidenceBucket`] reads, as [`independentCheck`]'s route. An absent
+ *  (or `null`) endpoint or region is `""`, which prints no flag. The values
+ *  are plan text, and [`shellWord`] quotes each as one word. */
+export function planEvidenceRoute(planBytes) {
+  const value = (key) => {
+    const v = planBlockValue(planBytes, "evidence", key);
+    return v === null || v === "null" || v === "~" ? "" : v;
+  };
+  return {
+    endpoint: value("endpoint"),
+    region: value("region"),
+    pathStyle: value("path_style") === "true",
+  };
+}
+
 /** The plan's `restore.time_basis`: `"producerTime"` when the approved
  *  plan bytes state it, `""` when this reader finds no such value.
  *
@@ -2280,6 +2329,15 @@ export function prefixOf(url) {
   return prefix;
 }
 
+/** Said above the fetches when the store is addressed path-style at an
+ *  endpoint. The AWS CLI has no per-command flag for it; with
+ *  `--endpoint-url` it already addresses path-style unless the profile sets
+ *  `s3.addressing_style` to `virtual` (botocore's `args.py`, AWS CLI 2.34). */
+export const PATH_STYLE_SENTENCE =
+  "This store is addressed in path style. With `--endpoint-url` the AWS CLI uses " +
+  "path style unless your profile sets `s3.addressing_style` to `virtual`; if it does, run " +
+  "`aws configure set s3.addressing_style path` before the two fetches.";
+
 /** THE INDEPENDENT CHECK, AND IT FETCHES BEFORE IT VERIFIES.
  *
  *  `status.evidence.receiptKey` and `scorecardKey` are OBJECT-STORE KEYS, and
@@ -2291,26 +2349,40 @@ export function prefixOf(url) {
  *  files the fetches just wrote.
  *
  *  `payloadType` is `backup-receipt` for a `Backup` and `scorecard` for a
- *  `Restore`. `document` is the local filename the fetch writes. */
-export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile, sidecarFile) {
-  return copyBlock([
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile,
-    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile,
-    "logweir drill verify --payload-type " +
-      payloadType +
-      " --scorecard ./" +
-      documentFile +
-      " --signature ./" +
-      sidecarFile +
-      " --public-key <your key>",
-    "python3 verify_scorecard.py --payload-type " +
-      payloadType +
-      " --scorecard ./" +
-      documentFile +
-      " --signature ./" +
-      sidecarFile +
-      " --public-key <your key>",
-  ]);
+ *  `Restore`. `document` is the local filename the fetch writes. `route`,
+ *  when given, is `{endpoint, region, pathStyle}` of the store the bucket is
+ *  on: an S3-compatible endpoint is not AWS, and a fetch without it asks AWS.
+ *  A path-style store at an endpoint gets [`PATH_STYLE_SENTENCE`] above the
+ *  block. The caller prints the block only when [`hasEvidenceKeys`] holds.
+ *
+ *  `verify_scorecard.py` takes its three files as POSITIONALS and only
+ *  `--payload-type` as a flag (its own usage line); `--scorecard` and the
+ *  rest are the Rust CLI's flags, and the script answers them with its usage
+ *  and exit 1. */
+export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile,
+  sidecarFile, route) {
+  const r = route || {};
+  const flags = (r.endpoint ? " --endpoint-url " + shellWord(r.endpoint) : "") +
+    (r.region ? " --region " + shellWord(r.region) : "");
+  return (r.pathStyle === true && r.endpoint
+    ? "<p class=\"note\" data-addressing=\"path\">" + codeSpans(PATH_STYLE_SENTENCE) + "</p>"
+    : "") +
+    copyBlock([
+      "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile + flags,
+      "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile + flags,
+      "logweir drill verify --payload-type " + payloadType + " --scorecard ./" + documentFile +
+        " --signature ./" + sidecarFile + " --public-key <your key>",
+      "python3 verify_scorecard.py --payload-type " + payloadType + " ./" + documentFile +
+        " ./" + sidecarFile + " <your key>",
+    ]);
+}
+
+/** Whether a run recorded BOTH keys the fetches name. A fetch of an empty key
+ *  is a fetch of the bucket root, which is not a command that works, so a run
+ *  without both prints no command, only why. */
+export function hasEvidenceKeys(documentKey, sidecarKey) {
+  return typeof documentKey === "string" && documentKey.length > 0 &&
+    typeof sidecarKey === "string" && sidecarKey.length > 0;
 }
 
 // THE FORM HALF: field-level errors and one mutation status every form

@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85 and 86 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84, 85, 86, 87, 88 and 89 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1824,6 +1824,119 @@ of `v0.2.0-rc.1`'s document against this one.
 **Rollback:** an older console image serves `1.0.0-alpha.2` again; roll it
 back with the items it names.
 
+#### 87. A refused retention run stays named on its RetentionPolicy until the next run (D-R1)
+
+**Changed.** Item 79 named a refused run (exit 3) on the harvest only: the
+next pass, seconds later, read `NothingToDo` ("this plan has already run in
+the slot"), and after three runs `EnforcementDegraded` said the last run
+"named no per-point code". The refusal is now recorded in
+`status.lastEnforcement.refusalCode` (and `refusalVariable`, a variable's name,
+never its value), and `Enforced` and `EnforcementDegraded` keep naming it until
+the next run starts. A pass with something else to fix first (the mode, the
+schedule, the catalog view, the ceiling or the approval) shows that on
+`Enforced`; the record and `EnforcementDegraded` still name the refusal. A
+refused run counts toward the three failed runs that stop scheduling, as
+before. Nothing about what is deleted, planned or scheduled changes.
+**Do:** nothing beyond applying the CRDs before the controller, as every
+upgrade does ([install.md](install.md#upgrade-crds-before-upgrading-the-controller)).
+**Scope:** controller rows over the recording API double for six refusal
+classes across the reconcile after the harvest, and for three refused runs
+and the pass after them; each fails on the previous controller; eight
+mutants.
+[UNVERIFIED — no live install has run this build's refusal yet.]
+**Rollback:** roll the controller back; it neither writes nor reads the two
+fields, and the refusal is named only on the harvest pass again. The newer
+CRD is harmless to it. After a rollback and a roll-forward, a refused run the
+older controller harvested can be read with the previous run's code until the
+next run starts, in the messages and the console's fields only.
+
+#### 88. The console's check commands, Rotate access, Retention panel, "What uses this" and Restore detail say what is so (PROD-14.1)
+
+**Changed.** Five defects the PROD-14.1 visual pass found on the console:
+- A Backup's *Check it yourself* fetches from the bucket of the destination the
+  run names, with `--endpoint-url` and `--region` when the destination has them.
+  It printed the destination's name as the bucket (`s3://primary/…`). A
+  destination that now names another location than the run froze, or that this
+  login may not read, gets a placeholder bucket and the reason; a run with no
+  evidence keys yet says so instead of fetching the bucket root. A Restore's
+  fetches carry the endpoint and region of its plan's evidence store too, a
+  path-style store at an endpoint gets a note naming
+  `aws configure set s3.addressing_style path`, a run missing either key prints
+  no command, and the Python line passes its three files as the positionals
+  `verify_scorecard.py` reads (it printed the Rust flags, which the script
+  refuses).
+- *Rotate access* starts every grant on `keep`, which sends the grant as the
+  destination has it. It started the three optional grants on `absent`, so
+  rotating one key removed the others and turned evidence verification off.
+  Choosing `absent` for a grant the destination holds says what turns off. A
+  Secret whose data keys are not `access-key-id` and `secret-access-key` cannot
+  be kept from the console, and the form says so and sends nothing.
+- A schedule's *Retention* panel shows the `RetentionPolicy` whose
+  `spec.destinationRef` names the schedule's destination: a `Report` policy
+  deletes nothing, an `Enforce` one is shown as deleting, and two such policies
+  are the `Conflict` the controller marks them. A policy that is not
+  recommendation-only and names another destination is listed under it, since
+  two destinations can share a bucket and prefix. "Logweir never deletes from
+  your archive" appears only when the policies were read and none names the
+  destination.
+- `GET …/destinations/{name}/usage` lists the schedules and Backups whose
+  `spec.destinationRef` names the destination, from at most 1,600 of each kind,
+  and says `truncated` past either bound. It selected on a label no schedule or
+  Backup carried, so the console said nothing used a destination that a schedule
+  and its Backups used.
+- The `Restore` view gains `integrityResult`, `integrityPartialReason`,
+  `topicPreflight` (`TopicPreflightView`) and `oldTopics` (OpenAPI
+  `1.0.0-alpha.3`, additive), and a Restore's detail shows them. The objectives
+  and the measured values, which no route publishes, are one sentence in place
+  of six "not published" rows.
+**Do:** nothing. `:update-access` still takes the complete grant block; a script
+that sends only the grant it changes still removes the others.
+**Scope:** `ui/tests/visual-pass-a.spec.js` (`h1_*`, `h2_*`, `h3_*`, `m9_*`),
+`crates/logweir-api/tests/destinations.rs` (usage) and
+`crates/logweir-api/tests/list_projection_additions.rs` (the Restore members),
+each with a control that fails on the old code.
+[UNVERIFIED — no PoC page has shown these fixes yet; the PoC re-check after merge walks each page again.]
+**Rollback:** an older console image serves the old pages and the old usage
+route; nothing is stored, and an older console ignores the four new members.
+
+#### 89. The console's fixes from PROD-14.1's visual pass: where Create goes, who sees which form, identifiers on one line (PROD-14.1)
+
+**Changed.** The console only (`ui/`); no API document, controller, chart value
+or signed format changes. What a person sees:
+- *Create the Restore* opens the run's operation view (`#/operations`), as
+  step 6 says, and a Restore waiting for its approval reads "Waiting for
+  approval" instead of "Pending: no Job exists, and none will ...".
+- A role that cannot create a connection or a schedule (a viewer, an approver)
+  is not offered those create forms, and an approver lands on Approvals instead
+  of a refused Clusters page.
+- In a table a long identifier (a key id, a point id, a backup set, a signer)
+  is one line, cut between 8 and 14 characters wide, whole on hover, and copied
+  by a click. In the Approvals table an approver reads as their identity
+  provider's host and a short form of their subject, its cut marked by an
+  ellipsis, or "you". Where an approval is decided or audited (the Approval
+  card's approver, the two-person panel's "requested by" and "approved by"),
+  the full principal is shown, wrapped, so one subject at two identity
+  providers, or two subjects sharing a head and tail, never read alike. The
+  restore picker's archive points list the point and its set under
+  the catalog, so their STATE column is in sight at 1024 px.
+- With no topic ticked, step 5's Check readiness is disabled and says why;
+  under a confirm-mode namespace step 5 says "you confirm".
+- The operation view labels a restore's scorecard key as the scorecard, and
+  its state chip has the phase chip's colour.
+- At 390 px an instant stays inside its card, and COVERED keeps "from" and
+  "to" together.
+- The Protection list's "OPEN ALERTS" column is OPEN PROBLEMS: delivery is
+  withdrawn (item 74), and the ledger records problems.
+**Do:** nothing. A script that waited for `#/history` after a confirm-mode
+Create waits for `#/operations?...&kind=restore` instead (the repository's two
+journeys that did are updated).
+**Scope:** `ui/tests/console-visual-pass.spec.js`, one row per defect with its
+negative control, in the UI behaviour suite. The layouts were measured in
+Chromium at 1440, 1024 and 390 px over the page modules and the stylesheet,
+before and after. [UNVERIFIED — not yet seen on the PoC; the re-check after
+merge walks each page as each role.]
+**Rollback:** an older console image renders the old pages; nothing is stored.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1960,7 +2073,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85 and 86, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88 and 89, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2024,6 +2137,9 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 84 | the identity hook's image | nothing |
 | 85 | the chart only | nothing until `minio.persistence.keep` is set |
 | 86 | the API document's version (the console image) | nothing |
+| 87 | the controller and the `RetentionPolicy` CRD | the CRDs applied |
+| 88 | the console image (the API and the page) | nothing |
+| 89 | the console | nothing; a script waiting for `#/history` after Create waits for `#/operations` |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

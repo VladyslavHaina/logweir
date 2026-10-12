@@ -40,9 +40,11 @@ import {
   inert,
   evidenceBlock,
   facts,
+  hasEvidenceKeys,
   independentCheck,
   listFooter,
   planEvidenceBucket,
+  planEvidenceRoute,
   planTimeBasis,
   runPhaseBadge,
   LEFT_TOPIC_SENTENCE,
@@ -75,7 +77,13 @@ import {
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
-import { backupBadge, greenLabel, operationCell, validVerification } from "./backups.js";
+import {
+  NO_EVIDENCE_KEYS_SENTENCE,
+  backupBadge,
+  greenLabel,
+  operationCell,
+  validVerification,
+} from "./backups.js";
 import { operationRoute } from "./operation.js";
 import { isRecoveryPoint, restorePointRoute } from "./restore-wizard.js";
 import {
@@ -530,9 +538,15 @@ export { NOT_PUBLISHED, notPublishedIn };
 export const NOT_PUBLISHED_SENTENCE =
   "A cell that reads \"" + NOT_PUBLISHED + "\" is not an empty one. It is a value the " +
   "controller keeps on the Restore object's status and the product API serving this console " +
-  "does not publish, so this page cannot say whether one is recorded. The integrity result " +
-  "and partial reason, the objectives and the measured values are also in the run's signed " +
-  "scorecard, which the commands under Check it yourself fetch and verify.";
+  "does not publish, so this page cannot say whether one is recorded. The run's signed " +
+  "scorecard carries it, and the commands under Check it yourself fetch and verify that.";
+
+/** Said in place of the objectives table when the product API publishes
+ *  neither the objectives nor the measured values. */
+export const OBJECTIVES_NOT_PUBLISHED_SENTENCE =
+  "The product API does not publish the objectives a restore asked for or what it measured, " +
+  "so this page shows none. When the plan set objectives, the run's signed scorecard carries " +
+  "them with the measured values, and the commands under Check it yourself fetch and verify it.";
 
 /** One Restore, in full. With `operation`, the view opens with where the
  *  operation stands (see [`renderRestoreOperation`]). */
@@ -579,7 +593,16 @@ export function renderRestoreDetail(object, operation) {
     ["result", shown("status.integrity.result", integrity.result, claim)],
     ["partial reason", shown("status.integrity.partialReason", integrity.partialReason, claim)],
   ]);
-  const objectiveFacts = facts([
+  // THE OBJECTIVES TABLE IS SHOWN WHEN THERE IS SOMETHING TO SHOW: a value the
+  // controller recorded, on an object that carries them. The product API
+  // publishes neither block, so a console projection says so once instead of
+  // six cells; a custom resource on which the controller recorded none (the
+  // plan set no objective) has no table at all.
+  const objectivesUnpublished = status.objectives === undefined &&
+    status.measured === undefined && notPublishedIn(object, "status.objectives") &&
+    notPublishedIn(object, "status.measured");
+  const objectivesRecorded = status.objectives !== undefined || status.measured !== undefined;
+  const objectiveFacts = !objectivesRecorded ? "" : facts([
     ["objectives.rtoSeconds", shown("status.objectives.rtoSeconds", objectives.rtoSeconds, cell)],
     ["objectives.rpoSeconds", shown("status.objectives.rpoSeconds", objectives.rpoSeconds, cell)],
     ["objectives.passRate", shown("status.objectives.passRate", objectives.passRate, cell)],
@@ -676,8 +699,13 @@ export function renderRestoreDetail(object, operation) {
       ? "<p class=\"note\" id=\"restore-coverage-cost\">" + messageText(COMPLETE_COVERAGE_COST) +
         "</p>"
       : "") +
-    "<h3>Objectives asked for, and what the run achieved</h3>" +
-    objectiveFacts +
+    (objectivesUnpublished
+      ? "<h3>Objectives asked for, and what the run achieved</h3>" +
+        "<p class=\"note\" id=\"restore-objectives-not-published\">" +
+        esc(OBJECTIVES_NOT_PUBLISHED_SENTENCE) + "</p>"
+      : objectiveFacts === ""
+        ? ""
+        : "<h3>Objectives asked for, and what the run achieved</h3>" + objectiveFacts) +
     "<h3>Target topic preflight</h3>" +
     preflightFacts +
     "<h3>Topics</h3>" +
@@ -696,20 +724,24 @@ export function renderRestoreDetail(object, operation) {
     evidenceBlock(evidence) +
     "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +
     "<section class=\"check\"><h3>Check it yourself</h3>" +
-    "<p class=\"note\">The two keys above name objects in the evidence bucket this " +
-    "restore's approved plan wrote to; the verifiers take local files. So the first two " +
-    "lines fetch, and the last two verify -- once with the Rust reader and once with the " +
-    "Python one.</p>" +
-    independentCheck(
-      "scorecard",
-      // The plan's evidence bucket, never the source archive's: the scorecard is
-      // where the approved plan wrote it.
-      planEvidenceBucket(spec.planBytes) || bucketOf(""),
-      evidence.scorecardKey || "",
-      evidence.sidecarKey || "",
-      "scorecard.json",
-      "scorecard.sig",
-    ) +
+    (!hasEvidenceKeys(evidence.scorecardKey, evidence.sidecarKey)
+      ? "<p class=\"note\" id=\"restore-check-no-keys\">" + esc(NO_EVIDENCE_KEYS_SENTENCE) + "</p>"
+      : "<p class=\"note\">The two keys above name objects in the evidence bucket this " +
+        "restore's approved plan wrote to; the verifiers take local files. So the first two " +
+        "lines fetch, and the last two verify -- once with the Rust reader and once with the " +
+        "Python one.</p>" +
+        independentCheck(
+          "scorecard",
+          // The plan's evidence store, never the source archive's: the
+          // scorecard is where the approved plan wrote it, reached at the
+          // plan's endpoint and region.
+          planEvidenceBucket(spec.planBytes) || bucketOf(""),
+          evidence.scorecardKey,
+          evidence.sidecarKey,
+          "scorecard.json",
+          "scorecard.sig",
+          planEvidenceRoute(spec.planBytes),
+        )) +
     "</section>"
   );
 }

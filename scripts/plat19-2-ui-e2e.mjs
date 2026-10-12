@@ -939,7 +939,8 @@ async function main() {
     check(!o.planStep.includes("logweir drill approve"), "and offered no out-of-band approval");
     check(o.answer.authorization && o.answer.authorization.state === "confirmed",
       "the product API answered confirmed: " + JSON.stringify(o.answer.authorization));
-    const oHash = await waitForHash(alice.page, "#/history?ns=" + o.ns + "&name=" + o.restore,
+    const oHash = await waitForHash(alice.page,
+      "#/operations?ns=" + o.ns + "&kind=restore&name=" + o.restore,
       "the ordinary submission's destination");
     await shot(alice.page, "01-ordinary-operation-view");
     const oApproval = kubeJson(["-n", o.ns, "get", "approval", o.approvalName]);

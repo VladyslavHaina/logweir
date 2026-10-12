@@ -51,7 +51,7 @@
 // rejected attempt and not a failure of this page -- and this page never offers
 // to reuse an Approval bound to another subject or another execution.
 
-import { apiClient, granted } from "../client.js";
+import { apiClient, granted, sessionIdentity } from "../client.js";
 import {
   active,
   cancelled,
@@ -82,16 +82,19 @@ import {
   inert,
   facts,
   fieldErrorLine,
+  ident,
   invalidAttributes,
   listFooter,
   mutationStatus,
   phaseBadge,
   replace,
   table,
+  titledBadge,
   when,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
+import { operationRoute } from "./operation.js";
 
 const PLURAL = "approvals";
 const RESTORES = "restores";
@@ -175,9 +178,11 @@ export function approvalSubjectRoute(ns, subject, hash, name) {
   );
 }
 
-/** The durable operation view of one Restore: its detail page under History. */
-export function restoreOperationRoute(ns, name) {
-  return "#/history?ns=" + encodeURIComponent(ns) + "&name=" + encodeURIComponent(name);
+/** The durable operation view of one Restore, `#/operations`: the page that
+ *  follows the run as a stream until it is terminal. `uid`, when known, binds
+ *  the link to this run. */
+export function restoreOperationRoute(ns, name, uid) {
+  return operationRoute(ns, "restore", name, uid);
 }
 
 const API = apiClient();
@@ -291,13 +296,15 @@ function approvalTable(collection, now, policy) {
     const spec = object.spec || {};
     const status = object.status || {};
     const subject = spec.subjectRef || {};
+    // ONE LINE A ROW (PROD-14.1 visual pass, M6): the verdict chip says one
+    // word, its key one hover away and in the KEY-ID column; the key id and
+    // the approver are shortened identifiers with the full value on hover and
+    // a copy button. The card below each table keeps every value in full.
     return [
       cell(subject.kind ? subject.kind + "/" + String(subject.name) : subject.name),
-      verifiedBadge(status),
-      cell(status.approver),
-      typeof status.matchedKeyId === "string" && status.matchedKeyId.length > 0
-        ? "<code>" + esc(status.matchedKeyId) + "</code>"
-        : cell(null),
+      verifiedChip(status),
+      principalCell(status.approver),
+      ident(status.matchedKeyId),
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
@@ -406,7 +413,7 @@ export function renderApprovalStatus(object) {
       ["verified subject uid", cell((status.verifiedSubjectRef || {}).uid)],
       ["Verified reason", cell((condition || {}).reason)],
       ["matched key id", cell(status.matchedKeyId)],
-      ["approver", cell(status.approver)],
+      ["approver", principalFull(status.approver)],
       ["ticket", cell(status.ticket)],
       // What the signed document authorises.
       ["approval subject", "<span class=\"approval-subject-value\">" +
@@ -655,6 +662,13 @@ function stateBlock(kind, words, sentence) {
   );
 }
 
+/** A Pending Restore whose approval weirkeeper has not verified yet. That is
+ *  the first state of every Restore, a confirm-mode one included for the
+ *  seconds its confirmation takes to verify, so it reads as waiting and not
+ *  as a refusal. */
+export const WAITING_FOR_APPROVAL_SENTENCE =
+  "Waiting for approval: no Job runs until weirkeeper verifies its Approval (Verified=True).";
+
 /** A Restore's own progress, as weirkeeper recorded it: the phase and reason,
  *  in words. */
 export function restoreProgressSentence(restore) {
@@ -663,7 +677,7 @@ export function restoreProgressSentence(restore) {
     return "weirkeeper has not reconciled this Restore yet.";
   }
   if (status.phase === "Pending" && status.reason === "ApprovalNotVerified") {
-    return "Pending: no Job exists, and none will until its approval is Verified=True.";
+    return WAITING_FOR_APPROVAL_SENTENCE;
   }
   if (status.phase === "Failed") {
     return "Failed, reason " + esc(status.reason) + ". Restore.spec is immutable; a refused " +
@@ -874,7 +888,7 @@ export function renderApprovalSubject(view, now) {
         esc(ORIGINAL_NAME_APPROVAL_SENTENCE) + "</p>"
       : "") +
     stateBlockOrWarning +
-    "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name)) + "\">Open the " +
+    "<p class=\"note\"><a href=\"" + esc(restoreOperationRoute(ns, s.name, s.uid)) + "\">Open the " +
     "Restore's operation view</a></p>" +
     "</section>" +
     existing +
@@ -1081,6 +1095,91 @@ export async function submitApproval(subject, documents, deps, options) {
 
 /** The verified badge. It reads `status.verified` and nothing else: this page
  *  verified nothing, and neither did the browser. */
+/** The longest subject a principal's short form shows whole. */
+export const PRINCIPAL_SHORT_CHARS = 20;
+
+/** What the cut in a principal's short form says on hover. */
+export const PRINCIPAL_CUT_TITLE = "shortened; full value on hover and in the card below";
+
+/** "you (<display name>)" when `full` IS the signed-in actor's own principal
+ *  (the whole `<issuer>#<subject>`, compared exactly), else `null`. The signed
+ *  approval names its approver by issuer and subject only, never a name or an
+ *  email (`logweir_core::approval_policy::Approver`), and the sign-in names
+ *  only its own actor. `self` is `sessionIdentity`'s answer, or `null`. */
+function youOf(full, self) {
+  const me = self || {};
+  return typeof me.actorId === "string" && me.actorId.length > 0 && me.actorId === full &&
+    typeof me.displayName === "string" && me.displayName.length > 0
+    ? "you (" + me.displayName + ")"
+    : null;
+}
+
+/** A PRINCIPAL IN FULL, wrapped and never shortened, where a person decides or
+ *  audits an approval: the Approval card's approver and the two-person
+ *  panel's "requested by" and "approved by". Two principals that differ
+ *  anywhere -- in the issuer, or in the middle of a subject -- read
+ *  differently there without a hover. "you (<display name>)" comes first when
+ *  it is the signed-in actor's own. */
+export function principalFull(id) {
+  if (id === null || id === undefined || id === "") {
+    return cell(null);
+  }
+  const full = String(id);
+  const you = youOf(full, sessionIdentity(""));
+  return (you === null ? "" : esc(inert(you)) + " ") + "<code>" + esc(inert(full)) + "</code>";
+}
+
+/** An issuer as its host: `[host]` for an https origin, `[host, ""]` (a cut
+ *  after the host) for an issuer with more than that, and the issuer whole
+ *  when it is not a URL. */
+function issuerParts(issuer) {
+  const url = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]+)(.*)$/.exec(issuer);
+  if (url === null) {
+    return [issuer];
+  }
+  return url[1].toLowerCase() === "https" && url[3] === "" ? [url[2]] : [url[2], ""];
+}
+
+/** THE APPROVALS TABLE'S SHORT FORM OF A PRINCIPAL, `<issuer>#<subject>`
+ *  (PROD-14.1 visual pass, M6 and M7), as the parts left between its cuts
+ *  (`ident` draws each cut as a marked ellipsis): "you (<display name>)" for
+ *  the signed-in actor's own principal; else the issuer's host, a middle dot
+ *  and the subject, its middle cut when it is longer than
+ *  [`PRINCIPAL_SHORT_CHARS`] (an IdP's opaque subject differs in its tail as
+ *  often as in its head). Only the table uses it: the card below shows the
+ *  principal in full ([`principalFull`]). */
+export function principalShort(id, self) {
+  const full = String(id === null || id === undefined ? "" : id);
+  const you = youOf(full, self);
+  if (you !== null) {
+    return [you];
+  }
+  const at = full.indexOf("#");
+  const subject = at === -1 ? full : full.slice(at + 1);
+  const cut = subject.length > PRINCIPAL_SHORT_CHARS;
+  const parts = at === -1 ? [""] : issuerParts(full.slice(0, at));
+  parts[parts.length - 1] += (at === -1 ? "" : " \u00b7 ") +
+    (cut ? subject.slice(0, 6) : subject);
+  return cut ? parts.concat([subject.slice(-12)]) : parts;
+}
+
+/** A principal as the Approvals table's cell: its short form, the full
+ *  principal on hover, in the text and on the copy button. */
+export function principalCell(id) {
+  return ident(id, principalShort(id, sessionIdentity("")), PRINCIPAL_CUT_TITLE);
+}
+
+/** The table's verdict chip: `verified` in one word, with the sentence the
+ *  card says -- which key, by whom -- as its hover title. Every other state is
+ *  [`verifiedBadge`]'s own words. */
+function verifiedChip(status) {
+  if ((status || {}).verified === true) {
+    return titledBadge("green", "verified",
+      "verified by weirkeeper against key " + String((status || {}).matchedKeyId));
+  }
+  return verifiedBadge(status);
+}
+
 function verifiedBadge(status) {
   const verified = (status || {}).verified;
   if (verified === true) {
@@ -1652,7 +1751,7 @@ export function renderConsoleApprovalPanel(view) {
   }
   const original = r.approvalSubject === "originalName";
   const rows = [
-    ["requested by", "<code id=\"request-requester\">" + esc(r.requester) + "</code>"],
+    ["requested by", "<span id=\"request-requester\">" + principalFull(r.requester) + "</span>"],
     ["Restore", "<code>" + esc(r.restore) + "</code>"],
     ["Restore uid", "<code>" + esc(r.restoreUid) + "</code>"],
     ["plan hash", "<code id=\"request-plan-hash\">" + esc(r.planHash) + "</code>"],
@@ -1665,7 +1764,8 @@ export function renderConsoleApprovalPanel(view) {
     ["expires at", "<span id=\"request-expires-at\">" + when(r.expiresAt) + "</span>"],
   ];
   if (r.state === "approved") {
-    rows.push(["approved by", "<code id=\"request-approver\">" + esc(r.approver) + "</code>"]);
+    rows.push(["approved by", "<span id=\"request-approver\">" + principalFull(r.approver) +
+      "</span>"]);
     rows.push(["approved at", when(r.approvedAt)]);
   }
   // THE SCOPE, WHOLE, or the server's sentence saying why it cannot be

@@ -379,6 +379,9 @@ export function sessionIdentity(ns) {
   return Object.freeze({
     displayName: display,
     subject: String(actor.subject || ""),
+    // The `<issuer>#<subject>` an Approval names its approver by, so a page
+    // can say "you" for the signed-in actor's own principal.
+    actorId: String(actor.id || ""),
     authenticationMode: String(decided.session.authenticationMode || ""),
     roles: Object.freeze(rolesFor(ns)),
     // NO ROLE ANYWHERE: the header says what the no-role card says, instead
@@ -698,21 +701,17 @@ const ABSENT_IN_CONSOLE = Object.freeze({
     "status.exitCode",
     "status.evidence",
   ]),
-  // A RESTORE'S SCORECARD FACTS, NAMED ONE BY ONE. The API publishes
-  // `integrity.level` on the operation route a DETAIL reads
-  // (`completion.integrityLevel`; `mergeOperation` takes it off this list when
-  // it supplies it). `integrity.result`, `integrity.partialReason`, the
-  // objectives, the measured values, the target topic preflight and the old
-  // topics are published by NO route; the page says so for each and points at
-  // the signed scorecard, which carries them.
+  // A RESTORE'S SCORECARD FACTS THE API DOES NOT PUBLISH. `integrity.level`
+  // comes with the operation route a DETAIL reads (`completion.integrityLevel`;
+  // `mergeOperation` takes it off this list when it supplies it); the result,
+  // partial reason, target topic preflight and old topics are on the Restore
+  // view. The objectives and the measured values are published by NO route:
+  // the page says so once and points at the signed scorecard, which carries
+  // them.
   restores: Object.freeze([
     "status.integrity.level",
-    "status.integrity.result",
-    "status.integrity.partialReason",
     "status.objectives",
     "status.measured",
-    "status.topicPreflight",
-    "status.oldTopics",
     "status.jobRef",
     "status.outcome",
     "status.evidence",
@@ -1147,6 +1146,26 @@ function projectRestore(item) {
     status.integrity = status.integrity || {};
     status.integrity.selection = copySelection(item.selection);
   }
+  // THE SCORECARD'S RESULT, PHASE 0'S TARGET PREFLIGHT AND THE OLD TOPICS,
+  // under the custom resource's own names. Absent stays absent: not recorded.
+  for (const [from, to] of [["integrityResult", "result"],
+    ["integrityPartialReason", "partialReason"]]) {
+    if (typeof item[from] === "string") {
+      status.integrity = status.integrity || {};
+      status.integrity[to] = item[from];
+    }
+  }
+  if (item.topicPreflight !== null && item.topicPreflight !== undefined) {
+    status.topicPreflight = {};
+    for (const field of ["timestampType", "retentionMs", "timestampBound"]) {
+      if (item.topicPreflight[field] !== null) {
+        status.topicPreflight[field] = item.topicPreflight[field];
+      }
+    }
+  }
+  if (Array.isArray(item.oldTopics) && item.oldTopics.length > 0) {
+    status.oldTopics = item.oldTopics.slice();
+  }
   object.status = status;
   return object;
 }
@@ -1284,8 +1303,8 @@ function mergeOperation(object, operation) {
   // (`byte-fingerprint`, `consume-only` or `not-attempted`, verbatim), written
   // where the custom resource keeps it, `status.integrity.level`. It is
   // copied and never derived: with no completion block the level stays
-  // absent, and the page says the API published none. The block's result and
-  // partial reason are published by no route; see `ABSENT_IN_CONSOLE`.
+  // absent, and the page says the API published none. The result and the
+  // partial reason come with the Restore view (`projectRestore`).
   const completion = operation.completion;
   if (operation.kind === "restore" && completion !== null && completion !== undefined &&
     typeof completion.integrityLevel === "string" && completion.integrityLevel.length > 0) {

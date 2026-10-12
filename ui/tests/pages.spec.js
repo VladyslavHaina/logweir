@@ -424,8 +424,8 @@ test("the_independent_check_command_fetches_before_it_verifies", () => {
   );
   assert.equal(
     lines[3],
-    "python3 verify_scorecard.py --payload-type backup-receipt --scorecard ./receipt.json " +
-      "--signature ./receipt.sig --public-key <your key>",
+    "python3 verify_scorecard.py --payload-type backup-receipt ./receipt.json ./receipt.sig " +
+      "<your key>",
   );
 
   for (const key of [evidence.receiptKey, evidence.sidecarKey]) {

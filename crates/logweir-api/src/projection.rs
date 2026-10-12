@@ -23,10 +23,11 @@ use crate::contract::{
     LastTestView, MissedSlotView, MissedSlotsView, NameRef, NextRunView, ObservedAuthView,
     ReachabilityState, ReachabilityView, Restore, RestoreMode, RestoreTargetView, RetentionView,
     RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView,
-    TlsCaView, TopicExclusions, TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
+    TlsCaView, TopicExclusions, TopicPreflightView, TriggerKind, TriggerView, VerifiedSubjectView,
+    WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
-use crate::validate::redact_url_userinfo;
+use crate::validate::{bounded, redact_url_userinfo};
 
 /// The most entries a bounded list in a projection carries.
 pub const MAX_LIST_ENTRIES: usize = 100;
@@ -411,6 +412,7 @@ fn queue_view(
 #[must_use]
 pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
     let status = object.status.as_ref();
+    let integrity = status.and_then(|s| s.integrity.as_ref());
     let operation = restore_operation(object);
     Restore {
         name: object.name_any(),
@@ -481,6 +483,25 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
         // The signed selection, so a list row never reads a
         // narrowed restore as a restore of everything.
         selection: crate::status::selection_view(status.and_then(|s| s.integrity.as_ref())),
+        integrity_result: integrity
+            .and_then(|i| i.result.as_deref())
+            .map(|r| bounded(r, 64)),
+        integrity_partial_reason: integrity
+            .and_then(|i| i.partial_reason.as_deref())
+            .map(|r| bounded(r, 1024)),
+        topic_preflight: status.and_then(|s| s.topic_preflight.as_ref()).map(|p| {
+            TopicPreflightView {
+                timestamp_type: p.timestamp_type.as_deref().map(|t| bounded(t, 64)),
+                retention_ms: p.retention_ms,
+                timestamp_bound: p.timestamp_bound,
+            }
+        }),
+        old_topics: status
+            .and_then(|s| s.old_topics.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .take(MAX_LIST_ENTRIES)
+            .collect(),
         operation: summary(&operation),
     }
 }

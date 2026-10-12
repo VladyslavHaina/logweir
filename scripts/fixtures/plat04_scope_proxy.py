@@ -293,8 +293,8 @@ def classify(method: str, path: str, body: bytes) -> tuple[str, str, str]:
         pending = (status.get("pendingBackupRef") or {}).get("name") if isinstance(status, dict) else None
         # A reservation is a PATCH today (`reservation_patch`, "A PATCH AND NOT
         # A PUT, AND THAT IS AN RBAC CONTRACT"); it was a PUT in the controller
-        # `scripts/test-plat04-live.py` was written against. Both are the same
-        # decision and both are named `reservation` so neither harness drifts.
+        # the first PLAT-04 harness was written against. Both are the same
+        # decision and both are named `reservation`.
         if method in {"PUT", "PATCH"} and pending:
             return "reservation", name, name
         if method in {"PUT", "PATCH"}:

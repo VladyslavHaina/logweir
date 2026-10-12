@@ -1435,8 +1435,44 @@ pub struct Restore {
     /// topic, from the archive's floor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<RestoreSelectionView>,
+    /// The signed scorecard's `integrity.result` (`pass`, `partial` or
+    /// `fail`) as the controller copied it onto `status.integrity`. A CLAIM
+    /// until the evidence verifies. ABSENT means not recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_result: Option<String>,
+    /// Why that result is `partial` (`status.integrity.partialReason`),
+    /// bounded. ABSENT means none is recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity_partial_reason: Option<String>,
+    /// What phase 0 found about the target topics (`status.topicPreflight`).
+    /// ABSENT on a run that did not complete phase 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_preflight: Option<TopicPreflightView>,
+    /// The source topics the new ones were restored from
+    /// (`status.oldTopics`), at most 100. Nothing here was written to.
+    /// Empty when none is recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub old_topics: Vec<String>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// `Restore.topicPreflight`: the target topic's configuration as phase 0
+/// read it.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicPreflightView {
+    /// `CreateTime` or `LogAppendTime`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_type: Option<String>,
+    /// The target topic's `retention.ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_ms: Option<i64>,
+    /// The oldest timestamp the target accepts without rejecting or
+    /// rewriting the record, epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_bound: Option<i64>,
 }
 
 /// **PROD-08.1a.** `Restore.coverage`: asked for, and signed.
@@ -2214,7 +2250,7 @@ pub struct DestinationUsageResponse {
     pub name: String,
     /// Schedules that name it, at most 100.
     pub schedules: Vec<DestinationUseView>,
-    /// Recent backups that name it, at most 100, newest name last.
+    /// Backups that name it, at most 100, in name order.
     pub backups: Vec<DestinationUseView>,
     /// Whether either list was cut.
     pub truncated: bool,

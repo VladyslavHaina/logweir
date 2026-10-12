@@ -759,7 +759,8 @@ test("the_guided_submit_routes_to_the_operation_view_when_an_approval_authorises
   assert.equal(again.outcome, "existing");
   assert.equal(again.object.metadata.uid, restore.metadata.uid);
   assert.equal(k8s.count(ns, "restores"), 1, "no second Restore");
-  assert.equal(again.route, "#/history?ns=" + ns + "&name=" + restore.metadata.name);
+  assert.equal(again.route, "#/operations?ns=" + ns + "&kind=restore&name=" + restore.metadata.name +
+    "&uid=" + restore.metadata.uid);
 
   // A verified Approval for ANOTHER execution of that name is not this one's.
   stored.status.verifiedSubjectRef.uid = "uid-of-an-older-restore";
@@ -1453,7 +1454,9 @@ test("an_edit_after_a_timed_out_restore_submit_still_settles_the_late_answer", a
     assert.equal(k8s.creates("restores")[0].body.metadata.name, submitted);
     const html = view.html();
     assert.ok(html.includes("Created Restore " + submitted), "and says so");
-    assert.ok(html.includes("<a href=\"#/history?ns=" + ns + "&amp;name=" + submitted + "\">Open Restore " + submitted + "</a>"),
+    const uid = k8s.objects.get(ns + "/restores/" + submitted).metadata.uid;
+    assert.ok(html.includes("<a href=\"#/operations?ns=" + ns + "&amp;kind=restore&amp;name=" + submitted +
+      "&amp;uid=" + uid + "\">Open Restore " + submitted + "</a>"),
       "with the durable link, which is the whole point of not dropping it");
     assert.ok(html.includes("not the plan shown above"), "said to be about the submitted plan, not the one on screen");
     assert.equal(globalThis.window.location.hash, "#/restore?ns=" + ns,

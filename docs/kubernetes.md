@@ -1772,6 +1772,13 @@ removed too; `planMaxAgeSeconds` bounds that.
   (LOGWEIR_RETENTION_MAX_OBJECTS))`; `EnforcementDegraded`'s message says
   `refused <code>` too. The codes are in
   [reference.md](reference.md#logweir-retention).
+- The refusal stays named until the next run starts:
+  `status.lastEnforcement.refusalCode` (and `refusalVariable`) records it,
+  and the passes between runs leave `Enforced` and `EnforcementDegraded`
+  naming it. A pass that has something else to fix first (`mode`, the
+  schedule, the catalog view, the ceiling, the approval) shows that on
+  `Enforced` instead; the record and `EnforcementDegraded` still name the
+  refusal. A refused run is a failed run: it counts toward the three below.
 - A record grant that a Job cannot use (malformed, no static keys — a
   `WorkloadIdentity` grant has no path here — or the same Secret as
   `credentialSecretRef`) gives `Enforced=False/EvidenceGrantUnusable` naming
@@ -1809,9 +1816,9 @@ in the catalog, and the next plan finishes it.
 `runId`, `startedAt`, `planSha256`) before its Job exists; a record that does not
 land creates no Job (`Enforced=False/RunNotRecorded`). After the run,
 `status.lastEnforcement` carries `exitCode`, `deleted[]`, `failed[]` with closed
-per-point codes and `objectsDeleted`. The Job is collected ten minutes after
-harvest, so **use the record, not a Job census**, to decide whether a run
-happened.
+per-point codes and `objectsDeleted`, and, for a refused run, `refusalCode`.
+The Job is collected ten minutes after harvest, so **use the record, not a Job
+census**, to decide whether a run happened.
 
 ```bash
 kubectl --context docker-desktop -n <namespace> get retentionpolicy primary \
@@ -2207,8 +2214,15 @@ What the console will and will not say:
   serverTime, freshWithinSeconds, ageSeconds}`). Reading trust policies needs an
   Administrator binding; namespace lists are filtered to what the actor
   administers (`namespacesFiltered`).
-- **The retention panel reads `status.enforcement`, not `spec.mode`.** "Logweir
-  never deletes from your archive" is shown only for `RecommendationOnly`.
+- **The retention panel shows the RetentionPolicy that names the schedule's
+  destination** (`spec.destinationRef.name`, the controller's own match), with
+  `status.enforcement` beside `spec.mode`: a `Report` policy reports and deletes
+  nothing, an `Enforce` one is shown as deleting. A policy that is not
+  recommendation-only and names another destination is listed under it: the
+  page does not compare locations, and two destinations can share a bucket and
+  prefix. "Logweir never deletes from your archive" is shown only when the
+  policies were read and none names the destination (nor does a policy that is
+  not recommendation-only name another).
   `legalHold` reads "declared by your provider; Logweir cannot verify it".
 - The API publishes no Job, pod or `ConfigMap` names and no frozen
   `locationDigest` on a catalog point; open vocabularies are rendered verbatim.

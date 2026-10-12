@@ -44,6 +44,7 @@ import {
   esc,
   evidenceBlock,
   facts,
+  hasEvidenceKeys,
   independentCheck,
   listFooter,
   runPhaseBadge,
@@ -234,14 +235,72 @@ export function renderBackupList(input, ns) {
   );
 }
 
+/** WHERE THE TWO FETCHES READ, or why this page cannot say.
+ *
+ *  A destination-backed run's `spec.archive.url` is the sentinel
+ *  `logweir-destination://<name>`, NOT a bucket: reading a bucket out of it
+ *  names the destination (`s3://primary/...`). The bucket, endpoint and
+ *  region are the destination's, as the product API projects them
+ *  (`storage`), read beside the run; `where` is `{destination}` or
+ *  `{destinationError}`. A destination whose location digest is not the one
+ *  this run froze is not where the run wrote, and is not used.
+ *
+ *  THE PREFIX IS NOT IN THE PATH, ON PURPOSE: the receipt and sidecar keys are
+ *  bucket-absolute under `logweir/`, the evidence root every run writes to
+ *  whatever the destination's prefix (`DestinationLocation::
+ *  evidence_storage_url`). A legacy inline run reads its bucket off its own
+ *  URL, as it always did. */
+export function evidenceRoute(object, where) {
+  const spec = (object && object.spec) || {};
+  const ref = (spec.destinationRef || {}).name;
+  if (typeof ref !== "string" || ref.length === 0) {
+    return { bucket: bucketOf((spec.archive || {}).url) };
+  }
+  const w = where || {};
+  const destination = w.destination || null;
+  const missing = (why) => ({ bucket: "<bucket of destination " + ref + ">", missing: why });
+  if (destination === null) {
+    return missing("destination " + ref + " could not be read" +
+      (w.destinationError ? ": " + String(w.destinationError.message || w.destinationError) : "") +
+      ", so this page does not know its bucket.");
+  }
+  const frozen = ((object && object.status) || {}).locationDigest;
+  const live = destination.locationDigest;
+  if (typeof frozen === "string" && typeof live === "string" && frozen !== live) {
+    return missing("destination " + ref + " now names location " + live + ", and this run " +
+      "froze " + frozen + ", so its bucket is not where this run wrote.");
+  }
+  const storage = destination.storage || {};
+  return { bucket: storage.bucket, endpoint: storage.endpoint, region: storage.region,
+    pathStyle: storage.addressing === "pathStyle" };
+}
+
+/** Said in place of the four lines while a run has not recorded both of the
+ *  keys they fetch (`hasEvidenceKeys`): a pending run, or one that wrote no
+ *  evidence. The Restore detail says the same. */
+export const NO_EVIDENCE_KEYS_SENTENCE =
+  "This run has recorded no evidence keys, so there is nothing to fetch. The commands " +
+  "appear here if it records them.";
+
+/** The identity a run presented to the brokers, from `status.auth`: its mode
+ *  and username, as many of them as were recorded, or "not recorded" (it read
+ *  "- -"; PROD-14.1 visual pass, L7). */
+export function identityPresented(auth) {
+  const a = auth || {};
+  const parts = [a.mode, a.username].filter((v) => typeof v === "string" && v.length > 0);
+  return parts.length === 0 ? "not recorded" : parts.map((v) => cell(v)).join(" ");
+}
+
 /** One Backup, in full: the run, the covered window as two RFC 3339 instants,
- *  the evidence block, and the four-line independent check. */
-export function renderBackupDetail(object) {
+ *  the evidence block, and the four-line independent check, against the
+ *  bucket [`evidenceRoute`] names. */
+export function renderBackupDetail(object, where) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const evidence = status.evidence || {};
   const auth = status.auth || {};
   const archive = spec.archive || {};
+  const route = evidenceRoute(object, where);
   return (
     "<h2>Backup " + nameOf(object) + "</h2>" +
     backupBadge(status) +
@@ -260,7 +319,7 @@ export function renderBackupDetail(object) {
       ["schedule", cell((spec.scheduleRef || {}).name)],
       ["schedule revision", revisionLine(spec.scheduleRef)],
       ["archive", cell(archive.url)],
-      ["identity presented", cell(auth.mode) + " " + cell(auth.username)],
+      ["identity presented", identityPresented(auth)],
       ["operation", operationCell(object, (object.metadata || {}).namespace)],
     ]) +
     // WHAT THIS RUN COVERED, from its own `status.selection` alone.
@@ -271,18 +330,24 @@ export function renderBackupDetail(object) {
     renderCoverageLine(object) +
     "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
     evidenceBlock(evidence) +
-    "<section class=\"check\"><h3>Check it yourself</h3>" +
-    "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
-    "take local files. So the first two lines fetch, and the last two verify -- once " +
-    "with the Rust reader and once with the Python one.</p>" +
-    independentCheck(
-      "backup-receipt",
-      bucketOf(archive.url),
-      evidence.receiptKey || "",
-      evidence.sidecarKey || "",
-      "receipt.json",
-      "receipt.sig",
-    ) +
+    "<section class=\"check\" id=\"backup-check\"><h3>Check it yourself</h3>" +
+    (!hasEvidenceKeys(evidence.receiptKey, evidence.sidecarKey)
+      ? "<p class=\"note\" id=\"backup-check-no-keys\">" + esc(NO_EVIDENCE_KEYS_SENTENCE) + "</p>"
+      : "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
+        "take local files. So the first two lines fetch, and the last two verify -- once " +
+        "with the Rust reader and once with the Python one.</p>" +
+        (route.missing
+          ? "<p class=\"caveat\" id=\"backup-check-bucket\">" + esc(route.missing) + "</p>"
+          : "") +
+        independentCheck(
+          "backup-receipt",
+          route.bucket,
+          evidence.receiptKey,
+          evidence.sidecarKey,
+          "receipt.json",
+          "receipt.sig",
+          route,
+        )) +
     "</section>"
   );
 }
@@ -310,15 +375,39 @@ export async function mountBackups(node, ns, parse, lifecycle, deps) {
   }
 }
 
-export async function mountBackupDetail(node, ns, name, parse, lifecycle) {
+export async function mountBackupDetail(node, ns, name, parse, lifecycle, deps) {
+  const api = (deps || {}).api || API;
   try {
-    const object = await API.get(ns, PLURAL, name, readOptions(lifecycle));
+    const object = await api.get(ns, PLURAL, name, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return;
+    }
+    const where = await readDestination(api, ns, object, lifecycle);
     if (active(lifecycle)) {
-      replace(node, parse(renderBackupDetail(object)));
+      replace(node, parse(renderBackupDetail(object, where)));
     }
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
     }
+  }
+}
+
+/** The destination a run names, read for its bucket: `null` for a legacy
+ *  inline run, `{destination}`, or `{destinationError}` -- a refusal (a role
+ *  that may read backups and not destinations) is the check's caveat, not the
+ *  page's error. */
+async function readDestination(api, ns, object, lifecycle) {
+  const ref = ((((object || {}).spec) || {}).destinationRef || {}).name;
+  if (typeof ref !== "string" || ref.length === 0) {
+    return null;
+  }
+  try {
+    return { destination: (await api.destination(ns, ref, readOptions(lifecycle))).item };
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return { destinationError: error };
   }
 }

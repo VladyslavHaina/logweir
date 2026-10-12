@@ -9,11 +9,12 @@
 //      `OperationViewResponse`, whose `completion.integrityLevel` is the
 //      scorecard's own word; a detail read decoded with the narrower
 //      `OperationResponse` (sixteen members, no `completion`) would drop it.
-//   2. THE RESULT AND THE PARTIAL REASON ARE PUBLISHED BY NO ROUTE. Neither
-//      `Restore` nor `OperationView` carries them, and "-" would say "the
-//      controller recorded none", which the page does not know; the cell says
-//      the product API does not publish the value, and one sentence says
-//      where it is.
+//   2. A VALUE NO ROUTE PUBLISHES IS SAID NOT TO BE PUBLISHED: "-" would say
+//      "the controller recorded none", which the page does not know. The
+//      result, the partial reason, the target topic preflight and the old
+//      topics are on the `Restore` view (`visual-pass-a.spec.js` m9_*); the
+//      objectives and the measured values are on no route, and the page says
+//      so once, where their table would be.
 //
 // EVERY ROW GOES THROUGH THE REAL CLIENT: the transport is stubbed at the
 // platform boundary, the two routes answer with the checked-in documents, and
@@ -29,6 +30,7 @@ import { decodeOperation } from "../contract.js";
 import {
   NOT_PUBLISHED,
   NOT_PUBLISHED_SENTENCE,
+  OBJECTIVES_NOT_PUBLISHED_SENTENCE,
   notPublishedIn,
   renderRestoreDetail,
 } from "../pages/history.js";
@@ -96,45 +98,30 @@ test("fx48_a_shared_console_restore_detail_shows_the_level_the_api_published", a
     "THE DEFECT: this cell read '-'");
 });
 
-test("fx48_a_value_the_api_does_not_publish_is_said_so_and_never_shown_as_a_dash", async () => {
-  const object = await consoleDetail(wire("restore.json"),
-    wire("operation-restore-completed.json"));
-  const html = renderRestoreDetail(object);
+test("fx48_the_objectives_the_api_does_not_publish_are_said_so_once_and_never_as_dashes",
+  async () => {
+    const object = await consoleDetail(wire("restore.json"),
+      wire("operation-restore-completed.json"));
+    const html = renderRestoreDetail(object);
 
-  // NO ROUTE PUBLISHES THESE TWO, and the cell says that -- not "-", which is
-  // what "the controller recorded none" looks like.
-  for (const label of ["result", "partial reason"]) {
-    assert.equal(fact(html, "Integrity", label), NOT_PUBLISHED, label);
-  }
-  assert.equal(NOT_PUBLISHED, "not published by the product API");
-  for (const path of ["status.integrity.result", "status.integrity.partialReason"]) {
-    assert.ok(object.__contract.absent.indexOf(path) !== -1, path + " is named absent");
-    assert.ok(html.indexOf("data-not-published=\"" + path + "\"") !== -1, path);
-  }
-
-  // THE SAME FOR THE OTHER FOUR BLOCKS OF THE CUSTOM RESOURCE THIS VIEW HAS
-  // ROWS FOR AND THE API HAS NO MEMBER FOR.
-  for (const [heading, label] of [
-    ["Objectives asked for, and what the run achieved", "objectives.rtoSeconds"],
-    ["Objectives asked for, and what the run achieved", "objectives.met"],
-    ["Objectives asked for, and what the run achieved", "measured.rpoSeconds"],
-    ["Target topic preflight", "timestampType"],
-    ["Target topic preflight", "timestampBound"],
-    ["Topics", "old topics -- written to by nothing, in any tag"],
-  ]) {
-    assert.equal(fact(html, heading, label), NOT_PUBLISHED, heading + " / " + label);
-  }
-
-  // ONE SENTENCE, ONCE, UNDER THE INTEGRITY TABLE, and it says where the
-  // values are.
-  assert.equal(html.split("id=\"restore-not-published\"").length - 1, 1);
-  const sentence = visible(html.slice(html.indexOf("id=\"restore-not-published\"")));
-  assert.ok(sentence.indexOf("is not an empty one") !== -1);
-  assert.ok(sentence.indexOf("signed scorecard") !== -1);
-  assert.ok(NOT_PUBLISHED_SENTENCE.indexOf("cannot say whether one is recorded") !== -1,
-    "the page does not claim the controller recorded a value it cannot see");
-  assert.ok(html.indexOf("id=\"restore-not-published\"") > html.indexOf("<h3>Integrity</h3>"));
-});
+    // NO ROUTE PUBLISHES THE OBJECTIVES OR THE MEASURED VALUES: one sentence
+    // where their table would be, and no row of "-", which is what "the
+    // controller recorded none" looks like.
+    for (const path of ["status.objectives", "status.measured"]) {
+      assert.ok(object.__contract.absent.indexOf(path) !== -1, path + " is named absent");
+    }
+    const at = html.indexOf("<h3>Objectives asked for, and what the run achieved</h3>");
+    assert.notEqual(at, -1);
+    assert.match(html.slice(at), /^<h3>[^<]*<\/h3><p class="note" id="restore-objectives-not-published">/);
+    assert.ok(visible(html).indexOf(OBJECTIVES_NOT_PUBLISHED_SENTENCE) !== -1);
+    assert.equal(html.indexOf("<dt>objectives.rtoSeconds</dt>"), -1);
+    assert.equal(html.indexOf(NOT_PUBLISHED), -1,
+      "every other value this view shows is published, or recorded as absent");
+    assert.equal(html.indexOf("id=\"restore-not-published\""), -1);
+    assert.equal(NOT_PUBLISHED, "not published by the product API");
+    assert.ok(NOT_PUBLISHED_SENTENCE.indexOf("cannot say whether one is recorded") !== -1,
+      "the page does not claim the controller recorded a value it cannot see");
+  });
 
 test("fx48_a_route_that_published_no_completion_leaves_the_level_named_not_invented", async () => {
   // NEGATIVE CONTROL of the first row: the same Restore, and an operation
@@ -212,7 +199,8 @@ test("fx48_a_custom_resource_keeps_its_own_cells_and_is_never_told_not_published
 
 test("fx48_a_console_list_row_names_the_same_values_absent", async () => {
   // A LIST has no operation route behind it, so the level is absent there too
-  // -- named, with the result and the reason.
+  // -- named, with the objectives and the measured values; what the Restore
+  // view publishes is not.
   resetMode();
   await selectMode({ probe: async () => ({ ok: true, status: 200, body: wire("session.json") }) });
   const original = globalThis.fetch;
@@ -222,10 +210,13 @@ test("fx48_a_console_list_row_names_the_same_values_absent", async () => {
   try {
     const list = await apiClient().list(NS, "restores");
     assert.ok(list.items.length > 0);
-    for (const path of ["status.integrity.level", "status.integrity.result",
-      "status.integrity.partialReason", "status.objectives", "status.measured",
-      "status.topicPreflight", "status.oldTopics", "status.jobRef"]) {
+    for (const path of ["status.integrity.level", "status.objectives", "status.measured",
+      "status.jobRef"]) {
       assert.ok(list.items[0].__contract.absent.indexOf(path) !== -1, path);
+    }
+    for (const path of ["status.integrity.result", "status.integrity.partialReason",
+      "status.topicPreflight", "status.oldTopics"]) {
+      assert.equal(list.items[0].__contract.absent.indexOf(path), -1, path + " is published");
     }
   } finally {
     globalThis.fetch = original;

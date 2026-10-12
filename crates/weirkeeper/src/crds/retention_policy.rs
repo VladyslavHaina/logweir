@@ -567,6 +567,15 @@ pub struct RetentionEnforcementRun {
     /// The run's exit code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The worker's `retention-refusal=` code, when the run exited 3 on a
+    /// refusal it named: one of the closed codes. `Enforced` names it until
+    /// the next run starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_code: Option<String>,
+    /// The binding variable that refusal names: a variable name, never its
+    /// value. Absent when the refusal names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_variable: Option<String>,
 }
 
 /// The points one run has claimed, so a second run cannot claim them too.

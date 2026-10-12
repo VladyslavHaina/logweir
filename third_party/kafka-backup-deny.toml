@@ -50,4 +50,9 @@ ignore = [
   # PR candidate (OD-3 rule 3), or a source patch if one is needed first.
   # Proposed child row PROD-00.3p, decision record section 13.
   { id = "RUSTSEC-2025-0134", reason = "unmaintained, not vulnerable; source change owed, PROD-00.3p" },
+  # unsafe-libyaml 0.2.11, under the engine's serde_yaml 0.9.34+deprecated, was
+  # archived on 2024-03-25 (RUSTSEC-2024-0449, published 2026-10). It carries no
+  # vulnerability and has no safe upgrade: the fix is a source change (a safe
+  # YAML parser), tracked with the workspace's own entry in deny.toml for v1.1.
+  { id = "RUSTSEC-2024-0449", reason = "unmaintained, not vulnerable; YAML parser replacement owed in v1.1" },
 ]

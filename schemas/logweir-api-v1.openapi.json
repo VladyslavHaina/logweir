@@ -8410,7 +8410,7 @@
         ],
         "properties": {
           "backups": {
-            "description": "Recent backups that name it, at most 100, newest name last.",
+            "description": "Backups that name it, at most 100, in name order.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/DestinationUseView"
@@ -11881,6 +11881,16 @@
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
+          "integrityPartialReason": {
+            "description": "Why that result is `partial` (`status.integrity.partialReason`), bounded. ABSENT means none is recorded.",
+            "type": "string",
+            "nullable": true
+          },
+          "integrityResult": {
+            "description": "The signed scorecard's `integrity.result` (`pass`, `partial` or `fail`) as the controller copied it onto `status.integrity`. A CLAIM until the evidence verifies. ABSENT means not recorded.",
+            "type": "string",
+            "nullable": true
+          },
           "name": {
             "description": "The object name.",
             "type": "string"
@@ -11891,6 +11901,13 @@
           },
           "newTopics": {
             "description": "The target topic names of this run (`status.newTopics`). For a run that reached its restore, the topics it created. After a stopped creation step (`targetTopicsAppeared`), exactly `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for (empty when its lists could not be read). For a run that was refused or failed before the creation step, the names its plan maps, none of which it created.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "oldTopics": {
+            "description": "The source topics the new ones were restored from (`status.oldTopics`), at most 100. Nothing here was written to. Empty when none is recorded.",
             "type": "array",
             "items": {
               "type": "string"
@@ -11955,6 +11972,11 @@
           "timeBasis": {
             "description": "FX-8 (review M-2): the signed scorecard's `source.time_basis` as the controller copied it onto `status.timeBasis` — which source topics the restore selected by the producers' clocks, and which it selected by time with no recorded timestamp type. A CLAIM until the evidence verifies, like `operation.result.outcome`. ABSENT means not recorded (a scorecard before format 1.3.0, a refused run, or one not read yet), never \"every selection used the topics' own clocks\".",
             "$ref": "#/components/schemas/RestoreTimeBasisView",
+            "nullable": true
+          },
+          "topicPreflight": {
+            "description": "What phase 0 found about the target topics (`status.topicPreflight`). ABSENT on a run that did not complete phase 0.",
+            "$ref": "#/components/schemas/TopicPreflightView",
             "nullable": true
           },
           "uid": {
@@ -14367,6 +14389,29 @@
           "scan": {
             "description": "How much of the result was read.",
             "$ref": "#/components/schemas/ScanView"
+          }
+        }
+      },
+      "TopicPreflightView": {
+        "description": "`Restore.topicPreflight`: the target topic's configuration as phase 0 read it.",
+        "type": "object",
+        "properties": {
+          "retentionMs": {
+            "description": "The target topic's `retention.ms`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "timestampBound": {
+            "description": "The oldest timestamp the target accepts without rejecting or rewriting the record, epoch milliseconds.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "timestampType": {
+            "description": "`CreateTime` or `LogAppendTime`.",
+            "type": "string",
+            "nullable": true
           }
         }
       },

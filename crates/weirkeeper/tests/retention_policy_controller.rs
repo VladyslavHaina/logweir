@@ -5103,7 +5103,7 @@ async fn a_successful_run_clears_the_consecutive_failure_count() {
 }
 
 /// The shape, asserted directly: a started run DELETES the previous run's
-/// terminal fields with explicit `null`s, all seven of them, so a change that
+/// terminal fields with explicit `null`s, all nine of them, so a change that
 /// cleared `finishedAt` some other way and left `exitCode` or `failed[]`
 /// behind is caught. `previously_refused()` reads `failed[]` to exclude a
 /// point from the next plan.
@@ -5123,7 +5123,9 @@ async fn a_started_run_deletes_the_previous_runs_terminal_fields() {
             "failed": [{"pointId": "p-not-in-this-view", "code": "AccessDenied"}],
             "objectsDeleted": 3,
             "recordKey": "logweir/retention/uid/r00000000deadbee9.json",
-            "recordSha256": "sha256:aa"
+            "recordSha256": "sha256:aa",
+            "refusalCode": "CapUnreadable",
+            "refusalVariable": "LOGWEIR_RETENTION_MAX_OBJECTS"
         },
         "consecutiveRunFailures": 1,
         "observedGeneration": 4
@@ -5139,6 +5141,9 @@ async fn a_started_run_deletes_the_previous_runs_terminal_fields() {
         "objectsDeleted",
         "recordKey",
         "recordSha256",
+        // D-R1: a refusal the previous run named is not the new run's.
+        "refusalCode",
+        "refusalVariable",
     ] {
         assert!(
             record.get(field).is_none(),
@@ -7022,12 +7027,13 @@ async fn fx20_a_binding_refusal_is_named_on_the_enforced_condition() {
 /// `CredentialBindingMismatch`. The refusal stands until a later run is
 /// harvested.
 ///
-/// CONTROLS: a generic exit-3 refusal is not held (the hold keys on the
-/// binding reason), and a newest run that exited 0 is not held (the hold
-/// keys on the run the refusal was written for).
+/// CONTROLS: an exit 3 whose code this build does not know is not held (the
+/// hold keys on a recorded, known refusal), and a newest run that exited 0 is
+/// not held (the hold keys on the run the refusal was written for).
 ///
-/// KILLS: `held_binding_refusal` answering `None` (the first assertion reads
-/// `True`); the hold applied to any exit 3; the hold outliving its run.
+/// KILLS: the hold answering `None` (the first assertion reads `True`); the
+/// hold applied to an exit 3 that named no known code; the hold outliving its
+/// run.
 #[tokio::test]
 async fn fx20c_a_binding_refusal_stands_on_enforced_until_a_later_run() {
     let digest = learned_digest().await;
@@ -7177,13 +7183,19 @@ async fn fx15_a_refused_run_names_its_refusal_on_the_status() {
             .unwrap_or_default()
             .to_string()
     };
-    // The status with the two messages a named refusal may change blanked.
+    // The status with what a named refusal may change blanked: the two
+    // messages, and the refusal `lastEnforcement` records (D-R1; this row
+    // first required the record to be byte-identical, which was the defect).
     let decided = |status: &Value| -> Value {
         let mut status = status.clone();
         for condition in status["conditions"].as_array_mut().expect("conditions") {
             if condition["type"] == "Enforced" || condition["type"] == "EnforcementDegraded" {
                 condition["message"] = Value::Null;
             }
+        }
+        if let Some(record) = status["lastEnforcement"].as_object_mut() {
+            record.remove("refusalCode");
+            record.remove("refusalVariable");
         }
         status
     };
@@ -7283,6 +7295,305 @@ fn fx15_the_refusal_codes_are_the_ones_the_worker_prints() {
     let read: std::collections::BTreeSet<&str> = ctrl::RETENTION_REFUSALS.iter().copied().collect();
     assert_eq!(printed, read);
     assert_eq!(read.len(), ctrl::RETENTION_REFUSALS.len(), "distinct");
+}
+
+// D-R1: a refusal stays on the policy until the next run
+
+/// The refusal classes FX-15 named, plus FX-20's binding refusal (the one the
+/// PoC ran): the log line, the code, the variable and the words the status
+/// uses for them.
+const DR1_CLASSES: [(&str, &str, &str, Option<&str>, &str); 6] = [
+    (
+        "invocation",
+        "logweir-retention: x\nretention-refusal=ContractVersion\n",
+        "ContractVersion",
+        None,
+        "ContractVersion",
+    ),
+    (
+        "binding variable",
+        "retention-refusal=CapUnreadable variable=LOGWEIR_RETENTION_MAX_OBJECTS\n",
+        "CapUnreadable",
+        Some("LOGWEIR_RETENTION_MAX_OBJECTS"),
+        "CapUnreadable (LOGWEIR_RETENTION_MAX_OBJECTS)",
+    ),
+    (
+        "plan",
+        "retention-refusal=PlanDigestMismatch\n",
+        "PlanDigestMismatch",
+        None,
+        "PlanDigestMismatch",
+    ),
+    (
+        "record credential",
+        "retention-refusal=NoRecordCredential\n",
+        "NoRecordCredential",
+        None,
+        "NoRecordCredential",
+    ),
+    (
+        "store handle",
+        "retention-refusal=PortUnavailable\n",
+        "PortUnavailable",
+        None,
+        "PortUnavailable",
+    ),
+    (
+        "credential binding",
+        "logweir-retention: CredentialBindingMismatch: x\nretention-refusal=CredentialBindingMismatch\n",
+        "CredentialBindingMismatch",
+        None,
+        "CredentialBindingMismatch",
+    ),
+];
+
+/// A pass expected to start no run: its outcome, the status it leaves and
+/// the Job `POST`s it sent.
+async fn dr1_pass(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    digest: &str,
+) -> (ctrl::Outcome, Value, usize) {
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(digest, at));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
+    let posted = f.posted("/jobs").len();
+    (outcome, after(status, &f), posted)
+}
+
+/// **A refused run stays named on the policy across the next reconcile, one
+/// row per refusal class (D-R1).** The PoC's shape: an approved plan on a
+/// cadence, a run that exits 3 naming its refusal, and the next pass inside
+/// the same slot, which reaches "this plan has already run in the slot"
+/// (`NothingToDo`). That pass leaves `Enforced` and `EnforcementDegraded`
+/// exactly as the harvest wrote them, and `status.lastEnforcement` records the
+/// code (and the variable). Nothing a pass decides changes: no Job, one
+/// failure, the same run record.
+///
+/// CONTROLS: a decision that names something to change first (`mode: Report`)
+/// takes `Enforced` while the record and `EnforcementDegraded` still name the
+/// refusal; a recorded code this build does not know is never echoed.
+///
+/// KILLS: the slot-already-run arm overwriting `Enforced`; `lastEnforcement`
+/// dropping the code; the not-spent `EnforcementDegraded` dropping the
+/// refusal; the hold applied over every decision; `status.enforcement` held
+/// for any refusal, or for a binding one over a start decision only.
+#[tokio::test]
+async fn dr1_a_refusal_stays_on_the_policy_across_the_next_reconcile() {
+    let digest = learned_digest().await;
+    let spec = enforcing(Some(&digest));
+    let at = now();
+    for (class, log, code, variable, named) in DR1_CLASSES {
+        let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+        let harvested = harvest_pass_logging(
+            &spec,
+            &started,
+            at + chrono::Duration::minutes(1),
+            &run_id,
+            3,
+            &digest,
+            log,
+        )
+        .await;
+        let (outcome, next, posted) = dr1_pass(
+            &spec,
+            &harvested,
+            at + chrono::Duration::minutes(2),
+            &digest,
+        )
+        .await;
+        // The arm the PoC reached: the decision is the slot's `NothingToDo`.
+        assert_eq!(outcome.enforced_reason, "NothingToDo", "{class}");
+        assert_eq!(posted, 0, "{class}: no Job");
+
+        let enforced = condition_of(&next, "Enforced").expect("Enforced");
+        assert_eq!(
+            Some(enforced),
+            condition_of(&harvested, "Enforced"),
+            "{class}: the next reconcile leaves the harvest's Enforced as it was"
+        );
+        let reason = if code == "CredentialBindingMismatch" {
+            "CredentialBindingMismatch"
+        } else {
+            "RunFailed"
+        };
+        assert_eq!(
+            (enforced["status"].as_str(), enforced["reason"].as_str()),
+            (Some("False"), Some(reason)),
+            "{class}: {enforced}"
+        );
+        let said = enforced["message"].as_str().unwrap_or_default();
+        assert!(said.contains(&run_id), "{class}: {said}");
+        if reason == "RunFailed" {
+            assert!(
+                said.contains(&format!("(exit 3, {named})")),
+                "{class}: {said}"
+            );
+        } else {
+            assert!(
+                said.contains("(CredentialBindingMismatch)"),
+                "{class}: {said}"
+            );
+        }
+
+        let record = &next["lastEnforcement"];
+        assert_eq!(record["refusalCode"], json!(code), "{class}: {record}");
+        assert_eq!(
+            record.get("refusalVariable").and_then(Value::as_str),
+            variable,
+            "{class}: {record}"
+        );
+        assert_eq!(record["runId"], json!(run_id), "{class}");
+        assert_eq!(
+            record["finishedAt"],
+            harvested["lastEnforcement"]["finishedAt"]
+        );
+
+        let degraded = condition_of(&next, "EnforcementDegraded").expect("Degraded");
+        assert_eq!(
+            Some(degraded),
+            condition_of(&harvested, "EnforcementDegraded"),
+            "{class}: the next reconcile keeps the harvest's detail"
+        );
+        assert_eq!(degraded["status"], "False", "{class}");
+        assert!(
+            degraded["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&format!("exited 3, refused {named}")),
+            "{class}: {degraded}"
+        );
+        assert_eq!(next["consecutiveRunFailures"], json!(1), "{class}");
+
+        // The two fields the console reads: only a binding refusal holds
+        // "Logweir never deletes" over the slot's `NothingToDo`; after any
+        // other refusal the next slot still deletes.
+        let console = if code == "CredentialBindingMismatch" {
+            ("RecommendationOnly", "NotEnforced")
+        } else {
+            ("LogweirWorker", "LogweirEnforced")
+        };
+        assert_eq!(
+            (
+                next["enforcement"].as_str().unwrap_or_default(),
+                next["guarantees"]["ageExpiry"].as_str().unwrap_or_default(),
+            ),
+            console,
+            "{class}"
+        );
+    }
+
+    // CONTROL: a decision naming something to change first takes `Enforced`;
+    // the record and the degraded detail still name the refusal.
+    let (started, run_id) = start_pass(&spec, &json!({}), at, &digest).await;
+    let harvested = harvest_pass_logging(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        3,
+        &digest,
+        "retention-refusal=PlanDigestMismatch\n",
+    )
+    .await;
+    let mut report = spec.clone();
+    report["mode"] = json!("Report");
+    let (_, next, _) = dr1_pass(
+        &report,
+        &harvested,
+        at + chrono::Duration::minutes(2),
+        &digest,
+    )
+    .await;
+    let enforced = condition_of(&next, "Enforced").expect("Enforced");
+    assert_eq!(enforced["reason"], "RecommendationOnly", "{enforced}");
+    assert_eq!(next["lastEnforcement"]["refusalCode"], "PlanDigestMismatch");
+    assert!(
+        condition_of(&next, "EnforcementDegraded").expect("Degraded")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refused PlanDigestMismatch")
+    );
+
+    // CONTROL: a recorded code this build does not know is not read back.
+    let mut forged = harvested.clone();
+    forged["lastEnforcement"]["refusalCode"] = json!("NotACode");
+    let (_, next, _) = dr1_pass(&spec, &forged, at + chrono::Duration::minutes(2), &digest).await;
+    let enforced = condition_of(&next, "Enforced").expect("Enforced");
+    assert_eq!(enforced["reason"], "NothingToDo", "{enforced}");
+    assert!(!next["conditions"].to_string().contains("NotACode"));
+}
+
+/// **Three refused runs stop scheduling, and the stop names the refusal
+/// (D-R1).** A named refusal is a failed run and counts toward the three
+/// (FX-15's design: a refusal is `RunFailed`, counted like the line-dropped
+/// run). The PoC's end state read `RunFailed` "3 consecutive runs failed"
+/// beside `EnforcementDegraded` "named no per-point code"; here the third
+/// harvest and the next day's pass, which starts nothing, both name it.
+///
+/// KILLS: the spent budget's `EnforcementDegraded` reading the per-point codes
+/// only (`last_failure_detail` ignoring the record); the spent budget's
+/// `RunFailed` overwriting `Enforced`; the binding hold of
+/// `status.enforcement` over a start decision only.
+#[tokio::test]
+async fn dr1_three_refused_runs_stop_scheduling_and_name_the_refusal() {
+    let spec = unattended_enforcing();
+    let log = "logweir-retention: CredentialBindingMismatch: x\n\
+               retention-refusal=CredentialBindingMismatch\n";
+    let mut status = json!({});
+    for day in 0..3 {
+        let (next, _) =
+            failed_cycle(&spec, &status, now() + chrono::Duration::days(day), 3, log).await;
+        status = next;
+    }
+    assert_eq!(status["consecutiveRunFailures"], json!(3));
+
+    let at = now() + chrono::Duration::days(3);
+    let digest = digest_for(&status, at).await;
+    let (outcome, next, posted) = dr1_pass(&spec, &status, at, &digest).await;
+    assert_eq!(
+        outcome.enforced_reason, "RunFailed",
+        "the spent budget's arm"
+    );
+    assert_eq!(posted, 0, "no fourth run");
+    let enforced = condition_of(&next, "Enforced").expect("Enforced");
+    assert_eq!(
+        enforced["reason"], "CredentialBindingMismatch",
+        "{enforced}"
+    );
+    assert!(enforced["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains(next["lastEnforcement"]["runId"].as_str().expect("run id")));
+    let degraded = condition_of(&next, "EnforcementDegraded").expect("Degraded");
+    assert_eq!(
+        (degraded["status"].as_str(), degraded["reason"].as_str()),
+        (Some("True"), Some("ConsecutiveRunFailures"))
+    );
+    let said = degraded["message"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("exited 3, refused CredentialBindingMismatch")
+            && !said.contains("named no per-point code"),
+        "{said}"
+    );
+    assert_eq!(
+        next["lastEnforcement"]["refusalCode"],
+        "CredentialBindingMismatch"
+    );
+    assert_eq!(next["consecutiveRunFailures"], json!(3));
+    assert_eq!(
+        (
+            next["enforcement"].as_str(),
+            next["guarantees"]["ageExpiry"].as_str(),
+        ),
+        (Some("RecommendationOnly"), Some("NotEnforced")),
+        "the binding refusal holds the console's two fields over the spent budget"
+    );
 }
 
 // The reaping of a finished run Job flaps nothing here

@@ -117,6 +117,38 @@ export function routeGateHas(flag, ns) {
   return typeof ns === "string" && ns.length > 0 ? granted(ns, flag) : grantedAnywhere(flag);
 }
 
+/** THE TAB A SIGNED-IN SESSION LANDS ON: the default (Clusters) when its role
+ *  can use it; otherwise Approvals when it can -- an approver's role reads no
+ *  connection, and approving is its work; otherwise the first tab it can use.
+ *  `null` when it can use none. Pure, over the tab rule. */
+export function landingRoute(routes, ns, has) {
+  const list = Array.isArray(routes) ? routes : [];
+  const usable = visibleRoutes(list, ns, has).filter((route) => routeAllowed(route, ns, has));
+  if (usable.length === 0) {
+    return null;
+  }
+  for (const hash of [list[0].hash, "#/approvals"]) {
+    const preferred = usable.find((route) => route.hash === hash);
+    if (preferred !== undefined) {
+      return preferred;
+    }
+  }
+  return usable[0];
+}
+
+/** Where a LANDING the role cannot use goes instead, or `null`. `landing` is
+ *  true only for the address the page was loaded with when it named no route
+ *  but the default one (a bare visit, and the sign-in round trip, which
+ *  returns to it): an address someone chose, or a later click, is refused by
+ *  name as before. Pure. */
+export function landingRedirect(landing, current, ns, has) {
+  if (landing !== true || routeAllowed(current, ns, has)) {
+    return null;
+  }
+  const target = landingRoute(ROUTES, ns, has);
+  return target === null || target === current ? null : target;
+}
+
 /** The state a route renders for a session whose role cannot use it: what the
  *  page is for, who is signed in with which role, and whom to ask. Pure. */
 export function renderRoleRefusal(route, identity) {
@@ -702,11 +734,27 @@ function render(lifecycle, context, navigated) {
     // bounded at five seconds.
     replace(main, el("p", { class: "pending", role: "status" }, "Connecting to Logweir..."));
   } else if (main !== null) {
+    // THE LANDING IS SPENT on the first page that names a namespace: until
+    // then (the namespace prompt) the default route is still where the
+    // visitor was put, not a page they chose.
+    const landing = context.landing === true;
+    const prompting = !current.cluster && (here.ns.length === 0 ||
+      (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1));
+    if (!prompting) {
+      context.landing = false;
+    }
     if (decided === CONSOLE && holdsNoRole()) {
       replace(main, parseFragment(renderNoRole(sessionIdentity(here.ns))));
-    } else if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
+    } else if (prompting) {
       replace(main, namespacePrompt(context.allowed));
     } else if (decided === CONSOLE && !routeAllowed(current, here.ns, routeGateHas)) {
+      const instead = landingRedirect(landing, current, here.ns, routeGateHas);
+      if (instead !== null) {
+        // Replaced, not pushed: Back does not return to a page the role was
+        // only ever put on. The hash change renders it.
+        window.location.replace(instead.hash + hash.slice(here.route.length));
+        return;
+      }
       replace(main, parseFragment(renderRoleRefusal(current, sessionIdentity(here.ns))));
     } else if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
@@ -742,6 +790,10 @@ function render(lifecycle, context, navigated) {
 
 function boot() {
   const context = namespaceContext(document.documentElement);
+  // A LANDING: loaded with no route, or with the bare default the sign-in
+  // round trip returns to. Its tab is chosen for the session's role once the
+  // session is known (`landingRedirect`).
+  context.landing = window.location.hash === "" || window.location.hash === DEFAULT_HASH;
   const routes = createRouteLifecycle();
   const renderCurrent = () => render(routes.begin(window.location.hash), context);
   window.addEventListener("hashchange", () =>
@@ -766,6 +818,22 @@ function boot() {
       }
     });
   }
+
+  // A SHORTENED IDENTIFIER IS ITS OWN COPY BUTTON (`render.js` `ident`): a
+  // click puts the full value on the clipboard. One listener for every page,
+  // because the pages render strings and wire nothing they did not write.
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    const button = target !== null && typeof target.closest === "function"
+      ? target.closest("button.ident")
+      : null;
+    if (button === null || !navigator.clipboard) {
+      return;
+    }
+    navigator.clipboard.writeText(String(button.getAttribute("data-copy") || "")).then(() => {
+      button.setAttribute("data-copied", "true");
+    }, () => {});
+  });
 
   // A region that scrolls is a region a keyboard can reach. Whether a table or
   // a plan block overflows is a fact of layout, so it is read after every

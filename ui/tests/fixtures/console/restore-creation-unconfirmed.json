@@ -32,6 +32,10 @@
     "newTopics": [
       "orders"
     ],
+    "oldTopics": [
+      "orders",
+      "payments"
+    ],
     "targetTopicsAppeared": {
       "appeared": [],
       "left": [
