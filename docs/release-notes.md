@@ -1858,7 +1858,13 @@ next run starts, in the messages and the console's fields only.
   It printed the destination's name as the bucket (`s3://primary/…`). A
   destination that now names another location than the run froze, or that this
   login may not read, gets a placeholder bucket and the reason; a run with no
-  evidence keys yet says so instead of fetching the bucket root.
+  evidence keys yet says so instead of fetching the bucket root. A Restore's
+  fetches carry the endpoint and region of its plan's evidence store too, a
+  path-style store at an endpoint gets a note naming
+  `aws configure set s3.addressing_style path`, a run missing either key prints
+  no command, and the Python line passes its three files as the positionals
+  `verify_scorecard.py` reads (it printed the Rust flags, which the script
+  refuses).
 - *Rotate access* starts every grant on `keep`, which sends the grant as the
   destination has it. It started the three optional grants on `absent`, so
   rotating one key removed the others and turned evidence verification off.
