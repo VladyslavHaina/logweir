@@ -774,6 +774,20 @@ What it fixed:
 - **Never touched:** the signed-format readers, the frozen schemas, the invariant corpus, the verifiers and consumer positions.
 - **Published and signed:** main run 38185556834 signed `sha-984127fa`. PROD-14.1's clean install uses that publication's chart and images. The release checklist says the owner approves every tag push (`docs/tag1-checklist.md`), so `v0.2.0-rc.2` and `v0.2.0` wait for the owner.
 
+**PR #32 — merged (2026-10-11) as `22dc6147`, release-notes items 83 and 84: PROD-14.1's preparation.** p14-chart had a Tier A review and p14-kit a checklist review; both were ACCEPT-WITH-FIXES, with the fixes done. Integrated by `integrate-17`.
+- **p14-chart:**
+  - An offline render (`helm template`, Argo CD) rendered empty identity placeholders on every apply. Argo CD's hook policy would then replace the filled key. Such a render is now refused by name unless `identity.renderedOffline` is set.
+  - The bootstrap image is re-pinned to the amd64+arm64 runner.
+  - The version and architecture floors show before install.
+  - `helm-demo.yml` walks the console's step 9. The orchestrator dispatches it once.
+- **p14-kit:**
+  - `just recovery-kit`, an offline kit with a sha256 manifest whose guard refuses private keys and Secrets. The review's MEDIUM, a guard that could pass a key through a broken pipe, was fixed.
+  - B14: `install.md` is the canonical guide.
+  - `just sandbox`, a trial from published images with no Rust toolchain.
+  - The PROD-16.1 harness no longer drives a hidden control.
+- **LOW, noted:** `weirkeeper/src/job.rs`'s compile-time `RUNNER_IMAGE` names a digest Docker Hub no longer serves. The chart always sets `LOGWEIR_RUNNER_IMAGE`, so it cannot be reached through the chart. This goes to v1.1.
+- **Next:** the live install under the k8s lock, in two agents run one after the other (`poc-14-1a`, `poc-14-1b`), against the `sha-` publication of this merge.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
