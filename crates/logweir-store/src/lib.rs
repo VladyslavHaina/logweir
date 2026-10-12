@@ -4037,6 +4037,8 @@ mod evidence_put_retry_tests {
     struct Bucket {
         faults: VecDeque<Fault>,
         object: Option<Vec<u8>>,
+        /// When set, every GET is answered with this status.
+        get_status: Option<u16>,
         puts: usize,
         unconditional_puts: usize,
         gets: usize,
@@ -4082,6 +4084,9 @@ mod evidence_put_retry_tests {
             let mut b = self.0.lock().unwrap();
             if req.method().as_str() == "GET" {
                 b.gets += 1;
+                if let Some(status) = b.get_status {
+                    return Ok(answer(status, Vec::new()));
+                }
                 return Ok(match &b.object {
                     Some(o) => {
                         let mut r = answer(200, o.clone());
@@ -4206,6 +4211,31 @@ mod evidence_put_retry_tests {
         let b = b.lock().unwrap();
         assert_eq!(b.unconditional_puts, 0, "evidence is never overwritten");
         assert_eq!(b.object.as_deref(), Some(&b"another run"[..]));
+    }
+
+    #[test]
+    fn a_lost_answer_over_same_length_different_bytes_is_still_refused() {
+        // Within the read cap, so the refusal is the byte comparison's.
+        let (s, b) = store(vec![Fault::DropAfterLanding(b"pXsitions".to_vec())], None);
+        assert!(matches!(
+            s.put_create_only(KEY, b"positions"),
+            Err(StoreError::AlreadyExists(_))
+        ));
+        let b = b.lock().unwrap();
+        assert_eq!((b.unconditional_puts, b.gets), (0, 1));
+        assert_eq!(b.object.as_deref(), Some(&b"pXsitions"[..]));
+    }
+
+    #[test]
+    fn a_denied_read_back_is_an_error_never_a_success() {
+        // A runner without `s3:GetObject` on `logweir/*` cannot compare.
+        let (s, b) = store(vec![Fault::DropAfterLanding(b"positions".to_vec())], None);
+        b.lock().unwrap().get_status = Some(403);
+        assert!(matches!(
+            s.put_create_only(KEY, b"positions"),
+            Err(StoreError::Io(_))
+        ));
+        assert_eq!(b.lock().unwrap().gets, 1);
     }
 
     #[test]
