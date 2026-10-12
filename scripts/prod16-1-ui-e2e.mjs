@@ -496,6 +496,9 @@ async function main() {
   check(legacyStep.toLowerCase().includes("approve it out of band"), "the strict step: " + legacyStep.slice(0, 600));
   await shot("01-unmarked-strict-step");
   const since = bodies.length;
+  // Create is on step 6: require the wizard to still show it, so the click never lands on a
+  // hidden step (toPlanStep walked there, but a click must not rely on a helper's last state).
+  await wizardAt(page, 6, 30);
   await page.click("#create-restore");
   let answer = null;
   for (let i = 0; i < 60 && answer === null; i += 1) {
@@ -549,6 +552,7 @@ async function main() {
   check(!confirmStep.includes("logweir drill"), "and no command for a key holder");
   await shot("03-confirm-step");
   const since3 = bodies.length;
+  await wizardAt(page, 6, 30);
   await page.click("#create-restore");
   answer = null;
   for (let i = 0; i < 60 && answer === null; i += 1) {

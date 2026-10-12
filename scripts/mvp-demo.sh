@@ -48,7 +48,9 @@
 #   would be invisible to the lint, which is the opposite of what a
 #   demonstration script wants.
 #
-# THE BINARY IT RUNS: `target/debug/logweir`, via `$PATH`.
+# THE BINARY IT RUNS: `target/debug/logweir`, via `$PATH`. `just sandbox`
+# runs the PUBLISHED runner image instead, with no Rust toolchain:
+# LOGWEIR_BIN=scripts/logweir-image.sh and LOGWEIR_IMAGE=<image>.
 #
 #   Plan erratum E9: the e2e harness runs the DEBUG binary, so the row in
 #   `e2e/tests/mvp_demo.rs` that shells this script and the rest of the e2e
@@ -123,7 +125,7 @@ command -v "$PYTHON" >/dev/null 2>&1 || die "\`$PYTHON\` is not on \$PATH; set L
 # on $PATH through a shim directory of exactly one entry rather than $PATH
 # gaining all of target/debug.
 LOGWEIR_BIN="${LOGWEIR_BIN:-$PWD/target/debug/logweir}"
-[ -x "$LOGWEIR_BIN" ] || die "no logweir binary at $LOGWEIR_BIN — run \`cargo build -p logweir\` (\`just mvp-demo\` does it for you), or set LOGWEIR_BIN."
+[ -x "$LOGWEIR_BIN" ] || die "no logweir binary at $LOGWEIR_BIN — run \`cargo build -p logweir\` (\`just mvp-demo\` does it for you), or set LOGWEIR_BIN; \`just sandbox\` needs no Rust toolchain."
 mkdir -p "$OUT/bin"
 ln -sf "$LOGWEIR_BIN" "$OUT/bin/logweir"
 PATH="$PWD/$OUT/bin:$PATH"
@@ -357,25 +359,40 @@ printf '{"allowed_cluster_ids":["SCRATCH-CLUSTER-NOT-THE-SOURCE"],"source_cluste
 # when LOGWEIR_E2E_ENGINE_IMAGE/LOGWEIR_E2E_ENGINE_PLATFORM name it).
 export LOGWEIR_E2E_ENGINE_MOUNT="$PWD/$OUT/tmp"
 mkdir -p "$LOGWEIR_E2E_ENGINE_MOUNT"
-if .engine/kafka-backup --version >/dev/null 2>&1; then
-  export LOGWEIR_ENGINE_BIN="$PWD/.engine/kafka-backup"
-  echo "    engine route: NATIVE $LOGWEIR_ENGINE_BIN"
+if [ -n "${LOGWEIR_IMAGE:-}" ]; then
+  # THE SANDBOX (`just sandbox`): every `logweir` command runs in the published
+  # runner image (scripts/logweir-image.sh), and so does its engine. The engine
+  # is named by the image's own identity file, never by this checkout.
+  set +e
+  docker run --rm --entrypoint cat "$LOGWEIR_IMAGE" /etc/logweir/engine-identity > "$OUT/engine-identity"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || die "could not read /etc/logweir/engine-identity from $LOGWEIR_IMAGE (rc=$rc)"
+  LOGWEIR_ENGINE_VERSION=$(sed -n 's/^version=//p' "$OUT/engine-identity")
+  LOGWEIR_ENGINE_DIGEST=$(sed -n 's/^digest=//p' "$OUT/engine-identity")
+  [ -n "$LOGWEIR_ENGINE_VERSION" ] && [ -n "$LOGWEIR_ENGINE_DIGEST" ] || die "$LOGWEIR_IMAGE names no engine version and digest"
+  echo "    engine route: IMAGE $LOGWEIR_IMAGE (its own /usr/local/bin/kafka-backup)"
 else
-  export LOGWEIR_ENGINE_BIN="$PWD/e2e/fixtures/engine-docker.sh"
-  echo "    engine route: CONTAINER via $LOGWEIR_ENGINE_BIN (.engine/kafka-backup is a linux/amd64 ELF and cannot exec here)"
+  if .engine/kafka-backup --version >/dev/null 2>&1; then
+    export LOGWEIR_ENGINE_BIN="$PWD/.engine/kafka-backup"
+    echo "    engine route: NATIVE $LOGWEIR_ENGINE_BIN"
+  else
+    export LOGWEIR_ENGINE_BIN="$PWD/e2e/fixtures/engine-docker.sh"
+    echo "    engine route: CONTAINER via $LOGWEIR_ENGINE_BIN (.engine/kafka-backup is a linux/amd64 ELF and cannot exec here)"
+  fi
+  LOGWEIR_ENGINE_VERSION=$("$LOGWEIR_ENGINE_BIN" --version)
+  LOGWEIR_ENGINE_VERSION=${LOGWEIR_ENGINE_VERSION##* }
+  # Logweir's build is named by its build-input digest (PROD-00.2), OSO's
+  # release by its image digest.
+  case "$LOGWEIR_ENGINE_VERSION" in
+    # The ledger names every build (FX-21): an earlier build run at this
+    # checkout is named by ITS digest, never by the newest build's.
+    *+logweir.*)
+      LOGWEIR_ENGINE_DIGEST=$(awk -v v="$LOGWEIR_ENGINE_VERSION" '$1 == v {print $2}' third_party/kafka-backup-builds.txt)
+      [ -n "$LOGWEIR_ENGINE_DIGEST" ] || { echo "engine $LOGWEIR_ENGINE_VERSION is not a build in third_party/kafka-backup-builds.txt" >&2; exit 1; } ;;
+    *) LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest) ;;
+  esac
 fi
-LOGWEIR_ENGINE_VERSION=$("$LOGWEIR_ENGINE_BIN" --version)
-LOGWEIR_ENGINE_VERSION=${LOGWEIR_ENGINE_VERSION##* }
-# Logweir's build is named by its build-input digest (PROD-00.2), OSO's
-# release by its image digest.
-case "$LOGWEIR_ENGINE_VERSION" in
-  # The ledger names every build (FX-21): an earlier build run at this
-  # checkout is named by ITS digest, never by the newest build's.
-  *+logweir.*)
-    LOGWEIR_ENGINE_DIGEST=$(awk -v v="$LOGWEIR_ENGINE_VERSION" '$1 == v {print $2}' third_party/kafka-backup-builds.txt)
-    [ -n "$LOGWEIR_ENGINE_DIGEST" ] || { echo "engine $LOGWEIR_ENGINE_VERSION is not a build in third_party/kafka-backup-builds.txt" >&2; exit 1; } ;;
-  *) LOGWEIR_ENGINE_DIGEST=$(tr -d '[:space:]' < third_party/kafka-backup-binary.digest) ;;
-esac
 export LOGWEIR_ENGINE_VERSION LOGWEIR_ENGINE_DIGEST
 export AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin AWS_REGION=us-east-1
 export TMPDIR="$LOGWEIR_E2E_ENGINE_MOUNT"

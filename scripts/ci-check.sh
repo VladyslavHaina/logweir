@@ -38,6 +38,7 @@ python3 scripts/test-ci-images.py
 python3 scripts/check-cosign-verify.py
 python3 scripts/test-check-cosign-verify.py
 python3 scripts/test-release.py
+python3 scripts/test-recovery-kit.py
 just verify-py
 
 just schema-check

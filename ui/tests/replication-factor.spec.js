@@ -469,9 +469,9 @@ test("fx5_the_factor_can_differ_from_the_sources_and_both_steps_and_the_docs_say
   assert.equal(replicationMayDiffer({ value: 4, basis: "chosen", source: 3, brokers: 5 }), true,
     "a typed factor that is not the source's");
   // THE SAME SENTENCE IN THE RESTORE DOCS: the wizard's own section and the
-  // quickstart's restore step. Markdown wraps lines and quotes with `>`.
+  // install guide's first-restore step. Markdown wraps lines and quotes with `>`.
   const flat = (text) => text.replace(/^[ \t]*>[ \t]?/gm, "").replace(/\s+/g, " ");
-  for (const doc of ["README.md", "../docs/quickstart.md"]) {
+  for (const doc of ["README.md", "../docs/install.md"]) {
     assert.ok(flat(readFileSync(UI_DIR + doc, "utf8")).includes(REPLICATION_DIFFERS_NOTE),
       "NEGATIVE CONTROL: " + doc + " without the page's sentence fails this");
   }
@@ -608,13 +608,13 @@ test("fx5_with_no_readiness_check_create_stays_enabled_and_the_page_and_quicksta
       "NEGATIVE CONTROL: the pre-FX-5 warning, which names no factor, fails this: " + warning);
     assert.match(warning,
       /a factor the brokers cannot hold fails the approved run when it creates the topics, with nothing restored\./);
-    const quickstart = readFileSync(UI_DIR + "../docs/quickstart.md", "utf8").replace(/\s+/g, " ");
+    const quickstart = readFileSync(UI_DIR + "../docs/install.md", "utf8").replace(/\s+/g, " ");
     assert.ok(!quickstart.includes("The readiness check must pass before *Create the Restore* is " +
       "enabled"), "NEGATIVE CONTROL: the old step 3, which says the check gates Create, fails this");
     for (const said of ["with no check at all Create stays enabled",
       "`Failed` with `exitCode 1` / `operational`, no signed result and nothing restored",
       "names `InvalidReplicationFactor`"]) {
-      assert.ok(quickstart.includes(said), "the quickstart's step 3 says: " + said);
+      assert.ok(quickstart.includes(said), "docs/install.md's first-restore step 3 says: " + said);
     }
   });
 

@@ -1,376 +1,226 @@
 # Verifying a Logweir drill scorecard
 
-This guide explains how to authenticate a scorecard, check its consistency,
-and interpret its limits using either Logweir or an independent Python verifier.
-For what the evidence supports, and what it does not show, against the backup
-and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and HIPAA, read
-the [control-evidence mapping](control-evidence.md).
+How to authenticate a scorecard, check it, and read its limits, with Logweir or
+with the independent Python verifier. What the evidence supports against the
+backup and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and
+HIPAA is the [control-evidence mapping](control-evidence.md).
 
 ## What the artifact is
 
-A **drill scorecard** records one Kafka restore drill: its archive, measured
-RTO/RPO, sampled-record fingerprints and approval. Restore drills compare the
-restored data with **the archive**, without contacting the source cluster;
-`measured.rpo_source_relative_unmeasured_reason` records that limitation, and
-[what a pass does not rule out](#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)
-is listed below. The separate `logweir backup run` command does contact a source
-cluster.
+A **drill scorecard** records one Kafka restore: its archive, measured RTO/RPO,
+sampled-record fingerprints and approval. A restore compares the restored data
+with **the archive**, never contacting the source cluster
+(`measured.rpo_source_relative_unmeasured_reason` says so;
+[what a pass does not rule out](#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)).
+`logweir backup run` does contact a source.
 
-The scorecard is a [DSSE statement](https://github.com/secure-systems-lab/dsse).
-Its JSON is never modified to carry a signature: a sidecar signs the exact
-payload bytes. The independent [Python verifier](verify_scorecard.py) implements
-DSSE and the document checks separately from Rust. A disagreement between the
-readers should be reported; neither reader's verdict alone proves the underlying
-measurements are true.
+The scorecard is a [DSSE statement](https://github.com/secure-systems-lab/dsse):
+a sidecar signs the exact payload bytes, and the JSON is never modified to carry
+a signature. The [Python verifier](verify_scorecard.py) implements DSSE and the
+document checks separately from Rust. Report any disagreement between the two;
+neither verdict alone proves the measurements are true.
 
 ## The three files you receive
 
 | File | Purpose |
 | --- | --- |
-| `scorecard.json` | The original measured result, as JSON. |
-| `scorecard.sig` | DSSE sidecar naming the key and signature over the exact JSON bytes. |
-| `public.pem` | Publisher's SPKI public key, authenticated independently of the scorecard handoff. |
+| `scorecard.json` | The measured result, as JSON. |
+| `scorecard.sig` | DSSE sidecar naming the key and the signature over the exact JSON bytes. |
+| `public.pem` | The publisher's SPKI public key, authenticated independently of the handoff. |
 
-These are the three inputs to the signature check. Never substitute a retyped
-or reformatted scorecard; see [payload handling](#the-payload-is-never-re-serialised).
-
-A storage receipt (`<run_id>.receipt.json` / `.receipt.sig`) and teardown
-attestation (`<run_id>.teardown.json` / `.teardown.sig`) may also accompany the
-scorecard. They are separate signed documents, each with its own `payloadType`.
-Neither is needed to verify the scorecard, and neither substitutes for it.
+Never substitute a retyped or reformatted scorecard
+([payload handling](#the-payload-is-never-re-serialised)). A storage receipt
+(`<run_id>.receipt.json`/`.sig`) and a teardown attestation
+(`<run_id>.teardown.json`/`.sig`) may come with it: separate signed documents,
+each with its own `payloadType`, neither needed for nor a substitute for the
+scorecard.
 
 ## Where the public key comes from
 
-**Authenticate the key through a channel independent of the document.** Someone
-who substitutes a scorecard and signature can include their own matching public
-key. A `VALID` result for that bundle proves only internal consistency, not that
-it came from the organization you intended to trust.
-
-Obtain the key from the publisher's established TLS website, an in-person or
-voice exchange, or your organization's previously established trusted-key
-registry. A key in the same email, folder or archive is insufficient by itself.
-
-Pin the publisher's key fingerprint on first use:
+**Authenticate the key through a channel independent of the document.** Whoever
+substitutes a scorecard and signature can include a matching key, and `VALID`
+for that bundle proves only internal consistency. Get the key from the
+publisher's established TLS website, an in-person or voice exchange, or your
+organization's trusted-key registry; a key in the same email, folder or archive
+is not enough. Pin its fingerprint on first use:
 
 ```bash
 openssl pkey -pubin -in public.pem -outform DER | openssl dgst -sha256
-```
-
-The hex digest is SHA-256 of the SPKI DER encoding. It is also the value used by
-`signatures[].keyid`. Inspect the sidecar's first declared key ID with:
-
-```bash
 python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['signatures'][0]['keyid'])" scorecard.sig
 ```
 
-Compare it with your pinned fingerprint. Resolve any mismatch with the publisher
-out of band before using either verification route; a verifier cannot decide
-whether an unexpected key represents an authorized rotation or substitution.
-See [key generation and rotation](keys.md).
-
-Retain the fingerprint alongside the publisher's identity and reuse your trusted
-`public.pem` for later scorecards. Check any replacement key against that trust
-record; receiving a fresh bundled key does not authenticate it.
+The first is the SHA-256 of the SPKI DER, the value `signatures[].keyid`
+carries; the second prints the sidecar's declared key id. Resolve any mismatch
+with the publisher out of band before verifying: no verifier can tell an
+authorized rotation from a substitution ([key generation and rotation](keys.md)).
+Keep the fingerprint with the publisher's identity, and check every replacement
+key against that record.
 
 ## Two ways to verify
 
-The readers are intended to agree on acceptance or refusal. Running both gives
-an additional independent check. Exit codes and malformed-document diagnostics
-can differ, as described below; a disagreement in acceptance is a defect to report.
+The readers are meant to agree on acceptance or refusal; a disagreement in
+acceptance is a defect to report. Exit codes and malformed-document diagnostics
+differ, as below.
 
 ### Route 1: `logweir drill verify` (if you have the Logweir binary)
 
 ```bash
-logweir drill verify \
-  --scorecard scorecard.json \
-  --signature scorecard.sig \
-  --public-key public.pem
+logweir drill verify --scorecard scorecard.json --signature scorecard.sig --public-key public.pem
 ```
 
 | Exit | Meaning |
 | --- | --- |
 | `0` | Signature valid; the document passes the reader's checks. |
-| `1` | Operational or parsing failure, including malformed scorecard shape. |
+| `1` | Operational or parsing failure, including a malformed scorecard shape. |
 | `4` | Signature, lock-proof or invariant failure, including an unsupported newer format major or an inconsistent approval claim. |
 
-A valid signature does not override a refusal to interpret an unsupported or
+A valid signature never overrides a refusal to interpret an unsupported or
 self-contradictory document.
 
 ### Route 2: `verify_scorecard.py` (no Rust required)
 
-Use Python 3 and the [cryptography](https://cryptography.io/) package, which
-performs the elliptic-curve and Ed25519 signature math:
+Python 3 and the [cryptography](https://cryptography.io/) package (the
+elliptic-curve and Ed25519 math):
 
 ```bash
-pip install cryptography
-python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
-```
-
-The command assumes the downloaded script is in your current directory. From
-this repository's root, use `python3 docs/verify_scorecard.py ...`. For an
-isolated installation:
-
-```bash
-python3 -m venv venv
-venv/bin/pip install cryptography
+python3 -m venv venv && venv/bin/pip install cryptography
 venv/bin/python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 ```
 
-`--payload-type scorecard|backup-receipt|receipt|teardown|catalog-point` selects
-the signed document type; the default is `scorecard`. `backup-receipt` records a
-[backup run](formats/backup-receipt.md); `receipt` records a scorecard's storage
-readback; `catalog-point` is a [recovery catalog point](formats/catalog-point.md),
-checked for its signature only. See [receipt verification](#verifying-the-receipts-signature).
+From this repository's root it is `python3 docs/verify_scorecard.py …`.
+`--payload-type scorecard|backup-receipt|receipt|teardown|catalog-point`
+selects the document type (default `scorecard`): `backup-receipt` is a
+[backup run](formats/backup-receipt.md), `receipt` a scorecard's storage
+readback, `catalog-point` a [catalog point](formats/catalog-point.md), checked
+for its signature only ([receipts](#verifying-the-receipts-signature)).
 
 | Exit/output | Meaning |
 | --- | --- |
 | `0`, `VALID` | Signature and applicable document checks passed. |
-| `1`, `INVALID` on stderr | Refusal, with a reason such as signature mismatch, wrong payload type, malformed base64, unreadable input or document inconsistency. |
-| `2`, `CANNOT RUN:` and `NOTHING WAS VERIFIED` | The `cryptography` dependency is missing. Install it and rerun; this is an infrastructure failure, not a verdict on the document. |
+| `1`, `INVALID` on stderr | Refusal, with a reason: signature mismatch, wrong payload type, malformed base64, unreadable input or an inconsistent document. |
+| `2`, `CANNOT RUN:` and `NOTHING WAS VERIFIED` | `cryptography` is missing: install it and rerun. Not a verdict on the document. |
 
 ### What "verify" actually checks
 
-Both routes check the sidecar's expected `payloadType`, the signature over DSSE
-PAE of the type and raw payload bytes, then the applicable document rules.
-Scorecards use `application/vnd.logweir.drill-scorecard+json;version=1.0.0`.
-A signature for another document type cannot serve as a scorecard signature.
-The media type's `version=1.0.0` names the envelope and stays the same for a
-document whose `format_version` is `1.1.0` or `1.2.0`; the document's own
-version is the field inside it.
+Both routes check the sidecar's expected `payloadType`, the signature over the
+DSSE PAE of the type and the raw payload bytes, then the document's rules. A
+scorecard's type is `application/vnd.logweir.drill-scorecard+json;version=1.0.0`;
+a signature for another type is never a scorecard signature. The media type's
+`version=1.0.0` names the envelope; the document's own version is
+`format_version` inside it.
 
-The current scorecard checks include:
+The scorecard checks:
 
-- A readable format major, checked before interpreting its invariants: major
-  1, and major 2 (format 2.0.0, a partition-subset restore's, since
-  PROD-11.1b) only for a document carrying `source.selection.partitions`
-  (arm PS-1); the
-  eleven required blocks and six required non-block fields; `u64` fields within
-  `0 <= v < 2**64`, with null allowed only for optional `u64` fields.
-- The four post-put `evidence` fields remain zeroed. Offset-report key and
-  digest are present or absent together. An absent target mode means `scratch`;
-  a present mode is `scratch` or `newTopic`, and scratch requires a marker topic.
-- A partial integrity result has a nonblank `partial_reason`; the two float
-  fields (`objectives.pass_rate`, `integrity.pass_rate_measured`) are finite.
-- Source-capture status agrees in both directions with the phase and source-RPO
-  value/reason. `last_phase_completed` stays within `-1..=9`.
-- Recovery-point gaps (`measured.rpo_seconds`, source-relative RPO and the RPO
-  objective) are nonnegative. Matching records do not exceed sampled records,
-  and sampled records do not exceed `sample.records_expected`.
-- `outcome: pass` agrees with integrity, the absence of a partial reason,
-  objectives and matching counts. An unmeasurable pass-rate objective cannot be
-  reported as met, and `pass_rate_measured` is null outside `byte-fingerprint`.
-- Matrix `fail` carries a reason; matrix `pass` requires a passing drill at
-  `byte-fingerprint` level.
-- An auth block names a nonblank supported mode (`plaintext` or `scramSha512`,
-  and from format 1.5.0 also `scramSha256`, `plain` or `mtls`);
-  a username without a mode is refused. `redactions` is empty.
-- `topic_parity`'s lists are arrays of strings. A `topic_parity.not_reconstructed`
-  (format 1.2.0) appears only under a `format_version` of at least `1.2.0`, and
-  each of its entries is also in `unexpected_divergence` and never in
-  `intentionally_deviated`. In a `newTopic` document that carries it,
-  `intentionally_deviated` is empty and every divergence on a setting the
-  restore decides (`cleanup.policy`, `retention.ms`, `partition_count`,
-  `replication_factor`) is in it; see [the format](formats/drill-scorecard.md#topic_parity-in-a-newtopic-restore-not-reconstructed-120).
-- A `source.time_basis` block (format 1.3.0) appears only under a version that
-  defines it; its `plan` is `producerTime` or absent; a topic selected by
-  producer time appears only when `plan` is `producerTime`; and no topic is in
-  both of its lists ([the arms](formats/drill-scorecard.md#sourcetime_basis-format-130)).
-- An `integrity.verification` block (format 1.4.0) appears only under a
-  version that defines it; its `coverage` is `sampled` or `complete`; it claims
-  header order verified only for complete coverage; its `complete` block is
-  present exactly with complete coverage, says why when it did not cover every
-  partition, and is never beside a `pass` unless it covered at least one
-  partition and every partition, verified every segment and found the restored
-  output exactly the expected one, in total and in every partition; and its
-  totals are its partitions' sums
-  ([the arms](formats/drill-scorecard.md#integrityverification-format-140)).
-- A `sample.unsampled_topics` list (format 1.6.0) appears only under a version
-  that defines it; it is never empty, names no blank topic, is sorted with no
-  repeat, and never sits beside a complete verification
-  ([the arms](formats/drill-scorecard.md#sampleunsampled_topics-format-160)).
-- A `source.selection` block (format 1.7.0, a restore from a stated window
-  start) appears only under a version that defines it; its start is before its
-  end; and a complete block beside it uses its window
-  ([the arms](formats/drill-scorecard.md#sourceselection-format-170-and-200)).
-  Under major 1 it is a start and its end only (PS-2). A format 2.0.0 block
-  (a partition-subset restore, PROD-11.1b) names each narrowed topic once, in
-  order, with a non-empty, sorted list of distinct partitions (PS-3), one
-  engine run per distinct subset or one more (PS-4), and a complete block
-  beside it expects nothing from a partition it does not select (PS-5)
-  ([the format](formats/drill-scorecard.md#format-200-a-partition-subset-prod-111b-od-9-a)).
-- A `target.original_name` block (format 1.8.0, a restore under the source's
-  original topic names) appears only under a version that defines it, never in
-  a scratch drill and only beside an empty `target.topic_mapping_prefix`; its
-  approval subject is `originalName`; "not the source cluster" names a source
-  cluster id other than the target's; it names where owners were looked for
-  (a `KafkaTopic` resources file by its sha256), and an owner found only on
-  the owner path; a one-person confirmation is signed only with every
-  original topic name re-typed (`confirmation: typedTopicNames`); its
-  verification is complete, never sampled; and it never sits beside a
-  partition subset, because such a restore restores whole topics
-  ([the arms](formats/drill-scorecard.md#targetoriginal_name-format-180)).
+- A readable format major, checked first: major 1, and major 2 (2.0.0, a
+  partition-subset restore, PROD-11.1b) only for a document carrying
+  `source.selection.partitions` (arm PS-1). The eleven required blocks and six
+  required non-block fields; `u64` fields in `0 <= v < 2**64`, null only for the
+  optional ones.
+- The four post-put `evidence` fields are zeroed; offset-report key and digest
+  are present or absent together. An absent target mode means `scratch`; a
+  present one is `scratch` or `newTopic`, and scratch requires a marker topic.
+- A partial integrity result has a nonblank `partial_reason`; the two floats
+  (`objectives.pass_rate`, `integrity.pass_rate_measured`) are finite.
+- Source-capture status agrees both ways with the phase and the source-RPO
+  value or reason; `last_phase_completed` is within `-1..=9`.
+- RPO gaps are nonnegative; matching records never exceed sampled ones, and
+  sampled records never exceed `sample.records_expected`.
+- `outcome: pass` agrees with integrity, no partial reason, objectives and
+  matching counts; an unmeasurable pass-rate objective is never met, and
+  `pass_rate_measured` is null outside `byte-fingerprint`. Matrix `fail` has a
+  reason; matrix `pass` needs a passing `byte-fingerprint` drill.
+- An auth block names a supported mode (`plaintext` or `scramSha512`, and from
+  format 1.5.0 also `scramSha256`, `plain` or `mtls`); a username without a mode
+  is refused. `redactions` is empty.
+- Each optional block appears only under a format that defines it, with its own
+  arms in [the format](formats/drill-scorecard.md):
+  `topic_parity.not_reconstructed` (1.2.0; each entry also in
+  `unexpected_divergence`, never in `intentionally_deviated`, and in a `newTopic`
+  document every divergence on a setting the restore decides is listed);
+  `source.time_basis` (1.3.0); `integrity.verification` (1.4.0: a `pass` only
+  over a covered, clean complete block, totals that are its partitions' sums);
+  `sample.unsampled_topics` (1.6.0: never empty, sorted, never beside a
+  complete verification); `source.selection` (1.7.0, a start and its end; 2.0.0,
+  a partition subset, arms PS-2 to PS-5); `target.original_name` (1.8.0, never
+  in scratch, never beside a subset, only with a complete verification and, for
+  a one-person confirmation, every name re-typed); `approval.console` (1.9.0 and
+  2.1.0, two people of one issuer).
 - The claimed `approval.self_attested` agrees with a derivation from the key
-  that actually verified the signature; see [approval](#reading-approvalself_attested).
+  that verified the signature ([approval](#reading-approvalself_attested)).
 
-Both readers also print one line about configuration parity for a scorecard
-whose `topic_parity.not_assessed` is not `[]`:
+Beside the verdict, both readers print what the document says about its own
+scope. None of these lines is a refusal or changes the exit code:
 
 ```
 configuration parity: NOT ASSESSED for drill-orders: configuration (captureDenied)
 configuration parity: not recorded, so an empty unexpected_divergence proves nothing
-```
-
-The first is a format 1.1.0 document naming the topics whose configuration
-parity was not assessed; the second is every 1.0.0 document, and a 1.1.0 one
-whose drill stopped before phase 7. Neither is a refusal and neither changes the
-exit code. No line is printed when every topic was assessed (`not_assessed: []`).
-Since FX-21 the first line also names a replication factor or partition count
-the source's record lacks, which the writer did not compare
-(`drill-orders: replication_factor (notRecorded)`): a writer before FX-21
-compared the target's own value with itself there and printed nothing.
-See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
-
-Both also print one line about the source settings a `newTopic` restore did
-not reconstruct, whenever the document has something to say:
-
-```
 reconstruction: source settings NOT RECONSTRUCTED for restore-20260907T140500Z-orders: cleanup.policy; restore-20260907T140500Z-orders: replication_factor
-reconstruction: not recorded, so the settings this newTopic document labels intentionally_deviated were NOT reconstructed: restore-20260907T140500Z-orders: cleanup.policy
-```
-
-The first is a format 1.2.0 document naming them in `not_reconstructed`; the
-second is a `newTopic` document signed before 1.2.0, whose writer labelled the
-same settings `intentionally_deviated`. Neither changes the exit code, and
-nothing is printed for a scratch drill, whose deviations are intended. See
-[a new-topic restore's settings](#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings).
-
-And both print the clock a restore's time selection read (`source.time_basis`,
-format 1.3.0), where it was not the topics' own:
-
-```
 time basis: SELECTED BY PRODUCER TIME for orders (recorded as LogAppendTime; the approved plan states restore.time_basis: producerTime)
-time basis: timestamp type NOT RECORDED for payments, so its time selection may have read producer timestamps
 time basis: not recorded, so whether a time selection read a LogAppendTime topic's producer timestamps is unknown
-```
-
-The first names the topics whose recorded timestamp type is `LogAppendTime` and
-which the restore selected by time — by the producers' clocks, as its approved
-plan accepted; the second the topics it selected by time with no recorded type;
-the third is every document without the block, including every one before
-1.3.0. None is a refusal and none changes the exit code. No line is printed for
-a 1.3.0 document whose two lists are empty. See
-[point-in-time selection over `LogAppendTime` topics](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled).
-
-And both say what the verdict covered (`integrity.verification`, format 1.4.0):
-
-```
 integrity coverage: complete (compared with the archive; header order verified; application validation notAttempted)
-integrity coverage: every selected record compared: 75 expected, 75 restored, 75 matching, 0 missing, 0 unexpected, 0 duplicates, 0 out of order, 0 different; 4 of 4 segments verified, 0 failed, 0 unverified; 0 offset holes
-integrity coverage: sampled (compared with the archive; header order notVerified; application validation notAttempted)
-integrity coverage: the verified partitions record 1 capture gaps and 0 pruned ranges
 integrity coverage: not recorded, so this verdict covered a sample, never every record
-```
-
-A complete verification prints its counts — `every selected record compared`,
-or `INCOMPLETE` followed by an `incomplete because …` line when a bound stopped
-it or a partition could not be compared; a sampled one says header order was
-not verified; every document before 1.4.0 prints the last line. None changes
-the exit code. See [sampled and complete coverage](#the-sample-window-is-not-a-claim-about-the-whole-archive).
-
-And both name the topics a sampled verification's `sample.max_partitions` left
-without a sampled partition (`sample.unsampled_topics`, format 1.6.0):
-
-```
 sample coverage: no partition of 1 topic(s) was sampled, because sample.max_partitions is below the number of topics with records in the window: payments; their partitions were held to the count bound only, never reconciled record by record
-```
-
-Nothing is printed for a document that names none, which is every document
-before 1.6.0 (a build whose cap kept the first partitions in manifest order
-and recorded nothing about the rest, so there the absence says nothing). It
-never changes the exit code. See
-[what the sampled lane guarantees](#what-a-sampled-pass-guarantees-and-what-it-does-not).
-
-And both say when a restore wrote under the source's ORIGINAL topic names
-(`target.original_name`, format 1.8.0), and what admitted it:
-
-```
 original name: restored under the source's own topic names, into topics this run created (a new generation of each name, not the original topic); approval subject originalName, approved by v1Approval; the target cluster is not the source cluster (5L6g3nShT-eMCtK--X86sw)
-original name: declarative owners looked for in plan: none found
 ```
 
-Nothing is printed for any other document. Neither line changes the exit
-code. A restored topic under its original name is a new generation of the
-name: Kafka assigns it a new topic id, and the document claims the name, not
-the original topic
-([the format](formats/drill-scorecard.md#targetoriginal_name-format-180)).
+- `configuration parity:` names topics a 1.1.0 document did not assess (since
+  FX-21 also a replication factor or partition count the source's record lacks,
+  `replication_factor (notRecorded)`); its second form is every 1.0.0 document
+  and a 1.1.0 one whose drill stopped before phase 7. Nothing is printed when
+  every topic was assessed.
+- `reconstruction:` names the source settings a `newTopic` restore did not
+  reconstruct; a `newTopic` document signed before 1.2.0 prints a `not recorded`
+  form naming what its writer labelled `intentionally_deviated`. Nothing for a
+  scratch drill.
+- `time basis:` names the topics selected by producer time, the topics selected
+  by time with no recorded type, or, for every document without the block, that
+  this is unknown.
+- `integrity coverage:` gives a complete verification's counts (or
+  `INCOMPLETE`, then `incomplete because …`), says a sampled one did not verify
+  header order, and says a document before 1.4.0 covered a sample.
+- `sample coverage:` names the topics `sample.max_partitions` left unsampled
+  (1.6.0 or later; before 1.6.0 the absence says nothing).
+- `original name:` and its owner line appear only for a 1.8.0 restore under the
+  source's names; the restored topic is a new generation of the name.
 
-Backup receipts have their own shape and invariants — forty-five arms since
-format 1.8.0 ([the list](formats/backup-receipt.md#the-forty-five-arms-and-the-positions-documents-fourteen)). For an accepted
-receipt both readers print its configuration capture coverage in the same words:
-
-```
-config_coverage["orders"]: captured, message.timestamp.type LogAppendTime from dynamicDefaultBrokerConfig
-config_coverage["payments"]: captureDenied, message.timestamp.type not recorded
-config_coverage: not recorded, so every topic's configuration capture is UNKNOWN, never captured
-```
-
-The last line is printed instead of per-topic lines for every receipt without
-the block, including every receipt written before format 1.1.0. For each topic
-the receipt records as `LogAppendTime`, both readers also say that its covered
-window is producer time:
-
-```
-time basis: "orders" is LogAppendTime, so the archive holds its producers' timestamps and the covered window reads them; a restore that selects it by time is refused unless its plan states restore.time_basis: producerTime
-```
-
-The receipt's format does not change for it (FX-8). Receipt and teardown
-verification do not apply scorecard-specific integrity rules.
-
-`logweir drill show` renders a document without verifying its signature. It
-refuses an unsupported newer major with exit `1` — and a 2.x document that
-states no partition subset (PS-1) — but it does not perform the full
-verification above.
+A backup receipt has its own forty-five arms since format 1.8.0
+([the list](formats/backup-receipt.md#the-forty-five-arms-and-the-positions-documents-fourteen)),
+and for an accepted receipt both readers print, per topic, its configuration
+capture (`config_coverage["orders"]: captured, message.timestamp.type
+LogAppendTime from dynamicDefaultBrokerConfig`, or `config_coverage: not
+recorded, …` for a receipt before 1.1.0) and, for a `LogAppendTime` topic, that
+its covered window is producer time. Receipt and teardown verification apply no
+scorecard rules. `logweir drill show` verifies no signature; it refuses an
+unsupported newer major, and a 2.x document stating no subset (PS-1), with exit
+`1`.
 
 ### The payload is never re-serialised
 
 The verifier reads the payload as bytes (`open(path, "rb").read()`). The
-signature covers trailing newlines, key order, whitespace, number formatting
-and Unicode escaping. Semantically equivalent JSON can have different bytes.
-
-**Do not pretty-print, run `jq .` over, or re-save the file before verification.**
-Verify the delivered bytes. Parsing and writing JSON back out would check a
-different payload rather than the stored artifact.
+signature covers trailing newlines, key order, whitespace, number formatting and
+Unicode escaping, so equivalent JSON can be different bytes. **Never
+pretty-print, run `jq .` over, or re-save the file before verifying it.**
 
 ### The DSSE PAE encoding, precisely
 
-The signed message is defined by the
-[DSSE v1 specification](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
+From the [DSSE v1 specification](https://github.com/secure-systems-lab/dsse/blob/master/protocol.md):
 
 ```
 PAE(type, body) = "DSSEv1" SP LEN(type) SP type SP LEN(body) SP body
 ```
 
 `SP` is byte `0x20`; `LEN` is the ASCII-decimal count of **bytes**, not
-characters. Encode the type to UTF-8 before measuring it. Python's
-`len(payload_type)` counts code points, while `len(payload_type.encode("utf-8"))`
-counts bytes; these differ for non-ASCII text. Logweir's media types are ASCII,
-but independent implementations must still implement the byte-count rule.
+characters: `len(payload_type.encode("utf-8"))`, not `len(payload_type)`.
+Logweir's media types are ASCII, but an independent implementation must still
+count bytes.
 
 ### One asymmetry in the signature encoding
 
-`signatures[].sig` is base64 of:
-
-- **ECDSA P-256:** a DER-encoded `ECDSA-Sig-Value`, the ASN.1 sequence of integers
-  `r` and `s`.
-- **Ed25519:** the raw 64-byte `R || S` value, without ASN.1 wrapping.
-
-Select the interpretation from the public key's type; the sidecar's JSON shape
-alone does not distinguish them. The Python verifier branches on the loaded key
-before checking the signature.
+`signatures[].sig` is base64 of a DER `ECDSA-Sig-Value` (the integers `r` and
+`s`) for **ECDSA P-256**, and of the raw 64-byte `R || S` for **Ed25519**. The
+public key's type decides which; the sidecar's shape does not.
 
 ## Re-deriving `source.manifest_sha256` independently
-
-A source block identifies the archive manifest, for example:
 
 ```json
 "source": {
@@ -381,43 +231,27 @@ A source block identifies the archive manifest, for example:
 }
 ```
 
-The signature authenticates this claim; it does not independently establish
-which bytes were in storage. To check the claim:
-
-1. Obtain the backup engine's bucket and key prefix for `backup_id` from your
-   operator or runbook. The manifest is conventionally `manifest.json` beside
-   its segment files, but the exact location is deployment-specific.
-2. Fetch the manifest. If `manifest_version_id` is non-null, request that
-   specific object version so an overwrite cannot silently change the input.
-3. Run `sha256sum manifest.json` (or `shasum -a 256 manifest.json` on macOS).
-4. Prefix the resulting hex digest with `sha256:` and compare it with
-   `source.manifest_sha256`.
-
-A mismatch is a finding: the fetched object differs from the signed claim,
-possibly because it is a different manifest or version. This check uses the
-underlying storage independently of either scorecard verifier.
+The signature authenticates the claim, not what storage held. To check it,
+fetch the manifest of `backup_id` (conventionally `manifest.json` beside its
+segments; ask the operator for the bucket and prefix), the exact version when
+`manifest_version_id` is non-null, run `sha256sum manifest.json` (or `shasum -a
+256`), and compare `sha256:<hex>` with `source.manifest_sha256`. A mismatch is a
+finding: a different manifest or version.
 
 ## The storage receipt: a second signed document
 
-The four post-put fields in every emitted scorecard start as:
+Every scorecard is signed with its four post-put fields zeroed:
 
 ```json
 "evidence": { "create_only_enforced": false, "immutable": false,
               "retain_until": null, "version_id": null }
 ```
 
-They describe an upload that has not happened when the scorecard is signed.
-Updating them afterward would alter the signed bytes. Read them as **no storage
-proof obtained at signing time**, not as evidence that the object was mutable,
-unprotected or uploaded without a conditional put. Optional offset-report
-fields may also appear in this block.
-
-Post-upload facts live in a separately signed storage receipt:
-
-| File | Purpose |
-| --- | --- |
-| `<run_id>.receipt.json` | Readback after uploading the scorecard. |
-| `<run_id>.receipt.sig` | DSSE sidecar with type `application/vnd.logweir.drill-put-receipt+json;version=1.0.0`. |
+They describe an upload that has not happened yet, so read them as **no storage
+proof at signing time**, never as a mutable or unprotected object. The facts
+after the upload are in a separately signed receipt, `<run_id>.receipt.json`,
+with a `.receipt.sig` of type
+`application/vnd.logweir.drill-put-receipt+json;version=1.0.0`:
 
 ```json
 {
@@ -432,29 +266,17 @@ Post-upload facts live in a separately signed storage receipt:
 }
 ```
 
-`create_only_enforced: true` means the store performed a conditional put.
-`false` records an unsupported-operation response and HEAD-then-PUT fallback;
-it does not establish that anything was overwritten. `immutable` and
-`retain_until` become true/non-null only with provider readback. Current
-backends supply no such readback, so false/null is absence of proof.
+`create_only_enforced: true` means the store performed a conditional put;
+`false` records an unsupported-operation answer and a HEAD-then-PUT fallback,
+not an overwrite. `immutable` and `retain_until` need a provider readback no
+backend supplies yet, so false/null is absence of proof.
 
 ### How the receipt binds to the scorecard
 
-`scorecard_sha256` hashes the scorecard's **exact signed bytes**. Compare it
-with the document you verified:
-
-```bash
-sha256sum scorecard.json
-python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['scorecard_sha256'])" receipt.json
-```
-
-Use the actual receipt filename in place of `receipt.json`. The second value
-must equal `sha256:` plus the first digest. A mismatch means the receipt does
-not bind to these bytes. Do not reformat the scorecard before hashing.
-
-The binding is to payload bytes, not to a particular signature: signing unchanged
-scorecard bytes again leaves the digest unchanged. `scorecard_key` records the
-actual uploaded object key, which you can fetch and hash independently.
+`scorecard_sha256` hashes the scorecard's **exact signed bytes**, so it must
+equal `sha256:` plus `sha256sum scorecard.json`; a mismatch means the receipt
+does not bind to these bytes. Signing the same bytes again leaves it unchanged,
+and `scorecard_key` is the uploaded object you can fetch and hash yourself.
 
 ### Verifying the receipt's signature
 
@@ -462,8 +284,6 @@ actual uploaded object key, which you can fetch and hash independently.
 python3 docs/verify_scorecard.py --payload-type receipt \
     '<run_id>.receipt.json' '<run_id>.receipt.sig' public.pem
 ```
-
-Replace `<run_id>` with the real identifier. Example output:
 
 ```
 VALID  receipt for logweir/drills/01M1RJZNEM507A7XQ7WCGPK6SJ.json
@@ -474,303 +294,190 @@ VALID  receipt for logweir/drills/01M1RJZNEM507A7XQ7WCGPK6SJ.json
        then check sha256(scorecard.json) equals the digest above.
 ```
 
-The flag accepts `scorecard`, `backup-receipt`, `receipt`, `teardown`, or the
-corresponding full supported media type. A wrong type is a refusal. Selecting
-the right type still requires a valid signature over those exact bytes; it does
-not run scorecard-specific integrity checks on a receipt. Use the shipped flag
-instead of hand-written receipt-verification scripts from older documentation.
-
-The [independent-key requirement](#where-the-public-key-comes-from) also applies
-to the receipt. An absent receipt means no storage evidence was published, not
-that the upload lacked create-only protection. Receipt publication happens after
-the scorecard is stored; failure is logged without retracting the measurement.
+A wrong type is a refusal, and the right type still needs a valid signature
+over those bytes. The [independent key](#where-the-public-key-comes-from)
+applies here too. An absent receipt means no storage evidence was published
+(it is written after the scorecard, and a failure is logged without retracting
+the measurement), not that the upload lacked create-only protection.
 
 ## The `logweir drill show` table is a SUMMARY, not the document
 
-`logweir drill show scorecard.json` renders fourteen fixed rows covering outcome,
-engine identity, levers, target, approval, RTO/RPO, integrity, target changes,
-topic parity and evidence. The footer adds qualifications:
-
-| Detail | Footer display |
-| --- | --- |
-| RTO, RPO and pass-rate objectives | `objectives (from the approved plan)` |
-| `objectives.met` | `yes`, `NO` or `unmeasurable`; the last means a requested pass rate could not be measured. |
-| `integrity.partial_reason` | Verbatim reason. |
-| `engine_subreport.caveat` | Verbatim caveat, or an explicit notice that the block is null. |
-| `sample.unsampled_topics` (format 1.6.0) | The topics a sampled verification's `max_partitions` left without a sampled partition — counted, not reconciled. Printed only when the document names one. |
-
-The footer states that the table is a summary; `--format json` prints the signed
-bytes. Read the JSON for details the summary omits:
-
-- `phases`, including refusal notes; `source.manifest_sha256` and
-  `target.topic_mapping_sha256`; `approval.plan_hash` and `approval.key_id`.
-- `sample.records_expected` versus `integrity.records_sampled`. A null measured
-  pass rate is not zero: the footer displays `measured —`, while
-  `integrity.partial_reason` explains why it is unmeasured.
-- `engine.matrix_verdict` and its reason; `redactions`.
-- `last_phase_completed`: a completed drill signs `7` because phase 8's record
-  and phase 9 teardown follow the frozen payload. This does not imply teardown
-  was skipped; teardown has its own attestation. See the
-  [format reference](formats/drill-scorecard.md).
-
-Attach the JSON and sidecar when copying a table into a change record. The table
-itself cannot be verified.
+`logweir drill show scorecard.json` renders fourteen fixed rows (outcome,
+engine, levers, target, approval, RTO/RPO, integrity, target changes, topic
+parity, evidence). The footer adds the objectives and `objectives.met` (`yes`,
+`NO` or `unmeasurable`), `integrity.partial_reason`, `engine_subreport.caveat`
+(or that the block is null), and `sample.unsampled_topics` when named.
+`--format json` prints the signed bytes. Read the JSON for `phases`, the
+manifest and mapping digests, `approval.plan_hash` and `key_id`,
+`sample.records_expected` against `integrity.records_sampled` (a null measured
+pass rate shows `measured —` and is not zero), `engine.matrix_verdict`,
+`redactions`, and `last_phase_completed`, which a completed drill signs as `7`
+because phases 8 and 9 follow the frozen payload (teardown has its own
+attestation; [format](formats/drill-scorecard.md)). Attach the JSON and sidecar
+to a change record: the table cannot be verified.
 
 ## What the scorecard does **not** claim
 
-A signature authenticates the publisher's bytes. Assess the scope and strength
-of the signed claims separately. The
+A signature authenticates the bytes; judge the claims' scope separately. The
 [control-evidence mapping](control-evidence.md#what-the-evidence-does-not-show)
-states these limits against each control clause it maps.
+states these limits against each clause.
 
 ### A pass compares the restored topic with the archive, not with the source
 
-Restore drills fingerprint sampled records of the restored topic against the
-same records in the archive. A loss that happened when the archive was written
-is in both, so the comparison cannot see it. With engine 0.21.0, and unchanged
-on the 0.23.3 pin (re-measured: PROD-01.1 record §11):
+A loss that happened when the archive was written is in both, so the drill
+cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
+§11):
 
-- **Transactions.** The backup reads uncommitted data. Records of aborted
-  transactions, records of transactions still open when the backup ran, and the
-  transactions' commit and abort markers are archived and restored as ordinary
-  records. A consumer of the restored topic sees all of them, even with
-  `isolation.level=read_committed`, because the restore does not produce
-  transactionally. The drill passes. Since PROD-01.1a, a restore whose archive
-  holds the markers is refused unless its plan states
-  `restore.allow_transaction_markers: true`, and then the scorecard's
-  `sample.coverage_note` says so ([details](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it)).
-  A transaction still open when the backup ran leaves no marker in the
-  archive, so its records alone do not cause a refusal.
-- **`LogAppendTime` topics.** The archive keeps the timestamp each producer set,
-  not the time the broker appended the record, and the restore writes it as
-  `CreateTime`. Restored timestamps therefore differ from what the source topic
-  reported, and the drill passes. A point-in-time restore would select records
-  by the producers' clocks; since FX-8 it is refused unless the plan accepts
-  that, and then the scorecard says so ([below](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)).
-- **Repeated header keys.** When a record carries the same header key more than
-  once, only one copy is archived and restored: at the first copy's position,
-  with the last copy's value. The drill does not detect it. A record that
-  already carried `x-original-offset` (a topic that was itself restored) keeps
-  only the backup's own, and a drill that samples such a record fails.
-- **Out-of-order timestamps.** Recovery-point selection reads each archive
-  segment's first and last record timestamps. When timestamps are not
-  increasing within a segment, a point-in-time restore can omit a record at or
-  before the requested point without the drill noticing; a record older than
-  every segment's first record is dropped from every restore, full or
-  point-in-time — a full restore's drill fails its count check, and a
-  point-in-time drill can pass; and a correct point-in-time restore can fail
-  the count check.
+- **Transactions.** The backup reads uncommitted data, so aborted and open
+  transactions' records and their markers are restored as ordinary records,
+  visible even under `read_committed`; the drill passes. Since PROD-01.1a an
+  archive holding markers is refused unless the plan states
+  `restore.allow_transaction_markers: true`, and `sample.coverage_note` says so
+  ([details](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it));
+  a transaction open at backup time leaves no marker.
+- **`LogAppendTime` topics.** The archive keeps each producer's timestamp and
+  the restore writes it as `CreateTime`, so restored timestamps differ and the
+  drill passes. Selecting by time is refused or labelled
+  ([below](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)).
+- **Repeated header keys.** Only one copy is archived and restored, at the first
+  copy's position with the last copy's value; undetected. A record that already
+  carried `x-original-offset` keeps only the backup's, and a drill sampling it
+  fails.
+- **Out-of-order timestamps.** Point selection reads each segment's first and
+  last timestamps, so a point-in-time restore can omit a record without the
+  drill noticing; a record older than every segment's first is dropped from every
+  restore (a full restore's count check fails, a point-in-time drill can pass),
+  and a correct point-in-time restore can fail the count check.
 
-Record order within a partition, keys, values, null versus empty keys, values
-and header values, tombstones, and the records a compacted source held when it
-was backed up are preserved.
-
-A broker outage or a lost produce acknowledgement during a restore can leave
-duplicates and a partial target; in every measured case Logweir exited `1` and
-signed nothing, and none reached the drill's comparison, so whether a drill that
-completes would catch the duplicates was not measured. See
-[stability.md](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates).
-
-[`docs/to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)
-records how each statement was measured.
+Order within a partition, keys, values, null versus empty, header values,
+tombstones and a compacted source's records at backup time are preserved. A
+broker outage or lost acknowledgement during a restore can leave duplicates and
+a partial target; every measured case exited `1` and signed nothing
+([stability.md](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates);
+measurements in
+[`to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)).
 
 ### A point-in-time restore of a `LogAppendTime` topic is refused, or labelled
 
-A scorecard signed before format 1.3.0 says nothing about which clock a
-point-in-time restore read; PROD-01.1 measured one that restored, at a point in
-2001, records the broker had appended in 2026, signed `pass`. Since FX-8 the
-runner refuses a selection by time over a topic whose timestamp type is
-recorded as `LogAppendTime` (exit 3, `PointInTimeByProducerTime`, no scorecard),
-unless the approved plan states `restore.time_basis: producerTime`. A scorecard
-of such a run lists the topic in `source.time_basis.producer_time`: its records
-were selected by the PRODUCERS' clocks, not the broker's. A topic in
-`source.time_basis.not_recorded` was selected by time while nothing recorded its
-type (a plan bound to no receipt, or a receipt from before format 1.1.0), so the
-clock it was selected by is unknown. A document without the block makes no
-claim either way ([the format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
+A scorecard before format 1.3.0 says nothing about the clock (PROD-01.1 measured
+one that restored, at a point in 2001, records appended in 2026, signed `pass`).
+Since FX-8 a selection by time over a topic recorded as `LogAppendTime` is
+refused (exit 3, `PointInTimeByProducerTime`, no scorecard) unless the plan
+states `restore.time_basis: producerTime`, and the scorecard lists the topic in
+`source.time_basis.producer_time` (selected by the PRODUCERS' clocks), or in
+`not_recorded` when no type was recorded (a plan bound to no receipt, or one
+before 1.1.0)
+([the format](formats/drill-scorecard.md#sourcetime_basis-format-130)).
 
 ### The sample window is not a claim about the whole archive
 
-The `sample` block's window, topics, partitions, expected/restored counts and
-`coverage_note` describe what was sampled. A passing byte-fingerprint result
-establishes agreement within that sampled window; it does not establish that
-unsampled archive records would also match. Read `coverage_note` before making
-claims about representativeness.
-
-Since format 1.4.0 the document says which it is.
-`integrity.verification.coverage: sampled` is that sample, and its
-`header_order: notVerified` says the fingerprint it compared sorts headers.
-`coverage: complete` is a verification of every archived segment and every
-restored record of every restored partition: the expected output selected by
-each archived record's own timestamp, every restored record mapped back by its
-`x-original-offset`, and the counts — expected, restored, matching, missing,
-unexpected, duplicates, out of order, different — in
-`integrity.verification.complete` per partition and in total. Read
-`complete.covered` before the counts: `false` means a bound stopped the
-verification or a partition could not be compared, `incomplete_reason` says
-which, and such a document is never a `pass`. A document without the block
-(every one before 1.4.0) covered a sample. Complete coverage still compares
-with the archive, not the source (the section above), and validates no
-application ([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
+The `sample` block's window, topics, partitions, counts and `coverage_note`
+describe what was sampled; a byte-fingerprint pass is agreement inside it. Since
+format 1.4.0, `integrity.verification.coverage: sampled` is that sample
+(`header_order: notVerified`: the fingerprint sorts headers), and `complete` is
+every archived segment and every restored record of every restored partition,
+each mapped back by `x-original-offset`, with expected, restored, matching,
+missing, unexpected, duplicate, out-of-order and different counts per partition
+and in total. Read `complete.covered` first: `false` means a bound stopped it or
+a partition could not be compared (`incomplete_reason`), and is never a `pass`.
+A document without the block covered a sample. Complete coverage still compares
+with the archive and validates no application
+([the contract](to-do/decisions/PROD-08.1-integrity-contract.md)).
 
 ### What a sampled `pass` guarantees, and what it does not
 
-A sampled verification (`coverage: sampled`, and every document before 1.4.0)
-reconciles a canary — the first `records_per_partition` records of each
-SELECTED partition — and holds the restored COUNTS to the archive manifest.
-
-**Only a scorecard of format 1.6.0 or later carries the guarantees below.**
-Only a build with FX-23's checks writes 1.6.0, and it writes 1.6.0 for every
-SAMPLED scorecard it signs, so the version marks that build. A sampled 1.4.0 or
-1.5.0 document comes from an earlier build — the scorecard names the engine,
-not the `logweir` build, and the version is the mark — so it proves what it
-always proved: the canary, and one count bound over every topic together.
-Read it as a pre-FX-23 document (the last paragraph of this section). Both readers say which, in a
-`sample coverage:` line printed for every sampled `pass`:
+A sampled verification reconciles a canary, the first `records_per_partition`
+records of each SELECTED partition, and holds the restored COUNTS to the
+manifest. **Only format 1.6.0 or later carries the guarantees below**: only a
+build with FX-23's checks writes it, for every sampled scorecard. Both readers
+say which in a line printed for every sampled `pass`:
 
 ```
 sample coverage: a sampled pass at format 1.6.0 or later: every mapped partition was held to its own count bound, max_partitions reached every topic before a second partition of any, and a readable engine report lacking a partition with records in the window was refused
 sample coverage: a sampled pass at format 1.4.0, before 1.6.0: it proves the canary and one count bound over every topic together, not a per-partition count bound, a sample of every topic or an engine-report check (a build from before FX-23 may have signed it)
 ```
 
-A sampled `pass` of format 1.6.0 or later also means all of this held:
+At 1.6.0 or later a sampled `pass` also means:
 
-- **Every mapped partition is inside its own count bound**, not only the sum
-  over every topic. The bound comes from the partition's own segments: those
-  wholly inside the restore window count in full, and a segment the window cuts
-  across counts as at least ONE record when its first or its last record's
-  timestamp is inside the window (the manifest records each segment's first
-  and last record timestamps, so that record was in the window and is
-  restored), and as at most its whole count. So a partition the manifest
-  proves holds records in the window is never empty in a `pass`, and one
-  partition cannot borrow another's slack. A failure names the partition:
-  `orders/0: drill-orders/0 holds no record but the manifest proves at least 1
-  in the window [...]`.
-- **The engine's own offset report names every such partition.** The engine
-  writes it after a restore that returned success, and an engine stopped by a
-  SIGTERM returns success too: it finishes the topic it is on, exits 0 and
-  never starts the rest, so its report lacks them (`the engine's offset report
-  has no entry for N mapped partition(s) ...`). A run with no readable report
-  checks nothing here and says so in its log; the two other guarantees still
-  hold.
+- **Every mapped partition is inside its own count bound**, from its own
+  segments: wholly inside the window counts in full, and a segment the window
+  cuts counts as at least ONE record when its first or last timestamp is inside
+  it, at most its whole count. A partition proved to hold records in the window
+  is never empty in a `pass` (`orders/0: drill-orders/0 holds no record but the
+  manifest proves at least 1 in the window [...]`).
+- **The engine's offset report names every such partition.** An engine stopped
+  by SIGTERM finishes its topic, exits 0 and skips the rest, so its report lacks
+  them (`the engine's offset report has no entry for N mapped partition(s)
+  ...`). With no readable report this check is skipped and logged.
 - **`sample.max_partitions` reaches every topic before a second partition of
-  any.** The cap keeps one partition of each restored topic with records in the
-  window, in manifest order, then a second of each, and so on. When it is
-  below the number of such topics, the topics it could not reach are named in
-  `sample.unsampled_topics`: they were COUNTED (the first two guarantees) and
-  never reconciled record by record.
+  any**; topics it could not reach are named in `sample.unsampled_topics`,
+  counted but never reconciled.
 
-What a sampled `pass` still does not establish: that every record of a
-partition is the archive's (only the canary is compared), that header order
-was kept, or anything about a straddling segment's records beyond its one
-proved record. Ask for `sample.coverage: complete` for that. And the bounds read
-the manifest's first and last record timestamps per segment, so they assume a
-segment's timestamps do not run backwards: a record older than every segment's
-first record (several producers with skewed clocks, `CreateTime`) is dropped
-by every restore of that archive, and the per-partition bound then fails a
-restore the engine performed faithfully — the safer verdict, but a failure the
-archive caused, not the restore
+It still does not establish that every record of a partition is the archive's,
+that header order was kept, or more than one record of a straddling segment:
+ask for `sample.coverage: complete`. The bounds assume a segment's timestamps
+do not run backwards; a record older than every segment's first is dropped and
+the bound then fails a faithful restore
 ([the limitation](stability.md#recovery-point-selection-uses-segment-first-and-last-timestamps)).
-
-A sampled document signed by a build from before FX-23 — any sampled 1.4.0 or
-1.5.0 document — was judged by one count bound over all topics together, and its `max_partitions` kept the first partitions in
-manifest order — the order the engine restores in. An engine stopped early
-restores a manifest-order prefix of the topics, so such a `pass` can cover a
-restore whose later topics are empty when the plan set `max_partitions` below
-the number of partitions with records in the window (measured on the compose
-stack: a SIGTERM to the engine mid-restore was signed `pass` with the second
-topic empty; the same restore is now `fail-integrity`). Read such a document's
-`sample.partitions` against the partitions the archive holds in the window.
+A sampled 1.4.0 or 1.5.0 document, from before FX-23, was judged by one count
+bound over all topics, and its `max_partitions` kept the first partitions in
+manifest order: an engine stopped early could leave later topics empty under a
+`pass` (measured: a SIGTERM mid-restore signed `pass` with the second topic
+empty; it is now `fail-integrity`). Read its `sample.partitions` against the
+partitions the archive holds in the window.
 
 ### The `evidence` block is not a finding about your bucket
 
-The four post-put fields are zeroed before signing. Storage facts belong in the
-[separate receipt](#the-storage-receipt-a-second-signed-document); false values
-in the scorecard do not establish that the bucket is mutable or unprotected.
+The post-put fields are zeroed before signing; storage facts are in the
+[separate receipt](#the-storage-receipt-a-second-signed-document).
 
 ### An empty `unexpected_divergence` is not configuration parity
 
-`topic_parity` compares each restored topic's configuration with the archive
-manifest's record of the source's. That record is empty whenever the backup
-could not read the source's configuration, so an empty
-`unexpected_divergence` is evidence of configuration parity only for a topic
-that `topic_parity.not_assessed` does NOT name, and only in a format 1.1.0
-document whose `not_assessed` is present. Differences listed for a named topic
-are still real; the SILENCE about it is not a finding. The reasons in
-parentheses are defined in the
-[scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means).
+`topic_parity` compares each restored topic's configuration with the
+manifest's record of the source's, which is empty whenever the backup could not
+read it. So an empty list is parity only for a topic `topic_parity.not_assessed`
+does NOT name, in a 1.1.0 document that has the field
+([the reasons](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
+Since 1.1.0 each such topic also has an `unexpected_divergence` entry
+`"<target topic>: configuration not assessed (<why>)"` (FX-21's twin:
+`replication_factor not assessed (notRecorded)` or `partition_count`), so an
+older reader sees a divergence, never a clean list; a key never contains a
+space.
 
-Since format 1.1.0 each topic `not_assessed` names ALSO has one entry
-`"<target topic>: configuration not assessed (<why>)"` in
-`unexpected_divergence`, so a reader that predates `not_assessed` (this
-script before 1.15.0, a `logweir drill show` built before FX-4, or a guide
-written for 1.0.0) sees a divergence for it, never a clean list. A
-configuration key never contains a space, which tells such an entry from a key.
-An FX-21 entry has the same twin, `"<target topic>: replication_factor not
-assessed (notRecorded)"` (or `partition_count`).
+**A replication factor is parity only where the source's is recorded**, from
+the manifest or else the bound receipt's `topic_configuration`. Before FX-21 the
+target's factor was compared with itself where the manifest lacked the source's
+(engine 0.23.3 omits it for every topic after the first). A runner-signed
+document whose `engine.version` is `0.23.3+logweir.2` or later was written with
+FX-21; for any other, read `topics[].source_replication_factor` in the archive's
+manifest: without it there is no replication-factor finding.
 
-**A replication factor is parity only where the source's is recorded.** Phase
-7 compares it from the archive's manifest, else from the bound receipt's
-`topic_configuration`; a scorecard written before FX-21 compared the target's
-own factor with itself where the manifest lacked the source's, which engine
-0.23.3 does for every topic after the first one a backup saves. No field marks
-FX-21: a runner-signed document whose `engine.version` is
-`0.23.3+logweir.2` or a later `+logweir.<n>` was written with it; for any
-other (and for a standalone CLI's), read `topics[].source_replication_factor`
-in the archive's manifest (`source.backup_id`, `source.manifest_sha256`): a
-topic without one has no replication-factor finding, whatever the scorecard
-lists
-([the format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-
-**What "assessed" covers.** An assessed topic's parity compares the
-configuration OVERRIDES the engine captured — explicit topic-level settings on
-its 24-key allowlist — with the restored topic's values. A value the source
-topic inherited from a broker default is not in the archive's record and is
-never compared: a source whose `message.timestamp.type` is `LogAppendTime`
-from the broker's default restored as `CreateTime` shows no divergence even
-when every topic was assessed (measured live by FX-4). The backup receipt's
-`config_coverage` records that effective value and its source; since FX-8 a
-restore that selects such a topic by time is refused or labelled
-([above](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)),
-and comparing the other effective values is PROD-05.1's.
+**"Assessed" covers explicit topic-level OVERRIDES** on the engine's 24-key
+allowlist. A value inherited from a broker default is never compared: a
+`LogAppendTime` broker default restored as `CreateTime` shows no divergence
+(measured by FX-4). The receipt's `config_coverage` records the effective value;
+comparing other effective values is PROD-05.1's.
 
 ### A `newTopic` restore does not reconstruct the source's topic settings
 
-A restore creates its target topics itself, at the plan's replication factor,
-with `retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch
-drill those deviations are intended and `intentionally_deviated` lists them. In
-a `newTopic` restore they are the source's compaction, retention and
-replication factor NOT reconstructed: a format 1.2.0 scorecard lists them in
-`topic_parity.not_reconstructed` and also in `unexpected_divergence`, and both
-readers print the `reconstruction:` line above. **A `newTopic` scorecard signed
-before 1.2.0 lists the same settings as `intentionally_deviated`; that label is
-the defect FX-3 fixed, not a finding that they were intended.** What to do about
-them, and what the comparison does not cover, is in
-[stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings).
+A restore creates its topics at the plan's replication factor, with
+`retention.ms=-1` and the target broker's `cleanup.policy`. In a scratch drill
+these are intended (`intentionally_deviated`); in a `newTopic` restore they are
+NOT reconstructed, listed in 1.2.0's `topic_parity.not_reconstructed` and in
+`unexpected_divergence`. **A `newTopic` scorecard before 1.2.0 labels them
+`intentionally_deviated`; that label is the defect FX-3 fixed, not intent**
+([stability.md](stability.md#a-newtopic-restore-does-not-reconstruct-the-sources-topic-settings)).
 
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
-Logweir never runs the engine's `validation run`, so emitted scorecards have
-`engine_subreport: null`. Phase 8's missing-report
-message is in structured logs, not the already frozen scorecard. Populated
-checked-in fixtures are hand-authored format examples, not current production
-output; their bodies can be minimal placeholders.
-
-If a populated report is encountered, base64-decode `engine_subreport.body_b64`
-and check `body_sha256` against the decoded bytes. There is no literal `body`
-field: the paths below refer to that decoded JSON. The pinned upstream source
-records two reasons not to treat it as independent corroboration:
-
-- `integrity.checksums_valid` is constructed as literal `true`, rather than
-  computed (`kafka-backup-core/src/evidence/emit.rs:109` in the upstream source).
-- `restore.start_time`, `restore.end_time` and `restore.duration_seconds` are
-  constructed as `None` (`emit.rs:100–104`), so they cannot corroborate RTO.
-
-These are findings about the inspected upstream version, not promises about
-future versions. The report is retained for provenance and traceability; a
-matching body digest binds the included bytes but does not independently prove
-who produced them or validate Logweir's integrity measurement. Read its caveat
-and assess Logweir's `integrity` block against the declared sample.
+Logweir never runs the engine's `validation run`, so scorecards carry
+`engine_subreport: null`, and phase 8's missing-report message is in the logs.
+Populated fixtures are hand-written format examples. For a populated report,
+base64-decode `body_b64` and check `body_sha256`. The pinned upstream source
+constructs `integrity.checksums_valid` as literal `true`
+(`kafka-backup-core/src/evidence/emit.rs:109`) and the restore times as `None`
+(`emit.rs:100–104`), so it corroborates neither integrity nor RTO. A matching
+digest binds the bytes, not who produced them.
 
 ## Reading `approval.self_attested`
 
@@ -785,229 +492,105 @@ and assess Logweir's `integrity` block against the declared sample.
 }
 ```
 
-Self-attestation means the approval key equals the scorecard-signing key. It
-indicates no separation at the key level; it does not independently identify the
-humans operating those keys. Logweir permits and labels such runs.
-
-**Both verifiers derive this finding** by comparing `approval.key_id` with the
-key ID that actually verified the signature. They refuse a contradictory
-`self_attested` claim: Rust exits `4`, Python exits `1`. The diagnostic is one
-of the following, with Python adding `INVALID: `:
+Self-attested means the approval key is the signing key: no separation at the
+key level, which says nothing about the humans behind them. Logweir permits and
+labels such runs. **Both verifiers derive it** from `approval.key_id` and the key
+that verified the signature, and refuse a contradictory claim (Rust exit `4`,
+Python exit `1`, with `INVALID: ` before):
 
 ```
 APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=true but the approval key id <a> does not match the verifying key id <b>
 APPROVAL CLAIM NOT VERIFIED: the document claims self_attested=false but the approval key id <a> matches the verifying key id <b>
-```
-
-`drill show` has neither signature nor key and cannot derive the result. Its
-self-attestation row says
-`SELF-ATTESTED (claimed; run 'drill verify' to check it against the signing key)`.
-Do not treat it as a verification.
-
-The stricter reader rule did not change `format_version: 1.0.0`; it rejects
-contradictory claims without adding or changing fields. Both verifiers surface a
-derived true with:
-
-```
 approval: SELF-ATTESTED — the approval key equals the signing key
-```
-
-The Python scorecard report also prints this reminder on every successful check:
-
-```
 evidence: the four post-put fields are zeroed before signing; the storage facts live in the receipt
 ```
 
-Treat derived self-attestation as a reason to seek additional corroboration,
-such as the change ticket, another reviewer or an independent drill. It is a
-weaker governance signal, not by itself a defect in the signed artifact.
+The third is a derived true; the fourth ends every successful Python check.
+`drill show` has no key, so it prints `SELF-ATTESTED (claimed; run 'drill
+verify' to check it against the signing key)`, which is not a verification. The
+rule added no field to `format_version: 1.0.0`. Treat self-attestation as a
+reason to seek corroboration (the ticket, another reviewer, an independent
+drill), not as a defect in the artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.30.0` followed by
-the checks it applied. This is the **verifier's version**, not the document's
-`format_version` (`1.0.0`, `1.1.0` for a scorecard signed since FX-4, `1.2.0`
-since FX-3, `1.3.0` since FX-8, `1.4.0` since PROD-08.1, `1.5.0` for a
-restore into a target whose auth mode is one PROD-01.3 added, `1.6.0` for
-every sampled drill since FX-23, `1.7.0` for a restore that states a window
-start since PROD-11.1, `1.8.0` for a restore under the original topic names
-since PROD-15.1, or `2.0.0` for a restore that states a partition subset since
-PROD-11.1b). It
-changes when the reader's accepted-document set changes. The compatibility
-history is:
+The Python report ends with `verifier: verify_scorecard.py 1.30.0` and the
+checks applied. That is the **verifier's** version, not the document's
+`format_version` (scorecard `1.0.0`; `1.1.0` FX-4; `1.2.0` FX-3; `1.3.0` FX-8;
+`1.4.0` PROD-08.1; `1.5.0` PROD-01.3's auth modes; `1.6.0` every sampled drill
+since FX-23; `1.7.0` a window start, PROD-11.1; `1.8.0` original names,
+PROD-15.1; `1.9.0`/`2.1.0` a console approval, PROD-16.2; `2.0.0` a partition
+subset, PROD-11.1b). It moves when the accepted-document set changes:
 
 | Version | Changed checks |
 | --- | --- |
 | `1.1.0` | Rejects nonzero post-put evidence fields in `1.0.x` scorecards. |
-| `1.2.0` | Derives self-attestation from the verified key and rejects contradictory claims. |
-| `1.3.0` | Rejects blank/whitespace partial reasons and nonempty redactions. |
-| `1.4.0` | Checks outcome against integrity, partial reason, objectives and matching counts; bounds sampled counts by expected counts; requires matrix pass to be a passing byte-fingerprint drill. |
-| `1.5.0` | Requires `sample` and integer `sample.records_expected`, closing Python/Rust disagreement on absent or mistyped sample data. |
-| `1.6.0` | Checks all eleven required blocks in Rust declaration order and bounds every `u64` field to `0 <= v < 2**64`; closes missing target, target-diff and topic-parity gaps. |
-| `1.7.0` | Requires all six non-block fields and rejects null for nonoptional `u64` values; the five optional `u64` fields still permit null. |
-| `1.8.0` | Type-checks the six non-block fields using their Rust-implied JSON types, closing cases such as `run_id: 42`, `phases: "x"` and `requested_at: 5`. |
-| `1.9.0` | Adds backup-receipt verification and scorecard auth-field consistency checks. |
-| `1.10.0` | Restricts scorecard/backup-receipt auth modes to `plaintext` or `scramSha512` (widened by version in `1.21.0`). |
-| `1.11.0` | Requires offset-report key and digest to be present or absent together. |
-| `1.12.0` | Requires a marker topic unless target mode is `newTopic`. |
-| `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
-| `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
-| `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed` are arrays of strings, and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
-| `1.16.0` | Knows backup-receipt and catalog-point format `1.2.0` (FX-7). Refuses a receipt's `archive.manifest_version_id` that is not a string — a shape check, where Rust refuses the same document at deserialisation — and prints the pinned manifest version of a receipt or a catalog point. No arm is added; every document without the field is decided exactly as before. |
-| `1.17.0` | Knows scorecard format `1.2.0` (FX-3). Adds the five `topic_parity.not_reconstructed` arms (NR-1 to NR-5; NR-4 and NR-5 refuse a `newTopic` document carrying the field whose `intentionally_deviated` is not empty, or whose block omits a divergence on a setting the restore decides) and prints the reconstruction line. Refuses `topic_parity.intentionally_deviated` and `unexpected_divergence` that are not arrays of strings, and a `format_version` whose major Rust's integer parse refuses (`" 1.0.0"`, `"0_1.0.0"`): `drill verify` refused all of these while earlier versions printed `VALID`. Every other document without the new field is decided exactly as before. |
-| `1.18.0` | Knows scorecard format `1.3.0` (FX-8). Adds `source.time_basis`'s four arms (TB-1 to TB-4) and its shape check, and prints the `time basis:` lines for a scorecard and, for a backup receipt, one per topic it records as `LogAppendTime`. Every document without the block is decided exactly as before. |
-| `1.19.0` | Knows scorecard format `1.4.0` (PROD-08.1). Adds `integrity.verification`'s seven arms (IV-1 to IV-7), its shape check and the domain of its 25 nested counts (24 refuse null), and prints the `integrity coverage:` lines. Every blank test (ruling R-A) now strips exactly the set Rust's `trim` strips: before, a reason, key, mode or marker made only of U+001C–U+001F was blank here and not in `logweir drill verify`, so the two readers split on it (the writer never produces one). Apart from such a value, every document without the block is decided exactly as before. |
-| `1.20.0` | Knows backup-receipt and catalog-point format `1.3.0` (PROD-05.1). Adds the backup receipt's eight `topic_configuration` arms (12–19) and two `owner_detection` arms (20–21), their shape checks (the counts are `u32`, an entry's value a string or absent, `owner_detection` a list of strings) and the `topic_configuration` lines: per topic the recorded partition count, replication factor, entry counts by portability class and the apply route — never a configuration value. The route is the admin API only where `owner_detection` says the run looked for an owner; otherwise the line says the owner was not checked. Every document without the block is decided exactly as before. |
-| `1.21.0` | Knows scorecard format `1.5.0` and backup-receipt format `1.4.0` (PROD-01.3). The auth mode's value set is VERSIONED: `scramSha256`, `plain` and `mtls` are accepted in `target.auth.mode` from scorecard 1.5.0 and in `source.auth.mode` from receipt 1.4.0; under an older version they are refused as a value it does not define; the closed set is five from the new version and the unchanged two below it. Every document that predates PROD-01.3 is decided exactly as before. |
-| `1.22.0` | Knows scorecard format `1.6.0` (FX-23). Adds `sample.unsampled_topics`'s three arms (US-1 to US-3: only from 1.6.0; never empty, no blank name, sorted with no repeat; never beside a complete verification), its shape check (an array of strings), and prints the `sample coverage:` line naming them; for every sampled `pass` it also prints a `sample coverage:` line saying whether the document's version proves FX-23's checks ran (only 1.6.0 or later does). Every document without the field is decided exactly as before. |
-| `1.23.0` | Knows scorecard format `1.7.0` (PROD-11.1). Adds `source.selection`'s three arms (SEL-1 to SEL-3: only from 1.7.0; a start before the end; a complete block over the block's window) and its shape check (an object with two integers), prints the `replay selection:` coverage line — saying no record before the start was RESTORED only over a complete verification that passed, and for a sampled document that the sampled check does not prove it — and for a sampled `pass` over a selection prints the `sample coverage:` line QUALIFIED by the window (`a sampled pass over a replay selection from epoch-ms S to epoch-ms E: …`) instead of the unqualified 1.6.0 line. Every document without the block is decided exactly as before. |
-| `1.24.0` | Knows backup receipt format `1.5.0` (PROD-03.0). Adds `schema_dependency`'s eight arms (22 to 29: only from 1.5.0; covering exactly the named topics; a closed verdict, reason and basis; both sides exactly when judged; a judged count that fits `records`; distinct plausible schema ids within the cap of 16 and a count; the one-in-ten threshold; a verdict its sides give) and its shape check, and prints one `schema_dependency["<topic>"]:` line per topic — `schema-dependent, registry not captured`, `no schema framing detected` or `not assessed (<reason>)`, with the framed share and the schema ids — or `schema_dependency: not assessed, …` for a receipt without the block. Every receipt without the block is decided exactly as before. |
-| `1.25.0` | Knows backup-receipt and catalog-point format `1.6.0` (PROD-01.4a). Adds the backup receipt's five `generations` arms (36–40: only from 1.6.0; covering exactly the named topic set; every recorded topic ID in Kafka's text — 22 URL-safe base64 characters over 16 bytes, never one of Kafka's reserved IDs, `AAAAAAAAAAAAAAAAAAAAAA` or `AAAAAAAAAAAAAAAAAAAAAQ`; a reason exactly for a null ID, from the closed six; a source exactly for a recorded one), its shape check (each field a string or null), and the `generations` lines: per topic, one generation, the ID CHANGED during the capture, or not established by ID (with the reason). For a catalog point it makes ONE check beyond the signature: every topic ID the record copies (`topics[].identity`) is a real one, else the record is refused in the Rust reader's words. Every document without the block is decided exactly as before. |
-| `1.26.0` | Knows backup-receipt and catalog-point format `1.7.0` (PROD-04.1). Adds the receipt's six `consumer_positions` arms (30–35, after PROD-03.0's 22–29): the block only from 1.7.0; a capture window that ends at or after it starts (compared as instants), a closed listing word and at least one group; this run's positions document named by a well-formed digest over at least one byte; each group's outcome and reason from the closed sets; what a captured (never `Dead` with no member, counts over at least one partition), a `GroupTypeNotCaptured` and any other group records; and an `active` the two states derive. With `--consumer-positions <file>` (backup receipts only) it checks the positions document the receipt binds — fourteen arms, CP-1 to CP-14: the receipt's digest and length, its backup and run, the named topics with their partitions in order and well-formed marks, a derived changed flag, exactly the captured groups, no kept position on a changed topic, no capture over an unread topic, every partition accounted for so absence is never offset 0, each position's status, value, reason and derived coverage, and the receipt's counts — and prints each position. Adds their shape checks and prints the `consumer_positions` lines: the document and whether it was verified, per group its outcome and counts, and with the document one line per position. Every document without the block is decided exactly as before. |
-| `1.27.0` | Knows scorecard format `2.0.0` (PROD-11.1b, the owner's decision OD-9 (a)), the format's first MAJOR, written only for a restore that states a partition subset. Reads major 2 for that shape alone: a 2.x document without `source.selection.partitions` is refused before any arm (PS-1), and every arm of major 1 holds for a 2.0.0 one. PS-2 holds a 1.x `source.selection` to a start and its end (a block without a start, or with `partitions` or `engine_runs`, is refused); PS-3 to PS-5 judge the subset list, the engine runs and a complete block that expects records from an unselected partition. The shape layer reads the 2.0.0 block (an optional start, the subsets, the runs). The `replay selection:` line names the subset (`ONLY orders partitions [0, 2] (every partition of any other restored topic), …, in N engine run(s); …`), saying no record of another partition was RESTORED only over a verification that passed; a sampled `pass` over a subset prints `a sampled pass over a partition subset from … to …: every selected partition was held to its own count bound over that window, every other partition of a narrowed topic was held empty, …`. A newer major is refused naming `2.0.0`. Every 1.x document is decided exactly as before, except a 1.7.0 block that is not a start and its end, which no writer produces and which 1.23.0 refused at its shape layer when the start was missing. |
-| `1.28.0` | Knows scorecard format `1.8.0` (PROD-15.1). Adds `target.original_name`'s fourteen arms (ON-1 to ON-14: only from 1.8.0 of format 1, and never beside a partition subset (ON-14, judged first: a restore under the original topic names restores whole topics, so no 2.x document carries the block); never in scratch mode; only beside an empty `target.topic_mapping_prefix`; the `originalName` approval subject; the approval mode, cluster condition and owner-detection places from their closed sets; `targetIsNotSource` beside a different, known source cluster id; every owner found in a place looked in, of a known kind, and only on the owner path; a one-person confirmation (`ordinary`) exactly with `confirmation: typedTopicNames`; the `KafkaTopic` resources looked in named by their sha256; and only beside a COMPLETE `integrity.verification`, never a sampled one and never a pass that records none) and its shape check, and prints the two `original name:` lines. Every document without the block is decided exactly as before. |
-| `1.29.0` | Knows scorecard format `1.9.0` and `2.1.0` (PROD-16.2): the optional `approval.console` of a restore a second person approved in the console. Adds arms CA-1 to CA-8 (only from 1.9.0 of format 1 or 2.1.0 of format 2; its mode `consoleApproval`; two people of one issuer, neither the local administrator nor a `system:` subject; the approval inside the request's window; `approval.approver`, `approval.key_id` and `approval.approved_at` held to the block; `target.original_name.approval_mode` `consoleApproval` exactly beside it) and its shape check, splits ON-5 by version (the member `consoleApproval` from 1.9.0), and prints one `console approval:` line saying who asked, who approved, both instants and that the console key signed both. Every document without the block is decided exactly as before. |
-| `1.30.0` | Knows backup-receipt format `1.8.0` (PROD-02.1). Adds the receipt's five `source_watermarks` arms (41–45: only from 1.8.0; covering exactly the named topic set; at least one partition per topic; a low watermark never above its high; an empty `covered` window — an empty capture — only with no record counted and every partition `low == high`), admits arm 4's empty window only beside the block, and prints the `source_watermarks` lines: "coverage not recorded" for a receipt without the block, never complete. An older verifier refuses an empty capture through arm 4. |
+| `1.2.0` | Derives self-attestation from the verified key; rejects contradictory claims. |
+| `1.3.0` | Rejects blank partial reasons and nonempty redactions. |
+| `1.4.0` | Outcome against integrity, partial reason, objectives and matching counts; sampled counts bounded by expected; matrix pass needs a passing byte-fingerprint drill. |
+| `1.5.0` | Requires `sample` and integer `sample.records_expected`. |
+| `1.6.0` | The eleven required blocks in Rust declaration order; every `u64` in `0 <= v < 2**64`. |
+| `1.7.0` | The six non-block fields required; null refused for non-optional `u64` (the five optional ones allow it). |
+| `1.8.0` | Type-checks the six non-block fields (`run_id: 42`, `phases: "x"`, `requested_at: 5`). |
+| `1.9.0` | Backup-receipt verification; scorecard auth-field consistency. |
+| `1.10.0` | Auth modes `plaintext` or `scramSha512` (versioned in `1.21.0`). |
+| `1.11.0` | Offset-report key and digest present or absent together. |
+| `1.12.0` | A marker topic unless target mode is `newTopic`. |
+| `1.13.0` | Refuses target modes other than `scratch`/`newTopic`, null included. |
+| `1.14.0` | `--payload-type catalog-point`, signature only. |
+| `1.15.0` | Scorecard and receipt `1.1.0`: receipt `config_coverage` arms 6–11 and lines; `not_assessed` arrays; the configuration-parity line. |
+| `1.16.0` | Receipt and catalog-point `1.2.0` (FX-7): `archive.manifest_version_id` a string; prints the pinned version. |
+| `1.17.0` | Scorecard `1.2.0` (FX-3): NR-1 to NR-5, the reconstruction line; refuses non-string parity lists and a major Rust cannot parse (`" 1.0.0"`). |
+| `1.18.0` | Scorecard `1.3.0` (FX-8): TB-1 to TB-4, the `time basis:` lines (and a receipt's per `LogAppendTime` topic). |
+| `1.19.0` | Scorecard `1.4.0` (PROD-08.1): IV-1 to IV-7 and 25 nested counts (24 refuse null), the `integrity coverage:` lines; blank means exactly what Rust's `trim` strips. |
+| `1.20.0` | Receipt and catalog-point `1.3.0` (PROD-05.1): `topic_configuration` arms 12–19, `owner_detection` 20–21, and their lines (never a configuration value). |
+| `1.21.0` | Scorecard `1.5.0`, receipt `1.4.0` (PROD-01.3): `scramSha256`, `plain`, `mtls` only from those versions. |
+| `1.22.0` | Scorecard `1.6.0` (FX-23): US-1 to US-3, both `sample coverage:` lines. |
+| `1.23.0` | Scorecard `1.7.0` (PROD-11.1): SEL-1 to SEL-3, the `replay selection:` line, and the window-qualified `sample coverage:` line. |
+| `1.24.0` | Receipt `1.5.0` (PROD-03.0): `schema_dependency` arms 22–29 and lines. |
+| `1.25.0` | Receipt and catalog-point `1.6.0` (PROD-01.4a): `generations` arms 36–40 and lines; a catalog point's topic IDs must be real. |
+| `1.26.0` | Receipt and catalog-point `1.7.0` (PROD-04.1): `consumer_positions` arms 30–35; with `--consumer-positions <file>`, the positions document's CP-1 to CP-14, and one line per position. |
+| `1.27.0` | Scorecard `2.0.0` (PROD-11.1b, OD-9 (a)): major 2 only with `source.selection.partitions` (PS-1), PS-2 to PS-5; a newer major is refused naming `2.0.0`. |
+| `1.28.0` | Scorecard `1.8.0` (PROD-15.1): ON-1 to ON-14, the two `original name:` lines. |
+| `1.29.0` | Scorecard `1.9.0` and `2.1.0` (PROD-16.2): CA-1 to CA-8, ON-5 by version, the `console approval:` line. |
+| `1.30.0` | Receipt `1.8.0` (PROD-02.1): `source_watermarks` arms 41–45; an empty capture only beside the block. |
 
-A known diagnostic-order difference remains: Python checks blocks before plain
-fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
-reports `run_id`. Both refuse; this is not an acceptance disagreement.
+Every document without a version's new field is decided as before it. One
+diagnostic-order difference remains: with both `run_id` and `engine` absent,
+Python names `engine` and Rust `run_id`; both refuse.
 
-A verifier older than `1.25.0`, and a `logweir` built before PROD-01.4a, accept
-a 1.6.0 backup receipt or catalog point: they ignore `generations` (and the
-record's `topics[].identity`), check none of arms 36 to 40 and print no topic
-ID — so they cannot say whether a topic was recreated between two points or
-during one ([backup-receipt.md](formats/backup-receipt.md#versions)).
-A verifier older than `1.26.0`, and a `logweir` built before PROD-04.1, accept
-a 1.7.0 receipt — the major is unchanged — ignore `consumer_positions` and
-print no `consumer_positions` line, so they say nothing about the selected
-groups' positions (measured with 1.22.0: it accepts a signed receipt carrying the block
-whose captured group lists no position); every other check applies as before.
-To read positions — for instance to recover them with the source offline — use
-`1.26.0` or later with `--consumer-positions`, and look for the `positions
-document … verified against this receipt` line.
-**Every reader before `1.27.0` refuses a 2.0.0 document** (a partition-subset
-restore, PROD-11.1b), instead of reading it: a 2.0.0 document's
-`complete.partitions[]` and sampled-lane fields name the SELECTED partitions,
-which those readers would read as every partition (the owner's decision
-OD-9 (a)). Measured on the 2.0.0 scorecards a live subset restore signed
-(`e2e/tests/replay_selection.rs::older_readers_refuse_a_2_0_0_document`),
-`verify_scorecard.py` `1.16.0` to `1.24.0` each exit 1 with `INVALID:
-format_version 2.0.0 has a major version newer than this reader understands
-(this script knows 1.4.0)` (`1.1.0`, `1.2.0` and `1.3.0` for 1.16.0, 1.17.0
-and 1.18.0). A
-`logweir` built before PROD-11.1 exits 4 with the same sentence (`this build
-knows 1.4.0`); one built between PROD-11.1 and PROD-11.1b exits 4 with it for
-a subset from a stated start, and exits 1 one step earlier for a subset from
-the archive's floor, whose block has no `window_start_ms`: `signature verified
-but the payload is not a scorecard: missing field `window_start_ms``. None
-prints `VALID`. The media type keeps `version=1.0.0`, so an older reader
-reaches that refusal rather than a payload-type mismatch. To read a subset
-restore's scorecard, upgrade the verifier.
-A verifier older than `1.28.0`, and a `logweir` built before PROD-15.1, accept a
-1.8.0 scorecard — the major is unchanged — ignore `target.original_name`, check
-none of ON-1 to ON-14 and print no `original name:` line. What they print is
-true of the restore: measured on four live 1.8.0 scorecards (a second
-cluster, the same cluster and the owner path, each a pass, and a
-`fail-integrity` whose restored name another producer wrote into; every one
-under the complete verification such a restore requires),
-`verify_scorecard.py` 1.23.0 and 1.24.0 and a `logweir drill verify` built
-from the commit before PROD-15.1 print `VALID` and the restored topics' own
-`integrity coverage:` lines (complete, with the exact counts), and that
-build's `drill show` prints `mode=newTopic` with the mapping's entry count. They do not say the restore
-wrote under the original names, nor which condition admitted it; the document
-does, and this release's readers print it (`drill show` in its footer).
-`verify_scorecard.py` 1.27.0 (the last before this item) does the same over
-six later live 1.8.0 scorecards: `VALID`, and no `original name:` line.
-What older readers do with a scorecard of a restore approved in the console
-(measured on signed corpus documents, recorded in the row's report): an older
-`logweir drill verify` accepts a 1.9.0 document and prints
-`approval:  <issuer>#<subject> (<ticket>)`, with no key id and no word about
-the console; `verify_scorecard.py` before 1.29.0 accepts it and prints no
-approval line at all. Neither prints a `console approval:` line. A 1.28.0
-reader refuses such an original-name scorecard (`approval_mode` is not one of
-the three it knows). A 2.1.0 document is accepted from 1.27.0 and refused by
-older readers by its major.
+**What an older reader does with a newer document.** The major is unchanged
+except where said, so it accepts and prints less:
 
-A verifier older than `1.23.0`, and a `logweir` built before PROD-11.1, accept a
-1.7.0 scorecard — the major is unchanged — ignore `source.selection` and print
-no `replay selection:` line. A 1.7.0 document is a restore from a stated
-window START over every partition (a partition subset is format 2.0.0, which
-they refuse: above), and what they print about it is true: measured on the
-two live scorecards of a restore from epoch-ms 1760000000030 to
-1760000010000, `1.22.0` and main's `logweir drill verify` print, for the
-sampled one, `sample coverage: a sampled pass at format 1.6.0 or later: every
-mapped partition was held to its own count bound, …` (every partition was,
-over the restore window), and `1.21.0`, `1.22.0` and main's reader print, for
-the complete one, `integrity coverage: every selected record compared: 18
-expected, 18 restored, 18 matching, …`. None claims a restore from the
-archive's floor, and none names the start: the field that does is the
-free-text `sample.coverage_note`, which `logweir drill show` prints (a
-complete block's `window.start_ms` is the start too).
+| Reader older than (and a `logweir` before) | Given | It |
+| --- | --- | --- |
+| `1.15.0` (FX-4) | a 1.1.0 receipt or scorecard | accepts it (majors only) and prints neither coverage line; a not-assessed topic still shows as its `unexpected_divergence` entry |
+| `1.16.0` (FX-7) | a 1.2.0 receipt or catalog point | ignores `archive.manifest_version_id` ([versions](formats/backup-receipt.md#versions)) |
+| `1.17.0` (FX-3) | a 1.2.0 scorecard | checks no NR arm; an unreconstructed setting still shows under `unexpected`, never as intended |
+| `1.18.0` (FX-8) | a 1.3.0 scorecard | ignores `source.time_basis` |
+| `1.19.0` (PROD-08.1) | a 1.4.0 scorecard | ignores `integrity.verification`: a complete verification reads as a sample of every expected record |
+| `1.20.0` (PROD-05.1) | a 1.3.0 receipt or catalog point | ignores `topic_configuration` and `owner_detection` |
+| `1.21.0` (PROD-01.3) | a 1.5.0 scorecard or 1.4.0 receipt naming a new auth mode | **refuses** it, the safer verdict (OD-7, third case); documents naming `plaintext` or `scramSha512` keep their earlier version |
+| `1.22.0` (FX-23) | a 1.6.0 scorecard | ignores `sample.unsampled_topics` |
+| `1.23.0` (PROD-11.1) | a 1.7.0 scorecard | ignores `source.selection`; what it prints is true, but it names no start (`sample.coverage_note` does, [§5.3, §5.4](to-do/decisions/PROD-11.1-replay-selection.md)) |
+| `1.25.0` (PROD-01.4a) | a 1.6.0 receipt or catalog point | ignores `generations`: it cannot say whether a topic was recreated |
+| `1.26.0` (PROD-04.1) | a 1.7.0 receipt | ignores `consumer_positions` (use `--consumer-positions` with 1.26.0 or later) |
+| `1.27.0` (PROD-11.1b) | a 2.0.0 or 2.1.0 document | **refuses** it by its major (`format_version 2.0.0 has a major version newer than this reader understands`; measured by `e2e/tests/replay_selection.rs::older_readers_refuse_a_2_0_0_document`) |
+| `1.28.0` (PROD-15.1) | a 1.8.0 scorecard | prints `VALID` and the true coverage lines, but not that the restore wrote under the original names (measured on ten live scorecards) |
+| `1.29.0` (PROD-16.2) | a 1.9.0 scorecard | accepts it without a `console approval:` line (an older `drill verify` prints the approver with no key id); 1.28.0 refuses such an original-name scorecard |
 
-`1.23.0` adds the `replay selection:` line and says `a sampled pass over a
-replay selection from epoch-ms 1760000000030 to epoch-ms 1760000010000: …`
-instead of the unqualified line. Each lane claims only what it proves about
-the records before the start: the line ends `no record before the start was
-restored or expected` only over a complete verification that passed (a
-restored record below the start is `unexpected` there); a sampled document
-ends `no record before the start was expected; a sampled check does not
-prove that none was restored` (a segment straddling the start counts all of
-its records into the per-partition bound), and anything else `no record
-before the start was expected`
-([the record](to-do/decisions/PROD-11.1-replay-selection.md) §5.3, §5.4).
+On a 2.0.0 document, `verify_scorecard.py` `1.16.0` to `1.24.0` exit 1 naming
+the format they know, a `logweir` before PROD-11.1 exits 4 with the same
+sentence, and one between PROD-11.1 and PROD-11.1b exits 4, or 1 for a subset
+from the archive's floor (`missing field `window_start_ms``); none prints
+`VALID`, and the media type stays `version=1.0.0`, so the refusal is never a
+payload-type mismatch. `1.22.0` accepts a 1.7.0 receipt whose captured group
+lists no position (measured).
 
-A verifier older than `1.22.0`, and a `logweir` built before FX-23, accept a
-1.6.0 scorecard — the major is unchanged — ignore `sample.unsampled_topics`
-and print no `sample coverage:` line, so they say nothing about the topics the
-sample left out; every other check applies as before.
-
-A verifier older than `1.21.0`, and a `logweir` built before PROD-01.3,
-**refuse** a 1.5.0 scorecard or a 1.4.0 receipt that names `scramSha256`,
-`plain` or `mtls` — as a mode outside the two they know — which is the safer
-verdict (OD-7, third case). Every document naming `plaintext` or `scramSha512`
-is still written at its earlier version and still verifies with them.
-
-A verifier older than `1.18.0`, and a `logweir` built before FX-8, accept a
-1.3.0 scorecard — the major is unchanged — ignore `source.time_basis`, check
-none of its four arms and print no time-basis line.
-
-A verifier older than `1.20.0`, and a `logweir` built before PROD-05.1, accept a
-1.3.0 backup receipt or catalog point: they ignore `topic_configuration` (and the
-record's `topics[].configuration`) and `owner_detection`, check none of arms
-12 to 21 and print no model line.
-
-A verifier older than `1.19.0`, and a `logweir` built before PROD-08.1, accept a
-1.4.0 scorecard the same way: they ignore `integrity.verification`, check none
-of IV-1 to IV-7 and print no coverage line; a complete verification reads to
-them as a sample of every expected record.
-
-A `1.15.0` verifier, and a `logweir` built before FX-7, still accept a 1.2.0
-receipt or catalog point: they ignore `archive.manifest_version_id` and print
-no manifest version
-([backup-receipt.md](formats/backup-receipt.md#versions)).
-
-A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
-accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore
-`config_coverage` and `not_assessed`, check none of the six coverage arms and
-print neither line. A topic whose configuration parity was not assessed still
-reaches them, as its `configuration not assessed (<why>)` entry in
-`unexpected_divergence`, which `logweir drill show` prints in its `topic parity`
-row.
-
-A verifier older than `1.17.0`, and a `logweir` built before FX-3, accept a
-1.2.0 scorecard the same way (measured with the readers at main `b8b9263f`, with
-FX-7's script `1.16.0`, and at `v0.1.5`): they check none of NR-1 to NR-5 and
-print no reconstruction line.
-A setting a `newTopic` restore did not reconstruct still reaches them, as its
-entry in `unexpected_divergence`, which `logweir drill show` prints under
-`unexpected [...]`; none of them shows it as intended.
-
-**Rerun the current verifier over retained documents and sidecars checked with
-older versions.** Earlier `VALID` results may reflect weaker consistency or
-shape checks. The original payload bytes and signature stay unchanged; the
-reader's rules become stricter. Keep the verifier version with your audit record,
-not just the verdict.
+**Rerun the current verifier over retained documents checked with older
+versions.** An earlier `VALID` may reflect weaker checks; the bytes and
+signatures are unchanged, only the reader's rules are stricter. Keep the
+verifier version with your audit record, not just the verdict.
 
 ---
 
