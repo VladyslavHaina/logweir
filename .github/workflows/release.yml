@@ -63,6 +63,16 @@ jobs:
 
   tests:
     needs: [validate]
+    # ci.yml's `publish` job asks for id-token and attestations (keyless
+    # signing, PROD-00.2), and GitHub refuses to START a called workflow whose
+    # jobs ask for more than the calling job grants, skipped jobs included
+    # (run 38208888673: startup_failure). That job runs only on a push to main,
+    # never in a release run, so no token is minted here, and no secret is
+    # handed down (workflow_lint holds both).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/ci.yml
 
   plan:

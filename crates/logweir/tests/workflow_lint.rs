@@ -434,6 +434,31 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
                 .any(|v| !matches!(v.as_str(), Some("read") | Some("none"))),
             other => panic!("{name} has invalid permissions: {other:?}"),
         };
+        // `tests` calls ci.yml, whose `publish` job asks for id-token and
+        // attestations; GitHub refuses to start the call unless the calling
+        // job grants them. It is held to exactly those, handed no secret, and
+        // `the_release_tests_call_can_never_reach_ci_publish` proves no ci.yml
+        // job that uses them can run inside a release.
+        if name == "tests" {
+            assert!(job["secrets"].is_null(), "tests is handed no secret");
+            let scopes = job["permissions"].as_mapping().expect("tests grants explicit scopes");
+            let mut granted: Vec<(String, String)> = scopes
+                .iter()
+                .map(|(k, v)| (k.as_str().unwrap().to_string(), v.as_str().unwrap().to_string()))
+                .collect();
+            granted.sort();
+            assert_eq!(
+                granted,
+                [
+                    ("attestations".to_string(), "write".to_string()),
+                    ("contents".to_string(), "read".to_string()),
+                    ("id-token".to_string(), "write".to_string()),
+                ],
+                "tests grants what ci.yml's publish asks for, and nothing more"
+            );
+            assert_ne!(job["if"].as_str(), Some(GATE), "tests runs on a dispatch too");
+            continue;
+        }
         // A reusable workflow handed secrets (`secrets: inherit` included).
         let handed_secrets = !job["secrets"].is_null();
         let writes = write_scope || handed_secrets || WRITES.iter().any(|w| body.contains(w));
@@ -482,6 +507,37 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
     // tag push and nothing else (scripts/test-release.py, Validate).
     assert!(script.contains("tag=\"$REF_NAME\" publish=true ;;"));
     assert!(script.contains("tag=\"${REHEARSAL_TAG:-}\" publish=false ;;"));
+}
+
+/// release.yml's `tests` job grants ci.yml id-token and attestations, which
+/// only ci.yml's `publish` asks for. Every ci.yml job that asks for a write
+/// scope, or is handed secrets, runs only on a push to main: inside a release
+/// run (a tag push or a dispatch) its `if` is false, so nothing mints a token.
+#[test]
+fn the_release_tests_call_can_never_reach_ci_publish() {
+    const MAIN_PUSH: &str = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+    let ci = workflow("ci.yml");
+    let mut credentialed = Vec::new();
+    for (name, job) in ci["jobs"].as_mapping().unwrap() {
+        let name = name.as_str().unwrap();
+        let write_scope = match &job["permissions"] {
+            Value::Null => false,
+            Value::String(all) => all != "read-all",
+            Value::Mapping(scopes) => scopes
+                .values()
+                .any(|v| !matches!(v.as_str(), Some("read") | Some("none"))),
+            other => panic!("{name} has invalid permissions: {other:?}"),
+        };
+        if write_scope || !job["secrets"].is_null() {
+            assert_eq!(
+                job["if"].as_str(),
+                Some(MAIN_PUSH),
+                "ci.yml's {name} asks for a write scope or secrets, so it must run only on a push to main"
+            );
+            credentialed.push(name.to_string());
+        }
+    }
+    assert_eq!(credentialed, ["publish"]);
 }
 
 /// A TAG DELETION IS A PUSH TOO, and so is a re-run
