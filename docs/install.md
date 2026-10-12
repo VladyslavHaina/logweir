@@ -309,6 +309,10 @@ kubectl --context <ctx> -n <runner-ns> create secret generic logweir-signing-key
 The renderer never manages these objects, so no sync, re-apply or prune
 touches them; back them up like any identity
 ([Back up and recover the installation identity](#back-up-and-recover-the-installation-identity)).
+That holds only for objects made with the `kubectl create` commands above: one
+an earlier `kubectl apply` made keeps
+`kubectl.kubernetes.io/last-applied-configuration`, and `kubectl apply --prune`
+deletes it once the render drops it, so remove that annotation first.
 With `identity.externalSecret`, the hook adopts that key into the
 `logweir-signing-key` you created. Such an install starts **strict**: no
 `TrustPolicy` is created and no namespace defaults to confirm, so trust the

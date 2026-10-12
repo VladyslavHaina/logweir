@@ -1693,8 +1693,12 @@ unchanged.
 **Do:** nothing on the Helm path. Argo CD and `helm template | kubectl apply`:
 back the identity up, create the retained objects if they are missing, and set
 `identity.renderedOffline: true` ([install.md, *Argo CD and other offline
-renders*](install.md#argo-cd-and-other-offline-renders)). A preview or a lint
-adds `--set identity.renderedOffline=false`.
+renders*](install.md#argo-cd-and-other-offline-renders)). If an earlier render
+was applied with `kubectl apply --prune`, first remove
+`kubectl.kubernetes.io/last-applied-configuration` from the retained objects
+(`kubectl annotate <object> kubectl.kubernetes.io/last-applied-configuration-`),
+or the next prune deletes them. A preview or a lint adds
+`--set identity.renderedOffline=false`.
 **Scope:** `scripts/check-chart.sh` arm 12 (the refusal by name with its
 control, no placeholder, grant or trust argument with `true` and all of them in
 the `false` control, adoption offline, no key material in any render) with five
