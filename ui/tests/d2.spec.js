@@ -178,12 +178,12 @@ test("the_usage_list_renders_its_basis_beside_an_empty_answer", () => {
   const usage = decodeDestinationUsage(console_("destination-usage.json")).value;
   const html = renderUsage(usage, null);
   assert.match(html, /id="usage-basis"/);
-  assert.match(html, /created with kubectl carries no such label/);
+  assert.match(html, /whose spec\.destinationRef names this destination/);
   const empty = renderUsage(
     { name: "primary", truncated: false, basis: usage.basis, schedules: [], backups: [] },
     null,
   );
-  assert.match(empty, /Nothing labelled by this service names it/);
+  assert.match(empty, /No schedule or Backup the product API read names it/);
   assert.match(empty, /id="usage-basis"/,
     "an empty list without its basis would read as 'nothing uses this'");
 });

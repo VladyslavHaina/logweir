@@ -552,9 +552,9 @@ export function renderPreflight(preflight) {
 /** What names this destination, with the BASIS on which the lists were built.
  *
  *  The basis is rendered beside an empty list, not instead of it: the product
- *  API builds these from a label it sets on objects IT creates, so a schedule
- *  made with kubectl is invisible here, and an unexplained empty list would
- *  read as "nothing uses this" -- the sentence an operator deletes on. */
+ *  API matches `spec.destinationRef` over a bounded read and says how much it
+ *  read, and an unexplained empty list would read as "nothing uses this" --
+ *  the sentence an operator deletes on. */
 export function renderUsage(usage, error) {
   if (error !== null && error !== undefined) {
     return "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
@@ -568,7 +568,8 @@ export function renderUsage(usage, error) {
     .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]));
   return (
     "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
-    table(["KIND", "NAME", "CREATED"], rows, "Nothing labelled by this service names it.") +
+    table(["KIND", "NAME", "CREATED"], rows,
+      "No schedule or Backup the product API read names it.") +
     (usage.truncated === true
       ? "<p class=\"note\">One of the lists was cut at its bound; there may be more.</p>"
       : "") +

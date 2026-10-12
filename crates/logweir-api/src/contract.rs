@@ -2214,7 +2214,7 @@ pub struct DestinationUsageResponse {
     pub name: String,
     /// Schedules that name it, at most 100.
     pub schedules: Vec<DestinationUseView>,
-    /// Recent backups that name it, at most 100, newest name last.
+    /// Backups that name it, at most 100, in name order.
     pub backups: Vec<DestinationUseView>,
     /// Whether either list was cut.
     pub truncated: bool,
