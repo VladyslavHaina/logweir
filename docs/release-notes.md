@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84 and 85 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84, 85 and 86 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -95,7 +95,7 @@ controller and the console at start, and so are `mode: two-person` and a
 `defaultMode` other than `confirm`/`strict`. The console's configuration gains
 `confirmationKeyManaged`; the API's policy view gains `operatorMode` and
 `basis`, and a create's `authorization` gains `operatorMode` (OpenAPI
-`1.0.0-alpha.2`, additive).
+`1.0.0-alpha.3`, additive; item 86).
 **The install-only grant.** The `ClusterRole`/`ClusterRoleBinding`
 `<release>-identity-trust` is a `post-install` hook of the first install alone,
 deleted when the install's hooks finish on Helm 3.19+ and 4.x. Helm 3.12–3.18
@@ -1759,6 +1759,71 @@ it), and the value's FX-10 row.
 **Rollback:** remove `minio.persistence.keep` from the values first (an older
 schema refuses it); a PVC already kept stays until you delete it.
 
+#### 86. The product API's OpenAPI document is `1.0.0-alpha.3`; six changes since `1.0.0-alpha.2` are breaking (release preparation)
+
+**Changed.** `info.version` moves from `1.0.0-alpha.2`, the document
+`v0.2.0-rc.1` shipped, to `1.0.0-alpha.3`. The document is still pre-release,
+so its breaking changes move only the pre-release number, not the major
+([stability.md](stability.md)). It now has 57 operations (2 added, 3 removed)
+and 279 component schemas (37 added, 16 removed). The changes, one per line,
+with paths under `/api/v1/namespaces/{ns}`:
+- **Breaking:** `GET .../rehearsal-schedules` and `GET .../rehearsal-schedules/{name}`
+  are removed, with their ten schemas and the required `Capabilities.rehearsals` (item 73).
+- **Breaking:** `POST .../destinations:from-legacy` is removed (`404 not_found`), with
+  `DestinationFromLegacyRequest` and the problem codes `legacy_location_unknown` and
+  `legacy_location_mismatch` (item 75).
+- **Breaking:** `ScheduleStatusView.retentionReport` is removed, with `RetentionReportView`
+  and `RemovableSetView` (item 78).
+- **Breaking:** `ProtectionPolicyView.notifications`, `AlertView.delivery` and
+  `AlertView.notifiedTransition` are removed, with `NotificationsView`,
+  `NotificationRouteView` and `AlertDeliveryView` (item 74).
+- **Breaking:** `POST .../connections` refuses `auth.credentialRef`
+  (`422 existing_credential_refused`); the credential is typed once in `auth.credential` (item 33).
+- **Breaking:** `POST .../destinations` refuses a grant's `secret.existing`
+  (`existing_credential_refused`), and `:update-access` accepts only a Secret the
+  destination already names; the schemas do not say so (item 38).
+- Added: `GET .../restores/{name}/approval-request`, `POST .../restores/{name}/console-approval`
+  and `ApprovalPolicyView.consoleApprovalAvailable` (item 66).
+- Added: `ApprovalPolicyView.operatorMode` and `basis`, and `RestoreRoutingView.operatorMode` (item 29).
+- Added: `ConnectionAuthMode` `scramSha256`, `plain` and `mtls`, `ConnectionAuthRequest.credential`
+  and `tlsCa`, `ConnectionAuthView.clientCertificateRef` and `tlsCa` (item 33).
+- Added: `PointView.topics`, `topicsOmitted` and `ownerDetection` (item 32).
+- Added: `PointTopicView.schemaDependency` (item 46).
+- Added: `PointView.consumerPositions` (item 50).
+- Added: `CreateRestoreRequest.coverage` and `completeMaxRecords`, `Restore.coverage`, and
+  `VerificationScopeView.coverage`, `complete` and `unsampledTopics` (item 43).
+- Added: `Restore.selection` and `VerificationScopeView.selection` (item 51).
+- Added: `Approval.approvalSubject`, `Restore.approvalSubject` and `targetTopicsAppeared`,
+  `RestoreTargetView.originalName`, `TopicNamingRequest.originalName` and
+  `CreateRestoreRequest.originalNameConfirmation` (item 56).
+- Added: `RetentionEvaluationView.accounting`, `keptCount`, `truncatedByCap`,
+  `maxDeletionsPerRun` and `viewIncomplete`, and `EnforcementRunView.failedTruncated` (item 58).
+- Description only: `ApprovalPolicyView.name`, `legacy` and `ordinaryConfirmationAvailable` (item 29).
+- Description only: `POST .../connections`, `ConnectionAuthMode`, `ConnectionAuthRequest`,
+  `ConnectionAuthView` and `NewCredentialRequest` (item 33).
+- Description only: `VerificationScopeLevel` (item 43).
+- Description only: the problem code `malformed_request` names the body deadlines (item 44).
+- Description only: `RetentionEvaluationView.at` (item 45), and its `candidateCount`,
+  `candidates`, `kept`, `pointsEvaluated` and `truncated` (item 58).
+- Description only: `Restore.newTopics`, `RestoreTargetView.topicPrefix` and
+  `TopicNamingRequest.prefix` (item 56).
+- Description only: `CompletionView.recordsRestored` (item 57).
+- Description only: `TeardownView` and its `failed` (item 69).
+- Description only: `POST .../catalogs` and `ConnectArchiveRequest` (item 73).
+- Description only: `OperatorModeView` names `ApprovalRoute` (item 77).
+- Description only: `RetentionRequest`, `RetentionView` and `retention` on `Schedule`,
+  `CreateScheduleRequest` and `UpdateSchedulePolicyRequest` (item 78).
+**Do:** nothing for the console, which ships in the same image as the API. A
+script that calls a removed route or reads a removed member stops doing so;
+no client outside this repository is supported.
+**Scope:** `just schema-check` and
+`crates/logweir-api/tests/contract.rs::the_checked_in_openapi_document_is_what_the_types_generate`
+hold the checked-in document to the generator; the list is a diff of the
+operations, schemas, members, required members, enumerations and problem codes
+of `v0.2.0-rc.1`'s document against this one.
+**Rollback:** an older console image serves `1.0.0-alpha.2` again; roll it
+back with the items it names.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1895,7 +1960,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84 and 85, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85 and 86, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -1958,6 +2023,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 83 | the chart only | an offline render (Argo CD, `helm template`) sets `identity.renderedOffline` |
 | 84 | the identity hook's image | nothing |
 | 85 | the chart only | nothing until `minio.persistence.keep` is set |
+| 86 | the API document's version (the console image) | nothing |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:
