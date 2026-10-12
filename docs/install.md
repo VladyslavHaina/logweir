@@ -450,6 +450,18 @@ kubectl --context docker-desktop -n <namespace> create secret generic \
   --from-literal=secret-access-key="$AWS_SECRET_ACCESS_KEY"
 ```
 
+Bind it to the location your inline `archive.url` (and a Restore plan's
+`source` and `evidence`) dials, or every run is refused
+`CredentialBindingMismatch` ([kubernetes.md](kubernetes.md#credential-binding)).
+Run it once without `--apply`, confirm the endpoint it prints, then:
+
+```bash
+python3 scripts/bind-credential.py --context docker-desktop --namespace <namespace> \
+  --location s3://<bucket> --endpoint <url|aws> --region <region|none> \
+  --path-style true|false --allow-http true|false --secret logweir-s3 \
+  --apply --confirm-endpoint '<the endpoint it printed>'
+```
+
 **4. `logweir-evidence-ro`**: the controller's **read-only** evidence
 credential, another principal. Neither it nor the runner can delete:
 
