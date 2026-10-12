@@ -15,6 +15,7 @@ import { LIFE, fakeView, parse } from "./fake-view.js";
 
 import { resetMode, selectMode } from "../client.js";
 import { mountClusters } from "../pages/clusters.js";
+import { mountSchedules } from "../pages/schedules.js";
 
 import { restoreDestination } from "../pages/restore-wizard.js";
 import { restoreProgressSentence } from "../pages/approvals.js";
@@ -63,9 +64,9 @@ test("m2_a_restore_waiting_for_its_approval_says_so_and_not_none_will", () => {
   assert.match(html, /<dt>awaiting approval<\/dt><dd>yes: waiting for approval/);
 });
 
-// M3. A viewer got the whole Create a KafkaCluster form with an enabled CREATE,
-// password and key fields included. Destinations hides its form for such a
-// role.
+// M3 and M4. A viewer got the whole Create a KafkaCluster form with an enabled
+// CREATE (password and key fields included), and the whole editable Create a
+// BackupSchedule form. Destinations hides its form for such a role.
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/console/", import.meta.url));
 const session = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
@@ -113,4 +114,24 @@ test("m3_a_role_that_cannot_create_a_connection_is_not_offered_the_form", async 
   });
   assert.match(full, /id="cluster-form"/);
   assert.doesNotMatch(full, /id="clusters-read-only"/);
+});
+
+test("m4_a_role_that_cannot_create_a_schedule_is_not_offered_the_form", async () => {
+  const viewer = session("session-viewer.json");
+  assert.equal(viewer.namespaces[0].capabilities.scheduleCreate, false);
+  const read = await signedInAs(viewer, async () => {
+    const view = fakeView();
+    await mountSchedules(view.root, "team-a", parse, LIFE(), listsNothing);
+    return view.html();
+  });
+  assert.doesNotMatch(read, /id="schedule-form"/,
+    "NEGATIVE CONTROL: a viewer got the whole editable create form");
+  assert.match(read, /id="schedules-read-only"/);
+  const full = await signedInAs(session("session.json"), async () => {
+    const view = fakeView();
+    await mountSchedules(view.root, "team-a", parse, LIFE(), listsNothing);
+    return view.html();
+  });
+  assert.match(full, /id="schedule-form"/);
+  assert.doesNotMatch(full, /id="schedules-read-only"/);
 });
