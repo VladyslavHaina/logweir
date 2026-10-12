@@ -1110,6 +1110,37 @@ kubectl --context docker-desktop delete rolebinding logweir-viewer logweir-opera
 kubectl --context docker-desktop -n <namespace> delete serviceaccount logweir-runner
 ```
 
+### Keep the demo archive across an uninstall
+
+The chart's MinIO (`minio.enabled`) holds its archive on the PVC
+`<release>-minio`, and `helm uninstall` deletes it, with every backup on it
+when the volume's reclaim policy is `Delete` (docker-desktop's is). Helm keeps
+an object only when the manifest it **stored** says `helm.sh/resource-policy:
+keep`; an annotation set by hand on the live PVC is ignored. Set it through
+Helm, at install or before the uninstall:
+
+```bash
+helm upgrade logweir <chart> -n logweir-system --reuse-values \
+  --set minio.persistence.keep=true --wait
+```
+
+The PVC then outlives the release until you delete it (`kubectl delete pvc
+<release>-minio`) or its namespace. A later `helm install` of the same release
+into the same namespace, with the same `minio.*` values, takes the PVC over and
+serves the old archive.
+[UNVERIFIED — Helm's adoption of a kept PVC is not yet run on this chart; the next PoC reinstall measures it]
+The PVC is one copy on one node, so mirror every bucket as well:
+
+```bash
+kubectl --context docker-desktop -n logweir-system port-forward svc/<release>-minio 9000:9000 &
+mc alias set old http://127.0.0.1:9000          # prompts for minio.rootUser and its password
+mc ls old                                       # the buckets
+mc mirror old/<bucket> ./archive/<bucket>       # for each
+```
+
+`mc mirror ./archive/<bucket> <alias>/<bucket>` copies one back into a new
+installation's store (*Recover onto a clean installation with the kit*).
+
 ---
 
 ## Section numbers before v1

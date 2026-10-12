@@ -281,6 +281,7 @@ minio.rootPassword|demo|-|--set-string|fx10-password
 minio.persistence.enabled|demo|--set minio.persistence.enabled=true|--set|false
 minio.persistence.size|demo|--set minio.persistence.enabled=true|--set-string|6Gi
 minio.persistence.storageClassName|demo|--set minio.persistence.enabled=true|--set-string|fx10-sc
+minio.persistence.keep|demo|--set minio.persistence.enabled=true|--set|true
 minio.resources.requests.cpu|demo|-|--set-string|60m
 minio.resources.requests.memory|demo|-|--set-string|300Mi
 minio.nodeSelector|demo|-|--set-json|{"fx10":"probe"}

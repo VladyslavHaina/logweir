@@ -144,6 +144,7 @@ minio:
     enabled: true               # false uses an emptyDir: the archive dies with the pod
     size: 5Gi
     storageClassName: ""        # empty is the cluster's default StorageClass
+    keep: false                 # true: helm uninstall leaves the PVC, and the archive on it
   resources:
     requests: { cpu: 50m, memory: 256Mi }
   nodeSelector: {}

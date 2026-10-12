@@ -1868,6 +1868,27 @@ else
   echo "   rc=$rc  (allowed targets $targets: the demo target once, in the order given)"
 fi
 
+# ---------------------------------------------------------------- 15. the demo archive's PVC
+# poc-14-1a B1: `helm uninstall` keeps an object only when the manifest Helm
+# STORED says `helm.sh/resource-policy: keep`; a hand-set annotation is ignored.
+# minio.persistence.keep renders it on the demo MinIO's PVC and changes nothing
+# else. The control is the same render with keep=false: the diff is the two lines.
+echo "== 15. minio.persistence.keep keeps the demo MinIO's PVC through helm uninstall =="
+for keep in true false; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    --set minio.enabled=true --set "minio.persistence.keep=$keep" > "$tmp/keep-$keep.yaml" 2> "$tmp/keep-$keep.err" \
+    || { echo "FAIL: minio.persistence.keep=$keep did not render" >&2; sed 's/^/      /' "$tmp/keep-$keep.err" >&2; fail=1; }
+done
+kept="$(diff "$tmp/keep-false.yaml" "$tmp/keep-true.yaml" | grep '^[<>]' | paste -sd'|' -)"
+pvc_kept="$(awk '/^---/ { pvc = 0 } /^kind: PersistentVolumeClaim$/ { pvc = 1 }
+  pvc && $0 == "    helm.sh/resource-policy: keep" { n++ } END { print n + 0 }' "$tmp/keep-true.yaml")"
+if [ "$kept" != ">   annotations:|>     helm.sh/resource-policy: keep" ] || [ "$pvc_kept" -ne 1 ]; then
+  echo "FAIL: minio.persistence.keep=true must add only the keep annotation, on the MinIO PVC; diff from false '$kept', on the PVC $pvc_kept" >&2
+  fail=1
+else
+  echo "   ok: keep=true adds only helm.sh/resource-policy: keep, on the MinIO PVC; control: keep=false renders none"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
