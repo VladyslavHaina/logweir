@@ -811,6 +811,19 @@ What it fixed:
 - **Part 2 (`poc-14-1b`):** the timed fresh install, the owed rows, and the install left running. Started.
 - **`helm-demo.yml` at `22dc6147`:** failed at step 5, `CredentialBindingMismatch`, because the demo never bound its archive credential (pre-existing). Fixed on `claude/fx-helm-demo` (`6425a629`); the workflow is re-running on that branch.
 
+**PRs #33, #34 and #35 — merged (2026-10-12): the fixes from PROD-14.1's live part 1, and a CI flake.**
+- **#33 (`dcd6e5b3`):** `helm-demo.sh` binds its archive credential (FX-20 had made binding mandatory) and puts the target on the roster's allowlist. `helm-demo.yml` walked all ten steps on the branch, including step 9's console, and printed `HELM DEMO EXIT CRITERION MET` (run 38198426609).
+- **#34 (`36a7ee73`, item 85):** `fx-kit`, with the orchestrator's checklist ACCEPT:
+  - D1: the kit's chart loads on macOS;
+  - H1: the PROD-16.1 harness's engine identity is fixed;
+  - B2: a short `sha-` builds a kit;
+  - D7: the demo target id is listed once;
+  - B1: `minio.persistence.keep`;
+  - D2 to D6: RECOVERY.md and `install.md`'s recovery section match the walk, and the kit carries `install.md` and `keys.md`.
+- **#35 (`a575b65a`):** main's `check` failed twice, at `dcd6e5b3` and `36a7ee73`, in `scripts/test-release.py`. Removing a temporary repo hit "Directory not empty: …/.git/objects", because a detached git was still writing there. The test's git now runs with auto-gc and auto-maintenance off.
+  - **The orchestrator merged #34 before reading #33's red main run.** This is recorded as a rule: read the conclusion before the next merge.
+- **Published and signed:** main run 38205597618 signed `sha-a575b65a`. Neither `dcd6e5b3` nor `36a7ee73` was published.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
