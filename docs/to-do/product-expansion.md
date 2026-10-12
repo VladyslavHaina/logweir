@@ -787,6 +787,7 @@ What it fixed:
   - The PROD-16.1 harness no longer drives a hidden control.
 - **LOW, noted:** `weirkeeper/src/job.rs`'s compile-time `RUNNER_IMAGE` names a digest Docker Hub no longer serves. The chart always sets `LOGWEIR_RUNNER_IMAGE`, so it cannot be reached through the chart. This goes to v1.1.
 - **Next:** the live install under the k8s lock, in two agents run one after the other (`poc-14-1a`, `poc-14-1b`), against the `sha-` publication of this merge.
+- **Published and signed:** main run 38192306870 signed `sha-22dc6147`. `poc-14-1a` started on it, and `helm-demo.yml` was dispatched (run 38195441503).
 
 ## Carried over from the PLAT tracker
 
