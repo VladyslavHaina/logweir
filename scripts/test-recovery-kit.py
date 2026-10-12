@@ -57,6 +57,22 @@ def tgz(members: dict) -> bytes:
     return buf.getvalue()
 
 
+def appledouble(archive: Path) -> list:
+    """The AppleDouble `._*` members of a tarball. macOS tar lists them merged into their
+    file, so this reads the archive itself."""
+    with tarfile.open(archive) as tar:
+        return [n for n in tar.getnames() if Path(n).name.startswith("._")]
+
+
+def helm_show_chart(archive: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["helm", "show", "chart", str(archive)], capture_output=True, text=True, timeout=60)
+
+
+def set_xattr(path: Path):
+    """An extended attribute, as macOS gives a checked-out or downloaded file."""
+    subprocess.run(["xattr", "-w", "dev.logweir.test", "1", str(path)], check=True, timeout=30)
+
+
 def manifest_mismatches(kit: Path) -> list:
     """Every file on disk that MANIFEST.sha256 does not list with its sha256, and every entry with no file."""
     listed = {}
@@ -99,8 +115,8 @@ class RecoveryKit(unittest.TestCase):
             (self.assets / name).write_bytes(data)
         (self.assets / "SHA256SUMS").write_text("".join(f"{sha256(d)}  {n}\n" for n, d in sorted(files.items())))
 
-    def run_kit(self, *args, env=None):
-        return subprocess.run(["bash", str(SCRIPT), VERSION, *args, "--out", str(self.out)], cwd=ROOT,
+    def run_kit(self, *args, env=None, version=VERSION):
+        return subprocess.run(["bash", str(SCRIPT), version, *args, "--out", str(self.out)], cwd=ROOT,
                               capture_output=True, text=True, timeout=300, env=env)
 
     def trust_dir(self, files: dict, name: str = "trust") -> Path:
@@ -121,8 +137,12 @@ class RecoveryKit(unittest.TestCase):
         listed = (self.kit / "MANIFEST.sha256").read_text()
         for name in ("RECOVERY.md", "kit.json", "values-offline.yaml", "images/images.txt",
                      "chart/logweir-chart-9.9.9.tgz", "verify/verify_scorecard.py", "release.json",
-                     "schemas/logweir-drill-scorecard-1.0.0.json", "bin/logweir-aarch64-apple-darwin.tar.xz"):
+                     "schemas/logweir-drill-scorecard-1.0.0.json", "bin/logweir-aarch64-apple-darwin.tar.xz",
+                     "docs/install.md", "docs/keys.md"):
             self.assertIn(f"  {name}\n", listed)
+        # poc-14-1a D5: the sections RECOVERY.md cites can be read offline.
+        for guide in ("docs/install.md", "docs/keys.md"):
+            self.assertEqual((self.kit / guide).read_bytes(), (ROOT / guide).read_bytes())
         tarball = self.out / f"logweir-recovery-kit-{VERSION}.tar.gz"
         self.assertEqual((self.out / (tarball.name + ".sha256")).read_text(),
                          f"{sha256(tarball.read_bytes())}  {tarball.name}\n")
@@ -146,7 +166,10 @@ class RecoveryKit(unittest.TestCase):
         recovery = (self.kit / "RECOVERY.md").read_text()
         self.assertIn("\n## Recover onto a clean installation with the kit\n", recovery)
         flat = " ".join(recovery.split())
-        for step in ("Connect an existing archive", "verify_scorecard.py", "Trust the archive's signer"):
+        # poc-14-1a D2-D6: the console key first, the three grants, the target, the store, the receipt.
+        for step in ("Connect an existing archive", "verify_scorecard.py", "Trust the archive's signer",
+                     "create secret generic logweir-console-keys", "`archiveWrite`, `archiveRead` and `evidenceRead`",
+                     "**Connect the target:**", "mc mirror ./archive/<bucket>", "--payload-type backup-receipt"):
             self.assertIn(step, flat)
         self.assertNotIn("## Upgrade CRDs", recovery)
 
@@ -219,8 +242,8 @@ class RecoveryKit(unittest.TestCase):
 
     def test_the_checkout_must_hold_the_releases_guide_and_schemas(self):
         # RECOVERY.md and schemas/ come from this checkout but claim the release commit.
-        guide = (ROOT / "docs/install.md").read_text()
-        cases = {"docs/install.md": guide + "\nA step this release does not have.\n",
+        cases = {"docs/install.md": (ROOT / "docs/install.md").read_text() + "\nA step this release does not have.\n",
+                 "docs/keys.md": (ROOT / "docs/keys.md").read_text() + "\nA key step this release does not have.\n",
                  "schemas/logweir-drill-scorecard-1.0.0.json": "{}\n"}
         for path, text in cases.items():
             with self.subTest(path):
@@ -240,7 +263,8 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("does not match SHA256SUMS", done.stderr)
         self.assert_nothing_written()
 
-    def test_a_local_build_is_a_dry_run_and_says_so(self):
+    def local_build_env(self) -> dict:
+        """A stubbed registry and a stand-in binary for `--local-build`."""
         stub = self.base / "stub"
         stub.mkdir()
         (stub / "docker").write_text(STUB_DOCKER)
@@ -248,9 +272,11 @@ class RecoveryKit(unittest.TestCase):
         binary = self.base / "logweir"
         binary.write_text("#!/bin/sh\necho logweir 0.0.0\n")
         binary.chmod(0o755)
-        env = dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}", STUB_DIGEST=DIGEST,
-                   LOGWEIR_BIN=str(binary), DOCKER_CONFIG=str(self.base / "docker-config"))
-        done = self.run_kit("--local-build", env=env)
+        return dict(os.environ, PATH=f"{stub}:{os.environ['PATH']}", STUB_DIGEST=DIGEST,
+                    LOGWEIR_BIN=str(binary), DOCKER_CONFIG=str(self.base / "docker-config"))
+
+    def test_a_local_build_is_a_dry_run_and_says_so(self):
+        done = self.run_kit("--local-build", env=self.local_build_env())
         self.assertEqual(done.returncode, 0, done.stderr)
         kit = json.loads((self.kit / "kit.json").read_text())
         self.assertEqual(kit["binaries"], "local-build")
@@ -264,6 +290,76 @@ class RecoveryKit(unittest.TestCase):
         self.assertIn("logweir/values.yaml", names)
         self.assertFalse([n for n in names if "/rendered" in n])
         self.assertEqual(manifest_mismatches(self.kit), [])
+
+    def test_a_short_commit_names_the_full_one_and_an_ambiguous_one_is_refused(self):
+        # poc-14-1a B2: `just recovery-kit sha-22dc6147` was refused for want of 40 hex.
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+                              check=True, timeout=30).stdout.strip()
+        env = self.local_build_env()
+        done = self.run_kit("--local-build", env=env, version=f"sha-{head[:8]}")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        kit = json.loads((self.out / f"logweir-recovery-kit-sha-{head}" / "kit.json").read_text())
+        self.assertEqual(kit["version"], f"sha-{head}")
+        self.assertEqual(kit["images"]["runner"], f"docker.io/vladyslavhaina/logweir:sha-{head}@{DIGEST}")
+        # Two commits sharing a 4-hex prefix (a birthday search over commit bodies), written to
+        # a scratch object store so the checkout's repository is never written to.
+        tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT, capture_output=True, text=True,
+                              check=True, timeout=30).stdout.strip()
+        seen = {}
+        for i in range(1_000_000):
+            body = (f"tree {tree}\nparent {head}\nauthor kit test <kit@test.invalid> 0 +0000\n"
+                    f"committer kit test <kit@test.invalid> 0 +0000\n\nambiguous {i}\n").encode()
+            prefix = hashlib.sha1(b"commit %d\0" % len(body) + body).hexdigest()[:4]
+            if prefix in seen:
+                break
+            seen[prefix] = body
+        objects = self.base / "objects"
+        objects.mkdir()
+        real = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-path", "objects"], cwd=ROOT,
+                              capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        env.update(GIT_OBJECT_DIRECTORY=str(objects), GIT_ALTERNATE_OBJECT_DIRECTORIES=real)
+        for commit in (seen[prefix], body):
+            written = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=ROOT, env=env,
+                                     input=commit, capture_output=True, check=True, timeout=30).stdout
+            self.assertTrue(written.decode().startswith(prefix))
+        shutil.rmtree(self.out)
+        done = self.run_kit("--local-build", env=env, version=f"sha-{prefix}")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn(f"short object ID {prefix} is ambiguous", done.stderr)
+        self.assertIn(f"'sha-{prefix}' names no single commit in this checkout", done.stderr)
+        self.assert_nothing_written()
+
+    def test_the_kit_chart_loads_in_helm_and_no_tarball_has_an_appledouble_member(self):
+        # poc-14-1a D1: macOS tar packed a `._*` member for every file with an extended
+        # attribute, and `helm show chart` refused the kit's chart.
+        trust = self.trust_dir({"signing.pub.pem": "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n"})
+        if platform.system() == "Darwin":
+            set_xattr(trust / "signing.pub.pem")
+        done = self.run_kit("--local-build", "--trust", str(trust), env=self.local_build_env())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        chart = self.kit / "chart" / "logweir-chart-local.tgz"
+        shown = helm_show_chart(chart)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("name: logweir\n", shown.stdout)
+        self.assertEqual(appledouble(chart) + appledouble(self.out / f"logweir-recovery-kit-{VERSION}.tar.gz"), [])
+        # CONTROL: the old packing, a plain `tar -czf`, fails both checks. On Linux tar never
+        # wrote the member, so the control plants the one macOS tar wrote.
+        old = self.base / "old.tgz"
+        chart_yaml = "apiVersion: v2\nname: logweir\nversion: 0.1.0\n"
+        if platform.system() == "Darwin":
+            source = self.base / "old" / "logweir"
+            source.mkdir(parents=True)
+            (source / "Chart.yaml").write_text(chart_yaml)
+            set_xattr(source)
+            set_xattr(source / "Chart.yaml")
+            subprocess.run(["tar", "-czf", str(old), "-C", str(source.parent), "logweir"], check=True, timeout=60,
+                           env={k: v for k, v in os.environ.items() if k != "COPYFILE_DISABLE"})
+        else:
+            old.write_bytes(tgz({"._logweir": "\0\5\26\7", "logweir/Chart.yaml": chart_yaml}))
+        self.assertNotEqual(appledouble(old), [])
+        refused = helm_show_chart(old)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("outside the base directory", refused.stderr)
 
 
 if __name__ == "__main__":

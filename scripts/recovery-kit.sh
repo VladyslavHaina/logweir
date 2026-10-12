@@ -5,7 +5,8 @@
 #   recovery-kit.sh <version> --release-assets <dir> [options]   a release's assets (gh release download)
 #   recovery-kit.sh <version> --local-build [options]            a DRY RUN: this host's logweir build
 #
-#   <version>              v<semver>, or sha-<commit> for a main publication (--local-build only)
+#   <version>              v<semver>, or sha-<commit> for a main publication (--local-build only;
+#                          a short commit is resolved in this checkout)
 #   --trust <dir>          public material you exported (docs/install.md), copied into trust/
 #   --save-images <os/arch>  also `docker save` the four images for that platform
 #   --out <dir>            where the kit goes (default target/recovery-kit)
@@ -27,10 +28,18 @@ PRODUCTS=(weirkeeper logweir logweir-console)
 ROLES=(controller runner console)
 TARGETS=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin)
 GUIDE=docs/install.md
+KEYS=docs/keys.md   # the guide's key procedures; both ride in the kit's docs/
 GUIDE_SECTION='## Recover onto a clean installation with the kit'
 
 die() { echo "recovery-kit: $*" >&2; exit 1; }
 usage() { sed -n '4,13p' "$0" >&2; exit 2; }
+# Every tarball goes through pack. macOS tar adds an AppleDouble `._*` member for each
+# file with an extended attribute, and Helm refuses a chart holding one ("content outside
+# the base directory"); --no-xattrs also drops the xattr headers GNU tar warns about.
+export COPYFILE_DISABLE=1
+pack() {
+  if [[ "$(tar --version)" == bsdtar* ]]; then tar --no-mac-metadata --no-xattrs -czf "$@"; else tar --no-xattrs -czf "$@"; fi
+}
 sha256_of() {
   local line
   if command -v sha256sum >/dev/null 2>&1; then line=$(sha256sum "$1"); else line=$(shasum -a 256 "$1"); fi
@@ -54,13 +63,18 @@ done
 [[ -n "$mode" ]] || die "name the binaries' source: --release-assets <dir> or --local-build"
 if [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then :
 elif [[ "$version" =~ ^sha-[0-9a-f]{40}$ && "$mode" == local-build ]]; then :
+elif [[ "$version" =~ ^sha-[0-9a-f]{4,39}$ && "$mode" == local-build ]]; then
+  # The images are tagged with the full commit. git names it, or lists an ambiguous one's candidates.
+  full=$(git rev-parse --verify "${version#sha-}^{commit}") \
+    || die "'$version' names no single commit in this checkout; give more of it, or fetch it"
+  version="sha-$full"
 else die "'$version' is not v<semver> (or sha-<commit> with --local-build)"; fi
 [[ -z "$trust" || -d "$trust" ]] || die "--trust $trust is not a directory"
 
 name="logweir-recovery-kit-$version"
 kit="$out/$name"
 [[ ! -e "$kit" && ! -e "$kit.tar.gz" ]] || die "$kit exists; remove it or choose another --out"
-mkdir -p "$kit"/{bin,chart,images,schemas,verify}
+mkdir -p "$kit"/{bin,chart,docs,images,schemas,verify}
 done_ok=false
 trap '[[ "$done_ok" == true ]] || rm -rf "$kit" "$kit.tar.gz" "$kit.tar.gz.sha256" "$out/.$name.manifest"' EXIT
 
@@ -76,7 +90,8 @@ if [[ "$mode" == release ]]; then
   [[ "$(jq -r .tag "$assets/release.json")" == "$version" ]] || die "$assets/release.json is not $version"
   commit=$(jq -er .commit "$assets/release.json")
   git cat-file -e "$commit^{commit}" 2>/dev/null || die "the release commit $commit is not in this checkout; fetch it"
-  git diff --quiet "$commit" HEAD -- schemas "$GUIDE" || die "this checkout's schemas/ or $GUIDE differ from $version's; check out $version"
+  git diff --quiet "$commit" HEAD -- schemas "$GUIDE" "$KEYS" \
+    || die "this checkout's schemas/, $GUIDE or $KEYS differ from $version's; check out $version"
   for target in "${TARGETS[@]}"; do
     for file in "logweir-$target.tar.xz" "logweir-$target.tar.xz.sha256"; do
       awk -v f="$file" '$2 == f { n++ } END { exit n != 1 }' "$assets/SHA256SUMS" || die "$version has no $file"
@@ -106,7 +121,7 @@ else
   absent=$(printf '%s\n' "${TARGETS[@]}" | grep -vx "$host" | jq -R . | jq -sc .)
   commit=$(git rev-parse HEAD)
   chart="logweir-chart-local.tgz"
-  tar -czf "$kit/chart/$chart" --exclude rendered -C charts logweir
+  pack "$kit/chart/$chart" --exclude rendered -C charts logweir
   cp docs/verify_scorecard.py "$kit/verify/"
   # Anonymous registry reads, as release.sh does: "pullable by anyone" is the claim.
   anon=$(mktemp -d "${TMPDIR:-/tmp}/logweir-kit-docker.XXXXXX")
@@ -149,6 +164,7 @@ EOF
 
 # ---------------------------------------------------------------- schemas, trust, instructions
 cp schemas/*.json "$kit/schemas/"
+cp "$GUIDE" "$KEYS" "$kit/docs/"
 if [[ -n "$trust" ]]; then
   mkdir -p "$kit/trust"
   cp -R "$trust"/. "$kit/trust/"
@@ -161,7 +177,8 @@ Built by \`scripts/recovery-kit.sh\` from \`$commit\` (binaries: $mode). \`kit.j
 and \`images/images.txt\` name what is here. \`MANIFEST.sha256\` holds every file's
 sha256: check it first with \`sha256sum -c MANIFEST.sha256\` (or \`shasum -a 256 -c\`).
 Below is docs/install.md's section of the same name, at that commit; a section
-named in it (*3.11*, *5e*, *5f*, …) is one of that guide's.
+named in it (*3.11*, *5e*, *5f*, …) is in this kit's \`docs/install.md\`, beside
+\`docs/keys.md\`.
 
 EOF
   awk -v h="$GUIDE_SECTION" '$0 == h { on = 1; print; next } on && /^## / { exit } on { print }' "$GUIDE"
@@ -214,7 +231,7 @@ fi
     printf '%s  %s\n' "$(sha256_of "$f")" "$f"
   done ) > "$out/.$name.manifest"
 mv "$out/.$name.manifest" "$kit/MANIFEST.sha256"
-tar -czf "$kit.tar.gz" -C "$out" "$name"
+pack "$kit.tar.gz" -C "$out" "$name"
 printf '%s  %s\n' "$(sha256_of "$kit.tar.gz")" "$name.tar.gz" > "$kit.tar.gz.sha256"
 done_ok=true
 echo "recovery-kit: $kit.tar.gz ($mode binaries, $(wc -l < "$kit/MANIFEST.sha256" | tr -d ' ') files in MANIFEST.sha256)"

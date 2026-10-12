@@ -1849,6 +1849,46 @@ else
   echo "   rc=$rc  (Kubernetes 1.28.15 refused by kubeVersion >=1.29.0-0; control: 1.29.0 renders)"
 fi
 
+# ---------------------------------------------------------------- 14. restore targets
+# poc-14-1a D7: values that list the demo target demoKafka also adds give the
+# identity hook each cluster id once, in the order first given.
+echo "== 14. the fresh install's allowed restore targets name each cluster id once =="
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  -f "$EXAMPLES/demo.values.yaml" --set demoKafka.clusterIds.target=demoTargetClusterId000 \
+  --set-json 'identity.installationTrust.allowedTargetClusterIds=["demoTargetClusterId000","other-target"]' \
+  > "$tmp/targets.yaml" 2> "$tmp/targets.err"
+rc=$?
+targets="$(grep -A1 -x -F -- '            - --allowed-target-cluster-id' "$tmp/targets.yaml" \
+  | sed -n 's/^            - "\(.*\)"$/\1/p' | paste -sd, -)"
+if [ "$rc" -ne 0 ] || [ "$targets" != "demoTargetClusterId000,other-target" ]; then
+  echo "FAIL: the demo target, in the values and added by demoKafka, must reach the hook once; got '$targets' (rc=$rc)" >&2
+  sed 's/^/      /' "$tmp/targets.err" >&2
+  fail=1
+else
+  echo "   rc=$rc  (allowed targets $targets: the demo target once, in the order given)"
+fi
+
+# ---------------------------------------------------------------- 15. the demo archive's PVC
+# poc-14-1a B1: `helm uninstall` keeps an object only when the manifest Helm
+# STORED says `helm.sh/resource-policy: keep`; a hand-set annotation is ignored.
+# minio.persistence.keep renders it on the demo MinIO's PVC and changes nothing
+# else. The control is the same render with keep=false: the diff is the two lines.
+echo "== 15. minio.persistence.keep keeps the demo MinIO's PVC through helm uninstall =="
+for keep in true false; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    --set minio.enabled=true --set "minio.persistence.keep=$keep" > "$tmp/keep-$keep.yaml" 2> "$tmp/keep-$keep.err" \
+    || { echo "FAIL: minio.persistence.keep=$keep did not render" >&2; sed 's/^/      /' "$tmp/keep-$keep.err" >&2; fail=1; }
+done
+kept="$(diff "$tmp/keep-false.yaml" "$tmp/keep-true.yaml" | grep '^[<>]' | paste -sd'|' -)"
+pvc_kept="$(awk '/^---/ { pvc = 0 } /^kind: PersistentVolumeClaim$/ { pvc = 1 }
+  pvc && $0 == "    helm.sh/resource-policy: keep" { n++ } END { print n + 0 }' "$tmp/keep-true.yaml")"
+if [ "$kept" != ">   annotations:|>     helm.sh/resource-policy: keep" ] || [ "$pvc_kept" -ne 1 ]; then
+  echo "FAIL: minio.persistence.keep=true must add only the keep annotation, on the MinIO PVC; diff from false '$kept', on the PVC $pvc_kept" >&2
+  fail=1
+else
+  echo "   ok: keep=true adds only helm.sh/resource-policy: keep, on the MinIO PVC; control: keep=false renders none"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2

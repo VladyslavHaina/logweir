@@ -774,6 +774,62 @@ What it fixed:
 - **Never touched:** the signed-format readers, the frozen schemas, the invariant corpus, the verifiers and consumer positions.
 - **Published and signed:** main run 38185556834 signed `sha-984127fa`. PROD-14.1's clean install uses that publication's chart and images. The release checklist says the owner approves every tag push (`docs/tag1-checklist.md`), so `v0.2.0-rc.2` and `v0.2.0` wait for the owner.
 
+**PR #32 — merged (2026-10-11) as `22dc6147`, release-notes items 83 and 84: PROD-14.1's preparation.** p14-chart had a Tier A review and p14-kit a checklist review; both were ACCEPT-WITH-FIXES, with the fixes done. Integrated by `integrate-17`.
+- **p14-chart:**
+  - An offline render (`helm template`, Argo CD) rendered empty identity placeholders on every apply. Argo CD's hook policy would then replace the filled key. Such a render is now refused by name unless `identity.renderedOffline` is set.
+  - The bootstrap image is re-pinned to the amd64+arm64 runner.
+  - The version and architecture floors show before install.
+  - `helm-demo.yml` walks the console's step 9. The orchestrator dispatches it once.
+- **p14-kit:**
+  - `just recovery-kit`, an offline kit with a sha256 manifest whose guard refuses private keys and Secrets. The review's MEDIUM, a guard that could pass a key through a broken pipe, was fixed.
+  - B14: `install.md` is the canonical guide.
+  - `just sandbox`, a trial from published images with no Rust toolchain.
+  - The PROD-16.1 harness no longer drives a hidden control.
+- **LOW, noted:** `weirkeeper/src/job.rs`'s compile-time `RUNNER_IMAGE` names a digest Docker Hub no longer serves. The chart always sets `LOGWEIR_RUNNER_IMAGE`, so it cannot be reached through the chart. This goes to v1.1.
+- **Next:** the live install under the k8s lock, in two agents run one after the other (`poc-14-1a`, `poc-14-1b`), against the `sha-` publication of this merge.
+- **Published and signed:** main run 38192306870 signed `sha-22dc6147`. `poc-14-1a` started on it, and `helm-demo.yml` was dispatched (run 38195441503).
+
+**PROD-14.1 live, part 1 (`poc-14-1a`, 2026-10-12) on the published `sha-22dc6147`.** Held the k8s lock from 02:21Z to 03:06Z (`claude/poc-14-1a.result.md`, `claude/artifacts/poc-14-1a/`).
+- **PASS:**
+  - Old-PoC snapshot: 393 of 393 receipts VALID in both readers.
+  - Backup: the identity, the console key, every custom resource and the Helm values, in `~/.logweir-poc/backup-2026-10-11/` (0600; names and sha256 only).
+  - MinIO mirror: 5,313 objects.
+  - The kit, after a rebuild: `shasum -c` 46 of 46, and the guard refuses a Secret YAML and a private key.
+  - The old PoC is taken down; no Logweir object is left, and Traefik, Dex and cert-manager are kept.
+  - **The disconnected recovery from the kit alone:** first `docker load` to a VALID scorecard in **5 min 37 s**, with no image pulled. RECOVERY.md's step 5 failed as written and passed corrected.
+- **FAIL:**
+  - Step 3b: a hand-set `helm.sh/resource-policy: keep` on the demo MinIO's PVC is ignored, because Helm reads its stored manifest, so the PVC was deleted. The mirror kept the data.
+  - Step 8: the PROD-16.1 harness as merged fails journey 4, on a hard-coded engine version.
+- **Not run:** the bundle-to-chart walk (item 76), because the `v0.2.0-rc.1` release ships no `logweir.yaml`. Item 76 stays `[UNVERIFIED]`.
+- **Real defects, fixed by `fx-kit`:**
+  - D1: the kit's chart, packed with macOS `tar`, does not load in Helm.
+  - H1: the harness's engine version.
+  - D7: the demo target id is duplicated.
+  - B1: no chart value keeps the demo MinIO's PVC.
+  - B2: the kit needs the full commit.
+  - D2 to D6: RECOVERY.md's steps, including that `archiveWrite` is mandatory and `evidenceRead` drives verification.
+- **Part 2 (`poc-14-1b`):** the timed fresh install, the owed rows, and the install left running. Started.
+- **`helm-demo.yml` at `22dc6147`:** failed at step 5, `CredentialBindingMismatch`, because the demo never bound its archive credential (pre-existing). Fixed on `claude/fx-helm-demo` (`6425a629`); the workflow is re-running on that branch.
+
+**PRs #33, #34 and #35 — merged (2026-10-12): the fixes from PROD-14.1's live part 1, and a CI flake.**
+- **#33 (`dcd6e5b3`):** `helm-demo.sh` binds its archive credential (FX-20 had made binding mandatory) and puts the target on the roster's allowlist. `helm-demo.yml` walked all ten steps on the branch, including step 9's console, and printed `HELM DEMO EXIT CRITERION MET` (run 38198426609).
+- **#34 (`36a7ee73`, item 85):** `fx-kit`, with the orchestrator's checklist ACCEPT:
+  - D1: the kit's chart loads on macOS;
+  - H1: the PROD-16.1 harness's engine identity is fixed;
+  - B2: a short `sha-` builds a kit;
+  - D7: the demo target id is listed once;
+  - B1: `minio.persistence.keep`;
+  - D2 to D6: RECOVERY.md and `install.md`'s recovery section match the walk, and the kit carries `install.md` and `keys.md`.
+- **#35 (`a575b65a`):** main's `check` failed twice, at `dcd6e5b3` and `36a7ee73`, in `scripts/test-release.py`. Removing a temporary repo hit "Directory not empty: …/.git/objects", because a detached git was still writing there. The test's git now runs with auto-gc and auto-maintenance off.
+  - **The orchestrator merged #34 before reading #33's red main run.** This is recorded as a rule: read the conclusion before the next merge.
+- **Published and signed:** main run 38205597618 signed `sha-a575b65a`. Neither `dcd6e5b3` nor `36a7ee73` was published.
+
+**PR #36 — merged (2026-10-12) as `1f15d15d`: a release blocker the rc.2 rehearsal found.** Every `release.yml` run since `c36897a2` (2026-10-08) ended in `startup_failure`. ci.yml's `publish` asks for `id-token` and `attestations` (keyless signing), and release.yml called ci.yml as `tests` with `contents: read` only. GitHub refuses to start a call whose jobs ask for more than the caller grants, skipped jobs included.
+- **The fix:** `tests` grants exactly those two scopes and is handed no secret.
+- **The new lint row** `the_release_tests_call_can_never_reach_ci_publish` proves the only ci.yml job that uses them runs only on a push to main, so a dispatch is still a dry run that reaches no credential. Its controls ran.
+- **Proof:** dry run 38209125597 on the branch passed every job up to `assemble`, and `release.sh verify` passed on its 14 assets (three multi-arch images from the `sha-a575b65a` publication).
+- **Published and signed:** main run 38213577690 signed `sha-1f15d15d`.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.

@@ -2127,6 +2127,13 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
             "the identity hook runs natively on arm64",
             "sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6",
         ),
+        // PROD-14.1 (item 85): the demo archive kept through an uninstall; the value.
+        (
+            "the demo archive can outlive helm uninstall",
+            "`minio.persistence.keep: true`",
+        ),
+        // Item 86: the API document's version step for the next candidate.
+        ("the API document is 1.0.0-alpha.3", "`1.0.0-alpha.3`"),
     ];
     assert_eq!(
         items.len(),

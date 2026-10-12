@@ -5,9 +5,10 @@
 # The chart (`charts/logweir`) has been installed with its optional components
 # on — `minio.enabled`, `demoKafka.enabled` and the console in its loopback
 # administrator mode (`api.console.enabled`, `api.console.mode=localAdmin`;
-# `examples/demo.values.yaml`) — and this script walks the product over it: two keypairs, the five Secrets, the
-# cluster-scoped TrustRoster, two KafkaClusters that the controller probes to
-# `status.reachable: true`, a BackupSchedule and the Backup it fires, a Restore
+# `examples/demo.values.yaml`) — and this script walks the product over it: two keypairs, the four Secrets
+# (the archive credential bound to its location), two KafkaClusters that the
+# controller probes to `status.reachable: true`, the cluster-scoped TrustRoster
+# allowing the target's observed cluster id, a BackupSchedule and the Backup it fires, a Restore
 # whose plan bytes come from the PAGE's own emitter, an approval minted on the
 # host with the shipped CLI, the Restore's terminal status with
 # `status.outcome: pass`, BOTH readers over the scorecard, the console
@@ -194,8 +195,8 @@ mc_cat() {  # key outfile
 
 # ---------------------------------------------------------------------------
 # 10/10 TEARDOWN — the EXIT trap. The demo namespace, the keys, the release,
-# the release namespace, the six CRDs Helm installed and never removes, and
-# the cluster-scoped TrustRoster; then the assertion that no `logweir-*`
+# the release namespace, the CRDs Helm installed from crds/ and never removes,
+# and the cluster-scoped TrustRoster; then the assertion that no `logweir-*`
 # namespace is left. Every rc printed.
 # ---------------------------------------------------------------------------
 teardown() {
@@ -228,12 +229,13 @@ teardown() {
   set -e
   echo "    rc=$rc  (kubectl delete ns $SYS)"
   # HELM INSTALLS crds/ ONCE AND NEVER DELETES IT. A clean cluster is the
-  # precondition of the next install, so the six go here, by name.
+  # precondition of the next install, so every CRD the chart ships goes here,
+  # read from the chart's own directory.
   set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete crd approvals.logweir.dev backups.logweir.dev backupschedules.logweir.dev kafkaclusters.logweir.dev restores.logweir.dev trustrosters.logweir.dev --ignore-not-found > "$OUT/teardown-crds.log" 2>&1
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete -f "$CHART/crds/" --ignore-not-found --timeout=300s > "$OUT/teardown-crds.log" 2>&1
   rc=$?
   set -e
-  echo "    rc=$rc  (kubectl delete crd <the six logweir.dev kinds>)"
+  echo "    rc=$rc  (kubectl delete -f $CHART/crds/ — every logweir.dev CRD the chart ships)"
   # THE KEYS GO UNCONDITIONALLY. Minted minutes ago, attested by nothing.
   rm -f "$OUT"/*.pem
   echo "    removed $OUT/*.pem (both keypairs this run minted)"
@@ -275,7 +277,7 @@ helm status "$REL" -n "$SYS" --kube-context "$LOGWEIR_KUBE_CONTEXT" -o json > "$
 rc=$?
 set -e
 echo "    rc=$rc  (helm status $REL -n $SYS -o json)"
-[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $SYS. Install it first: helm install $REL $CHART -n $SYS --create-namespace -f $CHART/examples/demo.values.yaml --set identity.installationTrust.enabled=false --wait --timeout 10m (this walk administers trust with its own TrustRoster, which a fresh install's default TrustPolicy would supersede)"; }
+[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $SYS. Install it first with the path at the top of $CHART/examples/demo.values.yaml (the console's key Secret, then helm install with --set identity.installationTrust.enabled=false: this walk administers trust with its own TrustRoster, which a fresh install's default TrustPolicy would supersede)"; }
 release_status=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["status"])' "$OUT/helm-status.json")
 # The JSON is read and then REMOVED: it flattens the whole release manifest
 # onto one line, and `scripts/check-unverified-labels.sh` walks `.demo/` —
@@ -364,10 +366,10 @@ echo "    approver key id: $APPROVER_KEY_ID"
 echo "    both keypairs were minted seconds ago and are attested by nothing; the teardown deletes them."
 
 # ---------------------------------------------------------------------------
-# 2/10 THE DEMO NAMESPACE, THE FIVE SECRETS, THE RUNNER ServiceAccount, THE
-#      NetworkPolicy — then `just check-secrets`.
+# 2/10 THE DEMO NAMESPACE, THE FOUR SECRETS (THE ARCHIVE CREDENTIAL BOUND TO
+#      ITS LOCATION), THE RUNNER ServiceAccount — then `just check-secrets`.
 # ---------------------------------------------------------------------------
-step "2/10 namespace $NS, the five Secrets, the runner ServiceAccount, then just check-secrets $NS"
+step "2/10 namespace $NS, the four Secrets, logweir-s3 bound to $ARCHIVE_URL, the runner ServiceAccount, then just check-secrets $NS"
 set +e
 kubectl --context "$LOGWEIR_KUBE_CONTEXT" create namespace "$NS" > "$OUT/ns.log" 2>&1
 rc=$?
@@ -383,19 +385,11 @@ set -e
 echo "    rc=$rc  (secret/logweir-signing-key, data key signing.pem)"
 [ "$rc" -eq 0 ] || die "could not create logweir-signing-key (rc=$rc)"
 
-# 2. the approval bundle — placeholders for the two halves that cannot exist
-#    yet (they sign the plan bytes, which are step 6's); step 7 REPLACES it,
-#    with the real allowlist carrying the target's OBSERVED cluster id.
-printf '{"allowed_cluster_ids":["REPLACED-AT-STEP-7"],"source_cluster_id":null}\n' > "$OUT/allowed-clusters.json"
-printf 'replaced-at-step-7\n' > "$OUT/approval.placeholder"
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic logweir-approval-bundle --from-file=approval.json="$OUT/approval.placeholder" --from-file=approval.sig="$OUT/approval.placeholder" --from-file=approver.pub.pem="$OUT/approver.pub.pem" --from-file=allowed-clusters.json="$OUT/allowed-clusters.json" > "$OUT/secret-approval.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (secret/logweir-approval-bundle, four keys — approval.json/.sig and the allowlist replaced at step 7)"
-[ "$rc" -eq 0 ] || die "could not create logweir-approval-bundle (rc=$rc)"
+# (No `logweir-approval-bundle`: since PLAT-01 the controller writes each
+# Restore its own immutable `<restore>-approval-bundle` from the verified
+# Approval and the TrustRoster's allowlist, step 4.)
 
-# 3. the per-cluster SCRAM credential — unused on PLAINTEXT, counted by check-secrets.
+# 2. the per-cluster SCRAM credential — unused on PLAINTEXT, counted by check-secrets.
 set +e
 kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic kafka-scram --from-literal=password=unused-on-the-plaintext-listener > "$OUT/secret-scram.log" 2>&1
 rc=$?
@@ -403,7 +397,7 @@ set -e
 echo "    rc=$rc  (secret/kafka-scram, data key password)"
 [ "$rc" -eq 0 ] || die "could not create kafka-scram (rc=$rc)"
 
-# 4. the runner's archive credential — COPIED from the chart's own
+# 3. the runner's archive credential — COPIED from the chart's own
 #    `logweir-s3` in the release namespace, so the demo dials the archive with
 #    the credential the chart minted and not a literal of its own.
 set +e
@@ -429,7 +423,24 @@ echo "    rc=$rc  (secret/logweir-s3 in $NS — the chart's data, copied)"
 [ "$rc" -eq 0 ] || die "could not create logweir-s3 in $NS (rc=$rc)"
 rm -f "$OUT/s3-secret.json" "$OUT/s3-secret-copy.json"
 
-# 5. the CONTROLLER's read-only evidence credential — in the release
+# ... AND BOUND to the location it is used at (FX-20, docs/kubernetes.md
+# "Credential binding"): a runner refuses a Secret whose `logweir-binding` is
+# not the binding of the location it dials, `CredentialBindingMismatch`, before
+# any request. The walk's Backups (the controller's AWS_* route, which the
+# chart renders from this same MinIO endpoint and region) and its Restore's
+# plan `source` and `evidence` are one location, bucket and endpoint, so one
+# binding covers all three. `--apply` prints what it binds; the walk states the
+# endpoint it means, and the tool refuses any other.
+BIND_CONFIRM="$S3_ENDPOINT bucket=$ARCHIVE_BUCKET region=$S3_REGION pathStyle=true allowHttp=true"
+set +e
+"$PYTHON" scripts/bind-credential.py --context "$LOGWEIR_KUBE_CONTEXT" --namespace "$NS" --location "$ARCHIVE_URL" --endpoint "$S3_ENDPOINT" --region "$S3_REGION" --path-style true --allow-http true --secret logweir-s3 --apply --confirm-endpoint "$BIND_CONFIRM" > "$OUT/bind-s3.log" 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (scripts/bind-credential.py --location $ARCHIVE_URL --secret logweir-s3 --apply --confirm-endpoint '$BIND_CONFIRM')"
+cat "$OUT/bind-s3.log"
+[ "$rc" -eq 0 ] || die "could not bind logweir-s3 to $ARCHIVE_URL (rc=$rc); see $OUT/bind-s3.log"
+
+# 4. the CONTROLLER's read-only evidence credential — in the release
 #    namespace. MinIO gives no second identity out of the box, so the demo
 #    uses the same root pair under a different Secret name: WHAT THIS PROVES
 #    IS THE PROJECTION, not the IAM policy. An adopter gives this principal
@@ -465,9 +476,9 @@ set -e
 echo "    rc=$rc  (kubectl apply -f config/samples/backup-runner-serviceaccount.yaml -n $NS)"
 [ "$rc" -eq 0 ] || die "could not create the runner ServiceAccount (rc=$rc)"
 
-# `just check-secrets` reads the fifth Secret from the literal `logweir-system`
+# `just check-secrets` reads the fourth Secret from the literal `logweir-system`
 # (its recipe), which is this walk's default release namespace. Under another
-# release namespace the same five reads are made here instead, and said so.
+# release namespace the same four reads are made here instead, and said so.
 if [ "$SYS" = "logweir-system" ]; then
   set +e
   just check-secrets "$NS" > "$OUT/check-secrets.log" 2>&1
@@ -478,8 +489,8 @@ if [ "$SYS" = "logweir-system" ]; then
   [ "$rc" -eq 0 ] || die "\`just check-secrets $NS\` exited $rc; see $OUT/check-secrets.log"
 else
   echo "    just check-secrets reads logweir-evidence-ro from the literal namespace logweir-system; this"
-  echo "    release is in $SYS, so the five reads are made here:"
-  for pair in "logweir-signing-key:$NS" "logweir-approval-bundle:$NS" "kafka-scram:$NS" "logweir-s3:$NS" "logweir-evidence-ro:$SYS"; do
+  echo "    release is in $SYS, so the four reads are made here:"
+  for pair in "logweir-signing-key:$NS" "kafka-scram:$NS" "logweir-s3:$NS" "logweir-evidence-ro:$SYS"; do
     set +e
     kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "${pair##*:}" get secret "${pair%%:*}" -o name > /dev/null 2>&1
     rc=$?
@@ -490,44 +501,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3/10 THE CLUSTER-SCOPED TrustRoster `default`, from the sample's shape.
+# 3/10 TWO KafkaClusters AT THE CHART'S BROKERS, AND `reachable: true` ON BOTH.
 # ---------------------------------------------------------------------------
-step "3/10 TrustRoster default — the approver key id and the signing key MATERIAL"
-"$PYTHON" - "$OUT/signing.pub.pem" "$SIGNING_KEY_ID" "$OUT/approver.pub.pem" "$APPROVER_KEY_ID" "$OUT/trustroster.yaml" <<'PY'
-import sys, textwrap
-sig_pem, sig_id, app_pem, app_id, out = sys.argv[1:6]
-def block(path):
-    return textwrap.indent(open(path).read().rstrip("\n"), " " * 8)
-doc = f"""apiVersion: logweir.dev/v1alpha1
-kind: TrustRoster
-metadata:
-  name: default
-spec:
-  allowedClusterIds: []
-  approverKeys:
-    - keyId: {app_id}
-      subject: helm-demo-approver@example.invalid
-      spkiPem: |
-{block(app_pem)}
-  signingKeys:
-    - keyId: {sig_id}
-      subject: logweir-runner@example.invalid
-      spkiPem: |
-{block(sig_pem)}
-"""
-open(out, "w").write(doc)
-PY
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" apply -f "$OUT/trustroster.yaml" > "$OUT/roster.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (kubectl apply -f trustroster.yaml — cluster-scoped, name 'default')"
-[ "$rc" -eq 0 ] || die "could not apply the TrustRoster (rc=$rc); see $OUT/roster.log"
-
-# ---------------------------------------------------------------------------
-# 4/10 TWO KafkaClusters AT THE CHART'S BROKERS, AND `reachable: true` ON BOTH.
-# ---------------------------------------------------------------------------
-step "4/10 KafkaCluster source ($SOURCE_BOOTSTRAP) and target ($TARGET_BOOTSTRAP) -> status.reachable"
+step "3/10 KafkaCluster source ($SOURCE_BOOTSTRAP) and target ($TARGET_BOOTSTRAP) -> status.reachable"
 cat > "$OUT/kafkaclusters.yaml" <<YAML
 apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
@@ -574,8 +550,46 @@ SOURCE_CLUSTER_ID=$(read_field kafkacluster source '{.status.clusterId}' 'source
 TARGET_CLUSTER_ID=$(read_field kafkacluster target '{.status.clusterId}' 'target status.clusterId')
 [ -n "$SOURCE_CLUSTER_ID" ] || die "the source KafkaCluster recorded no clusterId"
 [ -n "$TARGET_CLUSTER_ID" ] || die "the target KafkaCluster recorded no clusterId"
-[ "$SOURCE_CLUSTER_ID" != "$TARGET_CLUSTER_ID" ] || die "the two brokers report the SAME cluster id ($SOURCE_CLUSTER_ID); phase 0's target != source rail would refuse the restore"
+[ "$SOURCE_CLUSTER_ID" != "$TARGET_CLUSTER_ID" ] || die "the two brokers report the SAME cluster id ($SOURCE_CLUSTER_ID); a scratch restore must not write into the cluster it backs up"
 echo "    two clusters, two ids: source $SOURCE_CLUSTER_ID, target $TARGET_CLUSTER_ID"
+
+# ---------------------------------------------------------------------------
+# 4/10 THE CLUSTER-SCOPED TrustRoster `default`, from the sample's shape. AFTER
+#      step 3, because its `allowedClusterIds` is the restore-target allowlist
+#      phase 0 reads (the controller copies it into each Restore's approval
+#      bundle) and must carry the target's OBSERVED id; `spec` is immutable.
+# ---------------------------------------------------------------------------
+step "4/10 TrustRoster default — the approver key id, the signing key MATERIAL, allowedClusterIds [$TARGET_CLUSTER_ID]"
+"$PYTHON" - "$OUT/signing.pub.pem" "$SIGNING_KEY_ID" "$OUT/approver.pub.pem" "$APPROVER_KEY_ID" "$TARGET_CLUSTER_ID" "$OUT/trustroster.yaml" <<'PY'
+import sys, textwrap
+sig_pem, sig_id, app_pem, app_id, target_id, out = sys.argv[1:7]
+def block(path):
+    return textwrap.indent(open(path).read().rstrip("\n"), " " * 8)
+doc = f"""apiVersion: logweir.dev/v1alpha1
+kind: TrustRoster
+metadata:
+  name: default
+spec:
+  allowedClusterIds: ["{target_id}"]
+  approverKeys:
+    - keyId: {app_id}
+      subject: helm-demo-approver@example.invalid
+      spkiPem: |
+{block(app_pem)}
+  signingKeys:
+    - keyId: {sig_id}
+      subject: logweir-runner@example.invalid
+      spkiPem: |
+{block(sig_pem)}
+"""
+open(out, "w").write(doc)
+PY
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" apply -f "$OUT/trustroster.yaml" > "$OUT/roster.log" 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl apply -f trustroster.yaml — cluster-scoped, name 'default')"
+[ "$rc" -eq 0 ] || die "could not apply the TrustRoster (rc=$rc); see $OUT/roster.log"
 
 # ---------------------------------------------------------------------------
 # 5/10 A BackupSchedule ON */2, AND THE Backup IT FIRES — Succeeded, exitCode 0,
@@ -754,7 +768,7 @@ echo "    rc=$rc  (kubectl create -f restore-body.json — Restore/$RESTORE_NAME
 # ---------------------------------------------------------------------------
 # 7/10 THE APPROVAL, MINTED ON THE HOST WITH THE SHIPPED CLI, AND THE Approval.
 # ---------------------------------------------------------------------------
-step "7/10 logweir drill approve on the HOST, the real approval bundle, then the Approval object"
+step "7/10 logweir drill approve on the HOST, then the Approval object (the controller writes the Restore's bundle from it)"
 set +e
 logweir drill approve --spec "$OUT/plan.yaml" --key "$OUT/approver.pem" --approver helm-demo --ticket DEMO-HELM --subject-kind Restore --out "$OUT/approval.json" > "$OUT/approve.out" 2>&1
 rc=$?
@@ -767,21 +781,6 @@ APPROVED_HASH=$(awk '/plan_hash/ { print $2 }' "$OUT/approve.out")
 echo "    plan_hash from the CLI : $APPROVED_HASH"
 echo "    plan-hash from the page: $PLAN_HASH"
 [ "$APPROVED_HASH" = "$PLAN_HASH" ] || die "the CLI signed $APPROVED_HASH and the page showed $PLAN_HASH — two documents with one name"
-
-# THE REAL ALLOWLIST: the target's OBSERVED cluster id (phase 0's scratch rail
-# 1), and the source's id as the id a scratch restore must not equal (rail 2).
-printf '{"allowed_cluster_ids":["%s"],"source_cluster_id":"%s"}\n' "$TARGET_CLUSTER_ID" "$SOURCE_CLUSTER_ID" > "$OUT/allowed-clusters.json"
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" delete secret logweir-approval-bundle > "$OUT/secret-approval-delete.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (kubectl delete secret logweir-approval-bundle — the placeholder)"
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic logweir-approval-bundle --from-file=approval.json="$OUT/approval.json" --from-file=approval.sig="$OUT/approval.sig" --from-file=approver.pub.pem="$OUT/approver.pub.pem" --from-file=allowed-clusters.json="$OUT/allowed-clusters.json" > "$OUT/secret-approval2.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (secret/logweir-approval-bundle, the real four keys; allowlist = [$TARGET_CLUSTER_ID], source $SOURCE_CLUSTER_ID)"
-[ "$rc" -eq 0 ] || die "could not re-create logweir-approval-bundle (rc=$rc)"
 
 "$PYTHON" - "$OUT/approval.json" "$OUT/approval.sig" "$NS" "$APPROVAL_NAME" "$RESTORE_NAME" "$APPROVED_HASH" "$OUT/approval-object.yaml" <<'PY'
 import sys, textwrap

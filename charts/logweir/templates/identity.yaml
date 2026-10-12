@@ -80,6 +80,7 @@ installed without the trust: the operator chooses (a newer Helm, or
 {{- if .Values.demoKafka.enabled }}
 {{- $allowedTargets = append $allowedTargets .Values.demoKafka.clusterIds.target }}
 {{- end }}
+{{- $allowedTargets = uniq $allowedTargets }}
 {{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
 {{- if eq $namespace $.Release.Namespace }}{{ fail "identity.authorizedRunnerNamespaces must not repeat the release namespace; it is always authorized" }}{{ end }}
 {{- end }}
