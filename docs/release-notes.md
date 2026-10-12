@@ -28,7 +28,7 @@ candidate shipped. This entry collects what lands on `main` after that
 publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
-81, 82, 83, 84, 85 and 86 so far. Items continue the next entry's numbering. No candidate is
+81, 82, 83, 84, 85, 86 and 87 so far. Items continue the next entry's numbering. No candidate is
 cut from this entry yet, so it carries no candidate record; when one is, its
 record follows [the release checklist](tag1-checklist.md) as the next entry's does.
 
@@ -1824,6 +1824,30 @@ of `v0.2.0-rc.1`'s document against this one.
 **Rollback:** an older console image serves `1.0.0-alpha.2` again; roll it
 back with the items it names.
 
+#### 87. A refused retention run stays named on its RetentionPolicy until the next run (D-R1)
+
+**Changed.** Item 79 named a refused run (exit 3) on the harvest only: the
+next pass, seconds later, read `NothingToDo` ("this plan has already run in
+the slot"), and after three runs `EnforcementDegraded` said the last run
+"named no per-point code". The refusal is now recorded in
+`status.lastEnforcement.refusalCode` (and `refusalVariable`, a variable's name,
+never its value), and `Enforced` and `EnforcementDegraded` keep naming it until
+the next run starts. A pass with something else to fix first (the mode, the
+schedule, the catalog view, the ceiling or the approval) shows that on
+`Enforced`; the record and `EnforcementDegraded` still name the refusal. A
+refused run counts toward the three failed runs that stop scheduling, as
+before. Nothing about what is deleted, planned or scheduled changes.
+**Do:** nothing beyond applying the CRDs before the controller, as every
+upgrade does ([install.md](install.md#upgrade-crds-before-upgrading-the-controller)).
+**Scope:** controller rows over the recording API double for six refusal
+classes across the reconcile after the harvest, and for three refused runs
+and the pass after them; each fails on the previous controller; eight
+mutants.
+[UNVERIFIED — no live install has run this build's refusal yet.]
+**Rollback:** roll the controller back; it neither writes nor reads the two
+fields, and the refusal is named only on the harvest pass again. The newer
+CRD is harmless to it.
+
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
@@ -1960,7 +1984,7 @@ audit record keeps that hash, so only a rotation retires it (item 33).
 An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
-71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85 and 86, in the order of the next
+71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86 and 87, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -2024,6 +2048,7 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 84 | the identity hook's image | nothing |
 | 85 | the chart only | nothing until `minio.persistence.keep` is set |
 | 86 | the API document's version (the console image) | nothing |
+| 87 | the controller and the `RetentionPolicy` CRD | the CRDs applied |
 
 To roll back to `v0.2.0-rc.1`, in this order, on top of the next entry's
 rollback steps:

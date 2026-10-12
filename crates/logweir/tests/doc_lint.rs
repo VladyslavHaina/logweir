@@ -2134,6 +2134,12 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // Item 86: the API document's version step for the next candidate.
         ("the API document is 1.0.0-alpha.3", "`1.0.0-alpha.3`"),
+        // Item 87 (D-R1): a refusal stays named until the next run; the
+        // record that keeps it.
+        (
+            "a refused run stays named until the next run",
+            "`status.lastEnforcement.refusalCode`",
+        ),
     ];
     assert_eq!(
         items.len(),
