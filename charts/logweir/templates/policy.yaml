@@ -1,104 +1,29 @@
 {{- /*
-The installation policy `ConfigMap` — D2 §4.4, rendered by W11 and read by
-`weirkeeper::check::policy`.
+The installation policy ConfigMap, read by `weirkeeper::check::policy`.
 
-WHY IT IS A ConfigMap IN THE RELEASE NAMESPACE, AND WHY THAT IS THE WHOLE
-SECURITY ARGUMENT. `status.result.visibility.state: attestedComplete` is the
-one place where a human statement outranks what Logweir observed, and D2 §5.4
-only allows it from "an explicit administrator-governed capability". The
-capability here is `create`/`update` on THIS ConfigMap in the RELEASE
-namespace: a chart or cluster administrator has it, and a namespace operator —
-who holds `logweir-operator`, which names no `configmaps` at all — does not.
-The controller reads it with the `configmaps: get` it already had.
+It is in the release namespace because write access to it is what makes a
+visibility attestation an administrator's statement: a namespace operator
+(`logweir-operator` names no `configmaps`) cannot write it. Every value comes
+from `values.yaml` and none is a secret.
 
-NO CREDENTIAL, EVER. Every value below comes from `values.yaml`; none of them
-is a secret, and Global Constraint / spec §9's rule that private signing
-material never reaches a ConfigMap is not weakened by this file — there is no
-path from a Secret into this document.
+The parser uses `deny_unknown_fields` and range checks, and a document it
+refuses fails closed almost silently (no attestations, no evidence allowlist,
+one advisory row). So `values.schema.json` requires every field read here and
+`_validate.tpl` refuses the one cross-field rule the schema cannot state.
 
-FAIL-CLOSED ON ITS OWN MALFORMEDNESS. `check::policy::parse` uses
-`deny_unknown_fields` and refuses an out-of-range value; a document it refuses
-produces `Policy::fail_closed()` (no attestations, no evidence allowlist) plus
-the advisory `configuration.policy notReady PolicyUnreadable` row. That is why
-`values.schema.json` REQUIRES every field of `checks`, `checks.discovery` and
-`checks.preflight` that this template reads: a half-written block would render a
-document the controller refuses, and the refusal is silent unless someone reads
-a Preflight. (The two withdrawn keys are optional there and read by nothing
-here; see below.)
-
-THE `runs` BLOCK (P10) is how many MANUAL runs one namespace may have ACTIVE
-at once — `runs.maxManualBackupsActivePerNamespace` "Back up now" runner Jobs
-and `runs.maxManualRestoresActivePerNamespace` manual restores — before the
-rest wait `phase: Queued` (`weirkeeper::run_pool`). An administrator's
-ceiling, in the administrator's ConfigMap, for the same reason the check
-ceilings are. A controller that predates the block refuses the WHOLE document
-(`deny_unknown_fields`) and fails closed, so the block is rendered only when a
-value differs from the controller's defaults (below), and a non-default
-install rolls the controller image back with the chart, never alone.
-
-THE `legacyArchiveAddressing` BLOCK IS THE SAME `archive.s3.*` VALUES
-`deployment.yaml` renders as `AWS_ENDPOINT_URL` / `AWS_REGION` /
-`AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, which the Preflight
-controller reads for a legacy plan. The two are derived from ONE pair of
-helpers so they cannot drift.
-
-THE `if $endpoint` GUARD IS THE WHOLE POINT OF THE BLOCK, not a tidiness.
-`deployment.yaml` renders `AWS_ALLOW_HTTP` ONLY inside `{{ if $endpoint }}`, so
-an install with no endpoint at all (plain Amazon S3) forwards no addressing
-env and its `allowHttp` is not `true` — it does not exist. Copying the bare
-`ternary` out of that block would publish `allowHttp: true` for exactly that
-install and publish a plaintext-HTTP fact nobody configured, which
-is D-SEAMS S5 (transport security is never derived) failing in the one
-direction that matters.
+`legacyArchiveAddressing` is the same `archive.s3.*` addressing
+`deployment.yaml` renders as env, from the same helpers. It carries a
+plaintext `allowHttp` only when an endpoint exists: an install on plain Amazon
+S3 must never publish an HTTP fact nobody configured.
 */ -}}
 {{- /*
-THE ONE RULE `values.schema.json` CANNOT CARRY, REFUSED HERE INSTEAD.
-
-`Policy::validate` enforces `maxActiveTotal >= maxActivePerNamespace`. It
-compares two SIBLING values, and JSON Schema draft-07 — which is what Helm
-evaluates — has no way to express that; `additionalProperties`, `minimum` and
-`maximum` are per-field or nothing. (There were two until FX-10 withdrew
-`checks.discovery.defaultMaxTopics`, whose `<= hardMaxTopics` rule went with
-it: see the compatibility fields below.)
-
-WHY IT MUST BE REFUSED AT RENDER TIME AND NOT LEFT TO THE CONTROLLER. A
-document the parser refuses fails CLOSED and SILENTLY: `Policy::fail_closed()`
-discards EVERY `visibilityAttestation` and EVERY `controllerIdentityLocation`
-the administrator configured, `attestedComplete` becomes unreachable, retention
-reverts to the compiled-in defaults, and the only signal is one advisory
-`configuration.policy notReady PolicyUnreadable` row on a `Preflight` nobody
-is necessarily looking at. `helm install` would have said nothing at all. So
-the refusal happens where the operator is still watching, naming the rule and
-both values.
-*/ -}}
-{{- $maxNs := int .Values.checks.maxActivePerNamespace -}}
-{{- $maxTotal := int .Values.checks.maxActiveTotal -}}
-{{- if lt $maxTotal $maxNs -}}
-{{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxNs) -}}
-{{- end -}}
-{{- /*
-THE TWO WITHDRAWN FIELDS ARE RENDERED AS FIXED COMPATIBILITY VALUES, NEVER
-FROM A VALUE (FX-10, 2026-10-05).
-
-`checks.discovery.defaultMaxTopics` and `checks.preflight.defaultTimeoutSeconds`
-were documented as the default a request that names none gets. No request ever
-names none — both CRDs default the field at admission and the console API
-writes it — so the two knobs changed nothing, and they are gone from
-`values.yaml`. `values.schema.json` still ACCEPTS them, so an older values file
-or a `--reuse-values` upgrade does not fail on the closed schema, and NOTES.txt
-says that a set one is ignored.
-
-The document still CARRIES both keys, at `WITHDRAWN_DEFAULT_MAX_TOPICS`
-(clamped to `hardMaxTopics`) and `WITHDRAWN_DEFAULT_TIMEOUT_SECONDS`, because a
-controller older than FX-10 parses `discovery` and `preflight` with both keys
-REQUIRED and range-checked (`1 <= defaultMaxTopics <= hardMaxTopics`,
-`1..=600`) and refuses — fails closed — a document without them. Rendering
-them keeps a DEFAULT install readable by such a controller (an image-only
-rollback, and the old pod during a rolling upgrade), which is the rule the
-`runs` block below follows too. This controller parses them and reads neither
-(`weirkeeper::check::policy`). Drop them when no supported controller
-requires them; `weirkeeper/tests/chart_policy.rs` pins both numbers to the
-parser's constants.
+`defaultMaxTopics` and `defaultTimeoutSeconds` are fixed compatibility values,
+never read from values: no request ever lacks its own (the CRDs default them),
+so the two knobs were withdrawn; the schema still accepts them and NOTES.txt
+says a set one is ignored. A controller older than the withdrawal requires both
+keys in range and fails closed without them, so a default install keeps them
+for an image-only rollback. `weirkeeper/tests/chart_policy.rs` pins both
+numbers to the parser's constants.
 */ -}}
 {{- $compatMaxTopics := min 20000 (int .Values.checks.discovery.hardMaxTopics) -}}
 {{- $endpoint := include "logweir.archive.endpoint" . -}}
@@ -134,15 +59,10 @@ parser's constants.
       "evidence" (dict "controllerIdentityLocations" .Values.evidence.controllerIdentityLocations)
       "legacyArchiveAddressing" $legacy -}}
 {{- /*
-THE `runs` BLOCK IS RENDERED ONLY WHEN IT DIFFERS FROM THE CONTROLLER'S OWN
-DEFAULTS (P10 review L2). `4` and `2` are `RunsPolicy::default()`, pinned by
-`weirkeeper/tests/chart_policy.rs`. A controller that predates the block parses
-`policy.json` with `deny_unknown_fields` and would refuse the WHOLE document —
-failing closed: no attestation, no evidence allowlist — so a default install
-must not carry it: then an image-only rollback reads the same document it
-always did, and the newer controller reads the absent block as these defaults.
-A non-default value is rendered, and then the controller is rolled back WITH
-the chart (`helm rollback`), never alone.
+`runs` renders only away from `RunsPolicy::default()` (4, 2, pinned by
+`weirkeeper/tests/chart_policy.rs`): an older controller refuses the whole
+document for an unknown block, so a default install must not carry it. A
+non-default value rolls back with the chart, never with the image alone.
 */ -}}
 {{- $runsBackups := int .Values.runs.maxManualBackupsActivePerNamespace -}}
 {{- $runsRestores := int .Values.runs.maxManualRestoresActivePerNamespace -}}

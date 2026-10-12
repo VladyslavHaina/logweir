@@ -120,7 +120,7 @@ carrying a `metadata.resourceVersion` precondition.
 
 `weirkeeper-policy` is the one place an operator cannot reach. **The chart
 refuses what the controller would refuse** (the schema pins every bound;
-`templates/policy.yaml` refuses a total below the per-namespace ceiling),
+`templates/_validate.tpl` refuses a total below the per-namespace ceiling),
 because a refused document fails closed almost silently: attestations and
 evidence locations are dropped and the ceilings revert, with one advisory
 `Preflight` row and one `WARN` line. The `runs` block renders only when a value
