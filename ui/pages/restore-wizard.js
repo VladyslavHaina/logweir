@@ -3718,6 +3718,12 @@ export function readinessSourceSentence(point) {
     "itself will use. Only a point with no destinationRef uses legacySourceArchive.";
 }
 
+/** Why Check readiness is disabled while no topic is ticked. */
+export const NO_TOPIC_READINESS_SENTENCE =
+  "Select at least one topic in step 4 (Target, topic subset and naming) first. A readiness " +
+  "check is about this plan, and a plan with no topic cannot be made, so there is nothing to " +
+  "check yet.";
+
 /** Why a readiness result is not a promise about the run. */
 export const READINESS_CAVEAT_SENTENCE =
   "A ready verdict says these checks passed when they ran. It is not a promise about the run: a " +
@@ -3754,6 +3760,14 @@ export function renderPreflightStep(state, prepared) {
   const edited = result !== null && currentHash.length > 0 &&
     ((boundHash.length > 0 && boundHash !== currentHash) ||
       (typeof serverHash === "string" && serverHash.length > 0 && serverHash !== currentHash));
+  // A PLAN THAT CANNOT BE RENDERED HAS NOTHING TO CHECK, and the button says
+  // so instead of doing nothing on a click: no topic ticked is the usual case.
+  const unchecked = typeof p.problem !== "string"
+    ? null
+    : (topics.length === 0
+      ? NO_TOPIC_READINESS_SENTENCE
+      : "The plan cannot be rendered from these values, so there is nothing to check: " +
+        p.problem);
   return (
     "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Operation readiness</h3>" +
     "<p class=\"blurb\">A readiness check for THIS plan, plus the target cluster's own most " +
@@ -3766,12 +3780,19 @@ export function renderPreflightStep(state, prepared) {
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
         "<div class=\"actions\">" +
-        "<button type=\"submit\" id=\"restore-readiness-start\">" +
+        "<button type=\"submit\" id=\"restore-readiness-start\"" +
+        (unchecked === null
+          ? ""
+          : " disabled aria-describedby=\"restore-readiness-blocked\"") + ">" +
         (result === null ? "Check readiness" : "Check this plan again") + "</button>" +
         (result !== null && result.terminal === false
           ? "<button type=\"button\" id=\"restore-readiness-cancel\">Cancel</button>"
           : "") +
         "</div></fieldset>" +
+        (unchecked === null
+          ? ""
+          : "<p class=\"complaint\" id=\"restore-readiness-blocked\">" + messageText(unchecked) +
+            "</p>") +
         "<div class=\"form-status\" id=\"restore-readiness-status\" tabindex=\"-1\">" +
         mutationStatus(record, { kind: "Preflight", name: (result || {}).id || "" }, null) +
         "</div></form>") +

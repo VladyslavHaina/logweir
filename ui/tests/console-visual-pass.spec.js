@@ -18,7 +18,14 @@ import { NAV_ROUTES, landingRedirect, landingRoute } from "../app.js";
 import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
-import { restoreDestination } from "../pages/restore-wizard.js";
+import {
+  NO_TOPIC_READINESS_SENTENCE,
+  initialState,
+  preparePlanOrProblem,
+  recoveryPoints,
+  renderPreflightStep,
+  restoreDestination,
+} from "../pages/restore-wizard.js";
 import {
   PRINCIPAL_SHORT_CHARS,
   principalShort,
@@ -284,4 +291,34 @@ test("m7_two_approvers_read_differently_at_a_glance_and_the_signed_in_one_is_you
     renderApprovalList({ items: [pocApproval("a-3", viewer.actor.id)] }, 0));
   assert.equal(seen(firstRowCells(mine)[2]), "you (Dana Viewer)");
   assert.ok(firstRowCells(mine)[2].includes("title=\"oidc#dana\""), "with the principal on hover");
+});
+
+// M8. On wizard step 5 with no topic ticked, Check readiness did nothing: no
+// message and no Preflight (the plan cannot be rendered, so `start` returned).
+
+const WIZARD = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const wizardFixture = (name) => JSON.parse(readFileSync(WIZARD + name, "utf8"));
+
+function wizardState() {
+  const backups = wizardFixture("wizard-backups.json");
+  const point = recoveryPoints(backups)[0];
+  return initialState("logweir-t27", wizardFixture("wizard-clusters.json"), backups,
+    { uid: point.metadata.uid, backup: point.metadata.name });
+}
+
+test("m8_check_readiness_with_no_topic_is_disabled_and_says_why", async () => {
+  const state = wizardState();
+  const ready = renderPreflightStep(state, await preparePlanOrProblem(state));
+  assert.match(ready, /<button type="submit" id="restore-readiness-start">Check readiness/,
+    "with a topic the button is live");
+  assert.doesNotMatch(ready, /id="restore-readiness-blocked"/);
+
+  state.fields.topics = [];
+  const prepared = await preparePlanOrProblem(state);
+  assert.equal(typeof prepared.problem, "string", "no topic, no plan");
+  const html = renderPreflightStep(state, prepared);
+  assert.match(html, /<button type="submit" id="restore-readiness-start" disabled aria-describedby="restore-readiness-blocked">/,
+    "NEGATIVE CONTROL: an enabled button that did nothing on a click");
+  assert.match(html, /<p class="complaint" id="restore-readiness-blocked">Select at least one topic in step 4/);
+  assert.ok(NO_TOPIC_READINESS_SENTENCE.toLowerCase().includes("select at least one topic"));
 });
