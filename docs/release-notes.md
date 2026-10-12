@@ -1842,8 +1842,10 @@ back with the items it names.
 - A schedule's *Retention* panel shows the `RetentionPolicy` whose
   `spec.destinationRef` names the schedule's destination: a `Report` policy
   deletes nothing, an `Enforce` one is shown as deleting, and two such policies
-  are the `Conflict` the controller marks them. "Logweir never deletes from your
-  archive" appears only when the policies were read and none names the
+  are the `Conflict` the controller marks them. A policy that is not
+  recommendation-only and names another destination is listed under it, since
+  two destinations can share a bucket and prefix. "Logweir never deletes from
+  your archive" appears only when the policies were read and none names the
   destination.
 - `GET …/destinations/{name}/usage` lists the schedules and Backups whose
   `spec.destinationRef` names the destination, from at most 1,600 of each kind,

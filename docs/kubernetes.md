@@ -2210,9 +2210,12 @@ What the console will and will not say:
 - **The retention panel shows the RetentionPolicy that names the schedule's
   destination** (`spec.destinationRef.name`, the controller's own match), with
   `status.enforcement` beside `spec.mode`: a `Report` policy reports and deletes
-  nothing, an `Enforce` one is shown as deleting. "Logweir never deletes from
-  your archive" is shown only when the policies were read and none names the
-  destination (nor does a policy that is not recommendation-only name another).
+  nothing, an `Enforce` one is shown as deleting. A policy that is not
+  recommendation-only and names another destination is listed under it: the
+  page does not compare locations, and two destinations can share a bucket and
+  prefix. "Logweir never deletes from your archive" is shown only when the
+  policies were read and none names the destination (nor does a policy that is
+  not recommendation-only name another).
   `legalHold` reads "declared by your provider; Logweir cannot verify it".
 - The API publishes no Job, pod or `ConfigMap` names and no frozen
   `locationDigest` on a catalog point; open vocabularies are rendered verbatim.

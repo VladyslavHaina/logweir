@@ -369,6 +369,8 @@ export function renderRetentionPanel(object, policy, policies) {
   // Conflict, and neither evaluates. Where none names it but one that is not
   // recommendation-only names another destination, the panel does not compare
   // the two locations, names the policies, and prints no sentence either.
+  // Where one names it and such a policy names another destination, both are
+  // shown: the covering one's own sentence, then the caveat and the others.
   const readFailed = policies !== null && typeof policies === "object" &&
     !Array.isArray(policies);
   const named = readFailed ? [] : policiesNaming(object, policies);
@@ -376,6 +378,9 @@ export function renderRetentionPanel(object, policy, policies) {
     ? policy
     : named.length === 1 ? named[0] : null;
   const unproven = covering === null ? deletingPolicies(policies) : [];
+  const elsewhere = covering === null || named.length > 1
+    ? []
+    : deletingPolicies(policies).filter((p) => p !== covering);
   const enforcement = readFailed
     ? renderPoliciesUnread(policies.readFailed)
     : named.length > 1
@@ -396,7 +401,9 @@ export function renderRetentionPanel(object, policy, policies) {
     "<p class=\"note\" data-retention-pointer=\"true\">" + esc(RETENTION_POINTER_SENTENCE) +
     "</p>" +
     enforcement +
-    sentence + "</section>"
+    sentence +
+    (elsewhere.length > 0 ? renderCoverageUnknown(elsewhere, RETENTION_ELSEWHERE_SENTENCE) : "") +
+    "</section>"
   );
 }
 
@@ -430,6 +437,15 @@ export const RETENTION_COVERAGE_UNKNOWN_SENTENCE =
   "not recommendation-only names another. This page does not compare the two locations, so it " +
   "does not say that Logweir never deletes from this schedule's archive: check which " +
   "destination each policy below governs.";
+
+/** The caveat under the covering policy's own sentence when a policy that is
+ *  not recommendation-only names another destination: two destinations can be
+ *  at one bucket and prefix, and retention matches points by location. */
+export const RETENTION_ELSEWHERE_SENTENCE =
+  "A RetentionPolicy in this namespace that is not recommendation-only names another " +
+  "destination. This page does not compare locations: if that destination is at this one's " +
+  "bucket and prefix, that policy can delete this schedule's points, or declares a bucket rule " +
+  "that can. Check which destination each policy below governs.";
 
 /** What the panel says when no RetentionPolicy names this schedule's
  *  destination, and the read that says so succeeded. */
@@ -481,9 +497,10 @@ export function coveringSentence(policy) {
     "\">" + esc(words) + "</p>";
 }
 
-/** The panel's enforcement block when coverage cannot be told: the sentence
- *  above and each deleting policy with the destination and state it recorded. */
-export function renderCoverageUnknown(policies) {
+/** The panel's enforcement block when coverage cannot be told: `sentence` (by
+ *  default the one above) and each deleting policy with the destination and
+ *  state it recorded. */
+export function renderCoverageUnknown(policies, sentence) {
   const rows = policies.map((p) => [
     cell(((p || {}).metadata || {}).name),
     cell((((p || {}).spec || {}).destinationRef || {}).name),
@@ -491,7 +508,7 @@ export function renderCoverageUnknown(policies) {
   ]);
   return (
     "<div class=\"enforcement\" data-enforcement=\"unknown-coverage\">" +
-    "<p class=\"caveat\">" + esc(RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
+    "<p class=\"caveat\">" + esc(sentence || RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
     table(["RETENTION POLICY", "DESTINATION", "ENFORCEMENT"], rows, "") +
     "</div>"
   );

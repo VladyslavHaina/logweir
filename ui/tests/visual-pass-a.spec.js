@@ -33,6 +33,7 @@ import {
   validateGrants,
 } from "../pages/destinations.js";
 import {
+  RETENTION_ELSEWHERE_SENTENCE,
   policyForSchedule,
   readRetentionPolicies,
   renderRetentionPanel,
@@ -421,6 +422,32 @@ test("h3_a_successful_read_with_no_policy_naming_the_destination_keeps_the_sente
   }
   resetMode();
 });
+
+test("h3_a_policy_that_deletes_on_another_destination_is_named_beside_the_covering_one",
+  async () => {
+    // Review F1: `primary` (Report) names `dest`; `copy` (LogweirWorker) names
+    // `dest-copy`, which may be at dest's bucket and prefix. Retention matches
+    // points by location, so `copy` can delete what this schedule writes.
+    await sharedConsole();
+    const schedule = await scheduleTz();
+    const panel = retentionPanel(schedule, await policiesRead((items) =>
+      [named(items[0], "dest", "primary"), named(items[1], "dest-copy", "copy")]));
+    assert.ok(panel.indexOf("RetentionPolicy primary is in Report mode") !== -1, panel);
+    assert.ok(panel.indexOf(RETENTION_ELSEWHERE_SENTENCE) !== -1,
+      "THE DEFECT: the Report policy's 'deletes nothing' with no word of `copy`");
+    assert.match(panel, /<td>copy<\/td><td>dest-copy<\/td><td>LogweirWorker<\/td>/);
+    assert.equal(panel.indexOf(RETENTION_SENTENCE), -1);
+    // The covering policy is not listed as "another"; with no other policy
+    // that deletes, there is no caveat.
+    const enforcing = retentionPanel(schedule, await policiesRead((items) =>
+      [named(items[1], "dest"), items[2]]));
+    assert.match(enforcing, /<td>declared-c<\/td><td>dest-b<\/td>/);
+    assert.equal(enforcing.indexOf("<td>enforce-a</td>"), -1);
+    const alone = retentionPanel(schedule, await policiesRead((items) =>
+      [named(items[0], "dest", "primary")]));
+    assert.equal(alone.indexOf(RETENTION_ELSEWHERE_SENTENCE), -1);
+    resetMode();
+  });
 
 test("h3_a_failed_read_or_a_conflict_never_claims_no_deletion", async () => {
   await sharedConsole();
