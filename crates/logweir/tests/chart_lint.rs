@@ -4716,13 +4716,15 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // install, and a key the schema types that values.yaml does not show is
     // accepted and, unless a template reads it, silently ignored (`kafka.markerTopic`
     // was, until the chart-validate pass). A WITHDRAWN key is the one exception:
-    // the schema accepts it only so the render can refuse it (`notify`, `ui`) or
-    // the install notes can name it, and values.yaml no longer shows it. An open
-    // map (`resources`, `nodeSelector`, annotations: a schema object with no
-    // `properties`) is compared by its own key, not its contents.
-    const WITHDRAWN: [&str; 4] = [
+    // the schema accepts it only so the render can refuse it (`notify`, `ui`,
+    // `kafka.markerTopic`) or the install notes can name it, and values.yaml no
+    // longer shows it. An open map (`resources`, `nodeSelector`, annotations: a
+    // schema object with no `properties`) is compared by its own key, not its
+    // contents.
+    const WITHDRAWN: [&str; 5] = [
         "notify",
         "ui",
+        "kafka.markerTopic",
         "checks.discovery.defaultMaxTopics",
         "checks.preflight.defaultTimeoutSeconds",
     ];

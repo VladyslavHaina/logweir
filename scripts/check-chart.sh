@@ -974,6 +974,25 @@ if [ "$rc" -ne 0 ]; then
 else
   echo "   rc=0  (control: the same render with no ui block renders)"
 fi
+# kafka.markerTopic (the source's) was typed by the schema and read by nothing;
+# it is refused by name, not by the schema's generic unknown-key error.
+# CONTROL: the target's markerTopic, the key that does mark a scratch target,
+# still renders onto the target KafkaCluster.
+refuses "the withdrawn source kafka.markerTopic" "kafka.markerTopic is withdrawn" \
+  --set kafka.enabled=true --set kafka.bootstrapServers=source:9092 \
+  --set kafka.markerTopic=logweir.scratch
+if renders "the control: kafka.target.markerTopic" "$tmp/marker-target.yaml" \
+  --set kafka.enabled=true --set kafka.bootstrapServers=source:9092 \
+  --set kafka.target.bootstrapServers=target:9092; then
+  grep -F -q 'markerTopic: "logweir.scratch"' "$tmp/marker-target.yaml"
+  grc=$?
+  if [ "$grc" -ne 0 ]; then
+    echo "FAIL: the control for the kafka.markerTopic refusal rendered no target markerTopic" >&2
+    fail=1
+  else
+    echo "   rc=0  (control: kafka.target.markerTopic renders onto the target)"
+  fi
+fi
 refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \

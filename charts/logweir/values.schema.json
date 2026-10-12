@@ -359,7 +359,8 @@
         },
         "username": { "type": "string" },
         "secretRef": { "type": "string" },
-        "secretKey": { "type": "string" }
+        "secretKey": { "type": "string" },
+        "markerTopic": { "description": "WITHDRAWN: the source's markerTopic, which nothing ever read (only kafka.target.markerTopic marks a scratch target). Accepted here only so templates/_validate.tpl can refuse it by name; remove it from your values." }
       }
     },
     "minio": {
