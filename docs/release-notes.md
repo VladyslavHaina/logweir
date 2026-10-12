@@ -1966,23 +1966,27 @@ merge walks each page as each role.]
 
 **Changed.** Every create-only evidence write (a receipt and its signature, the
 consumer positions document, a scorecard, a catalog record) is re-sent up to
-three times, 200 ms, 400 ms and 800 ms apart, when the store gave no answer:
-a dropped or reset connection, such as a pooled connection the store had
+three times, 200 ms, 400 ms and 800 ms apart, when its connection dropped in
+under 2 seconds with no answer, such as a pooled connection the store had
 already closed. Before, one such drop failed a backup with exit 4 and
 `signing: storage: Generic S3 error: Error performing PUT ... - HTTP error:
-error sending request`, though the archive was written. Create-only still
-holds: a re-sent write that finds the key taken reads the object back, and
-succeeds only when it holds exactly the bytes this run wrote (the lost attempt
-landed them); any other object is refused as before and never overwritten. An
-answered refusal (a 4xx) is not re-sent. Not in `v0.2.0-rc.2`.
+error sending request`, though the archive was written. A timeout, a refused
+connection (which the store client already retries) and any answered status
+(a 4xx) are not re-sent, so a put that fails still fails within about 7
+seconds of the time it took before. Create-only still holds: a re-sent write
+that finds the key taken reads the object back and succeeds only when it holds
+exactly the bytes this run wrote (the lost attempt landed them), where the
+writer may read the key; a runner holding only `s3:PutObject` on `logweir/*`
+still fails such a run, as before. Any other object is refused as before and
+never overwritten. Not in `v0.2.0-rc.2`.
 **Do:** nothing.
 **Scope:** `logweir-store`'s `evidence_put_retry_tests`, over the real S3
-client and a scripted transport: a dropped connection is re-sent and lands;
-a lost answer over the same bytes succeeds; over different bytes it is
-refused; a 403 is sent once; a first `AlreadyExists` is refused without a
-read. Today's code fails the first two. Live on the compose stack: the e2e row
-that failed this way in CI (`position_evidence`) and `full_drill`'s main row,
-five times each.
+client and a scripted transport: a fast drop is re-sent and lands; a lost
+answer over the same bytes succeeds; over different bytes, longer or of the
+same length, it is refused; a denied read-back is an error; a 403, a timeout
+and a slow drop are each sent once; a first `AlreadyExists` is refused without
+a read. Live on the compose stack: the e2e row that failed this way in CI
+(`position_evidence`) and `full_drill`'s main row.
 **Rollback:** an older runner image fails the run on such a drop, as before;
 nothing is stored differently.
 
