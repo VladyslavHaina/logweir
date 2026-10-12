@@ -852,6 +852,19 @@ What it fixed:
   - `logweir-pair` is two-person.
   - Uninstall per `deploy/poc/README.md`: mirror the archive first, or set `minio.persistence.keep`.
 
+**PROD-14.1's visual pass (`ui-pass`, 2026-10-12) on the new PoC.** Done as the owner asked on 2026-09-23: visible clicks only, every role, viewports of 1440, 1024 and 390, with screenshots read one by one (`claude/ui-pass.result.md`, `claude/artifacts/ui-pass/`, 217 shots). Passwords were read from file by the script and never printed.
+- **The journey passed:** as `operator`, Back up now was verified in 8 s, then a six-step restore into a scratch topic reached Succeeded, verified by weirkeeper with 75 of 75 sampled records matching.
+- **No withdrawn text remains:** no legacy-mode, rehearsal or delivery text, and no `keepLast` or `keepDays` field.
+- **Defects: 3 HIGH, 11 MEDIUM, 14 LOW.**
+  - **H1:** "Check it yourself" names the destination as the bucket.
+  - **H2:** "Rotate access" defaults the existing grants to `absent`, so one rotation would turn evidence verification off.
+  - **H3:** the schedule's Retention panel misses an existing RetentionPolicy and says "Logweir never deletes from your archive".
+  - **M1 to M11:** a label lookup that misses console-made objects, the viewer's create forms, the approver's landing tab, the Approvals table's width and its unreadable approver, restore-detail rows "not published", key labels, and id wrapping.
+- **Being fixed before the release candidate:**
+  - `ui-fix-a` (Tier A): H1 to H3, M1 and M9;
+  - `ui-fix-b` (checklist): the other MEDIUMs and seven cheap LOWs.
+- **The other LOWs go to v1.1:** L1 timestamp formats, L3 "last -", L6 duplicate run lists, L8 the inventory search, L9 a dangling sentence, L10 the 390 px header height, L13 the norole namespace box.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
