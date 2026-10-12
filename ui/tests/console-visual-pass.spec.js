@@ -459,3 +459,47 @@ test("l7_an_unrecorded_identity_reads_not_recorded", () => {
     status: { phase: "Succeeded" } });
   assert.match(html, /<dt>identity presented<\/dt><dd>not recorded<\/dd>/);
 });
+
+// L11 and L12, at 390 px, where a table is a stack of cards and each cell a
+// two-column grid: caption, value. Measured in Chromium (the branch's report):
+// the LOCAL TIME chip's instant ran 21 px past its card, the picker's archive
+// points ran an instant 47 px past theirs, and COVERED's "to ..." line sat
+// under the caption, at x 54 against "from ..." at x 170.
+
+/** The body of the stylesheet's narrow (stacked-card) block. */
+function narrowBlock(css) {
+  const at = css.indexOf("@media (max-width: 767.98px) {");
+  assert.ok(at !== -1, "the stacked-card block exists");
+  let depth = 0;
+  for (let i = css.indexOf("{", at); i < css.length; i += 1) {
+    if (css[i] === "{") {
+      depth += 1;
+    } else if (css[i] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return css.slice(at, i);
+      }
+    }
+  }
+  return "";
+}
+
+test("l11_an_instant_in_a_stacked_card_wraps_rather_than_leave_its_card", () => {
+  const narrow = narrowBlock(CSS());
+  assert.match(narrow, /\.grid td \.ts \{\n {4}white-space: normal;\n {2}\}/,
+    "NEGATIVE CONTROL: `.ts` never wraps, so a chip holding one ran past its card");
+  // Only on a phone: a laptop's table still keeps an instant on one line.
+  assert.match(CSS(), /^\.ts \{\n {2}white-space: nowrap;/m);
+});
+
+test("l12_a_cells_second_line_stays_in_the_value_column_on_a_phone", () => {
+  const narrow = narrowBlock(CSS());
+  assert.match(narrow,
+    /\.grid td > \.cell-sub-first,\n {2}\.grid td > \.cell-sub \{\n {4}grid-column: 2;\n {2}\}/,
+    "NEGATIVE CONTROL: COVERED's \"to ...\" line wrapped to the caption column");
+  // And the picker's two state badges are one item, beside their caption.
+  const wire = decoded("catalog-points.json").items[0];
+  const html = renderCatalogOffers("logweir-poc", { offers: [{ catalog: "archive", entry: wire }],
+    notes: [] });
+  assert.match(firstRowCells(html)[4], /^<span><span class="badge badge-green">Available<\/span> <span class="badge badge-green">Verified<\/span><\/span>$/);
+});

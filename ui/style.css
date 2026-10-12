@@ -1281,6 +1281,23 @@ th[aria-sort="descending"] .datagrid-sort::after {
     overflow-wrap: anywhere;
   }
 
+  /* An instant in a stacked card may wrap at its spaces (PROD-14.1 visual
+   * pass, L11): the next run's LOCAL TIME chip, "2026-10-13 02:00:00 +00:00",
+   * ran 21 px past its card at 390 px, and the picker's archive points ran
+   * their RECOVERY POINT 47 px past theirs, because an instant never wraps
+   * elsewhere. It wraps only where it does not fit. */
+  .grid td .ts {
+    white-space: normal;
+  }
+
+  /* A cell's second line stays under its first, in the value column (L12):
+   * COVERED read "from ..." beside its caption and "to ..." under the caption,
+   * because each line is a grid item and the second one wrapped to column 1. */
+  .grid td > .cell-sub-first,
+  .grid td > .cell-sub {
+    grid-column: 2;
+  }
+
   .grid td.empty::before {
     content: none;
   }

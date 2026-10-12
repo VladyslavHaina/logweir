@@ -6238,8 +6238,10 @@ export function renderCatalogOffers(ns, offers) {
       when(e.recoveryPointAt),
       "<span class=\"cell-sub-first\">from " + when(e.coveredFrom) + "</span>" +
         "<span class=\"cell-sub\">to " + when(e.coveredTo) + "</span>",
-      badge("green", String(e.availability || "")) + " " +
-        badge("green", String(e.verification || "")),
+      // One item, so a phone's stacked card keeps both badges beside their
+      // caption (L12's class).
+      "<span>" + badge("green", String(e.availability || "")) + " " +
+        badge("green", String(e.verification || "")) + "</span>",
     ];
   });
   return (
