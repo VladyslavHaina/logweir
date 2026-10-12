@@ -315,8 +315,13 @@ the upstream licences and notices with any image you redistribute.
 
 Turn the console on in this same first install, so the install starts in
 **confirm** and its first restore needs no key (*5f*). Create the release
-namespace and the console's key Secret first (*5e*), then install the published
-chart ([(c)](#c-the-helm-chart)) with a console example as your values:
+namespace and the console's key Secret first (*5e*); in `shared` mode also the
+OIDC client Secret and, for an identity provider with a private CA, the
+`oidc.caBundle` ConfigMap (*5e*); and `logweir-evidence-ro` (*3*, Secret 4),
+which the controller reads only at start. Do not create
+`logweir-console-confirmation`: the install generates it and trusts it, and a
+hand-made one is trusted nowhere (*5f*). Then install the published chart
+([(c)](#c-the-helm-chart)) with a console example as your values:
 `charts/logweir/examples/console.values.yaml` (`localAdmin`, one administrator
 over `kubectl port-forward`) or `charts/logweir/examples/console-shared.values.yaml`
 (`shared`, sign-in through your OIDC provider):
@@ -339,12 +344,16 @@ half old archives cannot be verified.
 
 ### Before any custom resource
 
-Once the identity hook has finished, run the preflight. It reads the cluster,
-changes nothing, checks presence only, and exits **1 naming the first absent
-Secret** (*3*):
+On the `kubectl` path (*The samples, applied second*), once the identity hook
+has finished and you have created the Secrets of *3*, run the preflight from a
+checkout against the namespace your `Backup` and `KafkaCluster` objects live
+in. It reads the cluster, changes nothing, checks presence only, and exits **1
+naming the first absent Secret** (*3*). A console install skips it: the console
+creates each connection's and destination's credential Secret itself, so
+`kafka-scram` and `logweir-s3` never exist there and the preflight would fail.
 
 ```bash
-just check-secrets logweir-system; echo "rc=$?"
+just check-secrets <namespace>; echo "rc=$?"
 ```
 
 ### 1. Installation signer and approver identity
@@ -418,6 +427,8 @@ changing keys replaces the roster and briefly interrupts approval checks.
 
 Three live in the namespace of your `Backup`, `Restore` and `KafkaCluster`
 objects; the fourth is the controller's. Names and data keys are the code's.
+With the console, it creates 2 and 3 for each connection and destination from
+the credential you type once; create only 4.
 
 **1. `logweir-signing-key`**: the bootstrap creates it in the release namespace
 and the runner projects its `signing.pem`; never create or replace it. Declare
@@ -867,9 +878,14 @@ its `.sig` from the `Restore`'s `status.evidence` keys and run
 | retention *removes nothing* / *an isolated worker deletes* | `RetentionPolicy.status.enforcement` `RecommendationOnly` / `LogweirWorker`; `status.guarantees.*` | nothing is deleted / an approved plan is enforced; who enforces each guarantee |
 | key evaluation `unknown` | a `TrustPolicy` with no fresh status | never read as valid |
 
-**Time to the first verified restore: PLACEHOLDER, to be measured by PROD-14.1's
-clean install** (from `helm install` to the first `Restore`'s
-`status.evidence.verification.verifiedAt`, with the independent re-check's lag).
+**Time to the first verified restore: 4 min 22 s**, measured by PROD-14.1's
+clean install on 2026-10-12 from `helm install` to the first `Restore`'s
+`status.evidence.verification.verifiedAt`: docker-desktop 1.34.1 on arm64, the
+images already on the node, the [PoC profile](../deploy/poc/README.md) with its
+ingress, CA and identity provider installed beforehand, and the first backup and
+restore made in the console. `helm install --wait` took 44 s and the first
+backup verified 3 min 23 s in. The independent re-check (`docs/verify_scorecard.py`
+over the fetched scorecard) printed `VALID` 22 s after `verifiedAt`.
 
 Retention starts in `mode: Report` and deletes nothing until a retention
 administrator enforces an approved plan ([kubernetes.md](kubernetes.md#retention)).
