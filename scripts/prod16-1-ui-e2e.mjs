@@ -59,7 +59,8 @@
 //
 // Requires: `eval "$(e2e/compose/stack-env.sh --slot 3 --profiles cluster2)"`
 // and `just e2e-up` in this shell's environment; target/debug/{logweir,logweir-api}
-// built from this tree.
+// built from this tree; `.engine/kafka-backup` the engine this tree builds
+// (`scripts/engine-source.sh build`), whose version the runner checks.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -103,6 +104,15 @@ const TARGET_CLUSTER_ID = (() => {
     return "";
   }
 })();
+
+// The runner signs only under the version its engine reports (engine_identity.rs), so a
+// host run names the engine this tree builds, as the runner image does.
+const ENGINE_BUILD = require("node:fs").readFileSync(join(REPO, "third_party", "kafka-backup-build.env"), "utf8");
+const ENGINE_VERSION = (/^ENGINE_VERSION=(.+)$/m.exec(ENGINE_BUILD) || [])[1];
+const ENGINE_DIGEST = (/^ENGINE_DIGEST=(sha256:[0-9a-f]{64})$/m.exec(ENGINE_BUILD) || [])[1];
+if (!ENGINE_VERSION || !ENGINE_DIGEST) {
+  throw new Error("third_party/kafka-backup-build.env names no ENGINE_VERSION and ENGINE_DIGEST");
+}
 
 const result = {
   harness: "scripts/prod16-1-ui-e2e.mjs", stamp: stamp, namespace: NS, context: KUBE_CONTEXT,
@@ -636,9 +646,8 @@ async function main() {
     LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256: digest(files.confirmationKey),
     AWS_ACCESS_KEY_ID: "minioadmin", AWS_SECRET_ACCESS_KEY: "minioadmin",
     AWS_ENDPOINT_URL: "http://127.0.0.1:" + S3_PORT, AWS_ALLOW_HTTP: "true", AWS_REGION: "us-east-1",
-    // The runner Job's image names its engine; a host run says what it is.
-    LOGWEIR_ENGINE_VERSION: "host-proof:prod-16-1",
-    LOGWEIR_ENGINE_DIGEST: "sha256:" + "0".repeat(64),
+    LOGWEIR_ENGINE_VERSION: ENGINE_VERSION,
+    LOGWEIR_ENGINE_DIGEST: ENGINE_DIGEST,
     LOGWEIR_ENGINE_BIN: join(REPO, ".engine", "kafka-backup"),
   };
   const runRunner = (snapshotPath, env) => {
