@@ -245,7 +245,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Done |
 | 1 | PROD-01.2 | Publish a tested compatibility contract | P1 | M1 | research | 00.1, 01.1, 01.3, 01.5 | OD-4 (provider rows) | compose | B | Done |
 | 3 | PROD-01.2a | Fixtures behind the matrix's hand-run and untested cells: a SCRAM-SHA-512 TLS listener in the `auth` profile with its `auth_modes` row (the mode Amazon MSK's SCRAM endpoint needs); RustFS and versitygw as opt-in profiles or weekly rows; a directory-archive row for the standalone CLI (`backend: filesystem`); and a weekly job for the rows PROD-01.2 ran by hand (Confluent Platform, Redpanda, SeaweedFS, Karapace), so a supported cell is re-proven without a person | P2 | M3 | infra | 01.2 | — | compose | B | Done |
-| 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | In progress |
+| 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2, 16.1 | — | k8s | A | Done |
 | 1 | PROD-17.1 | Simplify for v1: a measured pass that cuts, folds or shrinks what the v1 cut does not need (OD-11) | P1 | M1 | impl | the v1 cut's in-flight rows | OD-11, OD-12 | none | A | Done |
 | 1 | PROD-16.1 | No key by default: one-person console confirmation, console key generated at install | P1 | M1 | impl | — | — | k8s | A | Done |
 | 1 | PROD-16.2 | Two-person approval in the console: the second person clicks Approve | P1 | M1 | impl | 16.1 | — | k8s | A | Done |
@@ -932,6 +932,16 @@ What it fixed:
 **PR #42 — merged (2026-10-12) as `3c2f358c`, release-notes item 90: FX-51 Done.** A create-only evidence write (`put_create_only`) that failed fast with no HTTP answer, a reset on a stale pooled connection, is re-sent up to 3 times. A re-send that finds the key taken succeeds only on identical full bytes, and evidence is never overwritten. Timeouts, slow drops, a connect error object_store already retried, 4xx and a first "already exists" are unchanged.
 - **Review:** Tier A, ACCEPT-WITH-FIXES. M-1 (no re-send after timeouts) and M-2 (same-length different-bytes and 403 read-back rows) are fixed, and all 8 mutants are killed. The execution claim is safe, because its bytes carry a per-run random id.
 - **Live:** 5 of 5 runs passed for both the failing e2e row and `full_drill`, on slot 3.
+
+**`v0.2.0` — RELEASED (2026-10-12) at `c43410dd`** (publication `3c2f358c`), with the owner's approval. **This is Logweir v1.**
+- **The release run** 38305748419 passed every job. It is a full GitHub Release (not a pre-release) with 15 assets.
+- **Verified as a user would:** `SHA256SUMS` checks every asset, an anonymous `helm pull` of `logweir-chart` `0.2.0` is byte-identical, and the `v0.2.0` image tags name the dry run's three digests. The identity bootstrap image is recorded.
+- **Before the tag:** the final PoC check (`poc-14-1d`) passed on `3c2f358c`, and the dry run 38302537508 was green.
+- **PROD-14.1 — Done.** It covered the clean install (4 min 22 s to the first verified restore), the offline recovery kit (5 min 37 s), the visual pass and its fixes, and the release. The PoC pin lands as PR #43.
+- **Owner steps now open:**
+  - delete the 26 leftover v0.1.x Docker Hub tags in `logweir`, `weirkeeper` and `logweir-ui`, with the owner's own login. R1, the v0.1.5 upgrade rehearsal, is then retired;
+  - optionally, Amendment D (PROD-04.0c).
+- **What follows** is v1.1 (8 fixes, plus the review and visual-pass leftovers recorded above) and v2 (32 rows), both only when the owner starts them.
 
 ## Carried over from the PLAT tracker
 
