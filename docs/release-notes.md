@@ -83,18 +83,18 @@ chart and archive rows after the tag.
 
 | What | Value |
 |---|---|
-| Candidate commit (the tagged commit) | the commit that adds this record; it differs from the publication commit only under `docs/` |
-| Version tag | `v0.2.0` (pushed only with the owner's approval) |
+| Candidate commit (the tagged commit) | `c43410dd`, the commit that added this record; it differs from the publication commit only under `docs/` |
+| Version tag | `v0.2.0`, pushed 2026-10-12 with the owner's approval; a full GitHub Release |
 | Publication commit (`release.json` `.images.publication`) | `3c2f358ccabc960638464ef2ea44fff2e9a5baa0` |
 | CI run (`ci.yml`) for the publication commit, its `publish` job green | [38294944730](https://github.com/VladyslavHaina/logweir/actions/runs/38294944730): `check`, the four `e2e` shards and `publish` (build amd64, build arm64, promote, sign) green |
 | Release dry run (`release.yml` dispatched on `main`) | [38302537508](https://github.com/VladyslavHaina/logweir/actions/runs/38302537508) on `03a48bf9`, every job green; `release.sh verify` on its `release-assets`: 14 assets verified |
-| Release run (`release.yml` on the tag) and release drill | — (after the tag) |
+| Release run (`release.yml` on the tag) and release drill | [38305748419](https://github.com/VladyslavHaina/logweir/actions/runs/38305748419): every job green, including the full `ci.yml`, `drill / drill-from-artifact`, `publish-images` and `github-release`; the version tags name the dry run's three digests |
 | Runner image digest (`logweir`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:5dcd8e37b55d309cf58beb00dcbc293ca70ac1514252c8261677b30881188f34` |
 | Controller image digest (`weirkeeper`; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:c80995d7dd48ff2f5864c698436c5e75f1fbda0109ff48ce6eddfaf57b822991` |
 | Console image digest (`logweir-console`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:4e5718771c7285b82670e040ab12445a9d509315cf16767ed20a93248af7613c` |
 | Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | `docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6` (amd64 and arm64), built from `d4e32956` |
-| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | — (after the tag) |
-| CLI archives (three, from the tag run's `release.json` `.archives`) | — (after the tag) |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.2.0`, package sha256 `7c721d7e4531905281101144b33ecdebf40f909f486d8461ec9e62258d1d72b9`, OCI digest `sha256:8b7faae8f5754190481314dfa8ae89e5500891cf465b96d45b249f00b5de5a1a`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `371c3713aab33f81a71777b8c661bff278439db2feb2e75550436d3ffaecbc94` (glibc 2.34+); `logweir-aarch64-unknown-linux-gnu.tar.xz` `1a3f4698fcd8895eaeabcf9bcc44843696cb283910a1140f7f28b7095041d4d4` (glibc 2.34+); `logweir-aarch64-apple-darwin.tar.xz` `89f02aec0f111080cfd27f049eb323fdd3ecbfaa4b75ccd76ef6261bef241575` (macOS 11+, Homebrew `openssl@3`); `SHA256SUMS` checks every asset |
 | Kubernetes exercises run on this candidate | the PoC (docker-desktop, arm64, Kubernetes 1.34, Helm 4.0.1, shared mode with Traefik, Dex and cert-manager) upgraded from `v0.2.0-rc.2`'s publication to `3c2f358c` (Helm revisions 7 and 8): the rendered diff was only labels, image tags and comments, with the same NetworkPolicy peers; `cosign verify` of all four images; a backup with its consumer-positions block verified by both readers, and a verified restore. `v0.2.0-rc.2`'s record covers the clean install, the kit recovery and the visual pass |
 | Checks deliberately deferred, each with its reason | as `v0.2.0-rc.2`'s, plus: the demo MinIO and Kafka are not PSA-restricted (documented; hardening is v1.1's); the YAML parser replacement (RUSTSEC-2024-0370/0449) is v1.1's |
 
