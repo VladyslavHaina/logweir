@@ -903,6 +903,12 @@ What it fixed:
 - **The PoC pin commit** `2525bbdf` (`claude/poc-14-1c`) lands after the tag. It is deploy/-only, so the candidate stays a docs-only descendant of the published `96e601f0`.
 - **Release prep started:** a `release.yml` dry run (`rehearsal_tag=v0.2.0-rc.2`) on main.
 
+**`v0.2.0-rc.2` — tagged and released (2026-10-12) at `f9ed98ff`** (publication `96e601f0`), with the owner's approval.
+- The release run 38272680382 passed every job: the full CI, three builds, the drill from the artifact, `publish-images` and `github-release`. A GitHub pre-release with 15 assets.
+- Verified as a user would: `SHA256SUMS` checks every asset, an anonymous `helm pull` of `logweir-chart` `0.2.0-rc.2` is byte-identical to the asset, and the `v0.2.0-rc.2` image tags name the dry run's three digests.
+- The candidate record is filled (`docs/release-notes.md`). The PoC pin lands after the tag (PR #40).
+- **Next:** the owner asked to "validate the helm chart and simplify it" (`chart-validate`, `chart-simplify`). Then `v0.2.0` final, with the owner's approval.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
