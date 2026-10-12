@@ -79,14 +79,10 @@ deployment.yaml used to refuse it.)
 {{- fail "api.console.roles.bindings is empty. Shared mode has no default namespace and no implicit grant: with no binding every authenticated user is authorized for nothing, which is a console that installs and serves 403." -}}
 {{- end -}}
 {{- /*
-D0 STAGE 5 — SHARED MODE IS NOT RENDERED INSIDE THE CONTROLLER'S JOB-CREATE
-AUTHORITY. The console's session and cursor keys live in the release namespace
-(`api.console.keySecret`). Under the default cluster-wide ClusterRoleBinding the
-controller may create a Job there, and a Job can mount that Secret — residual
-O1 extended to the console, which D0 says must not be declared secure. So
-shared mode requires the scoped controller (`controller.watchNamespaces`), and
-refuses a list that includes the release namespace, because that list is where
-the controller may create Jobs.
+Shared mode is never rendered inside the controller's Job-create authority. The
+console's keys live in the release namespace, and a Job the controller creates
+there could mount them; so shared mode needs a scoped controller
+(`controller.watchNamespaces`) whose list leaves the release namespace out.
 */ -}}
 {{- $watch := .Values.controller.watchNamespaces | default list -}}
 {{- if not $watch -}}
@@ -155,13 +151,10 @@ the controller may create Jobs.
 {{- fail (printf "api.console.ingress.host is %q but api.console.publicBaseUrl is %q. They must name the SAME authority. The OIDC redirect URI is publicBaseUrl plus /auth/callback, and the service answers 421 misdirected_request to any Host it does not serve — so a mismatched pair renders, lints and installs clean, and then refuses every browser that arrives through the Ingress it just published. Every other way to get this wrong is refused here by name; so is this one." $c.ingress.host $c.publicBaseUrl) -}}
 {{- end -}}
 {{- /*
-FX-24c: THE INGRESS IS NAMED, OR THE OPT-OUT IS DELIBERATE. The console caps
-the connections one peer outside its trusted-proxy set may hold, and the
-sign-in limiter counts each client behind a trusted proxy (FX-13); with no
-trusted proxy configured neither can tell the ingress from any other peer, so
-the cap is off and every sign-in through the ingress shares one budget. A
-chart that renders the Ingress knows there is a proxy, so it refuses to leave
-it unnamed by accident.
+A chart that renders the Ingress knows there is a proxy, so it must be named
+(or opted out of with `trustedProxy: none`): without it the console cannot tell
+the ingress from any pod that dials it, its per-peer connection cap is off, and
+every sign-in through the ingress shares one rate-limit budget.
 */ -}}
 {{- if and (not $c.trustedProxyCidrs) (not $proxySvc.name) (ne (toString $c.trustedProxy) "none") -}}
 {{- fail "api.console.ingress.enabled in shared mode needs the trusted proxy named: set api.console.trustedProxyService to the ingress controller's Service (namespace and name; its serving pods are then trusted), or api.console.trustedProxyCidrs to its pods' range. Without it the console cannot tell the ingress from any pod that dials it directly, so one in-cluster address may hold every one of its 256 connections (the per-peer cap, FX-24c, is off) and every sign-in through the ingress shares one rate-limit budget (FX-13). To run without a named proxy deliberately — a service mesh that re-originates every connection, say — set api.console.trustedProxy=none." -}}
@@ -171,9 +164,9 @@ it unnamed by accident.
 {{- fail (printf "api.console.mode is %q. The two modes are `localAdmin` (a loopback listener reached with kubectl port-forward, one configured administrator, no identity provider) and `shared` (SSO: OIDC, an encrypted session cookie, exact role bindings and TLS). There is no default: a file that forgets to say which it wants is refused rather than read as the more permissive one." $c.mode) -}}
 {{- end -}}
 {{- /*
-PLAT-19.2: a namespace this console serves that is bound to an approval policy
-needs the console's ConsoleConfirmation key -- both modes carry its signature --
-and `logweir-api` refuses to start without it. Refused here first, by name.
+A namespace the console serves that is bound to an approval policy needs the
+console's ConsoleConfirmation key (both modes sign with it); `logweir-api`
+refuses to start without it.
 */ -}}
 {{- $served := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- $consoleKeySecret := include "logweir.consoleKey.secret" . -}}
@@ -313,7 +306,7 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `confirm` (Ordinary), `two-person` (Governed, approved by a second person in the console) or `strict` (Governed, approved with a personal key)." $i ($policy.mode | default "")) -}}
 {{- end -}}
 {{- $mode := include "logweir.approvalPolicy.internalMode" $policy.mode -}}
-{{- /* PROD-16.2: who signs the approval. The binary's three refusals, first. */ -}}
+{{- /* Who signs the approval: the binary's three refusals. */ -}}
 {{- if hasKey $policy "approverSignature" -}}
 {{- if ne (toString $policy.approverSignature) "Console" -}}
 {{- fail (printf "approvalPolicy.policies[%d].approverSignature is %q; it is `Console` (a second person approves in the console) or absent (a personal GovernedApproval key)." $i (toString $policy.approverSignature)) -}}
@@ -360,10 +353,9 @@ a standing cluster-wide `create trustpolicies`, so it is refused there.
 {{- end -}}
 {{- end -}}
 {{- /*
-PROD-16.2: TWO-PERSON APPROVAL NEEDS THE SHARED CONSOLE. Last, after every
-refusal the binary also makes, so a malformed policy is named as that. This one
-is the chart's alone: the document is well formed, and what is missing is two
-identities to tell apart.
+Two-person approval needs the shared console. Last, so a malformed policy is
+named as that first; this refusal is the chart's alone (the document is well
+formed, there are just not two identities to tell apart).
 */ -}}
 {{- range $i, $policy := ($p.policies | default list) -}}
 {{- if include "logweir.approvalPolicy.console" $policy -}}
@@ -419,12 +411,11 @@ pair is refused rather than rendered into an object that cannot authenticate.
 {{- end -}}
 
 {{- /*
-PROD-16.1 fix round (review H1): whether this Helm deletes an earlier
-`hook-succeeded` hook when a LATER hook of the same event fails. Helm 3.19.0
-and 4.x do (`pkg/action/hooks.go` `execHook`, `deleteHooksByPolicy(executingHooks…)`);
-3.12–3.18 delete only the failed hook, so the install-only trust grant would
-outlive a failed identity Job. Called with `.Capabilities.HelmVersion.Version`;
-`scripts/check-chart.sh` calls it with fixed versions as its self-test.
+Whether this Helm deletes an earlier `hook-succeeded` hook when a later hook of
+the same event fails: 3.19.0 and 4.x do (`pkg/action/hooks.go`, `execHook`),
+3.12-3.18 delete only the failed hook. Called with
+`.Capabilities.HelmVersion.Version`; `scripts/check-chart.sh` calls it with
+fixed versions as its self-test.
 */ -}}
 {{- define "logweir.helmCleansFailedHooks" -}}
 {{- if semverCompare ">=3.19.0-0" . -}}true{{- end -}}

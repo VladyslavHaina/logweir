@@ -4,9 +4,7 @@
 # --------------------------------------------------------------- identity
 environment: ""                 # a label on every object; switches nothing
 
-# ------------------------------------- placement, for every pod rendered
-# Runner Jobs are the operator's: imagePullSecrets reach them through the
-# runner ServiceAccount, node placement does not (not implemented).
+# ------------- placement, for every pod rendered (runner Jobs: pull secrets yes, placement no)
 kubernetes:
   namespace: ""                 # feeds api.namespaces; `-n` decides the install
   connectionsNamespace: ""      # kafka.enabled's KafkaClusters + minio's logweir-s3; "" = release ns. Must be watched
@@ -16,21 +14,13 @@ kubernetes:
 
 # ----------------------------------------------------------------- images
 controllerImage: docker.io/vladyslavhaina/weirkeeper:latest
-# `runnerImage` is ALSO the retention enforcement image: there is no separate
-# `retentionImage`, because the image below carries both binaries. The
-# controller renders enforcement Jobs from this value and overrides only the
-# container's command (`logweir-retention`, beside the `logweir` entrypoint the
-# backup, restore and check Jobs run). Point this at an image built from a tree
-# whose Dockerfile does not build `-p logweir-retention` and `mode: Enforce`
-# Jobs die at the kubelet with exitCode 127.
+# runnerImage runs every Job, retention enforcement too, so it must carry `logweir-retention`
 runnerImage: docker.io/vladyslavhaina/logweir:latest
 imagePullPolicy: Always         # controller container: Always | IfNotPresent | Never
 runnerImagePullPolicy: Always   # runner Jobs; Never only for images loaded onto the node
 imagePullSecrets: []            # [{name: regcred}] — on both ServiceAccounts and every pod
 
-# --------------------------------------- persistent installation signing identity
-# A post-install/post-upgrade hook in the signer-capable runner image initializes
-# retained objects once. It never renders private material into a Helm manifest.
+# ---- the installation signing identity: a hook fills retained objects once; no key in a manifest
 identity:
   enabled: true
   bootstrapImage: docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6 # rev d4e32956, amd64 + arm64
@@ -38,7 +28,7 @@ identity:
   allowMutableBootstrapImageForDevelopment: false
   renderedOffline: null         # null: helm install only; true: Argo CD, kubectl apply (install.md); false: preview
   bootstrapFeatures:            # what bootstrapImage can run; flipped only WITH its re-pin
-    consoleKey: true            # PROD-16.1: console key, fresh-install trust and marker, revocation
+    consoleKey: true            # console key, fresh-install trust and marker, revocation
   publicConfigMapName: logweir-signing-trust
   authorizedRunnerNamespaces: [] # release namespace implicit; same signer copied to each
   kubernetesApiCIDRs: []          # exact API /32 or /128 endpoints; TCP 443/6443 only
@@ -56,9 +46,9 @@ identity:
 # ------------------------------------------------------------- controller
 controller:
   logLevel: info                # RUST_LOG; below info the per-object lines are lost
-  failFastSeconds: ""           # D3: patience for a stuck run. "" = 300s; 0 = never; floor 60
-  jobTtlSeconds: ""             # D3: how long a finished Job is kept. "" = 604800s; floor 3600
-  watchNamespaces: []           # D0 stage 5: [] = every namespace (ClusterRoleBinding). A list = RoleBindings
+  failFastSeconds: ""           # patience for a stuck run. "" = 300s; 0 = never; floor 60
+  jobTtlSeconds: ""             # how long a finished Job is kept. "" = 604800s; floor 3600
+  watchNamespaces: []           # [] = every namespace (ClusterRoleBinding). A list = RoleBindings
                                 # there only; required by api.console.mode=shared, release namespace excluded
   resources:
     requests: { cpu: 50m, memory: 128Mi }
@@ -67,10 +57,7 @@ controller:
   tolerations: []
   affinity: {}
 
-# ------------------------------ the installation policy (D2 §4.4), rendered
-# as the `weirkeeper-policy` ConfigMap in the release namespace. Only someone
-# who can write that ConfigMap can change it, which is what makes an
-# attestation an ADMINISTRATOR statement; a namespace operator cannot.
+# ---- the installation policy: the `weirkeeper-policy` ConfigMap, writable by administrators only
 checks:
   maxActivePerNamespace: 4      # check Jobs running at once in one namespace
   maxActiveTotal: 20            # and across the whole installation
@@ -82,20 +69,17 @@ checks:
     keepPerConnection: 5        # and never more than this many per connection
     hardMaxTopics: 50000        # every discovery's maxTopics is clamped to this
     visibilityAttestations: []  # [{id,namespace,kafkaCluster,clusterId,principal,attestedBy,attestedAt,expiresAt,statement}]
-    # defaultMaxTopics: WITHDRAWN (FX-10). It never changed anything; README, "Withdrawn values"
+    # defaultMaxTopics: WITHDRAWN, accepted and ignored; README, "Withdrawn values"
   preflight:
     retentionSeconds: 3600      # a terminal Preflight is collected after this
-    # defaultTimeoutSeconds: WITHDRAWN (FX-10). It never changed anything; README, "Withdrawn values"
-runs: { maxManualBackupsActivePerNamespace: 4, maxManualRestoresActivePerNamespace: 2 }  # P10: manual runs active per namespace; the rest wait Queued
+    # defaultTimeoutSeconds: WITHDRAWN, accepted and ignored; README, "Withdrawn values"
+runs: { maxManualBackupsActivePerNamespace: 4, maxManualRestoresActivePerNamespace: 2 }  # manual runs active per namespace; the rest wait Queued
 engine:
   allowUnverifiedCustomCa: false  # a destination CA the archive engine cannot verify
 evidence:
   controllerIdentityLocations: [] # [{endpoint, region, bucket}] the controller may read evidence from
 
-# ------------- admissionPolicy — fence the console's `create secrets` (D2 §7.3)
-# OFF by default ONLY because `admissionregistration.k8s.io/v1`
-# ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29.
-# Turn it on wherever the API server has the kind.
+# ---- admissionPolicy: fence the console's `create secrets`. Off only because it needs Kubernetes 1.30+
 admissionPolicy:
   enabled: false
   consoleServiceAccountName: logweir-api  # in the release namespace
@@ -111,17 +95,14 @@ archive:
     allowHttp: false            # both rendered only when endpoint is set
     virtualHostedStyle: false   # false is path-style, which MinIO wants
 
-# ------------------------------- kafka.enabled — YOUR clusters, as objects
-# Renders KafkaCluster custom resources. secretRef names a Secret in the
-# release namespace holding the SASL password under secretKey; Logweir never
-# reads it. Mutually exclusive with demoKafka.enabled.
+# ---- kafka.enabled: YOUR clusters, as KafkaCluster objects. Not with demoKafka.enabled
 kafka:
   enabled: false
   name: source
   bootstrapServers: ""          # "h1:9096,h2:9096" or a list
   security: { protocol: PLAINTEXT, mechanism: "" }  # PLAINTEXT | SASL_SSL | SASL_PLAINTEXT + SCRAM-SHA-512
   username: ""
-  secretRef: ""
+  secretRef: ""                 # a Secret holding the SASL password; Logweir never reads it
   secretKey: password           # the only key the operator projects
   target:                       # optional restore target, same keys
     name: target
@@ -168,29 +149,25 @@ demoKafka:
   tolerations: []
   affinity: {}
 
-# --------------------- retention.enabled — the enforcement Job's identity (D3)
-# Renders ONE ServiceAccount, `logweir-retention`, granted no Kubernetes verb.
-# It deletes nothing by itself; see charts/logweir/README.md for the other gates.
+# ---- retention.enabled: the `logweir-retention` ServiceAccount, granted no verb; deletes nothing by itself
 retention:
   enabled: false
 
-# ------ approvalPolicy — confirm (one click) | two-person (PROD-16.2) | strict (personal key)
+# ---- approvalPolicy: confirm (one click) | two-person (second person, shared console) | strict (personal key)
 approvalPolicy:
   default: ""                       # unbound: "" = confirm if fresh with a console, else strict | confirm | strict
-  allowOrdinaryConfirmation: false  # D0's floor: confirm (Ordinary) policies and default: confirm need it
+  allowOrdinaryConfirmation: false  # the floor: confirm (Ordinary) policies and default: confirm need it
   policies: []                      # [{name, mode: confirm|two-person|strict, maxAgeSeconds, requireDistinctPrincipal}]; two-person needs api.console.mode=shared; Ordinary|Governed are older aliases
   namespaces: {}                    # {<namespace>: <policy name>}; an explicit binding always wins
   confirmationKeySecret: ""         # "" = the hook's key with identity.bootstrapFeatures.consoleKey, else none
 
-# ------------------------- api.enabled — the console/API principal's RBAC (D3)
-# ServiceAccount + roles only. api.console.enabled additionally runs the pod.
+# ---- api.enabled: the console/API principal (ServiceAccount + roles); api.console.enabled runs the pod
 api:
   enabled: false
   namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
-  # --------- api.console — D0's `console.*`: the logweir-console workload (D0 §7)
-  # localAdmin binds loopback and is reached with port-forward; shared is SSO.
+  # ---- api.console: the logweir-console workload. localAdmin: loopback + port-forward; shared: SSO
   console:
-    enabled: false              # needs api.enabled; D0 installs the identity first
+    enabled: false              # needs api.enabled
     image: docker.io/vladyslavhaina/logweir-console:latest  # logweir-api + the page
     imagePullPolicy: Always     # use Never for locally loaded images
     mode: ""                    # REQUIRED: localAdmin | shared. There is no default
@@ -205,7 +182,7 @@ api:
     trustedProxyService: { namespace: "", name: "" }  # shared: the ingress controller's Service; its serving pods
     requireTrustedProxy: false  # shared: refuse (421) any request not from those proxies over HTTPS
     trustedProxy: ""            # shared + ingress.enabled: one of the two above is REQUIRED, or `none` to opt out deliberately (no per-peer cap)
-    rateLimits: { manualBackupsPerMinute: 10, manualRestoresPerMinute: 5 }  # P10: starts per person, per namespace, per minute; then 429
+    rateLimits: { manualBackupsPerMinute: 10, manualRestoresPerMinute: 5 }  # starts per person, per namespace, per minute; then 429
     hostAliases: []             # [{ip, hostnames}]: e.g. the issuer's public name -> the in-cluster ingress
     oidc:
       issuer: ""                # EXACT, as the discovery document states it

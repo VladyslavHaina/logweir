@@ -206,31 +206,26 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
-  # D2 W7 (PLAT-08.1): the seventh kind, in its own rule so the six-kind list
-  # the `logweir-viewer` role shares is untouched.
+  # In its own rule so the six-kind list `logweir-viewer` shares is untouched.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
-  # D2 W8 (PLAT-09.1): the eighth kind. `list`/`watch` only — the reconciler
-  # never re-reads a discovery, and every granted verb here has a caller.
+  # `list`/`watch` only: the reconciler never re-reads a discovery.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
-  # D3 W8 (PLAT-15.1): the ninth kind, `list`/`watch` for the catalog
-  # reconciler's own watch, plus the `get` D3 W6 needs to read the ONE catalog a
-  # `ProtectionPolicy` names.
+  # `get` reads the one catalog a `ProtectionPolicy` names.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
     verbs: ["get", "list", "watch"]
-  # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
   # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
-  # look one up (D2 §6.8).
+  # look one up.
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
-  # `create` is one `Backup` per due slot; `patch` is PLAT-05.2's history
-  # migration (D1 §6.8) — a metadata-only merge patch that removes the
-  # schedule's ownerReference from a terminal run. No `update`, no `delete`.
+  # `create` is one `Backup` per due slot; `patch` removes the schedule's
+  # ownerReference from a terminal run (history migration). No `update`, no
+  # `delete`.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create", "patch"]
@@ -255,10 +250,8 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights/status"]
     verbs: ["patch"]
-  # D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule, on the two TRANSIENT
-  # check kinds and nothing else. `collect_expired` in each of the two
-  # reconcilers, with `DeleteParams { preconditions: { uid } }` and a
-  # per-pass cap.
+  # The one `delete` rule, on the two transient check kinds: each reconciler's
+  # garbage collection, with a UID precondition and a per-pass cap.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries", "preflights"]
     verbs: ["delete"]
@@ -271,10 +264,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # D2 §7.1: `FailedCreate` and `FailedMount` for the Jobs and pods the
-  # controller owns, by `involvedObject.uid` and only while a pod has not
-  # started — every Job-owning reconciler reads them (FX-11). `list` and
-  # nothing else.
+  # `FailedCreate` and `FailedMount` for the Jobs and pods the controller owns,
+  # by `involvedObject.uid`, while a pod has not started.
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list"]
@@ -282,27 +273,25 @@ rules:
     resources: ["configmaps"]
     verbs: ["create", "get"]
   # `patch` on the object is the compromise-revocation finalizer and nothing
-  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
+  # else.
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
     verbs: ["list", "watch", "patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]
-  # PLAT-14.2 (D3 W6): the `ProtectionPolicy` reconciler's `Controller::new`
-  # watch and its `Api::patch_status`. No `get` on the kind and no `update`
-  # anywhere.
+  # The `ProtectionPolicy` reconciler's watch and `patch_status`. No `get`, no
+  # `update`.
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies"]
     verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies/status"]
     verbs: ["patch"]
-  # PLAT-16.1 / PLAT-16.2 (D3 W9): the `RetentionPolicy` reconciler's
-  # `Controller::new` watch, its namespace-wide `list` for the two-policies-one-
-  # destination conflict check, and its `Api::patch_status`. No `get` on the
-  # kind, no `update` anywhere, and no `delete` on anything: the controller
-  # creates the retention Job and does not link the code that deletes.
+  # The `RetentionPolicy` reconciler's watch, its namespace-wide `list` for the
+  # two-policies-one-destination check, and `patch_status`. No `get`, no
+  # `update`, no `delete` on anything: the controller creates the retention Job
+  # and does not link the code that deletes.
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies"]
     verbs: ["list", "watch"]
@@ -331,7 +320,7 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
-  # The seven kinds Amendments F and G added. Read only.
+  # Read only.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
@@ -365,9 +354,8 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
     verbs: ["update", "patch"]
-  # D2 §7.2. `patch` and NOT `update`: a destination's access grants and a
-  # check's `cancelRequested` are merge patches, and what may change is the
-  # CRD's own CEL rule.
+  # `patch` and not `update`: a destination's access grants and a check's
+  # `cancelRequested` are merge patches; what may change is the CRD's CEL rule.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
@@ -380,7 +368,7 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
-  # D3 §9 — declare protection, connect an archive…
+  # Declare protection, connect an archive…
   - apiGroups: ["logweir.dev"]
     resources:
       - protectionpolicies
@@ -414,7 +402,7 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["approvals"]
     verbs: ["create"]
-  # D2 §7.2 — approval context, read only.
+  # Approval context, read only.
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["get", "list"]
@@ -570,9 +558,8 @@ spec:
               value: "Always"
             - name: LOGWEIR_ARCHIVE_URL
               value: ""
-            # D2 §4.4 — the installation policy. The override ships empty and
-            # the namespace comes from the pod; `templates/policy.yaml` renders
-            # `weirkeeper-policy` into exactly that namespace.
+            # The override ships empty and the namespace comes from the pod, which
+            # is where `templates/policy.yaml` renders `weirkeeper-policy`.
             - name: LOGWEIR_POLICY_CONFIGMAP
               value: ""
             - name: LOGWEIR_INSTALLATION_NAMESPACE

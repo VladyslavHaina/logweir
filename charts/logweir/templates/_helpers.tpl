@@ -1,11 +1,8 @@
 {{- /*
-The chart's helpers. Every namespaced object renders into `.Release.Namespace`
-and nothing here spells a namespace by name; the release name prefixes only
-the OPTIONAL components (`<release>-minio`, `<release>-kafka-*`, `<release>-api`),
-while the control plane keeps fixed names — `weirkeeper`,
-`logweir-viewer`/`-operator`/`-approver`, `logweir-runner-egress`,
-`logweir-runner` — because those are cluster-scoped or code-named constants and
-Global Constraint 30 allows one controller per cluster anyway.
+Namespaced objects render into `.Release.Namespace`. The release name prefixes
+only the optional components (`<release>-minio`, `<release>-kafka-*`,
+`<release>-api`); the control plane keeps fixed names, because they are
+cluster-scoped or constants the code names, and one controller runs per cluster.
 */ -}}
 
 {{- define "logweir.labels" -}}
@@ -13,10 +10,9 @@ app.kubernetes.io/name: logweir
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- /*
-A label value is at most 63 characters and ends alphanumeric. The PUBLISHED
-chart is `logweir-chart` at `<version>-sha-<40 hex>` on main (chart gap G4,
-`scripts/ci-images.sh chart`), 64 characters here, so the value is cut the way
-Helm's own scaffold cuts it. The full version stays in `helm list`.
+A label value is at most 63 characters and ends alphanumeric; the published
+chart's `<version>-sha-<40 hex>` is 64 here, so it is cut the way Helm's own
+scaffold cuts it. The full version stays in `helm list`.
 */}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | trimSuffix "." }}
 {{- include "logweir.environmentLabel" . }}
@@ -61,16 +57,7 @@ us-east-1
 {{ .release }}-kafka-{{ .role }}.{{ .namespace }}.svc.cluster.local
 {{- end -}}
 
-{{- /*
-Task 38. The three cross-cutting values the owner's own file asked for, in one
-place: a label, node placement, and pull secrets. Each renders NOTHING when its
-value is empty, so the shipped default render is byte-identical to what it was.
-*/ -}}
-
-{{- /*
-`environment` — a LABEL and nothing else (it switches no behaviour). Included by
-`logweir.labels`, so every object this chart renders carries it.
-*/ -}}
+{{- /* `environment`: a label on every object, and nothing else. */ -}}
 {{- define "logweir.environmentLabel" -}}
 {{- with .Values.environment }}
 logweir.dev/environment: {{ . | quote }}
@@ -78,15 +65,11 @@ logweir.dev/environment: {{ . | quote }}
 {{- end -}}
 
 {{- /*
-Node placement for EVERY pod this chart renders. Takes a dict:
-  root — the top-level context
-  over — a component's own values map, or omitted; a non-empty `nodeSelector`,
-         `tolerations` or `affinity` there overrides `kubernetes.<key>`
-Returns "" when nothing is set, so the call site renders nothing at all.
-
-RUNNER JOBS ARE NOT HERE. Jobs are created by the operator, not by this chart,
-and node placement for them is not implemented — `README.md` says so by name.
-`imagePullSecrets` DO reach them, through the runner ServiceAccount.
+Node placement for every pod this chart renders. Takes a dict: `root`, the top
+context, and `over`, a component's own values, whose non-empty `nodeSelector`,
+`tolerations` or `affinity` overrides `kubernetes.<key>`. Empty renders nothing.
+Runner Jobs are the operator's, not the chart's: placement does not reach them
+(not implemented); `imagePullSecrets` do, through the runner ServiceAccount.
 */ -}}
 {{- define "logweir.placement" -}}
 {{- $k := .root.Values.kubernetes -}}
@@ -98,10 +81,7 @@ and node placement for them is not implemented — `README.md` says so by name.
 {{- if $out }}{{ toYaml $out }}{{- end }}
 {{- end -}}
 
-{{- /*
-`imagePullSecrets`, as the block a ServiceAccount and a PodSpec both spell the
-same way. Empty renders nothing.
-*/ -}}
+{{- /* `imagePullSecrets` as a ServiceAccount and a PodSpec both spell it. */ -}}
 {{- define "logweir.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets -}}
 imagePullSecrets:
@@ -110,35 +90,21 @@ imagePullSecrets:
 {{- end -}}
 
 {{- /*
-THE CONSOLE/API ServiceAccount'S NAME, IN ONE PLACE — review finding **F3**.
-
-Two templates need it and they used to spell it differently: `ui/api-rbac.yaml`
-rendered `{{ .Release.Name }}-api` while `admission-policy.yaml` took the fixed
-string `admissionPolicy.consoleServiceAccountName`, whose default is
-`logweir-api`. Those agree under the default release name and NOWHERE ELSE:
-`helm install myrel …` rendered `ServiceAccount myrel-api` beside a
-ValidatingAdmissionPolicy whose whole effect is
-`request.userInfo.username in ["system:serviceaccount:<ns>:logweir-api"]` — a
-fence that installs, reads as enabled, and matches nobody, while the principal
-it was meant to bound holds `create` on Secrets that RBAC cannot narrow by
-shape.
-
-So the name is defined once, here, and both files call it. The value is still
-the one an installation OVERRIDES with (a console run out of band has whatever
-account its operator gave it, and `extraPrincipals` exists for the rest), but a
-value that DISAGREES with an account this chart is itself rendering is refused
-at render time rather than installed — see `_validate.tpl`.
+The console/API ServiceAccount's name, defined once: `ui/api-rbac.yaml` renders
+the account and the admission policy fences it. Two spellings agreed only under
+the default release name, and a fence naming nobody installs and protects
+nothing. `_validate.tpl` refuses an `admissionPolicy.consoleServiceAccountName`
+that disagrees with the account this chart renders.
 */ -}}
 {{- define "logweir.api.serviceAccountName" -}}
 {{- printf "%s-api" .Release.Name -}}
 {{- end -}}
 
 {{- /*
-The namespaces the console/API ServiceAccount is bound in: the release
-namespace, plus `api.namespaces`, or `kubernetes.namespace` when that list is
-empty, so the common case needs one key and not two. DEDUPLICATED: `-n kafka`
-beside `kubernetes.namespace: kafka` would otherwise render the same
-RoleBinding twice and refuse the install.
+The namespaces the console/API account is bound in: the release namespace, plus
+`api.namespaces`, or `kubernetes.namespace` when that list is empty.
+Deduplicated: `-n kafka` beside `kubernetes.namespace: kafka` would otherwise
+render one RoleBinding twice and fail the install.
 */ -}}
 {{- define "logweir.api.namespaces" -}}
 {{- $extra := .Values.api.namespaces -}}
@@ -149,11 +115,9 @@ RoleBinding twice and refuse the install.
 {{- end -}}
 
 {{- /*
-One `KafkaCluster.spec.auth` from the owner's flat `security:` shape. Takes the
-per-cluster values map. THE MAPPING IS THE CHART'S JOB, and every combination
-outside it is refused at render time (`_validate.tpl`) rather than an object that installs and
-cannot authenticate: the CRD's enum is `plaintext|scramSha512` and the client
-speaks SCRAM-SHA-512 only.
+One `KafkaCluster.spec.auth` from the flat `security:` values. The CRD's enum is
+`plaintext|scramSha512` and the client speaks SCRAM-SHA-512 only; every other
+pair is refused in `_validate.tpl` before this runs.
 */ -}}
 {{- define "logweir.kafka.auth" -}}
 {{- $c := .cluster -}}
@@ -181,9 +145,8 @@ secretRef:
 {{- end -}}
 
 {{- /*
-`bootstrapServers` as the CRD wants it — a LIST — from either shape the owner
-may write: a comma-separated string (their MSK endpoint, copied from the AWS
-console) or a YAML list. Whitespace around each entry is trimmed.
+`bootstrapServers` as the CRD's list, from a comma-separated string (an MSK
+endpoint as the AWS console shows it) or a list; each entry trimmed.
 */ -}}
 {{- define "logweir.kafka.bootstrapServers" -}}
 {{- $v := .servers -}}
@@ -203,20 +166,11 @@ console) or a YAML list. Whitespace around each entry is trimmed.
 {{- end -}}
 
 {{- /*
-CHART GAP G3 — WHERE THE CHART'S OWN CONNECTION OBJECTS LAND.
-
-`kafka.enabled` renders the `KafkaCluster`s a Backup names, and `minio.enabled`
-renders `logweir-s3`, the archive credential a Backup's `secretRef` names. Both
-are read in the namespace the Backup runs in, by a controller that only sees
-the namespaces it watches. They used to be rendered in the RELEASE namespace,
-which a shared console's scoped controller is forbidden to watch
-(`controller.watchNamespaces` may not include it): objects nothing could use.
-
-`kubernetes.connectionsNamespace` moves them; empty keeps the release namespace,
-so an unscoped installation renders exactly what it did. With a scoped
-controller the render FAILS unless the namespace is watched — the only other
-outcome is a connection the operator sees and the controller never reads. The
-namespace must exist before the install, like every execution namespace.
+Where `kafka.enabled`'s KafkaClusters and `minio.enabled`'s `logweir-s3` land:
+`kubernetes.connectionsNamespace`, or the release namespace. The controller
+reads them in the namespace a Backup runs in and sees only the namespaces it
+watches, so `_validate.tpl` refuses a namespace a scoped controller does not
+watch. The namespace must exist before the install.
 */ -}}
 {{- define "logweir.connectionsNamespace" -}}
 {{- $ns := .Values.kubernetes.connectionsNamespace | default .Release.Namespace -}}

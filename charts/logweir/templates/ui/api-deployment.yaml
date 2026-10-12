@@ -1,99 +1,24 @@
 {{/*
-`api.console.enabled` — THE CONSOLE POD, ITS Service, AND ITS DISRUPTION BUDGET.
+`api.console.enabled`: the console pod, its Service and its disruption budget.
 
-`api-config.yaml`'s header carries the two switches, the naming, and why the
-configuration is an immutable ConfigMap with no credential in it. This file is
-the workload: one Deployment running `logweir-api --config` out of the
-`logweir-console` image (`Dockerfile.console`), one ClusterIP Service, and a
-PodDisruptionBudget only where one can do any good.
+The Service renders in `shared` mode only. `localAdmin` binds loopback, so a
+Service there would have endpoints that refuse every connection (an outage to
+every monitor); `kubectl port-forward` takes the Deployment directly. In that
+mode nothing in the cluster can dial the pod, and `create pods/portforward` in
+this namespace IS full console-administrator authority over every bound
+namespace: grant it as such. The Service is ClusterIP only, with no value to
+change it; the Ingress is the one public path.
 
----------------------------------------------------------------------------
-THE Service IS RENDERED IN `shared` MODE ONLY
----------------------------------------------------------------------------
-In `shared` mode the process binds `0.0.0.0`, the ClusterIP is the Ingress's
-backend, and the Service is the ordinary thing it looks like.
+Probes in `shared` mode only: `/healthz` (liveness, consults nothing) and
+`/readyz` (Kubernetes answers for this identity). A kubelet probes the pod IP,
+which a loopback listener refuses, so in `localAdmin` a probe would hold the pod
+NotReady or kill a working console; there a refused configuration shows as
+CrashLoopBackOff with a one-line refusal naming the field.
 
-In the IN-CLUSTER ADMINISTRATOR MODE (`localAdmin`) there is NO Service at all,
-and that is a change made after review. `config.rs` refuses any non-loopback
-listener in that mode, so a Service rendered there would have populated
-Endpoints (the pod is Ready the moment it starts, there being no readiness
-probe — see below) and would refuse every connection: a security property to a
-reader of this file, and an outage to every monitor in the cluster. There is no
-need for it either, because `kubectl port-forward` takes a Deployment directly:
-
-    kubectl --context docker-desktop -n <ns> port-forward deploy/<release>-api 8484:8484
-
-So this chart renders, in that mode, nothing that anything in the cluster could
-dial: no Service, no Ingress (refused by name), and no ingress rule in the
-NetworkPolicy. `shared` is the only mode that may be exposed through either.
-
-Stated the other way round, because it is the answer to PLAT-17.1's residue:
-turning this component on CANNOT produce an unauthenticated shared console. The
-in-cluster administrator mode has no Service to reach, and shared mode
-authenticates and authorizes every request before it reaches a route.
-
-AND THE PRICE OF THE ADMINISTRATOR MODE, SAID OUT LOUD: `create
-pods/portforward` in this namespace is equivalent to full console administrator
-authority over every bound namespace. There is no identity provider and no
-product role check in that mode — every request is the one configured
-administrator — so that Kubernetes verb IS the authorization boundary, and it
-should be granted as such.
-
-WHERE IT IS RENDERED, ClusterIP AND NOTHING ELSE, with no chart value to change
-it. D0: "A ClusterIP Service exposes only the console port. No
-NodePort/LoadBalancer by default." A NodePort would put the console on every
-node's address, ahead of the Ingress and its TLS; the supported public path is
-the Ingress and nothing else.
-
----------------------------------------------------------------------------
-PROBES, AND WHY THERE ARE NONE IN localAdmin MODE
----------------------------------------------------------------------------
-`shared` mode gets both: `/healthz` as the liveness probe (process liveness
-only, consults nothing) and `/readyz` as the readiness probe (additionally
-requires that Kubernetes answers for this service's identity; its body never
-says which endpoint or why). Both are exempt from the service's own `Host`
-allowlist precisely because a kubelet addresses the Pod by IP.
-
-The in-cluster administrator mode gets NEITHER, and that is a consequence of the
-loopback rule rather than an omission — readiness there is not gated on OIDC or
-on anything else, because nothing can probe a loopback listener. The kubelet performs an HTTP probe from the node's
-network namespace against the POD IP; a loopback-only listener refuses that
-connection, so a readiness probe would hold the pod permanently NotReady and a
-liveness probe would kill and restart a console that is working perfectly. A
-probe that cannot succeed is not a weaker check than none — it is an outage.
-`httpGet.host: 127.0.0.1` is not the escape it looks like: that is the NODE's
-loopback, not the pod's.
-
-What is lost is real and is said out loud in `charts/logweir/README.md`: in
-localAdmin mode the Deployment reports Ready as soon as the container starts,
-so a configuration the binary refuses (exit 2) shows up as CrashLoopBackOff in
-`kubectl get pods` rather than as a NotReady endpoint. The container's exit code
-and its one-line refusal naming the field are the signal.
-
----------------------------------------------------------------------------
-THE TOKEN, THE FILESYSTEM, AND THE THREE MOUNTS
----------------------------------------------------------------------------
-`automountServiceAccountToken: true`. This service composes every Kubernetes
-call itself through one sealed adapter after authenticating and authorizing the
-actor. The mounted token is the projected, time-bound kind
-(BoundServiceAccountTokenVolume, the default since Kubernetes 1.21), which is
-what D0 means by "projected token".
-
-`readOnlyRootFilesystem: true` with ONE writable volume, `/tmp`, and no state in
-it: the twenty-six page files are read into memory once at startup
-(`assets.rs`), the configuration and the keys are read-only mounts, and every
-audit record goes to stdout.
-
-The key mount is read-only, `defaultMode: 0440`, and the pod sets
-`fsGroup: 65532`. Those two go together and a live run is what established it:
-the kubelet writes a Secret volume owned by root, so `0400` alone means
-"readable by root alone" and a container running as 65532 gets
-`Permission denied (os error 13)` on its own key — which this file had, and
-which no render test could see, because a file mode is only wrong relative to a
-UID. `fsGroup` makes the volume group-owned by 65532; `0440` is then the
-narrowest mode the process can actually read through. It is a Secret volume, so
-the kubelet keeps it on tmpfs, and it is mounted at a path the ConfigMap names —
-one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
+The token is mounted (the service makes its own Kubernetes calls through one
+sealed adapter) and is the kubelet's projected, time-bound one.
+`readOnlyRootFilesystem` with one writable `/tmp`; the page files are read
+into memory at start and every audit record goes to stdout.
 */}}
 {{- if .Values.api.console.enabled }}
 {{- $c := .Values.api.console }}
@@ -141,11 +66,8 @@ spec:
     metadata:
       annotations:
         {{- /*
-        The ConfigMap is immutable and content-addressed, so its NAME already
-        changes when the configuration does and the pod would roll anyway. This
-        annotation is here for the reader and for `kubectl rollout status`: it
-        is the digest of the exact document the pod is running, visible without
-        resolving the volume.
+        The ConfigMap's name already changes with its content; this digest is
+        for the reader and `kubectl rollout status`.
         */}}
         checksum/logweir-api-config: {{ $configHash }}
       labels:
@@ -159,18 +81,12 @@ spec:
       {{- end }}
       automountServiceAccountToken: true
       {{- /*
-      CHART GAP G2: name resolution for the issuer, when its public name does
-      not resolve to a reachable address inside the cluster (split-horizon
-      DNS, a laptop cluster where `*.localtest.me` is 127.0.0.1). An entry here
-      changes WHERE the name resolves and nothing about what is trusted: TLS
-      still verifies the certificate against the name in the URL, and the ID
-      token's `iss` is still compared exactly with `oidc.issuer`. That makes a
-      wrong address a failed handshake ONLY when the target is an endpoint just
-      the IdP's owner can route — its own Service, TLS terminated by the IdP —
-      and the CA bundle does not issue that name to anyone else on the path. A
-      SHARED ingress fails that test: an Ingress from any namespace can claim
-      the issuer's host behind the owner's certificate (charts/logweir/README.md,
-      *The identity provider inside the cluster*).
+      Where the issuer's public name does not resolve to a reachable address
+      inside the cluster (split-horizon DNS, `*.localtest.me`). It changes where
+      a name resolves, not what is trusted: TLS still verifies the name and the
+      ID token's `iss` is compared exactly. That holds only when the target is
+      an endpoint just the IdP's owner can route; a shared ingress fails it
+      (charts/logweir/README.md, *The identity provider inside the cluster*).
       */}}
       {{- with $c.hostAliases }}
       hostAliases:
@@ -181,17 +97,10 @@ spec:
         runAsUser: 65532
         runAsGroup: 65532
         {{- /*
-        `fsGroup` IS NOT DECORATION HERE, AND A LIVE RUN PROVED IT. The kubelet
-        writes a Secret volume owned by ROOT; without an fsGroup the key files
-        are root:root, and `defaultMode: 0400` then means "readable by root
-        alone" — so this container, which runs as 65532, got `cannot read the
-        configuration file …/cursor.key: Permission denied (os error 13)` and
-        CrashLoopBackOff'd on its first live install. Every render and unit
-        assertion passed on that manifest, because a file mode is only wrong
-        relative to a UID and none of them read the two together;
-        `chart_lint.rs` now does. With this set the kubelet chgrps the volume to
-        65532, and 0440 below is the narrowest mode the process can read
-        through.
+        The kubelet writes Secret volumes owned by root; with `fsGroup` it
+        chgrps them to 65532, and 0440 below is the narrowest mode this
+        non-root process can read (0400 alone gave `Permission denied` on a
+        live install; `chart_lint.rs` reads the mode and the UID together).
         */}}
         fsGroup: 65532
         seccompProfile:
@@ -262,20 +171,14 @@ spec:
               - key: config.yaml
                 path: config.yaml
         {{- /*
-        THE KEYS. `optional` is deliberately absent: a Secret that is not there
-        holds the pod in ContainerCreating with an event naming it, which is a
-        better failure than a console that starts and mints cursors with a key
-        it invented. See the pod's `fsGroup` above for why the mode is 0440
-        and not 0400.
+        No `optional`: a missing Secret holds the pod in ContainerCreating with
+        an event naming it, better than a console minting cursors with a key it
+        invented.
         */}}
         - name: keys
           secret:
             secretName: {{ $c.keySecret }}
-            {{- /*
-            0440 AND NOT 0400: with the pod's `fsGroup: 65532` above, the
-            kubelet makes this volume root:65532, so the group bit is what the
-            process reads through and the world bit stays off.
-            */}}
+            {{- /* Group-readable for `fsGroup: 65532`, world bit off. */}}
             defaultMode: 0440
         {{- if eq $c.mode "shared" }}
         - name: oidc
@@ -286,12 +189,9 @@ spec:
               - key: clientSecret
                 path: clientSecret
         {{- /*
-        CHART GAP G1: the issuer's CA bundle — PUBLIC certificates — from the
-        one object `api.console.oidc.caBundle` names. Only its one key is
-        projected, and there is no `optional`: a bundle that is not there holds
-        the pod in ContainerCreating with an event naming it, and a bundle that
-        is there but unreadable or empty stops `logweir-api` at exit 2. Neither
-        ends in a console that quietly trusts the system roots alone.
+        The issuer's CA bundle (public certificates), one key, no `optional`: a
+        missing bundle holds the pod, an unreadable one stops `logweir-api`;
+        neither ends in a console that quietly trusts the system roots alone.
         */}}
         {{- if include "logweir.api.oidcCaConfigured" . }}
         - name: oidc-ca
@@ -310,21 +210,18 @@ spec:
         {{- end }}
         - name: tmp
           emptyDir: {}
-        {{- /* PLAT-19.2: the same immutable policy document the controller mounts. */}}
+        {{- /* The same immutable policy document the controller mounts. */}}
         {{- if include "logweir.approvalPolicy.configured" . }}
         - name: approval-policy
           configMap:
             name: {{ include "logweir.approvalPolicy.name" . }}
         {{- end }}
         {{- /*
-        PLAT-19.2: the ConsoleConfirmation PRIVATE key. Only `confirmation.key`
-        is projected, 0440 for the reason the keys volume gives. A Secret the
-        operator named has no `optional`: a console bound to a policy with no
-        key must not start. PROD-16.1: the MANAGED key's Secret is `optional`,
-        because the identity hook fills it AFTER this pod starts (a post-install
-        hook, after `--wait`); the kubelet projects the key once it is written,
-        without a restart, and `logweir-api` reads it on first use, refusing a
-        confirmation before anything is created until then.
+        The ConsoleConfirmation private key, `confirmation.key` only, 0440. An
+        operator-named Secret has no `optional`: a console bound to a policy
+        with no key must not start. The managed key's Secret is `optional`: the
+        identity hook fills it after this pod starts, the kubelet projects it
+        without a restart, and `logweir-api` refuses a confirmation until then.
         */}}
         {{- if include "logweir.consoleKey.secret" . }}
         - name: confirmation
@@ -341,12 +238,8 @@ spec:
 {{- if gt (int $c.replicas) 1 }}
 ---
 {{- /*
-A PodDisruptionBudget ONLY ABOVE ONE REPLICA, and the condition is the whole
-argument. D0's Helm list names a PDB; a PDB over a single-replica Deployment
-with `minAvailable: 1` makes `kubectl drain` block forever on a node with the
-only console pod on it, which turns an availability object into an outage during
-a node upgrade. With two or more replicas `maxUnavailable: 1` is what it should
-have been all along: a rolling disruption, never a simultaneous one.
+Only above one replica: a PDB over a single replica blocks `kubectl drain`
+forever on that node. With two or more, `maxUnavailable: 1`.
 */}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget

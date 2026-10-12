@@ -1,49 +1,28 @@
 {{- if .Values.admissionPolicy.enabled }}
 {{- /*
-The ValidatingAdmissionPolicy D2 §7.3 asks for, and the one thing that fences
-the console API's `create` on Secrets.
+The ValidatingAdmissionPolicy that fences the console API's `create` on Secrets.
+`logweir-api` holds `create` and no read verb on `secrets`, and `create` cannot
+be narrowed by name: in a namespace it could mint a
+`kubernetes.io/service-account-token` for any ServiceAccount. The console's
+credential builders stamp their own `type` (`logweir.dev/object-store-credential`,
+`logweir.dev/kafka-sasl-password`, `logweir.dev/kafka-client-certificate`) and
+the `app.kubernetes.io/managed-by: logweir` label so this policy can require
+both. A cluster administrator can delete it; it bounds a mistake or a
+compromised console, not a deliberate administrator.
 
-WHAT IT CLOSES. `logweir-api` holds `create` on `secrets` and NO read verb, so
-a stored credential cannot be read back by any route (`docs/api.md`). `create`
-alone is still the widest grant that service asks for: in a namespace it could
-in principle mint a `kubernetes.io/service-account-token` Secret for any
-ServiceAccount there, which is a token for an identity the console was never
-given. The two credential builders already stamp a distinct, immutable-after-
-create `type` — `logweir.dev/object-store-credential` (PLAT-08.1's destination
-credential), `logweir.dev/kafka-sasl-password` (PLAT-07.1's connection
-credential) and `logweir.dev/kafka-client-certificate` (PROD-01.3's mTLS
-connection credential) — and the `app.kubernetes.io/managed-by: logweir` label,
-precisely so this policy can require both.
-
-WHAT IT DOES NOT CLOSE, said plainly. A cluster administrator can delete this
-policy (O0, default (a), spec §9); it raises the cost of a mistake and of a
-compromised console, not of a deliberate administrator. It says nothing about
-what the console does with a credential it legitimately creates, and it is not
-what keeps the value unreadable — that is the missing read verb.
-
-WHY `matchConditions` AND NOT A NARROWER `matchConstraints`. RBAC cannot
-express "this Secret shape", and `matchConstraints` cannot express "this
-subject": the subject test is a `matchConditions` expression over
-`request.userInfo.username`. Every other principal in the cluster — an
-administrator, the controller, a CSI driver — is skipped by that condition and
-is completely unaffected by this policy, which is why `failurePolicy: Fail` is
-safe to set. A Fail-closed policy that matched every subject would break
-`kubernetes.io/service-account-token` creation cluster-wide.
-
-WHY IT IS OFF BY DEFAULT, and the only reason: `admissionregistration.k8s.io/v1`
-ValidatingAdmissionPolicy is Kubernetes **1.30+**, and this chart's floor is
-1.29 (Global Constraint 25), where the API server answers `no matches for
-kind`. Turn `admissionPolicy.enabled` on wherever the kind exists. The same two
-documents are in `config/samples/console-credential-admission-policy.yaml` for
-a kustomize install, which is applied BY HAND for the same reason
-`config/samples/validatingadmissionpolicy.yaml` is.
+`matchConditions` selects the console's own subject, so every other principal
+is skipped, which is why `failurePolicy: Fail` is safe: a Fail-closed policy
+that matched every subject would break service-account-token creation
+cluster-wide. Off by default only because ValidatingAdmissionPolicy is
+Kubernetes 1.30+ and the chart's floor is 1.29. A kustomize install applies
+`config/samples/console-credential-admission-policy.yaml` by hand.
 
 [UNVERIFIED — not applied to a live API server]. What would verify it: on a
 1.30+ cluster, apply both documents, then as the console ServiceAccount create
 (a) a Secret of type `logweir.dev/object-store-credential` carrying the
 managed-by label — ACCEPTED — and (b) a Secret of type
 `kubernetes.io/service-account-token` — REJECTED with the message below — and
-show (b) succeeding once the binding is deleted. D2 W14 owns that evidence.
+show (b) succeeding once the binding is deleted.
 */ -}}
 {{- $name := .Values.admissionPolicy.consoleServiceAccountName -}}
 {{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace $name -}}

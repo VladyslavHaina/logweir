@@ -1,38 +1,22 @@
 {{- /*
-D0 STAGE 5 — THE CONTROLLER'S AUTHORITY, SCOPED TO THE EXECUTION NAMESPACES.
+The controller's authority, scoped to the execution namespaces. A Job can
+mount any Secret in its namespace, so Job-create authority there is every
+Secret there (residual O1, `docs/kubernetes.md` §15.4), and the default
+cluster-wide binding would put the release namespace, where the shared
+console's keys live, inside it. RBAC is additive, so the only narrowing is not
+to grant it; with `controller.watchNamespaces` set this file replaces the
+ClusterRoleBinding with:
 
-WHY. `weirkeeper` creates Jobs, and a Job can mount any Secret in its
-namespace, so Job-create authority in a namespace is every Secret there —
-residual O1 (`docs/kubernetes.md` §15.4). The default install grants the
-`weirkeeper` ClusterRole through a cluster-wide ClusterRoleBinding, which puts
-EVERY namespace inside that authority, including the release namespace where
-the shared console's session and cursor keys live. D0: "Until that is done,
-the documented Job-create signing-oracle residual would extend to the
-console's keys and shared mode must not be declared secure." RBAC is additive
-— nothing can subtract a namespace from a ClusterRoleBinding — so the only
-narrowing is not to grant it: this file replaces the ClusterRoleBinding with
+* one RoleBinding per listed namespace to the same `weirkeeper` ClusterRole
+  (under a RoleBinding its namespaced rules apply there only, its
+  cluster-scoped rules nowhere);
+* `weirkeeper-cluster-scope`, bound cluster-wide, holding the two
+  cluster-scoped trust kinds and nothing else;
+* a Role in the release namespace for the installation policy ConfigMap, by
+  name.
 
-* one `RoleBinding` per `controller.watchNamespaces` entry, to the SAME
-  `weirkeeper` ClusterRole (under a RoleBinding its namespaced rules apply in
-  that namespace only, and its cluster-scoped rules apply nowhere);
-* the ClusterRole `weirkeeper-cluster-scope`, bound cluster-wide, holding the
-  two cluster-scoped trust kinds and NOTHING else — no Job, no Pod, no
-  ConfigMap, no namespaced kind;
-* a Role in the release namespace for the ONE object the controller reads there,
-  the installation policy ConfigMap, by name.
-
-The controller itself watches exactly the listed namespaces
-(`LOGWEIR_WATCH_NAMESPACES`, rendered by `deployment.yaml` from the same value).
-
-WHAT IT DOES NOT CHANGE. The `weirkeeper` ClusterRole is rendered exactly as
-before (`clusterrole.yaml`); the execution namespaces still carry O1 for their own signing key
-(`docs/kubernetes.md` §15.4 — that residual is the design's, and moving the
-signer out is not this stage). Cluster-admin is out of scope (O0).
-
-`kubectl --context docker-desktop auth can-i create jobs -n <release-namespace>
---as system:serviceaccount:<release-namespace>:weirkeeper` answers `no` under
-this render; `charts/logweir/README.md` §`controller.watchNamespaces` has the
-whole matrix.
+`deployment.yaml` renders `LOGWEIR_WATCH_NAMESPACES` from the same value.
+`charts/logweir/README.md` §`controller.watchNamespaces` has the matrix.
 */ -}}
 {{- with .Values.controller.watchNamespaces }}
 {{- range $ns := . }}
@@ -64,12 +48,8 @@ metadata:
     app.kubernetes.io/component: control-plane
 rules:
   # The two cluster-scoped kinds, with exactly the verbs `clusterrole.yaml`
-  # grants on them — and nothing namespaced. `TrustRoster` is read and its
-  # status patched by `controllers::trust_roster`; `TrustPolicy` is watched by
-  # the trust, approval, backup and restore reconcilers and its status patched
-  # by `controllers::trust_policy`, which also places and releases the
-  # compromise-revocation finalizer — the one `patch` on the object itself
-  # (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
+  # grants on them. The one `patch` on a TrustPolicy itself places and releases
+  # the compromise-revocation finalizer.
   - apiGroups: ["logweir.dev"]
     resources: ["trustrosters"]
     verbs: ["get", "list", "watch"]
@@ -99,9 +79,8 @@ subjects:
     name: weirkeeper
     namespace: {{ $.Release.Namespace }}
 ---
-# The installation policy (`templates/policy.yaml`), read by name from the
-# release namespace (`LOGWEIR_INSTALLATION_NAMESPACE`). `get` on this one
-# ConfigMap and nothing else: no Job, no Pod, no other ConfigMap, no Secret.
+# The installation policy, read by name from the release namespace: `get` on
+# this one ConfigMap and nothing else.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -114,7 +93,7 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     {{- if include "logweir.freshInstallConfirm" $ }}
-    # PROD-16.1: and the public identity ConfigMap, for the fresh-install marker.
+    # And the public identity ConfigMap, for the fresh-install marker.
     resourceNames: ["weirkeeper-policy", {{ $.Values.identity.publicConfigMapName | quote }}]
     {{- else }}
     resourceNames: ["weirkeeper-policy"]

@@ -1,23 +1,16 @@
 {{- /*
-`demoKafka.enabled` — TWO THROWAWAY KAFKA CLUSTERS. `<release>-kafka-source`
-and `<release>-kafka-target`: each a one-replica KRaft StatefulSet (combined
-controller+broker, `KAFKA_PROCESS_ROLES: controller,broker`, the shape the
-compose stack's broker uses) with a headless Service for the StatefulSet and
-a ClusterIP Service on 9092 that the broker ADVERTISES, so a pod anywhere in
-the cluster can follow the broker's metadata to it. PLAINTEXT inside the
-cluster network — the demo's transport, not a recommendation. Storage is an
-emptyDir. Each broker is handed its OWN KRaft cluster id
-(`demoKafka.clusterIds`): the image's default is one fixed id for every
-broker started without one, and two brokers sharing it are one cluster to
-phase 0's `target != source` rail — measured, not assumed (values.yaml).
+`demoKafka.enabled`: two throwaway clusters, `<release>-kafka-source` and
+`<release>-kafka-target`, each a one-replica combined controller+broker KRaft
+StatefulSet on an emptyDir, PLAINTEXT inside the cluster network (the demo's
+transport, not a recommendation). Each has a headless Service and a ClusterIP
+Service on 9092 that the broker advertises, so any pod can follow the broker's
+metadata to it. Each gets its own KRaft cluster id: two brokers sharing the
+image's default id are one cluster to phase 0's `target != source` rail.
 
-The seed Job is a `post-install` hook: it waits for both brokers, creates
-`orders` and `payments` on the source with `seed.recordsPerTopic` records
-each, produced with `kafka-console-producer.sh` from the same image, and
-creates the marker topic `logweir.scratch` on the TARGET — the scratch
-segregation proof phase 0 requires, in the exact form
-`e2e/compose/docker-compose.yml`'s topic-setup uses (one partition,
-replication factor 1). Nothing in this file renders unless the flag is on.
+The `post-install` seed Job waits for both brokers, creates `orders` and
+`payments` on the source with `seed.recordsPerTopic` records each, and creates
+the marker topic `logweir.scratch` on the target (one partition, replication
+factor 1, as the compose stack does).
 */ -}}
 {{- if .Values.demoKafka.enabled }}
 {{- range $role := list "source" "target" }}
@@ -103,8 +96,8 @@ spec:
           image: {{ $.Values.demoKafka.image }}
           imagePullPolicy: IfNotPresent
           env:
-            # THE CLUSTER ID, per role and DISTINCT — values.yaml says why the
-            # image's own default cannot be left to stand for two brokers.
+            # Distinct per role: the image's default id would make the two
+            # brokers one cluster.
             - name: CLUSTER_ID
               value: {{ index $.Values.demoKafka.clusterIds $role | quote }}
             - name: KAFKA_NODE_ID
@@ -113,10 +106,9 @@ spec:
               value: controller,broker
             - name: KAFKA_LISTENERS
               value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-            # THE ADVERTISED LISTENER IS THE ClusterIP SERVICE'S DNS NAME. A
-            # Kafka client is redirected to the advertised listener by the
-            # broker's metadata whatever address it bootstrapped at, so this
-            # is the name that has to resolve from every pod — and it does.
+            # The ClusterIP Service's DNS name: a client follows the broker's
+            # metadata to the advertised listener, so it must resolve from
+            # every pod.
             - name: KAFKA_ADVERTISED_LISTENERS
               value: PLAINTEXT://{{ $host }}:9092
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
@@ -150,9 +142,8 @@ spec:
               containerPort: 9092
             - name: controller
               containerPort: 9093
-          # A port probe, because the broker binds its data-plane listener
-          # only once startup has completed; the seed Job's own retry loop is
-          # what proves a client round trip.
+          # A port probe: the broker binds its data listener only once started;
+          # the seed Job's retry loop proves a client round trip.
           startupProbe:
             tcpSocket:
               port: kafka
