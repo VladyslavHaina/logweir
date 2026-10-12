@@ -136,7 +136,7 @@ of its format's Versions table:
 ## The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the one checked-in schema the rule
-above does **not** cover. `info.version` is `1.0.0-alpha.2`. Its consumers are
+above does **not** cover. `info.version` is `1.0.0-alpha.3`. Its consumers are
 the console image and its typed client (PLAT-18.1); the binary is
 `publish = false`, and no client outside this repository is supported, so the
 console and the API ship and upgrade together. The owner decided on 2026-10-07
@@ -149,6 +149,23 @@ maintainer approval, but never a silent edit: `just schema-check` and
 compare the checked-in bytes with the generator (regenerate with `just schema`).
 Adding an optional field is MINOR and removing or retyping one MAJOR, so prefer
 leaving a field out (it is why `Operation` carries no `jobName`).
+
+Six changes since `1.0.0-alpha.2` (`v0.2.0-rc.1`) are breaking. The document
+is still pre-release, so they move only the pre-release number, from
+`-alpha.2` to `-alpha.3`, and not the major:
+- **breaking:** `GET .../rehearsal-schedules[/{name}]` and the `rehearsals`
+  capability are removed (release-notes item 73);
+- **breaking:** `POST .../destinations:from-legacy` and the problem codes
+  `legacy_location_unknown` and `legacy_location_mismatch` are removed (item 75);
+- **breaking:** a schedule's `status.retentionReport` is removed (item 78);
+- **breaking:** a protection policy's `notifications` and an alert's `delivery`
+  and `notifiedTransition` are removed (item 74);
+- **breaking:** a connection create that sets `auth.credentialRef` is refused
+  (item 33);
+- **breaking:** a destination create that sets a grant's `secret.existing` is
+  refused (item 38).
+
+[release-notes.md](release-notes.md) item 86 lists every change, one line each.
 
 ## The CLI, and what is not a contract
 
