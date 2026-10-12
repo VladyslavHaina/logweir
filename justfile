@@ -14,6 +14,7 @@ lint:
     python3 scripts/test_k8s_scram_seed.py
     python3 scripts/test_plat06_case_e_rows.py
     python3 scripts/test_bind_credential_rows.py
+    python3 scripts/test_console_steps.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh
