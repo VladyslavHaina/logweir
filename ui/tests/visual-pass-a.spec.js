@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { apiClient, resetMode, selectMode } from "../client.js";
@@ -361,9 +361,11 @@ test("h1_both_verify_lines_run_as_printed", async () => {
     .filter((w) => w !== "key>");
   const rust = words(lines[2]);
   assert.equal(rust[0], "logweir");
-  const binary = process.env.LOGWEIR_BIN || join(REPO, "target/release/logweir");
+  // The gate hands a path relative to the repository; the line runs elsewhere.
+  const binary = resolve(REPO, process.env.LOGWEIR_BIN || "target/release/logweir");
   const run = spawnSync(binary, rust.slice(1), { encoding: "utf8", cwd: directory });
-  assert.equal(run.status, 0, "the printed Rust line verifies: " + run.stdout + run.stderr);
+  assert.equal(run.status, 0, "the printed Rust line verifies: " + String(run.error) +
+    String(run.stdout) + String(run.stderr));
   assert.match(String(run.stdout), /signature: VALID/);
 
   // The Python line, read by the script's own grammar: `--payload-type` and
