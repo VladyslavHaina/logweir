@@ -828,6 +828,7 @@ What it fixed:
 - **The fix:** `tests` grants exactly those two scopes and is handed no secret.
 - **The new lint row** `the_release_tests_call_can_never_reach_ci_publish` proves the only ci.yml job that uses them runs only on a push to main, so a dispatch is still a dry run that reaches no credential. Its controls ran.
 - **Proof:** dry run 38209125597 on the branch passed every job up to `assemble`, and `release.sh verify` passed on its 14 assets (three multi-arch images from the `sha-a575b65a` publication).
+- **Published and signed:** main run 38213577690 signed `sha-1f15d15d`.
 
 ## Carried over from the PLAT tracker
 
