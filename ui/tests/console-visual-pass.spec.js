@@ -34,7 +34,7 @@ import {
 } from "../pages/approvals.js";
 import { ident } from "../render.js";
 import { LONG_TOKEN_CHARS, SHORT_CHIP_CHARS } from "../app.js";
-import { renderOperation } from "../pages/operation.js";
+import { operationFacts, renderEvidence, renderOperation } from "../pages/operation.js";
 
 const PREPARED = Object.freeze({
   restoreName: "restore-x", approvalName: "approval-x", hash: "sha256:" + "e".repeat(64),
@@ -321,4 +321,28 @@ test("m8_check_readiness_with_no_topic_is_disabled_and_says_why", async () => {
     "NEGATIVE CONTROL: an enabled button that did nothing on a click");
   assert.match(html, /<p class="complaint" id="restore-readiness-blocked">Select at least one topic in step 4/);
   assert.ok(NO_TOPIC_READINESS_SENTENCE.toLowerCase().includes("select at least one topic"));
+});
+
+// M10. The operation view labelled a restore's scorecard "receipt key"
+// (`logweir/drills/....json`), and "scorecard key" read "-".
+
+/** The value a fact list gives `label`, or `null` when it has no such row. */
+function factValue(html, label) {
+  const at = html.indexOf("<dt>" + label + "</dt><dd>");
+  return at === -1 ? null : html.slice(at + label.length + 13, html.indexOf("</dd>", at));
+}
+
+test("m10_the_operation_view_labels_a_scorecard_as_a_scorecard_and_a_receipt_as_a_receipt", () => {
+  const restore = operationFacts(decoded("operation-restore-completed.json").item, true);
+  const shown = renderEvidence(restore);
+  assert.equal(factValue(shown, "scorecard key"),
+    "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.scorecard.json",
+    "NEGATIVE CONTROL: it read \"-\" while the scorecard was labelled the receipt");
+  assert.equal(factValue(shown, "receipt key"), null, "a restore has no receipt row");
+  assert.match(factValue(shown, "scorecard sha256"), /^sha256:0d90834b/);
+
+  const backup = operationFacts(decoded("operation-backup.json").item, true);
+  const theirs = renderEvidence(backup);
+  assert.match(factValue(theirs, "receipt key"), /receipt\.json$/);
+  assert.equal(factValue(theirs, "scorecard key"), null, "a backup has no scorecard row");
 });

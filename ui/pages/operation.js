@@ -453,6 +453,7 @@ export function renderEvidence(v) {
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
   const ver = (console_ ? v.verification : v.evidenceVerification) || {};
   const policy = trust.policy || {};
+  const restore = v.kind === "restore";
   const green = evidenceGreen(v);
   const historical = console_
     ? v.trustState === "verifiedHistorical"
@@ -485,9 +486,15 @@ export function renderEvidence(v) {
       ["trust policy", cell(policy.name) +
         (typeof policy.generation === "number" ? " g" + String(policy.generation) : "")],
       ["detail", cell(ver.detail)],
-      ["receipt key", cell(e.receiptKey || e.payloadKey)],
-      ["receipt sha256", cell(e.receiptSha256 || e.payloadSha256)],
-      ["scorecard key", cell(e.scorecardKey)],
+      // THE SIGNED DOCUMENT, LABELLED BY KIND (PROD-14.1 visual pass, M10).
+      // The product API publishes one `payloadKey`: a backup's receipt or a
+      // restore's scorecard (`OperationEvidence`); the custom resource names
+      // each. A restore's scorecard read "receipt key", beside a "scorecard
+      // key" of "-".
+      [restore ? "scorecard key" : "receipt key",
+        cell((restore ? e.scorecardKey : e.receiptKey) || e.payloadKey)],
+      [restore ? "scorecard sha256" : "receipt sha256",
+        cell((restore ? e.scorecardSha256 : e.receiptSha256) || e.payloadSha256)],
       ["sidecar key", cell(e.sidecarKey)],
       ["offset report key", cell(e.offsetReportKey)],
     ]) +
