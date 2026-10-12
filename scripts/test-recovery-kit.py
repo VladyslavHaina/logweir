@@ -158,6 +158,9 @@ class RecoveryKit(unittest.TestCase):
             "a base64 private key inside a ConfigMap": {
                 "export.yaml": "kind: ConfigMap\ndata:\n  k: " + base64.b64encode(pem.encode()).decode() + "\n"},
             "a Kubernetes Secret": {"identity.yaml": "apiVersion: v1\nkind: Secret\ndata:\n  x: eA==\n"},
+            "a Secret whose kind is double-quoted": {"s3.yaml": 'apiVersion: v1\nkind: "Secret"\nstringData:\n  k: v\n'},
+            "a Secret whose kind is single-quoted": {"oidc.yaml": "apiVersion: v1\nkind: 'Secret'  # hand-written\n"
+                                                                 "stringData:\n  k: v\n"},
             "a password file": {"minio.password": "not-a-real-one\n"},
         }
         for i, (what, files) in enumerate(cases.items()):

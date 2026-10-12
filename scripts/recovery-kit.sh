@@ -191,7 +191,7 @@ while IFS= read -r -d '' file; do
       continue ;;
   esac
   if grep -aEq -- "$pem|$b64" "$file"; then refuse "$rel" "it holds a private key"; fi
-  if grep -aEq '^[[:space:]]*kind:[[:space:]]*Secret[[:space:]]*$|"kind"[[:space:]]*:[[:space:]]*"Secret"' "$file"; then
+  if grep -aEq '^[[:space:]]*kind:[[:space:]]*["'\'']?Secret["'\'']?[[:space:]]*(#.*)?$|"kind"[[:space:]]*:[[:space:]]*"Secret"' "$file"; then
     refuse "$rel" "it is a Kubernetes Secret"
   fi
 done < <(find "$kit" -type f -print0)
