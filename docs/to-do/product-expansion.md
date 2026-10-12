@@ -268,7 +268,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-01.5d | A produce-response fault proxy profile: drop or hold one produce response deterministically (oracle for 07.1-R9 and 00.3d's A-C5-1) | P2 | M2 | infra | 01.5 | — | compose | B | Done |
 | 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Done |
 | 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Done |
-| 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Blocked |
+| 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | owner's yes on Amendment D (rule 8) | none | B | Done |
 | 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Done |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Deferred to v2 |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Deferred to v2 |
