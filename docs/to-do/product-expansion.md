@@ -789,6 +789,28 @@ What it fixed:
 - **Next:** the live install under the k8s lock, in two agents run one after the other (`poc-14-1a`, `poc-14-1b`), against the `sha-` publication of this merge.
 - **Published and signed:** main run 38192306870 signed `sha-22dc6147`. `poc-14-1a` started on it, and `helm-demo.yml` was dispatched (run 38195441503).
 
+**PROD-14.1 live, part 1 (`poc-14-1a`, 2026-10-12) on the published `sha-22dc6147`.** Held the k8s lock from 02:21Z to 03:06Z (`claude/poc-14-1a.result.md`, `claude/artifacts/poc-14-1a/`).
+- **PASS:**
+  - Old-PoC snapshot: 393 of 393 receipts VALID in both readers.
+  - Backup: the identity, the console key, every custom resource and the Helm values, in `~/.logweir-poc/backup-2026-10-11/` (0600; names and sha256 only).
+  - MinIO mirror: 5,313 objects.
+  - The kit, after a rebuild: `shasum -c` 46 of 46, and the guard refuses a Secret YAML and a private key.
+  - The old PoC is taken down; no Logweir object is left, and Traefik, Dex and cert-manager are kept.
+  - **The disconnected recovery from the kit alone:** first `docker load` to a VALID scorecard in **5 min 37 s**, with no image pulled. RECOVERY.md's step 5 failed as written and passed corrected.
+- **FAIL:**
+  - Step 3b: a hand-set `helm.sh/resource-policy: keep` on the demo MinIO's PVC is ignored, because Helm reads its stored manifest, so the PVC was deleted. The mirror kept the data.
+  - Step 8: the PROD-16.1 harness as merged fails journey 4, on a hard-coded engine version.
+- **Not run:** the bundle-to-chart walk (item 76), because the `v0.2.0-rc.1` release ships no `logweir.yaml`. Item 76 stays `[UNVERIFIED]`.
+- **Real defects, fixed by `fx-kit`:**
+  - D1: the kit's chart, packed with macOS `tar`, does not load in Helm.
+  - H1: the harness's engine version.
+  - D7: the demo target id is duplicated.
+  - B1: no chart value keeps the demo MinIO's PVC.
+  - B2: the kit needs the full commit.
+  - D2 to D6: RECOVERY.md's steps, including that `archiveWrite` is mandatory and `evidenceRead` drives verification.
+- **Part 2 (`poc-14-1b`):** the timed fresh install, the owed rows, and the install left running. Started.
+- **`helm-demo.yml` at `22dc6147`:** failed at step 5, `CredentialBindingMismatch`, because the demo never bound its archive credential (pre-existing). Fixed on `claude/fx-helm-demo` (`6425a629`); the workflow is re-running on that branch.
+
 ## Carried over from the PLAT tracker
 
 `docs/to-do/platform-improvements.md` is retired by PROD-17.1 C7 (OD-12, 2026-10-11): all 41 PLAT rows are Done, and git history keeps every completion record. These are the rows its defect ledger still held open, copied verbatim. Under OD-11 each is Deferred unless it is a real defect in what v1 ships; the orchestrator re-checks them at PROD-14.1. Also open from that ledger: CONSOLE-MCP-ROUND3's R3-4 (internal vocabulary in the applicability chip) and R3-5 (cluster IDs wrap at 1024 px), both LOW. Its REHEARSAL-* rows close with C1, which withdraws scheduled rehearsals.
