@@ -883,6 +883,7 @@ What it fixed:
   - the stale `RUNNER_IMAGE` default;
   - the seven visual-pass LOWs;
   - a safe YAML parser.
+- **Published and signed:** main run 38256093754 signed `sha-96e601f0`, the release-candidate build. `poc-14-1c` upgrades the PoC to it and re-checks every fix live.
 
 ## Carried over from the PLAT tracker
 
