@@ -303,7 +303,7 @@ COPY --from=builder  /out/logweir  /usr/local/bin/logweir
 # a second variable on the Deployment, a second publish job and a second digest
 # to keep in step with the first; the live wave that found RET-NOIMAGE proved
 # the fix by building exactly this image plus this one binary
-# (`e2e/k8s/d3/Dockerfile.retention`, a test fixture that this line retires).
+# (a test-only Dockerfile, removed after v0.2.0, that this line retired).
 #
 # IT DOES NOT WIDEN THE DELETION BOUNDARY, and the boundary is a LINKAGE claim,
 # not an image one. `scripts/check-no-archive-write.sh` check 3 asserts from

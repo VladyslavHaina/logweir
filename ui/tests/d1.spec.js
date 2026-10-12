@@ -1258,8 +1258,7 @@ test("an_unknown_outcome_on_a_manual_run_names_the_key_and_no_empty_name", () =>
 
 // 10. THE MANUAL-RUN NAME RULE AND OBJECT BUILDER: the page's half of D1
 // section 8.2's name rule and 8.1's canonical object, pinned against the
-// product API by `manual-backup-names.json` and `scripts/live/d1/run.py`'s
-// L-06-2-cli.
+// product API by `manual-backup-names.json`.
 
 const NAME_RULE = fixture("manual-backup-names.json");
 
@@ -1275,10 +1274,9 @@ function legacySchedule(overrides) {
 
 test("the_manual_run_name_rule_is_one_rule_and_the_fixture_pins_both_sides", async () => {
   // THE FIXTURE IS THE CONTRACT BETWEEN TWO IMPLEMENTATIONS.
-  // `crates/logweir-api/src/idempotency.rs::identity` is the other one, and
-  // `scripts/live/d1/run.py`'s L-06-2-cli drives the REAL binary over the same
-  // rule and fails if the object kube-apiserver stored is not named what this
-  // function says. Here the page's half is held to every recorded row.
+  // `crates/logweir-api/src/idempotency.rs::identity` is the other one, held
+  // to the same rows by `crates/logweir-api/tests/manual_backups.rs`. Here the
+  // page's half is held to every recorded row.
   assert.equal(NAME_RULE.rule.prefix, "logweir-manual-");
   assert.equal(NAME_RULE.rule.hashChars, 26);
   assert.deepEqual(NAME_RULE.rule.fieldOrder, ["issuer", "subject", "namespace", "route", "key"]);

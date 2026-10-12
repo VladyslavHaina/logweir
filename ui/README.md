@@ -304,10 +304,8 @@ when the behaviour is removed.
 
 ## Live browser journeys
 
-The console's live journeys are `e2e/journeys/console.mjs` and the
-`scripts/*-ui-e2e.mjs` harnesses the journeys suite runs
-([e2e/journeys/README.md](../e2e/journeys/README.md)). They need a cluster and
-are not part of `just lint`.
+The console's live journey is `scripts/prod16-1-ui-e2e.mjs` (approvals without a
+personal key). It needs a cluster and is not part of `just lint`.
 
 Apache Kafka(R) and Kafka(R) are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.

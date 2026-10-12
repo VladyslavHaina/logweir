@@ -141,7 +141,8 @@ verification is `NotAttempted`, with a detail naming the field; it never falls
 back to a wider grant.
 
 The minimal actions were measured on docker-desktop MinIO by removing one action
-at a time (`e2e/k8s/d2/d2_live.py`, phases `U6`). The full table, with the
+at a time (the `U6` phases of the D2 live harness, `e2e/k8s/d2/d2_live.py` at
+commit `d648b4d7`, removed from the tree after v0.2.0). The full table, with the
 action each removal broke, is in [reference.md](reference.md#object-storage-grants).
 
 | Role | Minimal actions, each at the resource scope shown |

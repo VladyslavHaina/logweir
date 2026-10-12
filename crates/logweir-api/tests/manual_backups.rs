@@ -976,8 +976,7 @@ async fn the_shipped_sample_is_what_this_route_creates() {
 /// do not.
 ///
 /// A PIN NEEDS BOTH SIDES. `ui/tests/d1.spec.js` drives the page over every
-/// recorded row, and `scripts/live/d1/run.py`'s `L-06-2-cli` drives the real
-/// binary over ONE live scope -- so without this row a change to
+/// recorded row -- so without this row a change to
 /// `ROUTE_CREATE`, [`NAME_PREFIX`], the field order, `push_field`'s width,
 /// `NAME_HASH_CHARS` or the base32 alphabet would pass every gate that runs
 /// without a cluster. The six recorded names are what BOTH implementations

@@ -697,8 +697,9 @@ failed list leaves the object on its previous path.
 
 The minimal actions per role are in [kubernetes.md](kubernetes.md#the-grants-and-the-object-storage-actions-each-one-needs).
 This is what the product answers when one required action is missing, as
-measured on docker-desktop MinIO (`e2e/k8s/d2/d2_live.py`, `U6` phases; re-run
-with `u6setup u6point u6b u6f u6a u6c u6d u6e`, then `u6table`). Every other
+measured on docker-desktop MinIO (the `U6` phases of the D2 live harness,
+`e2e/k8s/d2/d2_live.py` at commit `d648b4d7`, removed from the tree after
+v0.2.0). Every other
 action tried (`s3:GetBucketLocation`, `s3:AbortMultipartUpload`,
 `s3:DeleteObject` outside the enforcer, the second `s3:prefix` leg, reads under
 the other root) was removed with no effect.
