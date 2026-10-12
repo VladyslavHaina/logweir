@@ -1846,7 +1846,9 @@ mutants.
 [UNVERIFIED — no live install has run this build's refusal yet.]
 **Rollback:** roll the controller back; it neither writes nor reads the two
 fields, and the refusal is named only on the harvest pass again. The newer
-CRD is harmless to it.
+CRD is harmless to it. After a rollback and a roll-forward, a refused run the
+older controller harvested can be read with the previous run's code until the
+next run starts, in the messages and the console's fields only.
 
 #### 88. The console's check commands, Rotate access, Retention panel, "What uses this" and Restore detail say what is so (PROD-14.1)
 
