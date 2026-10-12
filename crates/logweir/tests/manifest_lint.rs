@@ -2171,7 +2171,17 @@ fn install_docs_name_all_operator_managed_secrets() {
         .find("\n#")
         .map_or(docs.len(), |end| offline + 1 + end);
     for (at, _) in docs.match_indices("create secret generic") {
-        let line = docs[at..].lines().next().unwrap_or_default();
+        // The whole command: backslash continuations joined into one line.
+        let mut line = String::new();
+        for l in docs[at..].lines() {
+            match l.trim_end().strip_suffix('\\') {
+                Some(head) => line.push_str(head),
+                None => {
+                    line.push_str(l);
+                    break;
+                }
+            }
+        }
         if !line.contains("logweir-signing-key") {
             continue;
         }
