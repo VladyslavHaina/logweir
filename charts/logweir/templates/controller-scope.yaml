@@ -36,9 +36,6 @@ whole matrix.
 */ -}}
 {{- with .Values.controller.watchNamespaces }}
 {{- range $ns := . }}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) }}
-{{- fail (printf "controller.watchNamespaces names %q, which is not a namespace name (a DNS label). The controller refuses the same list at startup rather than leave a namespace silently unreconciled." $ns) }}
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

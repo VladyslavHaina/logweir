@@ -96,7 +96,6 @@ the kubelet keeps it on tmpfs, and it is mounted at a path the ConfigMap names â
 one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
 */}}
 {{- if .Values.api.console.enabled }}
-{{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}
 {{- $configHash := include "logweir.api.config" . | sha256sum }}

@@ -20,9 +20,6 @@ segregation proof phase 0 requires, in the exact form
 replication factor 1). Nothing in this file renders unless the flag is on.
 */ -}}
 {{- if .Values.demoKafka.enabled }}
-{{- if eq .Values.demoKafka.clusterIds.source .Values.demoKafka.clusterIds.target }}
-{{- fail "demoKafka.clusterIds.source and .target must differ: two brokers with one KRaft cluster id are one cluster to phase 0's target != source rail" }}
-{{- end }}
 {{- range $role := list "source" "target" }}
 {{- $name := printf "%s-kafka-%s" $.Release.Name $role }}
 {{- $host := include "logweir.kafka.host" (dict "release" $.Release.Name "namespace" $.Release.Namespace "role" $role) }}

@@ -1,5 +1,6 @@
 {{/*
-`api.console.enabled` — THE CONSOLE'S CONFIGURATION FILE, AND THE REFUSALS.
+`api.console.enabled` — THE CONSOLE'S CONFIGURATION FILE. Its refusals are in
+`_validate.tpl`.
 
 READ `api-rbac.yaml`'s HEADER FIRST. That file renders the console PRINCIPAL —
 a ServiceAccount, two ClusterRoles and one RoleBinding per configured namespace
@@ -97,192 +98,6 @@ CHART GAP G6: the ingress controller's Service, when both halves are named.
 {{- if and (eq .Values.api.console.mode "shared") $s.name $s.namespace }}true{{ end -}}
 {{- end -}}
 
-{{- /*
-EVERY REFUSAL THIS COMPONENT HAS, IN ONE PLACE, EVALUATED BEFORE ANYTHING
-RENDERS. `fail` stops `helm template`, `helm lint`, `helm install` and
-`helm upgrade` alike, so each of these is a chart that does not install rather
-than an installation that comes up wrong. D0: "A console that comes up on plain
-HTTP, or with a key someone rewrote underneath it, is worse than one that does
-not come up at all, because the first two look like they are working."
-
-The service itself refuses the same things at startup (exit 2, `config.rs`), and
-that is not a duplication to remove: this arm refuses at RENDER time, where the
-operator is still holding the values file, and it refuses in `helm lint` on a
-laptop with no cluster.
-*/ -}}
-{{- define "logweir.api.consoleChecks" -}}
-{{- $c := .Values.api.console -}}
-{{- if not .Values.api.enabled -}}
-{{- fail "api.console.enabled requires api.enabled: the console runs AS the principal `api.enabled` renders (its ServiceAccount, its two ClusterRoles and its per-namespace RoleBindings). A pod without them holds no grant on any Logweir kind and every route would 403. Set api.enabled=true." -}}
-{{- end -}}
-{{- if not $c.image -}}
-{{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the twenty-six page files it serves at /ui/." -}}
-{{- end -}}
-{{- if not $c.keySecret -}}
-{{- fail "api.console.keySecret is empty. The console needs a cursor MAC key of at least 32 bytes (and, in shared mode, a session key), and this chart DELIBERATELY does not generate one: a Helm-generated key changes on every render, which would make the rendered fixtures unstable and the key unrecoverable on upgrade. D0 requires these to be persistent, versioned Secrets created or adopted EXPLICITLY. Create one and name it here; charts/logweir/README.md carries the command." -}}
-{{- end -}}
-{{- if lt (int $c.replicas) 1 -}}
-{{- fail "api.console.replicas must be at least 1." -}}
-{{- end -}}
-{{- if not $c.mode -}}
-{{- fail "api.console.mode is empty, and there is no default. The two modes are `localAdmin` — THE IN-CLUSTER ADMINISTRATOR MODE: a loopback listener with no Service at all, reached only with `kubectl port-forward deploy/<release>-api`, one configured administrator, no identity provider, the narrowly bound <release>-api ServiceAccount, and readiness not gated on OIDC — and `shared`, the SSO console, which is the ONLY mode that may be exposed through a Service or an Ingress. `crates/logweir-api/src/config.rs` refuses a configuration file that forgets to name a mode rather than reading it as the more permissive one; this chart refuses the same way and for the same reason. Name one." -}}
-{{- end -}}
-{{- if eq $c.mode "localAdmin" -}}
-{{- if not $c.localAdminSubject -}}
-{{- fail "api.console.localAdminSubject is empty. localAdmin mode has no identity provider: every request is attributed to this one configured administrator, so the name it is recorded under is not optional." -}}
-{{- end -}}
-{{- if $c.requireTrustedProxy -}}
-{{- fail "api.console.requireTrustedProxy belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust." -}}
-{{- end -}}
-{{- if ($c.trustedProxyService | default dict).name -}}
-{{- fail "api.console.trustedProxyService belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust, and no Role in the ingress namespace should be granted for one." -}}
-{{- end -}}
-{{- if $c.trustedProxy -}}
-{{- fail "api.console.trustedProxy belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to name or to opt out of." -}}
-{{- end -}}
-{{- if $c.ingress.enabled -}}
-{{- fail "api.console.ingress.enabled with api.console.mode=localAdmin is refused. D0: the local administrator path \"must not bind 0.0.0.0, get an Ingress, or be described as shared-console mode\" — it authenticates nobody, so an Ingress in front of it is an unauthenticated shared console. Set api.console.mode=shared and configure OIDC and TLS, or reach localAdmin mode with `kubectl port-forward`." -}}
-{{- end -}}
-{{- else if eq $c.mode "shared" -}}
-{{- if not (hasPrefix "https://" $c.publicBaseUrl) -}}
-{{- fail (printf "api.console.publicBaseUrl is %q. Shared mode requires the EXACT https:// URL the browser uses — TLS at the shared entry point is required, not recommended (D0). The OIDC redirect URI is this value plus /auth/callback, so a value that is wrong here is a login that cannot complete." $c.publicBaseUrl) -}}
-{{- end -}}
-{{- if or (hasSuffix "/" $c.publicBaseUrl) (contains "@" $c.publicBaseUrl) -}}
-{{- fail (printf "api.console.publicBaseUrl is %q. It carries no path, no trailing slash and no userinfo: the redirect URI registered with the provider is this value plus /auth/callback." $c.publicBaseUrl) -}}
-{{- end -}}
-{{- if not $c.oidc.issuer -}}
-{{- fail "api.console.oidc.issuer is empty. Shared mode is SSO: the issuer is compared for exact equality with the ID token's `iss`, so there is no default and no discovery from the public URL." -}}
-{{- end -}}
-{{- if not $c.oidc.clientId -}}
-{{- fail "api.console.oidc.clientId is empty. It is also the expected audience of every ID token." -}}
-{{- end -}}
-{{- if not $c.oidc.clientSecret -}}
-{{- fail "api.console.oidc.clientSecret is empty. It is the NAME of a Secret in the release namespace holding the client secret under the key `clientSecret` — never the secret itself: a literal here would be a credential in a rendered manifest, in `helm get manifest` and in charts/logweir/rendered/." -}}
-{{- end -}}
-{{- if not $c.roles.revision -}}
-{{- fail "api.console.roles.revision is empty. It is the provenance of every authorization decision in the audit log; a role table with no revision is a decision nobody can trace to the values file that made it." -}}
-{{- end -}}
-{{- if not $c.roles.bindings -}}
-{{- fail "api.console.roles.bindings is empty. Shared mode has no default namespace and no implicit grant: with no binding every authenticated user is authorized for nothing, which is a console that installs and serves 403." -}}
-{{- end -}}
-{{- /*
-D0 STAGE 5 — SHARED MODE IS NOT RENDERED INSIDE THE CONTROLLER'S JOB-CREATE
-AUTHORITY. The console's session and cursor keys live in the release namespace
-(`api.console.keySecret`). Under the default cluster-wide ClusterRoleBinding the
-controller may create a Job there, and a Job can mount that Secret — residual
-O1 extended to the console, which D0 says must not be declared secure. So
-shared mode requires the scoped controller (`controller.watchNamespaces`), and
-refuses a list that includes the release namespace, because that list is where
-the controller may create Jobs.
-*/ -}}
-{{- $watch := .Values.controller.watchNamespaces | default list -}}
-{{- if not $watch -}}
-{{- fail (printf "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5). The console's session and cursor keys live in the release namespace %q, and with the default cluster-wide ClusterRoleBinding the controller may create a Job there that mounts them — the signing-oracle residual O1 extended to the console's keys, which D0 says must not be declared secure. List the namespaces Backups and Restores run in; the controller then holds Job-create authority there and nowhere else. charts/logweir/README.md §controller.watchNamespaces has the migration." .Release.Namespace) -}}
-{{- end -}}
-{{- if has .Release.Namespace $watch -}}
-{{- fail (printf "controller.watchNamespaces includes the release namespace %q, which holds the shared console's keys (api.console.keySecret). The controller may create Jobs in every listed namespace, so this list would put the keys back inside its Job-create authority (D0 stage 5). Run Backups and Restores in other namespaces and remove %q from the list." .Release.Namespace .Release.Namespace) -}}
-{{- end -}}
-{{- $proxySvc := $c.trustedProxyService | default dict -}}
-{{- if or (and $proxySvc.name (not $proxySvc.namespace)) (and $proxySvc.namespace (not $proxySvc.name)) -}}
-{{- fail (printf "api.console.trustedProxyService names only half a Service (namespace %q, name %q). Name both — the ingress controller's Service and the namespace it runs in — or neither." (toString $proxySvc.namespace) (toString $proxySvc.name)) -}}
-{{- end -}}
-{{- if and (eq (toString $c.trustedProxy) "none") (or $c.trustedProxyCidrs $proxySvc.name) -}}
-{{- fail "api.console.trustedProxy=none says the console trusts no proxy, but api.console.trustedProxyService or api.console.trustedProxyCidrs names one. Remove one side: name the ingress controller (and leave trustedProxy empty), or opt out." -}}
-{{- end -}}
-{{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) (not $proxySvc.name) -}}
-{{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyService (the ingress controller's Service, whose serving pods are then trusted) or api.console.trustedProxyCidrs: with nothing to trust, the entry point would refuse every request (421) and the console would look like an outage." -}}
-{{- end -}}
-{{- $ca := $c.oidc.caBundle | default dict -}}
-{{- if and $ca.configMap $ca.secret -}}
-{{- fail (printf "api.console.oidc.caBundle names both ConfigMap %q and Secret %q. The issuer's CA bundle is ONE object; name the one that holds it." $ca.configMap $ca.secret) -}}
-{{- end -}}
-{{- if and (or $ca.configMap $ca.secret) (not $ca.key) -}}
-{{- fail "api.console.oidc.caBundle.key is empty. It is the key, inside the ConfigMap or Secret, of the PEM file holding the issuer's CA certificates (ca.crt by convention)." -}}
-{{- end -}}
-{{- if and (eq (toString $c.oidc.systemRoots) "false") (not (or $ca.configMap $ca.secret)) -}}
-{{- fail "api.console.oidc.systemRoots=false without api.console.oidc.caBundle: the console would trust no certificate at all and could never reach its issuer. Name the bundle that replaces the system roots, or keep them." -}}
-{{- end -}}
-{{- range $alias := ($c.hostAliases | default list) -}}
-{{- if or (not $alias.ip) (not $alias.hostnames) -}}
-{{- fail "api.console.hostAliases entries need an `ip` and at least one hostname: {ip: <address>, hostnames: [<name>, …]}." -}}
-{{- end -}}
-{{- if contains "*" (toString $alias.hostnames) -}}
-{{- fail (printf "api.console.hostAliases for %s names a wildcard; /etc/hosts has none, so it would resolve nothing." $alias.ip) -}}
-{{- end -}}
-{{- end -}}
-{{- if $c.requireTrustedProxy -}}
-{{- range $cidr := $c.trustedProxyCidrs -}}
-{{- $prefix := int (last (splitList "/" (toString $cidr))) -}}
-{{- $floor := ternary 48 16 (contains ":" (toString $cidr)) -}}
-{{- if lt $prefix $floor -}}
-{{- fail (printf "api.console.trustedProxyCidrs names %q, wider than /%d. With requireTrustedProxy a range this wide trusts the pods the gate exists to refuse: on most clusters every pod is inside 10.0.0.0/8 and can dial the console Service directly and send the proxy's header itself. Name the ingress controller's own pod range (the binary refuses the same)." (toString $cidr) $floor) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- $granted := (include "logweir.api.namespaces" . | fromJsonArray) -}}
-{{- range $b := $c.roles.bindings -}}
-{{- if not (has $b.namespace $granted) -}}
-{{- fail (printf "api.console.roles.bindings names namespace %q, which is not one the console is bound in (%s). The RoleBindings come from api.namespaces and kubernetes.namespace; a product binding for a namespace the ServiceAccount cannot read is a role that grants a 403." $b.namespace (join ", " $granted)) -}}
-{{- end -}}
-{{- if or (contains "*" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) (contains "?" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) -}}
-{{- fail (printf "api.console.roles.bindings for role %q in namespace %q contains `*` or `?`. Bindings are EXACT strings: there is no regex, no wildcard and no email-domain inference, and a `*` is refused by name rather than silently matching nothing." $b.role $b.namespace) -}}
-{{- end -}}
-{{- if not (has $b.namespace $watch) -}}
-{{- fail (printf "api.console.roles.bindings names namespace %q, which is not in controller.watchNamespaces (%s). The console would create Backups, Restores and checks there that no controller reconciles. Add it to controller.watchNamespaces, or remove the binding." $b.namespace (join ", " $watch)) -}}
-{{- end -}}
-{{- end -}}
-{{- if $c.ingress.enabled -}}
-{{- if not $c.ingress.host -}}
-{{- fail "api.console.ingress.host is empty. The Ingress rule needs the exact host the browser uses, and it must be publicBaseUrl's own authority." -}}
-{{- end -}}
-{{- if not $c.ingress.tlsSecretName -}}
-{{- fail "api.console.ingress.tlsSecretName is empty. An Ingress for the shared console without a TLS block is a console published over plain HTTP: the session cookie is `__Host-`/`Secure` and would never be sent, and the OIDC redirect URI is https. TLS at the shared entry point is required, not recommended (D0)." -}}
-{{- end -}}
-{{- if ne $c.ingress.host (trimPrefix "https://" $c.publicBaseUrl) -}}
-{{- fail (printf "api.console.ingress.host is %q but api.console.publicBaseUrl is %q. They must name the SAME authority. The OIDC redirect URI is publicBaseUrl plus /auth/callback, and the service answers 421 misdirected_request to any Host it does not serve — so a mismatched pair renders, lints and installs clean, and then refuses every browser that arrives through the Ingress it just published. Every other way to get this wrong is refused here by name; so is this one." $c.ingress.host $c.publicBaseUrl) -}}
-{{- end -}}
-{{- /*
-FX-24c: THE INGRESS IS NAMED, OR THE OPT-OUT IS DELIBERATE. The console caps
-the connections one peer outside its trusted-proxy set may hold, and the
-sign-in limiter counts each client behind a trusted proxy (FX-13); with no
-trusted proxy configured neither can tell the ingress from any other peer, so
-the cap is off and every sign-in through the ingress shares one budget. A
-chart that renders the Ingress knows there is a proxy, so it refuses to leave
-it unnamed by accident.
-*/ -}}
-{{- if and (not $c.trustedProxyCidrs) (not $proxySvc.name) (ne (toString $c.trustedProxy) "none") -}}
-{{- fail "api.console.ingress.enabled in shared mode needs the trusted proxy named: set api.console.trustedProxyService to the ingress controller's Service (namespace and name; its serving pods are then trusted), or api.console.trustedProxyCidrs to its pods' range. Without it the console cannot tell the ingress from any pod that dials it directly, so one in-cluster address may hold every one of its 256 connections (the per-peer cap, FX-24c, is off) and every sign-in through the ingress shares one rate-limit budget (FX-13). To run without a named proxy deliberately — a service mesh that re-originates every connection, say — set api.console.trustedProxy=none." -}}
-{{- end -}}
-{{- end -}}
-{{- else -}}
-{{- fail (printf "api.console.mode is %q. The two modes are `localAdmin` (a loopback listener reached with kubectl port-forward, one configured administrator, no identity provider) and `shared` (SSO: OIDC, an encrypted session cookie, exact role bindings and TLS). There is no default: a file that forgets to say which it wants is refused rather than read as the more permissive one." $c.mode) -}}
-{{- end -}}
-{{- /*
-PLAT-19.2: a namespace this console serves that is bound to an approval policy
-needs the console's ConsoleConfirmation key -- both modes carry its signature --
-and `logweir-api` refuses to start without it. Refused here first, by name.
-*/ -}}
-{{- $served := (include "logweir.api.namespaces" . | fromJsonArray) -}}
-{{- $consoleKeySecret := include "logweir.consoleKey.secret" . -}}
-{{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
-{{- if and (has $ns $served) (not $consoleKeySecret) -}}
-{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or use a chart whose bootstrap image generates the key, or unbind the namespace." $ns $policy) -}}
-{{- end -}}
-{{- end -}}
-{{- if and (eq (.Values.approvalPolicy.default | default "") "confirm") (not $consoleKeySecret) -}}
-{{- fail "approvalPolicy.default is confirm and there is no console confirmation key: approvalPolicy.confirmationKeySecret is empty and the identity hook does not manage one (identity.enabled with identity.bootstrapFeatures.consoleKey). Every unbound namespace would be created and then never authorisable; name the key's Secret, or use a chart whose bootstrap image generates the key." -}}
-{{- end -}}
-{{- range $peer := ($c.networkPolicy.oidcPeers | default list) -}}
-{{- if or (not $peer.namespace) (not $peer.podLabels) (lt (int $peer.port) 1) -}}
-{{- fail "api.console.networkPolicy.oidcPeers entries need a namespace, non-empty podLabels and a port: an empty selector would admit egress to every pod in the namespace, which is not what `the identity provider's path` means." -}}
-{{- end -}}
-{{- end -}}
-{{- if and $c.networkPolicy.enabled (eq $c.mode "shared") -}}
-{{- if or (not $c.networkPolicy.ingressNamespace) (not $c.networkPolicy.ingressPodLabels) -}}
-{{- fail "api.console.networkPolicy.enabled in shared mode needs both networkPolicy.ingressNamespace and networkPolicy.ingressPodLabels. An ingress rule with no `from` selector admits nothing at all, which would be a console nobody can reach; one with an empty podSelector admits every pod in the controller's namespace, which is not what `only the configured ingress controller` means. (In the in-cluster administrator mode there is no ingress rule to write: nothing may dial this pod, so the policy denies ingress outright and neither selector is read.)" -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 
 {{- /*
 THE CONFIGURATION DOCUMENT ITSELF. Three things about it are decisions and not
@@ -450,11 +265,10 @@ A REFUSAL RATHER THAN A CONDITION. `api.console.enabled` with `api.enabled`
 still false used to render NOTHING: the operator asked for a console, `helm
 install` exited 0, and no pod, Service or ConfigMap existed to look for. A
 missing principal is a configuration error and is answered as one below —
-`logweir.api.consoleChecks` fails naming both flags — so the workload's absence
+`_validate.tpl` fails naming both flags — so the workload's absence
 can never be silent. `scripts/check-chart.sh` arm 8 runs exactly that case.
 */}}
 {{- if .Values.api.console.enabled }}
-{{- include "logweir.api.consoleChecks" . }}
 {{- $name := include "logweir.api.consoleName" . }}
 {{- $config := include "logweir.api.config" . }}
 {{- $hash := $config | sha256sum }}

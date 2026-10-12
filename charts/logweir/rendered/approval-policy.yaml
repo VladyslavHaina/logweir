@@ -1181,7 +1181,7 @@ rules: []
 # the installation signer and that console key. `create` cannot be narrowed by
 # resourceName in RBAC, so this grant must not outlive the install (security
 # review of 428a481a; fix round of 2026-10-08): it is rendered only under
-# `$freshTrust`, only on Helm 3.19+ (the `fail` above), as a `post-install` hook
+# `$freshTrust`, only on Helm 3.19+ (`_validate.tpl`), as a `post-install` hook
 # — never upgrade or rollback — weighted before the Job that spends it, and
 # deleted by Helm when the install's post-install hooks have run, succeeded or
 # failed (`hook-succeeded`, `hook-failed`; Helm 3.19.0 and v4.0.1

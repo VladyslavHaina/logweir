@@ -127,7 +127,7 @@ So the name is defined once, here, and both files call it. The value is still
 the one an installation OVERRIDES with (a console run out of band has whatever
 account its operator gave it, and `extraPrincipals` exists for the rest), but a
 value that DISAGREES with an account this chart is itself rendering is refused
-at render time rather than installed — see `admission-policy.yaml`.
+at render time rather than installed — see `_validate.tpl`.
 */ -}}
 {{- define "logweir.api.serviceAccountName" -}}
 {{- printf "%s-api" .Release.Name -}}
@@ -151,7 +151,7 @@ RoleBinding twice and refuse the install.
 {{- /*
 One `KafkaCluster.spec.auth` from the owner's flat `security:` shape. Takes the
 per-cluster values map. THE MAPPING IS THE CHART'S JOB, and every combination
-outside it is a `fail` at render time rather than an object that installs and
+outside it is refused at render time (`_validate.tpl`) rather than an object that installs and
 cannot authenticate: the CRD's enum is `plaintext|scramSha512` and the client
 speaks SCRAM-SHA-512 only.
 */ -}}
@@ -168,15 +168,6 @@ speaks SCRAM-SHA-512 only.
 {{- $tls = true -}}
 {{- else if and (eq $protocol "SASL_PLAINTEXT") (eq $mechanism "SCRAM-SHA-512") -}}
 {{- $mode = "scramSha512" -}}
-{{- else -}}
-{{- fail (printf "kafka: security.protocol %q with security.mechanism %q is not supported. Logweir speaks PLAINTEXT, or SCRAM-SHA-512 over SASL_SSL or SASL_PLAINTEXT, and nothing else — the KafkaCluster CRD's auth.mode enum is plaintext|scramSha512. A silently rendered PLAIN or SCRAM-SHA-256 would be a chart that installs and cannot authenticate." $protocol $mechanism) -}}
-{{- end -}}
-{{- if ne $mode "plaintext" -}}
-{{- if not $c.username }}{{ fail "kafka: security.mechanism SCRAM-SHA-512 needs a username" }}{{ end -}}
-{{- if not $c.secretRef }}{{ fail "kafka: security.mechanism SCRAM-SHA-512 needs a secretRef — the name of a Secret in the release namespace holding the password" }}{{ end -}}
-{{- end -}}
-{{- if and $c.secretKey (ne $c.secretKey "password") -}}
-{{- fail (printf "kafka: secretKey is %q. The operator projects exactly one key name into the probe — `password` (weirkeeper::controllers::restore::TARGET_PASSWORD_SECRET_KEY) — so any other value renders a KafkaCluster whose probe cannot read its credential." $c.secretKey) -}}
 {{- end -}}
 mode: {{ $mode }}
 tls: {{ $tls }}
@@ -208,7 +199,6 @@ console) or a YAML list. Whitespace around each entry is trimmed.
 {{- if $t }}{{ $list = append $list $t }}{{ end -}}
 {{- end -}}
 {{- end -}}
-{{- if not $list }}{{ fail "kafka: bootstrapServers is empty — give a comma-separated string or a list of host:port" }}{{ end -}}
 {{ toYaml $list }}
 {{- end -}}
 
@@ -230,9 +220,5 @@ namespace must exist before the install, like every execution namespace.
 */ -}}
 {{- define "logweir.connectionsNamespace" -}}
 {{- $ns := .Values.kubernetes.connectionsNamespace | default .Release.Namespace -}}
-{{- $watch := .Values.controller.watchNamespaces | default list -}}
-{{- if and $watch (not (has $ns $watch)) -}}
-{{- fail (printf "kafka.enabled / minio.enabled render their connection objects (KafkaClusters, the logweir-s3 archive credential) into namespace %q, which controller.watchNamespaces (%s) does not include: the controller would never read them and no Backup could use them. Set kubernetes.connectionsNamespace to a watched namespace (the one Backups run in)." $ns (join ", " $watch)) -}}
-{{- end -}}
 {{- $ns -}}
 {{- end -}}

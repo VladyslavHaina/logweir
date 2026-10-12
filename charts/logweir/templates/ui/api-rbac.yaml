@@ -1,4 +1,4 @@
-{{- include "logweir.validate" . -}}
+{{- $_ := include "logweir.validate" . -}}
 {{/*
 `api.enabled` — THE CONSOLE/API PRINCIPAL'S GRANTS, AND ONLY ITS GRANTS.
 

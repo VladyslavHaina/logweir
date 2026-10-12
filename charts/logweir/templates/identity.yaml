@@ -1,18 +1,8 @@
 {{- if .Values.identity.enabled }}
-{{- $publicName := required "identity.publicConfigMapName must be set when identity.enabled=true" .Values.identity.publicConfigMapName }}
-{{- $bootstrapImage := required "identity.bootstrapImage must name a reviewed runner digest containing `identity bootstrap` (the chart default pins one); use a digest, or the explicit local-development override" .Values.identity.bootstrapImage }}
-{{- if not (regexMatch "^.+@sha256:[0-9a-f]{64}$" $bootstrapImage) }}
-{{- if not .Values.identity.allowMutableBootstrapImageForDevelopment }}
-{{- fail "identity.bootstrapImage must be an immutable @sha256 digest; mutable/local references require identity.allowMutableBootstrapImageForDevelopment=true and identity.bootstrapImagePullPolicy=Never" }}
-{{- end }}
-{{- if ne .Values.identity.bootstrapImagePullPolicy "Never" }}
-{{- fail "a mutable identity.bootstrapImage is development-only and requires both identity.allowMutableBootstrapImageForDevelopment=true and identity.bootstrapImagePullPolicy=Never" }}
-{{- end }}
-{{- end }}
+{{- $publicName := .Values.identity.publicConfigMapName }}
+{{- $bootstrapImage := .Values.identity.bootstrapImage }}
 {{- $externalName := .Values.identity.externalSecret.name | default "" }}
 {{- $externalKey := .Values.identity.externalSecret.key | default "" }}
-{{- if and $externalName (not $externalKey) }}{{ fail "identity.externalSecret.key must be set when identity.externalSecret.name is set" }}{{ end }}
-{{- if and (not $externalName) (ne $externalKey "signing.pem") }}{{ fail "identity.externalSecret.name must be set when identity.externalSecret.key is customized" }}{{ end }}
 {{- /*
 PROD-14.1: A RENDER THAT CANNOT ASK THE CLUSTER IS REFUSED. Everything below
 that is rendered once (the empty placeholders, the fresh-install trust grant)
@@ -26,11 +16,7 @@ is the operator's answer: `true` renders no placeholder and no grant (the
 retained objects are created once by hand); `false` renders what `helm install`
 would, for a preview that is never applied (this chart's own gates).
 */ -}}
-{{- $renderedOffline := .Values.identity.renderedOffline }}
-{{- if and (kindIs "invalid" $renderedOffline) (not (lookup "v1" "Service" "default" "kubernetes")) }}
-{{- fail "identity.renderedOffline is unset and this render cannot ask the cluster (Helm's lookup finds no default/kubernetes Service: helm template, helm lint, --dry-run=client, Argo CD), so it cannot tell a fresh install from an established one; applied, it could replace the filled signing Secret with an empty placeholder. Install with helm install or helm upgrade (preview with --dry-run=server). For Argo CD or `helm template | kubectl apply` set identity.renderedOffline=true and create the retained objects first (docs/install.md, \"Argo CD and other offline renders\"). identity.renderedOffline=false renders what helm install would, only for a preview that is never applied." }}
-{{- end }}
-{{- $offline := eq (toString $renderedOffline) "true" }}
+{{- $offline := eq (toString .Values.identity.renderedOffline) "true" }}
 {{- $existingSecret := or $offline (lookup "v1" "Secret" .Release.Namespace "logweir-signing-key") }}
 {{- $existingPublic := or $offline (lookup "v1" "ConfigMap" .Release.Namespace $publicName) }}
 {{- /*
@@ -63,37 +49,15 @@ weight): an install that never uses confirm gets no grant and no automatic trust
 PROD-14.1: nor does `identity.renderedOffline=true` (`$existingSecret` is true
 there): outside Helm nothing deletes the grant, and a re-apply re-creates it.
 */ -}}
-{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) (not $externalName) (include "logweir.freshInstallConfirm" .) }}
-{{- /*
-THE FIX ROUND (review H1): THE GRANT IS RENDERED ONLY WHERE HELM REMOVES IT ON
-FAILURE TOO. Helm 3.12–3.18 deletes only the failed hook when the identity Job
-fails, so the `hook-succeeded` grant rendered before it would stay bound — a
-standing cluster-wide `create trustpolicies`. Refused, by name, rather than
-installed without the trust: the operator chooses (a newer Helm, or
-`identity.installationTrust.enabled=false`, which installs strict).
-*/ -}}
-{{- if and $freshTrust (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}
-{{- fail (printf "identity.installationTrust needs Helm 3.19.0 or newer (this is %s): the fresh install's TrustPolicy grant is an install-only hook, and Helm before 3.19 keeps it bound when the identity hook fails, leaving a standing cluster-wide `create trustpolicies`. Install with Helm 3.19+ or 4.x, or set identity.installationTrust.enabled=false (the install then starts strict, and you trust the console key yourself; docs/install.md §5f)." .Capabilities.HelmVersion.Version) }}
-{{- end }}
+{{- $freshTrust := include "logweir.identity.freshTrust" . }}
 {{- $trustGrant := printf "%s-identity-trust" .Release.Name }}
 {{- $allowedTargets := $trust.allowedTargetClusterIds | default list }}
 {{- if .Values.demoKafka.enabled }}
 {{- $allowedTargets = append $allowedTargets .Values.demoKafka.clusterIds.target }}
 {{- end }}
 {{- $allowedTargets = uniq $allowedTargets }}
-{{- range $namespace := .Values.identity.authorizedRunnerNamespaces }}
-{{- if eq $namespace $.Release.Namespace }}{{ fail "identity.authorizedRunnerNamespaces must not repeat the release namespace; it is always authorized" }}{{ end }}
-{{- end }}
 {{- $singletonName := "logweir-identity-singleton" }}
-{{- $singleton := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $singletonName }}
-{{- if $singleton }}
-{{- $owner := $singleton.metadata.annotations | default dict }}
-{{- $ownerName := index $owner "logweir.dev/release-name" | default "<unknown>" }}
-{{- $ownerNamespace := index $owner "logweir.dev/release-namespace" | default "<unknown>" }}
-{{- if or (ne $ownerName .Release.Name) (ne $ownerNamespace .Release.Namespace) }}
-{{- fail (printf "cluster installation identity is already claimed by Helm release %s/%s; Logweir supports one installation identity per cluster until PLAT-19.1" $ownerNamespace $ownerName) }}
-{{- end }}
-{{- else }}
+{{- if not (lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $singletonName) }}
 # A fixed, authority-free cluster-scoped marker makes the current singleton
 # contract explicit. It contains no key material and grants no permissions.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -273,7 +237,7 @@ subjects:
 # the installation signer and that console key. `create` cannot be narrowed by
 # resourceName in RBAC, so this grant must not outlive the install (security
 # review of 428a481a; fix round of 2026-10-08): it is rendered only under
-# `$freshTrust`, only on Helm 3.19+ (the `fail` above), as a `post-install` hook
+# `$freshTrust`, only on Helm 3.19+ (`_validate.tpl`), as a `post-install` hook
 # — never upgrade or rollback — weighted before the Job that spends it, and
 # deleted by Helm when the install's post-install hooks have run, succeeded or
 # failed (`hook-succeeded`, `hook-failed`; Helm 3.19.0 and v4.0.1

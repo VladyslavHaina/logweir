@@ -619,7 +619,7 @@ fi
 #
 # `crates/logweir/tests/chart_lint.rs` asserts these from checked-in bytes —
 # the schema's `pattern`, the `fail` strings in
-# `templates/ui/api-config.yaml` — because Global Constraint 22 forbids a
+# `templates/_validate.tpl` — because Global Constraint 22 forbids a
 # `#[test]` that shells out. THIS is the half that proves `helm` ACTS on them,
 # and the difference matters: a `fail` inside a `define` that no rendered path
 # reaches is a refusal that reads correctly and refuses nothing.
@@ -828,7 +828,7 @@ done
 # fixed versions — the versions whose `hooks.go` the review read.
 mkdir -p "$tmp/floor/templates"
 printf 'apiVersion: v2\nname: floor\nversion: 0.0.1\n' > "$tmp/floor/Chart.yaml"
-awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templates/approval-policy.yaml" > "$tmp/floor/templates/_floor.tpl"
+awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templates/_validate.tpl" > "$tmp/floor/templates/_floor.tpl"
 {
   for v in v3.12.0 v3.18.6 v3.19.0-rc.1 v3.19.0 v4.0.1; do
     printf '# %s=[{{ include "logweir.helmCleansFailedHooks" "%s" }}]\n' "$v" "$v"
@@ -836,8 +836,8 @@ awk '/define "logweir.helmCleansFailedHooks"/,/^\{\{- end -\}\}$/' "$CHART/templ
 } > "$tmp/floor/templates/floor.yaml"
 floor="$(helm template floor "$tmp/floor" 2> "$tmp/floor.err" | grep '^# v' | tr '\n' ' ')"
 expected="# v3.12.0=[] # v3.18.6=[] # v3.19.0-rc.1=[true] # v3.19.0=[true] # v4.0.1=[true] "
-if [ "$floor" != "$expected" ] || ! grep -q -F '{{- if and $freshTrust (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}' "$CHART/templates/identity.yaml"; then
-  echo "FAIL: the Helm floor for the install-only trust grant: expected '$expected', got '$floor' (or identity.yaml no longer gates the grant on it)" >&2
+if [ "$floor" != "$expected" ] || ! grep -q -F '{{- if and (include "logweir.identity.freshTrust" .) (not (include "logweir.helmCleansFailedHooks" .Capabilities.HelmVersion.Version)) }}' "$CHART/templates/_validate.tpl"; then
+  echo "FAIL: the Helm floor for the install-only trust grant: expected '$expected', got '$floor' (or _validate.tpl no longer gates the grant on it)" >&2
   sed 's/^/      /' "$tmp/floor.err" >&2
   fail=1
 else

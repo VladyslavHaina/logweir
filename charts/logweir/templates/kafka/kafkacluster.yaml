@@ -7,19 +7,16 @@ operator reconciles, probes and reports `status.clusterId` for. This file is the
 bridge between the flat shape an adopter writes (`bootstrapServers`,
 `security.protocol`, `security.mechanism`, `username`, `secretRef`) and the
 shape the CRD declares (`auth: {mode, tls, username, secretRef}`). The mapping
-and its refusals live in `_helpers.tpl`'s `logweir.kafka.auth`; the README says
+lives in `_helpers.tpl`'s `logweir.kafka.auth`, its refusals in `_validate.tpl`; the README says
 what the Secret must hold and that Logweir never reads it into a status field,
 a log line or a rendered document.
 
 Nothing renders unless the flag is on, so every existing example renders exactly
 as it did. The objects land in `kubernetes.connectionsNamespace` (default: the
-release namespace), which a scoped controller must watch — `_helpers.tpl`'s
-`logweir.connectionsNamespace` refuses the render otherwise (chart gap G3).
+release namespace), which a scoped controller must watch — `_validate.tpl` refuses the render
+otherwise (chart gap G3).
 */ -}}
 {{- if .Values.kafka.enabled }}
-{{- if .Values.demoKafka.enabled }}
-{{- fail "kafka.enabled and demoKafka.enabled are both true. demoKafka brings its own two throwaway brokers and their own KafkaCluster objects (scripts/helm-demo.sh creates them); kafka: points Logweir at a cluster you already run. Turn one off — demoKafka.enabled: false to use your own cluster, kafka.enabled: false to walk the demo." }}
-{{- end }}
 {{- $source := .Values.kafka }}
 apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster

@@ -968,27 +968,29 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
     // renders `--is-upgrade` and requires the grant and its arguments absent.
     let template = read("charts/logweir/templates/identity.yaml");
     assert!(
-        template.contains(
-            "{{- $freshTrust := and $trust.enabled .Release.IsInstall (not $existingSecret) \
-             (not $externalName) (include \"logweir.freshInstallConfirm\" .) }}"
-        ),
+        template.contains("{{- $freshTrust := include \"logweir.identity.freshTrust\" . }}")
+            && read("charts/logweir/templates/approval-policy.yaml").contains(
+                "{{- if and .Values.identity.installationTrust.enabled .Release.IsInstall \
+                 (not $existingSecret) (not (.Values.identity.externalSecret.name | default \"\")) \
+                 (include \"logweir.freshInstallConfirm\" .) -}}true{{- end -}}"
+            ),
         "the trust grant is rendered only on a first install into a namespace with no identity, \
          with the managed console key and no external identity (review M2)"
     );
+    let validate = read("charts/logweir/templates/_validate.tpl");
     // THE HELM FLOOR: refused, by name, where Helm would keep the
     // grant after a failed hook. check-chart.sh runs the helper with fixed
     // versions and, given a pre-3.19 Helm, the refusal itself.
     assert!(
-        template.contains(
-            "{{- if and $freshTrust (not (include \"logweir.helmCleansFailedHooks\" \
-             .Capabilities.HelmVersion.Version)) }}\n{{- fail (printf \"identity.installationTrust \
-             needs Helm 3.19.0 or newer"
+        validate.contains(
+            "{{- if and (include \"logweir.identity.freshTrust\" .) (not (include \
+             \"logweir.helmCleansFailedHooks\" .Capabilities.HelmVersion.Version)) }}\n{{- fail \
+             (printf \"identity.installationTrust needs Helm 3.19.0 or newer"
         ),
         "the trust grant renders only under a Helm that deletes it when the hook fails"
     );
     assert!(
-        read("charts/logweir/templates/approval-policy.yaml")
-            .contains("{{- if semverCompare \">=3.19.0-0\" . -}}true{{- end -}}"),
+        validate.contains("{{- if semverCompare \">=3.19.0-0\" . -}}true{{- end -}}"),
         "the floor is 3.19.0 (the first Helm whose execHook deletes earlier hook-succeeded hooks)"
     );
     let gate = read("scripts/check-chart.sh");
@@ -1894,8 +1896,8 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             "renders the account",
         ),
         (
-            "charts/logweir/templates/admission-policy.yaml",
-            "fences it",
+            "charts/logweir/templates/_validate.tpl",
+            "checks the account the fence names",
         ),
     ] {
         let text = read(file);
@@ -1911,9 +1913,9 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         );
     }
     assert!(
-        read("charts/logweir/templates/admission-policy.yaml")
+        read("charts/logweir/templates/_validate.tpl")
             .contains("if and .Values.api.enabled (ne $name $rendered)"),
-        "`admission-policy.yaml` must REFUSE at render time when this chart creates a console \
+        "`_validate.tpl` must REFUSE at render time when this chart creates a console \
          account and the fence names a different one. It must not silently substitute the \
          rendered name either: an installation may legitimately fence a console deployed out \
          of band, and `api.enabled` false is how it says so"
@@ -2852,7 +2854,7 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
 ///      is refused before a template runs. The same pattern refuses a path, a
 ///      query, userinfo and a trailing slash — the OIDC redirect URI is this
 ///      value plus `/auth/callback`.
-///   2. `templates/ui/api-config.yaml` refuses at RENDER time, naming the
+///   2. `templates/_validate.tpl` refuses at RENDER time, naming the
 ///      field: a non-HTTPS base URL, an Ingress with no TLS Secret, and an
 ///      Ingress in front of `localAdmin` mode at all (D0: that path "must not
 ///      bind 0.0.0.0, get an Ingress, or be described as shared-console mode").
@@ -2894,7 +2896,7 @@ fn chart_lint_the_shared_console_cannot_be_published_without_tls() {
         "pattern {pattern} accepts userinfo"
     );
 
-    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    let template = read("charts/logweir/templates/_validate.tpl");
     for needle in [
         "api.console.publicBaseUrl is %q. Shared mode requires the EXACT https:// URL",
         "api.console.ingress.tlsSecretName is empty.",
@@ -2902,7 +2904,7 @@ fn chart_lint_the_shared_console_cannot_be_published_without_tls() {
     ] {
         assert!(
             template.contains(needle),
-            "templates/ui/api-config.yaml must still refuse at render time with `{needle}`"
+            "templates/_validate.tpl must still refuse at render time with `{needle}`"
         );
     }
 
@@ -2966,14 +2968,14 @@ fn chart_lint_the_console_mode_has_no_default_and_only_shared_is_exposed() {
          one layer up. Ship an empty string and let the template refuse it by name."
     );
 
-    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    let template = read("charts/logweir/templates/_validate.tpl");
     assert!(
         template.contains("api.console.mode is empty, and there is no default."),
-        "templates/ui/api-config.yaml must refuse an empty mode at render time, naming the field"
+        "templates/_validate.tpl must refuse an empty mode at render time, naming the field"
     );
     assert!(
         template.contains("They must name the SAME authority"),
-        "templates/ui/api-config.yaml must refuse an ingress.host that is not publicBaseUrl's \
+        "templates/_validate.tpl must refuse an ingress.host that is not publicBaseUrl's \
          authority: a mismatched pair renders, lints and installs clean, and then the service \
          answers 421 misdirected_request to every browser that arrives through the Ingress it \
          just published"
@@ -3163,7 +3165,7 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
             .contains_key("LOGWEIR_WATCH_NAMESPACES")
     );
 
-    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    let template = read("charts/logweir/templates/_validate.tpl");
     for needle in [
         "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5).",
         "includes the release namespace %q, which holds the shared console's keys",
@@ -3174,7 +3176,7 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
     ] {
         assert!(
             template.contains(needle),
-            "templates/ui/api-config.yaml must still refuse at render time with `{needle}` \
+            "templates/_validate.tpl must still refuse at render time with `{needle}` \
              (scripts/check-chart.sh arm 8 runs it)"
         );
     }
@@ -4903,18 +4905,19 @@ fn chart_lint_kafka_maps_every_supported_mechanism_and_refuses_the_rest() {
         .expect("_helpers.tpl must map SASL_PLAINTEXT + SCRAM-SHA-512 onto scramSha512");
     let after = &helpers[sasl_plaintext..];
     let arm_end = after
-        .find("{{- else -}}")
-        .expect("the mapping ends in an else");
+        .find("{{- end -}}")
+        .expect("the mapping ends");
     assert!(
         !after[..arm_end].contains("$tls = true"),
         "the SASL_PLAINTEXT arm must NOT set tls — SASL_PLAINTEXT is SASL over a cleartext \
          transport, and a chart claiming TLS there installs and cannot connect"
     );
     // AND EVERYTHING ELSE IS A REFUSAL AT RENDER TIME, naming what is supported.
-    let refusal = helpers
-        .split("{{- else -}}")
-        .nth(1)
-        .expect("a final else arm")
+    let validate = read("charts/logweir/templates/_validate.tpl");
+    let refusal = validate
+        .lines()
+        .find(|l| l.contains("kafka: security.protocol %q"))
+        .expect("_validate.tpl refuses an unsupported protocol/mechanism pair")
         .to_string();
     assert!(
         refusal.contains("fail") && refusal.contains("is not supported"),
@@ -4938,14 +4941,13 @@ fn chart_lint_kafka_maps_every_supported_mechanism_and_refuses_the_rest() {
         })
         .expect("restore.rs declares TARGET_PASSWORD_SECRET_KEY");
     assert!(
-        helpers.contains(&format!(r#"(ne $c.secretKey "{projected}")"#)),
-        "_helpers.tpl must refuse any `secretKey` but `{projected}` — the ONE key name the \
+        validate.contains(&format!(r#"(ne $c.secretKey "{projected}")"#)),
+        "_validate.tpl must refuse any `secretKey` but `{projected}` — the ONE key name the \
          operator projects into the probe. Any other value renders a KafkaCluster whose probe \
          cannot read its credential"
     );
-    // And both blocks on at once is a refusal too, in the template that renders
-    // the objects.
-    let template = read("charts/logweir/templates/kafka/kafkacluster.yaml");
+    // And both blocks on at once is a refusal too.
+    let template = read("charts/logweir/templates/_validate.tpl");
     assert!(
         template.contains("{{- fail \"kafka.enabled and demoKafka.enabled are both true."),
         "kafka.enabled beside demoKafka.enabled must be a render-time `fail`: demoKafka brings \
@@ -5309,7 +5311,7 @@ fn chart_lint_constraints_show_before_install() {
         .expect("kubeVersion is a floor")
         .trim_end_matches(".0-0")
         .to_string();
-    let helper = read("charts/logweir/templates/approval-policy.yaml");
+    let helper = read("charts/logweir/templates/_validate.tpl");
     let helm = helper
         .split("semverCompare \">=")
         .nth(1)
@@ -6045,7 +6047,7 @@ fn chart_lint_two_person_renders_as_the_console_setting_and_only_with_the_shared
     // The template's refusal, and the gate that runs it.
     let template = read("charts/logweir/templates/approval-policy.yaml");
     assert!(
-        template.contains(
+        read("charts/logweir/templates/_validate.tpl").contains(
             "{{- if not (and $.Values.api.enabled $.Values.api.console.enabled (eq \
              ($.Values.api.console.mode | default \"\") \"shared\")) -}}"
         ),
@@ -6097,7 +6099,7 @@ fn chart_lint_a_published_shared_console_names_its_trusted_proxy_or_opts_out() {
         "api.console.trustedProxy must be typed as exactly \"\" or \"none\""
     );
 
-    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    let template = read("charts/logweir/templates/_validate.tpl");
     for needle in [
         "{{- if and (not $c.trustedProxyCidrs) (not $proxySvc.name) (ne (toString $c.trustedProxy) \"none\") -}}",
         "api.console.ingress.enabled in shared mode needs the trusted proxy named",
@@ -6106,7 +6108,7 @@ fn chart_lint_a_published_shared_console_names_its_trusted_proxy_or_opts_out() {
     ] {
         assert!(
             template.contains(needle),
-            "templates/ui/api-config.yaml must still carry `{needle}`"
+            "templates/_validate.tpl must still carry `{needle}`"
         );
     }
     // The requirement lives inside the Ingress arm: a shared console with no

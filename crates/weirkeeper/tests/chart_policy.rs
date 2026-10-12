@@ -352,7 +352,7 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
 }
 
 /// **The cross-field rule `Policy::validate` enforces is real**, so the `fail`
-/// `charts/logweir/templates/policy.yaml` carries for it is not belt-and-braces
+/// `charts/logweir/templates/_validate.tpl` carries for it is not belt-and-braces
 /// over a rule that does not exist, and the rule withdrawn with
 /// `defaultMaxTopics` is really gone, so a document an older chart rendered is
 /// never refused for it.
@@ -374,7 +374,7 @@ fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
     assert!(
         policy::parse(inverted_pool.to_string().as_bytes()).is_err(),
         "`maxActiveTotal` below `maxActivePerNamespace` must be refused; \
-         templates/policy.yaml fails the render for it"
+         templates/_validate.tpl fails the render for it"
     );
 
     // The withdrawn pair's rule is gone. An older chart's document with
@@ -388,28 +388,29 @@ fn the_rule_the_schema_cannot_express_is_a_rule_the_parser_enforces() {
     assert_eq!(parsed.discovery.hard_max_topics, 100);
 }
 
-/// **The chart's own template refuses the cross-field pair**, named, at render
-/// time, asserted over the template text because `chart_lint` is the crate
-/// that runs `helm` and this one does not.
+/// **The chart refuses the cross-field pair**, named, at render time, asserted
+/// over the template text because `chart_lint` is the crate that runs `helm`
+/// and this one does not. Every refusal is in `templates/_validate.tpl`.
 #[test]
 fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
-    let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
-        .expect("the policy template is readable");
-    let code: String = template
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_eq!(
-        code.matches("{{- fail (printf").count(),
-        1,
-        "one cross-field rule, one named refusal (FX-10 withdrew the other with its value)"
-    );
-    let needle = "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace";
+    let read = |rel: &str| {
+        let text = std::fs::read_to_string(repo().join(rel)).expect("the template is readable");
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert!(
-        code.contains(needle),
-        "templates/policy.yaml must refuse the render naming the rule and both values; \
-         `{needle}` is missing"
+        !read("charts/logweir/templates/policy.yaml").contains("{{- fail"),
+        "templates/policy.yaml renders; its refusal is in templates/_validate.tpl"
+    );
+    let code = read("charts/logweir/templates/_validate.tpl");
+    let needle = "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace";
+    assert_eq!(
+        code.matches(needle).count(),
+        1,
+        "one cross-field rule, one named refusal (FX-10 withdrew the other with its value); \
+         templates/_validate.tpl must refuse the render naming the rule and both values"
     );
     assert!(
         code.contains("fails CLOSED"),
@@ -417,20 +418,20 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
          parser refuses discards every attestation and every evidence location silently"
     );
 
-    // AND THE CONDITIONS ARE LIVE. Pinning the MESSAGES alone is not enough:
+    // AND THE CONDITION IS LIVE. Pinning the MESSAGE alone is not enough:
     // replacing `{{- if lt $maxTotal $maxNs -}}` with `{{- if false -}}` leaves
-    // both `fail`s and both message strings where they were. `scripts/check-chart.sh`
-    // renders the two inverted pairs and is the live proof; this is the cheap
-    // half that says which comparison each `fail` hangs off.
+    // the `fail` and its message where they were. `scripts/check-chart.sh`
+    // renders the inverted pair and is the live proof; this is the cheap half
+    // that says which comparison the `fail` hangs off.
     let condition = "{{- if lt $maxTotal $maxNs -}}";
     assert!(
         code.contains(condition),
-        "templates/policy.yaml must guard its refusal with `{condition}`; a `fail` behind a \
+        "templates/_validate.tpl must guard the refusal with `{condition}`; a `fail` behind a \
          condition that cannot fire is a message nobody ever reads"
     );
     assert!(
         !code.contains("{{- if false -}}"),
-        "a disabled guard in the policy template"
+        "a disabled guard in the refusals"
     );
 }
 

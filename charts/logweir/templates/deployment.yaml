@@ -7,9 +7,6 @@ the `runnerImage` default names a `latest` tag and a tag under a policy that
 never pulls is a Job no kubelet can start), and the archive addressing env
 (`archive.*`, rendered only when a value or `minio.enabled` supplies one).
 
-`notify` is WITHDRAWN with the alert sinks it configured: a values file that
-still sets it is refused below, naming it.
-
 Task 38 adds node placement (`kubernetes.nodeSelector`/`tolerations`/`affinity`,
 overridable by `controller.*`) — which renders NOTHING when nothing is set, so
 the shipped default render is byte-identical to what it was. The controller's
@@ -82,9 +79,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            {{- if .Values.notify }}
-            {{- fail "notify.* is withdrawn (release notes, item 74): Logweir no longer delivers ProtectionPolicy alerts, so no key under notify configures anything. Remove the notify block from your values, or on helm upgrade --reuse-values pass --set notify=null" }}
-            {{- end }}
             {{- /*
             D3 §2.3 and §2.7's two controller-wide windows, RENDERED ONLY WHEN
             CONFIGURED for the same reason the line above is.

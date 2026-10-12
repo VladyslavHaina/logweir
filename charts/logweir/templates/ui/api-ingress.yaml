@@ -1,8 +1,8 @@
 {{/*
 `api.console.ingress.enabled` — THE SHARED CONSOLE'S ONLY PUBLIC ENTRY POINT.
 
-SHARED MODE ONLY, AND TLS IS NOT OPTIONAL. `api-config.yaml`'s
-`logweir.api.consoleChecks` refuses this object outright in `localAdmin` mode
+SHARED MODE ONLY, AND TLS IS NOT OPTIONAL. `_validate.tpl` refuses this
+object outright in `localAdmin` mode
 (D0: the local administrator path "must not bind 0.0.0.0, get an Ingress, or be
 described as shared-console mode" — it authenticates nobody, so an Ingress in
 front of it is an unauthenticated shared console), and it refuses an empty
@@ -33,7 +33,6 @@ and the two health paths, and splitting it across backends would break the
 same-origin cookie and CSRF model it depends on.
 */}}
 {{- if and .Values.api.console.enabled .Values.api.console.ingress.enabled }}
-{{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}
 apiVersion: networking.k8s.io/v1

@@ -52,31 +52,6 @@ is D-SEAMS S5 (transport security is never derived) failing in the one
 direction that matters.
 */ -}}
 {{- /*
-THE ONE RULE `values.schema.json` CANNOT CARRY, REFUSED HERE INSTEAD.
-
-`Policy::validate` enforces `maxActiveTotal >= maxActivePerNamespace`. It
-compares two SIBLING values, and JSON Schema draft-07 — which is what Helm
-evaluates — has no way to express that; `additionalProperties`, `minimum` and
-`maximum` are per-field or nothing. (There were two until FX-10 withdrew
-`checks.discovery.defaultMaxTopics`, whose `<= hardMaxTopics` rule went with
-it: see the compatibility fields below.)
-
-WHY IT MUST BE REFUSED AT RENDER TIME AND NOT LEFT TO THE CONTROLLER. A
-document the parser refuses fails CLOSED and SILENTLY: `Policy::fail_closed()`
-discards EVERY `visibilityAttestation` and EVERY `controllerIdentityLocation`
-the administrator configured, `attestedComplete` becomes unreachable, retention
-reverts to the compiled-in defaults, and the only signal is one advisory
-`configuration.policy notReady PolicyUnreadable` row on a `Preflight` nobody
-is necessarily looking at. `helm install` would have said nothing at all. So
-the refusal happens where the operator is still watching, naming the rule and
-both values.
-*/ -}}
-{{- $maxNs := int .Values.checks.maxActivePerNamespace -}}
-{{- $maxTotal := int .Values.checks.maxActiveTotal -}}
-{{- if lt $maxTotal $maxNs -}}
-{{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxNs) -}}
-{{- end -}}
-{{- /*
 THE TWO WITHDRAWN FIELDS ARE RENDERED AS FIXED COMPATIBILITY VALUES, NEVER
 FROM A VALUE (FX-10, 2026-10-05).
 
