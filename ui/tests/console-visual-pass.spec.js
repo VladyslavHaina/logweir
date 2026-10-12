@@ -14,6 +14,7 @@ import { decoded } from "./console-fixture.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
 
 import { resetMode, selectMode } from "../client.js";
+import { NAV_ROUTES, landingRedirect, landingRoute } from "../app.js";
 import { mountClusters } from "../pages/clusters.js";
 import { mountSchedules } from "../pages/schedules.js";
 
@@ -134,4 +135,44 @@ test("m4_a_role_that_cannot_create_a_schedule_is_not_offered_the_form", async ()
   });
   assert.match(full, /id="schedule-form"/);
   assert.doesNotMatch(full, /id="schedules-read-only"/);
+});
+
+// M5. An approver landed on #/clusters, which refused them ("This page needs
+// any role"): the landing must be a tab the role can use.
+
+/** The flags a role's grant publishes, by the role table in
+ *  `crates/logweir-api/src/authz.rs` (`Role::allows`). */
+const ROLE_FLAGS = {
+  approver: ["preflight", "backupsRead", "restoresRead", "approvalsRead", "approvalPacketRead",
+    "operationsRead", "operationEvents", "approvalSubmit"],
+  viewer: ["connectionsRead", "destinations", "topicDiscovery", "preflight", "schedulesRead",
+    "backupsRead", "restoresRead", "approvalsRead", "operationsRead", "operationEvents",
+    "protection", "catalogs", "retention"],
+};
+const holding = (role) => (flag) => ROLE_FLAGS[role].includes(flag);
+const route = (hash) => NAV_ROUTES.find((r) => r.hash === hash);
+
+test("m5_an_approver_lands_on_approvals_and_a_viewer_on_clusters", () => {
+  assert.equal(landingRoute(NAV_ROUTES, "team-a", holding("approver")).hash, "#/approvals",
+    "NEGATIVE CONTROL: the approver landed on the refused #/clusters");
+  assert.equal(landingRoute(NAV_ROUTES, "team-a", holding("viewer")).hash, "#/clusters",
+    "the default stays the landing for a role that can use it");
+  assert.equal(landingRoute(NAV_ROUTES, "team-a", () => false), null, "no tab, no landing");
+
+  // The redirect is for the LANDING only: an address someone chose is still
+  // refused by name.
+  const clusters = route("#/clusters");
+  assert.equal(landingRedirect(true, clusters, "team-a", holding("approver")).hash, "#/approvals");
+  assert.equal(landingRedirect(false, clusters, "team-a", holding("approver")), null);
+  assert.equal(landingRedirect(true, clusters, "team-a", holding("viewer")), null,
+    "a usable landing is not moved");
+
+  // AND THE SHELL ASKS IT: the refusal arm of `render` redirects a landing
+  // before it refuses, and `boot` marks the bare and sign-in addresses.
+  const app = readFileSync(fileURLToPath(new URL("../app.js", import.meta.url)), "utf8");
+  const body = app.slice(app.indexOf("function render(lifecycle"), app.indexOf("function boot()"));
+  const asked = body.indexOf("landingRedirect(landing, current, here.ns, routeGateHas)");
+  assert.ok(asked > 0 && asked < body.indexOf("renderRoleRefusal(current"),
+    "the landing is redirected before the refusal renders");
+  assert.match(app, /context\.landing = window\.location\.hash === "" \|\| window\.location\.hash === DEFAULT_HASH;/);
 });

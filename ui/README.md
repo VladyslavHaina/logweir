@@ -80,7 +80,9 @@ A **hash** router: every route lives after `#`, so the server is asked only for
 files. `app.js`'s `ROUTES` table names each route, its title, its mount and the
 capability flags it needs. A route is a tab when the session holds one of its
 flags in the chosen namespace (for `#/keys`, in any namespace); a hidden route
-still refuses by name when an address reaches it.
+still refuses by name when an address reaches it. A visit with no route, and
+the sign-in round trip, land on Clusters when the role can use it, else on
+Approvals, else on the first tab it can use (`landingRoute`).
 
 | route | page |
 |---|---|
