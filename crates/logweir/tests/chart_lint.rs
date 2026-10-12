@@ -6185,3 +6185,47 @@ fn chart_lint_a_published_shared_console_names_its_trusted_proxy_or_opts_out() {
          {published}"
     );
 }
+
+/// **The demo pods are not ready for the `restricted` Pod Security Standard, and
+/// the docs say so.** The demo MinIO, the demo brokers and their seed Jobs set
+/// no `securityContext` (hardening them is v1.1's). When one gains it, this row
+/// fails, and the sentence in the chart README and `docs/install.md` goes too.
+/// CONTROL: the same predicate finds the controller's own securityContext.
+#[test]
+fn chart_lint_the_demo_pods_pod_security_gap_is_documented() {
+    let docs = rendered("demo");
+    let sets_one = |kind: &str, name: &str| {
+        let pod = &find(&docs, kind, name).value["spec"]["template"]["spec"];
+        !pod["securityContext"].is_null()
+            || pod["containers"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .any(|c| !c["securityContext"].is_null())
+    };
+    assert!(
+        sets_one("Deployment", "weirkeeper"),
+        "the control: the predicate must find the controller's securityContext"
+    );
+    for (kind, name) in [
+        ("Deployment", "logweir-minio"),
+        ("StatefulSet", "logweir-kafka-source"),
+        ("StatefulSet", "logweir-kafka-target"),
+        ("Job", "logweir-kafka-seed"),
+        ("Job", "logweir-minio-seed"),
+    ] {
+        assert!(
+            !sets_one(kind, name),
+            "{kind}/{name} now sets a securityContext: update the demo Pod Security sentence in \
+             charts/logweir/README.md and docs/install.md, then this row"
+        );
+    }
+    for doc in ["charts/logweir/README.md", "docs/install.md"] {
+        let text = read(doc).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            text.contains("set no `securityContext`")
+                && text.contains("`restricted` Pod Security Standard refuses them"),
+            "{doc} must say the demo pods set no securityContext and a `restricted` namespace refuses them"
+        );
+    }
+}

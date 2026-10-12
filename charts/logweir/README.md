@@ -63,6 +63,10 @@ author-only install is not evidence of publication.**
 | `Role` and `RoleBinding` `<release>-api-trusted-proxy` (`list` on `endpointslices` in the ingress namespace) | `api.console.trustedProxyService` |
 | immutable `ConfigMap` `<release>-approval-policy-<digest>` | any `approvalPolicy.*` value |
 
+The demo MinIO, the demo Kafka brokers and their seed `Job`s set no
+`securityContext`, so a namespace enforcing the `restricted` Pod Security
+Standard refuses them; install a demo only into a namespace that admits them.
+
 Nothing optional is on by default. `manifest_lint.rs` holds the controller's
 role to its calls: no verb on `secrets`, no `update`, and `delete` only on
 `topicdiscoveries` and `preflights`. Every status write is a merge `PATCH`
